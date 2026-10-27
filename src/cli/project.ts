@@ -69,6 +69,10 @@ export interface ProjectConfig {
   /** `mason serve` wrote it from the environment (src/cli/serve.ts), and writes it again at every start; a project
    *  `mason init` made is never taken over by a serve */
   served?: boolean;
+  /** `mason init demo` made it: its database is the demo database `mason start` hosts in `.mason/demo/` (src/demo/source.ts),
+   *  on the loopback port the sources file's URL names (the port is in that URL alone, never recorded twice). Read by
+   *  polling only: the demo database has no change log. Kept by `mason destroy`, so the next start seeds it again */
+  demo?: boolean;
   /** the Postgres API's port, the project's own: recorded at its first start (src/cli/ports.ts `choosePgPort`) and used
    *  by every later one — refused when held, never moved by itself, so a BI tool's saved connection keeps working;
    *  `MASON_PG_PORT` in the shell moves it. Kept by `mason stop` and `mason destroy` (config.json stays) */
@@ -85,6 +89,9 @@ export interface ProjectConfig {
 
 /** The copy of the data, a DuckDB file in the project's `.mason/`: kept by mason stop, deleted by mason destroy. */
 export const DUCK_FILE = "duck.db";
+
+/** The demo database's folder in the project's `.mason/` (`mason init demo`): hosted by mason start, deleted by mason destroy. */
+export const DEMO_DIR = "demo";
 
 export interface Project {
   /** the folder `mason init` ran in: `.mason/` is in it */
@@ -172,8 +179,8 @@ export function writeConfig(dir: string, c: ProjectConfig): void {
 }
 
 /** A new project's config: the secrets made here, once. */
-export function newConfig(name: string, folder: string, remote: boolean): ProjectConfig {
-  return { name, folder, remote, apiKey: randomBytes(24).toString("hex"), sourceServer: null, running: null, lastRun: null };
+export function newConfig(name: string, folder: string, remote: boolean, o: { demo?: boolean } = {}): ProjectConfig {
+  return { name, folder, remote, ...(o.demo ? { demo: true } : {}), apiKey: randomBytes(24).toString("hex"), sourceServer: null, running: null, lastRun: null };
 }
 
 /**
@@ -184,7 +191,7 @@ export function theProject(cwd: string): { project: Project } | Problem {
   const p = findProject(cwd);
   if (p && "broken" in p) return brokenProblem(p);
   if (p) return { project: p };
-  return { problem: "no Mason project here or above", code: "no_project", fix: "cd into a project's folder, or make this folder one",
+  return { problem: "no Mason project here or above", code: "no_project", fix: "cd into a project's folder, or make this folder one (mason init demo: a demo database, nothing to install)",
     next: [["mason init", "make this folder a project (DATABASE_URL from .env, or mason init postgres://…)"]] };
 }
 

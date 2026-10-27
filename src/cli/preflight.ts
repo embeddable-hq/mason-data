@@ -60,8 +60,12 @@ export function parseSource(url: string): { source: Source } | { problem: string
 
 export interface ConnectFailure { message: string; hints: string[] }
 
+/** How a connection is explained: `demo` when the project's database is the demo database mason start hosts
+ *  (ProjectConfig.demo, from the project's config, never guessed from the URL), which nothing serves while it is down. */
+export interface ConnectContext { demo?: boolean }
+
 /** What a failed connection means, and what to change. */
-export function explainConnectError(e: unknown, s: Source): ConnectFailure {
+export function explainConnectError(e: unknown, s: Source, o: ConnectContext = {}): ConnectFailure {
   const where = `${s.host}:${s.port}`;
   const msg = (e as Error)?.message ?? String(e);
   if (e instanceof PgError) {
@@ -80,6 +84,8 @@ export function explainConnectError(e: unknown, s: Source): ConnectFailure {
     return { message: `${where}: ${msg}`, hints: [] };
   }
   if (/ECONNREFUSED/.test(msg)) {
+    // the demo database is served by the project's own run: nothing else could be listening there
+    if (o.demo) return { message: `the demo database is not running on ${where}`, hints: ["the demo database runs inside mason start: start it first"] };
     return {
       message: `nothing is listening on ${where}`,
       hints: [
@@ -104,12 +110,12 @@ export function explainConnectError(e: unknown, s: Source): ConnectFailure {
 }
 
 /** Connect as the service will. The failure is explained; for a missing database, the ones that exist are listed. */
-export async function connectSource(s: Source): Promise<{ pg: PgConnection } | { failure: ConnectFailure }> {
+export async function connectSource(s: Source, o: ConnectContext = {}): Promise<{ pg: PgConnection } | { failure: ConnectFailure }> {
   const opts = { host: s.host, port: s.port, database: s.database, user: s.user, password: s.password, sslmode: s.sslmode, connectTimeoutMs: 10_000, applicationName: "mason-dev" };
   try {
     return { pg: await PgConnection.connect(opts) };
   } catch (e) {
-    const failure = explainConnectError(e, s);
+    const failure = explainConnectError(e, s, o);
     if (e instanceof PgError && e.code === "3D000") {
       try {
         const pg = await PgConnection.connect({ ...opts, database: "postgres" });

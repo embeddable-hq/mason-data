@@ -87,6 +87,8 @@ ${codes}
     mason add orders customers --json && mason wait --json
     mason user add my-tool --json             the URL and password a tool connects with
     mason status --json                       each table's copy, and the last day's slow and refused statements
+  With no database to hand, in a new folder: mason init demo --json && mason start --json — a demo database Mason
+  hosts itself (customers, products, orders, order_items, all added), changed every few seconds, read by polling only.
 `;
 }
 

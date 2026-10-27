@@ -21,6 +21,8 @@ import { READY, STEP_MARK } from "./dev.ts";
 import { liveRun } from "./runs.ts";
 import { theProject } from "./project.ts";
 import { runListenerSettings } from "./pg-tls.ts";
+import { demoChangesRefusal } from "./demo.ts";
+import type { ChangeSource } from "../cdc/poll.ts";
 import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
 import { DEV } from "./registry.ts";
 import { out as styleOut, stepRenderer } from "./style.ts";
@@ -42,7 +44,7 @@ export const NEXT_STEPS: NextStep[] = [
 ];
 
 /** `args` are `mason start`'s own, passed on to the run with --attach. */
-export async function devInBackground(args: readonly string[], o: { json: boolean; selfSignedTls: boolean }): Promise<number> {
+export async function devInBackground(args: readonly string[], o: { json: boolean; selfSignedTls: boolean; changes?: ChangeSource | null }): Promise<number> {
   const t = theProject(process.cwd());
   if ("problem" in t) return failed("start", t, { json: o.json });
   const home = t.project.dir;
@@ -54,6 +56,9 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
     say(nextBlock([["mason status", "what it is doing"], ["mason stop", "stop it"]]));
     return 0;
   }
+  // a demo project with --replication (src/cli/demo.ts): refused here too, where it is read, before a run is spawned
+  const demoRefused = demoChangesRefusal(t.project.config, o.changes ?? null);
+  if (demoRefused) return failed("start", demoRefused, { json: o.json });
   // a MASON_PG_PORT that is no port, or is held, is refused HERE, where the person (or --json) reads it, before a run is
   // spawned; the run checks again for itself (choosePgPort, src/cli/ports.ts), since a port may be taken in between
   const pg = await choosePgPort(process.env.MASON_PG_PORT, new Set(), t.project.config.pgPort ?? null);
@@ -120,6 +125,9 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
           const pgLine = /^\s+Postgres\s+(postgresql:\S+)/.exec(l);
           if (pgLine) { postgres = postgresLink(withoutPlaceholders(pgLine[1]!)); steps.print(`  ${st.dim("Postgres API")}  ${pgLine[1]!}  ${st.dim("(mason user add <name> makes a user)")}`); continue; }
           if (/^\s+Web UI\s+mason ui\b/.test(l)) { steps.print(`  ${st.dim("Web UI".padEnd("Postgres API".length))}  ${st.cyan("mason ui")}  ${st.dim("(the status page and the users, in your browser)")}`); continue; }
+          // a demo project's line (src/cli/dev.ts: "Demo  a new order lands every <n> s: …"), in the same column
+          const demoLine = /^\s+Demo\s{2}(.+)$/.exec(l);
+          if (demoLine) { steps.print(`  ${st.dim("Demo".padEnd("Postgres API".length))}  ${demoLine[1]!}`); continue; }
           if (l.trim()) since.push(l.trim().replace(/^mason start: /, ""));
           steps.print(l);
         }

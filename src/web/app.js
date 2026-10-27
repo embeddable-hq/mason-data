@@ -119,10 +119,11 @@ export const pickBody = (table, columns = [], key = []) => ({ table, picked: tru
 export function sourceRows(s) {
   return [
     ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`]] : []),
-    ["Database", `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
+    ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
+      : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
         `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · mason start --replication reads the database's change log instead`],
+      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · ${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
   ];
 }
 

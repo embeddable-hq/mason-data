@@ -49,13 +49,16 @@ const table = (name: string, rows: number): SourceTable => ({ source: `public.${
 const TABLES = [table("customers", 1200), table("orders", 2_000_000), table("events", 30_000_000), table("audit", 50)];
 const parsed = parseSource("postgres://shop:secret@db.example.com:5432/shop");
 const source = "source" in parsed ? parsed.source : assert.fail(parsed.problem);
+const parsedDemo = parseSource("postgres://demo@127.0.0.1:5434/demo");
+const demoSource = "source" in parsedDemo ? parsedDemo.source : assert.fail(parsedDemo.problem);
 const sourceFile = parseSourceText("kind: postgres\nurl: x\ntables:\n  customers: {}\n  orders: {}\n  events: {}\n", "shop", "/app/mason/sources/shop.yml");
 assert.ok(!("problems" in sourceFile));
 
 /** The state /api/state answers for these copies (src/cli/run-server.ts runState), as JSON travels. */
-function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: boolean; tables?: SourceTable[]; sources?: typeof sourceFile } = {}): RunState {
+function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: boolean; tables?: SourceTable[]; sources?: typeof sourceFile; demo?: boolean } = {}): RunState {
   const ctx = {
-    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: o.tables ?? TABLES, systemIdentifier: null }),
+    source: o.demo ? demoSource : source, ...(o.demo ? { demo: true } : {}),
+    facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: o.tables ?? TABLES, systemIdentifier: null }),
     warnings: o.warnings ?? [], slot: o.replication ? "mason_dev_shop" : "", changes: o.replication ? "replication" : "poll",
     ...(o.replication ? { publication: { name: "app_pub", owned: false } } : {}),
     page: true, folder: () => "/app/mason", root: "/app", sources: () => ({ file: o.sources ?? sourceFile, problem: null }),
@@ -169,6 +172,17 @@ test("a table added and tables removed are said as mason add and mason remove pr
   assert.equal(added(PICKED.already), "Added public.customers to /app/mason/sources/shop.yml: every column (already so) Dismiss");
   assert.equal(textOf(fn<[unknown], string>("renderTablesRemoved")({ removed: ["public.orders"], file: FILE })),
     "Removed public.orders from /app/mason/sources/shop.yml Tip: Mason stops copying it and drops its copy Dismiss");
+});
+
+test("a demo project's database row says it is the demo database Mason hosts, polled only: the page and mason status alike", () => {
+  const sourceRows = (commands as unknown as { sourceRows?: (s: RunState) => Array<[string, string]> }).sourceRows!;
+  const DEMO = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.000Z")], { demo: true });
+  assert.equal((DEMO.source as { demo?: boolean }).demo, true, "the run's state says it");
+  assert.equal((RUNNING.source as { demo?: boolean }).demo, false);
+  const rows = sourceRows(DEMO);
+  assert.deepEqual(rows.find(([k]) => k === "Database"), ["Database", "the demo database Mason hosts (postgres://demo@127.0.0.1:5434/demo · Postgres 16.4)"]);
+  assert.deepEqual(rows.find(([k]) => k === "Changes"), ["Changes", "polling with SELECTs (xmin), every 5 s · the demo database is read by polling only"]);
+  assert.deepEqual(fn<[unknown], unknown>("sourceRows")(DEMO), rows);
 });
 
 // ------------------------------------------------------------------ what the page writes

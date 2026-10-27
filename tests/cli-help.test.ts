@@ -109,6 +109,7 @@ test("mason alone: no project here, a project not running — each with its own 
     const none = await orientation(dir, PLAIN);
     assert.match(none, /\n {2}Project {3}none here: mason init makes this folder one\n/);
     assert.match(none, /\nNext:\n {2}mason init {2}/);
+    assert.match(none, /\n {2}mason init demo +or try it on a demo database Mason makes itself: nothing to install\n/);
     writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason", false));
     fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
     const stopped = await orientation(path.join(dir, "mason", "sources"), PLAIN);
@@ -144,7 +145,7 @@ test("the --json shapes of the commands that change what is copied name the sour
   assert.deepEqual(keys("tables"), ["database", "source", "tables", "next"], "the source file the tables are read against");
   assert.deepEqual(keys("add"), ["added", "file", "error", "next"], "the sources file it wrote");
   assert.deepEqual(keys("remove"), ["removed", "file", "next"], "the sources file it wrote");
-  assert.deepEqual(keys("init"), ["name", "root", "folder", "config", "source", "database", "warnings", "next"], "the source file it wrote");
+  assert.deepEqual(keys("init"), ["name", "root", "folder", "config", "demo", "source", "database", "warnings", "next"], "the source file it wrote");
   assert.ok(keys("status")?.includes("source") && !keys("status")?.includes("sources"), "status names its source, the database, with the sources file in it");
   assert.deepEqual(COMMANDS.filter((c) => c.json?.some((k) => /model/i.test(k))).map((c) => c.name), [], "no command answers with a model");
   for (const name of ["add", "remove", "tables"]) {
