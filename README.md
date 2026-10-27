@@ -64,6 +64,25 @@ npm i -g @mason-data/cli            # needs Node 22.13+ and nothing else; `mason
 cd your-app
 ```
 
+### Try it without a database
+
+`mason init demo`, in a new folder, makes a project whose database Mason hosts itself: a small
+shop (`customers`, `products`, `orders`, `order_items`) in a Postgres that `mason start` runs in
+its own process, kept in `.mason/demo/` and served on a port of this machine. Nothing to install,
+no Docker. The four tables are added already, and a new order lands every few seconds, so
+`mason status` shows the copy keeping up. Mason reads it as it reads yours, over the Postgres
+protocol, by polling (the demo database has no change log, so `--replication` does not apply).
+
+```bash
+mkdir mason-demo && cd mason-demo
+mason init demo && mason start
+mason user add me                    # prints the URL with its password, once
+psql "postgres://me:<password>@127.0.0.1:5433/mason-demo" -c "select status, count(*) from orders group by 1"
+mason destroy                        # the copy and the demo database go; the next mason start seeds it again
+```
+
+### On your app's database
+
 **1. Make the folder a project.** `mason init` reads `DATABASE_URL` from `.env.local`, `.env` or
 the shell (or takes the URL), checks it can read the database, and writes the project's sources
 file, `mason/sources/<database>.yml` — yours to commit — beside `.mason/`, this machine's copy of

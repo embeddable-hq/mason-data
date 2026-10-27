@@ -33,6 +33,12 @@ without one it reads `DATABASE_URL` from the folder's `.env.local`, `.env` or th
 argument or it was only in the shell, and gitignores that file): change it there when the password changes. The
 database is required.
 
+**No database at hand?** `mason init demo && mason start`, in a new folder, makes a project on a demo database Mason
+hosts itself — a small shop (`customers`, `products`, `orders`, `order_items`, all four added), kept in `.mason/demo/`,
+served on a port of this machine, with a new order every few seconds (`MASON_DEMO_CHANGE_MS`, default 5000) so
+`mason status` shows the copy keeping up. Nothing to install. It is read by polling only (it has no change log), and
+`mason destroy` removes it with the copy.
+
 ## The project: its sources file, in your app
 
 ```
@@ -180,7 +186,9 @@ keeps a different set:
 | Pause | `mason stop` | the data, the state, your files: the next `mason start` resumes in seconds |
 | Copy the data again, or free its disk | `mason destroy` | your files, `.mason/config.json` and the users: the next `mason start` copies everything again |
 
-Restarting the machine is a `mason stop` that nobody ran: the next `mason start` resumes.
+Restarting the machine is a `mason stop` that nobody ran: the next `mason start` resumes. In a demo project
+(`mason init demo`) the demo database is state too: `mason destroy` removes it with the copy, and the next `mason start`
+seeds it again.
 
 ## Requirements
 
