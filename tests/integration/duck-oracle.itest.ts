@@ -357,6 +357,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     [...counted].sort((a, b) => b[1] - a[1]).map(([k, n]) => `  ${n} × ${k}`).join("\n") + "\n\n" +
     differences.map((d) => `[${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`).join("\n\n") + "\n");
   console.log(`duck oracle: ${asked} statements asked, ${differences.length} differ (${report}): ${[...counted].map(([k, n]) => `${n} ${k}`).join(", ")}`);
+  // the first differences in the log too, whichever assertion below fails first (a difference can be why a decision
+  // is stale or a verified entry dropped, and CI keeps only the log)
+  for (const d of differences.slice(0, 5)) console.log(`duck oracle: differs: [${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`);
   console.log(`duck oracle: ${nodesPlacedTwice().length} node(s) a rewrite placed twice${nodesPlacedTwice().length > 0 ? `: ${nodesPlacedTwice().slice(0, 10).join(" | ")}` : ""}`);
   if (EAGER_JSON) {
     // the run read JSON from stored columns: how many paths, and none left unfilled
