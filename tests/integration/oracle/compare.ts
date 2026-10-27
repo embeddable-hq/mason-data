@@ -1,7 +1,7 @@
 /**
  * TWO VALUES COMPARED BY WHAT THEY MEAN (tests/integration/duck-oracle.itest.ts tells a wrong VALUE from a different
  * TEXT of the same value with it): a number is a number whether `120`, `"120"` or `120.00`; a time is its instant
- * whether `2026-09-15T00:00:00Z` or `2026-09-15 00:00:00+00`; a boolean is `t` / `f`; NULL is NULL. An INTEGER on both
+ * whether `2026-09-15T00:00:00Z` or `2026-09-15 00:00:00+00` (and `1.5e+15` is `1500000000000000`); a boolean is `t` / `f`; NULL is NULL. An INTEGER on both
  * sides compares exactly, by its digits (a 2^53 + 1 that came back as 2^53 is a difference, as is 1,000 off on a
  * 13-digit id); every other number to one part in 10^12.
  */
@@ -20,7 +20,9 @@ export function normalise(v: unknown, text = false): Norm {
   const t = TIME_RE.exec(s);
   if (t) return { t: `${t[1]} ${t[2]}${t[3] ? `.${t[3].replace(/0+$/, "")}`.replace(/\.$/, "") : ""}` };
   if (/^-?\d+$/.test(s)) return { n: Number(s), i: BigInt(s).toString() };
-  if (/^-?\d+\.\d+$/.test(s) && Number.isFinite(Number(s))) return { n: Number(s) };
+  // a non-integer, with an exponent too: a double past 1e15 or under 1e-4 is printed so (`1.6935087641981325e+15`),
+  // and read as text its last digit was a wrong VALUE (CI's x86_64 runner, a float8 variance)
+  if (/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(s) && Number.isFinite(Number(s))) return { n: Number(s) };
   return { s };
 }
 
