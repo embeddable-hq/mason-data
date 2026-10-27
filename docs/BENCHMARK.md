@@ -2,7 +2,7 @@
 
 `scripts/bench-replica.ts` answers "why not just use a Postgres read replica?" with numbers: what the same SQL costs on
 a Postgres and on Mason as the tables grow and as more readers ask at once. Its result is
-`tests/fixtures/bench-replica.json`, from which the README's "Why not a Postgres read replica" is rendered;
+`tests/fixtures/bench-replica.json`, from which the README's "When is Mason faster?" is rendered;
 docs/DESIGN.md "Mason against a Postgres read replica" says why the sweep is shaped so and what a run does and does not show.
 
 ## What it measures
