@@ -4,7 +4,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeProject, destroy } from "../src/cli/machine.ts";
+import { DESTROY_USAGE, removeProject, destroy } from "../src/cli/machine.ts";
 import { DUCK_FILE, isProject, newConfig, readProject, writeConfig, type Project } from "../src/cli/project.ts";
 import type { DevRun } from "../src/cli/runs.ts";
 
@@ -66,6 +66,27 @@ test("removing a stopped project keeps config.json and the project's files, and 
     assert.deepEqual(fs.readdirSync(shop.dir).sort(), ["config.json", "postgres-tls.crt", "postgres-tls.key", "users.json"]);
     assert.ok(fs.existsSync(path.join(shop.folder, "sources", "shop_dev.yml")), "the files are the developer's");
     assert.equal(project(shop.root).config.sourceServer, null, "the next start records the server again");
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("mason destroy on a demo project: the demo database goes with the copy, said; config.demo stays, so the next start seeds it again", async () => {
+  const { home, shop } = fakeProject();
+  try {
+    const cfg = project(shop.root).config as ReturnType<typeof project>["config"] & { demo?: boolean };
+    cfg.demo = true;
+    writeConfig(shop.dir, cfg);
+    fs.writeFileSync(path.join(shop.dir, DUCK_FILE), "x");
+    fs.mkdirSync(path.join(shop.dir, "demo", "base"), { recursive: true });
+    fs.writeFileSync(path.join(shop.dir, "demo", "base", "1"), "rows");
+    const chunks: string[] = [];
+    const io = { out: (m: string) => { chunks.push(`${m}\n`); }, err: (m: string) => { chunks.push(`${m}\n`); } };
+    const code = await destroy([], { io, cwd: shop.root, removeProject: (p) => removeProject(p, { state: async () => ({ kind: "none", run: null }), stopSupervisor: async () => null }) });
+    assert.equal(code, 0, chunks.join(""));
+    assert.ok(!fs.existsSync(path.join(shop.dir, "demo")), "the demo database is state, like the copy");
+    assert.deepEqual(fs.readdirSync(shop.dir), ["config.json"]);
+    assert.equal((project(shop.root).config as { demo?: boolean }).demo, true, "still the demo's project: the next mason start makes and seeds it");
+    assert.match(chunks.join(""), /^Removed shop\n {2}removed {3}.*\.mason\/ \(demo, duck\.db\)\n {2}kept {6}your files in .*\/shop\/mason, \.mason\/config\.json and the users — not the demo database, which went with the copy: the next mason start seeds it again\n/);
+    assert.match(DESTROY_USAGE, /A demo project's database \(mason init demo, in \.mason\/demo\/\)\n {2}goes with the copy: the next mason start makes and seeds it again\./);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 

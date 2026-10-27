@@ -54,6 +54,8 @@ export interface RunContext {
   /** the web page (src/web/, `mason ui`): `mason start`'s run serves it, `mason serve`'s never (its guard is loopback's
    *  Host and cookie; off loopback the page would need TLS and a login, which are not designed) */
   page: boolean;
+  /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
+  demo?: boolean;
   /** the project's users (src/cli/user.ts): what `/api/users` lists and changes, with the functions `mason user` calls —
    *  the list (.mason/users.json), the API key their passwords are made with, the database a user connects to, and
    *  where the Postgres API listens (the run's recorded URL), for the URL an added user is shown */
@@ -128,7 +130,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     readiness: readiness({ tables }),
     // the run serves the web page (mason ui): mason status prints its URL
     ui: ctx.page,
-    source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote,
+    source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
       version: facts.versionText, standby: facts.standby, changes: ctx.changes, name: sources.file?.name ?? null, file: sources.file?.file ?? null,
       ...(ctx.publication ? { replication: { slot: ctx.slot, publication: ctx.publication.name, owned: ctx.publication.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so

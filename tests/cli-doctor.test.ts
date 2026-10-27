@@ -119,6 +119,9 @@ test("the next command follows the first failing check, in the order a first ses
   const first = (c: Check[], r: typeof run | null, p: typeof project | null): string => nextSteps(c, r, p).map(([cmd]) => cmd).join(" | ");
   assert.equal(first([bad("node"), bad("memory")], null, null), "mason doctor");
   assert.match(nextSteps([ok("node"), bad("database")], null, project)[0]![1]!, /the URL is in \/app\/\.mason\/config\.json/);
+  // the demo database is down until its run is up: mason start is the way out, not a URL to fix
+  const demoProject = { ...project, config: { ...project.config, demo: true } } as typeof project;
+  assert.deepEqual(nextSteps([ok("node"), bad("database")], null, demoProject), [["mason start", "hosts the demo database, then copies its tables"]]);
   assert.equal(first([ok("node"), ok("memory")], null, null), "mason init | mason init postgres://user:password@localhost:5432/your_app");
   assert.equal(first([ok("node"), ok("database")], null, project), "mason start");
   assert.equal(first([ok("node"), bad("mason start")], run, project), "mason logs | mason stop");

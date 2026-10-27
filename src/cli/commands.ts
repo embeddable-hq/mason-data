@@ -57,6 +57,8 @@ export interface TableState extends CatalogTable {
 export interface RunState {
   /** the database the run copies from: a JSON key named `source` is always this object, never a table (a table is `table`) */
   source: { url: string; database: string; remote: boolean; version: string; standby: boolean; changes: "poll" | "replication";
+    /** the demo database this run hosts (`mason init demo`); absent from a run before it was said */
+    demo?: boolean;
     /** the source's name: its sources file's, without `.yml` */
     name: string | null;
     /** the sources file the run copies from, absolute */
@@ -250,8 +252,8 @@ const STATUS_USAGE = `usage: mason status [--json]
   --json   as data: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), listener:
            { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
            source's: its sources file's), file (the sources file), url, database, remote, version, standby, changes,
-           replication }, warnings, folder, project, tables: [{ table, rows, bytes, key, added, addedColumns, copy, error,
-           … }], engine: { file, bytes, pollSeconds, restarts (each time its supervisor started the
+           replication, demo (the demo database this run hosts) }, warnings, folder, project, tables: [{ table, rows,
+           bytes, key, added, addedColumns, copy, error, … }], engine: { file, bytes, pollSeconds, restarts (each time its supervisor started the
            run again: { at, reason, upSeconds }) }, slowQueries, refusedQueries, refusedTotal (how many in all),
            readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
@@ -370,10 +372,11 @@ export async function status(argv: string[]): Promise<number> {
 export function sourceRows(s: Pick<RunState, "source" | "engine">): Array<[string, string]> {
   return [
     ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`] as [string, string]] : []),
-    ["Database", `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
+    ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
+      : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
         `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · mason start --replication reads the database's change log instead`],
+      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · ${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
   ];
 }
 
@@ -608,11 +611,17 @@ export async function tables(argv: string[]): Promise<number> {
 async function databaseTables(p: Project): Promise<{ database: string; name: string; file: string; tables: CatalogTable[] } | Failure> {
   const src = projectSource(p);
   if ("message" in src) return src;
+  const demo = p.config.demo === true;
   const fix = `change the URL where it is (${src.from}) when the database's password or host changed`;
   const parsed = parseSource(src.resolved);
   if ("problem" in parsed) return { message: `the database's URL (${src.from}): ${parsed.problem}`, code: "bad_source", fix };
-  const connected = await connectSource(parsed.source);
+  const connected = await connectSource(parsed.source, { demo });
   if ("failure" in connected) {
+    // the demo database's way out is its run (src/cli/demo.ts): its hint is the fix, mason start the next command
+    if (demo) {
+      return { message: `could not connect to ${maskedUrl(parsed.source.url)}: ${connected.failure.message}`, code: "unreachable",
+        fix: connected.failure.hints.join("; ") || "mason start hosts the demo database", next: [["mason start", "the demo database and Mason, in the background"]] };
+    }
     return { message: `could not connect to ${maskedUrl(parsed.source.url)}: ${connected.failure.message}`, code: "unreachable",
       ...(connected.failure.hints.length ? { why: connected.failure.hints.join("; ") } : {}), fix,
       next: [["mason doctor", "checks the machine and the project's database"]] };

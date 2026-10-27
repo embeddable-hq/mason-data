@@ -70,6 +70,19 @@ test("a refused connection to localhost says nothing is listening, from the real
   assert.ok(said.some((h) => /Is Postgres running\?/.test(h)), said.join("\n"));
 });
 
+test("the demo database refused while its run is down says the way out: it runs inside mason start (the project's config says it is the demo's)", async () => {
+  const { connectSource } = await import("../src/cli/preflight.ts");
+  const port = await new Promise<number>((resolve) => { const srv = net.createServer().listen(0, "127.0.0.1", () => { const p = (srv.address() as net.AddressInfo).port; srv.close(() => resolve(p)); }); });
+  const s = source(`postgres://demo@127.0.0.1:${port}/demo`);
+  const demo = await connectSource(s, { demo: true });
+  assert.ok("failure" in demo);
+  assert.deepEqual(demo.failure, { message: `the demo database is not running on 127.0.0.1:${port}`, hints: ["the demo database runs inside mason start: start it first"] });
+  // the same URL in a project that is not the demo's: nothing is listening, as before (the URL is never sniffed)
+  const other = await connectSource(s);
+  assert.ok("failure" in other);
+  assert.equal(other.failure.message, `nothing is listening on 127.0.0.1:${port}`);
+});
+
 const table = (o: Partial<SourceTable>): SourceTable => ({ source: "public.t", schema: "public", table: "t", key: ["id"], rows: 10, bytes: 8192, comment: null, columns: [], foreignKeys: [], ...o });
 
 test("a table without a primary key cannot be picked; one of any size can, wherever its database is", () => {
