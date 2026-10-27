@@ -1,13 +1,12 @@
 /**
  * THE LOCAL SERVERS' GUARD (security comes first here). `mason start` serves the command server
  * on the developer's machine, which reads the database and WRITES the sources file of a folder for the `mason`
- * commands. In the ClickHouse stack this was cut from, a run served a pipeline web UI beside it too, whose playground
- * minted query tokens and whose Save button wrote a saved query: the page rules below were for it, and stay. Any
+ * commands, and its web page (`mason ui`, src/web/), whose users section adds and removes the project's users. Any
  * website the developer visits can make their browser send requests to 127.0.0.1, so each request must prove it comes
  * from the run itself (a command) or from a page the run served:
  *
  *   - LOOPBACK ONLY: the servers bind 127.0.0.1.
- *   - A TOKEN: 32 random bytes, made per run and printed once in the URL `mason start` opens. The first request trades it
+ *   - A TOKEN: 32 random bytes, made per run and printed in the URL `mason ui` opens. The first request trades it
  *     for an HttpOnly, SameSite=Strict cookie and is redirected to a URL without it; every request after needs the
  *     cookie. A page on another site cannot read it, and SameSite=Strict keeps the browser from sending it on a
  *     request another site starts.

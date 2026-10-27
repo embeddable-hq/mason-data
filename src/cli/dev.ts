@@ -419,6 +419,8 @@ export async function dev(o: DevOptions): Promise<number> {
   });
   say("");
   say(`  Postgres  ${withPlaceholders(postgresUrl)}  (mason user add <name> makes a user)`);
+  // the web page by its command, never its URL: the URL carries the run's token, and this goes to dev.log
+  if (o.serve === undefined) say("  Web UI  mason ui  (the status page and the users, in your browser)");
   const elsewhere = elsewhereTip(pgTls.listener);
   if (elsewhere) say(`  ${elsewhere}`);
   say(READY);

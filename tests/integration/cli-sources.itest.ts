@@ -128,6 +128,24 @@ test("init writes the sources file; tables, add and remove read and edit it; the
   ok(mason("wait", "--json"), "mason wait");
   const user = ok(mason("user", "add", "it", "--json"), "mason user add");
   const api = user.json.url as string;
+
+  // THE WEB PAGE (mason ui): its URL carries the run's token, traded once for the cookie; mason status prints the URL
+  // without it, mason start's log names the command, never the URL
+  const page = ok(mason("ui", "--json"), "mason ui");
+  const pageUrl = new URL(page.json.url as string);
+  assert.equal(pageUrl.pathname, "/");
+  assert.equal(Number(pageUrl.port), page.json.port);
+  const token = pageUrl.searchParams.get("token")!;
+  const handed = await fetch(pageUrl, { redirect: "manual" });
+  assert.equal(handed.status, 303);
+  const cookie = handed.headers.get("set-cookie")!.split(";")[0]!;
+  const html = await fetch(new URL("/", pageUrl), { headers: { Cookie: cookie } });
+  assert.equal(html.status, 200);
+  assert.match(await html.text(), /<script type="module" src="\/app\.js"><\/script>/);
+  const st = ok(mason("status"), "mason status");
+  assert.match(st.stdout, new RegExp(`Web UI +http://127\\.0\\.0\\.1:${pageUrl.port}/  \\(mason ui opens it\\)`));
+  assert.ok(!st.stdout.includes(token) && !fs.readFileSync(path.join(root, ".mason", "dev.log"), "utf8").includes(token), "the token is only mason ui's");
+  assert.match(fs.readFileSync(path.join(root, ".mason", "dev.log"), "utf8"), /^ {2}Web UI {2}mason ui {2}\(the status page and the users, in your browser\)$/m);
   assert.deepEqual(psqlWithHeader(api, "SELECT * FROM public.customers ORDER BY id"),
     { columns: "id\tname\temail", rows: psql(dbUrl, "SELECT id, name, email FROM customers ORDER BY id") }, "columns: only those, the key first");
   assert.deepEqual(psqlWithHeader(api, "SELECT * FROM public.orders ORDER BY id"),

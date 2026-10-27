@@ -119,6 +119,7 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
           // the run's line (src/cli/dev.ts: "Postgres  <url>")
           const pgLine = /^\s+Postgres\s+(postgresql:\S+)/.exec(l);
           if (pgLine) { postgres = postgresLink(withoutPlaceholders(pgLine[1]!)); steps.print(`  ${st.dim("Postgres API")}  ${pgLine[1]!}  ${st.dim("(mason user add <name> makes a user)")}`); continue; }
+          if (/^\s+Web UI\s+mason ui\b/.test(l)) { steps.print(`  ${st.dim("Web UI".padEnd("Postgres API".length))}  ${st.cyan("mason ui")}  ${st.dim("(the status page and the users, in your browser)")}`); continue; }
           if (l.trim()) since.push(l.trim().replace(/^mason start: /, ""));
           steps.print(l);
         }

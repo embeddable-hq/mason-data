@@ -33,6 +33,8 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   wait: ["--timeout", "1"],
   user: ["list"],
   status: [],
+  // never a browser: in a state with no run it is refused before; --no-open whatever happens
+  ui: ["--no-open"],
   sync: ["no_such_table"],
   logs: [],
   stop: [],
