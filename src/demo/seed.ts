@@ -28,6 +28,15 @@ export function mulberry32(seed: number): () => number {
   };
 }
 
+/** The demo database's name and its user: what its URL says, and what `current_database()` and `current_user` are. */
+export const DEMO_DATABASE = "demo";
+export const DEMO_USER = "demo";
+
+/** `postgres://demo@127.0.0.1:<port>/demo`: the demo database's URL, its port the one fact that differs. */
+export function demoUrl(port: number): string {
+  return `postgres://${DEMO_USER}@127.0.0.1:${port}/${DEMO_DATABASE}`;
+}
+
 export const SEED_COUNTS = { customers: 200, products: 50, orders: 5_000 } as const;
 /** the four tables, in the order they are made (a foreign key's target first) */
 export const DEMO_TABLES = ["customers", "products", "orders", "order_items"] as const;

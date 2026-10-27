@@ -81,13 +81,10 @@ import {
 } from "../api/postgres/protocol.ts";
 import { CHANGE_STATE_SQL, DEMO_TABLES, changeSql, seedStatements, type ChangeState } from "./seed.ts";
 
-export const DEMO_DATABASE = "demo";
-export const DEMO_USER = "demo";
-
-/** `postgres://demo@127.0.0.1:<port>/demo` */
-export function demoUrl(port: number): string {
-  return `postgres://${DEMO_USER}@127.0.0.1:${port}/${DEMO_DATABASE}`;
-}
+import { DEMO_DATABASE, DEMO_USER, demoUrl } from "./seed.ts";
+/** the demo's URL and names are the seed's module's (no PGlite there: `mason init demo` and the run's port check read
+ *  them without loading this one) */
+export { DEMO_DATABASE, DEMO_USER, demoUrl };
 
 /** a wait for the lock longer than this is said in the log, once per wait */
 const LONG_WAIT_MS = 10_000;
@@ -287,7 +284,8 @@ class Connection {
     if (this.#closed) return;
     if (major !== 3) { this.#fatal("0A000", `unsupported frontend protocol ${major}.${minor}: the demo database speaks 3.0`); return; }
     if (params.replication !== undefined && params.replication !== "false" && params.replication !== "0") {
-      this.#fatal("0A000", "the demo database has no replication (PGlite has no walsender): Mason polls it");
+      // nothing a user reads names the engine (CLAUDE.md): the demo has no walsender, said as what it lacks
+      this.#fatal("0A000", "the demo database has no change log to stream: Mason polls it");
       return;
     }
     const database = params.database ?? params.user ?? "";
@@ -442,7 +440,8 @@ export class DemoSource {
     const port = await new Promise<number>((resolve, reject) => {
       server.once("error", (e: NodeJS.ErrnoException) => {
         reject(new Error(e.code === "EADDRINUSE"
-          ? `the demo database cannot listen on 127.0.0.1:${o.port}: port ${o.port} is in use by another program (choose another port, or stop what holds it)`
+          // what failed alone: the way out is the caller's to say, once (src/cli/demo.ts openDemo: the project's own words)
+          ? `the demo database cannot listen on 127.0.0.1:${o.port}: port ${o.port} is in use`
           : `the demo database cannot listen on 127.0.0.1:${o.port}: ${e.message}`, { cause: e }));
       });
       server.listen({ host: "127.0.0.1", port: o.port }, () => {
@@ -466,6 +465,10 @@ export class DemoSource {
         const counts = await countRows(db);
         o.log(`demo database: seeded ${DEMO_TABLES.map((t) => `${t} ${counts[t]!.toLocaleString("en-US")}`).join(", ")} rows in ${Date.now() - t0} ms, at ${o.dir}`);
       }
+      // ANALYZE AT EVERY OPEN, so the catalog's row estimates are the counts (`mason tables`' rows, the copy's
+      // smallest-first order): the seed's rows commit before an ANALYZE can run, and "seeded" is told by the tables
+      // alone, so a process ended between the two would leave a folder never analysed; ~20k rows, milliseconds
+      await db.exec("ANALYZE");
       const row = (await db.query<Record<string, string>>(`SELECT ${SERVER_PARAMETERS.map((p) => `current_setting('${p}') AS "${p}"`).join(", ")}`)).rows[0] ?? {};
       const serverParameters: Record<string, string> = {};
       for (const p of SERVER_PARAMETERS) serverParameters[p] = String(row[p] ?? "");
@@ -600,7 +603,7 @@ async function boot(dir: string, log: (line: string) => void): Promise<PGlite> {
   return asDemo();
 }
 
-/** the seed, in one transaction, then ANALYZE so the catalog's row estimates are the counts */
+/** the seed, in one transaction (the ANALYZE that makes the row estimates the counts is every open's, after it) */
 async function seed(db: PGlite): Promise<void> {
   const s = seedStatements(new Date());
   await db.transaction(async (tx) => {
@@ -608,7 +611,6 @@ async function seed(db: PGlite): Promise<void> {
     for (const statement of s.rows) await tx.exec(statement);
     for (const statement of s.after) await tx.exec(statement);
   });
-  await db.exec("ANALYZE");
 }
 
 async function countRows(db: PGlite): Promise<Record<string, number>> {
