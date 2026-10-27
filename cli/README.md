@@ -24,6 +24,7 @@ mason tables                         # the tables: rows, keys, added; a table's 
 mason add orders customers           # copy them, added to the sources file (--columns id,status: those only)
 mason wait                           # until every added table is copied and served
 mason user add metabase              # a user for a BI tool: its password, printed once, and the URL to paste
+mason ui                             # the status page and the users, in your browser
 ```
 
 `mason init` takes the database's URL as an argument too (`mason init postgres://user:password@localhost:5432/your_app`);
@@ -89,6 +90,7 @@ again and remove `mason/models/`.
 | `mason remove <table>…` | Takes tables out of the sources file — each one's entry, every other byte as it was — and Mason drops their copies. |
 | `mason wait [--timeout <s>]` | Waits until every added table is copied and served, showing every added table on a line of its own: 100% for the finished ones, in the order they finished, and a bar for each still copying (rows, %, rate, time left) at the bottom. Exit 0 ready, 1 a copy failed (printed, with what to do), 124 timed out (default 600 s). |
 | `mason user add\|list\|remove <name>` | The users of the Postgres API: a name and a password that does not expire, as a BI tool's datasource form asks for them or an app's `DATABASE_URL` carries them. `add` prints the password once with the URL; `remove` refuses the next connection at once and ends the sessions it holds at their next statement, without a restart. |
+| `mason ui` | Opens the running Mason's web page in your browser: what `mason status` says, refreshed every 2 s, and the users of `mason user` (add one, its password shown once; remove one). It prints the URL with the run's token, which the page trades for a cookie on the first visit; `--no-open` prints it only, `--json` is `{ url, port }`. `mason start`'s alone: `mason serve` serves no page. |
 | `mason status` | What Mason is doing: the database and how its changes are read, the project folder, the copy's file, the Postgres API and how it listens, each table's copy, the statements answered slowly in the last day and the ones refused or failed, each with its reason. In replication mode, where the stream is. |
 | `mason sync <table>…` | Makes the copy of these tables current now: a table over the sync's row limit (1,000,000 rows) is copied and served but kept current only so, or by replication. |
 | `mason logs [-n <lines>] [-f] [--start] [--requests [--failed]]` | Mason's log: every copy, poll and statement, with warnings and errors and their reasons; `-f` follows it, `--start` shows what `mason start` printed instead. `--requests` is the request log: every statement a tool sent, when, the outcome and SQLSTATE, how long, the rows, the tool and the user; `--failed` only the refused and failed ones. |
@@ -192,7 +194,7 @@ Restarting the machine is a `mason stop` that nobody ran: the next `mason start`
 ## Security
 
 `mason start`'s command server listens on 127.0.0.1 only; each request must carry the run's token, read from the
-project's `.mason/config.json`, which a browser cannot send. The Postgres API takes a user's password (`mason user`): a
+project's `.mason/config.json`, which a browser cannot send — or, for its web page (`mason ui`), the cookie the run's token is traded for on the first visit (HttpOnly, SameSite=Strict, its Host and every change's Origin checked). The Postgres API takes a user's password (`mason user`): a
 MAC over its name keyed by the project's API key, so rotating the key removes every user at once. Off loopback the Postgres API is TLS or refused.
 
 What a project keeps on this machine (the database URL, the API key, the run's token, the copy, its log and request

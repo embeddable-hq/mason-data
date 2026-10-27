@@ -111,6 +111,7 @@ password once, with the URL to paste into the tool's datasource form:
 
 ```bash
 mason user add metabase              # postgres://metabase:<password>@127.0.0.1:5433/your-app
+mason ui                             # the status page and the users, in your browser
 ```
 
 The tool sends the SQL it sends Postgres — the same names, types and text come back — and
@@ -213,6 +214,7 @@ Every setting, with its default: `mason serve --help`.
 |---|---|
 | [`cli/README.md`](cli/README.md) | every command and option of the `mason` command |
 | [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) | the Postgres API: connecting a tool, what SQL is answered, what is refused by name |
+| [`docs/WEB-UI.md`](docs/WEB-UI.md) | the web page of `mason start` (`mason ui`): what it shows, how it is opened and guarded, how to build it out |
 | [`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) | what is verified to answer exactly as Postgres does, and what is not (rendered from the code) |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | the design: how a statement is answered, the copy, replication, the decisions and measurements behind them |
 | [`docs/BENCHMARK.md`](docs/BENCHMARK.md) | Mason against a Postgres read replica: running the benchmark and publishing its result |

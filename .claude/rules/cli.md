@@ -24,7 +24,7 @@ CLI lacks).
   every option named in it, and a wrong option answered with the usage. A new command is added to the registry, or it
   does not run. **The list is the runbook** (the commands in the order a user will likely need them): `STEPS`
   (src/cli/registry.ts) names each command's step — Learn (`help` first), Set up (`doctor`, `init`, `start`), Add your
-  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`), Run (`status`, `sync`, `logs`, `stop`, `destroy`), Go to
+  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`), Run (`status`, `ui`, `sync`, `logs`, `stop`, `destroy`), Go to
   production (`serve`) — and `mason --help` prints the steps as headings, and under Learn the guides too, a line each
   beside `mason help`; `COMMANDS` is derived from it. A command's old name (`dev`, `purge`, `rm`, `connect`, `list`, …)
   answers with the new one and exit 2 (src/cli/main.ts), never runs. Nothing a command prints refers to a repository
@@ -95,12 +95,14 @@ CLI lacks).
   `/api/ping` with the run's token and its own pid (`answers`, src/cli/runs.ts); a pid in the config that is alive is
   not proof — after a reboot the number belongs to someone else.
 - **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state`, `/api/slow`,
-  `/api/refused`, `/api/requests`, `POST /api/pick|remove|sync`), with the run's token as `Authorization: Bearer` from
-  the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
+  `/api/refused`, `/api/requests`, `/api/users`, `POST /api/pick|remove|sync`), with the run's token as `Authorization:
+  Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
+  Under `mason start` it serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), whose users are
+  `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`), so the page and the CLI cannot disagree.
 - **`mason wait` shows every added table and is exact** (after `mason add a b c` where `a` and `c` were quick, it showed
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still copying at the bottom — redrawn in place on a terminal, printed when it changes
-  elsewhere; ready only when every added table is copied and served (`readiness`, src/cli/commands.ts); a copy that
+  elsewhere; ready only when every added table is copied and served (`readiness`, src/cli/readiness.ts); a copy that
   failed is said with its error and that Mason tries it again; a table over the sync's row limit says `NOT kept current`
   on its line, and a copy in the old layout that it is being copied again.
 - **What a project copies is ONE sources file** (a `sources` folder, each file a source to sync, naming the tables and

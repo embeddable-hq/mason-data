@@ -33,7 +33,8 @@ answered exactly as Postgres would is refused by name, from an allowlist the ora
 
 - **`src/`** is the PRODUCT, one folder per component: `cli/` (the `mason` command: every command, the run, `serve`, the
   sources file; packaged by the root's `cli/` as `@mason-data/cli`), `duck/` (the engine), `api/postgres/` (the listener
-  and its catalog), `cdc/` (reading a Postgres: the wire protocol, the poll, logical decoding), `lib/` (shared).
+  and its catalog), `cdc/` (reading a Postgres: the wire protocol, the poll, logical decoding), `lib/` (shared),
+  `web/` (`mason start`'s web page, `mason ui`: plain HTML, CSS and an ES module, served by the run's command server).
   `scripts/` is tooling for developing Mason (`fails-without.ts`, `duck-diff.ts`, `duck-repro.ts`); it may import
   `src/`, never the reverse.
 - **A project is a folder**: `mason/sources/<name>.yml` (the database and the tables to copy, committed; the URL stays
@@ -155,6 +156,8 @@ code, read its rules file:**
   shape, one failure shape, every command in every state, the project folder, the run's command server, `mason serve`.
 - `postgres-api.md` — the listener: the catalog is a Postgres, the password is a user's or a token's, TLS off loopback,
   the recorded corpus.
+- `web-ui.md` — the web page (`mason ui`): rendered from the command server's JSON in the CLI's words, no framework or
+  build, served from an allowlist under the run's guard, `mason start`'s only, and what the full UI adds.
 
 **Where a new rule goes**: a rule about one subsystem goes in its rules file, never here; this file holds only what
 every session needs. Write the rule and one sentence of why; the incident, the measurement and the dated decision go in
