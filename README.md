@@ -309,8 +309,20 @@ docker compose exec mason mason user add metabase
   needs `wal_level = logical`, a user with `REPLICATION`, and either a publication you name
   (`PG_PUBLICATION`, read as it is and never altered) or the right to create one; cap the slot's
   WAL with `max_slot_wal_keep_size`.
+- **Memory**: the copy may use half the container's memory limit by default (else half the
+  machine's RAM); the other half is the page cache, the catalog (~820 MB) and Node. Give the
+  container enough that the page cache holds the columns your dashboards read: a query over a
+  column it does not hold runs at the disk's speed. The benchmark's copy was about a fifth of its
+  tables in Postgres (10.1 GiB → 1.8 GiB, on a 15 GiB machine); `mason status` says yours. To set
+  it, `MASON_DUCKDB_MEMORY=4GB` with the container's limit about twice that. A statement past it
+  fails alone (53200) and the run goes on; a value near the container's limit is an OOM kill.
+- **CPU**: memory first, then cores. The benchmark's machine (4 vCPU Graviton3, 15 GiB) answered
+  32 clients at 10 M rows, 12 statements a second at a p95 of 3.5 s, as many a second as at 8
+  clients: more clients waited longer. A copy's readers take about a core each while it runs
+  (`MASON_COPY_PARALLEL`, default 3). The image is arm64 (the measured one) and amd64.
 
-Every setting, with its default: `mason serve --help`.
+[`deploy/mason-data/README.md`](deploy/mason-data/README.md#settings) lists the settings a
+production run must set and the ones worth deciding; `mason serve --help` has every one.
 
 ## The repo
 

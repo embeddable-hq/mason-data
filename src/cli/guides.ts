@@ -121,6 +121,16 @@ names the tables the server copies, and its url: names the variable that holds t
    write its file, so run one replica, with no autoscaling, and stop the old container before the new one starts.
    GET /healthz on MASON_HEALTH_PORT (4140) answers 503 while it starts and 200 once it serves; the first start takes
    about 15 seconds before that, then copies the tables.
+   MEMORY: the copy may use half the container's memory limit by default (else half the machine's RAM); the other
+   half is the page cache, Node and the catalog (~820 MB). Give the container enough that the page cache holds the
+   columns your dashboards read: a query over a column it does not hold runs at the disk's speed. The benchmark's copy
+   was about a fifth of its tables in Postgres (10.1 GiB to 1.8 GiB, on a 15 GiB machine); mason status says yours.
+   To set it, MASON_DUCKDB_MEMORY=4GB with the container's limit about twice that. A statement past it fails alone
+   (53200) and the run goes on; a value near the container's limit is an OOM kill.
+   CPU: memory first, then cores. The benchmark's machine (4 vCPU Graviton3, 15 GiB) answered 32 clients at 10 M rows,
+   12 statements a second at a p95 of 3.5 s, as many a second as at 8 clients: more clients waited longer. A copy's
+   readers take about a core each while it runs (MASON_COPY_PARALLEL, default 3). The image is arm64 (the measured
+   one) and amd64. Which settings to decide: ${REPO}/deploy/mason-data/README.md#settings
 
 3. CONNECT THE TOOLS: beside the server (docker compose exec mason …), a user is a password a tool keeps:
      mason user add metabase                        its URL and password, printed once
