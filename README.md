@@ -153,9 +153,10 @@ To rerun: `node scripts/bench-replica.ts` ([docs/BENCHMARK.md](docs/BENCHMARK.md
 
 ## How you use it
 
-You drive it with one command, `mason`, from your app's folder: the same commands for you and
-for a coding agent (Claude Code, Codex, …), each printing for a person or, with `--json`, as
-data, and saying by its exit code how it went.
+There is nothing to clone or build: install the CLI from npm and run it in your app's folder
+(or, with no database to hand, in a new folder with `mason init demo`). You drive it with one
+command, `mason`: the same commands for you and for a coding agent (Claude Code, Codex, …), each
+printing for a person or, with `--json`, as data, and saying by its exit code how it went.
 
 ```bash
 npm i -g @mason-data/cli            # needs Node 22.13+ and nothing else; `mason doctor` checks this machine

@@ -5,9 +5,10 @@ add, keeps the copy current, and serves it to BI tools and your app over the Pos
 same for you and for a coding agent (Claude Code, Codex, …): it prints for a person, or with `--json` as data, and its
 exit code says how it went ([for coding agents](#for-coding-agents)).
 
-It needs Node 22.13 or later and nothing else — no Docker, no database of its own; `mason doctor` checks this machine
-and says what is missing. On a terminal its output is coloured and wrapped to the window, and a command that takes a
-moment shows a spinner; piped, redirected, with `--json` or with `NO_COLOR` set, it is plain text.
+There is nothing to clone or build: install this package and run `mason`. It needs Node 22.13 or later and nothing
+else — no Docker, no database of its own; `mason doctor` checks this machine and says what is missing. On a terminal
+its output is coloured and wrapped to the window, and a command that takes a moment shows a spinner; piped,
+redirected, with `--json` or with `NO_COLOR` set, it is plain text.
 
 **A Mason project is your app's folder.** `mason init` makes it one: its sources file in `mason/sources/` — the
 database and the tables to copy — yours to commit; this machine's copy of your data and Mason's state in `.mason/`,
