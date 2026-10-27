@@ -25,6 +25,7 @@ import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { CopyState } from "../src/duck/sync.ts";
 import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
+import { withinDuckDBRounding } from "./memory-text.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -760,10 +761,14 @@ test("statement_timeout stops a statement that calls a Mason function: 57014 in 
   } finally { await c.end(); }
 });
 
+test("DuckDB's memory_limit text is held to the bytes it was set to", () => {
+  assert.equal(withinDuckDBRounding("64.0 MiB", 64 * 2 ** 20), true);
+  assert.equal(withinDuckDBRounding("64.0 MiB", 80 * 2 ** 20), false, "a wrong value");
+});
+
 // DuckDB's default is 80% of the machine's RAM, in the process that holds V8's heap, the PGlites and every session
 test("DuckDB's memory is bounded: half the RAM unless MASON_DUCKDB_MEMORY says, spilling beside the copy", async () => {
   const setting = async (st: DuckStore, name: string): Promise<string> => String((await st.writer.runAndReadAll(`SELECT current_setting('${name}')`)).getRows()[0]![0]);
-  const mib = (v: string): number => { const m = /^([\d.]+) (KiB|MiB|GiB|TiB)$/.exec(v)!; return Number(m[1]) * { KiB: 1 / 1024, MiB: 1, GiB: 1024, TiB: 1024 ** 2 }[m[2] as "MiB"]; };
   const own = await DuckStore.open(path.join(dir, "limited.db"), () => undefined, { memoryLimit: "64MiB" });
   try {
     assert.equal(await setting(own, "memory_limit"), "64.0 MiB");
@@ -778,7 +783,7 @@ test("DuckDB's memory is bounded: half the RAM unless MASON_DUCKDB_MEMORY says, 
     assert.deepEqual(compression, [["i", "BitPacking"], ["j", "ZSTD"]], "the string column ZSTD, the integer its own");
   } finally { own.close(); }
   // the shared store took the default: half the RAM (DuckDB rounds what it says)
-  assert.ok(Math.abs(mib(await setting(store, "memory_limit")) - os.totalmem() / 2 / 2 ** 20) < 2, await setting(store, "memory_limit"));
+  assert.ok(withinDuckDBRounding(await setting(store, "memory_limit"), os.totalmem() / 2), await setting(store, "memory_limit"));
   await assert.rejects(DuckStore.open(path.join(dir, "bad.db"), () => undefined, { memoryLimit: "lots" }), /MASON_DUCKDB_MEMORY="lots" is not an amount of memory: write it as 8GB or 512MiB/);
 });
 
