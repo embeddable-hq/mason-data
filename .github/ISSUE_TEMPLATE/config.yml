@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: What Mason answers, and the known differences
+    url: https://github.com/embeddable-hq/mason-data/blob/main/docs/SQL-SUPPORT.md
+    about: Rendered from the code; check it before reporting a difference.
+  - name: A security problem
+    url: https://github.com/embeddable-hq/mason-data/security/advisories/new
+    about: Report it privately here, never in a public issue (SECURITY.md).

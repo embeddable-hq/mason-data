@@ -1,0 +1,49 @@
+name: Mason is slower than Postgres
+description: A statement that takes longer on Mason than on Postgres, or longer than it should.
+title: "Slow: "
+labels: ["performance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A point lookup by primary key is expected to be faster on Postgres (the README's benchmark says why). An aggregate, a join or a scan over many rows is not, and is worth reporting.
+  - type: textarea
+    id: statement
+    attributes:
+      label: The statement
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: sizes
+    attributes:
+      label: The tables and their row counts
+      placeholder: "orders 42,000,000 rows, customers 300,000; synced with mason add orders customers"
+    validations:
+      required: true
+  - type: input
+    id: timings
+    attributes:
+      label: Timings
+      description: Wall time on Postgres and on Mason, warm (the second run of each).
+      placeholder: "Postgres 1.8 s, Mason 9.4 s"
+    validations:
+      required: true
+  - type: textarea
+    id: explain
+    attributes:
+      label: EXPLAIN from both
+      description: "`EXPLAIN (ANALYZE, BUFFERS)` on Postgres, and `EXPLAIN` of the same statement through Mason."
+      render: text
+  - type: textarea
+    id: machine
+    attributes:
+      label: Where Mason runs
+      description: CPU count and RAM, `MASON_DUCKDB_MEMORY` if set, disk type; `mason status` while it is slow.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "mason 0.6.1, PostgreSQL 16.4"
+    validations:
+      required: true

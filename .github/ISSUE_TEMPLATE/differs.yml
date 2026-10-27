@@ -1,0 +1,53 @@
+name: Mason answers differently from Postgres
+description: A statement whose answer from Mason is not the one Postgres gives. The most valuable report there is.
+title: "Differs: "
+labels: ["differs from postgres"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [docs/SQL-SUPPORT.md](../blob/main/docs/SQL-SUPPORT.md) "Known differences" first: a difference listed there is decided and documented. Everything else is a bug, and your report becomes a test case in `tests/integration/postgres-cases.ts`.
+  - type: textarea
+    id: statement
+    attributes:
+      label: The statement
+      description: The SQL exactly as the tool sends it. Replace table and column names if you must, but keep the shape and the types.
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: types
+    attributes:
+      label: The columns it reads, with their Postgres types
+      placeholder: "orders.amount numeric(12,2), orders.payload jsonb, customers.name text (citext?), created_at timestamptz"
+    validations:
+      required: true
+  - type: textarea
+    id: postgres
+    attributes:
+      label: Postgres's answer
+      description: The rows, or the error, from Postgres. `psql -X -c "..."` output is ideal.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: mason
+    attributes:
+      label: Mason's answer
+      description: The rows, or the error (with its SQLSTATE), from Mason over the same data.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`mason --version`, and Postgres's `SELECT version()`"
+      placeholder: "mason 0.6.1, PostgreSQL 16.4"
+    validations:
+      required: true
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: The collation or locale of the database, an extension involved (citext, PostGIS), how the table was synced (`mason tables`).

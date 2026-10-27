@@ -1,0 +1,28 @@
+{
+  "name": "mason-data",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "node --test 'tests/**/*.test.ts'",
+    "test:integration": "node --test --test-concurrency=1 'tests/integration/**/*.itest.ts'",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "^2.0.0-r.1",
+    "@electric-sql/pglite": "^0.5.10",
+    "libpg-query": "^18.1.5",
+    "pgsql-deparser": "18.3.8",
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.1",
+    "typescript": "^5.9.0"
+  }
+}

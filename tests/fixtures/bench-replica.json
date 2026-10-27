@@ -1,0 +1,3100 @@
+{
+  "environment": {
+    "label": "m7g.xlarge, 4 vCPU, 15 GiB RAM, EBS gp3",
+    "date": "2026-10-27T13:17:11.334Z",
+    "machine": {
+      "cpus": 4,
+      "cpuModel": "AWS Graviton3",
+      "ramBytes": 16426983424,
+      "memoryBytes": 16426983424,
+      "os": "Linux 7.0.0-1011-aws",
+      "arch": "arm64",
+      "node": "v24.20.0"
+    },
+    "postgres": {
+      "version": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+      "where": "Docker (postgres:18) on the same machine",
+      "containerMemoryBytes": 8212447232,
+      "settings": {
+        "effective_cache_size": "5874MB",
+        "effective_io_concurrency": "200",
+        "hash_mem_multiplier": "2",
+        "jit": "on",
+        "maintenance_work_mem": "979MB",
+        "max_connections": "1074",
+        "max_parallel_workers": "4",
+        "max_parallel_workers_per_gather": "2",
+        "max_worker_processes": "12",
+        "random_page_cost": "1.1",
+        "shared_buffers": "1958MB",
+        "work_mem": "32MB"
+      }
+    },
+    "mason": {
+      "commit": "a12bb860",
+      "duckdb": "v2.0.0",
+      "memoryLimit": "7832MiB",
+      "memoryLimitBytes": 8212447232,
+      "copyParallel": 3,
+      "storeJsonPaths": true
+    },
+    "method": {
+      "sizes": [
+        1000000,
+        10000000,
+        50000000
+      ],
+      "clients": [
+        1,
+        8,
+        32,
+        128
+      ],
+      "seconds": 30,
+      "warmupSeconds": 5,
+      "runs": 2,
+      "statementTimeoutSeconds": 300,
+      "clientProcess": "one Node process apart from Mason's, N node-postgres clients on its event loop",
+      "targetPostgresSeconds": 60,
+      "maxClients": 1024,
+      "sweepClients": 8,
+      "isolation": "each engine measured with the other stopped: Mason closed while Postgres ran, Postgres's container stopped while Mason ran"
+    }
+  },
+  "queries": [
+    {
+      "name": "status",
+      "title": "orders and revenue by status, every row",
+      "sql": "SELECT status, count(*) AS orders, sum(amount) AS revenue FROM public.orders GROUP BY status ORDER BY status"
+    },
+    {
+      "name": "daily_tenant",
+      "title": "one tenant's orders per day, last 90 days",
+      "sql": "SELECT date_trunc('day', created_at) AS day, count(*) AS orders, sum(amount) AS revenue FROM public.orders WHERE tenant_id = 42 AND created_at >= timestamptz '2026-07-03 00:00:00+00' AND created_at < timestamptz '2026-10-01 00:00:00+00' GROUP BY 1 ORDER BY 1"
+    },
+    {
+      "name": "top_customers",
+      "title": "top 20 customers by amount, joined to customers",
+      "sql": "SELECT c.id, c.name, sum(o.amount) AS total FROM public.orders o JOIN public.customers c ON c.id = o.customer_id GROUP BY c.id, c.name ORDER BY total DESC, c.id LIMIT 20"
+    },
+    {
+      "name": "json_source",
+      "title": "orders by a JSON field (payload ->> 'source')",
+      "sql": "SELECT payload ->> 'source' AS source, count(*) AS orders FROM public.orders GROUP BY 1 ORDER BY 1"
+    },
+    {
+      "name": "window_count",
+      "title": "paid orders in a 30-day window",
+      "sql": "SELECT count(*) FROM public.orders WHERE status = 'paid' AND created_at >= timestamptz '2026-09-01 00:00:00+00' AND created_at < timestamptz '2026-10-01 00:00:00+00'"
+    },
+    {
+      "name": "point_lookup",
+      "title": "one order by its primary key",
+      "sql": "SELECT id, tenant_id, customer_id, status, amount, created_at, payload, note FROM public.orders WHERE id = $1"
+    }
+  ],
+  "sizes": [
+    {
+      "rows": 1000000,
+      "customers": 50000,
+      "generatedSeconds": 11,
+      "postgresBytes": 362471424,
+      "copySeconds": 2.8,
+      "copyTables": {
+        "public.customers": 0.135,
+        "public.orders": 2.104
+      },
+      "masonFileBytes": 84153756,
+      "jsonPathReadySeconds": 17.9,
+      "answersEqual": true,
+      "differences": []
+    },
+    {
+      "rows": 3000000,
+      "customers": 150000,
+      "generatedSeconds": 51,
+      "postgresBytes": 1086971904,
+      "copySeconds": 8.2,
+      "copyTables": {
+        "public.customers": 0.206,
+        "public.orders": 6.76
+      },
+      "masonFileBytes": 216453672,
+      "jsonPathReadySeconds": 25.6,
+      "answersEqual": true,
+      "differences": []
+    },
+    {
+      "rows": 10000000,
+      "customers": 500000,
+      "generatedSeconds": 197.8,
+      "postgresBytes": 3622690816,
+      "copySeconds": 20.8,
+      "copyTables": {
+        "public.customers": 0.661,
+        "public.orders": 16.537
+      },
+      "masonFileBytes": 659566939,
+      "jsonPathReadySeconds": 77.4,
+      "answersEqual": true,
+      "differences": []
+    },
+    {
+      "rows": 30000000,
+      "customers": 1500000,
+      "generatedSeconds": 852.2,
+      "postgresBytes": 10871595008,
+      "copySeconds": 134,
+      "copyTables": {
+        "public.customers": 1.2,
+        "public.orders": 82.594
+      },
+      "masonFileBytes": 1976533256,
+      "jsonPathReadySeconds": 213.2,
+      "answersEqual": true,
+      "differences": []
+    }
+  ],
+  "skipped": [],
+  "cells": [
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "mix",
+      "seconds": 30,
+      "p50Ms": 30.48,
+      "p95Ms": 2063.28,
+      "qps": 15.87,
+      "completed": 978,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 30.74,
+          "p95Ms": 2044.49,
+          "qps": 15.97,
+          "completed": 492,
+          "errors": 0,
+          "loadAvg": [
+            1.2,
+            1.76,
+            1.9
+          ],
+          "clientLoopDelayP99Ms": 5.5,
+          "clientCpuPct": 1
+        },
+        {
+          "p50Ms": 30.22,
+          "p95Ms": 2082.07,
+          "qps": 15.77,
+          "completed": 486,
+          "errors": 0,
+          "loadAvg": [
+            6.29,
+            3.56,
+            2.55
+          ],
+          "clientLoopDelayP99Ms": 5.7,
+          "clientCpuPct": 1
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 1985.92
+      }
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "status",
+      "seconds": 30,
+      "p50Ms": 312.84,
+      "p95Ms": 553.75,
+      "qps": 2.66,
+      "completed": 164,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 307.67,
+          "p95Ms": 563.86,
+          "qps": 2.69,
+          "completed": 83,
+          "errors": 0
+        },
+        {
+          "p50Ms": 318,
+          "p95Ms": 543.64,
+          "qps": 2.63,
+          "completed": 81,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "daily_tenant",
+      "seconds": 30,
+      "p50Ms": 3,
+      "p95Ms": 5.26,
+      "qps": 2.63,
+      "completed": 162,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2.98,
+          "p95Ms": 5.4,
+          "qps": 2.63,
+          "completed": 81,
+          "errors": 0
+        },
+        {
+          "p50Ms": 3.03,
+          "p95Ms": 5.12,
+          "qps": 2.63,
+          "completed": 81,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "top_customers",
+      "seconds": 30,
+      "p50Ms": 1985.92,
+      "p95Ms": 2290.25,
+      "qps": 2.63,
+      "completed": 162,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 1998.92,
+          "p95Ms": 2319.18,
+          "qps": 2.63,
+          "completed": 81,
+          "errors": 0
+        },
+        {
+          "p50Ms": 1972.92,
+          "p95Ms": 2261.32,
+          "qps": 2.63,
+          "completed": 81,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "json_source",
+      "seconds": 30,
+      "p50Ms": 679.49,
+      "p95Ms": 822.99,
+      "qps": 2.63,
+      "completed": 162,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 675.99,
+          "p95Ms": 838.99,
+          "qps": 2.63,
+          "completed": 81,
+          "errors": 0
+        },
+        {
+          "p50Ms": 682.98,
+          "p95Ms": 806.99,
+          "qps": 2.63,
+          "completed": 81,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "window_count",
+      "seconds": 30,
+      "p50Ms": 18.37,
+      "p95Ms": 28.48,
+      "qps": 2.66,
+      "completed": 164,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 18.3,
+          "p95Ms": 28.99,
+          "qps": 2.69,
+          "completed": 83,
+          "errors": 0
+        },
+        {
+          "p50Ms": 18.44,
+          "p95Ms": 27.98,
+          "qps": 2.63,
+          "completed": 81,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "point_lookup",
+      "seconds": 30,
+      "p50Ms": 3.23,
+      "p95Ms": 7.89,
+      "qps": 2.66,
+      "completed": 164,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 3.43,
+          "p95Ms": 8.79,
+          "qps": 2.69,
+          "completed": 83,
+          "errors": 0
+        },
+        {
+          "p50Ms": 3.03,
+          "p95Ms": 7,
+          "qps": 2.63,
+          "completed": 81,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "mix",
+      "seconds": 30,
+      "p50Ms": 73.62,
+      "p95Ms": 139.67,
+      "qps": 104.22,
+      "completed": 6265,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 73.36,
+          "p95Ms": 142.96,
+          "qps": 104.05,
+          "completed": 3129,
+          "errors": 0,
+          "loadAvg": [
+            4.71,
+            2.61,
+            2.18
+          ],
+          "clientLoopDelayP99Ms": 7.6,
+          "clientCpuPct": 4
+        },
+        {
+          "p50Ms": 73.88,
+          "p95Ms": 136.37,
+          "qps": 104.38,
+          "completed": 3136,
+          "errors": 0,
+          "loadAvg": [
+            5.29,
+            3.06,
+            2.36
+          ],
+          "clientLoopDelayP99Ms": 7.8,
+          "clientCpuPct": 4
+        }
+      ],
+      "slowest": {
+        "query": "json_source",
+        "p50Ms": 113.61
+      }
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "status",
+      "seconds": 30,
+      "p50Ms": 83.47,
+      "p95Ms": 121,
+      "qps": 17.33,
+      "completed": 1042,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 83.25,
+          "p95Ms": 120.34,
+          "qps": 17.29,
+          "completed": 520,
+          "errors": 0
+        },
+        {
+          "p50Ms": 83.69,
+          "p95Ms": 121.67,
+          "qps": 17.37,
+          "completed": 522,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "daily_tenant",
+      "seconds": 30,
+      "p50Ms": 50.25,
+      "p95Ms": 87.94,
+      "qps": 17.4,
+      "completed": 1046,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 49.49,
+          "p95Ms": 91.05,
+          "qps": 17.36,
+          "completed": 522,
+          "errors": 0
+        },
+        {
+          "p50Ms": 51.01,
+          "p95Ms": 84.83,
+          "qps": 17.44,
+          "completed": 524,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "top_customers",
+      "seconds": 30,
+      "p50Ms": 107.98,
+      "p95Ms": 152.62,
+      "qps": 17.4,
+      "completed": 1046,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 108,
+          "p95Ms": 155.7,
+          "qps": 17.36,
+          "completed": 522,
+          "errors": 0
+        },
+        {
+          "p50Ms": 107.97,
+          "p95Ms": 149.53,
+          "qps": 17.44,
+          "completed": 524,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "json_source",
+      "seconds": 30,
+      "p50Ms": 113.61,
+      "p95Ms": 160.5,
+      "qps": 17.37,
+      "completed": 1044,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 116.61,
+          "p95Ms": 166.8,
+          "qps": 17.39,
+          "completed": 523,
+          "errors": 0
+        },
+        {
+          "p50Ms": 110.61,
+          "p95Ms": 154.19,
+          "qps": 17.34,
+          "completed": 521,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "window_count",
+      "seconds": 30,
+      "p50Ms": 44.02,
+      "p95Ms": 85.82,
+      "qps": 17.35,
+      "completed": 1043,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 42.12,
+          "p95Ms": 86.97,
+          "qps": 17.33,
+          "completed": 521,
+          "errors": 0
+        },
+        {
+          "p50Ms": 45.93,
+          "p95Ms": 84.67,
+          "qps": 17.37,
+          "completed": 522,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 1000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "point_lookup",
+      "seconds": 30,
+      "p50Ms": 43.69,
+      "p95Ms": 80.46,
+      "qps": 17.37,
+      "completed": 1044,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 40.41,
+          "p95Ms": 80.94,
+          "qps": 17.33,
+          "completed": 521,
+          "errors": 0
+        },
+        {
+          "p50Ms": 46.98,
+          "p95Ms": 79.98,
+          "qps": 17.41,
+          "completed": 523,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "mix",
+      "seconds": 30,
+      "p50Ms": 814.17,
+      "p95Ms": 7607.65,
+      "qps": 3.55,
+      "completed": 231,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 790.03,
+          "p95Ms": 7367.42,
+          "qps": 3.68,
+          "completed": 123,
+          "errors": 0,
+          "loadAvg": [
+            2.22,
+            3.29,
+            2.65
+          ],
+          "clientLoopDelayP99Ms": 5.6,
+          "clientCpuPct": 1
+        },
+        {
+          "p50Ms": 838.31,
+          "p95Ms": 7847.88,
+          "qps": 3.42,
+          "completed": 108,
+          "errors": 0,
+          "loadAvg": [
+            6.48,
+            4.66,
+            3.25
+          ],
+          "clientLoopDelayP99Ms": 5.4,
+          "clientCpuPct": 1
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 7379.75
+      }
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "status",
+      "seconds": 30,
+      "p50Ms": 948.14,
+      "p95Ms": 2322.9,
+      "qps": 0.57,
+      "completed": 37,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 871.34,
+          "p95Ms": 2026.03,
+          "qps": 0.6,
+          "completed": 20,
+          "errors": 0
+        },
+        {
+          "p50Ms": 1024.95,
+          "p95Ms": 2619.77,
+          "qps": 0.54,
+          "completed": 17,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "daily_tenant",
+      "seconds": 30,
+      "p50Ms": 4.71,
+      "p95Ms": 8.57,
+      "qps": 0.61,
+      "completed": 40,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 5.36,
+          "p95Ms": 8.57,
+          "qps": 0.63,
+          "completed": 21,
+          "errors": 0
+        },
+        {
+          "p50Ms": 4.06,
+          "p95Ms": 8.56,
+          "qps": 0.6,
+          "completed": 19,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "top_customers",
+      "seconds": 30,
+      "p50Ms": 7379.75,
+      "p95Ms": 7879.09,
+      "qps": 0.63,
+      "completed": 41,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 7184.92,
+          "p95Ms": 7722.8,
+          "qps": 0.63,
+          "completed": 21,
+          "errors": 0
+        },
+        {
+          "p50Ms": 7574.58,
+          "p95Ms": 8035.37,
+          "qps": 0.63,
+          "completed": 20,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "json_source",
+      "seconds": 30,
+      "p50Ms": 2718.88,
+      "p95Ms": 3180.78,
+      "qps": 0.61,
+      "completed": 40,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2602.7,
+          "p95Ms": 3061.92,
+          "qps": 0.66,
+          "completed": 22,
+          "errors": 0
+        },
+        {
+          "p50Ms": 2835.05,
+          "p95Ms": 3299.63,
+          "qps": 0.57,
+          "completed": 18,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "window_count",
+      "seconds": 30,
+      "p50Ms": 65.91,
+      "p95Ms": 100.52,
+      "qps": 0.55,
+      "completed": 36,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 63.19,
+          "p95Ms": 105.33,
+          "qps": 0.57,
+          "completed": 19,
+          "errors": 0
+        },
+        {
+          "p50Ms": 68.64,
+          "p95Ms": 95.71,
+          "qps": 0.54,
+          "completed": 17,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "point_lookup",
+      "seconds": 30,
+      "p50Ms": 2.1,
+      "p95Ms": 3.99,
+      "qps": 0.57,
+      "completed": 37,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 1.47,
+          "p95Ms": 3.99,
+          "qps": 0.6,
+          "completed": 20,
+          "errors": 0
+        },
+        {
+          "p50Ms": 2.74,
+          "p95Ms": 3.98,
+          "qps": 0.54,
+          "completed": 17,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "mix",
+      "seconds": 30,
+      "p50Ms": 185.58,
+      "p95Ms": 419.57,
+      "qps": 38.89,
+      "completed": 2346,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 188.95,
+          "p95Ms": 415.85,
+          "qps": 38.92,
+          "completed": 1175,
+          "errors": 0,
+          "loadAvg": [
+            5.37,
+            4.02,
+            2.94
+          ],
+          "clientLoopDelayP99Ms": 7.5,
+          "clientCpuPct": 2
+        },
+        {
+          "p50Ms": 182.21,
+          "p95Ms": 423.29,
+          "qps": 38.85,
+          "completed": 1171,
+          "errors": 0,
+          "loadAvg": [
+            6.25,
+            4.38,
+            3.1
+          ],
+          "clientLoopDelayP99Ms": 7.4,
+          "clientCpuPct": 2
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 357.19
+      }
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "status",
+      "seconds": 30,
+      "p50Ms": 223.24,
+      "p95Ms": 349.18,
+      "qps": 6.48,
+      "completed": 391,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 231.48,
+          "p95Ms": 332.43,
+          "qps": 6.49,
+          "completed": 196,
+          "errors": 0
+        },
+        {
+          "p50Ms": 215,
+          "p95Ms": 365.92,
+          "qps": 6.47,
+          "completed": 195,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "daily_tenant",
+      "seconds": 30,
+      "p50Ms": 110.55,
+      "p95Ms": 236.21,
+      "qps": 6.46,
+      "completed": 390,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 113.85,
+          "p95Ms": 246.27,
+          "qps": 6.53,
+          "completed": 197,
+          "errors": 0
+        },
+        {
+          "p50Ms": 107.25,
+          "p95Ms": 226.15,
+          "qps": 6.4,
+          "completed": 193,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "top_customers",
+      "seconds": 30,
+      "p50Ms": 357.19,
+      "p95Ms": 487.34,
+      "qps": 6.46,
+      "completed": 390,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 354.94,
+          "p95Ms": 499.93,
+          "qps": 6.46,
+          "completed": 195,
+          "errors": 0
+        },
+        {
+          "p50Ms": 359.44,
+          "p95Ms": 474.74,
+          "qps": 6.47,
+          "completed": 195,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "json_source",
+      "seconds": 30,
+      "p50Ms": 300.96,
+      "p95Ms": 447.61,
+      "qps": 6.45,
+      "completed": 389,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 292.68,
+          "p95Ms": 434.44,
+          "qps": 6.43,
+          "completed": 194,
+          "errors": 0
+        },
+        {
+          "p50Ms": 309.24,
+          "p95Ms": 460.77,
+          "qps": 6.47,
+          "completed": 195,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "window_count",
+      "seconds": 30,
+      "p50Ms": 103.97,
+      "p95Ms": 234.2,
+      "qps": 6.52,
+      "completed": 393,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 112.02,
+          "p95Ms": 237.29,
+          "qps": 6.49,
+          "completed": 196,
+          "errors": 0
+        },
+        {
+          "p50Ms": 95.92,
+          "p95Ms": 231.12,
+          "qps": 6.54,
+          "completed": 197,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 3000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "point_lookup",
+      "seconds": 30,
+      "p50Ms": 95.93,
+      "p95Ms": 211.57,
+      "qps": 6.52,
+      "completed": 393,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 99.75,
+          "p95Ms": 203.07,
+          "qps": 6.53,
+          "completed": 197,
+          "errors": 0
+        },
+        {
+          "p50Ms": 92.11,
+          "p95Ms": 220.07,
+          "qps": 6.5,
+          "completed": 196,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "mix",
+      "seconds": 180,
+      "p50Ms": 2011.37,
+      "p95Ms": 37878.1,
+      "qps": 0.96,
+      "completed": 365,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 3497.62,
+          "p95Ms": 37931.65,
+          "qps": 0.95,
+          "completed": 182,
+          "errors": 0,
+          "loadAvg": [
+            1.69,
+            2.91,
+            3.01
+          ],
+          "clientLoopDelayP99Ms": 5.4,
+          "clientCpuPct": 0
+        },
+        {
+          "p50Ms": 525.11,
+          "p95Ms": 37824.56,
+          "qps": 0.97,
+          "completed": 183,
+          "errors": 0,
+          "loadAvg": [
+            7.15,
+            7.61,
+            6.03
+          ],
+          "clientLoopDelayP99Ms": 5.4,
+          "clientCpuPct": 1
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 19050.41
+      }
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "status",
+      "seconds": 180,
+      "p50Ms": 8496.24,
+      "p95Ms": 10096.56,
+      "qps": 0.16,
+      "completed": 61,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 8329.89,
+          "p95Ms": 10052.75,
+          "qps": 0.16,
+          "completed": 30,
+          "errors": 0
+        },
+        {
+          "p50Ms": 8662.58,
+          "p95Ms": 10140.37,
+          "qps": 0.16,
+          "completed": 31,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "daily_tenant",
+      "seconds": 180,
+      "p50Ms": 23.42,
+      "p95Ms": 35.91,
+      "qps": 0.16,
+      "completed": 60,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 25.62,
+          "p95Ms": 35.94,
+          "qps": 0.16,
+          "completed": 30,
+          "errors": 0
+        },
+        {
+          "p50Ms": 21.22,
+          "p95Ms": 35.88,
+          "qps": 0.16,
+          "completed": 30,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "top_customers",
+      "seconds": 180,
+      "p50Ms": 19050.41,
+      "p95Ms": 42762.18,
+      "qps": 0.16,
+      "completed": 61,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 19230.24,
+          "p95Ms": 42524.59,
+          "qps": 0.16,
+          "completed": 31,
+          "errors": 0
+        },
+        {
+          "p50Ms": 18870.58,
+          "p95Ms": 42999.76,
+          "qps": 0.16,
+          "completed": 30,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "json_source",
+      "seconds": 180,
+      "p50Ms": 10719.6,
+      "p95Ms": 12137.23,
+      "qps": 0.16,
+      "completed": 61,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 10456.66,
+          "p95Ms": 11867.37,
+          "qps": 0.16,
+          "completed": 31,
+          "errors": 0
+        },
+        {
+          "p50Ms": 10982.55,
+          "p95Ms": 12407.08,
+          "qps": 0.16,
+          "completed": 30,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "window_count",
+      "seconds": 180,
+      "p50Ms": 280.01,
+      "p95Ms": 533.76,
+      "qps": 0.16,
+      "completed": 61,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 234.85,
+          "p95Ms": 554.09,
+          "qps": 0.16,
+          "completed": 30,
+          "errors": 0
+        },
+        {
+          "p50Ms": 325.17,
+          "p95Ms": 513.43,
+          "qps": 0.16,
+          "completed": 31,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "point_lookup",
+      "seconds": 180,
+      "p50Ms": 12.46,
+      "p95Ms": 54.83,
+      "qps": 0.16,
+      "completed": 61,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 16.74,
+          "p95Ms": 64.04,
+          "qps": 0.16,
+          "completed": 30,
+          "errors": 0
+        },
+        {
+          "p50Ms": 8.19,
+          "p95Ms": 45.62,
+          "qps": 0.16,
+          "completed": 31,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "mix",
+      "seconds": 180,
+      "p50Ms": 610.23,
+      "p95Ms": 1350.21,
+      "qps": 12.09,
+      "completed": 4369,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 626.03,
+          "p95Ms": 1359.97,
+          "qps": 12.05,
+          "completed": 2177,
+          "errors": 0,
+          "loadAvg": [
+            14.89,
+            8.95,
+            5.47
+          ],
+          "clientLoopDelayP99Ms": 7.8,
+          "clientCpuPct": 1
+        },
+        {
+          "p50Ms": 594.43,
+          "p95Ms": 1340.45,
+          "qps": 12.13,
+          "completed": 2192,
+          "errors": 0,
+          "loadAvg": [
+            6.91,
+            8.01,
+            5.77
+          ],
+          "clientLoopDelayP99Ms": 7.8,
+          "clientCpuPct": 1
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 1135.57
+      }
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "status",
+      "seconds": 180,
+      "p50Ms": 715.58,
+      "p95Ms": 1121.53,
+      "qps": 2.01,
+      "completed": 727,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 725.89,
+          "p95Ms": 1137.93,
+          "qps": 2,
+          "completed": 362,
+          "errors": 0
+        },
+        {
+          "p50Ms": 705.26,
+          "p95Ms": 1105.12,
+          "qps": 2.02,
+          "completed": 365,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "daily_tenant",
+      "seconds": 180,
+      "p50Ms": 362.63,
+      "p95Ms": 754.34,
+      "qps": 2.01,
+      "completed": 727,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 353.81,
+          "p95Ms": 773.17,
+          "qps": 2.01,
+          "completed": 363,
+          "errors": 0
+        },
+        {
+          "p50Ms": 371.46,
+          "p95Ms": 735.5,
+          "qps": 2.01,
+          "completed": 364,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "top_customers",
+      "seconds": 180,
+      "p50Ms": 1135.57,
+      "p95Ms": 1649.81,
+      "qps": 2.01,
+      "completed": 728,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 1140.86,
+          "p95Ms": 1652.85,
+          "qps": 2.01,
+          "completed": 363,
+          "errors": 0
+        },
+        {
+          "p50Ms": 1130.27,
+          "p95Ms": 1646.77,
+          "qps": 2.02,
+          "completed": 365,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "json_source",
+      "seconds": 180,
+      "p50Ms": 981.19,
+      "p95Ms": 1398.47,
+      "qps": 2.02,
+      "completed": 729,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 997.47,
+          "p95Ms": 1449.82,
+          "qps": 2.01,
+          "completed": 363,
+          "errors": 0
+        },
+        {
+          "p50Ms": 964.92,
+          "p95Ms": 1347.12,
+          "qps": 2.03,
+          "completed": 366,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "window_count",
+      "seconds": 180,
+      "p50Ms": 355.79,
+      "p95Ms": 769.96,
+      "qps": 2.02,
+      "completed": 729,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 356.02,
+          "p95Ms": 766.92,
+          "qps": 2.01,
+          "completed": 363,
+          "errors": 0
+        },
+        {
+          "p50Ms": 355.56,
+          "p95Ms": 773.01,
+          "qps": 2.03,
+          "completed": 366,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "point_lookup",
+      "seconds": 180,
+      "p50Ms": 297.6,
+      "p95Ms": 653.79,
+      "qps": 2.02,
+      "completed": 729,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 272.14,
+          "p95Ms": 664.34,
+          "qps": 2.01,
+          "completed": 363,
+          "errors": 0
+        },
+        {
+          "p50Ms": 323.06,
+          "p95Ms": 643.24,
+          "qps": 2.03,
+          "completed": 366,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "mix",
+      "seconds": 180,
+      "p50Ms": 9971.03,
+      "p95Ms": 258456.14,
+      "qps": 0.09,
+      "completed": 97,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 69773.46,
+          "p95Ms": 268063.26,
+          "qps": 0.05,
+          "completed": 16,
+          "errors": 0,
+          "loadAvg": [
+            3.05,
+            3.06,
+            4.03
+          ],
+          "clientLoopDelayP99Ms": 6.2,
+          "clientCpuPct": 0
+        },
+        {
+          "p50Ms": 600.12,
+          "p95Ms": 273721.31,
+          "qps": 0.09,
+          "completed": 26,
+          "errors": 0,
+          "loadAvg": [
+            7.03,
+            7.07,
+            6.82
+          ],
+          "clientLoopDelayP99Ms": 6.2,
+          "clientCpuPct": 0
+        },
+        {
+          "p50Ms": 19257.4,
+          "p95Ms": 248849.02,
+          "qps": 0.09,
+          "completed": 27,
+          "errors": 0,
+          "loadAvg": [
+            10.9,
+            11.38,
+            9.45
+          ],
+          "clientLoopDelayP99Ms": 6.3,
+          "clientCpuPct": 0
+        },
+        {
+          "p50Ms": 684.65,
+          "p95Ms": 210489.46,
+          "qps": 0.11,
+          "completed": 28,
+          "errors": 0,
+          "loadAvg": [
+            6.59,
+            9.71,
+            9.71
+          ],
+          "clientLoopDelayP99Ms": 6.2,
+          "clientCpuPct": 0
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 132997.64
+      }
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "status",
+      "seconds": 180,
+      "p50Ms": 31797.11,
+      "p95Ms": 71176.65,
+      "qps": 0.01,
+      "completed": 16,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 69773.46,
+          "p95Ms": 226388.68,
+          "qps": 0.01,
+          "completed": 2,
+          "errors": 0
+        },
+        {
+          "p50Ms": 9146.51,
+          "p95Ms": 25342.28,
+          "qps": 0.01,
+          "completed": 4,
+          "errors": 0
+        },
+        {
+          "p50Ms": 38369.41,
+          "p95Ms": 52024.52,
+          "qps": 0.01,
+          "completed": 4,
+          "errors": 0
+        },
+        {
+          "p50Ms": 25224.81,
+          "p95Ms": 90328.78,
+          "qps": 0.02,
+          "completed": 6,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "daily_tenant",
+      "seconds": 180,
+      "p50Ms": 40.3,
+      "p95Ms": 72.94,
+      "qps": 0.02,
+      "completed": 18,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 38.51,
+          "p95Ms": 57.96,
+          "qps": 0.01,
+          "completed": 3,
+          "errors": 0
+        },
+        {
+          "p50Ms": 42.1,
+          "p95Ms": 249.13,
+          "qps": 0.02,
+          "completed": 6,
+          "errors": 0
+        },
+        {
+          "p50Ms": 25.04,
+          "p95Ms": 49.68,
+          "qps": 0.02,
+          "completed": 5,
+          "errors": 0
+        },
+        {
+          "p50Ms": 45.81,
+          "p95Ms": 87.92,
+          "qps": 0.02,
+          "completed": 4,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "top_customers",
+      "seconds": 180,
+      "p50Ms": 132997.64,
+      "p95Ms": 260614.27,
+      "qps": 0.02,
+      "completed": 21,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 120900.78,
+          "p95Ms": 268063.26,
+          "qps": 0.01,
+          "completed": 4,
+          "errors": 0
+        },
+        {
+          "p50Ms": 245705.99,
+          "p95Ms": 281214.67,
+          "qps": 0.02,
+          "completed": 6,
+          "errors": 0
+        },
+        {
+          "p50Ms": 145094.49,
+          "p95Ms": 253165.28,
+          "qps": 0.02,
+          "completed": 7,
+          "errors": 0
+        },
+        {
+          "p50Ms": 91153.66,
+          "p95Ms": 210634.56,
+          "qps": 0.02,
+          "completed": 4,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "json_source",
+      "seconds": 180,
+      "p50Ms": 72984.04,
+      "p95Ms": 82690.48,
+      "qps": 0.01,
+      "completed": 11,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 202389.85,
+          "p95Ms": 222129.2,
+          "qps": 0.01,
+          "completed": 3,
+          "errors": 0
+        },
+        {
+          "p50Ms": 46391.31,
+          "p95Ms": 55819.87,
+          "qps": 0.01,
+          "completed": 2,
+          "errors": 0
+        },
+        {
+          "p50Ms": 88174.32,
+          "p95Ms": 103058.35,
+          "qps": 0.01,
+          "completed": 3,
+          "errors": 0
+        },
+        {
+          "p50Ms": 57793.77,
+          "p95Ms": 62322.61,
+          "qps": 0.01,
+          "completed": 3,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "window_count",
+      "seconds": 180,
+      "p50Ms": 452.17,
+      "p95Ms": 958.36,
+      "qps": 0.01,
+      "completed": 15,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 243.37,
+          "p95Ms": 472.25,
+          "qps": 0.01,
+          "completed": 2,
+          "errors": 0
+        },
+        {
+          "p50Ms": 430.72,
+          "p95Ms": 807.72,
+          "qps": 0.01,
+          "completed": 4,
+          "errors": 0
+        },
+        {
+          "p50Ms": 691.89,
+          "p95Ms": 1821.95,
+          "qps": 0.01,
+          "completed": 4,
+          "errors": 0
+        },
+        {
+          "p50Ms": 473.61,
+          "p95Ms": 1108.99,
+          "qps": 0.02,
+          "completed": 5,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "postgres",
+      "query": "point_lookup",
+      "seconds": 180,
+      "p50Ms": 12.56,
+      "p95Ms": 22.89,
+      "qps": 0.01,
+      "completed": 16,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 10.36,
+          "p95Ms": 16.5,
+          "qps": 0.01,
+          "completed": 2,
+          "errors": 0
+        },
+        {
+          "p50Ms": 12,
+          "p95Ms": 29.6,
+          "qps": 0.01,
+          "completed": 4,
+          "errors": 0
+        },
+        {
+          "p50Ms": 13.54,
+          "p95Ms": 28.37,
+          "qps": 0.01,
+          "completed": 4,
+          "errors": 0
+        },
+        {
+          "p50Ms": 13.12,
+          "p95Ms": 17.41,
+          "qps": 0.02,
+          "completed": 6,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "mix",
+      "seconds": 180,
+      "p50Ms": 1845.05,
+      "p95Ms": 4528.55,
+      "qps": 3.8,
+      "completed": 1383,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 1862.52,
+          "p95Ms": 4442.9,
+          "qps": 3.78,
+          "completed": 686,
+          "errors": 0,
+          "loadAvg": [
+            5.58,
+            7.13,
+            6.66
+          ],
+          "clientLoopDelayP99Ms": 7.8,
+          "clientCpuPct": 1
+        },
+        {
+          "p50Ms": 1827.59,
+          "p95Ms": 4614.19,
+          "qps": 3.82,
+          "completed": 697,
+          "errors": 0,
+          "loadAvg": [
+            7.03,
+            7.09,
+            6.74
+          ],
+          "clientLoopDelayP99Ms": 7.8,
+          "clientCpuPct": 1
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 3962.74
+      }
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "status",
+      "seconds": 180,
+      "p50Ms": 2146.7,
+      "p95Ms": 3754.98,
+      "qps": 0.64,
+      "completed": 231,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2283.01,
+          "p95Ms": 3985.18,
+          "qps": 0.63,
+          "completed": 114,
+          "errors": 0
+        },
+        {
+          "p50Ms": 2010.38,
+          "p95Ms": 3524.79,
+          "qps": 0.64,
+          "completed": 117,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "daily_tenant",
+      "seconds": 180,
+      "p50Ms": 956.89,
+      "p95Ms": 2465.17,
+      "qps": 0.63,
+      "completed": 229,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 1003.25,
+          "p95Ms": 2319.17,
+          "qps": 0.63,
+          "completed": 114,
+          "errors": 0
+        },
+        {
+          "p50Ms": 910.53,
+          "p95Ms": 2611.17,
+          "qps": 0.63,
+          "completed": 115,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "top_customers",
+      "seconds": 180,
+      "p50Ms": 3962.74,
+      "p95Ms": 5800.4,
+      "qps": 0.64,
+      "completed": 231,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 3882.09,
+          "p95Ms": 5659.08,
+          "qps": 0.63,
+          "completed": 115,
+          "errors": 0
+        },
+        {
+          "p50Ms": 4043.39,
+          "p95Ms": 5941.72,
+          "qps": 0.64,
+          "completed": 116,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "json_source",
+      "seconds": 180,
+      "p50Ms": 2839.09,
+      "p95Ms": 4754.4,
+      "qps": 0.63,
+      "completed": 229,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2760.97,
+          "p95Ms": 4579.38,
+          "qps": 0.63,
+          "completed": 114,
+          "errors": 0
+        },
+        {
+          "p50Ms": 2917.2,
+          "p95Ms": 4929.41,
+          "qps": 0.63,
+          "completed": 115,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "window_count",
+      "seconds": 180,
+      "p50Ms": 1046.16,
+      "p95Ms": 2589.48,
+      "qps": 0.64,
+      "completed": 232,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 1029.57,
+          "p95Ms": 2553.66,
+          "qps": 0.63,
+          "completed": 115,
+          "errors": 0
+        },
+        {
+          "p50Ms": 1062.76,
+          "p95Ms": 2625.31,
+          "qps": 0.64,
+          "completed": 117,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 30000000,
+      "clients": 8,
+      "engine": "mason",
+      "query": "point_lookup",
+      "seconds": 180,
+      "p50Ms": 993.71,
+      "p95Ms": 2088.38,
+      "qps": 0.64,
+      "completed": 231,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 1088.06,
+          "p95Ms": 2261.47,
+          "qps": 0.63,
+          "completed": 114,
+          "errors": 0
+        },
+        {
+          "p50Ms": 899.36,
+          "p95Ms": 1915.3,
+          "qps": 0.64,
+          "completed": 117,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "query": "mix",
+      "seconds": 30,
+      "p50Ms": 535.73,
+      "p95Ms": 5481.16,
+      "qps": 0.55,
+      "completed": 34,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 1001.01,
+          "p95Ms": 5597.77,
+          "qps": 0.52,
+          "completed": 16,
+          "errors": 0,
+          "loadAvg": [
+            2.26,
+            7.02,
+            9.03
+          ],
+          "clientLoopDelayP99Ms": 5.1,
+          "clientCpuPct": 0
+        },
+        {
+          "p50Ms": 70.45,
+          "p95Ms": 5364.55,
+          "qps": 0.59,
+          "completed": 18,
+          "errors": 0,
+          "loadAvg": [
+            3.5,
+            5.85,
+            8.35
+          ],
+          "clientLoopDelayP99Ms": 5.2,
+          "clientCpuPct": 0
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 5475.23
+      }
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "query": "status",
+      "seconds": 30,
+      "p50Ms": 993.2,
+      "p95Ms": 1001.25,
+      "qps": 0.1,
+      "completed": 6,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 1007,
+          "p95Ms": 1012.86,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        },
+        {
+          "p50Ms": 979.41,
+          "p95Ms": 989.64,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "query": "daily_tenant",
+      "seconds": 30,
+      "p50Ms": 8.32,
+      "p95Ms": 8.82,
+      "qps": 0.1,
+      "completed": 6,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 9.65,
+          "p95Ms": 10.06,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        },
+        {
+          "p50Ms": 7,
+          "p95Ms": 7.58,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "query": "top_customers",
+      "seconds": 30,
+      "p50Ms": 5475.23,
+      "p95Ms": 5481.16,
+      "qps": 0.1,
+      "completed": 6,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 5588.28,
+          "p95Ms": 5597.77,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        },
+        {
+          "p50Ms": 5362.19,
+          "p95Ms": 5364.55,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "query": "json_source",
+      "seconds": 30,
+      "p50Ms": 3696.45,
+      "p95Ms": 3699.83,
+      "qps": 0.1,
+      "completed": 6,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 3691.85,
+          "p95Ms": 3696.19,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        },
+        {
+          "p50Ms": 3701.06,
+          "p95Ms": 3703.47,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "query": "window_count",
+      "seconds": 30,
+      "p50Ms": 70.06,
+      "p95Ms": 70.5,
+      "qps": 0.08,
+      "completed": 5,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 70.18,
+          "p95Ms": 70.56,
+          "qps": 0.06,
+          "completed": 2,
+          "errors": 0
+        },
+        {
+          "p50Ms": 69.93,
+          "p95Ms": 70.45,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "postgres",
+      "query": "point_lookup",
+      "seconds": 30,
+      "p50Ms": 1.77,
+      "p95Ms": 1.81,
+      "qps": 0.08,
+      "completed": 5,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2.02,
+          "p95Ms": 2.08,
+          "qps": 0.06,
+          "completed": 2,
+          "errors": 0
+        },
+        {
+          "p50Ms": 1.51,
+          "p95Ms": 1.53,
+          "qps": 0.1,
+          "completed": 3,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "mason",
+      "query": "mix",
+      "seconds": 30,
+      "p50Ms": 91.19,
+      "p95Ms": 235.03,
+      "qps": 10.8,
+      "completed": 652,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 91.55,
+          "p95Ms": 236.88,
+          "qps": 10.78,
+          "completed": 325,
+          "errors": 0,
+          "loadAvg": [
+            2.42,
+            6.4,
+            8.73
+          ],
+          "clientLoopDelayP99Ms": 6.9,
+          "clientCpuPct": 1
+        },
+        {
+          "p50Ms": 90.84,
+          "p95Ms": 233.19,
+          "qps": 10.83,
+          "completed": 327,
+          "errors": 0,
+          "loadAvg": [
+            3.18,
+            6.15,
+            8.56
+          ],
+          "clientLoopDelayP99Ms": 6.8,
+          "clientCpuPct": 1
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 232.84
+      }
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "mason",
+      "query": "status",
+      "seconds": 30,
+      "p50Ms": 93.27,
+      "p95Ms": 99.65,
+      "qps": 1.79,
+      "completed": 108,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 93.56,
+          "p95Ms": 98.53,
+          "qps": 1.79,
+          "completed": 54,
+          "errors": 0
+        },
+        {
+          "p50Ms": 92.98,
+          "p95Ms": 100.76,
+          "qps": 1.79,
+          "completed": 54,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "mason",
+      "query": "daily_tenant",
+      "seconds": 30,
+      "p50Ms": 10.82,
+      "p95Ms": 15.47,
+      "qps": 1.81,
+      "completed": 109,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 11.23,
+          "p95Ms": 16.59,
+          "qps": 1.79,
+          "completed": 54,
+          "errors": 0
+        },
+        {
+          "p50Ms": 10.42,
+          "p95Ms": 14.36,
+          "qps": 1.82,
+          "completed": 55,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "mason",
+      "query": "top_customers",
+      "seconds": 30,
+      "p50Ms": 232.84,
+      "p95Ms": 243.38,
+      "qps": 1.81,
+      "completed": 109,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 234.98,
+          "p95Ms": 244.13,
+          "qps": 1.79,
+          "completed": 54,
+          "errors": 0
+        },
+        {
+          "p50Ms": 230.71,
+          "p95Ms": 242.63,
+          "qps": 1.82,
+          "completed": 55,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "mason",
+      "query": "json_source",
+      "seconds": 30,
+      "p50Ms": 196.15,
+      "p95Ms": 202.78,
+      "qps": 1.82,
+      "completed": 110,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 195.39,
+          "p95Ms": 202.78,
+          "qps": 1.82,
+          "completed": 55,
+          "errors": 0
+        },
+        {
+          "p50Ms": 196.92,
+          "p95Ms": 202.77,
+          "qps": 1.82,
+          "completed": 55,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "mason",
+      "query": "window_count",
+      "seconds": 30,
+      "p50Ms": 8.41,
+      "p95Ms": 10.91,
+      "qps": 1.79,
+      "completed": 108,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 8.27,
+          "p95Ms": 11.13,
+          "qps": 1.79,
+          "completed": 54,
+          "errors": 0
+        },
+        {
+          "p50Ms": 8.55,
+          "p95Ms": 10.68,
+          "qps": 1.79,
+          "completed": 54,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 1,
+      "engine": "mason",
+      "query": "point_lookup",
+      "seconds": 30,
+      "p50Ms": 5.96,
+      "p95Ms": 8.41,
+      "qps": 1.79,
+      "completed": 108,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 6.05,
+          "p95Ms": 8.78,
+          "qps": 1.79,
+          "completed": 54,
+          "errors": 0
+        },
+        {
+          "p50Ms": 5.87,
+          "p95Ms": 8.04,
+          "qps": 1.79,
+          "completed": 54,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "postgres",
+      "query": "mix",
+      "seconds": 180,
+      "p50Ms": 952.87,
+      "p95Ms": 96612.96,
+      "qps": 0.77,
+      "completed": 704,
+      "errors": 81,
+      "errorCodes": {
+        "53100": 81
+      },
+      "runs": [
+        {
+          "p50Ms": 1371.4,
+          "p95Ms": 88991.49,
+          "qps": 0.77,
+          "completed": 169,
+          "errors": 22,
+          "loadAvg": [
+            3.14,
+            5.46,
+            8.11
+          ],
+          "clientLoopDelayP99Ms": 5.9,
+          "clientCpuPct": 0
+        },
+        {
+          "p50Ms": 777.51,
+          "p95Ms": 127525.51,
+          "qps": 0.73,
+          "completed": 196,
+          "errors": 17,
+          "loadAvg": [
+            6.61,
+            11.74,
+            13.94
+          ],
+          "clientLoopDelayP99Ms": 5.5,
+          "clientCpuPct": 0
+        },
+        {
+          "p50Ms": 1128.22,
+          "p95Ms": 71837.54,
+          "qps": 0.79,
+          "completed": 159,
+          "errors": 22,
+          "loadAvg": [
+            20.42,
+            26.24,
+            21.26
+          ],
+          "clientLoopDelayP99Ms": 5.6,
+          "clientCpuPct": 0
+        },
+        {
+          "p50Ms": 619.55,
+          "p95Ms": 104234.42,
+          "qps": 0.77,
+          "completed": 180,
+          "errors": 20,
+          "loadAvg": [
+            29.1,
+            31.64,
+            26.14
+          ],
+          "clientLoopDelayP99Ms": 5.7,
+          "clientCpuPct": 0
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 114374.08
+      }
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "postgres",
+      "query": "status",
+      "seconds": 180,
+      "p50Ms": 19045.28,
+      "p95Ms": 29253.12,
+      "qps": 0.13,
+      "completed": 117,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 21055.95,
+          "p95Ms": 37022.81,
+          "qps": 0.11,
+          "completed": 25,
+          "errors": 0
+        },
+        {
+          "p50Ms": 17034.61,
+          "p95Ms": 23027.86,
+          "qps": 0.12,
+          "completed": 33,
+          "errors": 0
+        },
+        {
+          "p50Ms": 21756.72,
+          "p95Ms": 32895.41,
+          "qps": 0.14,
+          "completed": 29,
+          "errors": 0
+        },
+        {
+          "p50Ms": 14159.83,
+          "p95Ms": 25610.82,
+          "qps": 0.13,
+          "completed": 30,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "postgres",
+      "query": "daily_tenant",
+      "seconds": 180,
+      "p50Ms": 31.7,
+      "p95Ms": 92.27,
+      "qps": 0.15,
+      "completed": 133,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 36.59,
+          "p95Ms": 74.19,
+          "qps": 0.16,
+          "completed": 35,
+          "errors": 0
+        },
+        {
+          "p50Ms": 21.35,
+          "p95Ms": 92.33,
+          "qps": 0.14,
+          "completed": 37,
+          "errors": 0
+        },
+        {
+          "p50Ms": 36.73,
+          "p95Ms": 96.78,
+          "qps": 0.13,
+          "completed": 27,
+          "errors": 0
+        },
+        {
+          "p50Ms": 26.8,
+          "p95Ms": 92.2,
+          "qps": 0.15,
+          "completed": 34,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "postgres",
+      "query": "top_customers",
+      "seconds": 180,
+      "p50Ms": 114374.08,
+      "p95Ms": 167041.17,
+      "qps": 0.06,
+      "completed": 53,
+      "errors": 81,
+      "errorCodes": {
+        "53100": 81
+      },
+      "runs": [
+        {
+          "p50Ms": 90069.1,
+          "p95Ms": 171463.39,
+          "qps": 0.06,
+          "completed": 14,
+          "errors": 22
+        },
+        {
+          "p50Ms": 127005.75,
+          "p95Ms": 162618.96,
+          "qps": 0.07,
+          "completed": 20,
+          "errors": 17
+        },
+        {
+          "p50Ms": 110807.15,
+          "p95Ms": 178647.17,
+          "qps": 0.02,
+          "completed": 5,
+          "errors": 22
+        },
+        {
+          "p50Ms": 117941.02,
+          "p95Ms": 133339.27,
+          "qps": 0.06,
+          "completed": 14,
+          "errors": 20
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "postgres",
+      "query": "json_source",
+      "seconds": 180,
+      "p50Ms": 40963.97,
+      "p95Ms": 58791.48,
+      "qps": 0.2,
+      "completed": 170,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 38532.43,
+          "p95Ms": 59341.42,
+          "qps": 0.21,
+          "completed": 45,
+          "errors": 0
+        },
+        {
+          "p50Ms": 40971.2,
+          "p95Ms": 56612.74,
+          "qps": 0.15,
+          "completed": 40,
+          "errors": 0
+        },
+        {
+          "p50Ms": 40956.74,
+          "p95Ms": 72088.02,
+          "qps": 0.21,
+          "completed": 42,
+          "errors": 0
+        },
+        {
+          "p50Ms": 46140.87,
+          "p95Ms": 58241.54,
+          "qps": 0.19,
+          "completed": 43,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "postgres",
+      "query": "window_count",
+      "seconds": 180,
+      "p50Ms": 435.75,
+      "p95Ms": 1163.03,
+      "qps": 0.12,
+      "completed": 115,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 681.62,
+          "p95Ms": 1245.53,
+          "qps": 0.11,
+          "completed": 25,
+          "errors": 0
+        },
+        {
+          "p50Ms": 338.87,
+          "p95Ms": 1080.54,
+          "qps": 0.12,
+          "completed": 33,
+          "errors": 0
+        },
+        {
+          "p50Ms": 532.64,
+          "p95Ms": 1522.15,
+          "qps": 0.14,
+          "completed": 28,
+          "errors": 0
+        },
+        {
+          "p50Ms": 200.9,
+          "p95Ms": 650.3,
+          "qps": 0.12,
+          "completed": 29,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "postgres",
+      "query": "point_lookup",
+      "seconds": 180,
+      "p50Ms": 16.2,
+      "p95Ms": 51.91,
+      "qps": 0.13,
+      "completed": 116,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 13.5,
+          "p95Ms": 25.58,
+          "qps": 0.11,
+          "completed": 25,
+          "errors": 0
+        },
+        {
+          "p50Ms": 15.87,
+          "p95Ms": 83.27,
+          "qps": 0.12,
+          "completed": 33,
+          "errors": 0
+        },
+        {
+          "p50Ms": 16.52,
+          "p95Ms": 52.27,
+          "qps": 0.14,
+          "completed": 28,
+          "errors": 0
+        },
+        {
+          "p50Ms": 16.98,
+          "p95Ms": 51.54,
+          "qps": 0.13,
+          "completed": 30,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "mason",
+      "query": "mix",
+      "seconds": 180,
+      "p50Ms": 2569.8,
+      "p95Ms": 3510.03,
+      "qps": 12.18,
+      "completed": 4429,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2566.14,
+          "p95Ms": 3507.08,
+          "qps": 12.19,
+          "completed": 2211,
+          "errors": 0,
+          "loadAvg": [
+            22.76,
+            25.69,
+            17.79
+          ],
+          "clientLoopDelayP99Ms": 7.7,
+          "clientCpuPct": 1
+        },
+        {
+          "p50Ms": 2573.45,
+          "p95Ms": 3512.98,
+          "qps": 12.18,
+          "completed": 2218,
+          "errors": 0,
+          "loadAvg": [
+            7.09,
+            16.35,
+            15.62
+          ],
+          "clientLoopDelayP99Ms": 7.6,
+          "clientCpuPct": 1
+        }
+      ],
+      "slowest": {
+        "query": "top_customers",
+        "p50Ms": 3029.63
+      }
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "mason",
+      "query": "status",
+      "seconds": 180,
+      "p50Ms": 2689.43,
+      "p95Ms": 3425.55,
+      "qps": 2.04,
+      "completed": 740,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2749.91,
+          "p95Ms": 3478.18,
+          "qps": 2.03,
+          "completed": 369,
+          "errors": 0
+        },
+        {
+          "p50Ms": 2628.95,
+          "p95Ms": 3372.92,
+          "qps": 2.04,
+          "completed": 371,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "mason",
+      "query": "daily_tenant",
+      "seconds": 180,
+      "p50Ms": 2302.96,
+      "p95Ms": 2954.3,
+      "qps": 2.02,
+      "completed": 737,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2315.89,
+          "p95Ms": 2944.64,
+          "qps": 2.03,
+          "completed": 369,
+          "errors": 0
+        },
+        {
+          "p50Ms": 2290.03,
+          "p95Ms": 2963.97,
+          "qps": 2.02,
+          "completed": 368,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "mason",
+      "query": "top_customers",
+      "seconds": 180,
+      "p50Ms": 3029.63,
+      "p95Ms": 3846.96,
+      "qps": 2.01,
+      "completed": 732,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 3010.75,
+          "p95Ms": 3841.53,
+          "qps": 2.02,
+          "completed": 366,
+          "errors": 0
+        },
+        {
+          "p50Ms": 3048.51,
+          "p95Ms": 3852.39,
+          "qps": 2.01,
+          "completed": 366,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "mason",
+      "query": "json_source",
+      "seconds": 180,
+      "p50Ms": 2922.92,
+      "p95Ms": 3751.1,
+      "qps": 2.03,
+      "completed": 737,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2957.18,
+          "p95Ms": 3720.94,
+          "qps": 2.03,
+          "completed": 368,
+          "errors": 0
+        },
+        {
+          "p50Ms": 2888.66,
+          "p95Ms": 3781.25,
+          "qps": 2.03,
+          "completed": 369,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "mason",
+      "query": "window_count",
+      "seconds": 180,
+      "p50Ms": 2287.94,
+      "p95Ms": 2915.72,
+      "qps": 2.04,
+      "completed": 741,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2287.49,
+          "p95Ms": 2829.75,
+          "qps": 2.03,
+          "completed": 369,
+          "errors": 0
+        },
+        {
+          "p50Ms": 2288.39,
+          "p95Ms": 3001.68,
+          "qps": 2.04,
+          "completed": 372,
+          "errors": 0
+        }
+      ]
+    },
+    {
+      "rows": 10000000,
+      "clients": 32,
+      "engine": "mason",
+      "query": "point_lookup",
+      "seconds": 180,
+      "p50Ms": 2379.26,
+      "p95Ms": 3005.43,
+      "qps": 2.04,
+      "completed": 742,
+      "errors": 0,
+      "errorCodes": {},
+      "runs": [
+        {
+          "p50Ms": 2352.26,
+          "p95Ms": 3000.1,
+          "qps": 2.04,
+          "completed": 370,
+          "errors": 0
+        },
+        {
+          "p50Ms": 2406.25,
+          "p95Ms": 3010.75,
+          "qps": 2.04,
+          "completed": 372,
+          "errors": 0
+        }
+      ]
+    }
+  ],
+  "complete": true,
+  "sweeps": {
+    "rows": {
+      "axis": "rows",
+      "rows": null,
+      "clients": 8,
+      "steps": [
+        1000000,
+        3000000,
+        10000000,
+        30000000
+      ],
+      "reached": {
+        "rows": 30000000,
+        "clients": 8
+      },
+      "stopped": null,
+      "at": {
+        "rows": 30000000,
+        "clients": 8,
+        "postgresP95Ms": 258456.14,
+        "postgresQps": 0.09,
+        "slowest": {
+          "query": "top_customers",
+          "p50Ms": 132997.64
+        },
+        "masonP95Ms": 4528.55,
+        "masonQps": 3.8
+      }
+    },
+    "clients": {
+      "axis": "clients",
+      "rows": 10000000,
+      "clients": null,
+      "rowsWhy": "the largest size the rows sweep measured under 60 s",
+      "steps": [
+        1,
+        8,
+        32
+      ],
+      "reached": {
+        "rows": 10000000,
+        "clients": 32
+      },
+      "stopped": null,
+      "at": {
+        "rows": 10000000,
+        "clients": 32,
+        "postgresP95Ms": 96612.96,
+        "postgresQps": 0.77,
+        "slowest": {
+          "query": "top_customers",
+          "p50Ms": 114374.08
+        },
+        "masonP95Ms": 3510.03,
+        "masonQps": 12.18
+      }
+    }
+  }
+}

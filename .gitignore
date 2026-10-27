@@ -1,0 +1,19 @@
+# Credentials and local settings: never committed
+.env
+.env.*
+!.env.example
+.pgpass
+
+.DS_Store
+
+# Node
+# the directory, and a symlink to another checkout's (a trailing slash ignores only a directory: one was committed once)
+node_modules
+
+# scratch directories a test makes under tests/ (mkdtemp) and removes in a finally; one that survives a killed run
+# must never be committed
+tests/.tmp-*/
+
+# the @mason-data/cli package build (cli/build.ts) and its packed tarball
+/cli/dist/
+/cli/*.tgz

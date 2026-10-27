@@ -1,0 +1,36 @@
+# MASON ON ONE MACHINE: one container, `mason serve` (src/cli/serve.ts), beside wherever your Postgres is. It copies
+# the tables your project's sources file names, keeps them current, and answers the Postgres protocol for BI tools and your
+# app. deploy/mason-data/README.md is the walkthrough.
+#
+#   mkdir -p mason && cp .env.example .env      # the project folder, then DATABASE_URL and MASON_API_KEY at least
+#   docker compose up -d
+#   docker compose exec mason mason tables      # the database's tables
+#   docker compose exec mason mason add public.orders
+#   docker compose exec mason mason user add metabase   # a user for the BI tool: its password and the URL
+#
+# ./mason is the project folder (sources/, mason.yml): commit it. The copy and Mason's state are the volume
+# `mason-data`; `docker compose down` keeps it, `down -v` removes it (the next start copies again).
+#
+# ONE replica, always: DuckDB lets one process write its file. The image is ghcr.io/embeddable-hq/mason-data
+# (`main` is every merge, `<version>` a release; MASON_TAG pins one, MASON_IMAGE names another, `mason-data:dev` a
+# local `docker build -f docker/mason-data.Dockerfile -t mason-data:dev .` at the repo's root).
+name: mason
+
+services:
+  mason:
+    image: ${MASON_IMAGE:-ghcr.io/embeddable-hq/mason-data:${MASON_TAG:-main}}
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # the Postgres API, for BI tools and apps: TLS (the certificate in .env, or the self-signed one)
+      - "${MASON_PG_PUBLISH:-5433}:5433"
+      # /healthz, on this machine only
+      - "127.0.0.1:${MASON_HEALTH_PUBLISH:-4140}:4140"
+    volumes:
+      - ./mason:/mason/project
+      - mason-data:/mason/data
+    # the stop: a copy in flight is interrupted and rolled back, DuckDB closed; a minute is plenty
+    stop_grace_period: 60s
+
+volumes:
+  mason-data:

@@ -1,0 +1,149 @@
+# A RELEASE IS A MERGE. Every push to main looks at the newest release-notes/v<version>.md. When no GitHub release
+# exists for that version, this push is the release, and the workflow does what would otherwise be done by hand:
+#
+#   1. the annotated tag v<version> on the merge commit (skipped when the tag already exists)
+#   2. the image (images-publish.yml, called as a job: a tag made by GITHUB_TOKEN never triggers another workflow)
+#   3. the CLI, @mason-data/cli, when its version is not on npm yet; this one also runs when the release page already
+#      exists and only the CLI is missing from npm, since its first publish is by hand and may not have happened
+#   4. the GitHub release from the notes file, last: a release page means everything it names is published
+#
+# Every step is idempotent, so a failed run is re-run from the Actions page and picks up where it stopped. A merge
+# whose newest notes file is already released does nothing (`decide` says so), and so does one before the first notes
+# file exists.
+#
+# NO NPM CREDENTIAL IS STORED IN THIS REPOSITORY. Trusted publishing on npmjs.com, set up once by an owner of the
+# @mason-data org (Settings -> Trusted publisher -> GitHub Actions, repository embeddable-hq/mason-data, workflow
+# release.yml): the CLI's job then publishes with this workflow's OIDC identity. npm only offers it on a package that
+# already exists, so the package's FIRST publish is by hand (`npm publish` in cli/). Until it is set up, a granular
+# access token saved as the repository secret NPM_TOKEN works too; delete it afterwards.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write    # the tag and the release
+  packages: write    # the image
+  id-token: write    # npm's trusted publishing
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      cli_publish: ${{ steps.decide.outputs.cli_publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the tags
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # the newest notes file by version, not by name
+          version="$(ls release-notes 2>/dev/null | sed -n 's/^v\([0-9][0-9.]*\)\.md$/\1/p' | sort -V | tail -1)"
+          if [ -z "$version" ]; then
+            echo "no release-notes/v<version>.md yet: nothing to release"
+            echo "version=" >> "$GITHUB_OUTPUT"; echo "cli_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cli="$(node -p 'require("./cli/package.json").version')"
+          if [ "$cli" != "$version" ]; then
+            echo "cli/package.json is $cli, the newest release notes are v$version: they must agree" >&2; exit 1
+          fi
+          # the CLI is judged on its own: a release whose page exists but whose CLI never reached npm (the first publish
+          # is by hand, and may not have happened) is still published by the next push to main
+          if npm view "@mason-data/cli@$cli" version >/dev/null 2>&1; then
+            echo "@mason-data/cli $cli is on npm already"; echo "cli_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "@mason-data/cli $cli is not on npm: it is published"; echo "cli_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+          if gh release view "v$version" --json tagName >/dev/null 2>&1; then
+            echo "v$version is released already: nothing else to do"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "releasing v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  tag:
+    needs: decide
+    if: needs.decide.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: the annotated tag, on the merge commit
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "v$VERSION exists at $(git rev-parse "v$VERSION^{commit}")"
+          else
+            git tag -a "v$VERSION" -m "Mason v$VERSION" "$GITHUB_SHA"
+            git push origin "refs/tags/v$VERSION"
+          fi
+
+  image:
+    needs: [decide, tag]
+    uses: ./.github/workflows/images-publish.yml
+    with:
+      version: ${{ needs.decide.outputs.version }}
+    permissions:
+      contents: read
+      packages: write
+
+  cli:
+    needs: [decide, tag, image]
+    # after the image when this push releases; alone when the release exists and only the CLI is missing from npm
+    if: always() && needs.decide.result == 'success' && needs.decide.outputs.cli_publish == 'true' && needs.image.result != 'failure' && needs.tag.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+      # trusted publishing needs npm >= 11.5.1
+      - run: npm install -g npm@latest
+      # the package builds from the repo's src/ with the repo's TypeScript (cli/build.ts, its prepack)
+      - run: npm ci
+      - run: npm ci
+        working-directory: cli
+      - run: npm publish --access public
+        working-directory: cli
+        env:
+          # Empty when the secret is not set, which is the trusted-publishing case.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  release:
+    needs: [decide, tag, image, cli]
+    # the release page comes last, once everything it names is published; a skipped cli job is not a failure
+    if: always() && needs.decide.outputs.version != '' && needs.tag.result == 'success' && needs.image.result == 'success' && needs.cli.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          # the file's first line is the release's name; the rest is its body
+          tail -n +2 "release-notes/v$VERSION.md" > /tmp/notes.md
+          gh release create "v$VERSION" --title "Mason v$VERSION" --notes-file /tmp/notes.md --verify-tag

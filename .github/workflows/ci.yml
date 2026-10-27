@@ -1,0 +1,124 @@
+# Pre-merge gate. `checks` runs on the runner alone — no Docker, no Postgres, no .env — and finishes in a few minutes:
+# the code typechecks, the unit tests hold, the published CLI builds and answers, the image builds.
+#
+# `integration` runs the real thing against a Postgres service container: the copy and the poll, the stream (logical
+# replication), `mason serve`'s whole life, to_char, and the oracle — every statement answered by Mason held equal to
+# what the Postgres it copies from answers (tests/integration/README.md). It blocks.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'          # >= 23.6: the .ts files run via native type stripping
+          cache: npm
+
+      - run: npm ci
+
+      # Every check below runs even when an earlier one fails, so one CI round reports every problem instead of one
+      # per push.
+      - name: typecheck
+        if: ${{ !cancelled() }}
+        run: npm run typecheck
+
+      - name: unit tests
+        if: ${{ !cancelled() }}
+        run: npm test
+
+      # The published CLI (@mason-data/cli): src/ compiled to JavaScript (cli/build.ts), because Node strips no types
+      # under node_modules. This proves the ARTIFACT runs: the built `mason` answers.
+      - name: cli builds and runs
+        if: ${{ !cancelled() }}
+        run: |
+          node cli/build.ts
+          node cli/dist/src/cli/main.js --version
+          node cli/dist/src/cli/main.js --help > /dev/null
+
+      # shellcheck is preinstalled on the ubuntu-latest runner image; nothing to check when no script is bash.
+      - name: shellcheck
+        if: ${{ !cancelled() }}
+        run: |
+          files=$(grep -rl '^#!/usr/bin/env bash' scripts/ || true)
+          if [ -n "$files" ]; then shellcheck $files; else echo "no bash script under scripts/"; fi
+
+  # The image (docker/mason-data.Dockerfile), built as images-publish.yml builds it (one platform here): it starts,
+  # and `mason --version` inside it answers.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build mason-data
+        run: docker build -f docker/mason-data.Dockerfile -t mason-data:ci .
+      - name: the mason command inside it answers
+        run: docker run --rm --entrypoint mason mason-data:ci --version
+
+  integration:
+    runs-on: ubuntu-latest
+    # Two jobs at once, each with a Postgres of its own: the oracle runs the whole pipeline and hundreds of queries
+    # (minutes), `rest` is every other file, so a new one lands there by itself.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [oracle, rest]
+    name: integration (${{ matrix.shard }})
+    timeout-minutes: 30
+    # The Postgres every file copies from. Each file writes only inside a database it creates and drops; the stream
+    # needs wal_level=logical (set below: a service takes no command line). psql is on the runner image.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: it
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      IT_POSTGRES_URL: postgres://postgres:it@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: logical replication on the service Postgres
+        run: |
+          psql "$IT_POSTGRES_URL" -c "ALTER SYSTEM SET wal_level = logical"
+          docker restart ${{ job.services.postgres.id }}
+          for _ in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 5432 && break; sleep 1; done
+          test "$(psql "$IT_POSTGRES_URL" -tAc 'SHOW wal_level')" = logical
+
+      # one shard's files, one at a time (every file makes a database of its own, but each runs a listener on a port
+      # and a store of its own, and two at once double the runner's load): `oracle` is that file; `rest` every other
+      - name: integration tests
+        run: |
+          if [ "${{ matrix.shard }}" = rest ]; then
+            mapfile -t files < <(find tests/integration -name '*.itest.ts' ! -name duck-oracle.itest.ts | sort)
+          else
+            files=("tests/integration/duck-oracle.itest.ts")
+          fi
+          for f in "${files[@]}"; do test -f "$f" || { echo "no such integration file: $f" >&2; exit 1; }; done
+          node --test --test-concurrency=1 "${files[@]}"

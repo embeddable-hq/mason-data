@@ -1,0 +1,6 @@
+# ShellCheck settings for this repo's bash wrappers (scripts/*, no .sh suffix).
+#
+# SC1091 "Not following: ./.env was not specified as input" — every wrapper
+# sources the OPTIONAL, gitignored .env for credentials. There is no file for
+# ShellCheck to follow, by design; the guard is `if [ -f .env ]`.
+disable=SC1091

@@ -1,0 +1,37 @@
+name: Something else is wrong
+description: A crash, a refusal that should be an answer, a command that did not say what to do next, a sync that did not keep up.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to see it
+      description: The commands or statements, in order. A refusal's full message, SQLSTATE included.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: mason doctor --json
+      description: Paste its output; it names nothing secret (the database URL is masked).
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: The lines of mason logs around it
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "mason 0.6.1, PostgreSQL 16.4, macOS 15 / Ubuntu 24.04"
+    validations:
+      required: true

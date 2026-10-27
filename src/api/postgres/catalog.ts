@@ -1,0 +1,456 @@
+/**
+ * THE CATALOG SIDECAR: a real Postgres inside the process answers a BI tool's introspection. A tool's startup is
+ * hundreds of lines over `pg_catalog` and `information_schema` — `format_type`, `pg_get_expr`, `obj_description`,
+ * regclass casts, CTEs — and emulating that
+ * is a second query engine. So nothing is emulated: `@electric-sql/pglite` (Postgres 18.6 as WebAssembly) holds the
+ * copied tables' `PgSchema` (src/api/postgres/schema.ts) as EMPTY tables with their Postgres types, primary keys, a
+ * foreign key per foreign key between copied tables and a COMMENT per description, and the server hands it a tool's
+ * raw protocol message and forwards the raw reply, Postgres's own bytes. The DuckDB plan is made here too (src/duck/plan.ts:
+ * Postgres analyses the statement over these tables).
+ *
+ * Two halves. `catalogDdl` is pure: the statements that create the schema, pinned by tests/postgres-api/catalog.test.ts
+ * so a change to what a tool sees is read in a diff. `PgCatalog` owns the instance, under five rules:
+ *
+ * - OFF THE MAIN THREAD, WITH A DEADLINE. PGlite runs synchronously inside its WebAssembly, so an instance on the
+ *   listener's own thread stopped the event loop for the length of any statement — `SELECT pg_sleep(3600)` from any
+ *   session froze every other, and PGlite ignores `statement_timeout` (review of #480). The instance lives on a worker
+ *   thread (catalog-worker.ts); every call has `statementMs` to answer, and past it the worker is TERMINATED and
+ *   discarded (the call rejects saying so; the next call starts a fresh instance). Its ~820 MB is the worker's, not
+ *   the API's heap.
+ * - LAZY AND IDLE-STOPPED. An instance costs ~0.8 s to start and ~820 MB resident on Linux (1.5 GB on macOS), too much
+ *   for a deployment nobody connects a BI tool to, so it starts on the first `run` and stops after `idleMs` without
+ *   one. The idle timer is `unref`'d: it never keeps a process alive.
+ * - SERIALISED. PGlite is a single connection; every `run`, `query`, `stop` and `replace` is queued on one chain so
+ *   two callers never interleave their protocol messages and the DDL is applied exactly once per start.
+ * - THE SCHEMA IS THE CATALOG. When the copied tables change the server calls `replace` with the new schema: the running instance is
+ *   stopped and the next `run` starts with the new DDL. There is no ALTER path — a fresh instance is cheaper than
+ *   diffing two schemas correctly.
+ * - A START FAILURE IS THE CALLER'S. When the WASM cannot load or the DDL is refused, `run` rejects with an Error that
+ *   says PGlite could not start and why, and the object is left able to try again (nothing is cached half-started).
+ *
+ * The instance's TimeZone is UTC (the API treats every time as UTC, §4.8); its search_path is Postgres's default, so
+ * `public."orders"` and `orders` both resolve, as a tool expects.
+ */
+import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
+import { runnable } from "../../lib/runnable.ts";
+import { PG_API_TYPE_SPELLING, typeNameParts, type PgJoin, type PgSchema, type PgTable } from "./schema.ts";
+
+/** Ten minutes: long enough to outlive a tool's startup burst and a person's pause between two queries. */
+const DEFAULT_IDLE_MS = 10 * 60_000;
+/** A catalog statement's deadline (`MASON_PG_CATALOG_TIMEOUT_MS`): a tool's introspection answers in milliseconds; a
+ *  statement still running after this is runaway, and the instance is discarded. The start (WASM ~0.8 s, the DDL) has
+ *  the same budget. */
+export const DEFAULT_STATEMENT_MS = 10_000;
+/** the start (PGlite's own boot and the whole DDL, a second or more on a loaded host) gets at least this long, whatever
+ *  a statement's deadline is: a short statement deadline is for a statement, not for discarding every start */
+export const MIN_START_MS = 30_000;
+
+/** A SQL identifier, double-quoted with an inner quote doubled. */
+const ident = (name: string): string => `"${name.replaceAll('"', '""')}"`;
+/** A SQL string literal, single-quoted with an inner quote doubled. */
+const literal = (text: string): string => `'${text.replaceAll("'", "''")}'`;
+/** a table's name in the catalog: its schema (Mason's source schema, else public) and name */
+const qualified = (table: PgTable): string => `${table.schema === undefined ? "public" : ident(table.schema)}.${ident(table.name)}`;
+/** the table a join names: `<schema>.<table>`, or a bare name in public */
+const joinTarget = (schema: PgSchema, table: string): PgTable | undefined =>
+  schema.tables.find((t) => `${t.schema ?? "public"}.${t.name}` === table) ?? schema.tables.find((t) => t.schema === undefined && t.name === table);
+
+/**
+ * Whether a join can be a FOREIGN KEY in Postgres: a `many_to_one` or `one_to_one` edge (the side that holds the key),
+ * to a table in the schema, whose target column is that table's WHOLE primary key or the whole of one of its unique
+ * indexes (Postgres refuses a foreign key to a column no unique index covers exactly), from a column this table lists.
+ * Any other join is a comment on its column.
+ */
+function isForeignKey(schema: PgSchema, table: PgTable, join: PgJoin): boolean {
+  if (join.relationship !== "many_to_one" && join.relationship !== "one_to_one") return false;
+  if (!table.columns.some((c) => c.name === join.on[0])) return false;
+  const target = joinTarget(schema, join.table);
+  if (target === undefined) return false;
+  return [target.primaryKey, ...(target.uniqueKeys ?? []).map((u) => u.columns)].some((k) => k.length === 1 && k[0] === join.on[1]);
+}
+
+const joinNote = (join: PgJoin): string => `joins ${join.table} on ${join.on[1]} (${join.relationship})`;
+
+/**
+ * THE CATALOG'S DATABASE IS THE ONE A TOOL CONNECTED TO (the deployment): current_database(), pg_database — pgjdbc's
+ * getCatalogs and every TABLE_CAT, DBeaver's navigator — once said the sidecar's own `postgres`. The current
+ * database's row is renamed (ALTER DATABASE refuses the current one; the catalog row does not), after moving aside any
+ * OTHER database already holding the name — PGlite's `template0` / `template1` — since pg_database's names are unique
+ * (#484's review: a deployment named `template1` failed on pg_database_datname_index and the catalog never started).
+ */
+export function databaseNameSql(name: string): string[] {
+  const q = `'${name.replaceAll("'", "''")}'`;
+  return [
+    `UPDATE pg_catalog.pg_database SET datname = datname || '_pglite' WHERE datname = ${q} AND datname <> current_database()`,
+    `UPDATE pg_catalog.pg_database SET datname = ${q} WHERE datname = current_database()`,
+  ];
+}
+
+/**
+ * The statements that create the schema in Postgres, in the schema's own order: every table (its columns and its
+ * primary key), the comments from its descriptions, and — after every table exists, since a constraint may point
+ * forward — one foreign key per join that can be one. A join that cannot (a `one_to_many`, a target that is not a whole
+ * primary key, a target outside the schema) is a note appended to its column's comment; a join from a column the table
+ * does not list has no column to carry it and is noted on the table instead.
+ */
+export function catalogDdl(schema: PgSchema): string[] {
+  const statements: string[] = [];
+  const constraints: string[] = [];
+  // a constraint's name as Postgres chooses one (ChooseConstraintName): `<table>_<column>_fkey`, and a number appended
+  // from 1 when a constraint of the table already has it — two joins from one column (the shop's `customers.id` to
+  // `latest_orders` and to `latest_status`) are two constraints, and one name for both was refused
+  const named = new Set<string>();
+  const constraintName = (base: string): string => {
+    let name = base;
+    for (let n = 1; named.has(name); n++) name = `${base}${n}`;
+    named.add(name);
+    return name;
+  };
+  // an extension's type a column has (Mason copies a citext as itself): its extension, which the worker
+  // bundles (catalog-worker.ts), before the tables
+  if (schema.tables.some((t) => t.columns.some((c) => c.spelled === "citext"))) statements.push("CREATE EXTENSION IF NOT EXISTS citext;");
+  // a source schema the prototype copies from (decision C): created before its tables
+  for (const name of [...new Set(schema.tables.map((t) => t.schema).filter((x): x is string => x !== undefined && x !== "public"))]) {
+    statements.push(`CREATE SCHEMA IF NOT EXISTS ${ident(name)};`);
+  }
+  // a source enum a column has: the type, its labels in their declared order, before the tables —
+  // spelled as the source's format_type spells it (`mood`, `other.level`, `"Odd"`), its schema made first
+  const enums = new Map<string, readonly string[]>();
+  for (const t of schema.tables) for (const c of t.columns) if (c.enumLabels !== undefined && c.spelled !== undefined) enums.set(c.spelled.replace(/\[\]$/, ""), c.enumLabels);
+  for (const [type, labels] of enums) {
+    const qualifier = typeNameParts(type).schema;
+    if (qualifier !== null && qualifier !== '"public"' && qualifier !== "public") statements.push(`CREATE SCHEMA IF NOT EXISTS ${qualifier};`);
+    statements.push(`CREATE TYPE ${type} AS ENUM (${labels.map(literal).join(", ")});`);
+  }
+  for (const table of schema.tables) {
+    const lines: string[] = [];
+    for (const c of table.columns) lines.push(`${ident(c.name)} ${c.spelled ?? PG_API_TYPE_SPELLING[c.type]}${c.notNull === true ? " NOT NULL" : ""}`);
+    if (table.primaryKey.length > 0) lines.push(`PRIMARY KEY (${table.primaryKey.map(ident).join(", ")})`);
+    statements.push(`CREATE TABLE ${qualified(table)} (\n  ${lines.join(",\n  ")}\n);`);
+    // the source's unique indexes, under its names: before the foreign keys that may reference them
+    for (const u of table.uniqueKeys ?? []) {
+      const cols = `(${u.columns.map(ident).join(", ")})`;
+      const nulls = u.nullsNotDistinct ? "NULLS NOT DISTINCT" : "";
+      // the two spellings put NULLS NOT DISTINCT on either side of the columns
+      statements.push(u.constraint ? `ALTER TABLE ${qualified(table)} ADD CONSTRAINT ${ident(u.name)} UNIQUE ${nulls} ${cols};`
+        : `CREATE UNIQUE INDEX ${ident(u.name)} ON ${qualified(table)} ${cols} ${nulls};`);
+    }
+
+    const notesOn = new Map<string, string[]>();
+    const tableNotes: string[] = [];
+    for (const join of table.joins) {
+      if (isForeignKey(schema, table, join)) {
+        constraints.push(
+          `ALTER TABLE ${qualified(table)} ADD CONSTRAINT ${ident(constraintName(`${table.name}_${join.on[0]}_fkey`))}` +
+            ` FOREIGN KEY (${ident(join.on[0])}) REFERENCES ${qualified(joinTarget(schema, join.table)!)} (${ident(join.on[1])});`,
+        );
+      } else if (table.columns.some((c) => c.name === join.on[0])) {
+        notesOn.set(join.on[0], [...(notesOn.get(join.on[0]) ?? []), joinNote(join)]);
+      } else {
+        tableNotes.push(`${join.on[0]} ${joinNote(join)}`);
+      }
+    }
+
+    const tableComment = [table.description, ...tableNotes].filter((s): s is string => s !== undefined && s !== "").join("; ");
+    if (tableComment !== "") statements.push(`COMMENT ON TABLE ${qualified(table)} IS ${literal(tableComment)};`);
+    for (const c of table.columns) {
+      const parts = [c.description, ...(notesOn.get(c.name) ?? [])].filter((s): s is string => s !== undefined && s !== "");
+      if (parts.length > 0) statements.push(`COMMENT ON COLUMN ${qualified(table)}.${ident(c.name)} IS ${literal(parts.join("; "))};`);
+    }
+  }
+  return [...statements, ...constraints];
+}
+
+/**
+ * The source's column defaults, one statement each, run after the schema's DDL by
+ * `catalogDdl`'s caller one at a time: a default the catalog cannot create (a function or a sequence it does not have,
+ * `uuid_generate_v4()` without its extension) is said in the log and leaves the column without one, never the start
+ * refused. A serial's sequence is created and OWNED BY its column and an identity column is made one under its own
+ * sequence's name, so `pg_get_serial_sequence` and `information_schema.columns` answer as the source's. A generated
+ * column is declared as a plain one (its expression is no default, src/cli/preflight.ts).
+ */
+export function catalogDefaults(schema: PgSchema): string[] {
+  const out: string[] = [];
+  for (const table of schema.tables) for (const c of table.columns) {
+    const column = `${qualified(table)} ALTER COLUMN ${ident(c.name)}`;
+    if (c.identity !== undefined) {
+      const named = c.sequence !== undefined ? ` (SEQUENCE NAME ${c.sequence})` : "";
+      out.push(`ALTER TABLE ${column} ADD GENERATED ${c.identity === "a" ? "ALWAYS" : "BY DEFAULT"} AS IDENTITY${named};`);
+    } else if (c.default !== undefined && c.sequence !== undefined) {
+      // a serial's sequence is its column's integer type (CREATE SEQUENCE's default is bigint)
+      const declared = c.spelled ?? PG_API_TYPE_SPELLING[c.type];
+      const as = ["smallint", "integer", "bigint"].includes(declared) ? ` AS ${declared}` : "";
+      // one statement: the sequence, the default reading it and its owner stand or fall together
+      out.push(`CREATE SEQUENCE ${c.sequence}${as}; ALTER TABLE ${column} SET DEFAULT ${c.default}; ALTER SEQUENCE ${c.sequence} OWNED BY ${qualified(table)}.${ident(c.name)};`);
+    } else if (c.default !== undefined) {
+      out.push(`ALTER TABLE ${column} SET DEFAULT ${c.default};`);
+    }
+  }
+  return out;
+}
+
+/**
+ * The source's views, one statement each beside `catalogDefaults`'s: a view reading a table
+ * Mason has not copied (or a function the catalog lacks) is said in the log and left out. Each definition qualifies
+ * every name outside pg_catalog (src/cli/preflight.ts VIEWS_SQL), so it reads the same tables here; a view over a view
+ * is created once the other is (the worker runs these in passes).
+ */
+export function catalogViews(schema: PgSchema): string[] {
+  return (schema.views ?? []).map((v) => {
+    const name = `${ident(v.schema)}.${ident(v.name)}`;
+    const comment = v.description ? ` COMMENT ON VIEW ${name} IS ${literal(v.description)};` : "";
+    return `CREATE SCHEMA IF NOT EXISTS ${ident(v.schema)}; CREATE VIEW ${name} AS ${v.definition.replace(/;\s*$/, "")};${comment}`;
+  });
+}
+
+export interface PgCatalogOptions {
+  /** how long without a call before the instance is stopped; default ten minutes */
+  idleMs?: number;
+  /** where a line about a start, a stop or a failed close goes; default stderr */
+  log?: (line: string) => void;
+  /** statements run after the schema's DDL at every start (the server's `version()` override and its search_path) */
+  setup?: string[];
+  /** a call's deadline, the start included; past it the instance is discarded. Default DEFAULT_STATEMENT_MS */
+  statementMs?: number;
+  /** log the whole statement of a default or view left out (`MASON_PG_TRACE=1`, the server's `trace`) */
+  trace?: boolean;
+}
+
+/**
+ * WHAT A LEFT-OUT DEFAULT OR VIEW IS SAID AS, in one line (the test server's log printed every left-out source
+ * view's whole definition at each start of the instance — 7 multi-line entries per start, most of a 190 KB log, their
+ * continuation lines without a timestamp, and the views' own columns matched a grep for "error"): the object named,
+ * and the reason in the reader's words — a view reading a relation Mason has not copied says so. The statement itself
+ * is the trace's (`PgCatalogOptions.trace`).
+ */
+export function leftOutLine(r: { statement: string; message: string }): string {
+  const view = /CREATE VIEW ("(?:[^"]|"")+")\.("(?:[^"]|"")+") AS /.exec(r.statement);
+  const unquote = (s: string): string => s.slice(1, -1).replaceAll('""', '"');
+  if (view === null) return `catalog: a source default left out (${r.message}): ${r.statement}`;
+  const missing = /^relation "([^"]+)" does not exist$/.exec(r.message)?.[1];
+  const name = `${unquote(view[1]!)}.${unquote(view[2]!)}`;
+  return missing !== undefined ? `catalog: view ${name} left out: it reads ${missing}, which is not copied` : `catalog: view ${name} left out (${r.message})`;
+}
+
+const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+type Reply = { id: number; ok: true; bytes?: Uint8Array; rows?: Record<string, unknown>[]; refused?: Array<{ statement: string; message: string }> } | { id: number; ok: false; message: string };
+
+/** One worker thread holding one PGlite: requests one at a time (PgCatalog's chain), each with a deadline. */
+class CatalogWorker {
+  readonly #worker: Worker;
+  #pending: { id: number; resolve: (r: Reply) => void; reject: (e: Error) => void; timer: NodeJS.Timeout } | null = null;
+  #dead: Error | null = null;
+  #next = 1;
+
+  constructor() {
+    const file = new URL("./catalog-worker.ts", import.meta.url);
+    // `execArgv: []`: the worker must not inherit this process's Node flags (src/api/postgres/parser.ts says why)
+    this.#worker = new Worker(runnable(fileURLToPath(file)), { execArgv: [], argv: [] });
+    this.#worker.unref();
+    this.#worker.on("message", (reply: Reply) => {
+      const p = this.#pending;
+      if (p === null || p.id !== reply.id) return;   // a reply past its deadline: its worker is being terminated
+      this.#pending = null;
+      clearTimeout(p.timer);
+      p.resolve(reply);
+    });
+    this.#worker.on("error", (e) => this.#die(new Error(`the catalog's worker failed: ${e.message}`)));
+    this.#worker.on("exit", (code) => this.#die(new Error(`the catalog's worker exited with code ${code}`)));
+  }
+
+  get alive(): boolean { return this.#dead === null; }
+
+  #die(e: Error): void {
+    if (this.#dead !== null) return;
+    this.#dead = e;
+    const p = this.#pending;
+    this.#pending = null;
+    if (p !== null) { clearTimeout(p.timer); p.reject(e); }
+  }
+
+  /** one request; past `ms` the worker is terminated and the request rejects naming the deadline */
+  request(message: Record<string, unknown>, ms: number, what: string, transfer: ArrayBuffer[] = []): Promise<Reply> {
+    if (this.#dead !== null) return Promise.reject(this.#dead);
+    if (this.#pending !== null) return Promise.reject(new Error("the catalog's worker is busy: PgCatalog serialises its calls"));
+    return new Promise((resolve, reject) => {
+      const id = this.#next++;
+      const timer = setTimeout(() => {
+        this.#die(new Error(`the catalog did not answer ${what} within ${ms / 1000} s: PGlite was discarded (the next statement starts a fresh one; MASON_PG_CATALOG_TIMEOUT_MS raises the deadline)`));
+        void this.#worker.terminate();
+      }, ms);
+      timer.unref();
+      this.#pending = { id, resolve, reject, timer };
+      this.#worker.postMessage({ ...message, id }, transfer);
+    });
+  }
+
+  async terminate(): Promise<void> {
+    this.#die(new Error("the catalog was stopped"));
+    await this.#worker.terminate();
+  }
+}
+
+export class PgCatalog {
+  #schema: PgSchema;
+  readonly #idleMs: number;
+  readonly #statementMs: number;
+  readonly #log: (line: string) => void;
+  readonly #setup: string[];
+  readonly #trace: boolean;
+  /** the left-out lines said for this schema (`leftOutLine`): each once, not at every start of the instance; cleared
+   *  with the schema (`replace`), so a change is said again */
+  #said = new Set<string>();
+  #db: CatalogWorker | null = null;
+  /** the one queue every call runs on; always resolved, so a failed call never blocks the next (its rejection is the caller's) */
+  #chain: Promise<void> = Promise.resolve();
+  #idleTimer: NodeJS.Timeout | null = null;
+  #lastUsed = 0;
+
+  constructor(schema: PgSchema, opts: PgCatalogOptions = {}) {
+    this.#schema = schema;
+    this.#idleMs = opts.idleMs ?? DEFAULT_IDLE_MS;
+    this.#statementMs = opts.statementMs ?? DEFAULT_STATEMENT_MS;
+    this.#log = opts.log ?? ((line) => console.error(line));
+    this.#setup = opts.setup ?? [];
+    this.#trace = opts.trace === true;
+  }
+
+  /** whether an instance is running (started and its DDL applied) */
+  get started(): boolean {
+    return this.#db !== null && this.#db.alive;
+  }
+
+  /** Runs raw frontend protocol bytes — one message or several (Parse, Bind, Describe, Execute, Sync in one buffer
+   *  works) — and returns the backend's raw reply, starting the instance when needed. */
+  run(message: Uint8Array): Promise<Uint8Array> {
+    return this.#enqueue(async () => {
+      const db = await this.#ensureStarted();
+      const copy = new Uint8Array(message);
+      const reply = await this.#ask(db, { op: "raw", bytes: copy }, "a statement", [copy.buffer]);
+      this.#touch();
+      return reply.bytes ?? new Uint8Array(0);
+    });
+  }
+
+  /** The server's own catalog lookups and the tests: a statement through PGlite's API, its rows as objects. */
+  query(sql: string): Promise<{ rows: Record<string, unknown>[] }> {
+    return this.#enqueue(async () => {
+      const db = await this.#ensureStarted();
+      const reply = await this.#ask(db, { op: "query", sql }, "a query");
+      this.#touch();
+      return { rows: reply.rows ?? [] };
+    });
+  }
+
+  /** Stops the instance if one is running; the idle timer calls this. Resolves once it is gone. */
+  stop(): Promise<void> {
+    return this.#enqueue(() => this.#close("stopped"));
+  }
+
+  /** Swaps in a new schema (after an apply): the running instance is stopped and the next `run` starts with the new
+   *  DDL. Resolves once the old instance is gone; a caller need not wait for it. */
+  replace(schema: PgSchema): Promise<void> {
+    this.#schema = schema;
+    this.#said.clear();
+    return this.#enqueue(() => this.#close("replaced"));
+  }
+
+  #enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.#chain.then(fn);
+    // the chain only ORDERS calls: a rejection reaches the caller through `result`, and the next call must still run
+    this.#chain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  /** one request of the worker; a worker that died (the deadline, a crash) is dropped so the next call starts afresh */
+  async #ask(db: CatalogWorker, message: Record<string, unknown>, what: string, transfer: ArrayBuffer[] = []): Promise<Extract<Reply, { ok: true }>> {
+    let reply: Reply;
+    try {
+      reply = await db.request(message, message["op"] === "init" ? Math.max(this.#statementMs, MIN_START_MS) : this.#statementMs, what, transfer);
+    } catch (e) {
+      if (this.#db === db) { this.#db = null; this.#log(`catalog: ${errorMessage(e)}`); }
+      throw e;
+    }
+    if (!reply.ok) throw new Error(reply.message);
+    return reply;
+  }
+
+  async #ensureStarted(): Promise<CatalogWorker> {
+    if (this.#db !== null && this.#db.alive) return this.#db;
+    this.#db = null;
+    const schema = this.#schema;
+    const t0 = Date.now();
+    const db = new CatalogWorker();
+    try {
+      const started = await this.#ask(db, { op: "init", statements: ["SET TimeZone = 'UTC'", ...catalogDdl(schema), ...this.#setup], optional: [...catalogDefaults(schema), ...catalogViews(schema)] }, "its start");
+      // each left-out default or view: one line, once per schema (the instance starts again after every idle stop)
+      for (const r of started.refused ?? []) {
+        const line = leftOutLine(r);
+        if (this.#said.has(line)) continue;
+        this.#said.add(line);
+        this.#log(line);
+        if (this.#trace) this.#log(`trace catalog: the statement left out: ${r.statement}`);
+      }
+    } catch (e) {
+      // the half-made worker is discarded so the next `run` tries afresh
+      await db.terminate();
+      throw new Error(`PGlite could not start: ${errorMessage(e)}`, { cause: e });
+    }
+    this.#db = db;
+    this.#log(`catalog: PGlite started in ${Date.now() - t0} ms with ${schema.tables.length} table(s)`);
+    this.#touch();
+    return db;
+  }
+
+  /** Every call resets the idle timer; the timer stops the instance only when nothing has used it since. */
+  #touch(): void {
+    this.#lastUsed = Date.now();
+    if (this.#idleTimer) clearTimeout(this.#idleTimer);
+    this.#arm(this.#idleMs);
+  }
+
+  #arm(ms: number): void {
+    this.#idleTimer = setTimeout(() => { this.#idleTimer = null; void this.#idleStop(); }, ms);
+    this.#idleTimer.unref();
+  }
+
+  #idleStop(): Promise<void> {
+    return this.#enqueue(async () => {
+      const idle = Date.now() - this.#lastUsed;
+      if (idle < this.#idleMs) {
+        // a call queued ahead of this one has touched the timer again (it armed a new one; it decides) — OR the firing
+        // was a millisecond early by the wall clock (timers run on the monotonic clock, `lastUsed` on Date.now(), and
+        // the two round differently): then nothing is armed, and an instance that returned here stayed up for good
+        // (CI: ~820 MB until the next statement). Arm again for what is left, never leave it running.
+        if (this.#idleTimer === null && this.#db !== null) this.#arm(Math.max(1, this.#idleMs - idle));
+        return;
+      }
+      await this.#close(`stopped after ${Math.round(this.#idleMs / 1000)} s idle`);
+    });
+  }
+
+  async #close(why: string): Promise<void> {
+    if (this.#idleTimer) {
+      clearTimeout(this.#idleTimer);
+      this.#idleTimer = null;
+    }
+    const db = this.#db;
+    if (!db) return;
+    this.#db = null;
+    if (db.alive) {
+      try {
+        await this.#ask(db, { op: "close" }, "its close");
+      } catch (e) {
+        // the instance is discarded either way (terminated below); the failure is reported, not hidden
+        this.#log(`catalog: PGlite did not close cleanly: ${errorMessage(e)}`);
+      }
+    }
+    await db.terminate();
+    this.#log(`catalog: PGlite ${why}`);
+  }
+}

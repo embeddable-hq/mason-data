@@ -1,0 +1,141 @@
+/**
+ * THE STATEMENT SHAPES A BI TOOL'S SAVED SQL USES MOST, and nothing else in the oracles generates: each a
+ * SYNTHETIC statement over the oracle's shop tables (oracle/data.ts SCHEMA), one per structure, ranked by how many saved
+ * reports of a real customer database use it (that database is confidential: only the ranking informed this list, and no
+ * name or value of it is here). The DuckDB oracle (duck-oracle.itest.ts) asks each of the DuckDB endpoint and of Postgres.
+ * `orders.meta` is a jsonb column the DuckDB oracle adds to the shop for the jsonb shapes (`META`).
+ */
+
+/**
+ * orders.meta: a jsonb object per order (none for every fifth), with a status, a tags array (empty, two, or one) and the
+ * amount. orders.amount_raw and orders.big: the numerics DuckDB's postgres extension reads as doubles — an unconstrained
+ * `numeric` (a Rails `decimal`) and Prisma's `Decimal` numeric(65,30), whose values use 5 of its 30 decimals (the copy
+ * stores 5, the wire writes 30) — kept from the amount, so the poll's changes reach them.
+ */
+export const META = "ALTER TABLE public.orders ADD COLUMN meta jsonb; UPDATE public.orders SET meta = jsonb_build_object('status', status, 'tags', CASE id % 3 WHEN 0 THEN '[]'::jsonb WHEN 1 THEN jsonb_build_array('a', 'B') ELSE jsonb_build_array(tenant_id) END, 'n', amount) WHERE id % 5 <> 0; " +
+  "ALTER TABLE public.orders ADD COLUMN amount_raw numeric GENERATED ALWAYS AS (amount * 1.5) STORED, ADD COLUMN big numeric(65,30) GENERATED ALWAYS AS (amount / 8) STORED";
+
+export const BI_SHAPES: Array<{ name: string; sql: string }> = [
+  { name: "cast of an expression: ::varchar", sql: "SELECT o.id::varchar AS id, o.created_at::varchar AS at, o.amount::varchar AS amount, o.status::varchar FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "cast: ::varchar(n) (truncates)", sql: "SELECT o.id, o.notes::varchar(12) AS head, c.name::varchar(3) AS initials FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 20" },
+  { name: "cast: number ::text", sql: "SELECT i.id, (i.quantity * i.unit_price)::text AS line, (i.unit_price / 3)::text AS third FROM order_items i ORDER BY i.id LIMIT 20" },
+  { name: "cast: ::numeric with no precision", sql: "SELECT o.tenant_id, round(avg(o.amount)::numeric, 4) AS avg4, (sum(o.amount) / 7)::numeric AS seventh FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "cast: ::time", sql: "SELECT o.id, o.created_at::time AS t, (o.created_at AT TIME ZONE 'America/New_York')::time AS ny FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "cast of an expression: ::bool / boolean ::int", sql: "SELECT o.id, (o.status = 'paid')::int AS paid, (o.amount > 100)::boolean::text AS big FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "cast: ::uuid", sql: "SELECT md5(o.id::text)::uuid AS u FROM orders o ORDER BY o.id LIMIT 5" },
+  { name: "cast: ::float4", sql: "SELECT i.id, i.unit_price::float4 * i.quantity AS f FROM order_items i WHERE i.unit_price IS NOT NULL ORDER BY i.id LIMIT 20" },
+  { name: "cast: array ::text / ::text[]", sql: "SELECT o.tenant_id, array_agg(o.id ORDER BY o.id)::text AS ids, '{a,b}'::text[] AS lit FROM orders o WHERE o.id < 20 GROUP BY 1 ORDER BY 1" },
+  { name: "function: date(x)", sql: "SELECT date(o.created_at) AS day, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "date_trunc over a DATE", sql: "SELECT date_trunc('month', o.created_at::date) AS m, date_trunc('week', current_date) IS NOT NULL AS ok, count(*) FROM orders o GROUP BY 1, 2 ORDER BY 1" },
+  { name: "date/time - date/time over columns (interval, integer days)", sql: "SELECT o.id, o.created_at - c.created_at AS since_signup, o.created_at::date - c.created_at::date AS days FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 20" },
+  { name: "interval - interval / (column) - interval", sql: "SELECT o.id, (o.created_at - c.created_at) - interval '1 day' AS less_a_day, o.created_at - interval '1 month' - interval '1 day' AS back FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 20" },
+  { name: "date_part(field, …) over a difference / a DATE / an INTERVAL", sql: "SELECT o.id, date_part('day', o.created_at - c.created_at) AS d, date_part('year', o.created_at) AS y, date_part('week', o.created_at::date) AS w, date_part('epoch', o.created_at) AS e FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 20" },
+  { name: "age()", sql: "SELECT o.id, age(o.created_at, c.created_at) AS a FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 20" },
+  { name: "to_date(text, fmt)", sql: "SELECT o.id, to_date('2026-09-' || lpad((o.id % 28 + 1)::text, 2, '0'), 'YYYY-MM-DD') AS d FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "to_timestamp(text, fmt)", sql: "SELECT o.id, to_timestamp('2026-09-15 ' || lpad((o.id % 24)::text, 2, '0') || ':30', 'YYYY-MM-DD HH24:MI') AS t FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "to_timestamp(epoch)", sql: "SELECT o.id, to_timestamp(extract(epoch from o.created_at)) AS back FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "to_char patterns (Month, Day, Mon, IW, IYYY, Q, FM, 9/0 number formats)", sql: "SELECT o.id, to_char(o.created_at, 'FMMonth YYYY') AS m, to_char(o.created_at, 'Dy DD Mon') AS d, to_char(o.created_at, 'IYYY-IW') AS w, to_char(o.created_at, 'YYYY-\"Q\"Q') AS q, to_char(o.amount, 'FM999,999,990.00') AS amt FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "AT TIME ZONE an expression", sql: "SELECT o.id, o.created_at AT TIME ZONE CASE WHEN o.tenant_id = 'acme' THEN 'America/New_York' ELSE 'Europe/London' END AS local FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "comparison: date vs timestamp / BETWEEN … AND <date>", sql: "SELECT count(*) FILTER (WHERE o.created_at BETWEEN date '2026-09-01' AND date '2026-09-30') AS inclusive_end, count(*) FILTER (WHERE o.created_at >= date '2026-09-01' AND o.created_at::date <= date '2026-09-30') AS by_date FROM orders o" },
+  { name: "typed literal: interval with fields / ::interval(typmod)", sql: "SELECT count(*) FILTER (WHERE o.created_at > timestamptz '2026-09-15' - interval '3' day) AS a, count(*) FILTER (WHERE o.created_at > timestamptz '2026-09-15' - '36 hours'::interval hour) AS b FROM orders o" },
+  { name: "generate_series in the select list", sql: "SELECT t.id, generate_series(1, 3) AS n FROM tenants t ORDER BY 1, 2" },
+  { name: "generate_series over dates (LATERAL / select list) + LEFT JOIN", sql: "SELECT d::date AS day, count(o.id) FROM generate_series(date '2026-09-01', date '2026-09-07', interval '1 day') d LEFT JOIN orders o ON o.created_at::date = d::date GROUP BY 1 ORDER BY 1" },
+  { name: "WITH RECURSIVE", sql: "WITH RECURSIVE days(day) AS (SELECT date '2026-09-01' UNION ALL SELECT day + 1 FROM days WHERE day < date '2026-09-07') SELECT days.day, count(o.id) FROM days LEFT JOIN orders o ON o.created_at::date = days.day GROUP BY 1 ORDER BY 1" },
+  { name: "make_date", sql: "SELECT o.id, make_date(2026, extract(month from o.created_at)::int, 1) AS first FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "trunc(x, n)", sql: "SELECT o.id, trunc(o.amount / 3, 2) AS t FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "OVERLAPS", sql: "SELECT o.id, (o.created_at, interval '1 day') OVERLAPS (timestamptz '2026-09-15', timestamptz '2026-09-16') AS ov FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "collation: ORDER BY a text column in a subquery / window ORDER BY text", sql: "SELECT s.name, s.rn FROM (SELECT c.name, row_number() OVER (ORDER BY c.name, c.id) AS rn FROM customers c ORDER BY c.name LIMIT 8) s ORDER BY s.rn" },
+  { name: "collation: < > against a text literal", sql: "SELECT c.id FROM customers c WHERE c.name >= 'b' AND c.name < 'Z' ORDER BY c.id" },
+  { name: "collation: ORDER BY text + LIMIT (outer) / min/max of text", sql: "SELECT c.name FROM customers c WHERE c.name IS NOT NULL ORDER BY c.name LIMIT 5" },
+  { name: "collation: max/min of text, string_agg(DISTINCT)", sql: "SELECT o.tenant_id, min(o.status), max(o.status), string_agg(DISTINCT o.status, ',') FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "aggregate: array_agg without ORDER BY / array_agg(DISTINCT)", sql: "SELECT o.tenant_id, array_agg(DISTINCT o.status) AS statuses FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "percentile_disc / mode()", sql: "SELECT o.tenant_id, percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) AS p50, mode() WITHIN GROUP (ORDER BY o.status) AS top_status FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "sum(DISTINCT) / stddev", sql: "SELECT i.tenant_id, sum(DISTINCT i.quantity) AS q, round(stddev(i.quantity)::numeric(20, 6), 6) AS sd FROM order_items i GROUP BY 1 ORDER BY 1" },
+  { name: "GROUP BY ROLLUP / GROUPING()", sql: "SELECT g, count(*), sum(n) FROM (SELECT o.tenant_id, o.status, count(*) AS n, GROUPING(o.tenant_id, o.status) AS g FROM orders o GROUP BY ROLLUP (o.tenant_id, o.status)) r GROUP BY g ORDER BY g" },
+  { name: "GROUP BY GROUPING SETS", sql: "SELECT g, count(*), sum(n) FROM (SELECT o.tenant_id, o.status, count(*) AS n, GROUPING(o.tenant_id, o.status) AS g FROM orders o GROUP BY GROUPING SETS ((o.tenant_id), (o.status), ())) r GROUP BY g ORDER BY g" },
+  { name: "CASE in GROUP BY", sql: "SELECT CASE WHEN o.amount >= 100 THEN 'big' WHEN o.amount > 0 THEN 'small' ELSE 'zero or less' END AS size, count(*) FROM orders o GROUP BY CASE WHEN o.amount >= 100 THEN 'big' WHEN o.amount > 0 THEN 'small' ELSE 'zero or less' END ORDER BY 1" },
+  { name: "window frame: ROWS BETWEEN n PRECEDING / UNBOUNDED PRECEDING AND CURRENT ROW", sql: "SELECT o.id, sum(o.amount) OVER (PARTITION BY o.tenant_id ORDER BY o.created_at, o.id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS last3, sum(o.amount) OVER (PARTITION BY o.tenant_id ORDER BY o.created_at, o.id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running FROM orders o ORDER BY o.id LIMIT 30" },
+  // Metabase's cumulative sum and count (its findings on #517): the frame's short form
+  { name: "window frame: ROWS UNBOUNDED PRECEDING over an aggregate (Metabase's cumulative sum / count)", sql: "SELECT date_trunc('month', o.created_at) AS m, sum(sum(o.amount)) OVER (ORDER BY date_trunc('month', o.created_at) ROWS UNBOUNDED PRECEDING) AS cum, sum(count(*)) OVER (ORDER BY date_trunc('month', o.created_at) ROWS UNBOUNDED PRECEDING) AS n FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "window: ORDER BY … DESC with the default nulls", sql: "SELECT i.id, rank() OVER (ORDER BY i.unit_price DESC) AS r FROM order_items i ORDER BY i.id LIMIT 30" },
+  { name: "ntile / percent_rank / lead with 2 arguments", sql: "SELECT o.id, ntile(4) OVER (ORDER BY o.amount, o.id) AS q, percent_rank() OVER (ORDER BY o.amount) AS pr, lead(o.amount, 2) OVER (ORDER BY o.id) AS l2 FROM orders o ORDER BY o.id LIMIT 30" },
+  { name: "WITH nested inside a subquery", sql: "SELECT s.tenant_id, s.n FROM (WITH t AS (SELECT tenant_id, count(*) AS n FROM orders GROUP BY tenant_id) SELECT * FROM t) s ORDER BY 1" },
+  { name: "subquery: NOT EXISTS (correlated)", sql: "SELECT c.id FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.status = 'refunded') ORDER BY c.id" },
+  { name: "subquery: IN (subquery) correlated / scalar in WHERE correlated", sql: "SELECT o.id FROM orders o WHERE o.amount > (SELECT avg(o2.amount) FROM orders o2 WHERE o2.tenant_id = o.tenant_id) AND o.customer_id IN (SELECT c.id FROM customers c WHERE c.tenant_id = o.tenant_id) ORDER BY o.id" },
+  { name: "subquery: scalar in a JOIN condition (correlated)", sql: "SELECT c.id, o.id AS last_order FROM customers c LEFT JOIN orders o ON o.id = (SELECT max(o2.id) FROM orders o2 WHERE o2.customer_id = c.id) ORDER BY c.id" },
+  { name: "row constructor: (a, b) IN (…)", sql: "SELECT o.id FROM orders o WHERE (o.tenant_id, o.status) IN (('acme', 'paid'), ('globex', 'pending')) ORDER BY o.id" },
+  { name: "VALUES in FROM with a column list", sql: "SELECT v.label, count(o.id) FROM (VALUES ('paid', 'Paid'), ('pending', 'Pending'), ('', 'Empty')) AS v(status, label) LEFT JOIN orders o ON o.status = v.status GROUP BY 1 ORDER BY 1" },
+  { name: "IN (list) with 50+ values", sql: "SELECT count(*) FROM orders o WHERE o.id IN (0, 7, 14, 21, 28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98, 105, 112, 119, 126, 133, 140, 147, 154, 161, 168, 175, 182, 189, 196, 203, 210, 217, 224, 231, 238, 245, 252, 259, 266, 273, 280, 287, 294, 301, 308, 315, 322, 329, 336, 343, 350, 357, 364, 371, 378, 385, 392, 399, 406, 413)" },
+  { name: "DISTINCT ON without ORDER BY (nondeterministic in Postgres too)", sql: "SELECT count(*) FROM (SELECT DISTINCT ON (o.tenant_id) o.tenant_id, o.id FROM orders o) s" },
+  { name: "substring(x FROM 'regex')", sql: "SELECT c.id, substring(c.email from '@(.*)$') AS domain, substring(c.email from '[0-9]+') AS digits FROM customers c ORDER BY c.id" },
+  { name: "regex: Postgres-only escapes (\\y, \\m)", sql: "SELECT o.id, o.notes ~ '\\yipsum\\y' AS word FROM orders o WHERE o.notes IS NOT NULL ORDER BY o.id LIMIT 20" },
+  { name: "regexp_match", sql: "SELECT c.id, regexp_match(c.email, '^c([0-9]+)@') AS m FROM customers c ORDER BY c.id" },
+  { name: "regexp_matches (set-returning, flag g)", sql: "SELECT c.id, regexp_matches(c.email, '[0-9]', 'g') AS m FROM customers c WHERE c.id < 15 ORDER BY 1, 2" },
+  { name: "SIMILAR TO", sql: "SELECT c.id, c.email SIMILAR TO 'c%@example.test' AS sim FROM customers c ORDER BY c.id" },
+  { name: "regex: class escapes (\\d \\s \\w)", sql: "SELECT o.id, regexp_replace(o.notes, '\\s+', ' ', 'g') = o.notes AS single_spaced, o.notes ~ '\\d' AS has_digit FROM orders o WHERE o.notes IS NOT NULL ORDER BY o.id LIMIT 20" },
+  { name: "initcap", sql: "SELECT c.id, initcap(c.name) AS n FROM customers c ORDER BY c.id" },
+  { name: "lpad / rpad", sql: "SELECT c.id, lpad(c.id::text, 5, '0') AS p, rpad(c.name, 4, '.') AS r FROM customers c ORDER BY c.id" },
+  { name: "btrim(x, chars) function form", sql: "SELECT c.id, btrim(c.name, ' ') AS b FROM customers c ORDER BY c.id" },
+  { name: "to_hex", sql: "SELECT o.id, to_hex(o.id * 1000) AS h FROM orders o ORDER BY o.id LIMIT 10" },
+  { name: "format()", sql: "SELECT c.id, format('%s <%s>', c.name, c.email) AS f FROM customers c ORDER BY c.id" },
+  { name: "chr / char_length / substr", sql: "SELECT c.id, chr(65 + (c.id % 26)::int) AS ch, char_length(c.name) AS n, substr(c.email, 2, 3) AS s FROM customers c ORDER BY c.id" },
+  { name: "upper() of non-ASCII (ß)", sql: "SELECT upper('straße'), upper(c.name) FROM customers c ORDER BY c.id LIMIT 5" },
+  { name: "array: ARRAY[…] constructor / = ANY(ARRAY[…])", sql: "SELECT o.id, ARRAY[o.status, o.tenant_id] AS pair FROM orders o WHERE o.status = ANY(ARRAY['paid', 'PAID']) ORDER BY o.id LIMIT 20" },
+  { name: "array: ILIKE ANY(ARRAY[…])", sql: "SELECT c.id FROM customers c WHERE c.name ILIKE ANY(ARRAY['%ada%', '%grace%']) ORDER BY c.id" },
+  { name: "array operators @> &&", sql: "SELECT o.id, string_to_array(o.notes, ' ') @> ARRAY['widget'] AS has, string_to_array(o.notes, ' ') && ARRAY['ok', 'short'] AS any_ FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "array_remove", sql: "SELECT o.id, array_remove(ARRAY[o.status, NULL, 'x'], NULL) AS a FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "array_to_json", sql: "SELECT o.id, array_to_json(ARRAY[o.status, o.tenant_id])::text AS j FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "set-returning unnest in the select list", sql: "SELECT o.id, unnest(string_to_array(o.status, 'a')) AS part FROM orders o WHERE o.id < 10 ORDER BY 1, 2" },
+  { name: "cast ::jsonb of an expression", sql: "SELECT o.id, ('{\"n\": ' || o.amount || '}')::jsonb ->> 'n' AS n FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "cast ::json of an expression", sql: "SELECT o.id, ('{\"n\": ' || o.amount || '}')::json ->> 'n' AS n FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "json ->> / -> on a jsonb column (stored as JSON)", sql: "SELECT o.id, o.meta ->> 'status' AS s, o.meta -> 'tags' ->> 0 AS t0, (o.meta -> 'n')::text AS n FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "jsonb @>", sql: "SELECT o.id, o.meta @> '{\"status\": \"paid\"}' AS paid FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "jsonb #>> / #>", sql: "SELECT o.id, o.meta #>> '{tags,0}' AS first_tag FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "jsonb ? key", sql: "SELECT o.id, o.meta ? 'status' AS has FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "jsonb ? / ?| / ?& on an object and on an array (a string element is a key)", sql: "SELECT o.id, o.meta ? 'tags' AS k, (o.meta -> 'tags') ? 'a' AS in_array, (o.meta -> 'tags') ?| ARRAY['B', 'z'] AS any_of, (o.meta -> 'tags') ?& ARRAY['a', 'B'] AS all_of, (o.meta -> 'status') ? 'paid' AS scalar FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "jsonb @> / <@ of arrays, nested arrays, objects and a top-level scalar", sql: "SELECT o.id, (o.meta -> 'tags') @> '[\"a\"]' AS a, (o.meta -> 'tags') @> '\"a\"' AS scalar_in_array, jsonb_build_array(o.meta -> 'tags') @> '[\"a\"]' AS nested, jsonb_build_array(o.meta -> 'tags') @> '[[\"a\"]]' AS nested_arr, '{\"status\": \"paid\"}' <@ o.meta AS within, o.meta @> jsonb_build_object('n', o.amount) AS n FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "string_to_array of '', with an empty or NULL delimiter, and a null_string", sql: "SELECT o.id, string_to_array(coalesce(o.notes, ''), ',') AS parts, string_to_array(o.status, '') AS whole, string_to_array(o.status, NULL) AS chars, string_to_array(o.status, 'a', 'p') AS nulled FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "a UNION's ORDER BY a column number, text under the database's collation", sql: "SELECT o.status FROM orders o UNION SELECT c.name FROM customers c ORDER BY 1" },
+  { name: "a UNION's ORDER BY the name of a qualified column", sql: "SELECT o.status FROM orders o UNION SELECT c.name FROM customers c ORDER BY status" },
+  { name: "a UNION ALL's ORDER BY a number of an expression column, descending, then another", sql: "SELECT lower(o.status) AS s, o.id FROM orders o WHERE o.id < 30 UNION ALL SELECT c.name, c.id FROM customers c ORDER BY 1 DESC, 2" },
+  { name: "jsonb_array_length of an object: Postgres's error", sql: "SELECT o.id, jsonb_array_length(o.meta) AS n FROM orders o WHERE o.meta IS NOT NULL ORDER BY o.id" },
+  { name: "array_length of an empty array, and jsonb_array_length", sql: "SELECT o.id, array_length(string_to_array(o.notes, ','), 1) AS parts, array_length(ARRAY[]::int[], 1) AS empty, jsonb_array_length(o.meta -> 'tags') AS n FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "jsonb_array_length", sql: "SELECT o.id, jsonb_array_length(o.meta -> 'tags') AS n FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "json_array_length", sql: "SELECT o.id, json_array_length((o.meta -> 'tags')::text::json) AS n FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "jsonb_extract_path_text / json_extract_path_text", sql: "SELECT o.id, jsonb_extract_path_text(o.meta, 'status') AS s FROM orders o ORDER BY o.id LIMIT 20" },
+  // an array of jsonb values made json (a BI tool's select item, `…(array[(t.col)->('key')])->>0`): each
+  // element embedded as json, never its text quoted as a string (`["\"x\""]`, whose ->>0 kept the quotes); a string, a
+  // number, an array, an object and NULL (every fifth order has no meta)
+  { name: "an array of jsonb values as json: array_to_json, then ->>0", sql: "SELECT o.id, array_to_json(array[(\"o\".\"meta\")->('status')])->>0 AS s, array_to_json(array[o.meta -> 'n', o.meta -> 'tags', o.meta, NULL]) AS mixed FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "an array of jsonb values as json: to_json / to_jsonb / json_build_array, then ->>0", sql: "SELECT o.id, to_json(array[o.meta -> 'status'])->>0 AS t, to_jsonb(array[o.meta -> 'status'])->>0 AS b, array_to_json(array[o.meta -> 'n', o.meta -> 'tags', o.meta, NULL]) AS mixed, to_json(array[o.meta]) AS whole, to_jsonb(array[o.meta -> 'n', o.meta]) AS jb, json_build_array(o.meta -> 'status')->>0 AS built, jsonb_build_array(o.meta -> 'tags')->>0 AS jbuilt FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "an array of json values as json: each element as written", sql: "SELECT o.id, array_to_json(array[o.meta::json -> 'status', o.meta::json])->>0 AS s, array_to_json(array[o.meta::json]) AS whole FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "an array of json values as jsonb", sql: "SELECT o.id, to_jsonb(array[o.meta::json]) AS jb, to_json(array[o.meta::json]) AS j FROM orders o ORDER BY o.id LIMIT 20" },
+  // JSON() (SQL/JSON's constructor, Postgres 16+) takes text, bytea, json or jsonb: an array is Postgres's refusal (42846)
+  { name: "JSON() of an array of jsonb: Postgres's refusal", sql: "SELECT o.id, json(array[(o.meta)->('status')])->>0 AS s FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "jsonb_agg / json_agg", sql: "SELECT o.tenant_id, json_agg(o.id ORDER BY o.id)::text AS ids FROM orders o WHERE o.id < 10 GROUP BY 1 ORDER BY 1" },
+  { name: "json_build_object / jsonb_build_object", sql: "SELECT o.id, json_build_object('s', o.status, 'a', o.amount)::text AS j FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "GROUP BY a primary key, selecting the columns it decides", sql: "SELECT c.id, c.name, c.email, count(o.id) AS n, sum(o.amount) AS total FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY c.name, c.id LIMIT 20" },
+  { name: "GROUP BY a primary key: a decided column in a window's ORDER BY", sql: "SELECT c.id, c.name, count(o.id) AS n, rank() OVER (ORDER BY c.name, c.id) AS r FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY c.id LIMIT 20" },
+  { name: "GROUP BY a primary key: a decided column in a correlated subquery", sql: "SELECT c.id, count(o.id) AS n, (SELECT count(*) FROM customers c2 WHERE c2.email = c.email) AS same_email FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY c.id LIMIT 20" },
+  { name: "GROUP BY a primary key, selecting t.* beside an aggregate", sql: "SELECT c.*, count(o.id) AS n FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY c.id LIMIT 20" },
+  { name: "GROUP BY a primary key: a decided numeric divided, computed exactly", sql: "SELECT o.id, o.amount / 3 AS third, round(o.amount * 1.5, 1) AS r, count(i.id) AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY o.id LIMIT 20" },
+  { name: "GROUP BY a primary key: a decided column in HAVING, ORDER BY and an expression", sql: "SELECT c.id, upper(c.name) AS n, count(*) AS orders FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.id HAVING c.email IS NOT NULL ORDER BY c.created_at, c.id LIMIT 20" },
+  { name: "an unconstrained numeric and a numeric(65,30) column, as stored", sql: "SELECT o.id, o.amount_raw, o.big FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "aggregates of an unconstrained numeric and a numeric(65,30)", sql: "SELECT o.tenant_id, sum(o.amount_raw) AS s, avg(o.amount_raw) AS a, sum(o.big) AS b, max(o.big) AS m, round(avg(o.big), 10) AS r FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "arithmetic and a filter on wide numerics", sql: "SELECT o.id, o.amount_raw * 2 - o.big AS d, o.big / 3 AS third FROM orders o WHERE o.amount_raw > 100 ORDER BY o.id LIMIT 20" },
+  { name: "casts of wide numerics", sql: "SELECT o.id, o.big::text AS t, o.amount_raw::numeric(20,1) AS c, o.amount_raw::float8 AS f FROM orders o ORDER BY o.id LIMIT 20" },
+  // a BI tool's statement (its shape over the shop): a derived table's columns named "t.x", a regular
+  // expression's first group, and json_each in a LEFT JOIN … ON TRUE over a CASE that passes only an object
+  { name: "json_each in a LEFT JOIN ON TRUE over a derived table, guarded by a CASE", sql: "SELECT q.\"t.id\", q.\"t.payload\", q.domain, q.domain_if_then, d.key AS payload_key, d.value AS payload_value FROM (SELECT \"t\".\"id\" AS \"t.id\", \"t\".\"meta\" AS \"t.payload\", substring(((\"c\".\"email\")::varchar) from ('@(.*)')) AS domain, CASE WHEN ((substring(((\"c\".\"email\")::varchar) from ('@(.*)')))::varchar) = ('example.test') THEN ('x') ELSE ('y') END AS domain_if_then FROM \"public\".\"orders\" AS \"t\" LEFT JOIN \"public\".\"customers\" AS \"c\" ON \"c\".\"id\" = \"t\".\"customer_id\") AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(\"t.payload\"::text), 1, 1) = '{' THEN \"t.payload\"::json ELSE NULL END) d ON TRUE" },
+  { name: "json_each / jsonb_each / their _text in a LEFT JOIN ON TRUE, ordered", sql: "SELECT o.id, a.key, a.value::text AS a, b.value::text AS b, c.value AS c, d.value AS d FROM orders o LEFT JOIN json_each(CASE WHEN substring(ltrim(o.meta::text), 1, 1) = '{' THEN o.meta::json END) a ON TRUE LEFT JOIN jsonb_each(o.meta) b ON b.key = a.key LEFT JOIN json_each_text(o.meta::json) c ON c.key = a.key LEFT JOIN jsonb_each_text(o.meta) d ON d.key = a.key WHERE o.id < 40 ORDER BY 1, 2" },
+  { name: "jsonb_array_elements_text / jsonb_object_keys in the select list or LATERAL", sql: "SELECT o.id, t.tag FROM orders o CROSS JOIN LATERAL jsonb_array_elements_text(o.meta -> 'tags') AS t(tag) WHERE o.id < 20 ORDER BY 1, 2" },
+  // the BI-tools test: a whole numeric written with an exponent (Grafana's $__timeGroup(col, '1M')), and a
+  // numeric written as a string
+  { name: "a numeric constant with an exponent, beside a column", sql: "SELECT o.id, o.amount * 2.5e2 AS a, o.id * 1e9 * 1e9 AS b, 1.50e1 AS c, '2.5e2'::numeric AS d, '1.5'::numeric AS e FROM orders o ORDER BY o.id LIMIT 20" },
+  { name: "Metabase's sum where: sum(CASE … ELSE 0.0 END), the arms the rows took", sql: "SELECT o.tenant_id, sum(CASE WHEN o.status = 'paid' THEN o.amount ELSE 0.0 END) AS paid, sum(CASE WHEN o.id > 0 THEN o.id ELSE 0.0 END) AS ids, sum(coalesce(CASE WHEN o.status = 'paid' THEN o.id END, 0.0)) AS c FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "Grafana's $__timeGroup: floor(epoch / n) * n", sql: "SELECT floor(extract(epoch FROM o.created_at) / 2.6784e+06) * 2.6784e+06 AS time, count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
+  // a dashboard's top N that keeps the rows tied with the last (until the cut, only the generated queries of the
+  // ClickHouse stack's Query API asked these two, so they are asked here); ordered outside, since the order among tied rows is Postgres's choice
+  { name: "a top N with its ties: FETCH FIRST n ROWS WITH TIES", sql: "SELECT * FROM (SELECT o.tenant_id, o.status, count(*) AS n FROM orders o GROUP BY 1, 2 ORDER BY n DESC FETCH FIRST 3 ROWS WITH TIES) t ORDER BY n DESC, tenant_id, status" },
+  { name: "a relative window: make_interval with named arguments", sql: "SELECT count(*) AS n, min(o.created_at + make_interval(hours => (o.id % 24)::int)) AS first FROM orders o WHERE o.created_at >= timestamptz '2026-10-01 00:00:00+00' - make_interval(days => 30)" },
+];

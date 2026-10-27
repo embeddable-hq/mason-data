@@ -1,0 +1,16 @@
+# The build context of both images (docker/*.Dockerfile). Only what they COPY matters; the rest is
+# excluded so a build does not send the checkout's state, credentials or node_modules to the daemon.
+.git
+.env
+.env.*
+.pgcreds
+node_modules
+sdk/node_modules
+sdk/dist
+generated
+docs
+tests
+examples
+deployments
+# the Postgres proxy is its own workspace and image (proxy/Dockerfile, its own build context); its target/ is GBs
+proxy

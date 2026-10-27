@@ -1,0 +1,110 @@
+/**
+ * WHAT THE DUCKDB ENDPOINT KNOWS IT DOES NOT DO AS POSTGRES DOES: a list of what is known to be unsupported, and the
+ * steps that keep the list true. Every entry is one of:
+ *  - `refused`: a statement using it is refused by name — SQLSTATE 0A000, the gap's id in the error's detail (or, for a
+ *    value only the data shows, in the message), and the way out in the hint;
+ *  - `differs`: answered, but not as Postgres answers (a decided difference: the oracle's KNOWN, which must still differ);
+ *  - `limit`: not about a statement — what the prototype cannot do yet (reach, access, the poll's cost).
+ *
+ * HOW IT IS KEPT TRUE (tests/duck-gaps.test.ts, tests/integration/duck-oracle.itest.ts):
+ *  - every refusal names an entry: `Unrewritable` takes a `GapId` (or Postgres's own refusal, which is not a gap), and a
+ *    runtime refusal's message says `Mason gap <id>` of an id this file has;
+ *  - the oracle accepts a refusal where Postgres answers ONLY when it names a `refused` entry, and fails when a
+ *    `refused` or `differs` entry is met by none of its statements (a dead entry is removed, or its test named in
+ *    `heldBy` instead, a test that names the id);
+ *  - docs/SQL-SUPPORT.md is rendered from this file and the verified list (src/duck/verified.ts), and must be current.
+ * Anything not in src/duck/verified.ts is refused as `unverified`: this list is what is known BEYOND that.
+ */
+
+export interface Gap {
+  kind: "refused" | "differs" | "limit";
+  /** what a developer writes or meets, in SQL's words */
+  what: string;
+  postgres: string;
+  mason: string;
+  /** what to write or do instead */
+  wayOut: string;
+  /** a test that holds it, when the oracle cannot (it names the id) */
+  heldBy?: string;
+}
+
+export const GAPS = {
+  // ---------------------------------------------------------------------------------------------- refused
+  unverified: { kind: "refused", what: "a function, operator, cast, type or construct the oracle has not held to Postgres", postgres: "answers", mason: "refused, naming each piece", wayOut: "write the statement without it; report it to have it verified", heldBy: "tests/duck-wire.test.ts" },
+  "explain-option": { kind: "refused", what: "EXPLAIN (FORMAT XML), (FORMAT YAML), (GENERIC_PLAN)", postgres: "the plan in XML or YAML; a plan for unbound parameters", mason: "refused by name: EXPLAIN is DuckDB's plan, in Postgres's text or JSON (docs/DESIGN.md)", wayOut: "FORMAT TEXT or FORMAT JSON; bind the parameters' values and EXPLAIN that" },
+  "setop-ordinal-star": { kind: "refused", what: "ORDER BY a column number of a UNION / INTERSECT / EXCEPT whose first SELECT lists *", postgres: "sorts by that column", mason: "refused", wayOut: "ORDER BY the column's name" },
+  "with-ties-distinct": { kind: "refused", what: "FETCH FIRST … WITH TIES over SELECT DISTINCT", postgres: "answers", mason: "refused (DuckDB has no WITH TIES; Mason's rank over DISTINCT is not Postgres's)", wayOut: "select the DISTINCT rows in a subquery and FETCH … WITH TIES from it" },
+  "collation-unknown": { kind: "refused", what: "COLLATE with a collation other than C, POSIX, default or an ICU locale DuckDB has", postgres: "sorts and compares under it", mason: "refused", wayOut: "COLLATE \"C\" for byte order, or no COLLATE for the database's" },
+  "like-any-array": { kind: "refused", what: "LIKE / ILIKE ANY (or ALL) over an array that is not written out", postgres: "answers", mason: "refused", wayOut: "write the patterns as ARRAY['…', '…'], or OR the LIKEs" },
+  "similar-to-forms": { kind: "refused", what: "SIMILAR TO with a pattern or ESCAPE that is not a literal, its substring markers, or substring(… SIMILAR … ESCAPE …)", postgres: "answers", mason: "refused", wayOut: "a literal pattern, or ~ with a POSIX regular expression" },
+  "array-remove-type": { kind: "refused", what: "array_remove of an array of a type other than text, integers, floats, booleans, dates or timestamps", postgres: "answers", mason: "refused", wayOut: "array_remove an array of one of those types" },
+  "json-agg-distinct": { kind: "refused", what: "json_agg / jsonb_agg (DISTINCT …)", postgres: "answers", mason: "refused", wayOut: "select the DISTINCT values in a subquery and aggregate them" },
+  "json-rows-in-select": { kind: "refused", what: "json(b)_array_elements / json(b)_each in the SELECT list", postgres: "a row per element", mason: "refused", wayOut: "read it in FROM: SELECT … FROM t, jsonb_array_elements(t.j) AS e" },
+  "regexp-flags": { kind: "refused", what: "regexp_replace with a start position or a count (its five- and six-argument forms)", postgres: "answers", mason: "refused", wayOut: "regexp_replace(text, pattern, replacement[, flags]): flags g for every match" },
+  "regexp-functions": { kind: "refused", what: "regexp_split_to_table / regexp_split_to_array / regexp_count / regexp_instr / regexp_substr / regexp_like", postgres: "answers", mason: "refused", wayOut: "~ to test, substring(text from pattern) to take a part, regexp_replace to replace" },
+  "regexp-matches-forms": { kind: "refused", what: "regexp_matches in FROM", postgres: "answers", mason: "refused", wayOut: "regexp_matches in the SELECT list" },
+  "json-of-type": { kind: "refused", what: "to_json / array_to_json / json_build_object of a value (or an array of elements) of a type Mason does not write as json", postgres: "answers", mason: "refused", wayOut: "cast the value to text, a number, a boolean, a timestamp or json first" },
+  "extract-julian": { kind: "refused", what: "extract(julian FROM …)", postgres: "answers", mason: "refused", wayOut: "extract(epoch FROM …) / 86400 + 2440587.5" },
+  "with-ordinality": { kind: "refused", what: "a function in FROM … WITH ORDINALITY", postgres: "numbers the rows", mason: "refused", wayOut: "row_number() OVER () instead" },
+  "multidim-array": { kind: "refused", what: "a multi-dimensional array literal", postgres: "answers", mason: "refused", wayOut: "a one-dimensional array" },
+  "format-specifiers": { kind: "refused", what: "format() with a specifier other than %s (%I, %L, widths, positions)", postgres: "answers", mason: "refused", wayOut: "concatenate with ||, or %s only" },
+  "to-char-patterns": { kind: "refused", what: "to_char of an interval or a time; its TZ, SP, EEEE, RN, V, B, L patterns; a day or month name padded to 9 characters in a parse", postgres: "answers", mason: "refused", wayOut: "the patterns listed in the hint; extract(… FROM interval) for an interval's parts" },
+  "to-timestamp-format": { kind: "refused", what: "to_timestamp / to_date with a format that is not a literal", postgres: "answers", mason: "refused", wayOut: "write the format as a string literal" },
+  "libc-uncovered": { kind: "refused", what: "ORDER BY, <, >, min / max of text holding a combining mark (e + U+0301), a Thai or Lao vowel written before its consonant, a private-use or unassigned code point, under a libc collation", postgres: "answers, in glibc's order", mason: "refused when a value holding one is ordered (the order is read from the database, and glibc orders these otherwise than Mason can follow)", wayOut: "normalize the text (normalize(x, NFC)), or ORDER BY x COLLATE \"C\" for byte order" },
+  "libc-symbol-punctuation": { kind: "differs", what: "text ordered under a libc collation where punctuation or a space follows a digit or a symbol and a later letter differs only in case ('1-X' beside '1x')", postgres: "the punctuation outranks the case: 1-X < 1x", mason: "the case outranks the punctuation: 1x < 1-X", wayOut: "ORDER BY lower(x), x when the case must not decide first" },
+  "percentile-text-libc": { kind: "refused", what: "percentile_disc / mode() WITHIN GROUP (ORDER BY text) under a libc collation", postgres: "answers", mason: "refused", wayOut: "order by a number, or ORDER BY … LIMIT in a subquery" },
+  "infinite-extract": { kind: "refused", what: "extract(year, decade, century, millennium, isoyear or epoch FROM) an infinite date or timestamp", postgres: "Infinity (a numeric)", mason: "refused when a row holds one (DuckDB's DECIMAL has no Infinity)", wayOut: "filter the infinite values out (isfinite(x)), or date_part(…), which is a double" },
+  "time-date-trunc": { kind: "refused", what: "date_trunc of a time (Postgres truncates it as an interval)", postgres: "an interval", mason: "refused", wayOut: "date_trunc of a timestamp, or extract the parts" },
+  "quote-ident": { kind: "refused", what: "quote_ident()", postgres: "quotes an identifier when it must be", mason: "refused (it needs Postgres's keyword list)", wayOut: "quote it in the statement, or format('%s', …)" },
+  "div-numeric": { kind: "refused", what: "div() of a value that is not an integer", postgres: "the integer quotient of two numerics", mason: "refused", wayOut: "trunc(a / b)" },
+  "jsonb-set": { kind: "refused", what: "jsonb_set, jsonb_insert, the #- operator, jsonb - of a text[] or an index", postgres: "answers", mason: "refused", wayOut: "build the value with jsonb_build_object" },
+  "jsonb-compare": { kind: "refused", what: "ORDER BY, GROUP BY, DISTINCT or <, >, = over jsonb (Postgres orders and equates jsonb by its own rules: numbers by value, objects by size first)", postgres: "answers", mason: "refused", wayOut: "compare a member: j ->> 'k', or j::text for the canonical text" },
+  "text-array-order": { kind: "refused", what: "ORDER BY, GROUP BY, DISTINCT, min, max or <, > over a text[] under the database's collation", postgres: "compares the elements under the collation", mason: "refused", wayOut: "sort by an element (a[1]), or by array_to_string(a, ',')" },
+  "sum-real": { kind: "refused", what: "sum() of a real (float4), as an aggregate or a window", postgres: "accumulates in single precision", mason: "refused (DuckDB accumulates in double precision)", wayOut: "sum(x::double precision)" },
+  "interval-aggregates": { kind: "refused", what: "sum() or avg() of an interval", postgres: "adds months, days and time apart", mason: "refused", wayOut: "sum(extract(epoch FROM x)) for the seconds" },
+  "bc-timestamptz-zone": { kind: "refused", what: "a timestamptz before year 1 written in a zone other than UTC", postgres: "the zone's local mean time", mason: "refused when a row holds one", wayOut: "SET TimeZone = 'UTC', or filter those rows out", heldBy: "tests/duck-wire.test.ts" },
+  "width-bucket-forms": { kind: "refused", what: "width_bucket with its bounds reversed, or of an array of thresholds", postgres: "answers", mason: "refused", wayOut: "low bound first" },
+  "inet-order": { kind: "refused", what: "ORDER BY, <, >, min or max over an inet", postgres: "orders addresses by network, then host", mason: "refused (equality, IS NULL and the value itself are answered)", wayOut: "sort or compare another column" },
+  "citext-forms": { kind: "refused", what: "GROUP BY, DISTINCT, min, max, a set operation, or = ANY (an array) over a citext", postgres: "groups and sorts without regard to case, answering one spelling", mason: "refused (=, <>, <, >, IN (…), LIKE and ORDER BY are answered, case-insensitively)", wayOut: "GROUP BY lower(x), or x::text where case matters" },
+  "bytea-forms": { kind: "refused", what: "encode / decode to a format other than hex, base64 or escape, or one not written as a literal; convert_to / convert_from of an encoding other than UTF8", postgres: "answers", mason: "refused", wayOut: "encode(x, 'hex'), 'base64' or 'escape'; the UTF8 encoding" },
+  "row-value": { kind: "refused", what: "a row as a value outside the SELECT list, a cast to text and the json functions (compared, tested with IS NULL, grouped, sorted); a row of a row; a row of a table Mason copied in part", postgres: "compares, tests and groups a row by its columns", mason: "refused", wayOut: "compare, test or sort its columns" },
+  "zone-abbreviation": { kind: "refused", what: "a time zone written as an abbreviation or a POSIX zone (`CST`, `IST`, `UTC+3`, `+05`) in AT TIME ZONE or date_trunc", postgres: "a fixed offset (`CST` is -06 all year; `UTC+3` is three hours WEST)", mason: "refused, written or held by a row (DuckDB reads several as another zone: `CST` as Chicago's, `IST` as India's, `UTC+3` as east)", wayOut: "an IANA zone name (America/Chicago, Asia/Kolkata), in any case; UT, Z and UTC are UTC", heldBy: "tests/duck-wire.test.ts" },
+  "volatile-window": { kind: "refused", what: "a window ordered or partitioned by random() or another volatile function (a random row per group)", postgres: "a new value per row", mason: "refused (DuckDB refuses a volatile expression there, and computes a deterministic one once for every row)", wayOut: "SELECT …, row_number() OVER (ORDER BY r) FROM (SELECT *, random() AS r FROM t) AS s" },
+  "numeric-special": { kind: "refused", what: "arithmetic on a numeric NaN or Infinity read from a text", postgres: "NaN and ±Infinity by its own rules (NaN + 1 is NaN)", mason: "refused when a row holds one", wayOut: "filter the special values out first (x <> 'NaN')" },
+  "numeric-exact-sum": { kind: "refused", what: "sum() or avg() of a numeric Postgres's own function computes here — a text read as an unconstrained numeric (Metabase's JSON number, `(j ->> 'k')::numeric`), ln, exp, sqrt, power — holding a value of more than 20 integer digits or 36 decimals besides trailing zeros, or summing past 20 integer digits", postgres: "adds every digit", mason: "refused when a row or the sum does (each value is summed exactly, in two DECIMAL(38,18) parts)", wayOut: "cast to numeric(p, s), or round(x, 18) first" },
+  "numeric-math": { kind: "refused", what: "ln, log, exp, sqrt or power of a numeric expression whose scale its types do not decide (a division, an unconstrained numeric's arithmetic)", postgres: "digits at a scale from the argument's own", mason: "refused (a column, an integer, a literal and a numeric(p, s) are answered by Postgres's own function)", wayOut: "cast the argument to numeric(p, s)" },
+  "view-forms": { kind: "refused", what: "a view's whole row as a value (`SELECT v FROM v`), a WITH query named as a view the statement reads, a column qualified by its view's schema beside another item of the view's name, views read through more than 16 others", postgres: "the view's row type; the WITH query or the view as each is in scope", mason: "refused (a view is answered by its definition in its place, as Postgres's rewriter answers it; its columns, `v.*` and `public.v.col` are answered)", wayOut: "name the view's columns; give the view or the WITH query another name" },
+  "enum-forms": { kind: "refused", what: "an array of an enum read from a text (`t::mood[]`)", postgres: "reads each element as a label", mason: "refused (a column, a label, an array literal and a text read as one label are answered)", wayOut: "write the array as a literal, or ARRAY[…] of its labels" },
+  "infinite-interval": { kind: "refused", what: "an infinite interval read from a text (Postgres 17+)", postgres: "infinity, -infinity", mason: "refused when a row holds one (DuckDB's interval has no infinity)", wayOut: "filter it out first, or read it as text" },
+  "relative-time-literal": { kind: "refused", what: "a relative time combined with anything else ('today 10:00', 'now'::date + …  written as one literal), or read from a row as a date or a time", postgres: "the transaction's start (a row's value: when the row is read)", mason: "refused (a bare 'now', 'today', 'tomorrow', 'yesterday' literal is answered: the transaction's start at the Parse)", wayOut: "current_date + time '10:00', now(), current_date + 1" },
+
+  // ---------------------------------------------------------------------------------------------- differs
+  "limit-errors": { kind: "differs", what: "a select-list value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out, where no index gives the ORDER BY", postgres: "raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers)", mason: "answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does", wayOut: "none needed for an answer; filter the bad rows out to have neither raise" },
+  "mixed-scale-numeric": { kind: "differs", what: "a numeric column whose values have several scales: an integer UNION ALL a numeric, lead(x, 1, 0) beside numeric(2,1) values, an unconstrained column holding 1 and 1.50", postgres: "each value its own scale: 1, 1.5", mason: "one scale per column: 1.0, 1.5", wayOut: "cast to numeric(p, s), or round(x, s)" },
+  "unicode-16-case": { kind: "differs", what: "upper / lower of letters added in Unicode 16", postgres: "maps them (its own Unicode 16 tables)", mason: "leaves them as they are (DuckDB's ICU predates Unicode 16)", wayOut: "none needed for letters before Unicode 16" },
+  "float-last-digit": { kind: "differs", what: "stddev / variance of a float, and ln, log, exp, power of a double: the last digit", postgres: "its algorithm and libm's", mason: "DuckDB's: equal to about 1e-15", wayOut: "round(x::numeric, 12)" },
+  "negative-zero": { kind: "differs", what: "-0 beside 0 in greatest / least / percentile_disc", postgres: "keeps the one it met first", mason: "may answer the other", wayOut: "x + 0 makes -0 into 0" },
+  "float-overflow": { kind: "differs", what: "exp / power of a double past its range, or so small it underflows", postgres: "an error (22003)", mason: "Infinity, or 0", wayOut: "bound the argument" },
+  "min-max-scale-tie": { kind: "differs", what: "min / max of a numeric expression (a quotient) where equal values have different scales (0 / 7 and 0 / 1000000)", postgres: "the last of them it reads, so the scan order decides the trailing zeros", mason: "the one whose operands are least (min) or greatest (max)", wayOut: "round(min(a / b), n)" },
+  "numeric-stddev": { kind: "differs", what: "stddev / variance of DISTINCT integers or numerics, or of a numeric declared without a precision or with more than 18 digits: the last digits", postgres: "exact numeric arithmetic, to its own scale", mason: "a double's 15 digits", wayOut: "round(stddev(x), 10)" },
+  "char-n-minmax": { kind: "differs", what: "greatest / least of a char(n) beside a text", postgres: "compares without the padding, answers the first of equal values", mason: "compares the padded text", wayOut: "cast the char(n) to text first" },
+  "nested-exact-numeric": { kind: "differs", what: "an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …)", postgres: "exact digits at every step", mason: "the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x), it is exact", wayOut: "compute it in the outermost query, or round(…, n) inside" },
+
+  // ---------------------------------------------------------------------------------------------- limits
+  "one-token": { kind: "limit", what: "access", postgres: "roles, grants, row-level security", mason: "every user (mason user) and token reads every copied table: no per-user or per-tenant scope", wayOut: "copy only the tables every user may read" },
+  "poll-full-scan": { kind: "limit", what: "keeping current by the poll (mason start without --replication)", postgres: "-", mason: "the xmin poll scans every added table whole, every poll (no index covers xmin): ~13–17 s for 13 GiB", wayOut: "logical replication: mason start --replication" },
+  "writes": { kind: "limit", what: "INSERT, UPDATE, DELETE, DDL, a read-write transaction", postgres: "answers", mason: "refused by name: the copy is read-only (a read-write transaction: 25006)", wayOut: "write to the source database; the copy follows" },
+  "numeric-over-38-digits": { kind: "limit", what: "a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside DuckDB's arithmetic or a WHERE", postgres: "exact", mason: "a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact", wayOut: "numeric(p, s) with p ≤ 38" },
+  "numeric-array": { kind: "limit", what: "an unconstrained numeric[] column", postgres: "exact elements", mason: "double precision elements (15 digits), said in the log", wayOut: "numeric(p, s)[]" },
+  "numeric-parameter": { kind: "limit", what: "a numeric parameter ($1) compared in a WHERE", postgres: "exact", mason: "a double (exact to 15 digits)", wayOut: "a literal" },
+  "log-literals": { kind: "limit", what: ".mason/mason.log's statement lines", postgres: "-", mason: "each statement DuckDB ran, whole, literals included", wayOut: "keep the log private" },
+} as const satisfies Record<string, Gap>;
+
+export type GapId = keyof typeof GAPS;
+
+/** a refusal that is Postgres's own (its words and its SQLSTATE), so not a gap: Postgres refuses the statement too */
+export interface PostgresRefuses { postgres: string }
+
+/** the words a runtime refusal carries for the oracle and a reader: `Mason gap <id>` */
+export const gapMark = (id: GapId): string => `Mason gap ${id}`;
+export const GAP_MARK = /\bMason gap ([a-z0-9-]+)/;
