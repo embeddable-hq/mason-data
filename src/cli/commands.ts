@@ -18,7 +18,7 @@ import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from
 import { alive, endRun, END_GRACE_MS, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
 import { readRestarts, signalSupervisor, stopSupervisor, supervisorGone, type Restart } from "./supervise.ts";
-import { DUCK_FILE, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
@@ -1125,8 +1125,10 @@ export async function stop(argv: string[]): Promise<number> {
   const recorded = readProject(run.root);
   const replicating = isProject(recorded) && recorded.config.changes === "replication";
   const named = isProject(recorded) ? recorded.config.publication ?? null : null;
+  // a demo project's database (src/cli/demo.ts) stays too, as the copy does: said where a person reads the stop
+  const demo = isProject(recorded) && recorded.config.demo === true;
   if (json) { out(jsonText(STOP, { stopped: [run.name] }, next)); return 0; }
-  out(reportText({ headline: `Stopped ${run.name}`, details: [["kept", "its copy of the data and its state"],
+  out(reportText({ headline: `Stopped ${run.name}`, details: [["kept", `its copy of the data and its state${demo ? ` and the demo database (${STATE_DIR}/${DEMO_DIR})` : ""}`],
     ...(replicating ? [["slot", `its replication slot stays on the database, holding WAL until the next mason start (mason destroy drops it)`] as const,
       ["publication", named ? `${named}, its owner's: read as it is, never altered (mason destroy leaves it)` : "Mason's own (mason destroy drops it)"] as const] : [])] }));
   out(endText({ next }));

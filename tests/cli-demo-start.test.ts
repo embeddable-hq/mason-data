@@ -12,7 +12,8 @@
  * ALWAYS ended: `after` runs `mason stop`, and a run that is still alive after it — found by its recorded pid, checked
  * by its command line as mason stop checks it — is killed with its supervisor, said on stderr. The Postgres API listens
  * on a port chosen free here (MASON_PG_PORT), never 5433; the demo's port is the one mason init demo picks. Needs
- * DuckDB's `postgres` extension: installed on the first use (the network), then read from ~/.duckdb/extensions.
+ * DuckDB's `postgres` extension: installed on the first use (the network), then read from ~/.duckdb/extensions; where
+ * it cannot load (offline, never installed) the suite is SKIPPED with the reason (`postgresExtension`).
  */
 import { after, describe, test } from "node:test";
 import * as assert from "node:assert/strict";
@@ -21,6 +22,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import pg from "pg";
+import { DuckDBInstance } from "@duckdb/node-api";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { alive, masonProcess } from "../src/cli/runs.ts";
 import { supervisorOf } from "../src/cli/supervise.ts";
@@ -33,6 +35,22 @@ async function freePort(): Promise<number> {
   await new Promise<void>((res) => s.close(() => res()));
   return port;
 }
+
+/**
+ * WHETHER THIS MACHINE CAN COPY AT ALL: the copy loads DuckDB's `postgres` extension (src/duck/sync.ts), which INSTALL
+ * downloads the first time on a machine. A throwaway in-memory DuckDB asks the same; null when it loads, else why not —
+ * so an offline machine without it is a visible SKIP with the reason ("couldn't tell"), never a failure or a silent pass.
+ */
+async function postgresExtension(): Promise<string | null> {
+  const instance = await DuckDBInstance.create(":memory:");
+  const c = await instance.connect();
+  try { await c.run("INSTALL postgres; LOAD postgres;"); return null; }
+  catch (e) { return (e as Error).message; }
+  finally { c.closeSync(); instance.closeSync(); }
+}
+const noExtension = await postgresExtension();
+const skip = noExtension === null ? false
+  : `DuckDB's postgres extension did not load (${noExtension}); the first copy on a machine with network installs it (then ~/.duckdb/extensions), and this runs`;
 
 /** What a failed command said, for an assertion's message. */
 const said = (a: Answer): string => `exit ${a.code}\n--- stdout\n${a.stdout}\n--- stderr\n${a.stderr}`;
@@ -77,7 +95,9 @@ after(async () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe("mason init demo, then the run as a person drives it", { timeout: 150_000 }, () => {
+// a skipped suite counts no test in the runner's summary: one skipped test carries the reason to `ℹ skipped`
+if (skip !== false) test("mason init demo end to end, as a person drives it", { skip }, () => undefined);
+describe("mason init demo, then the run as a person drives it", { timeout: 150_000, skip }, () => {
   test("mason init demo writes the demo's URL to .env, its four tables to the sources file, demo: true to the config", async () => {
     const init = await mason(["init", "demo"]);
     assert.equal(init.code, 0, said(init));
@@ -173,7 +193,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
   test("mason stop: exit 0, the demo database closed and kept in .mason/demo", async () => {
     const s = await mason(["stop"]);
     assert.equal(s.code, 0, said(s));
-    assert.match(s.stdout, new RegExp(`^Stopped ${config().name}\\n {2}kept +its copy of the data and its state$`, "m"));
+    assert.match(s.stdout, new RegExp(`^Stopped ${config().name}\\n {2}kept +its copy of the data and its state and the demo database \\(\\.mason/demo\\)$`, "m"));
     assert.ok(fs.existsSync(demoDir), ".mason/demo/ stays");
     // the run's own words, at its stop (its terminal: mason logs --start)
     const l = await mason(["logs", "--start"]);
