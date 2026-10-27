@@ -23,7 +23,10 @@ mason ui --json       # { url, port, next }
   with no primary key has **Name its key…**, the same form with its key to tick (`--key`). An added table has
   **Remove**, which asks first, then takes it out of the sources file and drops its copy (`mason remove`). What was
   added or removed is said under the table in the commands' words, and the Status above then shows the copy starting.
-  The sources file is edited by the run exactly as the commands edit it, and refused in the same words.
+  The sources file is edited by the run exactly as the commands edit it, and refused in the same words. While a
+  Columns… form is open or a Remove asks, the list is frozen as it was when it opened (no refresh, however long it
+  stays open, so nothing moves under the person's ticks or click); it is written from the latest state again once
+  they Add, Cancel or confirm.
 - **Users**: each user with when it was added and whether it connects; a form that adds one — its password and the
   URL to paste are shown once, with a copy button, and never again — and a Remove button that asks first. These are
   the same users as `mason user list|add|remove`, in the same file, refused in the same words.

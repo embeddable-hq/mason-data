@@ -34,7 +34,7 @@ import { addedTables, rereadSources, type RunSources } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
-import { closingOnce, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
+import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
 import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, SELF_SIGNED_FILES } from "./pg-tls.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
@@ -158,8 +158,18 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   }
   const pinned = cliPinProblem(folder, o.version);
   if (pinned) { say(`mason start: ${pinned}`); return 1; }
+  // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
+  // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
+  // always was (after the listener's checks): a demo project's port is needed first
+  const readSources = (): ReturnType<typeof projectSource> => projectSource(project, process.env, { shellFirst: o.serve !== undefined });
+  const src = readSources();
+  // a demo project's database listens on the port its URL names (the one place it is kept), which no listener of the
+  // run's may take: read BEFORE the Postgres API's port is chosen and recorded, so the choice avoids it (a recorded or
+  // named port that is the demo's is refused by choosePgPort, nothing recorded), and the command server is kept off it
+  const demoAt = cfg.demo === true && !("message" in src) ? demoPort(src.resolved, src.from) : null;
+  const demoPorts = new Set(demoAt !== null && "port" in demoAt ? [demoAt.port] : []);
   // THE PORT IS THE PROJECT'S (src/cli/ports.ts): the first start's choice recorded, every later start on it or refused
-  const pg = await choosePgPort(process.env.MASON_PG_PORT, new Set(), cfg.pgPort ?? null);
+  const pg = await choosePgPort(process.env.MASON_PG_PORT, demoPorts, cfg.pgPort ?? null);
   if ("problem" in pg) return failed("start", pg, { json: false });
   if (cfg.pgPort !== pg.port) { cfg.pgPort = pg.port; writeConfig(home, cfg); }
   // WHERE AND HOW THE POSTGRES LISTENER LISTENS (src/cli/pg-tls.ts): the one reader of MASON_PG_HOST and
@@ -168,20 +178,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if ("problem" in listen) return failed("start", listen, { json: false });
   const pgTls = listenerTls(listen, o.selfSignedTls, home, cfg);
   if ("problem" in pgTls) return failed("start", pgTls, { json: false });
-  const chosen = new Set([pg.port]);
+  const chosen = new Set([pg.port, ...demoPorts]);
   // a server's project folder is the team's, committed, and may be mounted read-only: mason serve writes nothing there
   const wrotePin = o.serve ? null : ensurePin(folder, o.version);
   if (wrotePin) say(`  wrote ${path.relative(project.root, wrotePin)}: version ${o.version}, the Mason this project is written for — commit it`);
-  // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
-  // URL from its environment first (mason serve is configured by it alone)
-  const readSources = (): ReturnType<typeof projectSource> => projectSource(project, process.env, { shellFirst: o.serve !== undefined });
-  const src = readSources();
   if ("message" in src) return failed("start", src, { json: false });
-  // a demo project's database listens on the port its URL names (the one place it is kept), which no listener of the
-  // run's may take: the command server is kept off it, and the Postgres API's port (chosen free before the demo
-  // database listened) is refused when it is that one
-  const demoAt = cfg.demo === true ? await demoPort(src.resolved, src.from) : null;
-  if (demoAt !== null && "port" in demoAt) chosen.add(demoAt.port);
   const logFile = path.join(home, "mason.log");
   const log = fs.createWriteStream(logFile, { flags: "a" });
   // one entry a line: a multi-line message's further lines indented under it (src/lib/log.ts `textEntry`);
@@ -196,12 +197,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (demoAt !== null) {
     begin("Starting the demo database");
     if ("problem" in demoAt) { fail("Starting the demo database"); say(`  ${demoAt.problem}`); return 1; }
-    if (demoAt.port === pg.port) {
-      fail("Starting the demo database");
-      say(`  the demo database's port ${pg.port} (${src.from} names it) is this project's Postgres API port too: MASON_PG_PORT=<another> mason start moves the API`);
-      return 1;
-    }
-    const opened = await openDemo({ home, port: demoAt.port, log: (l) => logLine(`[demo] ${l}`) });
+    const opened = await openDemo({ home, port: demoAt.port, from: src.from, log: (l) => logLine(`[demo] ${l}`) });
     if ("problem" in opened) { fail("Starting the demo database"); say(`  ${opened.problem}`); return 1; }
     demo = opened.demo;
     hosted.close = closingOnce(opened.demo);
@@ -458,7 +454,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         const closed = api.close().catch((e: unknown) => say(`  closing the listener: ${(e as Error).message}`));
         await Promise.race([closed, new Promise((r) => setTimeout(r, 2_000).unref())]);
         // the demo database's data flushed to its folder before the log it writes to ends (dev() closes it otherwise)
-        await Promise.race([closeDemo(hosted, null), new Promise((r) => setTimeout(r, 2_000).unref())]);
+        // (a close still going after 2 s is said: the process ends without it, and the folder may not be whole)
+        await closedWithin(closeDemo(hosted, null), 2_000, () => say(`  ${DEMO_STILL_CLOSING(2_000)}`));
         log.end();
         resolve(1);
       })();

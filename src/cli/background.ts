@@ -19,9 +19,9 @@ import { fileURLToPath } from "node:url";
 import { runnable } from "../lib/runnable.ts";
 import { READY, STEP_MARK } from "./dev.ts";
 import { liveRun } from "./runs.ts";
-import { theProject } from "./project.ts";
+import { projectSource, theProject } from "./project.ts";
 import { runListenerSettings } from "./pg-tls.ts";
-import { demoChangesRefusal } from "./demo.ts";
+import { demoChangesRefusal, demoPort } from "./demo.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
 import { DEV } from "./registry.ts";
@@ -43,6 +43,17 @@ export const NEXT_STEPS: NextStep[] = [
   ["mason stop", "stop Mason; the next mason start resumes where it stopped"],
 ];
 
+/** The ports a demo project's database takes (its URL's port, read as the run reads it), for the API's choice to avoid;
+ *  none for any other project. A sources file or a URL that cannot be read gives none HERE: the run refuses it in its
+ *  own words (its source step, its demo step), shown by this start as every other refusal of the run's is. */
+function demoPortsOf(project: Parameters<typeof projectSource>[0]): Set<number> {
+  if (project.config.demo !== true) return new Set();
+  const src = projectSource(project, process.env);
+  if ("message" in src) return new Set();
+  const at = demoPort(src.resolved, src.from);
+  return new Set("port" in at ? [at.port] : []);
+}
+
 /** `args` are `mason start`'s own, passed on to the run with --attach. */
 export async function devInBackground(args: readonly string[], o: { json: boolean; selfSignedTls: boolean; changes?: ChangeSource | null }): Promise<number> {
   const t = theProject(process.cwd());
@@ -60,8 +71,9 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   const demoRefused = demoChangesRefusal(t.project.config, o.changes ?? null);
   if (demoRefused) return failed("start", demoRefused, { json: o.json });
   // a MASON_PG_PORT that is no port, or is held, is refused HERE, where the person (or --json) reads it, before a run is
-  // spawned; the run checks again for itself (choosePgPort, src/cli/ports.ts), since a port may be taken in between
-  const pg = await choosePgPort(process.env.MASON_PG_PORT, new Set(), t.project.config.pgPort ?? null);
+  // spawned; the run checks again for itself (choosePgPort, src/cli/ports.ts), since a port may be taken in between.
+  // A demo project's database port (its URL's, src/cli/demo.ts demoPort) is avoided as the run avoids it
+  const pg = await choosePgPort(process.env.MASON_PG_PORT, demoPortsOf(t.project), t.project.config.pgPort ?? null);
   if ("problem" in pg) return failed("start", pg, { json: o.json });
   // and so is a listener off loopback without TLS, by the run's own check (src/cli/pg-tls.ts): read, never written
   const listen = runListenerSettings(process.env, { port: pg.port, selfSigned: o.selfSignedTls, home });

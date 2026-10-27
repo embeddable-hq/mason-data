@@ -14,6 +14,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import pg from "pg";
+import { PGlite } from "@electric-sql/pglite";
 import { BackendDecoder, cstr, frame, int32 } from "../src/api/postgres/protocol.ts";
 import { PgConnection, PgError } from "../src/cdc/pg-wire.ts";
 import { checkSource, parseSource, readSourceFacts } from "../src/cli/preflight.ts";
@@ -112,6 +113,9 @@ test("the demo database is read as a Postgres: Mason's client connects under ssl
   assert.equal(checked.facts.tables.length, 4);
 
   await assert.rejects(connect(s, { database: "shop" }), (e: unknown) => e instanceof PgError && e.code === "3D000" && /database "shop" does not exist/.test(e.message));
+  // a replication connection is refused in the developer's words: what the demo lacks, never the engine's name
+  await assert.rejects(PgConnection.connect({ host: "127.0.0.1", port: s.port, database: "demo", user: "demo", password: "", sslmode: "disable", replication: true }),
+    (e: unknown) => e instanceof PgError && e.code === "0A000" && e.message === "FATAL: the demo database has no change log to stream: Mason polls it");
   assert.ok(sharedLog.some((l) => /asked for database "shop"; refused/.test(l)), "a refused database is said in the log");
 });
 
@@ -302,9 +306,33 @@ test("a port already held refuses the open with an Error naming the port, before
   dirs.push(path.dirname(dir));
   try {
     await assert.rejects(demo().DemoSource.open({ dir, port, log: () => undefined }),
-      (e: unknown) => e instanceof Error && e.message.includes(`127.0.0.1:${port}`) && e.message.includes(`port ${port} is in use`));
+      // what failed alone, and no way out: src/cli/demo.ts openDemo says that once, in the project's words
+      (e: unknown) => e instanceof Error && e.message === `the demo database cannot listen on 127.0.0.1:${port}: port ${port} is in use`);
     assert.equal(fs.existsSync(dir), false, "nothing was made in the folder");
   } finally {
     await new Promise<void>((resolve) => held.close(() => resolve()));
   }
+});
+
+test("every open analyses the folder: one whose seed committed but whose ANALYZE never ran (a process ended between them) has row estimates again", async () => {
+  const dir = path.join(tmp("analyze"), "pg");
+  dirs.push(path.dirname(dir));
+  const first = await openAt(dir);
+  await first.close();
+  // the window mimicked: the seed's rows there, the catalog's estimates unset as before any ANALYZE
+  const db = new PGlite({ dataDir: dir, database: "demo", username: "demo" });
+  try {
+    await db.waitReady;
+    await db.exec("UPDATE pg_class SET reltuples = -1, relpages = 0 WHERE relname IN ('customers', 'products', 'orders', 'order_items') AND relkind = 'r'");
+    assert.deepEqual((await db.query<{ n: number }>("SELECT reltuples::int AS n FROM pg_class WHERE relname = 'orders' AND relkind = 'r'")).rows, [{ n: -1 }]);
+  } finally { await db.close(); }
+  const second = await openAt(dir);
+  assert.equal(second.seeded, false);
+  const c = await connect(second);
+  try {
+    // the catalog's own estimates (a small table never analysed is counted by the facts' reader, so those are read here)
+    const r = (await c.query("SELECT relname, reltuples::bigint FROM pg_class WHERE relname IN ('customers', 'products', 'orders') AND relkind = 'r' ORDER BY relname")).rows;
+    assert.deepEqual(r, [["customers", "200"], ["orders", "5000"], ["products", "50"]], "pg_class.reltuples are the counts again");
+  } finally { c.close(); }
+  await second.close();
 });

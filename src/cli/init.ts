@@ -27,7 +27,7 @@ import { version } from "./version.ts";
 import { parseVersion, PIN_FILE } from "../lib/project-version.ts";
 import { appDatabaseUrl, appEnvValue, appendEnvLine, ENV_FILE } from "../lib/dotenv.ts";
 import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateDir, nameFromFolder, newConfig, writeConfig } from "./project.ts";
-import { DEMO_ARG, DEMO_PORT, DEMO_TABLES, demoModule } from "./demo.ts";
+import { DEMO_ARG, DEMO_PORT, DEMO_TABLES, demoUrl } from "./demo.ts";
 import { freePort } from "./ports.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 
@@ -183,7 +183,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   if (named) return usage(named);
 
   // the demo's URL names a port free now, and is the one place the port is kept: mason start reads it from there
-  let url = demo ? (await demoModule()).demoUrl(await freePort(DEMO_PORT)) : f.positionals[0] ?? null;
+  let url = demo ? demoUrl(await freePort(DEMO_PORT)) : f.positionals[0] ?? null;
   let from = "";
   let envFile: string | null = null; // the folder's file the URL was read from (.env.local or .env): ignored with .mason/
   if (url === null) {

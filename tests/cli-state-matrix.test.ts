@@ -30,11 +30,26 @@ function deadPid(): number {
 const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
+/**
+ * A STOPPED DEMO PROJECT, written by `mason init demo` itself (its sources file, its `.env` naming a port free now,
+ * `demo: true`), once, and copied for each command: its database runs inside mason start, so nothing answers there.
+ */
+const demoTemplate = fs.mkdtempSync(path.join(os.tmpdir(), "mason-matrix-demo-template-"));
+made.push(demoTemplate);
+const demoInit = await runMason(demoTemplate, ["init", "demo", "--json"], matrixEnv());
+if (demoInit.code !== 0) throw new Error(`mason init demo, for the matrix's demo project: exit ${demoInit.code}\n${demoInit.stdout}${demoInit.stderr}`);
+const demoAt = /^DATABASE_URL=postgres:\/\/demo@(127\.0\.0\.1:\d+)\/demo$/m.exec(fs.readFileSync(path.join(demoTemplate, ".env"), "utf8"))?.[1];
+if (demoAt === undefined) throw new Error("mason init demo wrote no demo URL in .env");
+/** The commands' lines in a state: a demo project's start asks for replication, refused before anything starts (a
+ *  plain start there would host the demo database and run, which the matrix must not leave behind). */
+const argsIn = (state: string, cmd: string): readonly string[] => state === "demo" && cmd === "start" ? ["--replication"] : MATRIX_ARGS[cmd]!;
+
 /** A folder in a state; `null` config writes none. */
 function folderIn(state: string): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `mason-matrix-${state}-`));
   made.push(root);
   if (state === "no_project") return root;
+  if (state === "demo") { fs.cpSync(demoTemplate, root, { recursive: true }); return root; }
   const dir = path.join(root, ".mason");
   fs.mkdirSync(dir, { mode: 0o700 });
   fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
@@ -54,9 +69,9 @@ function folderIn(state: string): string {
   return root;
 }
 
-const STATES = ["no_project", "stopped", "stale", "squatted", "broken"] as const;
+const STATES = ["no_project", "stopped", "stale", "squatted", "broken", "demo"] as const;
 /** Which of src/cli/state.ts's states each folder is: a run recorded that does not answer is stopped. */
-const IS: Record<(typeof STATES)[number], ProjectState> = { no_project: "no_project", stopped: "stopped", stale: "stopped", squatted: "stopped", broken: "bad_config" };
+const IS: Record<(typeof STATES)[number], ProjectState> = { no_project: "no_project", stopped: "stopped", stale: "stopped", squatted: "stopped", broken: "bad_config", demo: "stopped" };
 
 test("the states are src/cli/state.ts's, in order: each meets more than the one before", () => {
   assert.deepEqual(Object.keys(PROJECT_STATES), ["no_project", "bad_config", "stopped", "up"]);
@@ -140,6 +155,22 @@ test("mason status --json, Mason stopped: source is the database — its name, i
   assert.match(bad.source.error.message, /^mason\/sources\/shop\.yml: tables\.a\.b\.c: /);
 });
 
+test("a demo project, stopped: mason tables says its database runs inside mason start, and --replication is refused before anything starts", async () => {
+  const tables = await runMason(folderIn("demo"), ["tables", "--json"], matrixEnv());
+  assert.equal(tables.code, 1, tables.stdout + tables.stderr);
+  const t = (JSON.parse(tables.stdout) as { error: { code: string; message: string; fix: string } }).error;
+  assert.deepEqual([t.code, t.message, t.fix], ["unreachable", `could not connect to postgres://demo@${demoAt}/demo: the demo database is not running on ${demoAt}`,
+    "the demo database runs inside mason start: start it first"]);
+  for (const json of [false, true]) {
+    const root = folderIn("demo");
+    const start = await runMason(root, ["start", "--replication", ...(json ? ["--json"] : [])], matrixEnv());
+    assert.equal(start.code, 1, start.stdout + start.stderr);
+    if (json) assert.equal((JSON.parse(start.stdout) as { error: { code: string } }).error.code, "refused");
+    assert.match(json ? start.stdout : start.stderr, /the demo database is read by polling only: --replication does not apply to it/);
+    assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, "refused before a run was spawned");
+  }
+});
+
 test("every command has a line in the matrix: a new command is run in every state by construction", () => {
   assert.deepEqual(Object.keys(MATRIX_ARGS).sort(), COMMANDS.map((c) => c.name).sort());
 });
@@ -164,7 +195,7 @@ test("every command, in every state without a run, as a person and with --json: 
       for (const json of takesJson(c.name) ? [false, true] : [false]) {
         jobs.push(async () => {
           const root = folderIn(state);
-          const argv = [c.name, ...MATRIX_ARGS[c.name]!, ...(json ? ["--json"] : [])];
+          const argv = [c.name, ...argsIn(state, c.name), ...(json ? ["--json"] : [])];
           return { state, cmd: c.name, json, a: await runMason(root, argv, env, TRANSITIONS.has(c.name) ? 90_000 : 30_000) };
         });
       }
