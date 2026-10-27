@@ -30,7 +30,9 @@ foundation: the full UI is built on it, page by page, under these rules.
   (`mason add`, the run's `pick`), Remove is `POST /api/remove` `{ tables }` (`mason remove`), and after either the page
   reads the state again. The columns and the key are TICKED from the table's own columns, never typed: the page sends
   the list as it is, and an empty one as no list (every column; its primary key) — no second grammar of `--columns`.
-  Remove asks first, as a user's Remove does. The answer and a refusal are said under their table.
+  Remove asks first, as a user's Remove does. The answer and a refusal are said under their table. While a form is
+  open or a Remove asks, the list is FROZEN at the state it opened over (`held`, src/web/app.js: no refresh, however
+  long), so a poll never rewrites it under the person; it is written from the latest state again at Add, Cancel or confirm.
 - **No framework, no build step, no dependency, no CDN, no fetched font**: plain HTML, CSS and an ES module, served as
   they are (cli/build.ts copies `src/**` that is not TypeScript, cli/beside.ts). The CSP (`default-src 'self'`,
   src/cli/security.ts `SECURITY_HEADERS`) is the detector: a script or font from elsewhere does not load, and

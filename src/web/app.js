@@ -323,8 +323,9 @@ export function createApp(fetchFn, now = () => new Date()) {
   // WHILE A FORM IS OPEN OR A REMOVE ASKS, THE TABLES ARE RENDERED FROM THE STATE THEY WERE OPENED OVER (`held`): the
   // run reads the catalog again every few seconds, and a live database's row estimates move, so a part written from
   // each poll's state would be rewritten under the person — the form's ticks gone, the confirm's button replaced under
-  // the click. The rows are a few seconds stale while they decide; the part is written from the latest state again
-  // once they Add, Cancel or confirm.
+  // the click. So the list is FROZEN for as long as a form stays open or a Remove asks — however long that is, with no
+  // refresh in between (its rows and its added marks may be minutes old; the Status part above is written from each
+  // poll as ever) — and is written from the latest state again once they Add, Cancel or confirm.
   const hold = () => { m.held = m.choosing !== null || m.removing !== null ? m.held ?? m.state : null; if (m.choosing === null) m.ticked = null; };
   /** One request: its JSON, or a Failure (`failure`) when it was refused or nothing answered. */
   const ask = async (path, init) => {
