@@ -197,15 +197,17 @@ export function renderTablesRemoved(b) {
     `<button type="button" data-dismiss-outcome>Dismiss</button></div>`;
 }
 
-const tick = (name, c) => `<label class="tick"><input type="checkbox" name="${name}" value="${esc(c.name)}"> ${code(c.name)} <span class="dim">${esc(c.type)}</span></label>`;
+const tick = (name, c, on) => `<label class="tick"><input type="checkbox" name="${name}" value="${esc(c.name)}"${on ? " checked" : ""}> ${code(c.name)} <span class="dim">${esc(c.type)}</span></label>`;
 
 /** The form that adds a table with the columns ticked (`--columns`) and, for one with no primary key, its key (`--key`).
- *  The ticks live in the document alone: the tables part is written again only when the tables themselves change. */
-function pickForm(t) {
+ *  The ticks live in the document while the person ticks (the tables part is held still meanwhile: `createApp`);
+ *  `ticked`, what a refused submit sent, writes them back when the refusal is said under the form. */
+function pickForm(t, ticked = null) {
   const name = entryName(t.table);
+  const boxes = (field) => t.columns.map((c) => tick(field, c, ticked?.[field]?.includes(c.name) ?? false)).join("");
   return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
-    (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart, as ${code(`mason add ${name} --key`)}</legend>${t.columns.map((c) => tick("key", c)).join("")}</fieldset>`) +
-    `<fieldset><legend>Its columns, as ${code(`mason add ${name} --columns`)} (none ticked: as ${code(`mason add ${name}`)}, every column)</legend>${t.columns.map((c) => tick("columns", c)).join("")}</fieldset>` +
+    (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart, as ${code(`mason add ${name} --key`)}</legend>${boxes("key")}</fieldset>`) +
+    `<fieldset><legend>Its columns, as ${code(`mason add ${name} --columns`)} (none ticked: as ${code(`mason add ${name}`)}, every column)</legend>${boxes("columns")}</fieldset>` +
     `<button type="submit">Add ${esc(name)}</button> <button type="button" data-cancel-choose>Cancel</button></form>`;
 }
 
@@ -213,11 +215,12 @@ function pickForm(t) {
  * THE DATABASE'S TABLES from `/api/state` `tables` (`mason tables --json`'s list): a line each — its size, its key, and
  * added or why it cannot be added as it is, as `mason tables` prints them — with what can be done to it: Add (every
  * column, as `mason add <table>`) and Columns… (the form) for a table not added, Name its key… for one with no primary
- * key, Remove (asking first, `ui.removing`) for an added one. `ui.choosing` is the table whose form is open; `ui.outcome`
- * what the last add or remove answered ({ table, added } | { table, removed } | { table, failure }), under its table.
+ * key, Remove (asking first, `ui.removing`) for an added one. `ui.choosing` is the table whose form is open (`ui.ticked`
+ * its boxes ticked: { columns, key }); `ui.outcome` what the last add or remove answered ({ table, added } |
+ * { table, removed } | { table, failure }), under its table.
  */
 export function renderTables(s, ui = {}) {
-  const { removing = null, choosing = null, outcome = null } = ui;
+  const { removing = null, choosing = null, outcome = null, ticked = null } = ui;
   if (!s.tables.length) return `<p class="dim">${esc(s.source.database)} has no table this user can read.</p>`;
   const under = (html) => `<tr class="under"><td colspan="5">${html}</td></tr>`;
   const line = (t) => {
@@ -235,7 +238,7 @@ export function renderTables(s, ui = {}) {
       : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added) : renderTablesRemoved(outcome.removed));
     return `<tr class="${t.added ? "c-added" : t.reason ? "c-cannot" : "c-not"}"><th scope="row">${code(t.table)}</th>` +
       `<td class="num">${esc(f.size)}</td><td>${esc(f.key)}</td><td class="state">${esc(f.state ?? "")}</td><td class="act">${act}</td></tr>` +
-      (choosing === t.table && !t.added ? under(pickForm(t)) : "") + said;
+      (choosing === t.table && !t.added ? under(pickForm(t, ticked)) : "") + said;
   };
   const added = s.tables.filter((t) => t.added).length;
   // a refusal for a table the list does not have (dropped since the run read the catalog): said above the list
@@ -315,7 +318,13 @@ export const updatedText = (at) => `Updated ${at.toLocaleTimeString("en-GB")}`;
  */
 export function createApp(fetchFn, now = () => new Date()) {
   const m = { state: null, requests: {}, users: null, usersFailure: null, pollFailure: null, actionFailure: null, added: null, confirming: null, updatedAt: null,
-    removing: null, choosing: null, outcome: null };
+    removing: null, choosing: null, outcome: null, ticked: null, held: null };
+  // WHILE A FORM IS OPEN OR A REMOVE ASKS, THE TABLES ARE RENDERED FROM THE STATE THEY WERE OPENED OVER (`held`): the
+  // run reads the catalog again every few seconds, and a live database's row estimates move, so a part written from
+  // each poll's state would be rewritten under the person — the form's ticks gone, the confirm's button replaced under
+  // the click. The rows are a few seconds stale while they decide; the part is written from the latest state again
+  // once they Add, Cancel or confirm.
+  const hold = () => { m.held = m.choosing !== null || m.removing !== null ? m.held ?? m.state : null; if (m.choosing === null) m.ticked = null; };
   /** One request: its JSON, or a Failure (`failure`) when it was refused or nothing answered. */
   const ask = async (path, init) => {
     let res;
@@ -342,6 +351,7 @@ export function createApp(fetchFn, now = () => new Date()) {
     const added = (table) => m.state.tables.some((t) => t.table === table && t.added);
     if (m.removing !== null && !added(m.removing)) m.removing = null;
     if (m.choosing !== null && added(m.choosing)) m.choosing = null;
+    hold();
     await readUsers();
   };
   return {
@@ -350,19 +360,20 @@ export function createApp(fetchFn, now = () => new Date()) {
     /** Add a table (`mason add`): the answer under its line, then the state read again — the Status shows its copy starting. */
     async addTable(table, columns = [], key = []) {
       const r = await ask("/api/pick", json("POST", pickBody(table, columns, key)));
-      if ("failure" in r) { m.outcome = { table, failure: r.failure }; return false; }
-      m.outcome = { table, added: r.body }; m.choosing = null;
+      // refused: said under the form, which is written again with the boxes the person had ticked
+      if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
+      m.outcome = { table, added: r.body }; m.choosing = null; hold();
       await poll();
       return true;
     },
-    choose(table) { m.choosing = table; m.removing = null; },
-    cancelChoose() { m.choosing = null; },
-    askRemoveTable(table) { m.removing = table; m.choosing = null; },
-    cancelRemoveTable() { m.removing = null; },
+    choose(table) { m.choosing = table; m.removing = null; m.ticked = null; hold(); },
+    cancelChoose() { m.choosing = null; hold(); },
+    askRemoveTable(table) { m.removing = table; m.choosing = null; hold(); },
+    cancelRemoveTable() { m.removing = null; hold(); },
     /** Remove a table (`mason remove`), once asked: the answer under its line, then the state read again. */
     async confirmRemoveTable(table) {
       const r = await ask("/api/remove", json("POST", { tables: [table] }));
-      m.removing = null;
+      m.removing = null; hold();
       if ("failure" in r) { m.outcome = { table, failure: r.failure }; return false; }
       m.outcome = { table, removed: r.body };
       await poll();
@@ -394,7 +405,7 @@ export function createApp(fetchFn, now = () => new Date()) {
         updated: m.updatedAt ? esc(updatedText(m.updatedAt)) : "",
         poll: m.pollFailure ? renderFailure(m.pollFailure) : "",
         status: m.state ? renderStatus(m.state, m.requests) : m.pollFailure ? "" : `<p class="dim">Asking Mason…</p>`,
-        tables: m.state ? renderTables(m.state, { removing: m.removing, choosing: m.choosing, outcome: m.outcome }) : "",
+        tables: m.state ? renderTables(m.held ?? m.state, { removing: m.removing, choosing: m.choosing, outcome: m.outcome, ticked: m.ticked }) : "",
         users: m.usersFailure ? renderFailure(m.usersFailure) : m.users ? renderUsers(m.users, m.confirming) : "",
         added: m.added ? renderAdded(m.added) : "",
         action: m.actionFailure ? renderFailure(m.actionFailure) : "",

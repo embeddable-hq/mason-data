@@ -435,6 +435,10 @@ test("the app: a refusal to add renders the server's Failure under its table, in
   const tables = app.view().tables!;
   assert.ok(tables.includes(`<div class="failure" role="alert"><p class="message"><span class="mark" aria-hidden="true">✗</span> ${message}</p></div>`), "the server's words, as renderFailure says them");
   assert.match(tables, /data-pick-form="public\.event_log"/, "the form stays, to name its key");
+  // refused with boxes ticked: the form written again under its refusal keeps them ticked
+  await app.addTable("public.event_log", ["payload"], ["id"]);
+  assert.deepEqual([...app.view().tables!.matchAll(/name="(key|columns)" value="([^"]*)" checked/g)].map((m) => `${m[1]}=${m[2]}`), ["key=id", "columns=payload"]);
+  app.cancelChoose();
   // a sources file the run cannot edit: the server's Failure as it sent it
   const file = "mason/sources/ has 2 source files: one source per project for now";
   run.answers.set("POST /api/pick", answer({ error: file, failure: { code: "refused", message: file, next: [] } }, 409));
@@ -534,12 +538,32 @@ test("in the browser: the tables are written when they change, never at every po
   tick(); await settle();
   tick(); await settle();
   assert.equal(tables.writes, writes, "the tables, unchanged while a copy moves, are not written again: the confirm stays the one clicked");
+  // the run reads the catalog again every few seconds, and a live database's row estimates move (pg_class.reltuples)
+  const rowsOf = (orders: number) => answer({ ...COPYING, tables: COPYING.tables.map((t) => t.table === "public.orders" ? { ...t, rows: orders } : t) });
+  run.answers.set("GET /api/state", rowsOf(2_000_350));
+  tick(); await settle();
+  assert.equal(tables.writes, writes, "rows that moved while a Remove asks do not write the tables again: the confirm stays the one clicked");
+  assert.match(textOf(tables.html), /public\.orders ~2,000,000 rows key id added Remove orders\? /);
   await on.get("click")!({ target: { closest: () => ({ dataset: { cancelRemoveTable: "" } }) } });
+  assert.match(textOf(tables.html), /public\.orders ~2,000,350 rows key id added Remove public\.events/, "Cancel writes the rows as they are now");
   await on.get("click")!({ target: { closest: () => ({ dataset: { choose: "public.audit" } }) } });
   assert.match(tables.html, /data-pick-form="public\.audit"/);
   writes = tables.writes;
   tick(); await settle();
   assert.equal(tables.writes, writes, "the form is not written again under the reader's ticks");
+  run.answers.set("GET /api/state", rowsOf(2_000_700));
+  tick(); await settle();
+  tick(); await settle();
+  assert.equal(tables.writes, writes, "nor when the rows moved: the ticks stay");
+  assert.match(textOf(tables.html), /public\.orders ~2,000,350 rows /);
+  await on.get("click")!({ target: { closest: () => ({ dataset: { cancelChoose: "" } }) } });
+  run.answers.set("GET /api/state", rowsOf(2_001_000));
+  writes = tables.writes;
+  tick(); await settle();
+  assert.ok(tables.writes > writes, "the form cancelled, the next poll writes the tables again");
+  assert.match(textOf(tables.html), /public\.orders ~2,001,000 rows /);
+  run.answers.set("GET /api/state", answer(COPYING));
+  await on.get("click")!({ target: { closest: () => ({ dataset: { choose: "public.audit" } }) } });
   // the form submitted: the ticked boxes, as FormData reads them, sent as the columns
   run.answers.set("POST /api/pick", answer({ ...PICKED.columns, state: COPYING }));
   let prevented = false;
