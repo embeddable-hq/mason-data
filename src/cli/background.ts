@@ -121,8 +121,8 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
           if (l.startsWith(STEP_MARK.begin)) { since.length = 0; steps.begin(l.slice(STEP_MARK.begin.length)); continue; }
           if (l.startsWith(STEP_MARK.done)) { since.length = 0; steps.done(l.slice(STEP_MARK.done.length)); continue; }
           if (l.startsWith(STEP_MARK.fail)) { since.length = 0; steps.fail(l.slice(STEP_MARK.fail.length)); continue; }
-          // the run's line (src/cli/dev.ts: "Postgres  <url>")
-          const pgLine = /^\s+Postgres\s+(postgresql:\S+)/.exec(l);
+          // the run's line (src/cli/dev.ts: "Postgres  <url>", the URL in its shown form, `withPlaceholders`: postgres://<user>:<password>@…)
+          const pgLine = /^\s+Postgres\s+(postgres:\/\/<user>:<password>@\S+)/.exec(l);
           if (pgLine) { postgres = postgresLink(withoutPlaceholders(pgLine[1]!)); steps.print(`  ${st.dim("Postgres API")}  ${pgLine[1]!}  ${st.dim("(mason user add <name> makes a user)")}`); continue; }
           if (/^\s+Web UI\s+mason ui\b/.test(l)) { steps.print(`  ${st.dim("Web UI".padEnd("Postgres API".length))}  ${st.cyan("mason ui")}  ${st.dim("(the status page and the users, in your browser)")}`); continue; }
           // a demo project's line (src/cli/dev.ts: "Demo  a new order lands every <n> s: …"), in the same column
