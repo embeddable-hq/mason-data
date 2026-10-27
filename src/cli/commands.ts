@@ -572,9 +572,8 @@ export async function tables(argv: string[]): Promise<number> {
   if (!f.positionals.length && !f.values.all) {
     const w = Math.max(...shown.map((t) => t.table.length));
     for (const t of shown) {
-      const size = t.rows === null ? "rows unknown" : `~${n(t.rows)} rows`;
-      out(`${t.table.padEnd(w)}  ${size.padStart(18)}  ${t.key.length ? `key ${t.key.join(", ")}` : "no key"}` +
-        `${t.added ? "  · added" : t.reason ? `  · cannot be added as it is: ${t.reason}` : ""}`);
+      const l = tableFacts(t);
+      out(`${t.table.padEnd(w)}  ${l.size.padStart(18)}  ${l.key}${l.state ? `  · ${l.state}` : ""}`);
     }
     out(nextBlock(next));
     return 0;
@@ -597,6 +596,13 @@ export async function tables(argv: string[]): Promise<number> {
   // each table above ends with its blank line: the block's own is left out
   if (next.length) out(nextBlock(next).slice(1));
   return 0;
+}
+
+/** A table's line in `mason tables`: its size, its key, and added or why it cannot be added as it is (the web page's
+ *  tables say the same, src/web/app.js; tests/web-page.test.ts holds the two equal). */
+export function tableFacts(t: CatalogTable): { size: string; key: string; state: string | null } {
+  return { size: t.rows === null ? "rows unknown" : `~${n(t.rows)} rows`, key: t.key.length ? `key ${t.key.join(", ")}` : "no key",
+    state: t.added ? "added" : t.reason ? `cannot be added as it is: ${t.reason}` : null };
 }
 
 /**
@@ -727,12 +733,9 @@ export async function add(argv: string[]): Promise<number> {
       results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already });
       added.push(b.table);
       if (json) continue;
-      const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
-      steps.done(`Added ${t.table} to ${shown(b.file)}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`);
-      if (b.addedKey.length) note(`key added: ${b.addedKey.join(", ")} (a copy always has its key)`);
-      // a secret is readable by anyone with a user's password: left out, and said, with the way to include one
-      if (b.skippedSecrets.length) note(`left out ${b.skippedSecrets.join(", ")}: ${b.skippedSecrets.length === 1 ? "it looks" : "they look"} like ${b.skippedSecrets.length === 1 ? "a secret" : "secrets"}, ` +
-        `which anyone with a user's password could read (--include ${b.skippedSecrets[0]} adds it)`);
+      const l = addedLines(b, shown(b.file));
+      steps.done(l.line);
+      for (const x of l.notes) note(x);
     }
     const next: NextStep[] = added.length ? [
       ["mason wait", `until ${added.length === 1 ? "its copy finishes" : "their copies finish"} (the copy has started)`],
@@ -757,7 +760,20 @@ export async function add(argv: string[]): Promise<number> {
 }
 
 /** What the run's command server answers a table added with (src/cli/run-server.ts PickResult). */
-interface PickAnswer { table: string; file: string; entry: string; columns: string[] | null; exclude: string[]; key: string[] | null; addedKey: string[]; skippedSecrets: string[]; already: boolean }
+export interface PickAnswer { table: string; file: string; entry: string; columns: string[] | null; exclude: string[]; key: string[] | null; addedKey: string[]; skippedSecrets: string[]; already: boolean }
+
+/** What `mason add` prints for a table added: its line (✔ …), then its notes under it (the web page says the same,
+ *  src/web/app.js; tests/web-page.test.ts holds the two equal). `file` is the sources file as the reader is shown it. */
+export function addedLines(b: PickAnswer, file: string): { line: string; notes: string[] } {
+  const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
+  const s = b.skippedSecrets;
+  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a copy always has its key)`] : []),
+    // a secret is readable by anyone with a user's password: left out, and said, with the way to include one
+    ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
+      `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
+  ] };
+}
 
 // ------------------------------------------------------------------ mason remove
 
@@ -801,10 +817,16 @@ export async function remove(argv: string[]): Promise<number> {
     const next: NextStep[] = [["mason status", "the tables left"]];
     if (json) { out(jsonText(REMOVE, { removed: b.removed, file: b.file }, next)); return 0; }
     const rel = path.relative(process.cwd(), b.file);
-    out(reportText({ headline: `Removed ${b.removed.join(", ")}`, details: [["from", rel.startsWith("..") ? b.file : rel]],
-      tips: [`Mason stops copying ${b.removed.length === 1 ? "it" : "them"} and drops ${b.removed.length === 1 ? "its copy" : "their copies"}`], next }, styleOut()));
+    out(reportText({ ...removedReport(b.removed, rel.startsWith("..") ? b.file : rel), next }, styleOut()));
     return 0;
   });
+}
+
+/** What `mason remove` prints for the tables removed, `file` the sources file as the reader is shown it (the web page
+ *  says the same, src/web/app.js; tests/web-page.test.ts holds the two equal). */
+export function removedReport(removed: readonly string[], file: string): { headline: string; details: Array<[string, string]>; tips: string[] } {
+  return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
+    tips: [`Mason stops copying ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its copy" : "their copies"}`] };
 }
 
 // ------------------------------------------------------------------ mason wait

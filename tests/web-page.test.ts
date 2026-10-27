@@ -3,7 +3,8 @@
  * The fixtures are the server's own: `runState` (src/cli/run-server.ts) over synthetic copies — a run ready, one copying
  * with its chunks' progress, one whose copy failed, a table served but not kept current — and, for a run that stopped,
  * the answers a page gets then (nothing at all; the guard's 403 to a cookie of an earlier run). The page's words are
- * held equal to the commands' (`tableLines`, `copyingText`, `duration`, `sourceRows`), so the two cannot drift; the
+ * held equal to the commands' (`tableLines`, `copyingText`, `duration`, `sourceRows`, `tableFacts`, `addedLines`,
+ * `removedReport`), so the two cannot drift; the
  * app is driven over a fake `fetch`, asserting on the parts of the page it writes and the state it keeps.
  */
 import { test } from "node:test";
@@ -32,6 +33,8 @@ interface App {
   model: Record<string, unknown>;
   poll(): Promise<void>; addUser(name: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
   confirmRemove(name: string): Promise<boolean>; dismissAdded(): void; view(): Record<string, string>;
+  addTable(table: string, columns?: string[], key?: string[]): Promise<boolean>; choose(table: string): void; cancelChoose(): void;
+  askRemoveTable(table: string): void; cancelRemoveTable(): void; confirmRemoveTable(table: string): Promise<boolean>; dismissOutcome(): void;
 }
 
 /** What a reader sees of some HTML: its text, tags gone and entities read, spaces collapsed. */
@@ -50,12 +53,12 @@ const sourceFile = parseSourceText("kind: postgres\nurl: x\ntables:\n  customers
 assert.ok(!("problems" in sourceFile));
 
 /** The state /api/state answers for these copies (src/cli/run-server.ts runState), as JSON travels. */
-function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: boolean } = {}): RunState {
+function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: boolean; tables?: SourceTable[]; sources?: typeof sourceFile } = {}): RunState {
   const ctx = {
-    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: TABLES, systemIdentifier: null }),
+    source, facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: o.tables ?? TABLES, systemIdentifier: null }),
     warnings: o.warnings ?? [], slot: o.replication ? "mason_dev_shop" : "", changes: o.replication ? "replication" : "poll",
     ...(o.replication ? { publication: { name: "app_pub", owned: false } } : {}),
-    page: true, folder: () => "/app/mason", root: "/app", sources: () => ({ file: sourceFile, problem: null }),
+    page: true, folder: () => "/app/mason", root: "/app", sources: () => ({ file: o.sources ?? sourceFile, problem: null }),
     duck: { file: "/app/.mason/duck.db", pollSeconds: 5 },
   } as unknown as RunContext;
   return JSON.parse(JSON.stringify(runState(ctx, copies, null))) as RunState;
@@ -72,6 +75,30 @@ const FAILED = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.00
   { warnings: ["mason/sources/shop.yml: tables.ordrs: no such table (Mason copies the tables it read before; mason start reads the file again)"], replication: true });
 const NONE = stateOf([]);
 for (const s of [NONE]) for (const t of s.tables) t.added = false;
+
+// the tables section's database: beside the four, a table with a secret-looking column, one with no primary key (a unique
+// index over two NOT NULL columns, which its reason names) and one never analysed (its rows unknown)
+const KEYLESS: SourceTable = { source: "public.event_log", schema: "public", table: "event_log", key: [], rows: 900, bytes: 8192, comment: null,
+  columns: [{ ...col("tenant_id", "bigint"), notNull: true }, { ...col("id", "bigint"), notNull: true }, col("payload", "jsonb")], foreignKeys: [],
+  uniqueKeys: [{ name: "event_log_tenant_id_id_key", columns: ["tenant_id", "id"], constraint: true, nullsNotDistinct: false }] };
+const CATALOG = [...TABLES, { ...table("accounts", 300), columns: [col("id", "bigint"), col("email"), col("password_hash")] }, KEYLESS, { ...table("staging", 0), rows: null }];
+const THREE_COPIED = () => [copied("public.customers", 1200, "2026-10-27T09:00:01.000Z"), copied("public.orders", 2_000_000, "2026-10-27T09:00:09.000Z"),
+  copied("public.events", 30_000_000, "2026-10-27T09:04:00.000Z")];
+const CATALOG_STATE = stateOf(THREE_COPIED(), { tables: CATALOG });
+// the same database once public.accounts is added: its copy not yet started
+const withAccounts = parseSourceText("kind: postgres\nurl: x\ntables:\n  customers: {}\n  orders: {}\n  events: {}\n  accounts: { exclude: [password_hash] }\n", "shop", "/app/mason/sources/shop.yml");
+assert.ok(!("problems" in withAccounts));
+const ACCOUNTS_ADDED = stateOf(THREE_COPIED(), { tables: CATALOG, sources: withAccounts });
+const FILE = "/app/mason/sources/shop.yml";
+/** `/api/pick`'s answers (src/cli/run-server.ts PickResult): every column with a secret left out, a --columns list
+ *  the key was added to, a table with no primary key added by --key, one the file named so already. */
+const PICKED = {
+  secret: { table: "public.accounts", file: FILE, entry: "accounts", columns: null, exclude: ["password_hash"], key: null, addedKey: [], skippedSecrets: ["password_hash"], already: false },
+  columns: { table: "public.audit", file: FILE, entry: "audit", columns: ["id", "name"], exclude: [], key: null, addedKey: ["id"], skippedSecrets: [], already: false },
+  keyed: { table: "public.event_log", file: FILE, entry: "event_log", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false },
+  already: { table: "public.customers", file: FILE, entry: "customers", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: true },
+};
+const answer = (v: unknown, status = 200) => () => new Response(JSON.stringify(v), { status });
 
 const SLOW = { slow: [{ route: "postgres", payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-27T09:03:00.000Z" }], slowMs: 1000 };
 const REFUSED = { total: 7, refused: [{ route: "postgres", code: "42P01", message: "relation \"nope\" does not exist", runs: 7, last: "2026-10-27T09:04:00.000Z", payload: "SELECT * FROM nope" }] };
@@ -118,6 +145,32 @@ test("the database's rows are mason status's: its sources file, its URL as the r
   for (const s of [RUNNING, FAILED]) assert.deepEqual(fn<[unknown], unknown>("sourceRows")(s), sourceRows!(s));
 });
 
+test("a table's line is mason tables': its size, its key, and added or why it cannot be added as it is", () => {
+  const cli = (commands as unknown as { tableFacts?: (t: unknown) => unknown }).tableFacts;
+  assert.equal(typeof cli, "function", "src/cli/commands.ts exports tableFacts");
+  const tableFacts = fn<[unknown], { size: string; key: string; state: string | null }>("tableFacts");
+  for (const t of CATALOG_STATE.tables) assert.deepEqual(tableFacts(t), cli!(t), t.table);
+  assert.deepEqual(tableFacts(CATALOG_STATE.tables.find((t) => t.table === "public.event_log")), { size: "~900 rows", key: "no key",
+    state: "cannot be added as it is: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id (its unique index event_log_tenant_id_id_key)" });
+});
+
+test("a table added and tables removed are said as mason add and mason remove print them: the key added, a secret left out", () => {
+  const cli = commands as unknown as { addedLines?: (b: unknown, file: string) => unknown; removedReport?: (r: string[], file: string) => unknown };
+  assert.equal(typeof cli.addedLines, "function", "src/cli/commands.ts exports addedLines");
+  assert.equal(typeof cli.removedReport, "function", "src/cli/commands.ts exports removedReport");
+  const addedLines = fn<[unknown, string], unknown>("addedLines"), removedReport = fn<[string[], string], unknown>("removedReport");
+  for (const b of Object.values(PICKED)) assert.deepEqual(addedLines(b, FILE), cli.addedLines!(b, FILE), b.table);
+  for (const r of [["public.orders"], ["public.orders", "billing.invoices"]]) assert.deepEqual(removedReport(r, FILE), cli.removedReport!(r, FILE));
+  const added = (b: unknown) => textOf(fn<[unknown], string>("renderTableAdded")(b));
+  assert.equal(added(PICKED.secret), "Added public.accounts to /app/mason/sources/shop.yml: every column but password_hash " +
+    "left out password_hash: it looks like a secret, which anyone with a user's password could read (--include password_hash adds it) Dismiss");
+  assert.equal(added(PICKED.columns), "Added public.audit to /app/mason/sources/shop.yml: id, name key added: id (a copy always has its key) Dismiss");
+  assert.equal(added(PICKED.keyed), "Added public.event_log to /app/mason/sources/shop.yml: every column, copied by tenant_id, id Dismiss");
+  assert.equal(added(PICKED.already), "Added public.customers to /app/mason/sources/shop.yml: every column (already so) Dismiss");
+  assert.equal(textOf(fn<[unknown], string>("renderTablesRemoved")({ removed: ["public.orders"], file: FILE })),
+    "Removed public.orders from /app/mason/sources/shop.yml Tip: Mason stops copying it and drops its copy Dismiss");
+});
+
 // ------------------------------------------------------------------ what the page writes
 
 test("running: the database masked, each table copied with its rows, the counts, Ready — and never the engine's name", () => {
@@ -160,6 +213,43 @@ test("failed: its error on its line and in full, the warning, a table not kept c
 
 test("no table added: the commands' sentence, and what adds one", () => {
   assert.match(textOf(fn<[unknown, unknown?], string>("renderStatus")(NONE)), /^Source .* No table added yet \(4 in the database\)\. mason tables lists them; mason add <table> copies one\.$/);
+});
+
+test("the tables: each of the database's, added, not added or cannot be added with its reason and no Add; Remove asks first", () => {
+  type Ui = { removing?: string | null; choosing?: string | null; outcome?: unknown };
+  const renderTables = fn<[unknown, Ui?], string>("renderTables");
+  const html = renderTables(CATALOG_STATE);
+  const text = textOf(html);
+  assert.match(text, /^3 of 7 added Table Rows Key /);
+  assert.match(text, /public\.customers ~1,200 rows key id added Remove public\.orders /);
+  assert.match(text, /public\.audit ~50 rows key id Add Columns… public\.accounts /);
+  assert.match(text, /public\.event_log ~900 rows no key cannot be added as it is: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id \(its unique index event_log_tenant_id_id_key\) Name its key… public\.staging /);
+  assert.match(text, /public\.staging rows unknown key id Add Columns…$/);
+  assert.match(html, /<button type="button" data-add-table="public\.audit">Add<\/button>/);
+  assert.ok(!/data-add-table="public\.(event_log|customers)"/.test(html), "no Add for a table that cannot be added as it is, nor for one added");
+  assert.match(html, /<button type="button" data-remove-table="public\.customers">Remove<\/button>/);
+  assert.ok(!/duckdb/i.test(html), "never the engine's name");
+  // Remove asks first, on its own line only
+  const asking = renderTables(CATALOG_STATE, { removing: "public.customers" });
+  assert.match(textOf(asking), /public\.customers ~1,200 rows key id added Remove customers\? Mason stops copying it and drops its copy\. Remove customers Cancel public\.orders /);
+  assert.match(asking, /data-confirm-remove-table="public\.customers"/);
+  assert.ok(!/data-confirm-remove-table="public\.orders"/.test(asking), "only the one asked");
+  // the form: a table with no primary key ticks its key and its columns, one with a key its columns only
+  const keyForm = renderTables(CATALOG_STATE, { choosing: "public.event_log" });
+  assert.match(keyForm, /<form class="pick" data-pick-form="public\.event_log"/);
+  assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart, as mason add event_log --key tenant_id bigint id bigint payload jsonb Its columns, as mason add event_log --columns \(none ticked: as mason add event_log ?, every column\) tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
+  assert.deepEqual([...keyForm.matchAll(/name="(key|columns)" value="([^"]*)"/g)].map((m) => `${m[1]}=${m[2]}`),
+    ["key=tenant_id", "key=id", "key=payload", "columns=tenant_id", "columns=id", "columns=payload"]);
+  const columnsForm = renderTables(CATALOG_STATE, { choosing: "public.accounts" });
+  assert.ok(!/name="key"/.test(columnsForm) && !/Its key/.test(columnsForm), "a table with a primary key is copied by it: no key to name");
+  assert.deepEqual([...columnsForm.matchAll(/name="columns" value="([^"]*)"/g)].map((m) => m[1]), ["id", "email", "password_hash"]);
+  assert.ok(!/pattern=|required/.test(keyForm + columnsForm), "the server judges what is sent, never the page");
+  // what an add or a remove answered is said under its table; a refusal for a table the list lacks, above the list
+  const said = renderTables(CATALOG_STATE, { outcome: { table: "public.accounts", added: PICKED.secret } });
+  assert.match(textOf(said), /public\.accounts ~300 rows key id Add Columns… Added public\.accounts to \/app\/mason\/sources\/shop\.yml: every column but password_hash .* public\.event_log /);
+  const gone = renderTables(CATALOG_STATE, { outcome: { table: "public.gone", failure: { code: "not_found", message: "public.gone is not a table of shop that this user can read" } } });
+  assert.match(textOf(gone), /^✗ public\.gone is not a table of shop that this user can read 3 of 7 added/);
+  assert.equal(textOf(renderTables({ ...NONE, tables: [] })), "shop has no table this user can read.");
 });
 
 test("a Failure renders as the CLI's four parts: ✗ what is wrong, why, fix, then Next with each command and what it does", () => {
@@ -295,6 +385,90 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE
   assert.equal(app.model.confirming, null);
 });
 
+test("the app: Add sends POST /api/pick, says what was added under its table, and reads the state again: the copy shows starting", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(CATALOG_STATE));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  await app.poll();
+  run.answers.set("POST /api/pick", () => {
+    // the run writes the sources file: from now on its state has the table added
+    run.answers.set("GET /api/state", answer(ACCOUNTS_ADDED));
+    return answer({ ...PICKED.secret, state: ACCOUNTS_ADDED })();
+  });
+  run.asked.length = 0;
+  assert.equal(await app.addTable("public.accounts"), true);
+  assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET /api/state", "GET /api/slow", "GET /api/refused", "GET /api/users"],
+    "every column, as mason add accounts asks; then the state again");
+  const v = app.view();
+  assert.match(textOf(v.tables!), /public\.accounts ~300 rows key id added Remove Added public\.accounts to \/app\/mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
+  assert.match(textOf(v.status!), /public\.accounts 0% waiting for its copy to start/, "the Status shows the copy starting");
+  app.dismissOutcome();
+  assert.ok(!/Added public\.accounts/.test(app.view().tables!));
+});
+
+test("the app: the form sends the columns ticked as columns and the key's as key, nothing when none is ticked", async () => {
+  const run = fakeRun();
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  run.answers.set("POST /api/pick", answer({ ...PICKED.keyed, state: COPYING }));
+  assert.deepEqual(fn<[string, string[]?, string[]?], unknown>("pickBody")("public.audit", [], []), { table: "public.audit", picked: true });
+  app.choose("public.event_log");
+  assert.equal(app.model.choosing, "public.event_log");
+  assert.equal(await app.addTable("public.event_log", ["payload"], ["tenant_id", "id"]), true);
+  assert.equal(run.asked[0], `POST /api/pick ${JSON.stringify({ table: "public.event_log", picked: true, columns: ["payload"], key: ["tenant_id", "id"] })}`);
+  assert.equal(app.model.choosing, null, "added: the form closes");
+  run.asked.length = 0;
+  await app.addTable("public.event_log", [], ["tenant_id", "id"]);
+  assert.equal(run.asked[0], `POST /api/pick ${JSON.stringify({ table: "public.event_log", picked: true, key: ["tenant_id", "id"] })}`, "no column ticked: every column");
+});
+
+test("the app: a refusal to add renders the server's Failure under its table, in its words, and the form stays open", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(CATALOG_STATE));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  await app.poll();
+  const message = "public.event_log cannot be added: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id (its unique index event_log_tenant_id_id_key)";
+  run.answers.set("POST /api/pick", answer({ error: message, failure: { code: "refused", message, next: [] } }, 409));
+  app.choose("public.event_log");
+  run.asked.length = 0;
+  assert.equal(await app.addTable("public.event_log"), false);
+  assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.event_log", picked: true })}`], "nothing read again: nothing changed");
+  const tables = app.view().tables!;
+  assert.ok(tables.includes(`<div class="failure" role="alert"><p class="message"><span class="mark" aria-hidden="true">✗</span> ${message}</p></div>`), "the server's words, as renderFailure says them");
+  assert.match(tables, /data-pick-form="public\.event_log"/, "the form stays, to name its key");
+  // a sources file the run cannot edit: the server's Failure as it sent it
+  const file = "mason/sources/ has 2 source files: one source per project for now";
+  run.answers.set("POST /api/pick", answer({ error: file, failure: { code: "refused", message: file, next: [] } }, 409));
+  await app.addTable("public.audit");
+  assert.match(textOf(app.view().tables!), /public\.audit ~50 rows key id Add Columns… ✗ mason\/sources\/ has 2 source files: one source per project for now public\.accounts/);
+});
+
+test("the app: Remove asks first, Cancel takes it back, the confirm sends POST /api/remove and reads the state again", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(ACCOUNTS_ADDED));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  await app.poll();
+  app.askRemoveTable("public.accounts");
+  assert.match(textOf(app.view().tables!), /Remove accounts\? Mason stops copying it and drops its copy\. Remove accounts Cancel/);
+  app.cancelRemoveTable();
+  assert.ok(!/Mason stops copying it/.test(app.view().tables!));
+  assert.equal(app.model.removing, null);
+  app.askRemoveTable("public.accounts");
+  run.answers.set("POST /api/remove", () => {
+    run.answers.set("GET /api/state", answer(CATALOG_STATE));
+    return answer({ removed: ["public.accounts"], file: FILE, state: CATALOG_STATE })();
+  });
+  run.asked.length = 0;
+  assert.equal(await app.confirmRemoveTable("public.accounts"), true);
+  assert.deepEqual(run.asked, [`POST /api/remove ${JSON.stringify({ tables: ["public.accounts"] })}`, "GET /api/state", "GET /api/slow", "GET /api/refused", "GET /api/users"]);
+  assert.match(textOf(app.view().tables!), /public\.accounts ~300 rows key id Add Columns… Removed public\.accounts from \/app\/mason\/sources\/shop\.yml Tip: Mason stops copying it and drops its copy/);
+  assert.equal(app.model.removing, null);
+  // refused: the server's words
+  const message = "shop.yml names no table orders — did you mean `orders`? (it names customers)";
+  run.answers.set("POST /api/remove", answer({ error: message, failure: { code: "not_found", message, next: [] } }, 404));
+  assert.equal(await app.confirmRemoveTable("public.orders"), false);
+  assert.match(textOf(app.view().tables!), /public\.orders .* ✗ shop\.yml names no table orders — did you mean `orders`\? \(it names customers\)/);
+});
+
 // ------------------------------------------------------------------ the files: under the CSP, never the token
 
 test("the page's files fetch nothing from elsewhere and never touch the token: the address, the cookie, storage", () => {
@@ -311,21 +485,25 @@ test("the page's files fetch nothing from elsewhere and never touch the token: t
   assert.ok(!/duckdb/i.test(html + code + css), "never the engine's name");
 });
 
-test("in the browser: each part is written when what it shows changes, never at every poll (a click must find its button)", async () => {
-  const start = fn<[unknown, unknown], void>("start");
-  const run = fakeRun();
-  /** An element whose innerHTML reads back as a browser serialises it: a bare data-x attribute as data-x="", an
-   *  apostrophe in text as itself. */
+/** The page in a fake browser: elements whose innerHTML reads back as a browser serialises it (a bare data-x attribute
+ *  as data-x="", an apostrophe in text as itself), the listeners `start` adds, the interval it sets, and a FormData
+ *  that reads a form's ticked boxes from the fake form. */
+function fakeBrowser(run: ReturnType<typeof fakeRun>) {
   const els = new Map<string, { writes: number; html: string; innerHTML: string; addEventListener: () => void }>();
   const el = (id: string) => els.get(id) ?? (els.set(id, { writes: 0, html: "", addEventListener: () => undefined,
     get innerHTML() { return this.html.replace(/ (data-[a-z-]+)(?=[ >])/g, ' $1=""').replace(/&#39;/g, "'"); },
     set innerHTML(v: string) { this.html = v; this.writes++; } }), els.get(id)!);
-  let tick: (() => void) | null = null;
   const on = new Map<string, (e: unknown) => Promise<void> | void>();
   const doc = { visibilityState: "visible", getElementById: el, addEventListener: (type: string, f: (e: unknown) => void) => { on.set(type, f); } };
-  const win = { fetch: run.fetch, setInterval: (f: () => void) => { tick = f; return 1; } };
-  const settle = () => new Promise((r) => setTimeout(r, 20));
-  start(doc, win);
+  let tick: (() => void) | null = null;
+  class FormData { readonly ticked: Record<string, string[]>; constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; } getAll(name: string) { return this.ticked[name] ?? []; } }
+  fn<[unknown, unknown], void>("start")(doc, { fetch: run.fetch, FormData, setInterval: (f: () => void) => { tick = f; return 1; } });
+  return { el, on, doc, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
+}
+
+test("in the browser: each part is written when what it shows changes, never at every poll (a click must find its button)", async () => {
+  const run = fakeRun();
+  const { el, on, doc, tick, settle } = fakeBrowser(run);
   await settle();
   assert.match(textOf(el("status").html), /public\.orders 15% copying/);
   // Remove clicked: the user's row holds the confirm, whose Cancel is a bare data- attribute
@@ -333,13 +511,40 @@ test("in the browser: each part is written when what it shows changes, never at 
   const users = el("users");
   assert.match(textOf(users.html), /Remove metabase\? It connects no more/);
   const [usersWrites, statusWrites] = [users.writes, el("status").writes];
-  tick!(); await settle();
-  tick!(); await settle();
+  tick(); await settle();
+  tick(); await settle();
   assert.equal(users.writes, usersWrites, "the users, unchanged, are not written again: the confirm's button stays the one clicked");
   assert.equal(el("status").writes, statusWrites, "the status, unchanged, is not written again");
   // a hidden tab asks nothing
   doc.visibilityState = "hidden";
   run.asked.length = 0;
-  tick!(); await settle();
+  tick(); await settle();
   assert.deepEqual(run.asked, [], "no poll while the tab is hidden");
+});
+
+test("in the browser: the tables are written when they change, never at every poll — a Remove's confirm and a form's ticks stay", async () => {
+  const run = fakeRun();
+  const { el, on, tick, settle } = fakeBrowser(run);
+  await settle();
+  const tables = el("tables");
+  assert.match(textOf(tables.html), /public\.orders ~2,000,000 rows key id added Remove/);
+  await on.get("click")!({ target: { closest: () => ({ dataset: { removeTable: "public.orders" } }) } });
+  assert.match(textOf(tables.html), /Remove orders\? Mason stops copying it and drops its copy\. Remove orders Cancel/);
+  let writes = tables.writes;
+  tick(); await settle();
+  tick(); await settle();
+  assert.equal(tables.writes, writes, "the tables, unchanged while a copy moves, are not written again: the confirm stays the one clicked");
+  await on.get("click")!({ target: { closest: () => ({ dataset: { cancelRemoveTable: "" } }) } });
+  await on.get("click")!({ target: { closest: () => ({ dataset: { choose: "public.audit" } }) } });
+  assert.match(tables.html, /data-pick-form="public\.audit"/);
+  writes = tables.writes;
+  tick(); await settle();
+  assert.equal(tables.writes, writes, "the form is not written again under the reader's ticks");
+  // the form submitted: the ticked boxes, as FormData reads them, sent as the columns
+  run.answers.set("POST /api/pick", answer({ ...PICKED.columns, state: COPYING }));
+  let prevented = false;
+  await on.get("submit")!({ target: { dataset: { pickForm: "public.audit" }, ticked: { columns: ["name"] } }, preventDefault: () => { prevented = true; } });
+  assert.ok(prevented, "the page posts it, not the browser");
+  assert.ok(run.asked.includes(`POST /api/pick ${JSON.stringify({ table: "public.audit", picked: true, columns: ["name"] })}`), run.asked.join("\n"));
+  assert.match(textOf(tables.html), /Added public\.audit to \/app\/mason\/sources\/shop\.yml: id, name key added: id/);
 });
