@@ -42,3 +42,18 @@ test("runnable: the .ts where it is (a checkout), else the .js beside it (the pa
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+
+test("the package ships the web page: every file the command server serves is under src/web/ and copied beside the code", async () => {
+  // imported when the test runs: at a commit without the rule's module the file still loads, and this test fails by name
+  const beside = await import(path.join(ROOT, "cli", "beside.ts") as string).catch(() => ({})) as { besideCode?: (src: string) => string[] };
+  assert.equal(typeof beside.besideCode, "function", "cli/beside.ts exports besideCode, cli/build.ts's copy rule");
+  const shipped = beside.besideCode!(path.join(ROOT, "src"));
+  // the routes the server reads its page from (src/cli/run-server.ts PAGE_ROUTES), from src/web/ beside src/cli/
+  const server = await import("../src/cli/run-server.ts") as { PAGE_ROUTES?: Record<string, readonly [string, string]> };
+  assert.ok(server.PAGE_ROUTES, "src/cli/run-server.ts exports PAGE_ROUTES");
+  const files = Object.values(server.PAGE_ROUTES).map(([f]) => path.join("web", f)).sort();
+  assert.deepEqual(files, [path.join("web", "app.css"), path.join("web", "app.js"), path.join("web", "index.html")]);
+  for (const f of files) assert.ok(shipped.includes(f), `${f} is copied into dist/src/`);
+  assert.ok(shipped.every((f) => !f.endsWith(".ts")), "TypeScript is compiled, never copied");
+  assert.match(fs.readFileSync(path.join(ROOT, "cli", "build.ts"), "utf8"), /for \(const f of besideCode\(path\.join\(ROOT, "src"\)\)\) copy\(/, "cli/build.ts copies what the rule names");
+});

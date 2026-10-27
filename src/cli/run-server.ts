@@ -11,16 +11,25 @@
  * What it knows it reads where the run keeps it: the copies from the sync (src/duck/sync.ts), the statements from the
  * request log (src/duck/requests.ts). Added is a fact about the project's files: a table is added when its sources file
  * names it.
+ *
+ * THE WEB PAGE (src/web/, `mason ui`, docs/WEB-UI.md): under `mason start` it also serves one page and its two files,
+ * from an allowlist read when it starts (`pageFiles`), and the users the page manages (`/api/users`, the functions
+ * `mason user` calls). The page reads the same JSON the commands read; a refusal carries `failure`, the CLI's Failure
+ * shape (message, why, fix, next), so the page says it as the command would. `mason serve`'s run serves no page.
  */
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { readBody, sendJson } from "../lib/http-json.ts";
 import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, SECURITY_HEADERS } from "./security.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
-import type { Failure } from "./command.ts";
+import { errorJson, nextJson, type Failure } from "./command.ts";
+import { readiness } from "./readiness.ts";
+import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT } from "./user.ts";
+import { postgresLink } from "./pg-url.ts";
 import { addedTables, catalogTable, chooseColumns, entryName, entryProblems, findEntry, parseSourceText, shownPath, sourceFailure, sourceFileNames, sourcesDir, unaddableReason,
   withoutTable, withTable, type ProjectSource, type SourceFile } from "./sources.ts";
 import { PollRefused, type CopyState, type PolledTable, type StreamStatus } from "../duck/sync.ts";
@@ -42,6 +51,13 @@ export interface RunContext {
   publication?: { name: string; owned: boolean };
   port: number;
   token: string;
+  /** the web page (src/web/, `mason ui`): `mason start`'s run serves it, `mason serve`'s never (its guard is loopback's
+   *  Host and cookie; off loopback the page would need TLS and a login, which are not designed) */
+  page: boolean;
+  /** the project's users (src/cli/user.ts): what `/api/users` lists and changes, with the functions `mason user` calls —
+   *  the list (.mason/users.json), the API key their passwords are made with, the database a user connects to, and
+   *  where the Postgres API listens (the run's recorded URL), for the URL an added user is shown */
+  users: { file: string; apiKey: string; database: string; postgresUrl: string };
   /** the project's folder (sources/, mason.yml) */
   folder: () => string | null;
   /** the project's root (where .mason/ is): what messages name files from */
@@ -94,7 +110,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       ...catalogTable(t, sources.file?.tables.find((e) => e.table === t.source)),
       // a table the sync has not reached is waiting for its copy (no copy yet), never "copying 0"
       // a copy in a retired layout (src/duck/sync.ts RETIRED_LAYOUT) serves until it is copied again: done, and said
-      copy: c && c.phase !== "waiting" ? { phase: c.phase === "copied" ? "done" : c.phase === "failed" ? "failed" : "copying",
+      copy: c && c.phase !== "waiting" ? { phase: (c.phase === "copied" ? "done" : c.phase === "failed" ? "failed" : "copying") as "copying" | "done" | "failed",
         rowsCopied: c.phase === "copied" ? c.rows ?? 0 : c.rowsSoFar ?? 0, updatedAt: c.copiedAt ?? "",
         // while its chunks are read: the chunks done and reading, the measured rate, the time left (src/duck/sync.ts
         // copyProgressNow), so mason wait and status move between two commits
@@ -107,6 +123,11 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     };
   });
   return {
+    // what mason wait waits on and mason status prints last (src/cli/readiness.ts): said by the run, so the page and the
+    // commands say one thing
+    readiness: readiness({ tables }),
+    // the run serves the web page (mason ui): mason status prints its URL
+    ui: ctx.page,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote,
       version: facts.versionText, standby: facts.standby, changes: ctx.changes, name: sources.file?.name ?? null, file: sources.file?.file ?? null,
       ...(ctx.publication ? { replication: { slot: ctx.slot, publication: ctx.publication.name, owned: ctx.publication.owned } } : {}) },
@@ -231,14 +252,57 @@ export async function removeTables(ctx: RunContext, names: readonly string[]): P
   return { removed: [...new Set(entries.map((e) => e.table))], file };
 }
 
-/** A refusal the command shows as it is. */
+/** A refusal the command shows as it is; `failure` is how the web page says it (the CLI's Failure: why, fix, next), by
+ *  default the message alone under the status's code. */
 export class Refusal extends Error {
   readonly status: number;
-  constructor(status: number, message: string) { super(message); this.status = status; }
+  readonly failure: Failure;
+  constructor(status: number, message: string, failure?: Failure) { super(message); this.status = status; this.failure = failure ?? { message, code: codeOf(status) }; }
+}
+
+/** The FAILURE_CODES code (src/cli/command.ts) of a refusal by its HTTP status. */
+const codeOf = (status: number): string => status === 400 ? "usage" : status === 404 ? "not_found" : status >= 500 ? "failed" : "refused";
+/** The HTTP status of a Failure by its code: the other way round. */
+const statusOf = (f: Failure): number => f.code === "usage" ? 400 : f.code === "not_found" ? 404 : f.code === "failed" ? 500 : 409;
+
+/**
+ * EVERY ERROR ANSWER: `error`, the sentence a command prints (src/cli/control.ts reads it), and `failure`, the same
+ * refusal in the CLI's Failure shape — { code, message, why?, fix?, next: [{ command, what }] }, what `--json` prints
+ * — which the web page renders as the CLI does.
+ */
+export function sendFailure(res: http.ServerResponse, status: number, f: Failure, extra: Record<string, unknown> = {}): void {
+  sendJson(res, status, { error: f.message, ...extra, failure: { ...errorJson(f), next: nextJson(f.next) } });
+}
+
+/** One file of the web page: its bytes and its content type. */
+export interface PageFile { body: Buffer; type: string }
+
+/** THE WEB PAGE'S ROUTES, AND THE FILE EACH IS: the only files the server ever reads for a URL. */
+export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: string]>> = {
+  "/": ["index.html", "text/html; charset=utf-8"],
+  "/app.js": ["app.js", "text/javascript; charset=utf-8"],
+  "/app.css": ["app.css", "text/css; charset=utf-8"],
+};
+
+/**
+ * The web page's files, READ ONCE when the server starts (src/web/ beside src/cli/, in a checkout and in the package
+ * alike: cli/build.ts copies them): a map of route to bytes. A request's path is looked up in it, never joined onto a
+ * folder, so no URL can name another file. A file missing is a broken install, said with the path.
+ */
+export function pageFiles(dir: string = fileURLToPath(new URL("../web/", import.meta.url))): Map<string, PageFile> {
+  return new Map(Object.entries(PAGE_ROUTES).map(([route, [file, type]]) => {
+    const at = path.join(dir, file);
+    let body: Buffer;
+    try { body = fs.readFileSync(at); }
+    catch (e) { throw new Error(`the web page's ${file} cannot be read (${at}: ${(e as Error).message}): this Mason is installed incompletely — npm i -g @mason-data/cli again`); }
+    return [route, { body, type }];
+  }));
 }
 
 export function createRunServer(ctx: RunContext): http.Server {
   const saidErrors = new Set<string>();
+  // read once, here: nothing a request names is ever read from disk (mason serve's run serves no page)
+  const page = ctx.page ? pageFiles() : new Map<string, PageFile>();
   return http.createServer((req, res) => {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
     const v = guard({ method: req.method ?? "GET", url: req.url ?? "/", host: req.headers.host, origin: req.headers.origin, cookie: req.headers.cookie, authorization: req.headers.authorization }, ctx.port, ctx.token);
@@ -250,7 +314,10 @@ export function createRunServer(ctx: RunContext): http.Server {
     const url = new URL(req.url ?? "/", `http://127.0.0.1:${ctx.port}`);
     void (async () => {
       try {
-        if (req.method === "GET" && url.pathname === "/api/ping") {
+        const file = req.method === "GET" || req.method === "HEAD" ? page.get(url.pathname) : undefined;
+        if (file !== undefined) {
+          res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length }).end(req.method === "HEAD" ? undefined : file.body);
+        } else if (req.method === "GET" && url.pathname === "/api/ping") {
           // what proves a run is up (src/cli/runs.ts answers): this token answered, by this process
           sendJson(res, 200, { pid: process.pid });
         } else if (req.method === "GET" && url.pathname === "/api/state") {
@@ -280,11 +347,33 @@ export function createRunServer(ctx: RunContext): http.Server {
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });
           }
+        } else if (req.method === "GET" && url.pathname === "/api/users") {
+          // mason user list --json's shape: the users, and whether each connects
+          const r = listUsers(ctx.users.file, ctx.users.apiKey);
+          if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
+          sendJson(res, 200, { ...r, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
+        } else if (req.method === "POST" && url.pathname === "/api/users") {
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown };
+          if (typeof body.name !== "string") throw new Refusal(400, "send { name }: the user's name");
+          // mason user add --json's shape: its password, once, and the URL to paste (this run is up, so it has one)
+          const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database });
+          if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
+          const { replaced, ...added } = r;
+          ctx.log(`user ${added.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}`);
+          sendJson(res, 200, { ...added, next: nextJson(addedNext(added.user, true)) });
+        } else if (req.method === "DELETE" && url.pathname.startsWith("/api/users/")) {
+          let name: string;
+          try { name = decodeURIComponent(url.pathname.slice("/api/users/".length)); }
+          catch { throw new Refusal(400, `${url.pathname} does not name a user: DELETE /api/users/<name>`); }
+          const r = removeUser(ctx.users.file, name);
+          if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
+          ctx.log(`user ${r.removed.name} removed`);
+          sendJson(res, 200, { ...r, next: nextJson(REMOVED_NEXT) });
         } else if (req.method === "POST" && url.pathname === "/api/sync") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
           if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((x) => typeof x === "string")) throw new Refusal(400, "send { tables: [schema.table, …] }");
           try { sendJson(res, 200, await ctx.duck.poll(body.tables as string[])); }
-          catch (e) { if (e instanceof PollRefused) { sendJson(res, e.code === "not_found" ? 404 : 409, { error: e.message, code: e.code }); return; } throw e; }
+          catch (e) { if (e instanceof PollRefused) { sendFailure(res, e.code === "not_found" ? 404 : 409, { message: e.message, code: e.code }, { code: e.code }); return; } throw e; }
         } else if (req.method === "POST" && url.pathname === "/api/remove") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
           if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((m) => typeof m === "string")) throw new Refusal(400, "send { tables: [name, …] }");
@@ -294,16 +383,16 @@ export function createRunServer(ctx: RunContext): http.Server {
           for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
           sendJson(res, 200, { ...r, state: await state(ctx) });
         } else {
-          sendJson(res, 404, { error: `no ${req.method} ${url.pathname}: this is mason start's server for the mason command (mason --help)` });
+          sendFailure(res, 404, { message: `no ${req.method} ${url.pathname}: this is mason start's server for the mason command (mason --help)`, code: "not_found" });
         }
       } catch (e) {
-        if (e instanceof Refusal) { sendJson(res, e.status, { error: e.message }); return; }
-        if (e instanceof SyntaxError) { sendJson(res, 400, { error: `the body is not JSON: ${e.message}` }); return; }
+        if (e instanceof Refusal) { sendFailure(res, e.status, e.failure); return; }
+        if (e instanceof SyntaxError) { sendFailure(res, 400, { message: `the body is not JSON: ${e.message}`, code: "usage" }); return; }
         // said ONCE per distinct reason: a command may ask every second, and a stack a second buried the terminal
         const why = ((e as Error).message.split("\n---\n").pop() ?? String(e)).split("\n")[0]!;
         const key = `${url.pathname} ${why}`;
         if (!saidErrors.has(key)) { saidErrors.add(key); ctx.log(`command server: ${req.method} ${url.pathname} failed: ${why}`); }
-        sendJson(res, 500, { error: (e as Error).message });
+        sendFailure(res, 500, { message: (e as Error).message, code: "failed", next: [["mason logs", "the run's log: what it was doing"]] });
       }
     })();
   });

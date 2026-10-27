@@ -2,8 +2,9 @@
  * The run's command server (src/cli/run-server.ts) over real HTTP: the run's guard refuses a request without the
  * token, one naming another Host and a write from another Origin; an add (mason add) writes its entry into the
  * project's sources file and nowhere else, a remove takes it out, the rest of the file as it was; every refusal is a
- * sentence to show — no folder yet, a table that is not there, one with no primary key and no --key; and there is no
- * page. The copies are the sync's, faked: what the state says of each is this test's subject too.
+ * sentence to show — no folder yet, a table that is not there, one with no primary key and no --key; the web page's
+ * three files from an allowlist, and its users through the functions mason user calls (mason serve's run serves no
+ * page). The copies are the sync's, faked: what the state says of each is this test's subject too.
  */
 import { test, after } from "node:test";
 import * as assert from "node:assert/strict";
@@ -18,6 +19,7 @@ import * as syncModule from "../src/duck/sync.ts";
 // read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
 const { PollRefused } = syncModule as unknown as { PollRefused: typeof import("../src/duck/sync.ts").PollRefused };
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
+import { readUsers, userPassword, USER_NAME_RULE } from "../src/duck/users.ts";
 // imported when the tests run: at a commit without the module the file still loads, and a test that needs it fails by name
 const sourcesModule = await import("../src/cli/sources.ts" as string).catch(() => ({})) as Record<string, unknown>;
 // read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
@@ -69,7 +71,10 @@ const requests = {
   slow: async () => [{ route: "postgres" as const, payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-24T10:03:00.000Z" }],
   refused: async () => ({ total: 3, refused: [{ route: "postgres" as const, payload: "SELECT * FROM nope", runs: 3, last: "2026-10-24T10:04:00.000Z", code: "42P01", message: 'relation "nope" does not exist' }] }),
 };
+const usersFile = path.join(root, "app", ".mason", "users.json");
+const API_KEY = "k".repeat(48);
 const ctx: RunContext = {
+  page: true, users: { file: usersFile, apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" },
   source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [],
   slot: "", changes: "poll", port: 0, token: "t0ken-of-this-run",
   folder: () => chosen, root: path.join(root, "app"), sources: () => ({ file: null, problem: null }), sourcesChanged: () => { changed++; }, log: (m) => logged.push(m),
@@ -237,12 +242,38 @@ test("mason remove: the table's entry goes, every other byte of the file as it w
   } finally { fs.writeFileSync(sourceFile, was); }
 });
 
-test("there is no page: the server answers the mason command, and says so to anything else", async () => {
-  for (const p of ["/", "/api/folders", "/api/folder", "/api/preview"]) {
+test("the web page: /, /app.js and /app.css from src/web/, with their types and the security headers; any other path is the 404 it was", async () => {
+  const web = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "src", "web");
+  for (const [p, file, type] of [["/", "index.html", "text/html; charset=utf-8"], ["/app.js", "app.js", "text/javascript; charset=utf-8"], ["/app.css", "app.css", "text/css; charset=utf-8"]] as const) {
+    const r = await call("GET", p);
+    assert.equal(r.status, 200, p);
+    assert.equal(r.headers["content-type"], type, p);
+    assert.equal(r.text, fs.readFileSync(path.join(web, file), "utf8"), `${p} is src/web/${file}, byte for byte`);
+    assert.match(String(r.headers["content-security-policy"]), /^default-src 'self';/, p);
+    assert.equal(r.headers["x-frame-options"], "DENY", p);
+    assert.equal(r.headers["cache-control"], "no-store", p);
+    assert.equal((await call("GET", p, { cookie: null })).status, 403, `${p} without the cookie`);
+  }
+  // the allowlist, never a path built from the URL: a file beside them, one above, an encoded one are the 404 they were
+  for (const p of ["/index.html", "/app.d.ts", "/web/app.js", "/../cli/run-server.ts", "/%2e%2e/cli/run-server.ts", "/app.js/", "/api/folders", "/api/preview"]) {
     const r = await call("GET", p);
     assert.equal(r.status, 404, p);
-    assert.match(r.text, /mason start's server for the mason command \(mason --help\)/, p);
+    assert.match(JSON.parse(r.text).error, /^no GET \/.*: this is mason start's server for the mason command \(mason --help\)$/, p);
+    assert.equal(JSON.parse(r.text).failure.code, "not_found", p);
   }
+  assert.equal((await call("POST", "/app.js", { body: {} })).status, 404, "a file is only read");
+});
+
+test("mason serve's run serves no page: / is the 404 it was, and the users are still the commands'", async () => {
+  const serveCtx: RunContext = { ...ctx, page: false };
+  const served = createRunServer(serveCtx);
+  await new Promise<void>((r) => served.listen(0, "127.0.0.1", () => r()));
+  const port = serveCtx.port = (served.address() as { port: number }).port;
+  try {
+    const at = (p: string) => fetch(`http://127.0.0.1:${port}${p}`, { headers: { Authorization: "Bearer t0ken-of-this-run" } });
+    for (const p of ["/", "/app.js", "/app.css"]) assert.equal((await at(p)).status, 404, p);
+    assert.equal((await at("/api/users")).status, 200, "the commands' users");
+  } finally { served.close(); }
 });
 
 test("the state: a copy under way says its rows so far, one not reached is waiting, a copied one is done; the sync and the request log answer through it", async () => {
@@ -322,3 +353,72 @@ test("a table of any size on a database elsewhere can be added, and mason tables
   } finally { remoteServer.close(); }
 });
 
+
+test("the users: /api/users lists, adds and removes through mason user's own functions and file — its shapes, its sentences", async () => {
+  fs.rmSync(usersFile, { force: true });
+  const list = async () => JSON.parse((await call("GET", "/api/users")).text) as { users: Array<{ name: string; id: string; addedAt: string; live: boolean }> };
+  assert.deepEqual((await list()).users, []);
+  const added = await call("POST", "/api/users", { body: { name: "metabase" } });
+  assert.equal(added.status, 200, added.text);
+  const a = JSON.parse(added.text) as Record<string, unknown>;
+  // mason user add --json's shape: the password, once, and the URL to paste
+  assert.deepEqual(Object.keys(a), ["user", "id", "addedAt", "password", "database", "url", "host", "port", "sslmode", "next"]);
+  assert.equal(a.user, "metabase");
+  assert.equal(a.password, userPassword(API_KEY, "metabase", a.id as string), "the password the listener takes (src/duck/users.ts)");
+  assert.equal(a.url, `postgres://metabase:${a.password as string}@127.0.0.1:5433/app`);
+  assert.deepEqual([a.host, a.port, a.database, a.sslmode], ["127.0.0.1", 5433, "app", "disable"]);
+  // the file mason user reads, with no password in it
+  const file = readUsers(usersFile);
+  assert.ok("users" in file);
+  assert.deepEqual(file.users.map((u) => [u.name, u.id]), [["metabase", a.id]]);
+  assert.ok(!fs.readFileSync(usersFile, "utf8").includes(a.password as string), "users.json holds no password");
+  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, live: true }]);
+  assert.ok(logged.includes("user metabase added"), "the run's log says it, without the password");
+  assert.ok(!logged.some((l) => l.includes(a.password as string)));
+
+  // refused in mason user add's own sentences, as the Failure shape the page renders
+  const again = await call("POST", "/api/users", { body: { name: "metabase" } });
+  assert.equal(again.status, 409);
+  const f = JSON.parse(again.text) as { error: string; failure: { code: string; message: string; why: string; fix: string; next: Array<{ command: string; what: string }> } };
+  assert.equal(f.error, "there is already a user \"metabase\"");
+  assert.deepEqual(f.failure, { code: "refused", message: "there is already a user \"metabase\"",
+    why: "a name names one user, so removing it means one thing; its password is not kept, so it cannot be printed again",
+    fix: "mason user remove metabase, then mason user add metabase (a new password; the old one stops connecting), or add another name (metabase-2) and remove metabase once the tool uses it",
+    next: [{ command: "mason user list", what: "the users" }, { command: "mason user remove metabase", what: "then add it again, with a new password" }] });
+  const bad = await call("POST", "/api/users", { body: { name: "Metabase" } });
+  assert.equal(bad.status, 400);
+  assert.equal(JSON.parse(bad.text).failure.message, `"Metabase" is not a user name: ${USER_NAME_RULE}`);
+  assert.equal(JSON.parse(bad.text).failure.code, "usage");
+  assert.equal((await call("POST", "/api/users", { body: { user: "x" } })).status, 400, "no name");
+  assert.equal(JSON.parse((await call("POST", "/api/users", { body: { user: "x" } })).text).error, "send { name }: the user's name");
+
+  // a change from another site, or with no Origin, never reaches the file
+  for (const origin of [null, "http://evil.example"]) {
+    assert.equal((await call("POST", "/api/users", { origin, body: { name: "grafana" } })).status, 403, String(origin));
+    assert.equal((await call("DELETE", "/api/users/metabase", { origin })).status, 403, String(origin));
+  }
+  assert.deepEqual((await list()).users.map((u) => u.name), ["metabase"], "nothing a refused request asked for happened");
+
+  const typo = await call("DELETE", "/api/users/metabse");
+  assert.equal(typo.status, 404);
+  assert.deepEqual(JSON.parse(typo.text).failure, { code: "not_found", message: "there is no user \"metabse\" — did you mean `metabase`?", why: "the users: metabase",
+    next: [{ command: "mason user list", what: "the users" }] });
+  const removed = await call("DELETE", "/api/users/metabase");
+  assert.equal(removed.status, 200, removed.text);
+  assert.deepEqual(JSON.parse(removed.text), { removed: { name: "metabase", id: a.id, addedAt: a.addedAt },
+    next: [{ command: "mason user list", what: "the users left" }, { command: "mason user add <name>", what: "a new user, with a new password" }] });
+  assert.deepEqual((await list()).users, []);
+  assert.ok(!fs.existsSync(`${usersFile}.lock`), "the lock is let go");
+});
+
+test("every error answer carries the Failure shape beside its sentence, the catch-all's wording kept", async () => {
+  const r = await call("GET", "/nope");
+  assert.equal(r.status, 404);
+  assert.deepEqual(JSON.parse(r.text), { error: "no GET /nope: this is mason start's server for the mason command (mason --help)",
+    failure: { code: "not_found", message: "no GET /nope: this is mason start's server for the mason command (mason --help)", next: [] } });
+  const notJson = await call("POST", "/api/users", { body: undefined });
+  assert.equal(notJson.status, 400);
+  assert.match(JSON.parse(notJson.text).failure.message, /^the body is not JSON: /);
+  const limit = JSON.parse((await call("GET", "/api/requests?limit=0")).text);
+  assert.deepEqual(limit, { error: "limit is a whole number of requests, 1 to 10000", failure: { code: "usage", message: "limit is a whole number of requests, 1 to 10000", next: [] } });
+});

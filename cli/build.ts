@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { besideCode } from "./beside.ts";
 
 const CLI = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(CLI);
@@ -22,16 +23,9 @@ const tsc = path.join(ROOT, "node_modules", "typescript", "bin", "tsc");
 if (!fs.existsSync(tsc)) throw new Error(`no TypeScript compiler at ${tsc}: run npm install at the repo's root first`);
 execFileSync(process.execPath, [tsc, "-p", CLI], { stdio: "inherit" });
 
-/** Every file under `dir` (relative paths), for the copies below. */
-function walk(dir: string, base = dir): string[] {
-  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-    e.isDirectory() ? walk(path.join(dir, e.name), base) : [path.relative(base, path.join(dir, e.name))]);
-}
 let copied = 0;
 const copy = (from: string, to: string): void => { fs.mkdirSync(path.dirname(to), { recursive: true }); fs.copyFileSync(from, to); copied++; };
-// what src/ reads beside its code (none today; a .yml or .html added under src/ rides along)
-for (const f of walk(path.join(ROOT, "src"))) {
-  if (!f.endsWith(".ts")) copy(path.join(ROOT, "src", f), path.join(DIST, "src", f));
-}
+// what src/ reads beside its code (the web page, src/web/; a .yml or .html added under src/ rides along): cli/beside.ts
+for (const f of besideCode(path.join(ROOT, "src"))) copy(path.join(ROOT, "src", f), path.join(DIST, "src", f));
 fs.chmodSync(path.join(DIST, "src", "cli", "main.js"), 0o755);
 console.log(`built ${DIST}: src/ compiled, ${copied} file(s) copied beside it`);

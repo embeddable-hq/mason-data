@@ -1,0 +1,65 @@
+/* The web page of mason start (src/web/app.js). The CLI's palette (src/cli/style.ts): bold for a heading, the type
+   colour for what you can type, dim for a description, green / red / yellow for a state only. No font is fetched:
+   the system's, under the server's default-src 'self'. */
+:root {
+  --bg: #fbfbfa; --fg: #1d1d1b; --dim: #6b6b66; --line: #e3e2de; --panel: #ffffff;
+  --code: #0b6e8a; --ok: #1f7a3a; --bad: #b42318; --warn: #8a5a00; --bar: #0b6e8a;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #161615; --fg: #e8e7e3; --dim: #9a9993; --line: #2e2e2b; --panel: #1e1e1c;
+    --code: #5cc3df; --ok: #5fcf80; --bad: #ff7b6e; --warn: #e9b64a; --bar: #5cc3df; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header, main, #poll { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; padding-top: 24px; }
+h1 { font-size: 22px; margin: 0; }
+.where { margin: 0; color: var(--dim); }
+.updated { margin: 0 0 0 auto; color: var(--dim); font-size: 13px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px 20px 16px; margin: 16px 0; }
+h2 { font-size: 17px; margin: 14px 0 10px; }
+h3 { font-size: 15px; margin: 18px 0 6px; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+code { color: var(--code); overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; margin: 6px 0 0; color: var(--dim); }
+.dim, .lead { color: var(--dim); }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+.facts dt { color: var(--dim); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; vertical-align: top; padding: 6px 8px 6px 0; border-top: 1px solid var(--line); font-weight: normal; }
+thead th { border-top: 0; color: var(--dim); font-size: 13px; }
+td.bar { white-space: nowrap; width: 1%; }
+tbody th code { white-space: nowrap; overflow-wrap: normal; }
+progress { width: 120px; height: 8px; vertical-align: middle; accent-color: var(--bar); }
+.pct { display: inline-block; min-width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; }
+.t-done progress { accent-color: var(--ok); }
+.t-failed progress, .t-failed .what { accent-color: var(--bad); color: var(--bad); }
+.t-unsynced progress, .t-unsynced .what { accent-color: var(--warn); color: var(--warn); }
+.count { margin: 10px 0 0; }
+.readiness { font-weight: 600; margin: 14px 0 4px; }
+.readiness.ok { color: var(--ok); }
+.readiness.bad { color: var(--bad); }
+.bullets { margin: 0; padding-left: 20px; }
+.warn { color: var(--warn); font-size: 13px; }
+td.act { text-align: right; white-space: nowrap; }
+.confirm { white-space: normal; }
+button { font: inherit; font-size: 14px; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+button:hover { border-color: var(--dim); }
+button.danger { border-color: var(--bad); color: var(--bad); }
+form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+input { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); min-width: 14em; }
+.failure { border-left: 3px solid var(--bad); padding: 8px 12px; margin: 12px 0; background: var(--panel); }
+.failure .message { margin: 0; font-weight: 600; }
+.failure .mark { color: var(--bad); }
+.failure dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0 0; }
+.failure dt { color: var(--dim); }
+.failure dd { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
+.next-head { margin: 8px 0 2px; font-weight: 600; }
+.next { list-style: none; margin: 0; padding: 0; }
+.next li span { color: var(--dim); margin-left: 8px; }
+.added { border: 1px solid var(--ok); border-radius: 8px; padding: 10px 14px; margin: 12px 0; }
+.added .headline { font-weight: 600; margin: 0 0 8px; }
+.added .tip { color: var(--dim); }
+#poll .failure { border: 1px solid var(--bad); border-left-width: 3px; border-radius: 4px; margin-top: 16px; }

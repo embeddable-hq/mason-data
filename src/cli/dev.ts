@@ -348,6 +348,9 @@ export async function dev(o: DevOptions): Promise<number> {
   const server = createRunServer({
     source, facts: () => facts, warnings,
     slot: changes === "replication" ? repl.slot : "", changes, port: setupPort, token, folder: () => folder, root: project.root,
+    // the web page (mason ui) is mason start's alone: mason serve's run serves none (src/cli/run-server.ts RunContext.page)
+    page: o.serve === undefined,
+    users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database: cfg.name, postgresUrl },
     ...(changes === "replication" ? { publication: { name: repl.publication, owned: repl.owned } } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
