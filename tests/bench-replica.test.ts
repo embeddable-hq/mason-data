@@ -1,5 +1,5 @@
 /**
- * THE README'S "WHY NOT A POSTGRES READ REPLICA" IS RENDERED FROM THE BENCHMARK'S FIXTURE (a section comparing Postgres
+ * THE README'S "WHEN IS MASON FASTER?" IS RENDERED FROM THE BENCHMARK'S FIXTURE (a section comparing Postgres
  * to Mason as a) concurrency increases and b) the size of the underlying rows increases):
  * tests/fixtures/bench-replica.json is what `node scripts/bench-replica.ts` wrote (docs/BENCHMARK.md), and the section
  * between the markers is what `renderReplicaSection` makes of it — the sizes, client counts, sweeps and environment all
@@ -246,7 +246,7 @@ test("the fixture's every measured cell has both engines, the mix and every stat
   assert.ok(f.complete, "the fixture is of a run that ended (complete: true)");
 });
 
-test("README.md's \"Why not a Postgres read replica\" is what the fixture renders", () => {
+test("README.md's \"When is Mason faster?\" is what the fixture renders", () => {
   const was = fs.readFileSync(README, "utf8");
   const a = was.indexOf(START), z = a < 0 ? -1 : was.indexOf(END, a);
   assert.ok(a >= 0 && z > a, `README.md has the lines ${START} … ${END}`);
