@@ -2,6 +2,32 @@
 
 A drop-in replacement for a Postgres read replica, built for analytical queries.
 
+```mermaid
+flowchart LR
+  subgraph pg["your Postgres, or a read replica of it: read only"]
+    tables[("the tables the sources file names")]
+  end
+  subgraph mason["mason start: one process"]
+    copy[("the copy, kept current by the sync<br>a columnar engine (DuckDB)")]
+    catalog["the catalog: a real Postgres<br>the copied tables' definitions, no rows"]
+    plan["Postgres decides, the engine computes<br>each statement analysed by the catalog,<br>rewritten and run on the copy,<br>answered with Postgres's names, types and text,<br>or refused by name if the oracle has not verified it exact"]
+  end
+  subgraph clients["what queries it"]
+    bi["BI tools: Metabase, Grafana, Superset, psql"]
+    agents["AI agents"]
+    app["your app's analytics code"]
+  end
+  tables -->|"first, each table copied in chunks"| copy
+  tables -->|"then the poll: SELECTs on xmin"| copy
+  tables -.->|"or the stream: its change log, by logical replication"| copy
+  copy --> plan
+  catalog --> plan
+  plan <-->|"the Postgres API, over the wire protocol: the SQL they send Postgres"| clients
+```
+
+Mason copies the tables you name and keeps them current; a tool connects to it as to any
+Postgres, and every statement is decided by Postgres and computed on the copy.
+
 ## Why Mason
 
 **A read replica, backed by a columnar store.** Point Mason at your Postgres and name the tables
