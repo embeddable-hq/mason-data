@@ -53,6 +53,7 @@ import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postg
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
+import { staleDecisions, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
@@ -146,9 +147,9 @@ export function verdict(want: Answer, got: Answer, inOrder: boolean): { kind: "v
 
 /**
  * DECIDED DIFFERENCES: what the endpoint answers differently from Postgres on purpose, or cannot answer alike, each
- * with why. Each must STILL differ (a fixed one is removed); nothing else may differ.
+ * with why. Each must STILL differ (a fixed one is removed, oracle/known.ts); nothing else may differ.
  */
-const KNOWN: Array<{ sql: RegExp; kind: string; gap: GapId; why: string }> = [
+const KNOWN: Decided[] = [
   // A NUMERIC COLUMN OF VALUES OF SEVERAL SCALES: Postgres keeps each value's (`1` beside `1.5`), a DuckDB DECIMAL
   // column has one (`1.0`). Only where values of two scales meet in ONE column — a UNION of an integer and a numeric,
   // a window function's default — which the exact programs (src/duck/rewrite.ts ExactColumn) cannot reach
@@ -273,7 +274,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     { group: "decided", name: "numeric values of several scales", sql: MIXED_SCALE },
   ].filter((q) => ONLY === null || ONLY.test(q.name));
   const differences: Array<{ phase: string; group: string; kind: string; name: string; detail: string; sql: string }> = [];
-  const known = new Set<(typeof KNOWN)[number]>();
+  const known = new Set<Decided>();
   // a statement verifies what it is made of when DuckDB answered it with rows, exactly as Postgres, in every phase
   const unproven = new Set<string>();
   // the gaps (src/duck/gaps.ts) the statements met: a refusal that names one, a decided difference
@@ -360,7 +361,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     assert.deepEqual(paths.filter((p) => p.state !== "ready").map((p) => `${p.table} ${p.column} ${p.steps}: ${p.state} ${p.why}`), [], "every path stored is ready");
   }
   // a filtered run asks only some statements: a decision it did not meet is not stale
-  const stale = ONLY !== null ? [] : KNOWN.filter((k) => !known.has(k)).map((k) => `${k.sql}: no longer differs (${k.why}) — remove it from KNOWN`);
+  const stale = ONLY !== null ? [] : staleDecisions(KNOWN, known);
   assert.deepEqual(stale, [], "a decided difference that no longer differs");
   console.log(`duck oracle: gaps met: ${[...met].sort().map(([g, n]) => `${g} ${n}`).join(", ")}`);
   // A DEAD GAP: a refused or decided entry no statement meets (removed, or held by a test it names)
