@@ -147,8 +147,8 @@ export function verdict(want: Answer, got: Answer, inOrder: boolean): { kind: "v
 
 /**
  * DECIDED DIFFERENCES: what the endpoint answers differently from Postgres on purpose, or cannot answer alike, each
- * with why. Each must STILL differ (a fixed one is removed), but one whose truth depends on the machine's math library
- * (`libm`, oracle/known.ts) may agree on this machine; nothing else may differ.
+ * with why. Each must STILL differ (a fixed one is removed), but one whose truth depends on the machine's floating-point
+ * arithmetic (`machineFloat`, oracle/known.ts) may agree on this machine; nothing else may differ.
  */
 const KNOWN: Decided[] = [
   // A NUMERIC COLUMN OF VALUES OF SEVERAL SCALES: Postgres keeps each value's (`1` beside `1.5`), a DuckDB DECIMAL
@@ -163,10 +163,14 @@ const KNOWN: Decided[] = [
   { sql: /stddev\(f4\)/, kind: "text", gap: "float-last-digit", why: "a float's stddev: Youngs-Cramer in Postgres, another accumulation in DuckDB" },
   // (a double's stddev, the 17th digit, differed after the polls' writes while the copy was in key order; now the
   // copy is in the heap's order and the oracle's rows meet DuckDB's accumulation in Postgres's order. A real heap's
-  // updates may still part the two orders: float-last-digit says that last digit may differ)
+  // updates may still part the two orders: float-last-digit says that last digit may differ). In that order it is
+  // alike on aarch64, Linux or macOS, and differs on CI's x86_64 runner (variance 1.6935087641981325e+15 where Postgres
+  // has …328e+15): the machine's arithmetic decides, so `machineFloat`. Its pieces are verified by the rounded one,
+  // "stddev / variance of a double" (oracle/type-matrix.ts), alike on every machine
+  { sql: /^SELECT stddev\(f8\), stddev_samp\(f8\), stddev_pop\(f8\), variance\(f8\), var_samp\(f8\), var_pop\(f8\) FROM typed/, kind: "text", gap: "float-last-digit", why: "a double's variance, the 17th digit: Youngs-Cramer in Postgres, DuckDB's accumulation, apart on x86_64", machineFloat: true },
   // (log10's last digit: it differs with Postgres in a Linux container and Mason on macOS, and agrees with both on
-  // Linux, as in CI, or both on macOS: the machines' math libraries decide, so `libm`)
-  { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", libm: true },
+  // Linux, as in CI, or both on macOS: the machines' math libraries decide, so `machineFloat`)
+  { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", machineFloat: true },
   { sql: /sqrt\(abs\((i4|i8|f8)\)\)/, kind: "answered", gap: "float-overflow", why: "exp past a double's range: Postgres's error, DuckDB's Infinity (or 0 below it)" },
   { sql: /stddev\(DISTINCT (i4|n2)\)|stddev\(n\)/, kind: "text", gap: "numeric-stddev", why: "Postgres's numeric stddev of DISTINCT values, or of an unconstrained numeric, is exact to its scale; DuckDB's a double" },
   { sql: /greatest\(ch, (t|vc)\)/, kind: "value", gap: "char-n-minmax", why: "least(char(5) '', text ''): Postgres compares without the padding" },

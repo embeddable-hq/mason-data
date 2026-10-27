@@ -391,7 +391,8 @@ function* matrix(): Generator<{ name: string; sql: string }> {
   // what Metabase writes and the endpoint refused as unverified (its findings on #517): a float's spread, a
   // smallint difference, a filter on an inet, a time's hour as a time, the session's zone, a numeric's log
   // (rounded: their last digit is each engine's accumulator's, float-last-digit)
-  yield q("stddev / variance of a double", "SELECT round(stddev_pop(f8)::numeric, 9), round(var_pop(f8)::numeric, 9), round(var_samp(f8)::numeric, 9), round(stddev_samp(f8)::numeric, 9) FROM typed WHERE id < 100 AND abs(f8) < 1e6");
+  // (stddev and variance too: the unrounded "f8 stddev/variance" is decided on x86_64, where its last digit parts)
+  yield q("stddev / variance of a double", "SELECT round(stddev_pop(f8)::numeric, 9), round(var_pop(f8)::numeric, 9), round(var_samp(f8)::numeric, 9), round(stddev_samp(f8)::numeric, 9), round(stddev(f8)::numeric, 9), round(variance(f8)::numeric, 9) FROM typed WHERE id < 100 AND abs(f8) < 1e6");
   yield q("smallint minus smallint", "SELECT id, i2 - i2, i2 - (i2 / 2)::smallint, i2 + i2, -i2 FROM typed WHERE i2 BETWEEN -1000 AND 1000 ORDER BY id");
   yield q("an inet equal to a varchar cast", "SELECT id FROM typed WHERE ip = CAST('10.3.6.45'::varchar AS inet) OR ip = CAST('::1' AS inet) ORDER BY id");
   yield q("make_time of a time's hour", "SELECT make_time(extract(hour from tm)::integer, 0, 0.0) AS h, make_time(extract(hour from tm)::integer, extract(minute from tm)::integer, 0.0), count(*) FROM typed GROUP BY 1, 2 ORDER BY 1, 2");
