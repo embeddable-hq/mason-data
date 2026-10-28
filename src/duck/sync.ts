@@ -1563,7 +1563,7 @@ export class Sync {
         if (held !== undefined) { foldInto(held, changes); continue; }
         applied.set(name, changes);
       }
-      await this.applyChanges(applied, lsn, committedAt);
+      await this.applyChanges(applied, { lsn, committedAt });
     });
   }
 
@@ -1575,10 +1575,16 @@ export class Sync {
    * index each of those is a scan of the table's key column, so a batch costs a few scans per table, never one per row. A numeric wider than its copy's DECIMAL is the table's to copy
    * again (`WIDER`), never rounded. A null `lsn` is a piece of a large transaction (src/duck/stream.ts): committed, the
    * position left as it was, so a run that dies before the transaction's last piece applies it again whole. What it
-   * applied is counted by table (`streamStatus`), and the batch's newest commit time kept (null: changes held during a
-   * catch-up, whose time is the batches' that held them).
+   * applied is counted by table (`streamStatus`), and the batch's newest commit time kept.
+   *
+   * `"held"` is THE CHANGES A CATCH-UP HELD, replayed after its poll (`catchUp`): written, and counted, as a batch's are,
+   * but NOT A POSITION of the stream — no `stream_state` row (its LSN and `applied_at` are the batches' that held them),
+   * no table's `synced`, no commit time, and not the stream working again (`streamFailures`): the replay ran on the
+   * writer, whatever the stream is doing (it may be failing).
    */
-  private async applyChanges(batch: ReadonlyMap<string, TableChanges>, lsn: bigint | null, committedAt: Date | null = null): Promise<void> {
+  private async applyChanges(batch: ReadonlyMap<string, TableChanges>, from: { lsn: bigint | null; committedAt: Date | null } | "held"): Promise<void> {
+    const lsn = from === "held" ? null : from.lsn;
+    const committedAt = from === "held" ? null : from.committedAt;
     const w = this.store.writer;
     let source: PgConnection | null = null;
     const started = Date.now();
@@ -1638,7 +1644,7 @@ export class Sync {
       throw e;
     } finally { source?.close(); }
     if (lsn !== null) this.appliedLsn = lsn;
-    this.streamFailures = 0;
+    if (from !== "held") this.streamFailures = 0;
     let moved = false;
     for (const [name, changes] of batch) {
       if (!this.tables.has(name)) continue;
@@ -2058,7 +2064,7 @@ export class Sync {
       const held = this.held.get(t.source);
       this.held.delete(t.source);
       if (held !== undefined && (held.truncated || held.keys.size > 0)) {
-        try { await this.applyChanges(new Map([[t.source, held]]), this.appliedLsn); }
+        try { await this.applyChanges(new Map([[t.source, held]]), "held"); }
         catch (e) {
           const m = e instanceof Error ? e.message : String(e);
           this.refreshStreamed();

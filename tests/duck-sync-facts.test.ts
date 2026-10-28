@@ -104,3 +104,29 @@ test("a copy's last sync is read back at a start and moved by every batch; curre
     assert.equal(events.length, 1, "current again once, never at every batch");
   });
 });
+
+test("the changes a catch-up held, replayed after its poll, are written but are no position of the stream: no table's last sync, no stream_state", async () => {
+  await aRun(async ({ store, sync, st, rows }) => {
+    const s = sync as unknown as {
+      behind: Map<string, { why: string }>; held: Map<string, TableChanges>; rebuilderLane: unknown; streamFailures: number;
+      poll: (lane: unknown, tables: readonly AddedTable[]) => Promise<unknown[]>; catchUp: (t: AddedTable) => Promise<unknown>;
+    };
+    const applied = async (): Promise<number> => Number((await store.writer.runAndReadAll(`SELECT epoch_ms(applied_at) FROM ${MASON_SCHEMA}.stream_state`)).getRowsJS()[0]![0]);
+    const before = { synced: JSON.stringify(st().synced), applied: await applied() };
+    // public.t is behind (a copy just swapped in), its catch-up poll found nothing new (the source is never reached),
+    // and the stream held two changes of it meanwhile
+    s.behind.set("public.t", { why: "after its copy" });
+    s.held.set("public.t", batch({ 11: "held", 1: null }).get("public.t")!);
+    s.rebuilderLane = { conn: store.writer, inFlight: false };
+    s.poll = async () => [{ source: "public.t" }];
+    s.streamFailures = 3;
+    await s.catchUp(T);
+    assert.deepEqual(await rows(), [10, 10, 10], "the held changes are written, and counted");
+    assert.equal(await one(store, "SELECT v FROM public.t WHERE id = 11"), "held");
+    assert.equal(await applied(), before.applied, "stream_state.applied_at is the batches' that held them, never the replay's");
+    assert.equal(JSON.stringify(st().synced), before.synced, "the replay is not the stream's last sync of the table");
+    assert.equal(s.streamFailures, 3, "a replay is not the stream working again");
+  });
+});
+
+async function one(store: DuckStore, sql: string): Promise<unknown> { return (await store.writer.runAndReadAll(sql)).getRowsJS()[0]![0]; }
