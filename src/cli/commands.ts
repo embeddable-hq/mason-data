@@ -24,6 +24,7 @@ import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
 import { SLOW_MS, type RefusedQuery, type SlowQuery } from "./run-server.ts";
+import { logEntries, logLineText } from "../lib/log-buffer.ts";
 import { catalogTable, entryName, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { changesOf } from "./replication-mode.ts";
@@ -1049,7 +1050,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [-
   --start          mason start's own terminal instead (its steps, then only the warnings and errors)
   --requests       the Postgres API's requests, from the run's request log (Mason must be running)
   --failed         with --requests: only the refused and failed ones
-  --json           as data: { lines } (the log's), or with --requests { requests: [{ requestId, startedAt, session,
+  --json           as data: { lines: [{ at, text }] } (the log's entries, oldest first; at is null for a line with no time), or with --requests { requests: [{ requestId, startedAt, session,
                    applicationName, tokenName, user (the mason user), method, outcome (ok, refused, failed), sqlstate, message, detail, hint,
                    rows, durationMs, query, queryTruncated }], keptDays }; next
 `;
@@ -1123,10 +1124,14 @@ export async function logs(argv: string[]): Promise<number> {
     return failed("logs", { message: `${file} does not exist yet`, code: "nothing_yet", why: `Mason has not run for ${t.project.config.name}`, next: [["mason start", "start it, in the background"]] }, { json });
   }
   const text = fs.readFileSync(file, "utf8");
-  const all = text.split("\n");
-  if (all[all.length - 1] === "") all.pop();
-  if (json) { out(jsonText(LOGS, { lines: all.slice(Math.max(0, all.length - lines)) }, [["mason logs --requests", "every statement the Postgres API met"]])); return 0; }
-  for (const l of all.slice(Math.max(0, all.length - lines))) out(l);
+  // WHY THE FILE, even with the run up: it is the whole record (the run's memory keeps only its last LOG_KEPT entries,
+  // src/lib/log-buffer.ts) and the only one when the run is down. The entries are parsed by the buffer's own parser, so
+  // `{ at, text }` is the shape of GET /api/logs too (the run's answer, which a `mason serve` run has no file for).
+  // -n counts entries, a multi-line one being ONE; dev.log's lines (the start's steps, indented under each other) are a line each.
+  const all = logEntries(text, { perLine: f.values.start === true });
+  const last = all.slice(Math.max(0, all.length - lines));
+  if (json) { out(jsonText(LOGS, { lines: last }, [["mason logs --requests", "every statement the Postgres API met"]])); return 0; }
+  for (const l of last) out(logLineText(l));
   if (!f.values.follow) return 0;
   let offset = Buffer.byteLength(text);
   for (;;) {

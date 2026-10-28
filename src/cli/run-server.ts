@@ -33,6 +33,7 @@ import { postgresLink } from "./pg-url.ts";
 import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type PolledTable, type StreamStatus } from "../duck/sync.ts";
+import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { RequestLedger } from "../duck/requests.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 
@@ -73,6 +74,8 @@ export interface RunContext {
   /** the database's URL the run copies from, as the sources file resolved it at the start */
   runUrl: string;
   log: (m: string) => void;
+  /** the run's last log entries (src/lib/log-buffer.ts), fed by the one writer of its log: `/api/logs` */
+  logs: Pick<LogBuffer, "recent" | "capacity">;
   /** the run's copy: each added table's copy as the sync has it, the file it is in, how often it polls */
   duck: { copies: () => CopyState[]; file: string; pollSeconds: number;
     /** a poll of exactly these tables, now (mason sync; src/duck/sync.ts pollNow) */
@@ -248,6 +251,13 @@ export function createRunServer(ctx: RunContext): http.Server {
           const limit = Number(url.searchParams.get("limit") ?? 40);
           if (!Number.isInteger(limit) || limit < 1 || limit > 10_000) throw new Refusal(400, "limit is a whole number of requests, 1 to 10000");
           sendJson(res, 200, { requests: await ctx.duck.requests.recent({ limit, failed: url.searchParams.get("failed") === "1" }), keptDays: ctx.duck.requests.days });
+        } else if (req.method === "GET" && url.pathname === "/api/logs") {
+          // the run's last log entries from memory (mason serve has no file to read): { at, text } each, oldest first
+          const lines = Number(url.searchParams.get("lines") ?? Math.min(40, ctx.logs.capacity));
+          if (!Number.isInteger(lines) || lines < 1 || lines > ctx.logs.capacity) throw new Refusal(400, `lines is a whole number of log entries, 1 to ${ctx.logs.capacity} (all the run keeps)`);
+          const since = url.searchParams.get("since") ?? undefined;
+          if (since !== undefined && !/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(since)) throw new Refusal(400, "since is a UTC time as an entry's `at` has it, like 2026-10-24T10:04:00.000Z");
+          sendJson(res, 200, { lines: ctx.logs.recent({ lines, ...(since !== undefined ? { since } : {}) }), kept: ctx.logs.capacity });
         } else if (req.method === "POST" && url.pathname === "/api/pick") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { table?: unknown; picked?: unknown; columns?: unknown; key?: unknown };
           if (typeof body.table !== "string" || typeof body.picked !== "boolean") throw new Refusal(400, "send { table, picked, columns?, key? }");

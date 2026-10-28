@@ -30,6 +30,10 @@ const readSource = (folder: string, root: string, env: NodeJS.ProcessEnv): Retur
 const newSourceText = (url?: string): string =>
   (sourcesModule.newSourceText as ((u?: string) => string) | undefined)?.(url) ?? `kind: postgres\nurl: ${url ?? "$" + "{DATABASE_URL}"}\ntables: {}\n`;
 
+// the module is imported when the tests run, so the file loads at a commit without it and the test fails by name
+const { LogBuffer } = await import("../src/lib/log-buffer.ts" as string).catch(() => ({ LogBuffer: class { capacity = 0; push(): void { return; } recent(): never[] { return []; } } })) as typeof import("../src/lib/log-buffer.ts");
+const runLog = new LogBuffer(3);
+
 const col = (name: string, type = "text") => ({ name, type, notNull: false, comment: null });
 const table = (o: Partial<SourceTable> & { table: string }): SourceTable => ({
   source: `public.${o.table}`, schema: "public", key: ["id"], rows: 3, bytes: 8192, comment: null,
@@ -81,6 +85,7 @@ const ctx: RunContext = {
   // the file as the run reads it: its URL resolved from no environment (the test's file writes it whole)
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app",
+  logs: runLog,
   duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, requests },
 };
 const server = createRunServer(ctx);
@@ -421,4 +426,22 @@ test("every error answer carries the Failure shape beside its sentence, the catc
   assert.match(JSON.parse(notJson.text).failure.message, /^the body is not JSON: /);
   const limit = JSON.parse((await call("GET", "/api/requests?limit=0")).text);
   assert.deepEqual(limit, { error: "limit is a whole number of requests, 1 to 10000", failure: { code: "usage", message: "limit is a whole number of requests, 1 to 10000", next: [] } });
+});
+
+test("GET /api/logs: the run's last entries from memory, { at, text } oldest first, under the guard; lines and since narrow, a bad one is a sentence", async () => {
+  assert.equal((await call("GET", "/api/logs", { cookie: null })).status, 403, "the guard applies");
+  assert.equal((await call("GET", "/api/logs", { host: `evil.example:${ctx.port}` })).status, 421);
+  const bearer = await call("GET", "/api/logs", { cookie: null, bearer: "t0ken-of-this-run" });
+  assert.equal(bearer.status, 200, "the commands' Bearer token passes");
+  assert.deepEqual(JSON.parse(bearer.text), { lines: [], kept: 3 });
+  for (const t of ["10:00:00.000", "10:00:01.000", "10:00:02.000", "10:00:03.000"]) runLog.push(`2026-10-24T${t}Z [sync] at ${t}\n    its second line\n`);
+  const get = async (q: string) => { const r = await call("GET", `/api/logs${q}`); return { status: r.status, body: JSON.parse(r.text) as { lines?: Array<{ at: string; text: string }>; kept?: number; error?: string } }; };
+  const all = await get("");
+  assert.equal(all.body.kept, 3);
+  assert.deepEqual(all.body.lines, ["10:00:01.000", "10:00:02.000", "10:00:03.000"].map((t) => ({ at: `2026-10-24T${t}Z`, text: `[sync] at ${t}\n    its second line` })), "bounded to what it keeps, a multi-line entry ONE");
+  assert.deepEqual((await get("?lines=2")).body.lines!.map((l) => l.at), ["2026-10-24T10:00:02.000Z", "2026-10-24T10:00:03.000Z"]);
+  assert.deepEqual((await get("?since=2026-10-24T10:00:02.000Z")).body.lines!.map((l) => l.at), ["2026-10-24T10:00:03.000Z"]);
+  const bad = await get("?lines=4");
+  assert.deepEqual([bad.status, bad.body.error], [400, "lines is a whole number of log entries, 1 to 3 (all the run keeps)"]);
+  assert.equal((await get("?since=yesterday")).status, 400);
 });
