@@ -790,6 +790,11 @@ export class Sync {
   private catchingUp: { source: string; phase: "polling" | "applying"; startedAt: number } | null = null;
   /** the stream's last failure and when it starts again; cleared when it starts */
   private streamFailure: { error: string; retryAt: number } | null = null;
+  /** A WHOLE-SYNC FAILURE NOT YET OVER, as its event said it (`table: null`): the stream stopped, over when it next applies
+   *  a batch; the publication and slot could not be made ready, over when a pass makes them so; the database's attach,
+   *  over when an attach succeeds. Its end is a `recovered` event of no table, which lets the next such failure be said again
+   *  (src/duck/events.ts: a failure said word for word within an hour is one event unless it recovered between) */
+  private readonly wholeFailure: { stream: string | null; prepare: string | null; attach: string | null } = { stream: null, prepare: null, attach: null };
   /** the database's position as last read (`databasePosition`), and the read in flight */
   private dbPosition: { lsn: bigint; at: number } | { error: string; at: number } | null = null;
   private dbPositionRead: Promise<void> | null = null;
@@ -839,6 +844,14 @@ export class Sync {
   private event(e: SyncEventInput): void {
     try { this.onEvent(e); }
     catch (x) { this.log(`the sync's event (${e.kind}${e.table ? ` ${e.table}` : ""}) could not be recorded: ${x instanceof Error ? x.message : String(x)}`); }
+  }
+
+  /** a whole-sync failure (`wholeFailure`) is over: said once, as a `recovered` event of no table */
+  private recovered(what: keyof Sync["wholeFailure"], words: string): void {
+    const was = this.wholeFailure[what];
+    if (was === null) return;
+    this.wholeFailure[what] = null;
+    this.event({ kind: "recovered", table: null, message: `${words} (it had failed: ${was.split("\n")[0]})` });
   }
 
   /** `f` on the writer's next turn: once every job queued before it has ended, so no other job's statement lands inside
@@ -987,20 +1000,25 @@ export class Sync {
    * `poll_state.polled_at` in their own transaction, and a copy's `copied_at` is recorded right after its swap — so a
    * copy recorded at or after its table's `polled_at` was last brought current by that copy (its time the copy's
    * `seconds`), else by a poll (its time unknown: null). In replication mode the stream's last batch
-   * (`stream_state.applied_at`) is newer for a table it streamed; a table not caught up is left at its copy.
+   * (`stream_state.applied_at`) is newer for a table it streamed; a table not caught up is left at its copy, and one the
+   * named publication does not carry (`unpublished`: never streamed, so the stream's time is not its own) at its copy
+   * or poll. `only`: those tables alone, read again (the pass that found them out of the publication), the others'
+   * last sync kept as it is.
    */
-  private async readSynced(): Promise<void> {
+  private async readSynced(only?: ReadonlySet<string>): Promise<void> {
     const r = await this.store.writer.runAndReadAll(`SELECT p.source, epoch_ms(p.polled_at), epoch_ms(c.copied_at), c.seconds FROM ${MASON_SCHEMA}.poll_state p ` +
       `LEFT JOIN ${MASON_SCHEMA}.copy_state c USING (source) WHERE p.polled_at IS NOT NULL`);
     const streamed = this.replication === null ? [] : (await this.store.writer.runAndReadAll(`SELECT epoch_ms(applied_at) FROM ${MASON_SCHEMA}.stream_state ` +
       `WHERE slot = $1 AND applied_at IS NOT NULL`, [this.replication.slot])).getRowsJS();
     const streamMs = streamed.length ? Number(streamed[0]![0]) : null;
-    this.synced.clear();
+    if (only === undefined) this.synced.clear();
     for (const [source, polled, copied, seconds] of r.getRowsJS() as Array<[string, bigint | number, bigint | number | null, number | null]>) {
+      if (only !== undefined && !only.has(source)) continue;
       const at = Number(polled);
       const s: Synced = copied !== null && Number(copied) >= at ? { at: new Date(Number(copied)).toISOString(), seconds, by: "copy" }
         : { at: new Date(at).toISOString(), seconds: null, by: "poll" };
-      this.synced.set(source, streamMs !== null && streamMs > Date.parse(s.at) && !this.behind.has(source) ? { at: new Date(streamMs).toISOString(), seconds: null, by: "stream" } : s);
+      const streamedIt = !this.behind.has(source) && !this.unpublished.has(source);
+      this.synced.set(source, streamMs !== null && streamMs > Date.parse(s.at) && streamedIt ? { at: new Date(streamMs).toISOString(), seconds: null, by: "stream" } : s);
     }
   }
   schema(): PgSchema { return this.currentSchema; }
@@ -1259,6 +1277,10 @@ export class Sync {
           await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error });
         } else if (st.error?.startsWith("replication: ")) await this.record({ ...st, error: null });
       }
+      // a table the publication does not carry was never streamed: its last sync is its copy's or its poll's, never
+      // the stream's time a start credited it with (`readSynced` at `open`, before the publication was read)
+      const credited = tables.filter((t) => this.unpublished.has(t.source) && this.synced.get(t.source)?.by === "stream").map((t) => t.source);
+      if (credited.length) await this.readSynced(new Set(credited));
       // a table the publication stopped carrying leaves the stream; one it carries now may join
       this.refreshStreamed();
     });
@@ -1362,6 +1384,7 @@ export class Sync {
       // one event for the stream, never one per table it kept current (each table's error says it); its failures in a
       // row are left out of the words, so a stream failing for good is one event, not one per restart
       this.event({ kind: "stream_failed", table: null, message: `${m} (the stream starts again by itself; the copies serve as they are)` });
+      this.wholeFailure.stream = m;
       // on the tables the stream kept current when it failed (one being caught up says its own)
       await this.onWriter(async () => { for (const source of this.streamed.keys()) if (!this.held.has(source)) await this.record({ ...this.states.get(source)!, error: m }); });
       this.timer = setTimeout(() => this.kick(), wait);
@@ -1563,7 +1586,7 @@ export class Sync {
         if (held !== undefined) { foldInto(held, changes); continue; }
         applied.set(name, changes);
       }
-      await this.applyChanges(applied, lsn, committedAt);
+      await this.applyChanges(applied, { lsn, committedAt });
     });
   }
 
@@ -1575,10 +1598,16 @@ export class Sync {
    * index each of those is a scan of the table's key column, so a batch costs a few scans per table, never one per row. A numeric wider than its copy's DECIMAL is the table's to copy
    * again (`WIDER`), never rounded. A null `lsn` is a piece of a large transaction (src/duck/stream.ts): committed, the
    * position left as it was, so a run that dies before the transaction's last piece applies it again whole. What it
-   * applied is counted by table (`streamStatus`), and the batch's newest commit time kept (null: changes held during a
-   * catch-up, whose time is the batches' that held them).
+   * applied is counted by table (`streamStatus`), and the batch's newest commit time kept.
+   *
+   * `"held"` is THE CHANGES A CATCH-UP HELD, replayed after its poll (`catchUp`): written, and counted, as a batch's are,
+   * but NOT A POSITION of the stream — no `stream_state` row (its LSN and `applied_at` are the batches' that held them),
+   * no table's `synced`, no commit time, and not the stream working again (`streamFailures`): the replay ran on the
+   * writer, whatever the stream is doing (it may be failing).
    */
-  private async applyChanges(batch: ReadonlyMap<string, TableChanges>, lsn: bigint | null, committedAt: Date | null = null): Promise<void> {
+  private async applyChanges(batch: ReadonlyMap<string, TableChanges>, from: { lsn: bigint | null; committedAt: Date | null } | "held"): Promise<void> {
+    const lsn = from === "held" ? null : from.lsn;
+    const committedAt = from === "held" ? null : from.committedAt;
     const w = this.store.writer;
     let source: PgConnection | null = null;
     const started = Date.now();
@@ -1638,7 +1667,7 @@ export class Sync {
       throw e;
     } finally { source?.close(); }
     if (lsn !== null) this.appliedLsn = lsn;
-    this.streamFailures = 0;
+    if (from !== "held") { this.streamFailures = 0; this.recovered("stream", "the stream applies changes again"); }
     let moved = false;
     for (const [name, changes] of batch) {
       if (!this.tables.has(name)) continue;
@@ -1857,6 +1886,7 @@ export class Sync {
       catch (e) {
         const m = `replication: ${e instanceof Error ? e.message : String(e)}`;
         this.event({ kind: "stream_failed", table: null, message: m });
+        this.wholeFailure.prepare = m;
         // a table copied before keeps serving its copy; one never copied is failed, so mason status says why
         await this.onWriter(async () => {
           for (const t of this.tables.values()) { const st = this.states.get(t.source)!; await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }); }
@@ -1864,6 +1894,7 @@ export class Sync {
         await this.rebuildSchema();
         throw e;
       }
+      this.recovered("prepare", "the publication and the slot are ready again");
       // the stream starts once the slot is known, and runs from then on whatever the passes and rebuilds do
       this.startStream();
     }
@@ -1871,6 +1902,7 @@ export class Sync {
     catch (e) {
       const m = e instanceof Error ? e.message : String(e);
       this.event({ kind: "source_unreachable", table: null, message: `could not attach the database: ${m}` });
+      this.wholeFailure.attach = m;
       // a table copied before keeps serving its copy (and its place in the catalog): the source being away is its error,
       // not a reason to copy it whole again when the source is back; one never copied is failed
       await this.onWriter(async () => {
@@ -1883,6 +1915,7 @@ export class Sync {
       await this.rebuildSchema();
       throw new Error(`DuckDB could not attach ${this.source.database} on ${this.source.host}:${this.source.port}: ${m}`);
     }
+    this.recovered("attach", "the database is attached again");
     try { await this.work(); }
     finally { await this.onWriter(() => this.detach()); }
     await this.rebuildSchema();
@@ -2058,7 +2091,7 @@ export class Sync {
       const held = this.held.get(t.source);
       this.held.delete(t.source);
       if (held !== undefined && (held.truncated || held.keys.size > 0)) {
-        try { await this.applyChanges(new Map([[t.source, held]]), this.appliedLsn); }
+        try { await this.applyChanges(new Map([[t.source, held]]), "held"); }
         catch (e) {
           const m = e instanceof Error ? e.message : String(e);
           this.refreshStreamed();

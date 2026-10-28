@@ -1136,7 +1136,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   stream that failed, the database out of reach, a table current again, and each restart of the run — a line each,
   newest last (a failure repeated word for word is said once an hour). Both are kept MASON_REQUEST_LOG_DAYS days
   (default 7) in the run's copy, and read through the running Mason. With --running, the statements running now
-  instead, one per session (mason cancel <session> stops one).
+  instead, one per session, each with its number (mason cancel <session> --statement <n> stops one).
 
     mason logs
     mason logs -f                 keep printing new lines as Mason works, until Ctrl-C
@@ -1205,7 +1205,7 @@ export function requestLine(r: LedgerRequest, st: Style): string {
 /** One statement running now on one line (src/api/postgres/server.ts RunningStatement): its session, how long, who, what. */
 export function runningLine(r: RunningStatement): string {
   const who = `${r.applicationName || "(no application_name)"}${r.user ? ` (user ${r.user})` : ""}`;
-  return `session ${String(r.session).padEnd(5)}  ${spanText(r.runningMs / 1000).padStart(8)}  ${`${n(r.rows)} row${r.rows === 1 ? "" : "s"} sent`.padStart(14)}  ${who}  ` +
+  return `session ${String(r.session).padEnd(5)}  statement ${String(r.statement).padEnd(6)}  ${spanText(r.runningMs / 1000).padStart(8)}  ${`${n(r.rows)} row${r.rows === 1 ? "" : "s"} sent`.padStart(14)}  ${who}  ` +
     `${oneLine(r.query, 120) || "(no statement)"}`;
 }
 
@@ -1276,7 +1276,7 @@ async function runningLogs(json: boolean): Promise<number> {
     if (reply.status !== 200) return failed("logs", runFailure(reply, [["mason logs", "Mason's log"]]), { json });
     const running = reply.body.running as RunningStatement[];
     const next: NextStep[] = running.length
-      ? [[`mason cancel ${running[0]!.session}`, "stop a session's statement, as a client's cancel does"], ["mason logs --requests", "the statements answered, refused and cancelled"]]
+      ? [[`mason cancel ${running[0]!.session} --statement ${running[0]!.statement}`, "stop a session's statement, as a client's cancel does"], ["mason logs --requests", "the statements answered, refused and cancelled"]]
       : [["mason logs --requests", "the statements answered, refused and cancelled"]];
     if (json) { out(jsonText(LOGS, { running }, next)); return 0; }
     const st = styleOut();
