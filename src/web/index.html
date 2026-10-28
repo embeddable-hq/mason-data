@@ -6,69 +6,78 @@
 <title>Mason</title>
 <!-- no favicon request: an empty one, inline (img-src allows data:) -->
 <link rel="icon" href="data:,">
+<!-- every file Mason's own, from its allowlist (src/cli/run-server.ts PAGE_ROUTES): the fonts are app.css's, vendored -->
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/vendor/uplot-1.6.32/uPlot.min.css">
 <script type="module" src="/app.js"></script>
 </head>
 <body>
-<header>
-  <h1>Mason</h1>
-  <p id="where" class="where"></p>
-  <p id="updated" class="updated" aria-live="polite"></p>
+<header class="topbar">
+  <div class="topbar-in">
+    <h1 class="brand"><span class="logo" aria-hidden="true"></span>Mason</h1>
+    <span class="slash" aria-hidden="true">/</span>
+    <p id="where" class="where"></p>
+    <span id="badge"></span>
+    <p id="updated" class="updated" aria-live="polite"></p>
+  </div>
+  <!-- the pages: one section each, the one shown chosen by the URL's hash (src/web/app.js); the links work before the script runs -->
+  <nav id="nav" class="tabs" aria-label="Pages"><ul><li><a href="#status">Status</a></li><li><a href="#tables">Tables</a></li><li><a href="#queries">Queries</a></li><li><a href="#users">Users</a></li><li><a href="#usage">Usage</a></li><li><a href="#logs">Logs</a></li></ul></nav>
 </header>
-<!-- the pages: one section each, the one shown chosen by the URL's hash (src/web/app.js); the links work before the script runs -->
-<nav id="nav" aria-label="Pages"><ul><li><a href="#status">Status</a></li><li><a href="#tables">Tables</a></li><li><a href="#queries">Queries</a></li><li><a href="#users">Users</a></li><li><a href="#usage">Usage</a></li><li><a href="#logs">Logs</a></li></ul></nav>
 <div id="poll"></div>
 <main>
   <section id="page-status" aria-labelledby="status-h">
-    <h2 id="status-h">Status</h2>
-    <div id="status"><p class="dim">Asking Mason…</p></div>
+    <div class="page-head"><h2 id="status-h">Status</h2><p class="desc">What <code>mason status</code> says: whether the copy is ready, the database, the sync and the statements.</p></div>
+    <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
   <section id="page-tables" aria-labelledby="tables-h" hidden>
-    <h2 id="tables-h">Tables</h2>
-    <p class="lead">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p>
-    <p class="search"><label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders">
-      <label for="tables-show">Show</label> <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="not-added">Not added</option></select></p>
+    <div class="page-head"><h2 id="tables-h">Tables</h2><p class="desc">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p></div>
+    <div id="tables-cards"></div>
+    <div class="toolbar">
+      <label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders">
+      <label for="tables-show">Show</label> <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="not-added">Not added</option></select>
+    </div>
     <div id="tables"></div>
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>
-    <h2 id="queries-h">Queries</h2>
+    <div class="page-head"><h2 id="queries-h">Queries</h2><p class="desc">The statements the Postgres API answers: who is connected, what runs now, and every statement that ran, as <code>mason logs</code> lists them.</p></div>
+    <div id="queries-kpis"></div>
     <h3>Connected now</h3>
-    <p class="lead">The clients with a session open: a row per user and client.</p>
     <div id="connected-now"></div>
     <h3>Running now</h3>
-    <p class="lead">The statements running now, as <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.</p>
+    <p class="lead">As <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.</p>
     <div id="running-now"></div>
     <h3>Request log</h3>
-    <p class="lead">The statements the Postgres API answered, refused or cancelled, as <code>mason logs --requests</code> lists them. Since is an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone.</p>
-    <form id="request-filters" autocomplete="off">
-      <label for="rq-status">Status</label>
-      <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select>
-      <label for="rq-since">Since</label>
-      <input id="rq-since" name="since" placeholder="2h" spellcheck="false">
-      <label for="rq-user">User</label>
-      <input id="rq-user" name="user" spellcheck="false">
-      <label for="rq-client">Client</label>
-      <input id="rq-client" name="client" spellcheck="false">
-      <button type="submit">Filter</button>
-      <button type="button" data-clear-filters>Clear</button>
+    <p class="lead">The statements answered, refused or cancelled, as <code>mason logs --requests</code> lists them. Since is an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone.</p>
+    <form id="request-filters" class="toolbar" autocomplete="off">
+      <div class="field"><label for="rq-status">Status</label>
+        <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
+      <div class="field"><label for="rq-since">Since</label>
+        <input id="rq-since" name="since" placeholder="2h" spellcheck="false"></div>
+      <div class="field"><label for="rq-user">User</label>
+        <input id="rq-user" name="user" spellcheck="false"></div>
+      <div class="field"><label for="rq-client">Client</label>
+        <input id="rq-client" name="client" spellcheck="false"></div>
+      <div class="actions"><button type="submit" class="primary">Filter</button>
+        <button type="button" data-clear-filters>Clear</button></div>
     </form>
     <div id="request-log"></div>
   </section>
   <section id="page-users" aria-labelledby="users-h" hidden>
-    <h2 id="users-h">Users</h2>
-    <p class="lead">A user of the Postgres API: a name and a password that does not expire, for a BI tool or an app. The same users as <code>mason user</code>.</p>
-    <div id="added"></div>
-    <form id="add-user" autocomplete="off">
+    <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">A user of the Postgres API: a name and a password that does not expire, for a BI tool or an app. The same users as <code>mason user</code>.</p></div>
+    <form id="add-user" class="formcard" autocomplete="off">
       <label for="user-name">Name</label>
       <input id="user-name" name="name" required placeholder="metabase" spellcheck="false" autocapitalize="off">
-      <button type="submit">Add a user</button>
+      <button type="submit" class="primary">Add a user</button>
     </form>
     <div id="action"></div>
+    <div id="added"></div>
     <div id="users"></div>
   </section>
   <section id="page-usage" aria-labelledby="usage-h" hidden>
-    <h2 id="usage-h">Usage</h2>
-    <h3>Statements</h3>
+    <div class="page-head"><h2 id="usage-h">Usage</h2><p class="desc">What the Postgres API answered over the last 24 hours and each copy's size, as <code>mason usage</code> prints them.</p></div>
+    <div id="usage-kpis"></div>
+    <div id="usage-charts"></div>
+    <h3>The last day and the last week</h3>
     <div id="usage-queries"></div>
     <h3>The last 24 hours, an hour a line</h3>
     <div id="usage-hourly"></div>
@@ -76,8 +85,8 @@
     <div id="usage-sizes"></div>
   </section>
   <section id="page-logs" aria-labelledby="logs-h" hidden>
-    <h2 id="logs-h">Logs</h2>
-    <h3>The sync's events</h3>
+    <div class="page-head"><h2 id="logs-h">Logs</h2><p class="desc">The sync's events, as <code>mason logs --events</code> lists them, and the run's own log behind a details.</p></div>
+    <div class="toolbar"><label class="check" for="logs-failures-only"><input type="checkbox" id="logs-failures-only"> Failures only</label></div>
     <div id="logs-events"></div>
     <div id="logs-run"></div>
   </section>

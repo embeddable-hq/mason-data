@@ -4,14 +4,24 @@
  * disk, the sessions open, the warnings), the changes the stream carries (replication mode: its position, lag, last
  * batch and the slot's hold on the database's WAL), the statements of the last day and week, the copies not finished (a
  * bar each, only while there are any), and the recent errors (the sync's and the statements'). The slow and the refused
- * statements are the Queries page's. Reads `/api/state` every poll, the request log's every 30 s. Never the engine's name.
+ * statements are the Queries page's. Reads `/api/state` every poll, the request log's every 30 s, the last 24 hours of
+ * usage (the cards' sparklines) every 60 s. Never the engine's name.
+ *
+ * Laid out as a dashboard (docs/WEB-UI.md "Presentation"): the word with a big dot, then KPI cards (the copies in all,
+ * their rows, the last sync, the copy's file, the last day's statements and their p95 — each its own fact, said once,
+ * with a sparkline of the last 24 hours where one helps), the copies not finished, the ONE table of the other facts,
+ * the stream, the statements, the recent errors.
  */
-import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText } from "../shared.js";
+import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
+  card, cards, details, createOpenSet, skeleton } from "../shared.js";
+import { spark, seriesOf, drawable } from "../charts.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`). */
 export const RECENT_ERRORS = 5;
 
 const POLL_MS = 2000;
+/** The last 24 hours an hour a point: the cards' sparklines (the Usage page's own read, src/web/pages/usage.js HOURLY). */
+export const HOURLY = "/api/usage?since=24h&step=3600";
 
 /**
  * What a copying table's line says, and how full its bar is: src/cli/readiness.ts `copyingText`, line for line, so the
@@ -85,7 +95,51 @@ export function totalsText(t, now = Date.now()) {
 export function renderHealth(s) {
   if (!s.tables.some((t) => t.added) || !s.readiness) return "";
   const word = readinessWord(s.readiness);
-  return `<p class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : ""}">${esc(word)}</p>`;
+  return `<div class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : "warn"}" role="status"><span class="dot" aria-hidden="true"></span><span class="word">${esc(word)}</span></div>`;
+}
+
+/** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
+export const SPARKS = { rows: ["copyRows", "Rows copied"], "copy-bytes": ["copyBytes", "The copy's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
+
+/** The sparklines' specs from the usage answer (`/api/usage`'s body; anything else draws none): what `charts()` returns. */
+export function sparkSpecs(usage) {
+  const samples = usage && Array.isArray(usage.samples) ? usage.samples : [];
+  return Object.fromEntries(Object.entries(SPARKS).map(([key, [field, label]]) => [key, { kind: "spark", label, ...seriesOf(samples, field) }]).filter(([, spec]) => drawable(spec)));
+}
+
+/**
+ * THE KPI CARDS: the copies in all (synced of added, the failed), their rows, the last sync (how long ago, and when),
+ * the copy's file (its size, or why it is unknown), and the last day's statements and their p95 from the request log
+ * (`q`: `/api/queries`' body, or `{ failure }`). Each card's sparkline is the last 24 hours (`usage`), only where there
+ * are two hours to draw; its numbers are the card's text either way. These facts are said here, and not in the facts table.
+ */
+export function renderKpis(s, o = {}) {
+  const now = o.now ?? Date.now();
+  const sparks = sparkSpecs(o.usage);
+  const line = (key) => sparks[key] ? spark(key, `${SPARKS[key][1]}, the last 24 hours an hour a point`) : "";
+  const list = [];
+  const t = s.totals;
+  // as renderStatus judges it: a table added (the totals count what the sources file names)
+  const added = Boolean(t) && s.tables.some((x) => x.added);
+  if (added) list.push(
+    card("Tables synced", `${n(t.copied)} of ${n(t.added)}`, `added${t.failed ? `, ${n(t.failed)} failed` : ""}`, "", t.failed ? "bad" : ""),
+    card("Rows", n(t.rows), "", line("rows")),
+    t.syncedAt === null ? card("Last sync", "none yet") : card("Last sync", `${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`, `${utcText(t.syncedAt)} UTC`));
+  const d = s.disk;
+  const copyBytes = s.engine.bytes ?? (d && typeof d.copyBytes === "number" ? d.copyBytes : null);
+  if (added || copyBytes !== null) list.push(copyBytes === null ? card("The copy's file", "unknown", "its size could not be read") : card("The copy's file", fileSize(copyBytes), "", line("copy-bytes")));
+  const q = o.queries;
+  if (added && q !== undefined) {
+    if ("failure" in q) list.push(card("Statements, last day", "unknown", `could not read them: ${firstLine(q.failure.message)}`));
+    else {
+      const day = q.queries.day;
+      const bad = day.refused + day.failed + day.cancelled;
+      list.push(card("Statements, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : ""),
+        card("p95, last day", day.durationMs === null ? "–" : `${n(day.durationMs.p95)} ms`,
+          day.durationMs === null ? "no statement completed" : `average ${n(day.durationMs.avg)} ms · p50 ${n(day.durationMs.p50)} ms`, line("p95")));
+    }
+  }
+  return cards(list);
 }
 
 /** A fact's row; `warn` marks one the reader should act on. */
@@ -111,9 +165,8 @@ export function renderStream(s, now = Date.now()) {
 }
 
 /**
- * THE FACTS, ONE table of what `mason status` says: the database and how its changes arrive (`sourceRows`), the
- * warnings, Mason's version, how long it has been up and its restarts (`engine`), the copies in all (`totals`), the
- * copy's file (`engine.bytes`), the free disk and what a running copy is projected to add (`disk`), the sessions open
+ * THE FACTS, ONE table of what `mason status` says beside the cards: the database and how its changes arrive (`sourceRows`), the
+ * warnings, Mason's version, how long it has been up and its restarts (`engine`), the free disk and what a running copy is projected to add (`disk`), the sessions open
  * (`sessions`). A fact the run did not say is absent; one it could not read is said as the CLI says it (its reason, never a 0). Mason's, the disk's, the restarts' and the sessions' rows are the CLI's (`masonRow`, `diskRows`, `restartsRows`, `sessionsRows`).
  */
 export function renderFacts(s, now = Date.now()) {
@@ -121,14 +174,8 @@ export function renderFacts(s, now = Date.now()) {
   const e = s.engine;
   if (typeof e.version === "string") rows.push(factRow(...masonRow(e)));
   rows.push(...restartsRows(e.restarts, now).map(([k, v]) => factRow(k, v, k === "Restarts")));
-  const t = s.totals;
-  if (t && t.added > 0) rows.push(
-    factRow("Tables synced", `${n(t.copied)} of ${n(t.added)} added${t.failed ? `, ${n(t.failed)} failed` : ""}`),
-    factRow("Rows", n(t.rows)),
-    factRow("Last sync", t.syncedAt === null ? "none yet" : `${utcText(t.syncedAt)} UTC · ${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`));
+  // the copies in all, their rows, the last sync and the copy's file are the cards' (`renderKpis`): a fact in ONE place
   const d = s.disk;
-  const copyBytes = e.bytes ?? (d && typeof d.copyBytes === "number" ? d.copyBytes : null);
-  if (t && t.added > 0 || copyBytes !== null) rows.push(factRow("The copy's file", copyBytes === null ? "its size could not be read" : fileSize(copyBytes)));
   rows.push(...diskRows(d).map(([k, v]) => factRow(k, v, d.freeBytes === null || (d.projectedBytes !== null && d.projectedBytes > d.freeBytes))));
   rows.push(...sessionsRows(s.sessions).map(([k, v]) => factRow(k, v)));
   return `<table class="facts-table"><caption>Mason</caption><tbody>${rows.join("")}</tbody></table>`;
@@ -139,7 +186,7 @@ export function renderFacts(s, now = Date.now()) {
  * failed, or copied but not kept current — and nothing once every copy is done. With no table added, the commands'
  * sentence and what adds one.
  */
-export function renderProgress(s) {
+export function renderProgress(s, isOpen = () => false) {
   const picked = s.tables.filter((t) => t.added);
   if (!picked.length) {
     return `<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>` +
@@ -154,7 +201,7 @@ export function renderProgress(s) {
     `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Copy</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
       `<tr class="t-${l.state}"><th scope="row">${code(t.table)}</th>` +
       `<td class="bar"><progress max="100" value="${Math.floor(Math.max(0, Math.min(1, l.fraction)) * 100)}"></progress> <span class="pct">${percent(l.fraction)}</span></td>` +
-      `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? `<details><summary>the whole error</summary><pre>${esc(t.error)}</pre></details>` : ""}</td></tr>`).join("")}</tbody></table>`;
+      `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, isOpen(`error:${t.table}`)) : ""}</td></tr>`).join("")}</tbody></table>`;
 }
 
 /**
@@ -209,15 +256,15 @@ export function renderRecentErrors(events, requests) {
 }
 
 /**
- * THE STATUS SECTION from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`: each the body,
- * or `{ failure }`; `o.now` the clock): the word, the facts, the stream, the statements, the copies not finished, the
- * recent errors. Never the engine's name.
+ * THE STATUS SECTION from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`, `o.usage`:
+ * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the cards,
+ * the copies not finished, the facts, the stream, the statements, the recent errors. Never the engine's name.
  */
 export function renderStatus(s, o = {}) {
   const now = o.now ?? Date.now();
   const added = s.tables.some((t) => t.added);
-  return renderHealth(s) + renderFacts(s, now) + renderStream(s, now) + (added ? renderQueries(o.queries) : "") + renderProgress(s) +
-    (added ? renderRecentErrors(o.events, o.requests) : "");
+  return renderHealth(s) + renderKpis(s, { ...o, now }) + renderProgress(s, o.open) + renderFacts(s, now) + renderStream(s, now) +
+    (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests) : "");
 }
 
 /** What the page reads every 30 s beside the state: the request log's summary and the recent errors. */
@@ -230,15 +277,20 @@ export const page = {
   id: "status",
   title: "Status",
   create(ctx) {
+    // the details open (a copy's whole error), by key: a poll rewrites the section, and they stay open
+    const opened = createOpenSet();
     return {
-      reads: () => [{ path: "/api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 }))],
+      model: { open: opened.open },
+      reads: () => [{ path: "/api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }],
       actions: {},
       view() {
         const st = ctx.read("/api/state");
-        if (!st?.body) return { status: st?.failure ? "" : `<p class="dim">Asking Mason…</p>` };
+        if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
         const [queries, events, requests] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests }) };
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, usage: ctx.read(HOURLY)?.body, open: opened.has }) };
       },
+      toggle: (target) => opened.toggle(target),
+      charts: () => sparkSpecs(ctx.read(HOURLY)?.body),
     };
   },
 };

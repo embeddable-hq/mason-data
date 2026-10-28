@@ -315,6 +315,16 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/pages/users.js": ["pages/users.js", "text/javascript; charset=utf-8"],
   "/pages/usage.js": ["pages/usage.js", "text/javascript; charset=utf-8"],
   "/pages/logs.js": ["pages/logs.js", "text/javascript; charset=utf-8"],
+  // the charts (src/web/charts.js over uPlot) and what the page vendors whole, pinned, with its licence
+  // (src/web/vendor/README.md): served from here, never fetched from elsewhere — a box without internet reads it all
+  "/charts.js": ["charts.js", "text/javascript; charset=utf-8"],
+  "/vendor/README.md": ["vendor/README.md", "text/plain; charset=utf-8"],
+  "/vendor/geist-1.7.2/Geist-Variable.woff2": ["vendor/geist-1.7.2/Geist-Variable.woff2", "font/woff2"],
+  "/vendor/geist-1.7.2/GeistMono-Variable.woff2": ["vendor/geist-1.7.2/GeistMono-Variable.woff2", "font/woff2"],
+  "/vendor/geist-1.7.2/LICENSE.txt": ["vendor/geist-1.7.2/LICENSE.txt", "text/plain; charset=utf-8"],
+  "/vendor/uplot-1.6.32/uPlot.esm.js": ["vendor/uplot-1.6.32/uPlot.esm.js", "text/javascript; charset=utf-8"],
+  "/vendor/uplot-1.6.32/uPlot.min.css": ["vendor/uplot-1.6.32/uPlot.min.css", "text/css; charset=utf-8"],
+  "/vendor/uplot-1.6.32/LICENSE.txt": ["vendor/uplot-1.6.32/LICENSE.txt", "text/plain; charset=utf-8"],
 };
 
 /**

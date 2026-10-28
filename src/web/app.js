@@ -28,7 +28,11 @@
  *                      promise (the shell writes the page again once it settles)
  *       submit?(form, FormData)  a form submitted: null when not its, else a promise (the shell prevents the default)
  *       input?(target)  an input changed: null when not its
- *       toggle?(target)  a <details> opened or closed: null when not its, else a value or a promise (as `click`)
+ *       toggle?(target)  a <details> opened or closed: null when not its, else a value or a promise (as `click`);
+ *                      a details that must stay open across a refresh is `details(key, …)` of shared.js, its open set
+ *                      `createOpenSet()` in the page's state, whose `toggle` this is
+ *       charts?()      { <holder key>: spec }: the charts drawn in its holders after each write (src/web/charts.js; a
+ *                      progressive addition: every number a chart draws is also text)
  *       model?         its state, for the tests
  *     }
  *     ctx = { ask(path, init) → { body } | { failure }, read(path) → { body, failure } | undefined (body: the last
@@ -37,7 +41,8 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, createAsk, renderFailure, updatedText } from "./shared.js";
+import { esc, badge, createAsk, renderFailure, updatedText } from "./shared.js";
+import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
 import { page as queriesPage } from "./pages/queries.js";
@@ -47,6 +52,7 @@ import { page as logsPage } from "./pages/logs.js";
 
 // every renderer the tests import from here, wherever it lives now
 export * from "./shared.js";
+export { spark, seriesChart, seriesOf, drawable, chartOptions, createCharts } from "./charts.js";
 export { copyingText, tableLine, sourceRows, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
 export { renderUsers, renderAdded } from "./pages/users.js";
@@ -119,7 +125,9 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       return {
         nav: renderNav(m.shown),
         where: st ? renderWhere(st) : "",
-        updated: m.updatedAt ? esc(updatedText(m.updatedAt)) : "",
+        // the demo database is said beside its name, so a person never takes it for their own
+        badge: st?.source?.demo ? badge("demo", "accent") : "",
+        updated: m.updatedAt ? esc(updatedText(m.updatedAt, now())) : "",
         poll: m.pollFailure ? renderFailure(m.pollFailure) : "",
         ...Object.assign({}, ...[...pages.values()].map((p) => p.view())),
       };
@@ -151,6 +159,8 @@ export function start(doc, win) {
   // a part is not rewritten while a pointer is pressed: a row whose age moves every poll would replace the button
   // between its press and its release, and the click would be lost
   let pressed = false;
+  // the shown page's charts, drawn after each write (src/web/charts.js); a document that cannot hold one draws none
+  const charts = typeof doc.querySelectorAll === "function" && typeof win.getComputedStyle === "function" ? createCharts({ doc, win }) : null;
   const paint = () => {
     if (pressed) return;
     for (const p of PAGES) { const section = doc.getElementById(`page-${p.id}`); if (section) section.hidden = p.id !== app.model.shown; }
@@ -160,6 +170,7 @@ export function start(doc, win) {
       el.innerHTML = html;
       written.set(id, html);
     }
+    if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
   };
   let busy = false;
   const poll = async () => {
@@ -200,6 +211,10 @@ export function start(doc, win) {
   doc.addEventListener("pointerdown", () => { pressed = true; });
   for (const type of ["pointerup", "pointercancel"]) doc.addEventListener(type, () => { pressed = false; win.setTimeout(paint, 0); });
   win.addEventListener?.("hashchange", () => { app.show(route()); paint(); void poll(); });
+  if (charts !== null) {
+    win.addEventListener?.("resize", () => charts.resize());
+    win.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", () => charts.retheme());
+  }
   doc.addEventListener("visibilitychange", () => { void poll(); });
   win.setInterval(() => { void poll(); }, POLL_MS);
   paint();

@@ -16,19 +16,22 @@ address's hash (`#tables`; none, or one it does not know, is Status), so a page 
 goes to the page before. Only the page shown asks Mason anything, each thing at the rate it changes, and nothing while
 the tab is hidden.
 
-- **Status**, refreshed every 2 s while it is shown (what comes from the request log, every 30 s): the word `mason
-  status` ends on (Ready, Under way or Failed), then ONE table of facts — the database (its URL with the password
+- **Status**, refreshed every 2 s while it is shown (what comes from the request log, every 30 s; the last 24 hours of
+  usage, every minute): the word `mason status` ends on (Ready, Under way or Failed) beside a big dot, then cards — the
+  tables synced of those added, their rows, the last sync (how long ago, and when), the copy file's size, the last day's
+  statements and their p95, each with a sparkline of the last 24 hours once there are two hours to draw — then the
+  copies not finished, then ONE table of the other facts — the database (its URL with the password
   masked, its Postgres version), how changes arrive (polling or logical replication), the warnings, Mason's version,
-  how long it has been up and its restarts, the tables synced of those added, their rows, the last sync and how long ago,
-  the copy file's size, the free disk where the copy is (and, while a copy runs, what it is projected to add: a warning
+  how long it has been up and its restarts, the free disk where the copy is (and, while a copy runs, what it is projected to add: a warning
   when that is more than is free) and the sessions open. In replication mode a **Changes** table says where the stream
   is as `mason status` does (running, or why not; its position against the database's; the lag; the last batch) and
   what the slot holds on the database's WAL, its status and the room left before the database drops it (`lost`,
   `unreserved` or no cap on the slot are warnings). A fact Mason could not read is said as unknown with its reason, never as 0.
-  Then the last day's and week's statements (how many, each outcome, average / p50 / p95, rows and bytes sent), the
-  copies not finished (a bar each, the percent and the line `mason wait` prints: rows, chunks, rows a second, the time
-  left, or why it failed — nothing once every copy is done), and the latest sync errors and statements refused, failed
-  or cancelled. The slow and the refused statements are the Queries page's. The time it last heard from Mason is beside the title.
+  Then the last day's and week's statements (how many, each outcome, average / p50 / p95, rows and bytes sent) and the
+  latest sync errors and statements refused, failed or cancelled. The copies not finished are a bar each, the percent
+  and the line `mason wait` prints (rows, chunks, rows a second, the time left, or why it failed — nothing once every
+  copy is done). The slow and the refused statements are the Queries page's. How long ago it last heard from Mason is
+  in the top bar.
 - **Tables**: the database's tables in ONE table, as `mason tables` lists them. An added table shows its copy —
   Synced, Syncing, Failed or Waiting, its rows, when it was last synced and how long ago, how long that took (`<0.1 s`
   when it was quicker), the copy's own size (measured every 10 minutes, as `mason usage` lists it), in replication mode
@@ -60,6 +63,29 @@ the tab is hidden.
 When something is refused, or Mason stops answering, the page says it as the commands do: what is wrong, why, the way
 out, and the commands to run next.
 
+## Presentation
+
+The page looks like Vercel's dashboard: Geist Sans for text and Geist Mono for numbers and code, a near-monochrome gray
+scale with hairline borders and generous space, a top bar (Mason, the database's name, a **demo** badge when it is the
+demo database, and how long ago Mason last answered — `Updated 3 s ago`, which keeps counting when it stops answering),
+underlined tabs, and on Status the run's word beside a big dot, a grid of KPI cards, then dense tables. Colour says a
+state and nothing else — a green, amber, red or gray dot always beside its word — besides the one blue accent for focus,
+links and a chart's mark. It follows the system's light or dark theme.
+
+Every colour, space, radius, font and size is a CSS custom property on `:root` in `src/web/app.css` (`--bg`,
+`--surface`, `--line`, `--fg`, `--muted`, `--accent`, `--ok`, `--warn`, `--bad`, `--unknown`, `--chart-*`,
+`--font-sans`, `--font-mono`, `--space-1…7`, `--radius*`, `--text-*`), set again for dark mode, so a page is restyled
+by its tokens. The components are helpers of `src/web/shared.js` (`status`, `card`, `cards`, `badge`, `button`,
+`panel`, `pageHead`, `empty`, `skeleton`, `details`); the charts, `src/web/charts.js`.
+
+**The vendored files, and why.** People run Mason on machines without internet, so the page fetches nothing from
+elsewhere — the policy it is served under (`default-src 'self'`) would refuse it anyway. What it uses that Mason did not
+write is copied whole into `src/web/vendor/`, pinned to an exact version, with its licence, and served by Mason itself:
+the Geist variable fonts (`geist` 1.7.2, SIL Open Font License 1.1; two woff2 files, 138 KiB) and uPlot (`uplot`
+1.6.32, MIT; its ES module and stylesheet, 144 KiB) for the sparklines and small time-series charts — about 282 KiB in
+all. `src/web/vendor/README.md` lists them and how one is updated. A chart only adds to the page: every number it draws
+is also written as text, and where uPlot does not load the page reads the same.
+
 ## How it is opened, and guarded
 
 The page is served by the run's command server, on 127.0.0.1 only. `mason ui` prints its URL with the run's token;
@@ -75,8 +101,8 @@ to the person at the machine; a page reached from other machines would need TLS 
 ## Building it out
 
 The page is plain HTML, CSS and JavaScript modules under `src/web/` — a shell (`app.js`), what the pages share
-(`shared.js`) and one module per page (`pages/<id>.js`, so pages are built independently) — with no framework, build
-step or dependency,
+(`shared.js`), the charts (`charts.js`) and one module per page (`pages/<id>.js`, so pages are built independently) —
+with no framework or build step, and its two dependencies vendored whole ("Presentation"),
 and every page of the full UI renders a command's `--json` shape from an endpoint the server already has (the
 statements that ran, the slow and refused statements, a sync on demand).
 [`.claude/rules/web-ui.md`](../.claude/rules/web-ui.md) has the rules and the table of what each feature reads.
