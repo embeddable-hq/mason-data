@@ -77,6 +77,33 @@ test("a failure said again word for word is one event, until its table is curren
   await store.writer.run(`DELETE FROM ${EVENTS_TABLE}`);
 });
 
+test("a failure over is said again when it recurs: a table's once it is copied anew, the whole sync's once a recovered of no table says it is over", async () => {
+  const { SyncEvents, EVENTS_TABLE } = await events();
+  let clock = Date.parse("2026-10-28T11:00:00.000Z");
+  const log = await SyncEvents.open(store, () => undefined, { days: 7, now: () => clock });
+  try {
+    const failed = { kind: "copy_failed" as const, table: "public.orders", message: "the source closed the connection" };
+    const away = { kind: "source_unreachable" as const, table: null, message: "could not attach the database: connection refused" };
+    const stream = { kind: "stream_failed" as const, table: null, message: "replication: the slot is in use" };
+    for (const e of [failed, away, stream]) log.record(e);
+    clock += 1000;
+    log.record({ kind: "copied", table: "public.orders", message: "copied: 10 row(s) in 0.10 s" });
+    log.record({ kind: "recovered", table: null, message: "the database is attached again" });
+    clock += 1000;
+    for (const e of [failed, away, stream]) log.record(e);
+    await log.flush();
+    assert.deepEqual((await log.recent({ limit: 20 })).map((e) => `${e.kind} ${e.table}`), [
+      "copy_failed public.orders", "source_unreachable null", "stream_failed null",
+      "copied public.orders", "recovered null",
+      "copy_failed public.orders", "source_unreachable null", "stream_failed null",
+    ], "within the hour, each is said again: the copy succeeded between, and the whole sync recovered between");
+  } finally {
+    // the next test reads the table: nothing of this one's is left in it, passed or failed
+    await log.close();
+    await store.writer.run(`DELETE FROM ${EVENTS_TABLE}`);
+  }
+});
+
 test("events older than the retention are deleted, said with their count; a write that fails is said once, never thrown", async () => {
   const { SyncEvents, EVENTS_TABLE } = await events();
   await store.writer.run(`CREATE SCHEMA IF NOT EXISTS _mason`);
