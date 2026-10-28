@@ -15,7 +15,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import pg from "pg";
 import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
-import { DuckStore } from "../src/duck/store.ts";
+import { DuckDBInstance } from "@duckdb/node-api";
+import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, memoryLimitBytes } from "../src/duck/store.ts";
 import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import { wireColumn } from "../src/duck/types.ts";
@@ -25,6 +26,7 @@ import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { CopyState } from "../src/duck/sync.ts";
 import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
+import { withinDuckDBRounding } from "./memory-text.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -760,10 +762,32 @@ test("statement_timeout stops a statement that calls a Mason function: 57014 in 
   } finally { await c.end(); }
 });
 
+test("DuckDB's memory_limit text is held to the bytes it was set to, to the tenth of the unit it prints", async () => {
+  const MiB = 2 ** 20, GiB = 2 ** 30;
+  assert.equal(withinDuckDBRounding("64.0 MiB", 64 * MiB), true);
+  assert.equal(withinDuckDBRounding("64.0 MiB", 80 * MiB), false, "a wrong value");
+  // CI's runner (main's run 40590378916): half its 15.6 GiB, about 7990 MiB, printed "7.8 GiB"
+  assert.equal(withinDuckDBRounding("7.8 GiB", 7990 * MiB), true);
+  assert.equal(withinDuckDBRounding("7.8 GiB", 7.8 * GiB + 1), true, "a tenth's own bytes");
+  assert.equal(withinDuckDBRounding("16.0 GiB", 32 * GiB / 2), true, "half a 32 GiB Mac");
+  assert.equal(withinDuckDBRounding("7.9 GiB", 7.99 * GiB), true, "truncated, not rounded");
+  assert.equal(withinDuckDBRounding("8.0 GiB", 7.99 * GiB), false, "DuckDB never rounds up");
+  assert.equal(withinDuckDBRounding("7.8 GiB", 7.79 * GiB), false, "below the amount printed");
+  assert.equal(withinDuckDBRounding("7.8 GiB", 7.95 * GiB), false, "past the next tenth");
+  // the rule is DuckDB's own: each limit set on an instance prints as the rule says
+  const db = await DuckDBInstance.create(":memory:"), c = await db.connect();
+  try {
+    for (const bytes of [64 * MiB, Math.floor(64.96 * MiB), Math.floor(1023.9 * MiB), 7990 * MiB, Math.floor(7.99 * GiB), 16 * GiB]) {
+      await c.run(`SET memory_limit = '${bytes}B'`);
+      const text = String((await c.runAndReadAll("SELECT current_setting('memory_limit')")).getRows()[0]![0]);
+      assert.ok(withinDuckDBRounding(text, bytes), `${bytes} bytes printed ${text}`);
+    }
+  } finally { c.closeSync(); db.closeSync(); }
+});
+
 // DuckDB's default is 80% of the machine's RAM, in the process that holds V8's heap, the PGlites and every session
 test("DuckDB's memory is bounded: half the RAM unless MASON_DUCKDB_MEMORY says, spilling beside the copy", async () => {
   const setting = async (st: DuckStore, name: string): Promise<string> => String((await st.writer.runAndReadAll(`SELECT current_setting('${name}')`)).getRows()[0]![0]);
-  const mib = (v: string): number => { const m = /^([\d.]+) (KiB|MiB|GiB|TiB)$/.exec(v)!; return Number(m[1]) * { KiB: 1 / 1024, MiB: 1, GiB: 1024, TiB: 1024 ** 2 }[m[2] as "MiB"]; };
   const own = await DuckStore.open(path.join(dir, "limited.db"), () => undefined, { memoryLimit: "64MiB" });
   try {
     assert.equal(await setting(own, "memory_limit"), "64.0 MiB");
@@ -777,8 +801,12 @@ test("DuckDB's memory is bounded: half the RAM unless MASON_DUCKDB_MEMORY says, 
     const compression = (await own.writer.runAndReadAll("SELECT column_name, compression FROM pragma_storage_info('packed') WHERE segment_type IN ('VARCHAR', 'BIGINT') GROUP BY 1, 2 ORDER BY 1, 2")).getRowsJS();
     assert.deepEqual(compression, [["i", "BitPacking"], ["j", "ZSTD"]], "the string column ZSTD, the integer its own");
   } finally { own.close(); }
-  // the shared store took the default: half the RAM (DuckDB rounds what it says)
-  assert.ok(Math.abs(mib(await setting(store, "memory_limit")) - os.totalmem() / 2 / 2 ** 20) < 2, await setting(store, "memory_limit"));
+  // the shared store took the default: half the RAM, or of the container's limit (in whole MiB, DEFAULT_MEMORY_LIMIT),
+  // as DuckDB prints it: to a tenth of its unit
+  assert.equal(DEFAULT_MEMORY_LIMIT, defaultMemoryLimit(machineMemoryBytes()));
+  assert.ok(Math.abs(memoryLimitBytes(DEFAULT_MEMORY_LIMIT) - machineMemoryBytes() / 2) < 2 ** 20, `${DEFAULT_MEMORY_LIMIT} is half of ${machineMemoryBytes()} bytes`);
+  assert.equal(store.memoryLimitBytes, memoryLimitBytes(DEFAULT_MEMORY_LIMIT));
+  assert.ok(withinDuckDBRounding(await setting(store, "memory_limit"), store.memoryLimitBytes), `${await setting(store, "memory_limit")} for ${store.memoryLimitBytes} bytes`);
   await assert.rejects(DuckStore.open(path.join(dir, "bad.db"), () => undefined, { memoryLimit: "lots" }), /MASON_DUCKDB_MEMORY="lots" is not an amount of memory: write it as 8GB or 512MiB/);
 });
 

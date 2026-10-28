@@ -53,6 +53,7 @@ import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postg
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
+import { staleDecisions, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
@@ -146,9 +147,10 @@ export function verdict(want: Answer, got: Answer, inOrder: boolean): { kind: "v
 
 /**
  * DECIDED DIFFERENCES: what the endpoint answers differently from Postgres on purpose, or cannot answer alike, each
- * with why. Each must STILL differ (a fixed one is removed); nothing else may differ.
+ * with why. Each must STILL differ (a fixed one is removed), but one whose truth depends on the machine's floating-point
+ * arithmetic (`machineFloat`, oracle/known.ts) may agree on this machine; nothing else may differ.
  */
-const KNOWN: Array<{ sql: RegExp; kind: string; gap: GapId; why: string }> = [
+const KNOWN: Decided[] = [
   // A NUMERIC COLUMN OF VALUES OF SEVERAL SCALES: Postgres keeps each value's (`1` beside `1.5`), a DuckDB DECIMAL
   // column has one (`1.0`). Only where values of two scales meet in ONE column — a UNION of an integer and a numeric,
   // a window function's default — which the exact programs (src/duck/rewrite.ts ExactColumn) cannot reach
@@ -161,8 +163,14 @@ const KNOWN: Array<{ sql: RegExp; kind: string; gap: GapId; why: string }> = [
   { sql: /stddev\(f4\)/, kind: "text", gap: "float-last-digit", why: "a float's stddev: Youngs-Cramer in Postgres, another accumulation in DuckDB" },
   // (a double's stddev, the 17th digit, differed after the polls' writes while the copy was in key order; now the
   // copy is in the heap's order and the oracle's rows meet DuckDB's accumulation in Postgres's order. A real heap's
-  // updates may still part the two orders: float-last-digit says that last digit may differ)
-  { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's" },
+  // updates may still part the two orders: float-last-digit says that last digit may differ). In that order it is
+  // alike on aarch64, Linux or macOS, and differs on CI's x86_64 runner (variance 1.6935087641981325e+15 where Postgres
+  // has …328e+15): the machine's arithmetic decides, so `machineFloat`. Its pieces are verified by the rounded one,
+  // "stddev / variance of a double" (oracle/type-matrix.ts), alike on every machine
+  { sql: /^SELECT stddev\(f8\), stddev_samp\(f8\), stddev_pop\(f8\), variance\(f8\), var_samp\(f8\), var_pop\(f8\) FROM typed/, kind: "text", gap: "float-last-digit", why: "a double's variance, the 17th digit: Youngs-Cramer in Postgres, DuckDB's accumulation, apart on x86_64", machineFloat: true },
+  // (log10's last digit: it differs with Postgres in a Linux container and Mason on macOS, and agrees with both on
+  // Linux, as in CI, or both on macOS: the machines' math libraries decide, so `machineFloat`)
+  { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", machineFloat: true },
   { sql: /sqrt\(abs\((i4|i8|f8)\)\)/, kind: "answered", gap: "float-overflow", why: "exp past a double's range: Postgres's error, DuckDB's Infinity (or 0 below it)" },
   { sql: /stddev\(DISTINCT (i4|n2)\)|stddev\(n\)/, kind: "text", gap: "numeric-stddev", why: "Postgres's numeric stddev of DISTINCT values, or of an unconstrained numeric, is exact to its scale; DuckDB's a double" },
   { sql: /greatest\(ch, (t|vc)\)/, kind: "value", gap: "char-n-minmax", why: "least(char(5) '', text ''): Postgres compares without the padding" },
@@ -273,7 +281,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     { group: "decided", name: "numeric values of several scales", sql: MIXED_SCALE },
   ].filter((q) => ONLY === null || ONLY.test(q.name));
   const differences: Array<{ phase: string; group: string; kind: string; name: string; detail: string; sql: string }> = [];
-  const known = new Set<(typeof KNOWN)[number]>();
+  // the decided differences a statement differed by, and those that decided a statement asked (oracle/known.ts)
+  const known = new Set<Decided>(), decided = new Set<Decided>();
   // a statement verifies what it is made of when DuckDB answered it with rows, exactly as Postgres, in every phase
   const unproven = new Set<string>();
   // the gaps (src/duck/gaps.ts) the statements met: a refusal that names one, a decided difference
@@ -300,6 +309,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       }
       if (v !== null || "code" in got) unproven.add(q.sql);
       const k = KNOWN.find((x) => x.sql.test(q.sql));
+      if (k) decided.add(k);
       // a decided case differing in ANOTHER way than decided is a difference like any other
       if (k && (v === null || v.kind === k.kind)) { unproven.add(q.sql); if (first) { if (v === null) tallies.mason.exact++; else tallies.mason.decided++; } if (v !== null) { known.add(k); meet(k.gap); } continue; }
       const gap = v === null ? null : namedGap(got);
@@ -351,6 +361,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     [...counted].sort((a, b) => b[1] - a[1]).map(([k, n]) => `  ${n} × ${k}`).join("\n") + "\n\n" +
     differences.map((d) => `[${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`).join("\n\n") + "\n");
   console.log(`duck oracle: ${asked} statements asked, ${differences.length} differ (${report}): ${[...counted].map(([k, n]) => `${n} ${k}`).join(", ")}`);
+  // the first differences in the log too, whichever assertion below fails first (a difference can be why a decision
+  // is stale or a verified entry dropped, and CI keeps only the log)
+  for (const d of differences.slice(0, 5)) console.log(`duck oracle: differs: [${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`);
   console.log(`duck oracle: ${nodesPlacedTwice().length} node(s) a rewrite placed twice${nodesPlacedTwice().length > 0 ? `: ${nodesPlacedTwice().slice(0, 10).join(" | ")}` : ""}`);
   if (EAGER_JSON) {
     // the run read JSON from stored columns: how many paths, and none left unfilled
@@ -360,7 +373,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     assert.deepEqual(paths.filter((p) => p.state !== "ready").map((p) => `${p.table} ${p.column} ${p.steps}: ${p.state} ${p.why}`), [], "every path stored is ready");
   }
   // a filtered run asks only some statements: a decision it did not meet is not stale
-  const stale = ONLY !== null ? [] : KNOWN.filter((k) => !known.has(k)).map((k) => `${k.sql}: no longer differs (${k.why}) — remove it from KNOWN`);
+  const stale = ONLY !== null ? [] : staleDecisions(KNOWN, known, decided);
   assert.deepEqual(stale, [], "a decided difference that no longer differs");
   console.log(`duck oracle: gaps met: ${[...met].sort().map(([g, n]) => `${g} ${n}`).join(", ")}`);
   // A DEAD GAP: a refused or decided entry no statement meets (removed, or held by a test it names)

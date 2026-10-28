@@ -22,6 +22,15 @@ test("same: integers compare by their digits, exactly; a non-integer to one part
   assert.equal(same(normalise(null), normalise(0)), false);
 });
 
+test("same: a double printed with an exponent is a number, its last digit another text of the same value", () => {
+  // CI's x86_64 runner (PR #3's run 40593841513): a float8 variance's 17th digit, read as text, was a wrong VALUE
+  assert.equal(same(normalise("1.6935087641981325e+15"), normalise("1.6935087641981328e+15")), true);
+  assert.equal(same(normalise("1.5e+15"), normalise("1500000000000000")), true);
+  assert.equal(same(normalise("-2.5e-05"), normalise("-0.000025")), true);
+  assert.equal(same(normalise("1.6935087641981325e+15"), normalise("1.6935087e+15")), false, "a wrong value is still one");
+  assert.equal(same(normalise("1e+400"), normalise("Infinity")), false, "past a double: text, not a number");
+});
+
 test("normalise: a text column's value is text, whatever its digits", () => {
   assert.equal(same(normalise("01", true), normalise("1", true)), false);
   assert.equal(same(normalise("01"), normalise("1")), true);
