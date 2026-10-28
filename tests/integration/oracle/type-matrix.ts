@@ -388,7 +388,12 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb: grouped view, ORDER BY its output name", `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM ${g} AS "e" GROUP BY 1 ORDER BY "e.j" DESC, "count" DESC LIMIT 100 OFFSET 0`);
   yield q("jsonb: grouped view, its NULLs first", `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM ${g} AS "e" GROUP BY 1 ORDER BY ("e"."j") IS NULL ASC, "e"."j" DESC LIMIT 100 OFFSET 0`);
   yield q("jsonb: grouped view, ORDER BY 1", `SELECT j, count(*) FROM ${g} AS e GROUP BY j ORDER BY 1`);
-  yield q("jsonb: grouped view, HAVING", `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM ${g} AS "e" GROUP BY "e.j" HAVING "e"."j" IS NOT NULL AND count(*) >= 1 ORDER BY "e.j" DESC`);
+  // the group's own tree, qualified, sorted: under libc the group is the equality key and the sort the collation's, so
+  // the sort reads the group's value (any_value), never the column
+  yield q("jsonb: grouped view, qualified, ORDER BY the column", `SELECT e.j, count(*) FROM ${g} AS e GROUP BY e.j ORDER BY e.j`);
+  yield q("jsonb: grouped view, qualified, ORDER BY the column DESC", `SELECT e.j, count(*) FROM ${g} AS e GROUP BY e.j ORDER BY e.j DESC, 2`);
+  yield q("jsonb: grouped view, qualified, its NULLs last", `SELECT e.j, count(*) FROM ${g} AS e GROUP BY e.j ORDER BY e.j IS NULL, e.j DESC`);
+  yield q("jsonb: grouped view, HAVING",`SELECT "e"."j" AS "e.j", count(*) AS "count" FROM ${g} AS "e" GROUP BY "e.j" HAVING "e"."j" IS NOT NULL AND count(*) >= 1 ORDER BY "e.j" DESC`);
   // the same class over text: a column the GROUP BY's key decides is read through any_value, and an ORDER BY of its
   // ordinal or output name sorts a copy of that under the database's collation (it sorted by bytes before)
   yield q("text decided by the key, ORDER BY its ordinal and its name", "SELECT t AS name, id FROM typed GROUP BY id ORDER BY 1, 2 LIMIT 40");
