@@ -9,7 +9,7 @@ import { out as styleOut, wrap, type Style } from "./style.ts";
 import { heldPgPort, namedPgPort, portHolder, type PortHolder } from "./ports.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { readiness, type RunState } from "./commands.ts";
-import { connectSource, maskedUrl, parseSource, readSourceFacts, versionProblem } from "./preflight.ts";
+import { connectSource, maskedUrl, parseSource, readSourceFacts, versionProblem, type ConnectContext } from "./preflight.ts";
 import { theRun, type DevRun } from "./runs.ts";
 import { projectSource, type Project } from "./project.ts";
 import { DEFAULT_PG_PORT } from "../api/postgres/listener.ts";
@@ -115,10 +115,10 @@ function portOf(url: string): number | null {
 }
 
 /** The database a URL names: reachable, its version, what this user can read. */
-export async function databaseCheck(url: string): Promise<Check> {
+export async function databaseCheck(url: string, o: ConnectContext = {}): Promise<Check> {
   const parsed = parseSource(url);
   if ("problem" in parsed) return { name: "database", ok: false, detail: parsed.problem };
-  const connected = await connectSource(parsed.source);
+  const connected = await connectSource(parsed.source, o);
   if ("failure" in connected) return { name: "database", ok: false, detail: `${maskedUrl(parsed.source.url)}: ${connected.failure.message}${connected.failure.hints.map((h) => `\n    - ${h}`).join("")}` };
   let facts;
   try { facts = await readSourceFacts(connected.pg); } finally { connected.pg.close(); }
@@ -158,6 +158,8 @@ export function nextSteps(checks: readonly Check[], run: DevRun | null, project:
   const bad = (name: string): boolean => checks.some((c) => c.name === name && c.ok === false);
   if (bad("node")) return [["mason doctor", `again, once Node ${NODE_MIN} or later is installed`]];
   if (bad("project") && run === null) return [["mason doctor", "again, once .mason/config.json is repaired or moved aside (the detail above says how)"]];
+  // the demo database is hosted by the run itself (src/cli/demo.ts): down until mason start makes it
+  if (bad("database") && project?.config.demo === true) return [["mason start", "hosts the demo database, then copies its tables"]];
   if (bad("database")) return [["mason start", `once the connection works (the detail above says how; the URL is in ${project ? `${project.dir}/config.json` : ".mason/config.json"})`]];
   if (project === null) return [
     ["mason init", "in your app's folder: the database from DATABASE_URL in .env.local, .env or the shell"],
@@ -207,7 +209,7 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
       // the database the project's sources file names (src/cli/sources.ts): a file that cannot be read is the failing line
       const src = projectSource(project);
       checks.push("message" in src ? { name: "database", ok: false, detail: `${src.message}${src.why ? `: ${src.why.replace(/\n/g, "; ")}` : ""}. ${src.fix?.split("\n")[0] ?? ""}`.trim() }
-        : await databaseCheck(src.resolved));
+        : await databaseCheck(src.resolved, { demo: project.config.demo === true }));
     }
     // a project here whose config cannot be read: init would refuse, so "Ready: mason init" would send a person nowhere
     if ("code" in which && which.code === "bad_config") checks.push({ name: "project", ok: false, detail: `${which.problem}. ${(which.fix ?? "").replace(/^./, (c) => c.toUpperCase())}`.trim() });

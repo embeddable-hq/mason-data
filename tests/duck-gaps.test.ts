@@ -170,7 +170,7 @@ export const README_END = "<!-- END GENERATED -->";
 
 test("README.md's table of what is answered and the known differences is what the registry renders", () => {
   const was = fs.readFileSync(README, "utf8");
-  const a = was.indexOf(README_START), z = was.indexOf(README_END);
+  const a = was.indexOf(README_START), z = was.indexOf(README_END, a);
   assert.ok(a >= 0 && z > a, `README.md has the lines ${README_START} … ${README_END}`);
   const out = was.slice(0, a) + renderReadmeSupport(GAPS, VERIFIED) + was.slice(z);
   if (UPDATE) { fs.writeFileSync(README, out); console.log(`UPDATE_FIXTURE=1: wrote ${README}`); return; }

@@ -1,9 +1,10 @@
 /**
  * THE WEB PAGE OF `mason start` (`mason ui`; docs/WEB-UI.md, and .claude/rules/web-ui.md for whoever builds it out):
- * one page, two sections, rendered from the run's command server's JSON (src/cli/run-server.ts) in the words the
+ * one page, three sections, rendered from the run's command server's JSON (src/cli/run-server.ts) in the words the
  * commands print —
  *
  *   STATUS   GET /api/state, /api/slow, /api/refused: what `mason status` prints, polled every 2 s while the tab is seen
+ *   TABLES   GET /api/state `tables`, POST /api/pick, POST /api/remove: what `mason tables`, `mason add` and `mason remove` do
  *   USERS    GET /api/users, POST /api/users, DELETE /api/users/<name>: what `mason user list|add|remove` does
  *
  * Plain JavaScript, an ES module, no framework and no build step: the server serves this file as it is, under a
@@ -82,14 +83,47 @@ export function tableLine(t) {
   return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}` };
 }
 
+/** A table's facts as `mason tables` says them on its line (src/cli/commands.ts `tableFacts`): its size, its key, and
+ *  added or why it cannot be added as it is (null: neither). */
+export function tableFacts(t) {
+  return { size: t.rows === null ? "rows unknown" : `~${n(t.rows)} rows`, key: t.key.length ? `key ${t.key.join(", ")}` : "no key",
+    state: t.added ? "added" : t.reason ? `cannot be added as it is: ${t.reason}` : null };
+}
+
+/** What `mason add` prints for a table added, from `/api/pick`'s answer (src/cli/commands.ts `addedLines`): its line,
+ *  then its notes — the key added to the columns asked, the secret-looking columns left out. */
+export function addedLines(b, file) {
+  const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
+  const s = b.skippedSecrets;
+  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a copy always has its key)`] : []),
+    ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
+      `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
+  ] };
+}
+
+/** What `mason remove` prints for the tables removed (src/cli/commands.ts `removedReport`). */
+export function removedReport(removed, file) {
+  return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
+    tips: [`Mason stops copying ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its copy" : "their copies"}`] };
+}
+
+/**
+ * `POST /api/pick`'s body for a table added: the columns ticked as `--columns`, the key's as `--key`, each left out when
+ * none is ticked (none: every column, as `mason add <table>` copies; no key: its primary key). What the lists may hold
+ * is the server's to judge (src/cli/run-server.ts `pick`), never the page's.
+ */
+export const pickBody = (table, columns = [], key = []) => ({ table, picked: true, ...(columns.length ? { columns } : {}), ...(key.length ? { key } : {}) });
+
 /** `mason status`'s rows for the database (src/cli/commands.ts `sourceRows`): its sources file, its URL as the run masked it, how its changes arrive. */
 export function sourceRows(s) {
   return [
     ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`]] : []),
-    ["Database", `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
+    ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
+      : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
         `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · mason start --replication reads the database's change log instead`],
+      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · ${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
   ];
 }
 
@@ -148,6 +182,71 @@ export function renderStatus(s, requests = {}) {
     else parts.push(`<p class="readiness">Under way:</p><ul class="bullets">${r.waiting.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`);
   }
   return parts.join("");
+}
+
+/** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): the line and notes `mason add` prints. */
+export function renderTableAdded(b) {
+  const l = addedLines(b, b.file);
+  return `<div class="done" role="status"><p class="headline">${esc(l.line)}</p>${l.notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
+    `<button type="button" data-dismiss-outcome>Dismiss</button></div>`;
+}
+
+/** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): what `mason remove` prints. */
+export function renderTablesRemoved(b) {
+  const r = removedReport(b.removed, b.file);
+  return `<div class="done" role="status"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
+    `<button type="button" data-dismiss-outcome>Dismiss</button></div>`;
+}
+
+const tick = (name, c, on) => `<label class="tick"><input type="checkbox" name="${name}" value="${esc(c.name)}"${on ? " checked" : ""}> ${code(c.name)} <span class="dim">${esc(c.type)}</span></label>`;
+
+/** The form that adds a table with the columns ticked (`--columns`) and, for one with no primary key, its key (`--key`).
+ *  The ticks live in the document while the person ticks (the tables part is held still meanwhile: `createApp`);
+ *  `ticked`, what a refused submit sent, writes them back when the refusal is said under the form. */
+function pickForm(t, ticked = null) {
+  const name = entryName(t.table);
+  const boxes = (field) => t.columns.map((c) => tick(field, c, ticked?.[field]?.includes(c.name) ?? false)).join("");
+  return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
+    (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart, as ${code(`mason add ${name} --key`)}</legend>${boxes("key")}</fieldset>`) +
+    `<fieldset><legend>Its columns, as ${code(`mason add ${name} --columns`)} (none ticked: as ${code(`mason add ${name}`)}, every column)</legend>${boxes("columns")}</fieldset>` +
+    `<button type="submit">Add ${esc(name)}</button> <button type="button" data-cancel-choose>Cancel</button></form>`;
+}
+
+/**
+ * THE DATABASE'S TABLES from `/api/state` `tables` (`mason tables --json`'s list): a line each — its size, its key, and
+ * added or why it cannot be added as it is, as `mason tables` prints them — with what can be done to it: Add (every
+ * column, as `mason add <table>`) and Columns… (the form) for a table not added, Name its key… for one with no primary
+ * key, Remove (asking first, `ui.removing`) for an added one. `ui.choosing` is the table whose form is open (`ui.ticked`
+ * its boxes ticked: { columns, key }); `ui.outcome` what the last add or remove answered ({ table, added } |
+ * { table, removed } | { table, failure }), under its table.
+ */
+export function renderTables(s, ui = {}) {
+  const { removing = null, choosing = null, outcome = null, ticked = null } = ui;
+  if (!s.tables.length) return `<p class="dim">${esc(s.source.database)} has no table this user can read.</p>`;
+  const under = (html) => `<tr class="under"><td colspan="5">${html}</td></tr>`;
+  const line = (t) => {
+    const f = tableFacts(t);
+    const name = entryName(t.table);
+    const act = t.added
+      ? removing === t.table
+        ? `<span class="confirm">Remove ${esc(name)}? ${esc(removedReport([t.table], "").tips[0])}.</span> ` +
+          `<button type="button" class="danger" data-confirm-remove-table="${esc(t.table)}">Remove ${esc(name)}</button> <button type="button" data-cancel-remove-table>Cancel</button>`
+        : `<button type="button" data-remove-table="${esc(t.table)}">Remove</button>`
+      : t.reason === null
+        ? `<button type="button" data-add-table="${esc(t.table)}">Add</button> <button type="button" data-choose="${esc(t.table)}">Columns…</button>`
+        : t.key.length ? "" : `<button type="button" data-choose="${esc(t.table)}">Name its key…</button>`;
+    const said = outcome?.table !== t.table ? ""
+      : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added) : renderTablesRemoved(outcome.removed));
+    return `<tr class="${t.added ? "c-added" : t.reason ? "c-cannot" : "c-not"}"><th scope="row">${code(t.table)}</th>` +
+      `<td class="num">${esc(f.size)}</td><td>${esc(f.key)}</td><td class="state">${esc(f.state ?? "")}</td><td class="act">${act}</td></tr>` +
+      (choosing === t.table && !t.added ? under(pickForm(t, ticked)) : "") + said;
+  };
+  const added = s.tables.filter((t) => t.added).length;
+  // a refusal for a table the list does not have (dropped since the run read the catalog): said above the list
+  const stray = outcome !== null && "failure" in outcome && !s.tables.some((t) => t.table === outcome.table) ? renderFailure(outcome.failure) : "";
+  return `${stray}<p class="count">${n(added)} of ${n(s.tables.length)} added</p>` +
+    `<table class="catalog"><thead><tr><th scope="col">Table</th><th scope="col">Rows</th><th scope="col">Key</th><th scope="col"></th><th scope="col"></th></tr></thead>` +
+    `<tbody>${s.tables.map(line).join("")}</tbody></table>`;
 }
 
 /** The heading's line: the database the run copies, and its sources file's name when that is another. */
@@ -214,11 +313,20 @@ export const updatedText = (at) => `Updated ${at.toLocaleTimeString("en-GB")}`;
 
 /**
  * THE PAGE'S STATE AND ACTIONS, over `fetch` (the browser's, or a test's): `poll` reads the status and the users,
- * `addUser` / `askRemove` / `cancelRemove` / `confirmRemove` / `dismissAdded` are the users' buttons; `view()` is the
- * HTML of each part of the page, from what it knows now. Nothing here touches a document.
+ * `addUser` / `askRemove` / `cancelRemove` / `confirmRemove` / `dismissAdded` are the users' buttons, `addTable` /
+ * `choose` / `cancelChoose` / `askRemoveTable` / `cancelRemoveTable` / `confirmRemoveTable` / `dismissOutcome` the
+ * tables'; `view()` is the HTML of each part of the page, from what it knows now. Nothing here touches a document.
  */
 export function createApp(fetchFn, now = () => new Date()) {
-  const m = { state: null, requests: {}, users: null, usersFailure: null, pollFailure: null, actionFailure: null, added: null, confirming: null, updatedAt: null };
+  const m = { state: null, requests: {}, users: null, usersFailure: null, pollFailure: null, actionFailure: null, added: null, confirming: null, updatedAt: null,
+    removing: null, choosing: null, outcome: null, ticked: null, held: null };
+  // WHILE A FORM IS OPEN OR A REMOVE ASKS, THE TABLES ARE RENDERED FROM THE STATE THEY WERE OPENED OVER (`held`): the
+  // run reads the catalog again every few seconds, and a live database's row estimates move, so a part written from
+  // each poll's state would be rewritten under the person — the form's ticks gone, the confirm's button replaced under
+  // the click. So the list is FROZEN for as long as a form stays open or a Remove asks — however long that is, with no
+  // refresh in between (its rows and its added marks may be minutes old; the Status part above is written from each
+  // poll as ever) — and is written from the latest state again once they Add, Cancel or confirm.
+  const hold = () => { m.held = m.choosing !== null || m.removing !== null ? m.held ?? m.state : null; if (m.choosing === null) m.ticked = null; };
   /** One request: its JSON, or a Failure (`failure`) when it was refused or nothing answered. */
   const ask = async (path, init) => {
     let res;
@@ -236,15 +344,44 @@ export function createApp(fetchFn, now = () => new Date()) {
     if (m.confirming !== null && !m.users.users.some((x) => x.name === m.confirming)) m.confirming = null;
   };
   const json = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const poll = async () => {
+    const [st, slow, refused] = await Promise.all([ask("/api/state"), ask("/api/slow"), ask("/api/refused")]);
+    if ("failure" in st) { m.pollFailure = st.failure; return; }
+    m.state = st.body; m.pollFailure = null; m.updatedAt = now();
+    m.requests = { slow: "failure" in slow ? slow : slow.body, refused: "failure" in refused ? refused : refused.body };
+    // a table removed or added elsewhere (mason remove, mason add) takes its confirm or its form with it
+    const added = (table) => m.state.tables.some((t) => t.table === table && t.added);
+    if (m.removing !== null && !added(m.removing)) m.removing = null;
+    if (m.choosing !== null && added(m.choosing)) m.choosing = null;
+    hold();
+    await readUsers();
+  };
   return {
     model: m,
-    async poll() {
-      const [st, slow, refused] = await Promise.all([ask("/api/state"), ask("/api/slow"), ask("/api/refused")]);
-      if ("failure" in st) { m.pollFailure = st.failure; return; }
-      m.state = st.body; m.pollFailure = null; m.updatedAt = now();
-      m.requests = { slow: "failure" in slow ? slow : slow.body, refused: "failure" in refused ? refused : refused.body };
-      await readUsers();
+    poll,
+    /** Add a table (`mason add`): the answer under its line, then the state read again — the Status shows its copy starting. */
+    async addTable(table, columns = [], key = []) {
+      const r = await ask("/api/pick", json("POST", pickBody(table, columns, key)));
+      // refused: said under the form, which is written again with the boxes the person had ticked
+      if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
+      m.outcome = { table, added: r.body }; m.choosing = null; hold();
+      await poll();
+      return true;
     },
+    choose(table) { m.choosing = table; m.removing = null; m.ticked = null; hold(); },
+    cancelChoose() { m.choosing = null; hold(); },
+    askRemoveTable(table) { m.removing = table; m.choosing = null; hold(); },
+    cancelRemoveTable() { m.removing = null; hold(); },
+    /** Remove a table (`mason remove`), once asked: the answer under its line, then the state read again. */
+    async confirmRemoveTable(table) {
+      const r = await ask("/api/remove", json("POST", { tables: [table] }));
+      m.removing = null; hold();
+      if ("failure" in r) { m.outcome = { table, failure: r.failure }; return false; }
+      m.outcome = { table, removed: r.body };
+      await poll();
+      return true;
+    },
+    dismissOutcome() { m.outcome = null; },
     async addUser(name) {
       m.actionFailure = null;
       const r = await ask("/api/users", json("POST", { name }));
@@ -270,6 +407,7 @@ export function createApp(fetchFn, now = () => new Date()) {
         updated: m.updatedAt ? esc(updatedText(m.updatedAt)) : "",
         poll: m.pollFailure ? renderFailure(m.pollFailure) : "",
         status: m.state ? renderStatus(m.state, m.requests) : m.pollFailure ? "" : `<p class="dim">Asking Mason…</p>`,
+        tables: m.state ? renderTables(m.held ?? m.state, { removing: m.removing, choosing: m.choosing, outcome: m.outcome, ticked: m.ticked }) : "",
         users: m.usersFailure ? renderFailure(m.usersFailure) : m.users ? renderUsers(m.users, m.confirming) : "",
         added: m.added ? renderAdded(m.added) : "",
         action: m.actionFailure ? renderFailure(m.actionFailure) : "",
@@ -309,6 +447,16 @@ export function start(doc, win) {
     if (await app.addUser(input.value.trim())) input.value = "";
     paint();
   });
+  // a table's form is written into the tables part: its submit is caught where it bubbles to, the ticked boxes sent as
+  // they are (FormData's getAll: the values of the boxes ticked, in the page's order)
+  doc.addEventListener("submit", async (e) => {
+    const f = e.target;
+    if (f.dataset?.pickForm === undefined) return;
+    e.preventDefault();
+    const ticked = new win.FormData(f);
+    await app.addTable(f.dataset.pickForm, ticked.getAll("columns"), ticked.getAll("key"));
+    paint();
+  });
   doc.addEventListener("click", async (e) => {
     const b = e.target.closest?.("button");
     if (!b) return;
@@ -316,6 +464,13 @@ export function start(doc, win) {
     else if (b.dataset.cancelRemove !== undefined) app.cancelRemove();
     else if (b.dataset.confirmRemove !== undefined) await app.confirmRemove(b.dataset.confirmRemove);
     else if (b.dataset.dismissAdded !== undefined) app.dismissAdded();
+    else if (b.dataset.addTable !== undefined) await app.addTable(b.dataset.addTable);
+    else if (b.dataset.choose !== undefined) app.choose(b.dataset.choose);
+    else if (b.dataset.cancelChoose !== undefined) app.cancelChoose();
+    else if (b.dataset.removeTable !== undefined) app.askRemoveTable(b.dataset.removeTable);
+    else if (b.dataset.cancelRemoveTable !== undefined) app.cancelRemoveTable();
+    else if (b.dataset.confirmRemoveTable !== undefined) await app.confirmRemoveTable(b.dataset.confirmRemoveTable);
+    else if (b.dataset.dismissOutcome !== undefined) app.dismissOutcome();
     else if (b.dataset.copy !== undefined) {
       const text = doc.getElementById(b.dataset.copy)?.textContent ?? "";
       try { await win.navigator.clipboard.writeText(text); b.textContent = "Copied"; }

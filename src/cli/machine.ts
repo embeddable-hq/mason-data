@@ -27,7 +27,8 @@ export const DESTROY_USAGE = `usage: mason destroy [--json]
 
   mason stop keeps the copy and the state, and the next mason start resumes in seconds; mason destroy frees the disk, and
   the next mason start begins again. In replication mode the slot (and Mason's own publication) are dropped from the
-  database too: they hold its WAL for as long as they exist.
+  database too: they hold its WAL for as long as they exist. A demo project's database (mason init demo, in .mason/demo/)
+  goes with the copy: the next mason start makes and seeds it again.
 
   --json   as data: { removed: [{ name, removed: [what], error }], next }
 
@@ -93,7 +94,9 @@ export async function removeProject(p: Project, o: { isAlive?: (pid: number) => 
   }
   // the users (src/duck/users.ts) are logins a BI tool keeps, like the API key their passwords are made with, and the
   // self-signed certificate is the fingerprint a tool pinned (the review of the cut: a new one at the next
-  // start, and config.selfSignedTls stale): the next start copies again, and every tool connects as before
+  // start, and config.selfSignedTls stale): the next start copies again, and every tool connects as before. A demo
+  // project's database (`.mason/demo/`, src/cli/demo.ts) is state like the copy: it goes, and config.demo stays, so the
+  // next start makes and seeds it again
   const kept = new Set(["config.json", USERS_FILE, SELF_SIGNED_FILES.cert, SELF_SIGNED_FILES.key]);
   const gone = fs.existsSync(p.dir) ? fs.readdirSync(p.dir).filter((x) => !kept.has(x)) : [];
   for (const x of gone) fs.rmSync(path.join(p.dir, x), { recursive: true, force: true });
@@ -124,7 +127,9 @@ export async function destroy(argv: string[], deps: { removeProject?: typeof rem
   if (result.error) return failed("destroy", { message: `${name}: ${result.error}`, code: "failed" }, { json: false, io });
   out(withEnd(reportText({
     headline: result.removed.length ? `Removed ${name}` : `Nothing was left of ${name} to remove`,
-    details: [...(result.removed.length ? [["removed", result.removed.join(", ")] as const] : []), ["kept", `your files in ${t.project.folder}, .mason/config.json and the users`]],
+    details: [...(result.removed.length ? [["removed", result.removed.join(", ")] as const] : []), ["kept", `your files in ${t.project.folder}, .mason/config.json and the users` +
+      // the demo database is state like the copy (src/cli/demo.ts): it goes, and config.demo stays to make it again
+      (t.project.config.demo === true ? ` — not the demo database, which went with the copy: the next mason start seeds it again` : "")]],
   }), { next }));
   return 0;
 }

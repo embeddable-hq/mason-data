@@ -480,6 +480,26 @@ millisecond clock, a refused login and the statement before it read back in eith
   given up after 5 in 10 minutes; it records its pid so `mason stop` between restarts reaches it (stop had said "not
   running" and the run came back seconds later). DuckDB recovers from its WAL, so a restart is seconds, no fresh copy.
 
+### The demo database (2026-10-27)
+
+**Decision.** `mason init demo` makes an ordinary project whose database Mason hosts itself: PGlite (Postgres 18 in
+WebAssembly, already a dependency for the catalog) persisted in `.mason/demo/`, seeded with a small shop schema at its
+first open, served by the `mason start` process on a loopback port over the Postgres wire protocol, and changed every
+`MASON_DEMO_CHANGE_MS` (5 s) by a writer in the run. The project's files are the usual ones — `url: ${DATABASE_URL}`, the
+four tables added, the demo's URL in `.env` — with `demo: true` in its config. The port is chosen free at init and kept
+in that URL alone; the run reads it back from the resolved URL (`src/cli/demo.ts` `demoPort`). It is read by polling
+only: `--replication` on a demo project is refused before anything starts.
+
+**Why.** A first try should need nothing installed: no Docker, no Postgres, no database of one's own to point at.
+PGlite is a real Postgres (its catalog, its types, its `xmin`) already in the package, where a fixture of rows would be a
+second account of what a source is. It is reached over the wire, not through PGlite's own API, because the demo must run
+the read path production runs — `checkSource`, the chunked copy, the poll, the catalog read every 10 s — or it would show
+a Mason no one deploys. Polling only, because PGlite has no WAL sender: there is no change log to stream. The port lives in
+one place because two records of it (the URL and a config field) would disagree the day a person edits `.env`; an edited
+URL is refused by the run with the way out. `mason destroy` removes `.mason/demo/` with the copy and keeps `demo: true`,
+so the next start seeds it again. **Where.** `src/cli/demo.ts`, `src/demo/source.ts`, `src/cli/init.ts`, `src/cli/dev.ts`;
+`tests/cli-demo.test.ts`, `tests/cli-project.test.ts`.
+
 ## Operating it
 
 ### On a server: `mason serve` and the image
@@ -572,7 +592,7 @@ A tuned Postgres would close part of the gap, not 23×.
 **Decision.** `scripts/bench-replica.ts` sweeps each axis until Postgres's p95 of a six-statement mix reaches a target
 (`--target-postgres-seconds`; a minute for a published run): rows at 8 clients about √10 a step (`nextSize`), then
 clients at the largest size under the target, doubling (`clientSteps`) to 1,024. Each engine is measured with the other
-stopped. The README's "Why not a Postgres read replica" is rendered from its fixture; `docs/BENCHMARK.md` has the method
+stopped. The README's "When is Mason faster?" is rendered from its fixture; `docs/BENCHMARK.md` has the method
 in full (a replica's settings and indexes for the container's memory, answers compared before timing, the median of
 runs).
 

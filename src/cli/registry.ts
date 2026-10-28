@@ -94,7 +94,7 @@ async function runDev(argv: string[]): Promise<number> {
   }
   const port = v.port === undefined ? 4039 : Number(v.port);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return failed("start", { message: `--port must be a port number (1-65535), not ${JSON.stringify(v.port)}`, code: "usage" }, { json: v.json });
-  if (!v.attach) return devInBackground(argv, { json: v.json, selfSignedTls: v["self-signed-tls"] });
+  if (!v.attach) return devInBackground(argv, { json: v.json, selfSignedTls: v["self-signed-tls"], changes: v.replication ? "replication" : v.poll ? "poll" : null });
   return dev({ port, version: version(), changes: v.replication ? "replication" : v.poll ? "poll" : null, publication: v.publication ?? null, selfSignedTls: v["self-signed-tls"] });
 }
 
@@ -159,7 +159,9 @@ export async function orientation(cwd: string, s: Style = styleOut()): Promise<s
     ? [["Project", `${project.config.name}, files in ${project.folder}`], ["Mason", run ? `running (pid ${run.pid})` : "not running"]]
     : [["Project", "none here: mason init makes this folder one"]];
   const next: NextStep[] = !project
-    ? [["mason init", "make this folder a project (DATABASE_URL from .env, or mason init postgres://…)"], ["mason doctor", "what this machine needs for Mason, and whether it has it"]]
+    ? [["mason init", "make this folder a project (DATABASE_URL from .env, or mason init postgres://…)"],
+      ["mason init demo", "or try it on a demo database Mason makes itself: nothing to install"],
+      ["mason doctor", "what this machine needs for Mason, and whether it has it"]]
     : !run ? [["mason start", "start Mason for this project, in the background"], ["mason status", "the project and its tables"]]
     : [["mason status", "what Mason is doing: its tables, and the last day's slow and refused statements"], ["mason user add <name>", "a user for a BI tool or your app: its password and URL, printed once"]];
   return `${reportText({ headline: "Mason: your Postgres tables, copied and served to BI tools and your app.", details: rows,

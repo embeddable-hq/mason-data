@@ -2,6 +2,9 @@
  * `mason start` (one run per project): Mason for the project of this folder
  * (src/cli/project.ts), on the database its sources file names (src/cli/sources.ts), copying the tables it names.
  *
+ *   0. A DEMO PROJECT'S DATABASE (`mason init demo`, src/cli/demo.ts): hosted by this process, opened first on the port
+ *      the sources file's URL names, then connected to and read as any database is (by polling: it has no change log),
+ *      and changed every few seconds so the copy is seen keeping current.
  *   1. THE DATABASE (src/cli/preflight.ts checkSource): connect as the run will, say what to change when it cannot;
  *      a database on another machine only when the project was made with --remote. A database restored to another server
  *      is read again (its rows compared, the unchanged kept); another database is refused (mason destroy, then mason start).
@@ -30,7 +33,8 @@ import { createRunServer } from "./run-server.ts";
 import { addedTables, rereadSources, type RunSources } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
-import { DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
+import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
 import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, SELF_SIGNED_FILES } from "./pg-tls.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
@@ -102,7 +106,39 @@ export function sourceMove(recorded: ProjectConfig["sourceServer"], now: { datab
   return { action: "same" };
 }
 
+/** What the run hosts beside the copy (a demo project's database), stopped and closed however the run ends. */
+interface Hosted {
+  /** the demo database's writer, once it runs */
+  stopChanges: (() => void) | null;
+  /** closes the demo database, once (src/cli/demo.ts closingOnce); null when there is none, or it was closed */
+  close: (() => Promise<string | null>) | null;
+}
+
+/**
+ * The run, and whatever it hosts closed however it ends: a demo database that was opened is closed at the stop (after
+ * the sync, before the copy), and by this on every other way out — a failed step, a crash — its data flushed to its
+ * folder, a close that fails said.
+ */
 export async function dev(o: DevOptions): Promise<number> {
+  const hosted: Hosted = { stopChanges: null, close: null };
+  try { return await run(o, hosted); }
+  finally {
+    hosted.stopChanges?.();
+    await closeDemo(hosted, null);
+  }
+}
+
+/** The demo database closed, if it is open: a failure said, never swallowed; `closed`, when given, said once it closed. */
+async function closeDemo(hosted: Hosted, closed: string | null): Promise<void> {
+  const close = hosted.close;
+  if (close === null) return;
+  hosted.close = null;
+  const failure = await close();
+  if (failure !== null) say(`  closing the demo database: ${failure}`);
+  else if (closed !== null) say(`  ${closed}`);
+}
+
+async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const t = theProject(process.cwd());
   if ("problem" in t) { say(`mason start: ${t.problem}`); return 1; }
   const project = t.project;
@@ -112,10 +148,28 @@ export async function dev(o: DevOptions): Promise<number> {
   // ONE mason start per project: a second would open the same DuckDB file, which DuckDB refuses to a second writer
   const other = await liveRun(project);
   if (other !== null) { say(`mason start: Mason is already running for ${cfg.name} (pid ${other.pid}): mason status says what it is doing`); return 1; }
+  // A DEMO PROJECT IS POLLED (src/cli/demo.ts): its database has no change log, so replication is refused before anything starts
+  const demoRefused = demoChangesRefusal(cfg, o.changes);
+  if (demoRefused) return failed("start", demoRefused, { json: false });
+  let demoChangeMs: number | null = null;
+  if (cfg.demo === true) {
+    try { demoChangeMs = demoSettings(process.env).changeMs; }
+    catch (e) { say(`mason start: ${(e as Error).message}`); return 1; }
+  }
   const pinned = cliPinProblem(folder, o.version);
   if (pinned) { say(`mason start: ${pinned}`); return 1; }
+  // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
+  // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
+  // always was (after the listener's checks): a demo project's port is needed first
+  const readSources = (): ReturnType<typeof projectSource> => projectSource(project, process.env, { shellFirst: o.serve !== undefined });
+  const src = readSources();
+  // a demo project's database listens on the port its URL names (the one place it is kept), which no listener of the
+  // run's may take: read BEFORE the Postgres API's port is chosen and recorded, so the choice avoids it (a recorded or
+  // named port that is the demo's is refused by choosePgPort, nothing recorded), and the command server is kept off it
+  const demoAt = cfg.demo === true && !("message" in src) ? demoPort(src.resolved, src.from) : null;
+  const demoPorts = new Set(demoAt !== null && "port" in demoAt ? [demoAt.port] : []);
   // THE PORT IS THE PROJECT'S (src/cli/ports.ts): the first start's choice recorded, every later start on it or refused
-  const pg = await choosePgPort(process.env.MASON_PG_PORT, new Set(), cfg.pgPort ?? null);
+  const pg = await choosePgPort(process.env.MASON_PG_PORT, demoPorts, cfg.pgPort ?? null);
   if ("problem" in pg) return failed("start", pg, { json: false });
   if (cfg.pgPort !== pg.port) { cfg.pgPort = pg.port; writeConfig(home, cfg); }
   // WHERE AND HOW THE POSTGRES LISTENER LISTENS (src/cli/pg-tls.ts): the one reader of MASON_PG_HOST and
@@ -124,15 +178,31 @@ export async function dev(o: DevOptions): Promise<number> {
   if ("problem" in listen) return failed("start", listen, { json: false });
   const pgTls = listenerTls(listen, o.selfSignedTls, home, cfg);
   if ("problem" in pgTls) return failed("start", pgTls, { json: false });
-  const chosen = new Set([pg.port]);
+  const chosen = new Set([pg.port, ...demoPorts]);
   // a server's project folder is the team's, committed, and may be mounted read-only: mason serve writes nothing there
   const wrotePin = o.serve ? null : ensurePin(folder, o.version);
   if (wrotePin) say(`  wrote ${path.relative(project.root, wrotePin)}: version ${o.version}, the Mason this project is written for — commit it`);
-  // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
-  // URL from its environment first (mason serve is configured by it alone)
-  const readSources = (): ReturnType<typeof projectSource> => projectSource(project, process.env, { shellFirst: o.serve !== undefined });
-  const src = readSources();
   if ("message" in src) return failed("start", src, { json: false });
+  const logFile = path.join(home, "mason.log");
+  const log = fs.createWriteStream(logFile, { flags: "a" });
+  // one entry a line: a multi-line message's further lines indented under it (src/lib/log.ts `textEntry`);
+  // mason serve gets the same entry, for the container's stdout (src/cli/serve.ts)
+  const logLine = (l: string): void => {
+    const entry = textEntry(`${new Date().toISOString()} `, l);
+    log.write(entry);
+    o.serve?.log(entry.trimEnd());
+  };
+  // THE DEMO DATABASE (src/cli/demo.ts), hosted here: opened before it is connected to, as any database is
+  let demo: Parameters<typeof demoChanges>[0] | null = null;
+  if (demoAt !== null) {
+    begin("Starting the demo database");
+    if ("problem" in demoAt) { fail("Starting the demo database"); say(`  ${demoAt.problem}`); return 1; }
+    const opened = await openDemo({ home, port: demoAt.port, from: src.from, log: (l) => logLine(`[demo] ${l}`) });
+    if ("problem" in opened) { fail("Starting the demo database"); say(`  ${opened.problem}`); return 1; }
+    demo = opened.demo;
+    hosted.close = closingOnce(opened.demo);
+    done(opened.done);
+  }
   const db = maskedUrl(src.resolved);
   begin(`Connecting to ${db}`);
   const checkSaid: string[] = [];
@@ -242,15 +312,6 @@ export async function dev(o: DevOptions): Promise<number> {
   try { storeJsonPaths = storeJsonPathsOf(process.env); }
   catch (e) { say(`mason start: ${(e as Error).message}`); return 1; }
 
-  const logFile = path.join(home, "mason.log");
-  const log = fs.createWriteStream(logFile, { flags: "a" });
-  // one entry a line: a multi-line message's further lines indented under it (src/lib/log.ts `textEntry`);
-  // mason serve gets the same entry, for the container's stdout (src/cli/serve.ts)
-  const logLine = (l: string): void => {
-    const entry = textEntry(`${new Date().toISOString()} `, l);
-    log.write(entry);
-    o.serve?.log(entry.trimEnd());
-  };
   begin("Opening the copy");
   const duckFile = path.join(home, DUCK_FILE);
   let store: DuckStore;
@@ -350,6 +411,7 @@ export async function dev(o: DevOptions): Promise<number> {
     slot: changes === "replication" ? repl.slot : "", changes, port: setupPort, token, folder: () => folder, root: project.root,
     // the web page (mason ui) is mason start's alone: mason serve's run serves none (src/cli/run-server.ts RunContext.page)
     page: o.serve === undefined,
+    demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database: cfg.name, postgresUrl },
     ...(changes === "replication" ? { publication: { name: repl.publication, owned: repl.owned } } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
@@ -372,6 +434,8 @@ export async function dev(o: DevOptions): Promise<number> {
   writeConfig(home, cfg);
   done(`Mason is up: ${sync.state().length} table(s) added, kept current ${syncMode === "replication" ? `by logical replication (slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})`
     : `every ${pollMs / 1000} s ${syncMode === "poll" ? "by polling with SELECTs (xmin)" : "by copying each table again whole (MASON_DUCK_SYNC=recopy)"}`}`);
+  // THE DEMO'S WRITER: a round of changes every MASON_DEMO_CHANGE_MS, begun once the run is up, said in the log
+  if (demo !== null && demoChangeMs !== null) hosted.stopChanges = demoChanges(demo, demoChangeMs, (l) => logLine(`[demo] ${l}`));
   // the stop is in place BEFORE the ready line: a supervisor or a test signals on reading it, and a SIGTERM that found
   // no handler would end the run with the default action, never recording `running: null`
   let stopping = false;
@@ -383,11 +447,15 @@ export async function dev(o: DevOptions): Promise<number> {
       stopping = true;
       say(`FATAL ERROR: Mason: the copy's thread stopped (${reason})`);
       clearInterval(refreshFacts);
+      hosted.stopChanges?.();
       server.close();
       void (async () => {
         // the sessions were told; the listener is closed so that none waits on a copy that cannot answer
         const closed = api.close().catch((e: unknown) => say(`  closing the listener: ${(e as Error).message}`));
         await Promise.race([closed, new Promise((r) => setTimeout(r, 2_000).unref())]);
+        // the demo database's data flushed to its folder before the log it writes to ends (dev() closes it otherwise)
+        // (a close still going after 2 s is said: the process ends without it, and the folder may not be whole)
+        await closedWithin(closeDemo(hosted, null), 2_000, () => say(`  ${DEMO_STILL_CLOSING(2_000)}`));
         log.end();
         resolve(1);
       })();
@@ -398,12 +466,20 @@ export async function dev(o: DevOptions): Promise<number> {
       o.serve?.stopping();
       say("\nmason start: stopping …");
       clearInterval(refreshFacts);
+      hosted.stopChanges?.();
       server.close();
       void (async () => {
         try { await api.close(); } catch (e) { say(`  closing the listener: ${(e as Error).message}`); }
         // after the listener: its last statements' rows are written before the file closes
         try { await requests.close(); } catch (e) { say(`  closing the request log: ${(e as Error).message}`); }
-        try { await sync.stop(); await store.close(); say(`  closed the copy (it stays in ${duckFile})`); } catch (e) { say(`  closing the copy: ${(e as Error).message}`); }
+        let syncStop: Error | null = null;
+        try { await sync.stop(); } catch (e) { syncStop = e as Error; }
+        // the demo database after the sync (nothing reads it any more) and before the copy closes
+        await closeDemo(hosted, `closed the demo database (it stays in ${path.join(home, DEMO_DIR)}; mason destroy removes it)`);
+        if (syncStop !== null) say(`  closing the copy: ${syncStop.message}`);
+        else {
+          try { await store.close(); say(`  closed the copy (it stays in ${duckFile})`); } catch (e) { say(`  closing the copy: ${(e as Error).message}`); }
+        }
         if (syncMode === "replication") say(`  replication slot ${repl.slot} stays on ${source.database}, holding its WAL until the next mason start reads it (mason destroy drops it)` +
           (repl.owned ? "" : `; publication ${repl.publication} is its owner's, left as it is`));
         cfg.running = null;
@@ -421,6 +497,7 @@ export async function dev(o: DevOptions): Promise<number> {
   say(`  Postgres  ${withPlaceholders(postgresUrl)}  (mason user add <name> makes a user)`);
   // the web page by its command, never its URL: the URL carries the run's token, and this goes to dev.log
   if (o.serve === undefined) say("  Web UI  mason ui  (the status page and the users, in your browser)");
+  if (demoChangeMs !== null) say(`  Demo  a new order lands every ${demoChangeMs / 1000} s: mason status shows the copy keeping up`);
   const elsewhere = elsewhereTip(pgTls.listener);
   if (elsewhere) say(`  ${elsewhere}`);
   say(READY);

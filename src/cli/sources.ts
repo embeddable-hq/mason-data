@@ -213,8 +213,9 @@ export function sourceFileNames(folder: string): string[] {
   return fs.readdirSync(dir).filter((f) => /\.ya?ml$/.test(f) && !f.startsWith(".")).sort();
 }
 
-/** The file `mason init` writes: the database, then its tables (none yet). */
-export function newSourceText(url = "${DATABASE_URL}"): string {
+/** The file `mason init` writes: the database, then its tables — none yet, but for `mason init demo`'s, which names the
+ *  demo database's tables (`tables`, each copied whole: `{}`), so its first start copies them and shows something. */
+export function newSourceText(url = "${DATABASE_URL}", tables: readonly string[] = []): string {
   return "# The database this project copies from, and which of its tables. Yours to commit; the URL stays out of it.\n" +
     "kind: postgres\n" +
     `url: ${url}${ENV_REF.test(url) ? "   # from .env.local, .env or the shell; a literal postgres:// URL works too" : ""}\n` +
@@ -222,7 +223,7 @@ export function newSourceText(url = "${DATABASE_URL}"): string {
     "# One entry per table, a bare name in public, else schema.table: {} copies every column, columns: [id, status]\n" +
     "# those, exclude: [payload] every column but those; key: [a, b] names the columns that tell its rows apart, for a\n" +
     "# table with no primary key. mason add and mason remove edit this list; so can you.\n" +
-    "tables: {}\n";
+    (tables.length ? `tables:\n${tables.map((t) => `  ${t}: {}\n`).join("")}` : "tables: {}\n");
 }
 
 /** A source's name from its database's: the file is named for it, else `app`. */

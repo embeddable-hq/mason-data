@@ -63,3 +63,14 @@ input { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid v
 .added .headline { font-weight: 600; margin: 0 0 8px; }
 .added .tip { color: var(--dim); }
 #poll .failure { border: 1px solid var(--bad); border-left-width: 3px; border-radius: 4px; margin-top: 16px; }
+table.catalog td.num { white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+.c-added .state { color: var(--ok); }
+.c-cannot .state { color: var(--warn); font-size: 13px; }
+tr.under > td { border-top: 0; padding-top: 0; }
+form.pick { display: block; margin: 4px 0 8px; }
+form.pick fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 8px; padding: 6px 10px; }
+form.pick legend { color: var(--dim); font-size: 13px; padding: 0 4px; }
+label.tick { display: inline-flex; align-items: baseline; gap: 4px; margin: 2px 14px 2px 0; }
+.done { border: 1px solid var(--ok); border-radius: 8px; padding: 8px 12px; margin: 4px 0 8px; }
+.done .headline { font-weight: 600; margin: 0 0 4px; overflow-wrap: anywhere; }
+.done .note, .done .tip { color: var(--dim); margin: 2px 0 6px; }

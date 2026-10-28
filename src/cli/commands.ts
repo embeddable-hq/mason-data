@@ -18,7 +18,7 @@ import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from
 import { alive, endRun, END_GRACE_MS, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
 import { readRestarts, signalSupervisor, stopSupervisor, supervisorGone, type Restart } from "./supervise.ts";
-import { DUCK_FILE, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
@@ -57,6 +57,8 @@ export interface TableState extends CatalogTable {
 export interface RunState {
   /** the database the run copies from: a JSON key named `source` is always this object, never a table (a table is `table`) */
   source: { url: string; database: string; remote: boolean; version: string; standby: boolean; changes: "poll" | "replication";
+    /** the demo database this run hosts (`mason init demo`); absent from a run before it was said */
+    demo?: boolean;
     /** the source's name: its sources file's, without `.yml` */
     name: string | null;
     /** the sources file the run copies from, absolute */
@@ -250,8 +252,8 @@ const STATUS_USAGE = `usage: mason status [--json]
   --json   as data: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), listener:
            { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
            source's: its sources file's), file (the sources file), url, database, remote, version, standby, changes,
-           replication }, warnings, folder, project, tables: [{ table, rows, bytes, key, added, addedColumns, copy, error,
-           … }], engine: { file, bytes, pollSeconds, restarts (each time its supervisor started the
+           replication, demo (the demo database this run hosts) }, warnings, folder, project, tables: [{ table, rows,
+           bytes, key, added, addedColumns, copy, error, … }], engine: { file, bytes, pollSeconds, restarts (each time its supervisor started the
            run again: { at, reason, upSeconds }) }, slowQueries, refusedQueries, refusedTotal (how many in all),
            readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
@@ -370,10 +372,11 @@ export async function status(argv: string[]): Promise<number> {
 export function sourceRows(s: Pick<RunState, "source" | "engine">): Array<[string, string]> {
   return [
     ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`] as [string, string]] : []),
-    ["Database", `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
+    ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
+      : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
         `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · mason start --replication reads the database's change log instead`],
+      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · ${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
   ];
 }
 
@@ -572,9 +575,8 @@ export async function tables(argv: string[]): Promise<number> {
   if (!f.positionals.length && !f.values.all) {
     const w = Math.max(...shown.map((t) => t.table.length));
     for (const t of shown) {
-      const size = t.rows === null ? "rows unknown" : `~${n(t.rows)} rows`;
-      out(`${t.table.padEnd(w)}  ${size.padStart(18)}  ${t.key.length ? `key ${t.key.join(", ")}` : "no key"}` +
-        `${t.added ? "  · added" : t.reason ? `  · cannot be added as it is: ${t.reason}` : ""}`);
+      const l = tableFacts(t);
+      out(`${t.table.padEnd(w)}  ${l.size.padStart(18)}  ${l.key}${l.state ? `  · ${l.state}` : ""}`);
     }
     out(nextBlock(next));
     return 0;
@@ -599,6 +601,13 @@ export async function tables(argv: string[]): Promise<number> {
   return 0;
 }
 
+/** A table's line in `mason tables`: its size, its key, and added or why it cannot be added as it is (the web page's
+ *  tables say the same, src/web/app.js; tests/web-page.test.ts holds the two equal). */
+export function tableFacts(t: CatalogTable): { size: string; key: string; state: string | null } {
+  return { size: t.rows === null ? "rows unknown" : `~${n(t.rows)} rows`, key: t.key.length ? `key ${t.key.join(", ")}` : "no key",
+    state: t.added ? "added" : t.reason ? `cannot be added as it is: ${t.reason}` : null };
+}
+
 /**
  * THE PROJECT'S DATABASE'S TABLES, READ BY THE COMMAND ITSELF (the hands-on review of #451, item 15: `mason tables`
  * answered "Mason is not running", though it reads only Postgres): the database's catalog (preflight.ts
@@ -608,11 +617,17 @@ export async function tables(argv: string[]): Promise<number> {
 async function databaseTables(p: Project): Promise<{ database: string; name: string; file: string; tables: CatalogTable[] } | Failure> {
   const src = projectSource(p);
   if ("message" in src) return src;
+  const demo = p.config.demo === true;
   const fix = `change the URL where it is (${src.from}) when the database's password or host changed`;
   const parsed = parseSource(src.resolved);
   if ("problem" in parsed) return { message: `the database's URL (${src.from}): ${parsed.problem}`, code: "bad_source", fix };
-  const connected = await connectSource(parsed.source);
+  const connected = await connectSource(parsed.source, { demo });
   if ("failure" in connected) {
+    // the demo database's way out is its run (src/cli/demo.ts): its hint is the fix, mason start the next command
+    if (demo) {
+      return { message: `could not connect to ${maskedUrl(parsed.source.url)}: ${connected.failure.message}`, code: "unreachable",
+        fix: connected.failure.hints.join("; ") || "mason start hosts the demo database", next: [["mason start", "the demo database and Mason, in the background"]] };
+    }
     return { message: `could not connect to ${maskedUrl(parsed.source.url)}: ${connected.failure.message}`, code: "unreachable",
       ...(connected.failure.hints.length ? { why: connected.failure.hints.join("; ") } : {}), fix,
       next: [["mason doctor", "checks the machine and the project's database"]] };
@@ -727,12 +742,9 @@ export async function add(argv: string[]): Promise<number> {
       results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already });
       added.push(b.table);
       if (json) continue;
-      const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
-      steps.done(`Added ${t.table} to ${shown(b.file)}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`);
-      if (b.addedKey.length) note(`key added: ${b.addedKey.join(", ")} (a copy always has its key)`);
-      // a secret is readable by anyone with a user's password: left out, and said, with the way to include one
-      if (b.skippedSecrets.length) note(`left out ${b.skippedSecrets.join(", ")}: ${b.skippedSecrets.length === 1 ? "it looks" : "they look"} like ${b.skippedSecrets.length === 1 ? "a secret" : "secrets"}, ` +
-        `which anyone with a user's password could read (--include ${b.skippedSecrets[0]} adds it)`);
+      const l = addedLines(b, shown(b.file));
+      steps.done(l.line);
+      for (const x of l.notes) note(x);
     }
     const next: NextStep[] = added.length ? [
       ["mason wait", `until ${added.length === 1 ? "its copy finishes" : "their copies finish"} (the copy has started)`],
@@ -757,7 +769,20 @@ export async function add(argv: string[]): Promise<number> {
 }
 
 /** What the run's command server answers a table added with (src/cli/run-server.ts PickResult). */
-interface PickAnswer { table: string; file: string; entry: string; columns: string[] | null; exclude: string[]; key: string[] | null; addedKey: string[]; skippedSecrets: string[]; already: boolean }
+export interface PickAnswer { table: string; file: string; entry: string; columns: string[] | null; exclude: string[]; key: string[] | null; addedKey: string[]; skippedSecrets: string[]; already: boolean }
+
+/** What `mason add` prints for a table added: its line (✔ …), then its notes under it (the web page says the same,
+ *  src/web/app.js; tests/web-page.test.ts holds the two equal). `file` is the sources file as the reader is shown it. */
+export function addedLines(b: PickAnswer, file: string): { line: string; notes: string[] } {
+  const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
+  const s = b.skippedSecrets;
+  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a copy always has its key)`] : []),
+    // a secret is readable by anyone with a user's password: left out, and said, with the way to include one
+    ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
+      `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
+  ] };
+}
 
 // ------------------------------------------------------------------ mason remove
 
@@ -801,10 +826,16 @@ export async function remove(argv: string[]): Promise<number> {
     const next: NextStep[] = [["mason status", "the tables left"]];
     if (json) { out(jsonText(REMOVE, { removed: b.removed, file: b.file }, next)); return 0; }
     const rel = path.relative(process.cwd(), b.file);
-    out(reportText({ headline: `Removed ${b.removed.join(", ")}`, details: [["from", rel.startsWith("..") ? b.file : rel]],
-      tips: [`Mason stops copying ${b.removed.length === 1 ? "it" : "them"} and drops ${b.removed.length === 1 ? "its copy" : "their copies"}`], next }, styleOut()));
+    out(reportText({ ...removedReport(b.removed, rel.startsWith("..") ? b.file : rel), next }, styleOut()));
     return 0;
   });
+}
+
+/** What `mason remove` prints for the tables removed, `file` the sources file as the reader is shown it (the web page
+ *  says the same, src/web/app.js; tests/web-page.test.ts holds the two equal). */
+export function removedReport(removed: readonly string[], file: string): { headline: string; details: Array<[string, string]>; tips: string[] } {
+  return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
+    tips: [`Mason stops copying ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its copy" : "their copies"}`] };
 }
 
 // ------------------------------------------------------------------ mason wait
@@ -1094,8 +1125,10 @@ export async function stop(argv: string[]): Promise<number> {
   const recorded = readProject(run.root);
   const replicating = isProject(recorded) && recorded.config.changes === "replication";
   const named = isProject(recorded) ? recorded.config.publication ?? null : null;
+  // a demo project's database (src/cli/demo.ts) stays too, as the copy does: said where a person reads the stop
+  const demo = isProject(recorded) && recorded.config.demo === true;
   if (json) { out(jsonText(STOP, { stopped: [run.name] }, next)); return 0; }
-  out(reportText({ headline: `Stopped ${run.name}`, details: [["kept", "its copy of the data and its state"],
+  out(reportText({ headline: `Stopped ${run.name}`, details: [["kept", `its copy of the data and its state${demo ? ` and the demo database (${STATE_DIR}/${DEMO_DIR})` : ""}`],
     ...(replicating ? [["slot", `its replication slot stays on the database, holding WAL until the next mason start (mason destroy drops it)`] as const,
       ["publication", named ? `${named}, its owner's: read as it is, never altered (mason destroy leaves it)` : "Mason's own (mason destroy drops it)"] as const] : [])] }));
   out(endText({ next }));
