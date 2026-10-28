@@ -83,6 +83,13 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   handed it back (`answer.close`). Never `worker.terminate()` a copy's worker that may have a statement in flight:
   even a call-free one aborted the process 2 times in 12. `tests/duck-executor.test.ts` "never ends the copy's thread
   under a call" holds it (a close with a 1 ms grace, a process ending while an answer drains).
+- **A statement closed while it STARTS is released only once DuckDB hands its start back** (Linux CI: the stop met a
+  calling count inside `stream()`, released it at once with nothing to close, and the result handed back after was
+  never closed — the connection and the instance closed under its running tasks, and the thread's end met their
+  queued calls, `FATAL ERROR: Error::Error napi_define_properties`): `drain` waits for a pending start (its failure
+  releases it through `cleanUp`, its answer is drained once handed back), and `SessionRunner.close` closes an answer a
+  statement opened while the close waited. `tests/duck-executor.test.ts` "a session closed while its function-calling
+  statement starts" holds both, by the order the worker's port keeps (answered, then released).
 - **A statement that calls a Mason function starves the executor worker for its whole run, and with it every other
   statement on the copy**: DuckDB's threads queue their calls faster than the worker answers, and Node's
   threadsafe-function loop runs up to a thousand calls between two turns of anything else (4.5 µs a row on the test

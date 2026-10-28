@@ -481,7 +481,14 @@ export class SessionRunner implements DuckRunner {
     // call raises) or read to its end, then released — the session's next statement waits for that (`releasing`)
     const drain = (): void => {
       const r = result;
-      if (!callsFunctions || r === null) { release(); return; }
+      // CLOSED WHILE DuckDB STILL STARTS IT (its `stream()` pending: an aggregate computes there whole): nothing is
+      // released under the pending start — that destroyed the prepared statement under it and, its release done, let the
+      // start's own failure skip `cleanUp`, so the connection and the instance closed while its other tasks still had
+      // calls queued for this thread, and the thread's end met them (Linux CI: `FATAL ERROR: Error::Error
+      // napi_define_properties`, 7 runs in 30 of a stop under a calling count). The start's own path releases it: its
+      // failure through `releaseAfterCleanup`, its answer drained once handed back (below `stream()`)
+      if (r === null) return;
+      if (!callsFunctions) { release(); return; }
       const done = (async () => {
         // read on until the next call raises or the result ends — an EMPTY chunk, as `fetch` reads it: past its end a
         // streamed result hands back empty chunks for ever, never null, and a result closed after its last row but
@@ -518,6 +525,8 @@ export class SessionRunner implements DuckRunner {
       const t1 = performance.now();
       try { result = await p.stream(); }
       catch (e) { throw failure(e); }
+      // closed while it started (`drain` above): drained now that DuckDB handed it back, its answer told the cancel
+      if (closed) drain();
       timing.duckdbMs += performance.now() - t1;
       const r = result;
       if (fields !== null && r.columnCount < fields.length) throw new StatementError({ code: "XX000", message: `DuckDB answered ${r.columnCount} column(s) where Postgres's analysis has ${fields.length}: report it (Mason's rewrite)` }, sql);
@@ -668,8 +677,15 @@ export class SessionRunner implements DuckRunner {
    *  answer released and every call of DuckDB settled (never under the executor: `drain`; a connection
    *  closed under a drain's pending fetch aborted the process). */
   async close(): Promise<void> {
-    this.openAnswer?.();
-    await this.idle();
+    // an answer left open is closed and drained — and one a statement still STARTING opens while this waits (the
+    // session closed between its ask and its answer: left open, the connection closed under it and its running tasks)
+    for (let last: (() => void) | null = null; ;) {
+      const open = this.openAnswer;
+      if (open !== null && open !== last) { last = open; open(); }
+      await this.idle();
+      // released (null), or one already closed: done; a new one opened meanwhile: closed in turn
+      if (this.openAnswer === null || this.openAnswer === last) break;
+    }
     this.conn.closeSync();
   }
 

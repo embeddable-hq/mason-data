@@ -558,3 +558,63 @@ test("a copy closed past its grace under a function-calling statement, or a proc
   assert.doesNotMatch(left.stderr, /Napi::Error|FATAL ERROR/);
   assert.equal(left.stdout.trim(), "left after 2048 row(s)");
 });
+
+// A SESSION CLOSED WHILE ITS STATEMENT STARTS (Linux CI, the test above: its "grace" child aborted, `FATAL ERROR:
+// Error::Error napi_define_properties` — 6 runs in 30 in a Linux container, 0 in 30 on the Mac). Traced: the stop met the
+// statement still in its start (DuckDB's `stream()` not yet handed back: milliseconds, longer on a loaded machine), and
+// the close RELEASED it at once — nothing to close yet — so the result DuckDB then handed back was never closed nor
+// waited on: the connection and the instance closed under its running tasks, and the thread's end met their queued
+// calls. A session closed before its statement's start even began (its zone being set) left the answer opened after it
+// the same way. Now a start's answer is drained once handed back, and a session's close closes an answer opened while
+// it waits. Told apart by ORDER, which the copy's thread's one port keeps: the statement is answered (its start), then
+// released — never released before it was even answered, nor never released. Each in a process of its own: the old
+// code may abort or hang.
+test("a session closed while its function-calling statement starts releases the answer DuckDB hands back, after it, never before or never", { timeout: 180_000 }, () => {
+  const at = (p: string): string => JSON.stringify(fileURLToPath(new URL(p, import.meta.url)));
+  // the copy's own worker, its starts handed back 300 ms late (a loaded machine's, made certain), said in the log
+  const slow = path.join(dir, "slow-start-worker.mjs");
+  fs.writeFileSync(slow, `import { parentPort } from "node:worker_threads";
+import { createRequire } from "node:module";
+const duck = createRequire(${at("../package.json")})("@duckdb/node-api");
+const stream = duck.DuckDBPreparedStatement.prototype.stream;
+duck.DuckDBPreparedStatement.prototype.stream = async function () {
+  parentPort.postMessage({ log: "starting" });
+  const r = await stream.call(this);
+  await new Promise((res) => setTimeout(res, 300));
+  return r;
+};
+await import(${at("../src/duck/executor-worker.ts")});
+`);
+  const run = (name: string, workerFile: string | null, before: string): string[] => {
+    const file = path.join(dir, `${name}.mjs`);
+    fs.writeFileSync(file, `
+      import { setTimeout as sleep } from "node:timers/promises";
+      const { DuckStore } = await import(${at("../src/duck/store.ts")});
+      const order = [];
+      const store = await DuckStore.open(${JSON.stringify(path.join(dir, `${name}.db`))}, (l) => { if (/^statement: /.test(l)) order.push("released"); if (l === "starting") order.push("starting"); },
+        ${workerFile === null ? "{}" : `{ workerFile: ${JSON.stringify(workerFile)} }`});
+      await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(2000000)");
+      const r = await store.runner();
+      order.length = 0;
+      // a count calling json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
+      const asked = r.run({ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL",
+        functions: ["__mason_json_get"] }, [], { timeZone: "UTC", searchPath: "public" }, new AbortController().signal)
+        .then(() => order.push("answered"), () => order.push("refused"));
+      ${before}
+      await r.close();
+      await asked;
+      await store.close();
+      console.log(JSON.stringify(order.filter((x) => x !== "starting")));
+    `);
+    const ran = spawnSync(process.execPath, [file], { encoding: "utf8", timeout: 60_000 });
+    assert.equal(ran.signal, null, `${name}: the process did not end by itself (${ran.signal})\n${ran.stderr}`);
+    assert.equal(ran.status, 0, `${name}: ${ran.stderr}`);
+    return JSON.parse(ran.stdout.trim()) as string[];
+  };
+  // the close while DuckDB's start is pending: its answer opened, not yet handed back
+  assert.deepEqual(run("closed-in-start", slow, `for (const t = Date.now(); !order.includes("starting"); await sleep(5)) if (Date.now() - t > 20_000) throw new Error("no start within 20 s");`),
+    ["answered", "released"], "closed while DuckDB started it: answered, then released — never released before its start was handed back");
+  // the close asked right after the statement, before its start began (its session's zone is set first)
+  assert.deepEqual(run("closed-before-start", null, ""),
+    ["answered", "released"], "closed before its start: the answer opened after the close is released too, never left open under the closing connection");
+});
