@@ -46,8 +46,9 @@ export function canonicalZone(z: unknown): string | null {
   return c !== undefined && isZone(c) ? c : null;
 }
 
-/** UTC and its aliases, in any case: a zone that changes nothing. */
-export const isUtc = (z: string): boolean => /^(UTC|Etc\/UTC|Etc\/GMT|GMT|Etc\/Universal|Universal|Zulu|Etc\/Zulu)$/i.test(z);
+/** UTC and its aliases (compared in any case): a zone that changes nothing. One list, read by isUtc and by the SQL that tests the session zone at execution. */
+export const UTC_NAMES = ["UTC", "Etc/UTC", "Etc/GMT", "GMT", "Etc/Universal", "Universal", "Zulu", "Etc/Zulu"] as const;
+export const isUtc = (z: string): boolean => UTC_NAMES.some((n) => n.toLowerCase() === z.toLowerCase());
 
 /**
  * THE ZONE OF A POSTGRES `AT TIME ZONE '<name>'`, as ClickHouse spells it, where Postgres and ClickHouse read the name

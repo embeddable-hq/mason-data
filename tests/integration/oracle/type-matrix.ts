@@ -105,6 +105,16 @@ export const COLL: Array<[number, string | null]> = [
   [50, "1x"], [51, "1-X"], [99, "e\u0301"],
 ];
 
+/** the instants of `instants` (as UTC text, which every zone reads alike) */
+const INSTANTS: Array<[number, string | null]> = [
+  [1, "2026-03-29 00:59:59.999999+00"], [2, "2026-03-29 01:00:00+00"], [3, "2026-03-29 01:30:00+00"], [4, "2026-10-25 00:30:00+00"],
+  [5, "2026-10-25 01:00:00+00"], [6, "2026-10-25 01:30:00+00"], [7, "2026-10-25 02:00:00+00"], [8, "2026-03-08 06:59:59+00"],
+  [9, "2026-03-08 07:00:00+00"], [10, "2026-11-01 05:30:00+00"], [11, "2026-11-01 06:30:00+00"], [12, "1969-12-31 23:59:59.5+00"],
+  [13, "1960-02-29 12:34:56.789+00"], [14, "1880-06-15 12:00:30+00"], [15, "2000-12-31 23:00:00+00"], [16, "2001-01-01 00:00:00+00"],
+  [17, "2026-01-04 23:59:59+00"], [18, "2026-01-05 00:00:00+00"], [19, "2026-07-01 12:34:56.123456+00"], [20, "infinity"], [21, "-infinity"], [22, null],
+  [23, "1999-12-31 23:59:59.999999+00"], [24, "2262-04-11 23:47:16+00"], [25, "2026-03-29 00:30:00+00"], [26, "2026-11-01 04:59:59.999999+00"],
+];
+
 /** the table and its rows (the oracle's TimeZone is UTC: a timestamptz literal's offset is folded into UTC); beside it,
  *  `typed_arrays` holds the array types the review found sent as text[] */
 export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public.typed (id int PRIMARY KEY, ${ALL.map((c) => `${c} ${COLUMNS[c]}`).join(", ")}); ` +
@@ -150,7 +160,23 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   "INSERT INTO public.late SELECT g, jsonb_build_object('n', CASE WHEN g = 2000 THEN 'x' ELSE g::text END, 'd', jsonb_build_object('os', 'ios' || g % 7)), 2000 - g, g % 50 FROM generate_series(1, 2000) g; " +
   "CREATE TABLE public.late_c (id int PRIMARY KEY, name text); INSERT INTO public.late_c SELECT g, 'c' || g FROM generate_series(0, 49) g;" +
   // JSONB IN POSTGRES'S ORDER (JORDER above), beside a json of the same text, which has no order at all
-  `CREATE TABLE public.jorder (id int PRIMARY KEY, j jsonb, js json); INSERT INTO public.jorder VALUES ${JORDER.map((v, i) => `(${i + 1}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};`
+  `CREATE TABLE public.jorder (id int PRIMARY KEY, j jsonb, js json); INSERT INTO public.jorder VALUES ${JORDER.map((v, i) => `(${i + 1}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};` +
+  // INSTANTS AT A TRUNCATION'S EDGES (date_trunc of a timestamptz, in the session's zone or a zone of its own): each side
+  // of Europe/Berlin's and America/New_York's changes of 2026, a repeated hour's two halves, before 1970, a zone's local
+  // mean time (1880), the first instant of a week, a century and a millennium, a microsecond, ±infinity and NULL
+  `CREATE TABLE public.instants (id int PRIMARY KEY, at timestamptz); INSERT INTO public.instants VALUES ${INSTANTS.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v}'`})`).join(", ")};` +
+  // DOCUMENTS A PREVIEW EXPANDS (a LEFT JOIN LATERAL json_each … ON TRUE): objects of several keys, a key twice in a
+  // json, an empty object, NULL, an array and a string the tool's CASE passes over; and arrays of other element types
+  // (an unnest's padding NULL is of each), empty, NULL, or holding a NULL
+  "CREATE TABLE public.docs (id int PRIMARY KEY, j json, jb jsonb, tags text[], ia int[], da date[], ua uuid[]); INSERT INTO public.docs SELECT g, d::json, d::jsonb, CASE WHEN g % 6 = 0 THEN NULL WHEN g % 6 = 1 THEN '{}' ELSE ARRAY['t' || (g % 4), 'u' || (g % 3)] END, " +
+  "CASE WHEN g % 5 = 0 THEN NULL WHEN g % 5 = 1 THEN '{}' WHEN g % 5 = 2 THEN ARRAY[g, NULL] ELSE ARRAY[g, g % 3] END, " +
+  "CASE WHEN g % 4 = 0 THEN NULL WHEN g % 4 = 1 THEN '{}' ELSE ARRAY[date '2026-01-01' + g, NULL] END, " +
+  "CASE WHEN g % 7 = 0 THEN NULL WHEN g % 7 = 1 THEN '{}' ELSE ARRAY[('00000000-0000-0000-0000-' || lpad(g::text, 12, '0'))::uuid] END " +
+  "FROM (SELECT g, CASE WHEN g % 13 = 0 THEN NULL WHEN g % 17 = 0 THEN '[1, 2, 3]' WHEN g % 19 = 0 THEN '{}' WHEN g % 23 = 0 THEN '\"s\"' WHEN g % 29 = 0 THEN '{\"a\": 1, \"a\": 2, \"bb\": null}' " +
+  "ELSE json_build_object('event', 'e' || (g % 7), 'n', g, 'ok', g % 2 = 0, 'nested', json_build_object('k', g % 3), 'z', CASE WHEN g % 3 = 0 THEN NULL ELSE 'x' || g END)::text END AS d FROM generate_series(1, 300) g) s;" +
+  // A NULLABLE COLUMN OF EACH KIND A SORT MEETS (the nulls-placement idiom): NULLs among ties
+  "CREATE TABLE public.nullish (id int PRIMARY KEY, ts timestamp, t text, n int); INSERT INTO public.nullish SELECT g, CASE WHEN g % 5 = 0 THEN NULL ELSE timestamp '2026-01-01' + (g % 17) * interval '1 hour' END, " +
+  "CASE WHEN g % 7 = 0 THEN NULL ELSE 'v' || (g % 11) END, CASE WHEN g % 4 = 0 THEN NULL ELSE g % 9 END FROM generate_series(1, 60) g;"
 
 /** a round of changes the poll carries: values move, a row goes, one comes */
 export function typedMutations(round: number): string {
@@ -164,7 +190,9 @@ export function typedMutations(round: number): string {
 const ORDINARY = "id < 100";
 const OPS = ["=", "<>", "<", "<=", ">", ">="];
 const pairs = <T>(xs: readonly T[]): Array<[T, T]> => xs.flatMap((a) => xs.map((b): [T, T] => [a, b]));
-const q = (name: string, sql: string): { name: string; sql: string } => ({ name: `type matrix: ${name}`, sql });
+/** a statement of the matrix; `zone`, the session's TimeZone it is asked in (UTC where none is said) */
+export interface Matrixed { name: string; sql: string; zone?: string }
+const q = (name: string, sql: string, zone?: string): Matrixed => ({ name: `type matrix: ${name}`, sql, ...(zone === undefined ? {} : { zone }) });
 
 /** a literal of each family to compare a column with */
 const LITERALS: Partial<Record<Col, string[]>> = {
@@ -177,7 +205,7 @@ const LITERALS: Partial<Record<Col, string[]>> = {
   jb: ["'{\"a\": 1.00}'", "'1.5'", "'[]'"],
 };
 
-function* matrix(): Generator<{ name: string; sql: string }> {
+function* matrix(): Generator<Matrixed> {
   // ---- every column: its text, its order, its groups, its NULLs, its aggregates, its casts to text ----------------
   for (const c of ALL) {
     yield q(`${c} as written`, `SELECT id, ${c} FROM typed ORDER BY id`);
@@ -660,7 +688,91 @@ function* matrix(): Generator<{ name: string; sql: string }> {
   yield q("enum columns in information_schema", "SELECT column_name, data_type, udt_schema, udt_name FROM information_schema.columns WHERE table_name = 'moods' ORDER BY ordinal_position");
   // ANY / ALL over a NULL array is NULL (DuckDB read it as an empty one)
   yield q("ANY / ALL over a NULL array", "SELECT id, 1 = ANY (ai), 1 <> ALL (ai), 1 < ANY (ai), 1 = ALL (ai), (1 = ANY (ai)) IS NULL FROM typed WHERE id < 100 ORDER BY id");
+  // ---- date_trunc of a timestamptz in the session's zone and in a zone of its own (src/duck/rewrite.ts truncInstant):
+  // the instant's arithmetic in UTC, the offset kept below a day elsewhere, every part Postgres accepts --------------
+  const UNITS = ["microseconds", "milliseconds", "second", "minute", "hour", "day", "week", "month", "quarter", "year", "decade", "century", "millennium"];
+  for (const zone of ["UTC", "Europe/Berlin", "America/New_York", "Australia/Lord_Howe", "Asia/Kathmandu"]) {
+    yield q(`date_trunc of a timestamptz, every part, in ${zone}`, `SELECT id, ${UNITS.map((u) => `date_trunc('${u}', at) AS "${u}"`).join(", ")} FROM instants ORDER BY id`, zone);
+    yield q(`date_trunc of a timestamptz grouped (a histogram), in ${zone}`, "SELECT DATE_TRUNC('hour', i.at) AS h, date_trunc('month', i.at) AS m, count(*) FROM instants i GROUP BY 1, 2 ORDER BY 1 DESC NULLS LAST LIMIT 100", zone);
+    yield q(`date_trunc of a timestamptz in a zone of its own, in ${zone}`, "SELECT id, date_trunc('hour', at, 'Europe/Berlin'), date_trunc('minute', at, 'Asia/Kathmandu'), date_trunc('day', at, 'America/New_York'), " +
+      "date_trunc('month', at, 'UTC'), date_trunc('century', at, 'Europe/Berlin'), date_trunc('week', at, 'utc'), date_trunc('second', at, 'Australia/Lord_Howe'), date_trunc('quarter', at, 'Etc/UTC') FROM instants ORDER BY id", zone);
+    yield q(`date_trunc of a date as a timestamptz, in ${zone}`, "SELECT id, date_trunc('week', at::date), date_trunc('hour', at::date) FROM instants WHERE isfinite(at) ORDER BY id", zone);
+  }
+  // date_trunc is strict and reads its zone before the part: a NULL zone is NULL for every part (an infinite instant's
+  // too), a row's zone is read for every row, and a zone it does not know is its error, whichever the part
+  const parts = ["microseconds", "milliseconds", "second", "minute", "hour", "day"];
+  yield q("date_trunc in a NULL zone, every part", `SELECT id, ${parts.map((u) => `date_trunc('${u}', at, NULL) AS "${u}"`).join(", ")}, date_trunc('second', at, NULL::text) FROM instants ORDER BY id`);
+  const rowZone = "CASE WHEN id % 3 = 0 THEN NULL WHEN id % 3 = 1 THEN 'Europe/Berlin' ELSE 'asia/kathmandu' END";
+  yield q("date_trunc in a row's zone, NULL in some", `SELECT id, ${parts.map((u) => `date_trunc('${u}', at, ${rowZone}) AS "${u}"`).join(", ")} FROM instants ORDER BY id`);
+  for (const u of ["milliseconds", "second", "hour"]) {
+    yield q(`date_trunc('${u}') in a zone it does not know (its error)`, `SELECT id, date_trunc('${u}', at, 'Nowhere/Land') FROM instants ORDER BY id`);
+    yield q(`date_trunc('${u}') in a row's zone it does not know (its error)`, `SELECT id, date_trunc('${u}', at, CASE WHEN id = 5 THEN 'Nowhere/Land' ELSE 'UTC' END) FROM instants ORDER BY id`);
+  }
+
+  // ---- a LEFT JOIN LATERAL of a list's rows ON TRUE (src/duck/rewrite.ts leftLateral): the preview a BI tool sends,
+  // limited, its rows and their order Postgres's; and what is NOT so written (an INNER lateral, a lateral sorted,
+  // counted) ------------------------------------------------------------------------------------------------------
+  const objectJson = "CASE WHEN substring(ltrim(q.j::text), 1, 1) = '{' THEN q.j::json ELSE NULL END";
+  const objectJsonb = "CASE WHEN jsonb_typeof(q.jb) = 'object' THEN q.jb ELSE NULL END";
+  for (const [limit, label] of [["LIMIT 100 OFFSET 0", "limited"], ["LIMIT 40 OFFSET 23", "limited and offset"], ["", "whole"]] as const) {
+    yield q(`json_each LEFT JOIN ON TRUE, guarded, ${label}`, `SELECT q.*, d.key, d.value FROM (SELECT t.id, t.j FROM docs t) AS q LEFT JOIN json_each(${objectJson}) d ON TRUE ${limit}`);
+    yield q(`jsonb_each LEFT JOIN ON TRUE, guarded, ${label}`, `SELECT q.id, d.key, d.value::text FROM (SELECT t.id, t.jb FROM docs t) AS q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE ${limit}`);
+    yield q(`json_each_text / jsonb_each_text LEFT JOIN LATERAL ON true, ${label}`, `SELECT q.id, a.key, a.value, b.key, b.value FROM docs q LEFT JOIN LATERAL json_each_text(${objectJson}) a ON true LEFT JOIN LATERAL jsonb_each_text(${objectJsonb}) b ON true ${limit}`);
+    yield q(`jsonb_each LEFT JOIN ON TRUE over objects and NULLs alone, unguarded, ${label}`, `SELECT q.id, d.key FROM (SELECT t.id, t.jb FROM docs t WHERE t.id % 17 <> 0 AND t.id % 23 <> 0) AS q LEFT JOIN jsonb_each(q.jb) d ON TRUE ${limit}`);
+    yield q(`jsonb_array_elements / _text, jsonb_object_keys, unnest LEFT JOIN ON TRUE, ${label}`, "SELECT q.id, e.v::text, x, k, u FROM docs q LEFT JOIN jsonb_array_elements(CASE WHEN jsonb_typeof(q.jb) = 'array' THEN q.jb END) AS e(v) ON TRUE " +
+      `LEFT JOIN jsonb_array_elements_text(CASE WHEN jsonb_typeof(q.jb) = 'array' THEN q.jb END) AS x ON TRUE LEFT JOIN jsonb_object_keys(${objectJsonb}) AS k ON TRUE LEFT JOIN unnest(q.tags) AS u ON TRUE ${limit}`);
+  }
+  yield q("json_each LEFT JOIN ON TRUE, unguarded over arrays (Postgres's error)", "SELECT q.id, d.key FROM docs q LEFT JOIN json_each(q.j) d ON TRUE");
+  yield q("json_each LEFT JOIN ON TRUE, sorted by the lateral's key", `SELECT q.id, d.key, d.value FROM (SELECT t.id, t.j FROM docs t) AS q LEFT JOIN json_each(${objectJson}) d ON TRUE ORDER BY d.key NULLS FIRST, q.id, d.value::text LIMIT 60`);
+  yield q("jsonb_each LEFT JOIN ON TRUE, filtered by the lateral's value", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE WHERE d.value IS NULL OR jsonb_typeof(d.value) = 'number' LIMIT 50`);
+  yield q("jsonb_each INNER lateral, limited", `SELECT q.id, d.key, d.value::text FROM docs q CROSS JOIN LATERAL jsonb_each(${objectJsonb}) d LIMIT 30 OFFSET 5`);
+  yield q("json_each INNER JOIN ON TRUE, limited", `SELECT q.id, d.key FROM docs q JOIN json_each(${objectJson}) d ON TRUE LIMIT 30`);
+  yield q("jsonb_each LEFT JOIN on a condition", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON d.key <> 'n' ORDER BY 1, 2`);
+  // json(b)_array_elements(_text)'s column is `value` under a FROM name too, and the FROM name alone is the element
+  const arrays = "CASE WHEN jsonb_typeof(q.jb) = 'array' THEN q.jb END";
+  for (const join of ["JOIN", "LEFT JOIN"]) {
+    yield q(`jsonb_array_elements ${join} ON TRUE, e.value and e`, `SELECT q.id, e.value, e, e::text FROM docs q ${join} jsonb_array_elements(${arrays}) e ON TRUE`);
+    yield q(`jsonb_array_elements_text ${join} ON TRUE, e.value and e`, `SELECT q.id, e.value, e FROM docs q ${join} jsonb_array_elements_text(${arrays}) e ON TRUE`);
+    yield q(`json_array_elements ${join} ON TRUE, unaliased, by its own name`, `SELECT q.id, value::text, json_array_elements::text FROM docs q ${join} json_array_elements(CASE WHEN json_typeof(q.j) = 'array' THEN q.j END) ON TRUE`);
+    yield q(`jsonb_array_elements ${join} ON TRUE, its column named, and the FROM name`, `SELECT q.id, e.v, e FROM docs q ${join} jsonb_array_elements(${arrays}) AS e(v) ON TRUE`);
+  }
+  yield q("jsonb_array_elements in a comma join, e.value and e", `SELECT q.id, e.value, e FROM docs q, jsonb_array_elements(${arrays}) e`);
+  // the lateral's whole row, which is NULL on the padding row (a row of key and value elsewhere: refused by name)
+  yield q("jsonb_each LEFT JOIN ON TRUE, its whole row", `SELECT q.id, d FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE`);
+  // an array of each element type unnested beside a never-empty list: the padding NULL is of the array's element type
+  for (const [limit, label] of [["LIMIT 50 OFFSET 7", "limited"], ["", "whole"]] as const) {
+    yield q(`unnest of int[], date[], uuid[] LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, a, b, c FROM docs q LEFT JOIN unnest(q.ia) a ON TRUE LEFT JOIN unnest(q.da) b ON TRUE LEFT JOIN unnest(q.ua) c ON TRUE ${limit}`);
+  }
+  yield q("unnest of an enum array LEFT JOIN ON TRUE", "SELECT m.id, u, u::text FROM moods m LEFT JOIN unnest(m.ms) u ON TRUE ORDER BY 1, 3");
+  yield q("count(*) over a LEFT JOIN json_each expansion", `SELECT count(*), count(s.key), count(DISTINCT s.key) FROM (SELECT q.*, d.key, d.value FROM (SELECT t.id, t.j FROM docs t) AS q LEFT JOIN json_each(${objectJson}) d ON TRUE) s`);
+
+  // ---- the nulls-placement idiom as one key (src/duck/rewrite.ts nullsKeyFolded): `x IS [NOT] NULL, x` in each
+  // direction, bare and parenthesised, limited or whole, beside other keys; and what is not the idiom -----------------
+  for (const col of ["ts", "t", "n"]) {
+    for (const test of ["IS NULL ASC", "IS NULL DESC", "IS NOT NULL ASC", "IS NOT NULL DESC"]) {
+      for (const second of ["DESC", "ASC"]) {
+        yield q(`ORDER BY (${col}) ${test}, ${col} ${second}, limited`, `SELECT e.id, e.${col} FROM nullish e ORDER BY (e.${col}) ${test}, e.${col} ${second}, e.id LIMIT 7 OFFSET 3`);
+        yield q(`ORDER BY ${col} ${test}, ${col} ${second}`, `SELECT e.${col}, e.id FROM nullish e ORDER BY e.${col} ${test}, e.${col} ${second}, e.id`);
+      }
+    }
+    yield q(`ORDER BY a key, then (${col}) IS NULL, ${col} DESC`, `SELECT e.id, e.${col} FROM nullish e ORDER BY e.id % 3, (e.${col}) IS NULL, e.${col} DESC, e.id LIMIT 10`);
+  }
+  yield q("ORDER BY ts IS NULL, another column", "SELECT e.id FROM nullish e ORDER BY e.ts IS NULL, e.t DESC, e.id");
+  yield q("ORDER BY ts IS NULL alone", "SELECT e.id FROM nullish e ORDER BY e.ts IS NULL, e.id");
+  yield q("ORDER BY ts IS NULL, ts under DISTINCT ON", "SELECT DISTINCT ON (e.ts IS NULL, e.ts) e.id, e.ts FROM nullish e ORDER BY e.ts IS NULL, e.ts, e.id");
+  yield q("SELECT DISTINCT, ORDER BY t IS NULL, t", "SELECT DISTINCT e.t, e.t IS NULL AS missing FROM nullish e ORDER BY e.t IS NULL, e.t LIMIT 5");
+  // a bare key Postgres reads as an OUTPUT column, where the same name in the test is the input's: not the idiom
+  yield q("ORDER BY n IS NULL, n where the output n is another expression", "SELECT e.id, coalesce(e.n, 0) AS n FROM nullish e ORDER BY n IS NULL, n, e.id");
+  yield q("ORDER BY n IS NULL, n DESC where the output n is another column", "SELECT e.id, e.t AS n FROM nullish e ORDER BY n IS NULL, n DESC, e.id");
+  yield q("ORDER BY n IS NULL, n where the output n is an unnamed CASE", "SELECT e.id, CASE WHEN e.id > 30 THEN 0 ELSE e.n END FROM nullish e ORDER BY n IS NULL, n, e.id");
+  yield q("a subquery's unnamed CASE and cast of a CASE read by Postgres's names for them", "SELECT s.n, s.text, s.case FROM (SELECT e.id, CASE WHEN e.id > 30 THEN 0 ELSE e.n END, (CASE WHEN e.id > 4 THEN 1 END)::text, CASE WHEN e.id > 4 THEN e.n ELSE 0 END FROM nullish e) s ORDER BY s.id");
+  yield q("ORDER BY n IS NULL, n DESC where the output n is the column itself", "SELECT id, n FROM nullish ORDER BY n IS NULL, n DESC, id LIMIT 20");
+  yield q("ORDER BY n IS NOT NULL, n where the output n is the qualified column", "SELECT e.id, e.n AS n FROM nullish e ORDER BY n IS NOT NULL, n, e.id");
+  yield q("ORDER BY n IS NULL, n under SELECT *", "SELECT * FROM nullish ORDER BY n IS NULL, n DESC, id LIMIT 20");
+  // an integer constant is an output position bare, a constant inside the test
+  yield q("ORDER BY 2 IS NULL, 2 DESC", "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NULL, 2 DESC, 1");
+  yield q("ORDER BY 2 IS NOT NULL, 2", "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NOT NULL, 2, 1");
   yield q("window frames", "SELECT id, sum(i4) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND CURRENT ROW), count(*) OVER (ORDER BY ts RANGE BETWEEN interval '1 day' PRECEDING AND interval '1 day' FOLLOWING), sum(i4) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), max(i4) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW), sum(i4) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW), sum(i4) OVER (ORDER BY id RANGE UNBOUNDED PRECEDING) FROM typed WHERE id < 100 ORDER BY id");
 }
 
-export const TYPE_MATRIX: Array<{ name: string; sql: string }> = [...matrix()];
+export const TYPE_MATRIX: Matrixed[] = [...matrix()];
