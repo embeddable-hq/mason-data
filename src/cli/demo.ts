@@ -2,9 +2,10 @@
  * THE DEMO PROJECT, THE CLI'S SIDE (`mason init demo`; the database itself is src/demo/source.ts): a project whose
  * database is one Mason hosts itself — a Postgres in this process, persisted in `.mason/demo/`, served on a loopback
  * port over the Postgres wire protocol and seeded with a small shop schema — so a person tries Mason with nothing to
- * install. The project stays an ordinary one: its sources file names `url: ${DATABASE_URL}` and the four tables, `.env`
- * the demo's URL, and `mason start` reads it over the wire as it reads any Postgres, so the demo runs the read path
- * production runs (docs/DESIGN.md "The demo database").
+ * install. The project stays an ordinary one: its sources file names `url: ${DATABASE_URL}` and three of the four
+ * tables (the fourth, `DEMO_TABLE_TO_ADD`, is the person's to add), `.env` the demo's URL, and `mason start` reads it
+ * over the wire as it reads any Postgres, so the demo runs the read path production runs (docs/DESIGN.md "The demo
+ * database").
  *
  *   - THE PORT LIVES IN THE URL ALONE: `mason init demo` picks one free and writes it into `.env`; `mason start` reads
  *     it back from the resolved URL (`demoPort`), never from a second record that could disagree with it.
@@ -32,9 +33,10 @@ export const DEMO_ARG = "demo";
 /** The port `mason init demo` prefers for the demo database (the next free one when it is held): beside Mason's 5433. */
 export const DEMO_PORT = 5434;
 
-/** The demo database's tables, the seed's own list, which `mason init demo` adds to the sources file, and its URL
- *  (src/demo/seed.ts: no PGlite is loaded by it, so `mason init demo` and `demoPort` never load the database). */
-export { DEMO_TABLES, demoUrl } from "../demo/seed.ts";
+/** The demo database's tables (the seed's own list), the ones `mason init demo` adds to the sources file and the one it
+ *  leaves for the person to add, and its URL (src/demo/seed.ts: no PGlite is loaded by it, so `mason init demo` and
+ *  `demoPort` never load the database). */
+export { DEMO_ADDED_TABLES, DEMO_TABLES, DEMO_TABLE_TO_ADD, demoUrl } from "../demo/seed.ts";
 
 /** How often the run changes the demo database by default (MASON_DEMO_CHANGE_MS). */
 export const DEMO_CHANGE_MS = 5000;

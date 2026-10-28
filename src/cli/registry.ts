@@ -193,7 +193,7 @@ export function topUsage(s: Style = styleOut()): string {
     `${s.bold("usage:")} mason <command> [options]`,
     "",
     para("Mason: your Postgres tables, copied and served to BI tools and your app. Make your app's folder a project (mason init), " +
-      `start Mason (mason start), add tables, connect a tool (mason user add). It needs Node ${NODE_MIN} or later; mason doctor checks.`),
+      `add tables (mason add, before or after the start), start Mason (mason start), connect a tool (mason user add). It needs Node ${NODE_MIN} or later; mason doctor checks.`),
     para(PROJECT_LINE),
     "",
     listed.map(([step, es]) => `  ${s.bold(step)}\n${block(es)}`).join("\n\n"),
