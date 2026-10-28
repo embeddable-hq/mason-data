@@ -268,6 +268,18 @@ test("mason status's slow and refused statements: each on one line with its time
   assert.deepEqual(refusedLines({ error: "the run answered 500" }, PLAIN), ["\nRefused queries: could not read them (the run answered 500; mason logs has the detail)"]);
 });
 
+test("mason status's query errors: the latest refused, failed or cancelled statements, a line each (requestLine); none, no section; declared and named in the usage", () => {
+  const { queryErrorLines, requestLine } = commands as unknown as { queryErrorLines: (r: unknown, st: typeof PLAIN) => string[]; requestLine: (r: unknown, st: typeof PLAIN) => string };
+  const refused = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 0,
+    startedAt: "2026-10-26T14:02:12.000Z", applicationName: "psql", tokenName: "", outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist',
+    rows: null, durationMs: 3, query: "SELECT * FROM nope" };
+  assert.deepEqual(queryErrorLines({ queries: [refused], queriesError: null }, PLAIN), [
+    "\nQuery errors (the latest refused, failed or cancelled, newest last; mason logs --requests --failed lists each):", `  ${requestLine(refused, PLAIN)}`]);
+  assert.deepEqual(queryErrorLines({ queries: [], queriesError: null }, PLAIN), [], "none: no section");
+  assert.deepEqual(queryErrorLines({ queries: [], queriesError: "the run answered 500\nstack" }, PLAIN), ["\nQuery errors: could not read them (the run answered 500; mason logs has the detail)"]);
+  assert.match(STATUS.usage, /recentErrors: \{ sync: [^]*queries: \[[^]*queriesError/, "mason status's usage names recentErrors.queries and queriesError");
+});
+
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
   const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
@@ -535,6 +547,9 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
   const asked: unknown[] = [];
   const running = { session: 4, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-24T10:04:30.000Z", runningMs: 1500, rows: 12,
     query: "SELECT count(*) FROM orders", queryTruncated: false };
+  const failedQueries = [{ requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", endedAt: "2026-10-24T10:04:00.003Z", session: 4, applicationName: "psql", tokenName: "", user: "",
+    method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, bytesSent: 0, durationMs: 3,
+    query: "SELECT * FROM nope", queryTruncated: false }];
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0,
@@ -543,7 +558,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     listener: { running: () => [running], cancel: (session) => session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session } },
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
-      requests: { days: 7, page: async (q) => { asked.push(q); return { requests: [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
+      requests: { days: 7, page: async (q) => { asked.push(q); return { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
         refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, lastUsed: async (u) => u.map(() => null) },
       events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
   };
@@ -586,6 +601,13 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
       assert.deepEqual([j.code, (JSON.parse(j.stdout) as { error: { code: string } }).error.code], [2, "usage"], argv.join(" "));
     }
     assert.equal(asked.length, before, "a refused filter never reaches the run");
+    // mason status reads the latest failed statements from the request log's page, beside the sync's failures (recentErrors.queries)
+    const asks = asked.length;
+    const st = await run(["status", "--json"]);
+    assert.equal(st.code, 0, st.stdout + st.stderr);
+    const recent = (JSON.parse(st.stdout) as { recentErrors: Record<string, unknown> }).recentErrors;
+    assert.deepEqual(recent, { sync: [], error: null, queries: failedQueries, queriesError: null });
+    assert.deepEqual(asked.slice(asks).map((q) => { const { limit, failed } = q as { limit: number; failed?: boolean }; return { limit, failed }; }), [{ limit: 5, failed: true }]);
     // the statements running now
     const now = await run(["logs", "--running", "--json"]);
     assert.equal(now.code, 0, now.stderr);
