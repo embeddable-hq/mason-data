@@ -214,8 +214,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   if ("failure" in conn) throw new Error(`connect: ${JSON.stringify(conn.failure)}`);
   const facts = await readSourceFacts(conn.pg);
   conn.pg.close();
-  const added = facts.tables.filter((t) => [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "jorder"].includes(t.table) && t.schema === "public");
-  assert.equal(added.length, TABLES.length + 12, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
+  const added = facts.tables.filter((t) => [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "instants", "docs", "nullish", "jorder"].includes(t.table) && t.schema === "public");
+  assert.equal(added.length, TABLES.length + 15, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
   const log: string[] = [];
   store = await DuckStore.open(path.join(dir, "duck.db"), (l) => log.push(l));
   sync = new Sync(store, parsed.source, tag, (l) => log.push(l), 3_600_000, "poll", null, EAGER_JSON ? { json: { eager: true } } : {});
@@ -270,13 +270,13 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
 
   // ---- every statement, both ways -------------------------------------------------------------------------------
   const tableSql = (t: string): string => `SELECT * FROM public.${t} ORDER BY ${KEY_OF[t] ?? "id"} COLLATE "C"`;
-  const all = (): Array<{ group: string; name: string; sql: string; inOrder?: boolean }> => [
-    ...[...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "jorder"].map((t) => ({ group: "copy", name: `the table ${t}, whole`, sql: tableSql(t) })),
+  const all = (): Array<{ group: string; name: string; sql: string; inOrder?: boolean; zone?: string }> => [
+    ...[...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "instants", "docs", "nullish", "jorder"].map((t) => ({ group: "copy", name: `the table ${t}, whole`, sql: tableSql(t) })),
     ...CASES.map((c) => ({ group: "dialect", name: c, sql: `SELECT ${c} FROM public.one` })),
     ...QUERY_CASES.map((q) => ({ group: "query case", name: q.slice(0, 80), sql: throughOne(q) })),
     ...REFUSED_CASES.map((q) => ({ group: "refused case", name: q.sql.slice(0, 80), sql: throughOne(q.sql) })),
     ...BI_SHAPES.map((q) => ({ group: "BI shape", name: q.name, sql: q.sql })),
-    ...TYPE_MATRIX.map((q) => ({ group: "type matrix", name: q.name, sql: q.sql })),
+    ...TYPE_MATRIX.map((q) => ({ group: "type matrix", name: q.name, sql: q.sql, ...(q.zone === undefined ? {} : { zone: q.zone }) })),
     ...GAP_CASES.map((q) => ({ group: "gap case", name: `gap case: ${q.gap}`, sql: q.sql })),
     { group: "decided", name: "numeric values of several scales", sql: MIXED_SCALE },
   ].filter((q) => ONLY === null || ONLY.test(q.name));
@@ -296,9 +296,17 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   let shaped = 0;
   /** the copy phase's tallies: how Mason answered each statement, and how DuckDB alone did (`duckdbAlone`) */
   const tallies = { statements: 0, mason: { exact: 0, decided: 0, refused: 0, differs: 0 }, duckdb: { exact: 0, name: 0, refused: 0, value: 0, rows: 0, text: 0, other: 0 } };
+  // the sessions' TimeZone: UTC, as set at their start, until a statement asks for another
+  let zone = "UTC";
   const run = async (phase: string): Promise<void> => {
     const first = phase === "after the copy";
     for (const q of all()) {
+      // A STATEMENT ASKED IN A SESSION ZONE OF ITS OWN (`zone`; UTC otherwise): both sessions, and DuckDB alone, set to it
+      if ((q.zone ?? "UTC") !== zone) {
+        zone = q.zone ?? "UTC";
+        for (const c of [source, mason]) await c.query(`SET TimeZone = '${zone}'`);
+        if (first) await alone.run(`SET TimeZone = '${zone}'`);
+      }
       const [want, got] = [await ask(source, q.sql), await ask(mason, q.sql)];
       const v = verdict(want, got, q.inOrder ?? ordered(q.sql));
       if (first) {

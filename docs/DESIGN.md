@@ -368,6 +368,151 @@ statement is refused by the gap's name, as the statement's own key refuses it, u
 reads no stored column at all (`hideKept`), so its sort is the function's: 23.2 s (C) and 84.3 s (libc) on the same
 rows.
 
+### What DuckDB is sent: the form it computes fastest, where that is Postgres's answer
+
+Three shapes BI tools send on every chart and preview were each the slow path of DuckDB's, and two of them were also
+not Postgres's answer. Each is now written in the form DuckDB computes natively, held to Postgres by the oracle (the
+new statements in `oracle/type-matrix.ts`, in five session zones) and by `tests/duck-wire.test.ts`.
+
+#### date_trunc of a timestamptz
+
+**Decision.** `date_trunc(part, timestamptz)` in the session's zone, and `date_trunc(part, timestamptz, zone)`, are the
+instant's own arithmetic where that is Postgres's `timestamptz_trunc_internal` (`truncInstant`, `src/duck/rewrite.ts`):
+the instant's microseconds (`epoch_us`) floored and made an instant again (`make_timestamptz`), never ICU's calendar.
+Postgres truncates the wall clock in the zone and, from a day up, reads the truncated wall clock back in it (`redotz`);
+below a day it keeps the instant's own offset. So: milliseconds and seconds floored in every zone (offsets are whole
+seconds); minutes and hours floored in UTC, elsewhere the instant less the wall clock's remainder (one zone conversion);
+day and week (Monday's) floored in UTC, month and up the naive calendar of the UTC wall clock (`make_timestamp`); a day
+and up in another zone stays DuckDB's own `date_trunc` in the session's zone (the three-argument form's wall clock
+there, read back), whose zone lookup no form here makes cheaper. ±infinity is itself, NULL NULL. The session's zone is
+the one the statement EXECUTES in, read by `current_setting('TimeZone')` under a CASE on UTC's names (`UTC_NAMES`,
+`src/lib/timezone.ts`), never the zone it was planned in: a prepared statement is planned at its Parse and run after any
+later `SET TimeZone`, so a plan that baked in the Parse's zone truncated by UTC's days in Berlin. DuckDB folds the
+CASE to one branch when it plans what it runs (the histogram's times below are unchanged by it). The three-argument
+form is strict and reads its zone first: a zone that is not a constant name (a row's, a NULL) is read by `__mason_zone`
+under `CASE WHEN zone IS NULL THEN NULL`, whatever the part, since a second or less never names the zone in its
+arithmetic (a review finding: a NULL zone answered the instant, a row's unknown zone no error).
+
+**Why.** On the test server a BI tool's monthly histogram (`DATE_TRUNC('month', t.ts) … GROUP BY 1 ORDER BY 1
+DESC LIMIT 100`) over 197 M rows took 7.9 s, every core busy and the disk idle: the Projection holding `date_trunc` took
+41.8 s of thread time against the scan's 13.1 (~150 ns a row a thread), and 799 statements of its request log carried a
+DATE_TRUNC (median 2.5 s). DuckDB's `date_trunc` of a TIMESTAMPTZ is the ICU extension's calendar for every row, in UTC
+too. And it was not Postgres's: below a day ICU re-reads the truncated wall clock, so 02:30 CEST on 2026-10-25 (the first
+of the repeated hour) was truncated to 02:00 **+01**, an hour after the instant, where Postgres answers 02:00 +02 (New
+York's 2026-11-01 alike); the three-argument form's centuries began in a year 0 (2000-01-01 for 2001-01-01). The oracle's
+new statements met both on main (9 of them, in each of the three phases) and none now.
+
+Measured on a laptop, DuckDB alone, 20 M timestamptz rows over two years, one thread, `sum(epoch_us(<form>))` (best of
+five, ns a row; the bare column ~1.4):
+
+| form | hour | day | week | month | year |
+|---|---|---|---|---|---|
+| (a) `date_trunc(p, ts)`, TimeZone UTC (ICU) | 42 | 43 | 64 | 46 | 48 |
+| (b) `date_trunc(p, ts::TIMESTAMP)::TIMESTAMPTZ` (UTC only) | 85 | 87 | — | 93 | — |
+| (c) `timezone(z, date_trunc(p, timezone(z, ts)))`, UTC | 72 | 73 | 97 | 79 | 80 |
+| (d) `time_bucket(INTERVAL '1 p', ts)` | 22 | 244 | — | 976 | — |
+| **the instant's arithmetic, UTC** (with the infinity CASE) | **8.0** | **8.5** | **8.2** | **12.6** | **10.7** |
+| (a) in Europe/Berlin | 67 | 78 | 77 | 74 | 77 |
+| (c) in Europe/Berlin | 99 | 99 | 101 | 103 | 112 |
+| **the offset kept, Europe/Berlin** (one `timezone(z, ts)`) | **56** | — | — | — | — |
+
+A cast between TIMESTAMP and TIMESTAMPTZ is itself ICU's (~40 ns: `timezone(z, ts)` costs that in UTC too), which is why
+(b) and (c) are slower than (a); `time_bucket` with a zone argument was slower still (272–414 ns). Through Mason (the
+listener and a client, the laptop's 10 cores, the histogram above over 50 M rows of a 3.8 GiB copy, best of three, ms):
+
+| part | UTC, main | UTC, now | Europe/Berlin, main | Europe/Berlin, now |
+|---|---|---|---|---|
+| month | 528 | 156 | 743 | 659 (DuckDB's own) |
+| day | 455 | 104 | 686 | 630 (DuckDB's own) |
+| hour | 439 | 94 | 672 | 500 (the offset kept) |
+| week | 513 | 92 | 762 | 686 (DuckDB's own) |
+| year | 475 | 108 | 666 | 615 (DuckDB's own) |
+
+The laptop's ICU call is ~45 ns where the test server's was ~150, so the test server's 7.9 s histogram should fall about
+as far; not measured there yet.
+
+#### A LEFT lateral of a list
+
+**Decision.** `FROM base LEFT JOIN <the rows of a list> ON TRUE` — `json_each`, `jsonb_each`, their `_text`,
+`json(b)_array_elements(_text)`, `json(b)_object_keys`, and `unnest` of an array column — is an INNER lateral over a list
+that is never empty: the rows, or one NULL where there are none (`leftLateral`; the functions' `orNull` argument,
+`src/duck/functions.ts`). That is the same rows whatever stands above the join (a WHERE, an ORDER BY, an aggregate), so the
+condition is the join's alone: LEFT, ON a literal TRUE, one such function on its right, no ORDINALITY. An INNER lateral, a
+condition, another function keep DuckDB's own plan.
+
+**Why.** On the test server a BI tool's "expand the JSON" preview (`SELECT q.*, d.key, d.value FROM (SELECT …) q LEFT
+JOIN json_each(CASE … END) d ON TRUE LIMIT 100 OFFSET 0`) over 22 M rows took 37.9 s, its `count(*)` cut off at 16 s.
+DuckDB plans a LEFT lateral as a delimiter join — the whole base grouped by the function's argument (a Hash Group By of
+22 M rows), the function called for each, a hash join back — under a LIMIT that applies after all of it; an INNER lateral
+of an unnested list is its UNNEST operator, streaming, in the base's order, the members in theirs. The delimiter join
+also handed its rows back in an order of its own, so the LIMIT kept OTHER rows than Postgres, which walks the base and
+each row's members in order: the oracle's new limited statements differed on main (11 of them: `"key": "nested" where Postgres has
+"event"`) and agree now. A `LIMIT n + m` pushed into the base instead would have kept the
+delimiter join over those rows and its order, so still not Postgres's rows. A row the LIMIT leaves out is still read in
+its chunk (2,048 rows): a document there Postgres would never reach and the function refuses raises here, as it did.
+
+DuckDB 2.0's own `json_each` / `json_tree` (table functions) keep a document's key order and a key held twice, but are no
+stand-in yet: a value is DuckDB's re-serialisation (`1.50` is `1.5`, `[1, 2]` is `[1,2]`, where Postgres's json keeps
+the text and jsonb prints its own), an array is read as members by index (Postgres refuses it), and jsonb's key order
+(by length, then bytes) is not theirs. Standing in would take the native read for keys and string, boolean and null
+values (as `->>` is), the function for the rest, a per-row order for jsonb and Postgres's refusal of a non-object: a
+second change, held by the oracle on every shape in the registry. And it is not what is slow: DuckDB's own `json_each`
+in a LEFT lateral is the same delimiter join (10.9 s for the 100-row preview below), and its INNER count took 17.7 s
+against Mason's 16.9.
+
+Measured through Mason on the laptop (10 cores), 5 M rows of ~150-byte JSON documents (a NULL every 13th, an array
+every 17th), best of three:
+
+| statement | main | now |
+|---|---|---|
+| the preview, `LEFT JOIN json_each(CASE …) d ON TRUE LIMIT 100 OFFSET 0` | 16.6 s | 84 ms |
+| the same, `LIMIT 100 OFFSET 1000` | 17.0 s | 71 ms |
+| the same `ORDER BY d.key, q.id LIMIT 100` (every row's members sorted) | 18.0 s | 16.7 s |
+| its `count(*)` (every row's members counted) | 17.9 s | 16.9 s |
+| an INNER lateral, `LIMIT 100` (already DuckDB's UNNEST) | 62 ms | 71–112 ms |
+
+What reads every row still calls the two functions for every document (~3.4 µs a row), and stays slow: that is the
+executor worker's cost ("The executor worker"), and the stored JSON paths' remedy does not reach a document's members.
+
+#### Nulls placed by a key of their own
+
+**Decision.** A pair of consecutive sort keys `<e> IS [NOT] NULL` then the same `<e>` (the same tree: parentheses are no
+node of it) is ONE key on `<e>` with the second key's direction and the nulls where the first put them: `IS NULL ASC`
+and `IS NOT NULL DESC` last, `IS NULL DESC` and `IS NOT NULL ASC` first (`nullsKeyFolded`, a canonicalisation of
+equivalent order keys). Every other key stays in place; never under a DISTINCT ON, and never a window's ORDER BY.
+The two keys must also be READ alike (`bareKeyIsInput`): Postgres reads a bare ORDER BY key by the SQL92 rule
+(findTargetlistEntrySQL92), an integer as an output position and a one-part name as an output column's name, where the
+same tree inside `IS NULL` is the constant or the input column. So `ORDER BY 2 IS NULL, 2` is never folded, nor `SELECT
+coalesce(x, 0) AS x … ORDER BY x IS NULL, x` (sorted by the input's test, then the output's value: a review finding);
+`SELECT x … ORDER BY x IS NULL, x` and `SELECT * …` are. An output column's name is Postgres's FigureColname, which
+names a CASE by its ELSE where that name is strong (`CASE … ELSE x END` is `x`, Mason once named it `case`).
+
+**Why.** It is how nulls-last is written in MySQL-compatible SQL, which has no NULLS LAST, so several tools emit it for
+every sort of a nullable column: `ORDER BY (e.col) IS NULL ASC, e.col DESC`. With an expression as its first key,
+DuckDB's top N cannot push its threshold (the current n-th value) into the scan, so it reads and heaps every row: on the
+test server a 100-row page of a 197 M-row copy by a timestamp took 6.4 s, and by a nullable text id 91 s, until the tool
+gave up. One plain key with its NULLS placed is pruned by the zone maps. Late materialisation (the top N over the key
+and the row id, then the winners' columns) applies to both forms already: Mason sets `late_materialization_max_rows` to
+10,000 (`INSTANCE_SETTINGS`; DuckDB's default is 50), so a page of 100 or 1,000 rows reads only the key column for the
+sort and the page's rows for the rest; a page past 10,000 rows sorts every column, as before.
+
+Measured on the laptop through Mason, a 40 M-row copy of 3.6 GiB (a nullable random text id, a nullable timestamp in
+heap order, two ~330-byte JSON documents, 3 more columns) under a 1 GB memory limit, the file in the page cache, best
+of three, ms; DuckDB's EXPLAIN ANALYZE of the statement sent:
+
+| ORDER BY … LIMIT | main (the idiom as written) | now (one key) | row groups the key's scan read, main → now |
+|---|---|---|---|
+| `(w.ts) IS NULL ASC, w.ts DESC` LIMIT 100 | 61 | 5 | 326 → 8 of 326 |
+| `(w.tid) IS NULL ASC, w.tid DESC` LIMIT 100 | 169 | 48 | 326 → 100 of 326 |
+| the timestamp, LIMIT 1000 | 67 | 16 | 326 → 10 |
+| the text id, LIMIT 1000 | 310 | 349 (noise: the folded key read every row group too) | 326 → 326 |
+
+Without the LIMIT the plan is the same but for its sort key (`#7 ASC, tid DESC` against `tid DESC`). On a plain
+DuckDB connection (late materialisation at its default 50) the text id's LIMIT 1000 took 2.8–3.0 s in either form: the
+top N over every column. The test server's 91 s is that table read from its disk at ~125 MB/s: one key column (the late
+fetch) and the row groups its threshold cannot skip are what remain, so a random text id gains what its zone maps
+prune (a third here), a time column nearly everything; not measured there yet.
+
 ### A query cannot take the run down
 
 **Decision.** Results stream (the next chunk read once the socket drained), an Execute's row limit pages, a cancel aborts
