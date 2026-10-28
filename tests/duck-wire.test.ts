@@ -1301,10 +1301,16 @@ test("the statements running now, by session; a cancel by session stops one as a
       if (Date.now() > deadline) throw new Error("the statement never showed as running");
       await sleep(20);
     }
-    assert.deepEqual({ ...running, startedAt: "", runningMs: 0 }, { session: s.pid, user: "", applicationName: "", method: "QUERY", startedAt: "", runningMs: 0, rows: 0,
+    assert.deepEqual({ ...running, statement: 0, startedAt: "", runningMs: 0 }, { session: s.pid, statement: 0, user: "", applicationName: "", method: "QUERY", startedAt: "", runningMs: 0, rows: 0,
       query: SLOW, queryTruncated: false });
     assert.ok(Date.parse(running.startedAt) >= t0 - 5 && running.runningMs >= 0);
-    const answer = api.cancel(s.pid);
+    assert.ok(Number.isInteger(running.statement) && running.statement >= 1, JSON.stringify(running));
+    assert.equal(api.running().find((r) => r.session === s.pid)?.statement, running.statement, "one statement, one number however often it is listed");
+    // a cancel naming ANOTHER statement (the one listed ended, and the session began this one): nothing is cancelled
+    const other = api.cancel(s.pid, running.statement + 1000);
+    assert.ok("other" in other && other.other.statement === running.statement && other.asked === running.statement + 1000, JSON.stringify(other));
+    assert.ok(api.running().some((r) => r.session === s.pid), "still running");
+    const answer = api.cancel(s.pid, running.statement);
     assert.ok("cancelled" in answer && answer.cancelled.session === s.pid && answer.cancelled.query === SLOW, JSON.stringify(answer));
     const ms = await s.untilReady();
     const error = ms.find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
@@ -1315,8 +1321,20 @@ test("the statements running now, by session; a cancel by session stops one as a
     assert.ok(logged.some((l) => l === `[postgres] session ${s.pid}: its statement cancelled by mason cancel`), "the log says who cancelled it");
     assert.ok(logged.some((l) => l.startsWith(`[postgres] session ${s.pid} cancelled: 57014 canceling statement due to user request — ${SLOW}`)), "its refusal line says cancelled");
     assert.deepEqual(api.cancel(s.pid), { idle: s.pid }, "nothing running: nothing cancelled");
+    assert.deepEqual(api.cancel(s.pid, running.statement), { idle: s.pid }, "its statement ended: nothing to cancel");
     assert.deepEqual(api.cancel(999_999), { unknown: 999_999 });
     s.socket.write(wire.query("SELECT count(*) FROM big"));
     assert.equal(String(dataRows(await s.untilReady())[0]!.values[0]), "150000", "the session goes on");
+    // the next statement of the session is another number: a cancel of the first one never stops it
+    s.socket.write(wire.query(SLOW));
+    let next = api.running().find((r) => r.session === s.pid);
+    for (const deadline = Date.now() + 10_000; next === undefined; next = api.running().find((r) => r.session === s.pid)) {
+      if (Date.now() > deadline) throw new Error("the second statement never showed as running");
+      await sleep(20);
+    }
+    assert.notEqual(next.statement, running.statement);
+    assert.ok("other" in api.cancel(s.pid, running.statement), "the first statement's cancel does not stop the second");
+    assert.ok("cancelled" in api.cancel(s.pid));
+    await s.untilReady();
   } finally { s.end(); }
 });

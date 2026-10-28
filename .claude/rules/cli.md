@@ -115,7 +115,9 @@ CLI lacks).
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
   worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint
   (`/api/queries`, one scan of the ledger), never part of `/api/state`, which the page asks every 2 s. `mason cancel`
-  cancels through the listener's one path, the CancelRequest's (`interrupt`, src/api/postgres/server.ts).
+  cancels through the listener's one path, the CancelRequest's (`interrupt`, src/api/postgres/server.ts); what it
+  names is the statement `mason logs --running` listed (`--statement`, `RunningStatement.statement`), refused 409 when
+  the session runs another by then — a session's number alone is whatever it runs at the moment.
 - **`mason wait` shows every added table and is exact** (after `mason add a b c` where `a` and `c` were quick, it showed
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still copying at the bottom — redrawn in place on a terminal, printed when it changes

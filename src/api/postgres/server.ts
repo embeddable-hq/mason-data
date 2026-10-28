@@ -279,8 +279,9 @@ export interface PgApiServer {
   readonly sessions: number;
   /** the statements running now, one per session, oldest first (`/api/running`, `mason logs --running`) */
   running(): RunningStatement[];
-  /** cancels a session's statement exactly as a CancelRequest does (`POST /api/cancel`, `mason cancel`) */
-  cancel(session: number): CancelAnswer;
+  /** cancels a session's statement exactly as a CancelRequest does (`POST /api/cancel`, `mason cancel`); `statement`
+   *  (RunningStatement.statement): only while the session runs that one, else nothing is cancelled (`other`) */
+  cancel(session: number, statement?: number): CancelAnswer;
 }
 
 /**
@@ -291,6 +292,9 @@ export interface PgApiServer {
 export interface RunningStatement {
   /** the listener's session number (the log's `session <n>`, the request log's `session`): what `mason cancel` names */
   session: number;
+  /** the statement's number in this run (`statementIdOf`; one across the Executes that page a portal's rows): what
+   *  `mason cancel <session> --statement <n>` names, so the cancel stops the statement listed, never the next one */
+  statement: number;
   /** the `mason user` the session logged in as ('' for a token's session) */
   user: string;
   /** the client's application_name ('' when it sent none) */
@@ -307,9 +311,20 @@ export interface RunningStatement {
   queryTruncated: boolean;
 }
 
-/** What a cancel did: asked the statement to stop (it ends with 57014, as Postgres's does), found the session idle, or
- *  found no such session. */
-export type CancelAnswer = { cancelled: RunningStatement } | { idle: number } | { unknown: number };
+/** What a cancel did: asked the statement to stop (it ends with 57014, as Postgres's does), found the session idle,
+ *  found no such session, or — asked for one statement — found the session running another (`other`), cancelling none.
+ *  Without a statement it stops whatever the session runs, as a CancelRequest does (Postgres's own semantics). */
+export type CancelAnswer = { cancelled: RunningStatement } | { idle: number } | { unknown: number } | { other: RunningStatement; asked: number };
+
+/** EACH STATEMENT'S NUMBER IN THIS RUN, by the controller that runs it — the thing a cancel aborts, so a cursor's is one
+ *  number across the Executes that page its rows — given when first asked (`runningNow`), never reused */
+const statementIds = new WeakMap<AbortController, number>();
+let nextStatementId = 1;
+function statementIdOf(c: AbortController): number {
+  let id = statementIds.get(c);
+  if (id === undefined) { id = nextStatementId++; statementIds.set(c, id); }
+  return id;
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // bytes
@@ -605,7 +620,7 @@ class Session {
   runningNow(now: number): RunningStatement | null {
     if (this.running === null || this.asked === null || this.phase !== "ready") return null;
     const stored = storedPayload(this.asked.sql);
-    return { session: this.id, user: this.token?.user ?? "", applicationName: this.vars.applicationName, method: this.asked.method,
+    return { session: this.id, statement: statementIdOf(this.running), user: this.token?.user ?? "", applicationName: this.vars.applicationName, method: this.asked.method,
       startedAt: new Date(this.asked.startedAt).toISOString(), runningMs: now - this.asked.startedAt, rows: this.asked.rows ?? 0,
       query: stored.text, queryTruncated: stored.truncated };
   }
@@ -1774,10 +1789,16 @@ class Server {
     return running;
   }
 
-  /** `mason cancel <session>` (`POST /api/cancel`): the session's statement stopped as a CancelRequest stops it. */
-  cancelSession(id: number): CancelAnswer {
+  /** `mason cancel <session>` (`POST /api/cancel`): the session's statement stopped as a CancelRequest stops it — with
+   *  `statement`, only while it is the one the session runs (a listing's statement may have ended, and the session
+   *  begun another, by the time the cancel arrives) */
+  cancelSession(id: number, statement?: number): CancelAnswer {
     const s = this.sessions.get(id);
     if (s === undefined) return { unknown: id };
+    if (statement !== undefined) {
+      const now = s.runningNow(Date.now());
+      if (now !== null && now.statement !== statement) return { other: now, asked: statement };
+    }
     const stopped = this.interrupt(s);
     if (stopped === null) return { idle: id };
     this.log(`session ${id}: its statement cancelled by mason cancel`);
@@ -1810,7 +1831,7 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
     port,
     get sessions() { return server.sessions.size; },
     running: () => server.running(),
-    cancel: (session) => server.cancelSession(session),
+    cancel: (session, statement) => server.cancelSession(session, statement),
     async close() {
       for (const s of [...server.sessions.values()]) s.end("server closing");
       await new Promise<void>((resolve) => listener.close(() => resolve()));

@@ -13,17 +13,21 @@ import type { RunningStatement } from "../api/postgres/server.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 
-export const CANCEL_USAGE = `usage: mason cancel <session> [--json]
+export const CANCEL_USAGE = `usage: mason cancel <session> [--statement <n>] [--json]
 
   Stops the statement a session of the Postgres API is running now, as the client's own cancel would: the client is
   told "canceling statement due to user request" (SQLSTATE 57014), its session stays open, and the request log keeps
-  the statement as cancelled. mason logs --running lists the statements running now, with their sessions.
+  the statement as cancelled. mason logs --running lists the statements running now, with their sessions and numbers.
 
     mason logs --running
+    mason cancel 12 --statement 340
     mason cancel 12
 
-  --json   as data: { cancelled: { session, user, applicationName, method, startedAt, runningMs, rows, query,
-           queryTruncated } (the statement it stopped), next }
+  --statement <n>   only that statement (its number in mason logs --running): if it ended and the session runs
+                    another, nothing is cancelled and the answer says so. Without it, whatever the session runs now
+                    is stopped, as a client's own cancel stops it.
+  --json            as data: { cancelled: { session, statement, user, applicationName, method, startedAt, runningMs,
+                    rows, query, queryTruncated } (the statement it stopped), next }
 `;
 
 export const CANCEL: CommandSpec & { needs: "run" } = {
@@ -31,7 +35,7 @@ export const CANCEL: CommandSpec & { needs: "run" } = {
   name: "cancel",
   summary: "stop the statement a session of the Postgres API is running, as the client's cancel would: mason cancel 12",
   usage: CANCEL_USAGE,
-  options: { json: { type: "boolean" } },
+  options: { statement: { type: "string" }, json: { type: "boolean" } },
   json: ["cancelled", "next"],
 };
 
@@ -45,11 +49,16 @@ export async function cancel(argv: string[]): Promise<number> {
       code: "usage", fix: "mason logs --running lists each statement running with its session", next: [running], usage: CANCEL_USAGE }, { json });
   }
   const session = Number(f.positionals[0]);
+  const statement = f.values.statement;
+  if (statement !== undefined && (typeof statement !== "string" || !/^[1-9]\d*$/.test(statement))) {
+    return failed("cancel", { message: `--statement ${String(statement)} is not a statement's number`, code: "usage",
+      fix: "mason logs --running lists each statement running with its number", next: [running], usage: CANCEL_USAGE }, { json });
+  }
   const w = await reach(CANCEL, json);
   if (w === null || !("run" in w)) return 1;
   const run = w.run;
   return guarded("cancel", json, async () => {
-    const r = await callRun(run, "POST", "/api/cancel", { session });
+    const r = await callRun(run, "POST", "/api/cancel", { session, ...(statement !== undefined ? { statement: Number(statement) } : {}) });
     if (r.status !== 200) return failed("cancel", runFailure(r, [running]), { json });
     const c = (r.body as { cancelled: RunningStatement }).cancelled;
     const next: NextStep[] = [[`mason logs --requests --outcome cancelled -n 5`, "the statements cancelled, this one among them once it ended"], running];

@@ -205,10 +205,12 @@ or the machine's: classes XX, 53, 57, 58) or `cancelled` (57014: a cancel or a s
 day's and week's statements (each outcome, the completed ones' average / p50 / p95 time, the rows and bytes sent) and
 the last day's slow and refused statements (docs/DESIGN.md "The request log").
 
-`mason logs --running` lists the statements running now, one per session (its user, `application_name`, when it
-started, the rows sent so far), and `mason cancel <session>` stops one exactly as the client's own cancel would: the
-client is told 57014 "canceling statement due to user request", its session goes on, and the request log keeps it as
-cancelled.
+`mason logs --running` lists the statements running now, one per session (its number, its user, `application_name`,
+when it started, the rows sent so far), and `mason cancel <session> --statement <n>` stops one exactly as the client's
+own cancel would: the client is told 57014 "canceling statement due to user request", its session goes on, and the
+request log keeps it as cancelled. With `--statement`, a statement that ended before the cancel arrived is never
+mistaken for the session's next one: nothing is cancelled, and the answer names the one it runs now (409). Without it,
+whatever the session runs at that moment is stopped, as a `CancelRequest` stops it (Postgres's own semantics).
 
 ## Settings
 

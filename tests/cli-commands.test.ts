@@ -528,14 +528,16 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
   const parsed = parseSource("postgres://me@localhost:5432/shop");
   assert.ok("source" in parsed);
   const asked: unknown[] = [];
-  const running = { session: 4, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-24T10:04:30.000Z", runningMs: 1500, rows: 12,
+  const cancelled: Array<number | [number, number]> = [];
+  const running = { session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-24T10:04:30.000Z", runningMs: 1500, rows: 12,
     query: "SELECT count(*) FROM orders", queryTruncated: false };
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0,
     token: "t0ken-of-the-run", folder: () => path.join(app, "mason"), root: app, sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
     readSource: () => ({ message: "not read here", code: "bad_source" }), runUrl: "postgres://me@localhost:5432/shop",
-    listener: { running: () => [running], cancel: (session) => session === 4 ? { cancelled: running } : session === 5 ? { idle: 5 } : { unknown: session } },
+    listener: { running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);
+      return session === 4 && statement !== undefined && statement !== 9 ? { other: running, asked: statement } : session === 4 ? { cancelled: running } : session === 5 ? { idle: 5 } : { unknown: session }; } },
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
       requests: { days: 7, page: async (q) => { asked.push(q); return { requests: [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
@@ -580,9 +582,9 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     // the statements running now
     const now = await run(["logs", "--running", "--json"]);
     assert.equal(now.code, 0, now.stderr);
-    assert.deepEqual(JSON.parse(now.stdout), { running: [running], next: [{ command: "mason cancel 4", what: "stop a session's statement, as a client's cancel does" },
+    assert.deepEqual(JSON.parse(now.stdout), { running: [running], next: [{ command: "mason cancel 4 --statement 9", what: "stop a session's statement, as a client's cancel does" },
       { command: "mason logs --requests", what: "the statements answered, refused and cancelled" }] });
-    assert.match((await run(["logs", "--running"])).stdout, /^Running now \(1\):\n {2}session 4 +1\.5 s +12 rows sent {2}Metabase \(user metabase\) {2}SELECT count\(\*\) FROM orders\n/);
+    assert.match((await run(["logs", "--running"])).stdout, /^Running now \(1\):\n {2}session 4 +statement 9 +1\.5 s +12 rows sent {2}Metabase \(user metabase\) {2}SELECT count\(\*\) FROM orders\n/);
     // a cancel: what it stopped; nothing running, or no such session, said with its code
     const done = await run(["cancel", "4", "--json"]);
     assert.equal(done.code, 0, done.stderr);
@@ -595,6 +597,18 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     assert.deepEqual([gone.code, JSON.parse(gone.stdout).error], [1, { code: "not_found", message: "no session 77 is open", why: "it ended, or never was" }]);
     const bad = await run(["cancel", "four"]);
     assert.deepEqual([bad.code, bad.stderr.split("\n")[0]], [2, "✗ mason cancel: four is not a session's number"]);
+    // --statement: sent, and the statement it names cancelled only while the session runs it
+    cancelled.length = 0;
+    const named = await run(["cancel", "4", "--statement", "9", "--json"]);
+    assert.deepEqual([named.code, JSON.parse(named.stdout).cancelled], [0, running]);
+    const moved = await run(["cancel", "4", "--statement", "8"]);
+    assert.equal(moved.code, 1);
+    assert.match(moved.stderr, /^✗ mason cancel: session 4 runs another statement now \(statement 9\), not statement 8: nothing cancelled\n/);
+    assert.match(moved.stderr, /mason cancel 4 --statement 9 stops the one it runs now/);
+    assert.deepEqual(cancelled, [[4, 9], [4, 8]], "the statement is sent with the session");
+    const badStatement = await run(["cancel", "4", "--statement", "nine"]);
+    assert.deepEqual([badStatement.code, badStatement.stderr.split("\n")[0]], [2, "✗ mason cancel: --statement nine is not a statement's number"]);
+    assert.deepEqual(cancelled, [[4, 9], [4, 8]], "a refused --statement never reaches the run");
   } finally {
     server.close();
     fs.rmSync(root, { recursive: true, force: true });
