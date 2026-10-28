@@ -125,6 +125,25 @@ export function pathText(r: Omit<JsonRead, "asText" | "source"> & { asText?: boo
  */
 export interface ReadyPath { name: string; exact: boolean }
 
+/**
+ * WHAT AN EXACT READ RAISES AT A MARK (src/duck/rewrite.ts `keptRead`, `keptKey`): a row marked to be computed
+ * (`KEPT_RECOMPUTE`, `KEY_RECOMPUTE_HEX`) written AFTER the path was counted exact — by the stream, the poll or a copy's
+ * side table, before the detector (src/duck/kept.ts `check`) counts it and turns the reads to the CASE — is never read
+ * as a value: the exact read raises at it, by the column alone. A jsonb's key under a libc collation is marked where
+ * its strings hold a character the measured order does not cover, the gap the statement's own key refuses by name
+ * (`libc-uncovered`); any other mark is a Mason bug. Once counted (a minute at most), the CASE computes the row from its
+ * document, and raises the function's own error (the character named) or answers.
+ */
+export function markedError(r: Omit<JsonRead, "source">, libc: boolean): string {
+  if (isOrderRead(r) && libc) {
+    return `mason[0A000]: a jsonb compared or sorted here holds a string Mason cannot order as the database's collation does (a combining mark, a Thai or Lao ` +
+      `vowel written before its consonant, a private-use or unassigned code point), in a row written since its stored keys were counted; asked again in a ` +
+      `minute, the error names the character (Mason gap libc-uncovered)`;
+  }
+  return `mason[XX000]: a stored value of ${pathText(r)} could not be computed when its row was written (a Mason bug: report it, with mason logs); asked ` +
+    "again in a minute, it is computed from the row's document";
+}
+
 /** What a statement's plan asks of the stored JSON paths (src/duck/kept.ts `KeptJsonPaths`). */
 export interface KeptRoutes {
   /** the hidden column of this read's path when every row of it is stored (READY), else null */

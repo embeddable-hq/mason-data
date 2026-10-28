@@ -56,7 +56,6 @@ function eachString(v: Json, out: string[]): void {
   }
 }
 
-/** The strings of a jsonb's text in the key's order (what DuckDB's ICU makes the keys of). */
 /**
  * THE FUNCTIONS A KEY IS MADE BY, per collation kind (src/duck/functions.ts registers them): the key's, and the one
  * listing the strings DuckDB makes ICU keys of (none under C). A statement's key (src/duck/rewrite.ts `jsonbKey`) and a
@@ -69,11 +68,24 @@ export const JSONB_KEY_FUNCTIONS = {
   libc: { key: "__mason_jsonb_key_libc", strings: "__mason_jsonb_libc_kept" },
 } as const;
 export const STORED_SUFFIX = "_stored";
+/**
+ * THE KEY'S VERSION: a stored key (src/duck/kept.ts `orderId`) is this encoding's, so a release that changes a byte of
+ * it — a tag, the number's form, a string's — bumps this, and a key stored by an earlier one is dropped at the start
+ * and stored again (tests/duck-jsonb-order.test.ts holds the encoding; a change it catches is a change of this).
+ */
+export const KEY_VERSION = 1;
 
+/** The strings of a jsonb's text in the key's order (what DuckDB's ICU makes the keys of). */
 export function jsonbStrings(text: string): string[] {
   const out: string[] = [];
   eachString(parseJson(text), out);
   return out;
+}
+
+/** whether a jsonb's strings hold a character a libc order does not cover: what its key refuses by name
+ *  (`libc-uncovered`, src/duck/libc-order.ts `libcKey`), told from any other failure of the key (src/duck/kept.ts) */
+export function libcUncovered(order: LibcOrder, text: string): boolean {
+  return jsonbStrings(text).some((s) => { for (const ch of s) if (order.uncovered[ch.codePointAt(0)!]) return true; return false; });
 }
 
 /** The strings ICU's accent and case levels read for a libc key of each (src/duck/libc-order.ts `libcKept`). */

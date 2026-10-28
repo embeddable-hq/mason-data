@@ -346,9 +346,23 @@ Trevor.io shape `SELECT e.id … ORDER BY e.j IS NULL, e.j DESC LIMIT 100` throu
 A sort by the function is a call per row, and a call per row holds the executor worker for the whole statement
 ("The executor worker"); a fill costs what one or four such sorts cost, and every later one is free. A key is its
 collation's (a string's key is ICU's or the measured libc order's), so it is stored under the collation's id and
-dropped when the source's collation, or its glibc's measured order, changes. The fill model (`FILL_US_PER_ROW`, made
-for paths) prices a key's fill at 13 µs a row where it measured 1.0 (C) to 4.7 (libc): a large table's key waits
-longer for its evidence than it must, the safe side, until the rate of a fill of that column is measured.
+dropped when the source's collation, or its glibc's measured order, changes — and with the key's encoding
+(`KEY_VERSION`) and the DuckDB whose ICU made its strings' keys (`DUCKDB_VERSION`) in the id, an upgrade that changes
+either stores it again rather than reading another release's bytes. The fill model (`FILL_US_PER_ROW`, made for
+paths) prices a key's fill at 13 µs a row where it measured 1.0 (C) to 4.7 (libc): a large table's key waits longer
+for its evidence than it must, the safe side, until the rate of a key's fill of that column is measured (a path's
+fill is another function's, and its rate is never read for a key's).
+
+**Equality under libc is the C key.** The `GROUP BY j` row above is C's and ICU's: under a libc collation an
+equality (GROUP BY, DISTINCT, =, PARTITION BY) reads the C key computed per row, because the stored key is the libc
+order's, which refuses a string holding a character the measured order does not cover where equality needs no order
+at all (the review found the first form keying equality by the collation, and refusing).
+
+**A mark written after the count (the review, 2026-10-28).** The stream and the poll write a libc-uncovered document
+(an NFD `café`, e + U+0301) at any time, and its key is the mark; the plans read the key alone until the detector
+counts the marks (a minute), so the mark sorted first as a key. Rather than every write path counting its marks before
+it commits, the exact read raises at a mark from the column alone (one comparison a row, no document read): the
+statement is refused by the gap's name, as the statement's own key refuses it, until the reads turn to the CASE.
 
 **What it does not cover.** A statement that lists a copy's columns without naming them (`SELECT * … ORDER BY j`)
 reads no stored column at all (`hideKept`), so its sort is the function's: 23.2 s (C) and 84.3 s (libc) on the same

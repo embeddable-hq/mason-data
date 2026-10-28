@@ -31,7 +31,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type Typed } from "./pgtree.ts";
-import { canonicalRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
+import { canonicalRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
 
@@ -310,10 +310,12 @@ class Rewriter {
     const prefix = fields.length === 1 && t.qualifier !== null ? [S(t.qualifier)] : fields.slice(0, -1).map((f) => structuredClone(f));
     const column = (): AstNode => ({ ColumnRef: { fields: [...prefix.map((f) => structuredClone(f)), S(ready.name)] } });
     const nul = (): AstNode => fn("chr", [intConst(0)]);
+    const recompute = (): AstNode => op("||", nul(), strConst("!"));
     const value = asText ? keptText(column, canonical) : caseWhen([[op("=", column(), nul()), nullConst()]], column());
-    if (ready.exact) return value;
+    // a row marked since the path was counted exact is never read as its value: it raises (kept-route.ts markedError)
+    if (ready.exact) return caseWhen([[op("=", column(), recompute()), fn("error", [strConst(markedError(read, false))])]], value);
     // (a copied table's column, checked above: a jsonb's text is the copy's canonical one)
-    return caseWhen([[or([isNull(column()), op("=", column(), op("||", nul(), strConst("!")))]), jsonGet(this.cp, l, steps, either, canonical, asText, canonical)]], value);
+    return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), jsonGet(this.cp, l, steps, either, canonical, asText, canonical)]], value);
   }
 
   /**
@@ -1618,9 +1620,11 @@ class Rewriter {
     if (ready === null) return null;
     const prefix = fields.length === 1 && t.qualifier !== null ? [S(t.qualifier)] : fields.slice(0, -1).map((f) => structuredClone(f));
     const column = (): AstNode => ({ ColumnRef: { fields: [...prefix.map((f) => structuredClone(f)), S(ready.name)] } });
-    const value = caseWhen([[op("=", column(), fn("unhex", [strConst(KEY_NULL_HEX)])), nullConst()]], column());
-    if (ready.exact) return value;
-    return caseWhen([[or([isNull(column()), op("=", column(), fn("unhex", [strConst(KEY_RECOMPUTE_HEX)]))]), this.jsonbKeyCall(e)]], value);
+    const recompute = (): AstNode => fn("unhex", [strConst(KEY_RECOMPUTE_HEX)]);
+    const isNullKey = (): AstNode => op("=", column(), fn("unhex", [strConst(KEY_NULL_HEX)]));
+    // a row marked since the key was counted exact is never read as a key: it raises (kept-route.ts markedError)
+    if (ready.exact) return caseWhen([[isNullKey(), nullConst()], [op("=", column(), recompute()), fn("error", [strConst(markedError(read, this.collation.kind === "libc"))])]], column());
+    return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), this.jsonbKeyCall(e)]], caseWhen([[isNullKey(), nullConst()]], column()));
   }
 
   /**
@@ -1632,7 +1636,11 @@ class Rewriter {
    * GROUP BY, DISTINCT [ON], count(DISTINCT), PARTITION BY) reads this one; ORDER BY, <, >, BETWEEN read `jsonbKey`.
    */
   private equalKey(e: AstNode): AstNode {
-    return fn("__mason_jsonb_key", [e]);
+    // under C and ICU the order's key is an equality key too (a string's collation key, then its bytes), which never
+    // refuses, so a stored one serves (keptKey) — both sides of an equality read the order's key; only a libc key
+    // refuses a string (libc-uncovered), so under libc equality reads the C key, computed
+    if (this.collation.kind !== "libc") return this.jsonbKey(e);
+    return fn(JSONB_KEY_FUNCTIONS.bytes.key, [e]);
   }
 
   /** a value compared for EQUALITY only (PARTITION BY, IS DISTINCT FROM, NULLIF, CASE x WHEN, = ANY, DISTINCT ON): a
