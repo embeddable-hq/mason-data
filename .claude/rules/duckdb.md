@@ -116,6 +116,15 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     with `->` or a number, never a string's `->>`;
   - **the JSON paths statements keep reading are stored as columns** (below), which answers a number's digits and
     the rest from a plain column. ("The executor worker", "A `->>` is DuckDB's own read")
+- **A jsonb is sorted, grouped and compared by ONE key, `jsonbKey` (src/duck/jsonb-order.ts), never by its text**:
+  Postgres orders jsonb by its own rules (`[] < 1 < [1]`, objects by size first) and equates `1.0` with `1.00`, so
+  every form that compares two jsonb — ORDER BY, GROUP BY, DISTINCT [ON], PARTITION BY, =, <, IN, BETWEEN, IS DISTINCT
+  FROM, NULLIF, CASE x WHEN, count(DISTINCT) — is rewritten to compare `__mason_jsonb_key*` (`jsonbKey` in
+  src/duck/rewrite.ts), and every other form refuses with `jsonb-compare`. A rule that compares values (a new
+  construct, a sort) asks `comparable`, which refuses a jsonb, or keys it; the allowlist does not see a sort's or a
+  group's operator, so nothing else stops DuckDB's text equality. A string inside is keyed by the collation's key of
+  that string (ICU's, or the measured libc order's), as text is. `tests/duck-jsonb-order.test.ts` holds the key to
+  Postgres's order under C, ICU and libc, and the oracle's `jorder` every form. ("jsonb's order")
 
 ## Stored JSON paths (src/duck/kept.ts, src/duck/kept-route.ts; docs/DESIGN.md "Stored JSON paths")
 

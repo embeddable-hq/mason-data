@@ -408,18 +408,18 @@ rendered from the code, names each). The copy is read-only.
 
 ### Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 2,764 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 2,808 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 2,764 statements | Mason | DuckDB alone |
+| Of 2,808 statements | Mason | DuckDB alone |
 |---|---|---|
-| answered exactly as Postgres: the rows, their text, the column names | 95% | 31% |
+| answered exactly as Postgres: the rows, their text, the column names | 95% | 30% |
 | answered differently by a decision the registry lists (the known differences below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 4% | — |
-| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 25% |
+| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 24% |
 | refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 16% |
-| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 11% |
-| wrong rows, or the rows in another order | — | 6% |
+| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 12% |
+| wrong rows, or the rows in another order | — | 7% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 5% |
 | another error than Postgres's, or answered where Postgres refuses | — | 5% |
 
@@ -431,11 +431,11 @@ plain reports fare better on DuckDB alone than this table says — and still not
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 85 forms of them verified |
 | The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 241 functions, 342 operators, 91 aggregates, 58 window functions and 78 casts verified; [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 241 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
 | Anything else: 46 shapes known not to answer as Postgres does (SQL-SUPPORT.md "Refused"), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
-### Known differences (11)
+### Known differences (12)
 
 Answered, but not as Postgres answers: each is a decided difference the oracle checks still differs.
 
@@ -450,6 +450,7 @@ Answered, but not as Postgres answers: each is a decided difference the oracle c
 | exp / power of a double past its range, or so small it underflows | an error (22003) | Infinity, or 0 | bound the argument |
 | min / max of a numeric expression (a quotient) where equal values have different scales (0 / 7 and 0 / 1000000) | the last of them it reads, so the scan order decides the trailing zeros | the one whose operands are least (min) or greatest (max) | round(min(a / b), n) |
 | stddev / variance of DISTINCT integers or numerics, or of a numeric declared without a precision or with more than 18 digits: the last digits | exact numeric arithmetic, to its own scale | a double's 15 digits | round(stddev(x), 10) |
+| GROUP BY or DISTINCT of jsonb values that are equal but written apart ('1.0' and '1.00', '{"a": 1}' and '{"a": 1.0}') | one group, written as the value its plan reads first | one group, written as the value DuckDB reads first: either may be any of them | GROUP BY j::text where the text must decide |
 | greatest / least of a char(n) beside a text | compares without the padding, answers the first of equal values | compares the padded text | cast the char(n) to text first |
 | an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …) | exact digits at every step | the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x), it is exact | compute it in the outermost query, or round(…, n) inside |
 

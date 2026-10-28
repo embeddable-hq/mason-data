@@ -308,6 +308,25 @@ profile must name it (`query.sql`), and a statement with none is said so, its pl
 answered and no times.
 **Where.** `src/api/postgres/explain.ts`, `src/duck/explain.ts`; `tests/duck-explain-options.test.ts`, `tests/duck-wire.test.ts`.
 
+### jsonb's order
+
+**Decision.** A jsonb is compared through a byte key (`src/duck/jsonb-order.ts`) that encodes Postgres's
+`compareJsonbContainers`: the type first (null < string < number < boolean < array < object), an array or object by its
+count then its members, an object's pairs in jsonb's storage order (shorter key first), a number by value with its scale
+dropped, a string by the collation's key of it. A top-level scalar is a one-element array marked raw, so `[] < 1 < [1]`
+and every scalar sorts before every object. Equality is the same key, so `'1.0' = '1.00'`; GROUP BY and DISTINCT write
+one group as one of its values (`jsonb-equal-text`). `json` has no order in Postgres (42883), and Mason answers it so.
+
+**Why.** A BI tool sorts by any column it shows (Trevor.io: `ORDER BY j IS NULL, j DESC LIMIT 100` over a jsonb), and
+the refusal broke a table view. The canonical text alone is not the order (`10 < 9` as text, objects by size first) nor
+the equality (`1.0` and `1.00` are one value), so the key is its own function, held to PGlite and to the oracle under
+each collation kind. Keying ORDER BY found that the allowlist never saw a sort's or a group's operator: IS DISTINCT
+FROM, NULLIF, CASE x WHEN, PARTITION BY, = ANY, INTERSECT, ROLLUP, BETWEEN and JOIN USING over jsonb had been answered
+by DuckDB's text equality. Each is now keyed or refused.
+
+**Where.** `src/duck/jsonb-order.ts`, `jsonbKey` in `src/duck/rewrite.ts`; `tests/duck-jsonb-order.test.ts`, the oracle's
+`jorder` (tests/integration/oracle/type-matrix.ts).
+
 ### A query cannot take the run down
 
 **Decision.** Results stream (the next chunk read once the socket drained), an Execute's row limit pages, a cancel aborts

@@ -43,14 +43,14 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `format-specifiers` | format() with a specifier other than %s (%I, %L, widths, positions) | answers | refused | concatenate with \|\|, or %s only |
 | `to-char-patterns` | to_char of an interval or a time; its TZ, SP, EEEE, RN, V, B, L patterns; a day or month name padded to 9 characters in a parse | answers | refused | the patterns listed in the hint; extract(… FROM interval) for an interval's parts |
 | `to-timestamp-format` | to_timestamp / to_date with a format that is not a literal | answers | refused | write the format as a string literal |
-| `libc-uncovered` | ORDER BY, <, >, min / max of text holding a combining mark (e + U+0301), a Thai or Lao vowel written before its consonant, a private-use or unassigned code point, under a libc collation | answers, in glibc's order | refused when a value holding one is ordered (the order is read from the database, and glibc orders these otherwise than Mason can follow) | normalize the text (normalize(x, NFC)), or ORDER BY x COLLATE "C" for byte order |
+| `libc-uncovered` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) holding a combining mark (e + U+0301), a Thai or Lao vowel written before its consonant, a private-use or unassigned code point, under a libc collation | answers, in glibc's order | refused when a value holding one is ordered (the order is read from the database, and glibc orders these otherwise than Mason can follow) | normalize the text (normalize(x, NFC)), or ORDER BY x COLLATE "C" for byte order |
 | `percentile-text-libc` | percentile_disc / mode() WITHIN GROUP (ORDER BY text) under a libc collation | answers | refused | order by a number, or ORDER BY … LIMIT in a subquery |
 | `infinite-extract` | extract(year, decade, century, millennium, isoyear or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |
 | `time-date-trunc` | date_trunc of a time (Postgres truncates it as an interval) | an interval | refused | date_trunc of a timestamp, or extract the parts |
 | `quote-ident` | quote_ident() | quotes an identifier when it must be | refused (it needs Postgres's keyword list) | quote it in the statement, or format('%s', …) |
 | `div-numeric` | div() of a value that is not an integer | the integer quotient of two numerics | refused | trunc(a / b) |
 | `jsonb-set` | jsonb_set, jsonb_insert, the #- operator, jsonb - of a text[] or an index | answers | refused | build the value with jsonb_build_object |
-| `jsonb-compare` | ORDER BY, GROUP BY, DISTINCT or <, >, = over jsonb (Postgres orders and equates jsonb by its own rules: numbers by value, objects by size first) | answers | refused | compare a member: j ->> 'k', or j::text for the canonical text |
+| `jsonb-compare` | a jsonb compared by GREATEST / LEAST, WITHIN GROUP (ORDER BY …), IN or = ANY of a subquery or of an array not written out, BETWEEN SYMMETRIC, JOIN … USING or NATURAL JOIN, UNION / INTERSECT / EXCEPT (but UNION ALL), SELECT DISTINCT *, GROUPING SETS / ROLLUP / CUBE, or an aggregate's DISTINCT but count's; a jsonb[] sorted, grouped or compared | answers, by jsonb's own order and equality | refused (ORDER BY, GROUP BY, DISTINCT [ON], =, <, >, IN (…), = ANY (ARRAY[…]), BETWEEN, IS DISTINCT FROM, NULLIF, CASE x WHEN, PARTITION BY and count(DISTINCT …) of a jsonb are answered in its order) | compare the jsonb in one of the answered forms, a member (j ->> 'k'), or j::text for the canonical text |
 | `text-array-order` | ORDER BY, GROUP BY, DISTINCT, min, max or <, > over a text[] under the database's collation | compares the elements under the collation | refused | sort by an element (a[1]), or by array_to_string(a, ',') |
 | `sum-real` | sum() of a real (float4), as an aggregate or a window | accumulates in single precision | refused (DuckDB accumulates in double precision) | sum(x::double precision) |
 | `interval-aggregates` | sum() or avg() of an interval | adds months, days and time apart | refused | sum(extract(epoch FROM x)) for the seconds |
@@ -70,7 +70,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `infinite-interval` | an infinite interval read from a text (Postgres 17+) | infinity, -infinity | refused when a row holds one (DuckDB's interval has no infinity) | filter it out first, or read it as text |
 | `relative-time-literal` | a relative time combined with anything else ('today 10:00', 'now'::date + …  written as one literal), or read from a row as a date or a time | the transaction's start (a row's value: when the row is read) | refused (a bare 'now', 'today', 'tomorrow', 'yesterday' literal is answered: the transaction's start at the Parse) | current_date + time '10:00', now(), current_date + 1 |
 
-## Answered differently (11)
+## Answered differently (12)
 
 Answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
@@ -85,6 +85,7 @@ Answered, but not as Postgres answers. Each is a decided difference the oracle c
 | `float-overflow` | exp / power of a double past its range, or so small it underflows | an error (22003) | Infinity, or 0 | bound the argument |
 | `min-max-scale-tie` | min / max of a numeric expression (a quotient) where equal values have different scales (0 / 7 and 0 / 1000000) | the last of them it reads, so the scan order decides the trailing zeros | the one whose operands are least (min) or greatest (max) | round(min(a / b), n) |
 | `numeric-stddev` | stddev / variance of DISTINCT integers or numerics, or of a numeric declared without a precision or with more than 18 digits: the last digits | exact numeric arithmetic, to its own scale | a double's 15 digits | round(stddev(x), 10) |
+| `jsonb-equal-text` | GROUP BY or DISTINCT of jsonb values that are equal but written apart ('1.0' and '1.00', '{"a": 1}' and '{"a": 1.0}') | one group, written as the value its plan reads first | one group, written as the value DuckDB reads first: either may be any of them | GROUP BY j::text where the text must decide |
 | `char-n-minmax` | greatest / least of a char(n) beside a text | compares without the padding, answers the first of equal values | compares the padded text | cast the char(n) to text first |
 | `nested-exact-numeric` | an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …) | exact digits at every step | the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x), it is exact | compute it in the outermost query, or round(…, n) inside |
 
@@ -102,7 +103,7 @@ Not about one statement: what the prototype cannot do yet.
 | `numeric-parameter` | a numeric parameter ($1) compared in a WHERE | exact | a double (exact to 15 digits) | a literal |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (987)
+## What is verified (992)
 
 ### Types (49)
 
@@ -400,7 +401,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function width_bucket(double precision,double precision,double precision,integer)
 - the function width_bucket(numeric,numeric,numeric,integer)
 
-### Operators (342)
+### Operators (347)
 
 - the operator !~(character,text)
 - the operator !~(text,text)
@@ -532,6 +533,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <(integer,integer)
 - the operator <(integer,smallint)
 - the operator <(interval,interval)
+- the operator <(jsonb,jsonb)
 - the operator <(numeric,numeric)
 - the operator <(real,double precision)
 - the operator <(real,real)
@@ -566,6 +568,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <=(integer,integer)
 - the operator <=(integer,smallint)
 - the operator <=(interval,interval)
+- the operator <=(jsonb,jsonb)
 - the operator <=(numeric,numeric)
 - the operator <=(real,double precision)
 - the operator <=(real,real)
@@ -598,6 +601,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <>(integer,integer)
 - the operator <>(integer,smallint)
 - the operator <>(interval,interval)
+- the operator <>(jsonb,jsonb)
 - the operator <>(numeric,numeric)
 - the operator <>(real,double precision)
 - the operator <>(real,real)
@@ -666,6 +670,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator >(integer,integer)
 - the operator >(integer,smallint)
 - the operator >(interval,interval)
+- the operator >(jsonb,jsonb)
 - the operator >(numeric,numeric)
 - the operator >(real,double precision)
 - the operator >(real,real)
@@ -698,6 +703,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator >=(integer,integer)
 - the operator >=(integer,smallint)
 - the operator >=(interval,interval)
+- the operator >=(jsonb,jsonb)
 - the operator >=(numeric,numeric)
 - the operator >=(real,double precision)
 - the operator >=(real,real)

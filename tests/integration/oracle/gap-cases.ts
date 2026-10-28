@@ -36,6 +36,7 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "view-forms", sql: "SELECT happy FROM happy" },
   { gap: "enum-forms", sql: "SELECT id, t::text::mood[] FROM moods WHERE false" },
   { gap: "numeric-exact-sum", sql: "SELECT sum(s::numeric) FROM castable WHERE id IN (71, 79)" },
+  { gap: "jsonb-compare", sql: "SELECT id, greatest(jb, '1') FROM typed ORDER BY id" },
   // the decided differences (KNOWN in duck-oracle.itest.ts)
   { gap: "limit-errors", sql: "SELECT l.id, (l.j ->> 'n')::int, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.k DESC LIMIT 3" },
   { gap: "volatile-window", sql: "SELECT id, row_number() OVER (PARTITION BY b ORDER BY random()) FROM typed" },

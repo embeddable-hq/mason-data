@@ -306,6 +306,27 @@ export function caseTwins(tree: TreeValue): Map<string, string[]> {
   return out;
 }
 
+/**
+ * Whether a JOIN … USING or a NATURAL JOIN of the analysed tree joins on a column of one of `types` (jsonb, jsonb[]):
+ * Postgres equates the columns by that type's `=`, which DuckDB's USING would not (it compares the text). The join's
+ * condition is Postgres's own (its `quals`), at no offset of the statement, so it is read here, not by the rewrite.
+ */
+export function joinsUsing(tree: TreeValue, types: ReadonlySet<number>): boolean {
+  const compares = (v: TreeValue | undefined): boolean => {
+    if (Array.isArray(v)) return v.some(compares);
+    if (v === undefined || !isNode(v)) return false;
+    if (v._node === "OPEXPR" && Array.isArray(v.args) && v.args.some((a) => isNode(a) && types.has(exprType(a)?.type ?? 0))) return true;
+    return Object.entries(v).some(([k, x]) => k !== "_node" && compares(x));
+  };
+  const visit = (v: TreeValue | undefined): boolean => {
+    if (Array.isArray(v)) return v.some(visit);
+    if (v === undefined || !isNode(v)) return false;
+    if (v._node === "JOINEXPR" && Array.isArray(v.usingClause) && v.usingClause.length > 0 && compares(v.quals)) return true;
+    return Object.entries(v).some(([k, x]) => k !== "_node" && visit(x));
+  };
+  return visit(tree);
+}
+
 /** The analysed query's output columns, in order (resjunk ones, which a sort may add, left out): their types. */
 export function outputTypes(tree: TreeValue): Array<{ name: string | null; type: number; typmod: number }> | null {
   if (!isNode(tree) || tree._node !== "QUERY" || !Array.isArray(tree.targetList)) return null;
