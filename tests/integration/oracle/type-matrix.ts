@@ -149,7 +149,10 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   // json, an empty object, NULL, an array and a string the tool's CASE passes over
   "CREATE TABLE public.docs (id int PRIMARY KEY, j json, jb jsonb, tags text[]); INSERT INTO public.docs SELECT g, d::json, d::jsonb, CASE WHEN g % 6 = 0 THEN NULL WHEN g % 6 = 1 THEN '{}' ELSE ARRAY['t' || (g % 4), 'u' || (g % 3)] END " +
   "FROM (SELECT g, CASE WHEN g % 13 = 0 THEN NULL WHEN g % 17 = 0 THEN '[1, 2, 3]' WHEN g % 19 = 0 THEN '{}' WHEN g % 23 = 0 THEN '\"s\"' WHEN g % 29 = 0 THEN '{\"a\": 1, \"a\": 2, \"bb\": null}' " +
-  "ELSE json_build_object('event', 'e' || (g % 7), 'n', g, 'ok', g % 2 = 0, 'nested', json_build_object('k', g % 3), 'z', CASE WHEN g % 3 = 0 THEN NULL ELSE 'x' || g END)::text END AS d FROM generate_series(1, 300) g) s;"
+  "ELSE json_build_object('event', 'e' || (g % 7), 'n', g, 'ok', g % 2 = 0, 'nested', json_build_object('k', g % 3), 'z', CASE WHEN g % 3 = 0 THEN NULL ELSE 'x' || g END)::text END AS d FROM generate_series(1, 300) g) s;" +
+  // A NULLABLE COLUMN OF EACH KIND A SORT MEETS (the nulls-placement idiom): NULLs among ties
+  "CREATE TABLE public.nullish (id int PRIMARY KEY, ts timestamp, t text, n int); INSERT INTO public.nullish SELECT g, CASE WHEN g % 5 = 0 THEN NULL ELSE timestamp '2026-01-01' + (g % 17) * interval '1 hour' END, " +
+  "CASE WHEN g % 7 = 0 THEN NULL ELSE 'v' || (g % 11) END, CASE WHEN g % 4 = 0 THEN NULL ELSE g % 9 END FROM generate_series(1, 60) g;"
 
 /** a round of changes the poll carries: values move, a row goes, one comes */
 export function typedMutations(round: number): string {
@@ -639,6 +642,22 @@ function* matrix(): Generator<Matrixed> {
   yield q("json_each INNER JOIN ON TRUE, limited", `SELECT q.id, d.key FROM docs q JOIN json_each(${objectJson}) d ON TRUE LIMIT 30`);
   yield q("jsonb_each LEFT JOIN on a condition", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON d.key <> 'n' ORDER BY 1, 2`);
   yield q("count(*) over a LEFT JOIN json_each expansion", `SELECT count(*), count(s.key), count(DISTINCT s.key) FROM (SELECT q.*, d.key, d.value FROM (SELECT t.id, t.j FROM docs t) AS q LEFT JOIN json_each(${objectJson}) d ON TRUE) s`);
+
+  // ---- the nulls-placement idiom as one key (src/duck/rewrite.ts nullsKeyFolded): `x IS [NOT] NULL, x` in each
+  // direction, bare and parenthesised, limited or whole, beside other keys; and what is not the idiom -----------------
+  for (const col of ["ts", "t", "n"]) {
+    for (const test of ["IS NULL ASC", "IS NULL DESC", "IS NOT NULL ASC", "IS NOT NULL DESC"]) {
+      for (const second of ["DESC", "ASC"]) {
+        yield q(`ORDER BY (${col}) ${test}, ${col} ${second}, limited`, `SELECT e.id, e.${col} FROM nullish e ORDER BY (e.${col}) ${test}, e.${col} ${second}, e.id LIMIT 7 OFFSET 3`);
+        yield q(`ORDER BY ${col} ${test}, ${col} ${second}`, `SELECT e.${col}, e.id FROM nullish e ORDER BY e.${col} ${test}, e.${col} ${second}, e.id`);
+      }
+    }
+    yield q(`ORDER BY a key, then (${col}) IS NULL, ${col} DESC`, `SELECT e.id, e.${col} FROM nullish e ORDER BY e.id % 3, (e.${col}) IS NULL, e.${col} DESC, e.id LIMIT 10`);
+  }
+  yield q("ORDER BY ts IS NULL, another column", "SELECT e.id FROM nullish e ORDER BY e.ts IS NULL, e.t DESC, e.id");
+  yield q("ORDER BY ts IS NULL alone", "SELECT e.id FROM nullish e ORDER BY e.ts IS NULL, e.id");
+  yield q("ORDER BY ts IS NULL, ts under DISTINCT ON", "SELECT DISTINCT ON (e.ts IS NULL, e.ts) e.id, e.ts FROM nullish e ORDER BY e.ts IS NULL, e.ts, e.id");
+  yield q("SELECT DISTINCT, ORDER BY t IS NULL, t", "SELECT DISTINCT e.t, e.t IS NULL AS missing FROM nullish e ORDER BY e.t IS NULL, e.t LIMIT 5");
   yield q("window frames", "SELECT id, sum(i4) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND CURRENT ROW), count(*) OVER (ORDER BY ts RANGE BETWEEN interval '1 day' PRECEDING AND interval '1 day' FOLLOWING), sum(i4) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), max(i4) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW), sum(i4) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW), sum(i4) OVER (ORDER BY id RANGE UNBOUNDED PRECEDING) FROM typed WHERE id < 100 ORDER BY id");
 }
 

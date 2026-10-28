@@ -698,6 +698,11 @@ class Rewriter {
       for (const t of (first.targetList ?? []) as AstNode[]) if (isNode(bodyOf(t).val)) this.comparable(bodyOf(t).val as AstNode, `${String(b.op).replace("SETOP_", "")} (without ALL) of`);
     }
     this.decidedByKey(b);
+    // `x IS NULL, x DESC` as `x DESC NULLS LAST` (nullsKeyFolded): the folded key is the statement's own, its rules to run
+    if (Array.isArray(b.sortClause)) {
+      b.sortClause = nullsKeyFolded(b.sortClause as AstNode[], b);
+      for (const s of b.sortClause as AstNode[]) this.original.add(bodyOf(s));
+    }
     // the statement's own ORDER BY: an ordinal or an output name sorts by that target's expression, so its key is
     // built over the expression (DuckDB's `ORDER BY 1 COLLATE …` would sort by the constant)
     if (Array.isArray(b.sortClause) && Array.isArray(b.targetList) && (b.op === undefined || b.op === "SETOP_NONE")) {
@@ -2691,6 +2696,42 @@ class Rewriter {
 
 /** a deep copy that stays the statement's own: each helper below that uses a node twice is handed its rewriter's */
 type Copy = <T>(n: T) => T;
+
+/**
+ * THE NULLS-PLACEMENT IDIOM AS ONE KEY (docs/DESIGN.md "Nulls placed by a key of their own"): `ORDER BY x IS NULL,
+ * x DESC` — nulls last, written without NULLS LAST, as SQL that must also run where NULLS LAST is not grammar — orders
+ * exactly as `ORDER BY x DESC NULLS LAST`. DuckDB's top N cannot push its threshold into the scan of an expression key,
+ * so it read every row of a 197 M-row copy for a 100-row page (6.4 s by a timestamp; 91 s by a text id, cut off by
+ * the tool); one plain key with its NULLS placement is pruned by the zone maps. So a pair of CONSECUTIVE keys, the
+ * first `<e> IS [NOT] NULL` (either direction, no USING) and the second the same `<e>` (the same tree, parentheses
+ * being no node of it), is one key on `<e>` with the second's direction and the nulls where the first put them: `IS
+ * NULL ASC` and `IS NOT NULL DESC` last, `IS NULL DESC` and `IS NOT NULL ASC` first. Every other key stays in place.
+ * Not under a DISTINCT ON, whose expressions must lead the ORDER BY as written, and never a window's ORDER BY.
+ */
+function nullsKeyFolded(keys: AstNode[], select: Body): AstNode[] {
+  const distinctOn = Array.isArray(select.distinctClause) && (select.distinctClause as unknown[]).some((d) => isNode(d));
+  if (distinctOn || keys.length < 2) return keys;
+  const out: AstNode[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const first = keys[i]!, second = keys[i + 1];
+    const a = kindOf(first) === "SortBy" ? bodyOf(first) : null, b = second !== undefined && kindOf(second) === "SortBy" ? bodyOf(second) : null;
+    const test = a !== null && isNode(a.node) && kindOf(a.node) === "NullTest" ? bodyOf(a.node) : null;
+    if (a === null || b === null || test === null || a.useOp !== undefined || b.useOp !== undefined || !isNode(test.arg) || !alikeTree(test.arg, b.node)) { out.push(first); continue; }
+    const last = (test.nulltesttype === "IS_NULL") === (a.sortby_dir !== "SORTBY_DESC");
+    out.push({ SortBy: { ...b, sortby_nulls: last ? "SORTBY_NULLS_LAST" : "SORTBY_NULLS_FIRST" } });
+    i++;
+  }
+  return out;
+}
+
+/** two trees alike but for where their text stood (`location`): `(x)` and `x` are one tree, parentheses no node */
+function alikeTree(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((x, i) => alikeTree(x, b[i]));
+  if (a === null || typeof a !== "object") return a === b;
+  if (b === null || typeof b !== "object" || Array.isArray(b)) return false;
+  const ka = Object.keys(a).filter((k) => k !== "location"), kb = Object.keys(b).filter((k) => k !== "location");
+  return ka.length === kb.length && ka.every((k) => alikeTree((a as Body)[k], (b as Body)[k]));
+}
 
 /** the json functions whose rows Mason writes as lists in FROM (src/duck/rewrite.ts rangeFunction), each with an
  *  `orNull` form (src/duck/functions.ts) */

@@ -303,7 +303,7 @@ summed over threads: a parallel scan's exceeds the Execution Time, which a reade
 
 ### What DuckDB is sent: the form it computes fastest, where that is Postgres's answer
 
-Two shapes BI tools send on every chart and preview were each the slow path of DuckDB's, and both were also
+Three shapes BI tools send on every chart and preview were each the slow path of DuckDB's, and two of them were also
 not Postgres's answer. Each is now written in the form DuckDB computes natively, held to Postgres by the oracle (the
 new statements in `oracle/type-matrix.ts`, in five session zones) and by `tests/duck-wire.test.ts`.
 
@@ -399,6 +399,39 @@ every 17th), best of three:
 
 What reads every row still calls the two functions for every document (~3.4 µs a row), and stays slow: that is the
 executor worker's cost ("The executor worker"), and the stored JSON paths' remedy does not reach a document's members.
+
+#### Nulls placed by a key of their own
+
+**Decision.** A pair of consecutive sort keys `<e> IS [NOT] NULL` then the same `<e>` (the same tree: parentheses are no
+node of it) is ONE key on `<e>` with the second key's direction and the nulls where the first put them: `IS NULL ASC`
+and `IS NOT NULL DESC` last, `IS NULL DESC` and `IS NOT NULL ASC` first (`nullsKeyFolded`, a canonicalisation of
+equivalent order keys). Every other key stays in place; never under a DISTINCT ON, and never a window's ORDER BY.
+
+**Why.** It is how nulls-last is written in MySQL-compatible SQL, which has no NULLS LAST, so several tools emit it for
+every sort of a nullable column: `ORDER BY (e.col) IS NULL ASC, e.col DESC`. With an expression as its first key,
+DuckDB's top N cannot push its threshold (the current n-th value) into the scan, so it reads and heaps every row: on the
+test server a 100-row page of a 197 M-row copy by a timestamp took 6.4 s, and by a nullable text id 91 s, until the tool
+gave up. One plain key with its NULLS placed is pruned by the zone maps. Late materialisation (the top N over the key
+and the row id, then the winners' columns) applies to both forms already: Mason sets `late_materialization_max_rows` to
+10,000 (`INSTANCE_SETTINGS`; DuckDB's default is 50), so a page of 100 or 1,000 rows reads only the key column for the
+sort and the page's rows for the rest; a page past 10,000 rows sorts every column, as before.
+
+Measured on the laptop through Mason, a 40 M-row copy of 3.6 GiB (a nullable random text id, a nullable timestamp in
+heap order, two ~330-byte JSON documents, 3 more columns) under a 1 GB memory limit, the file in the page cache, best
+of three, ms; DuckDB's EXPLAIN ANALYZE of the statement sent:
+
+| ORDER BY … LIMIT | main (the idiom as written) | now (one key) | row groups the key's scan read, main → now |
+|---|---|---|---|
+| `(w.ts) IS NULL ASC, w.ts DESC` LIMIT 100 | 61 | 5 | 326 → 8 of 326 |
+| `(w.ext_id) IS NULL ASC, w.ext_id DESC` LIMIT 100 | 169 | 48 | 326 → 100 of 326 |
+| the timestamp, LIMIT 1000 | 67 | 16 | 326 → 10 |
+| the text id, LIMIT 1000 | 310 | 349 (noise: the folded key read every row group too) | 326 → 326 |
+
+Without the LIMIT the plan is the same but for its sort key (`#7 ASC, ext_id DESC` against `ext_id DESC`). On a plain
+DuckDB connection (late materialisation at its default 50) the text id's LIMIT 1000 took 2.8–3.0 s in either form: the
+top N over every column. The test server's 91 s is that table read from its disk at ~125 MB/s: one key column (the late
+fetch) and the row groups its threshold cannot skip are what remain, so a random text id gains what its zone maps
+prune (a third here), a time column nearly everything; not measured there yet.
 
 ### A query cannot take the run down
 

@@ -35,7 +35,7 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   fails; every helper is a JavaScript scalar function (`src/duck/functions.ts`) or SQL written inline.
   ("How a statement is answered")
 - **What DuckDB is sent is the form it computes natively, where that is Postgres's answer** (each was a BI tool's slow
-  path on the test server, and both were not Postgres's answer either; "What DuckDB is sent"):
+  path on the test server, and two were not Postgres's answer either; "What DuckDB is sent"):
   - **a truncation of a timestamptz is the instant's arithmetic** (`truncInstant`: `epoch_us` floored, `make_timestamptz`),
     never ICU's calendar where the arithmetic is Postgres's: every part in UTC, a second or less in any zone, a minute or
     an hour elsewhere with the instant's offset kept (ICU re-read the wall clock: 02:30 CEST truncated to 02:00 +01). A
@@ -43,7 +43,9 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     arithmetic ~8; a TIMESTAMP ↔ TIMESTAMPTZ cast is ICU's too, so never "cast, truncate, cast back";
   - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty** (`leftLateral`, the functions'
     `orNull`): DuckDB's LEFT lateral is a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a
-    100-row preview) and whose order kept other rows than Postgres's; the INNER one is its streaming UNNEST.
+    100-row preview) and whose order kept other rows than Postgres's; the INNER one is its streaming UNNEST;
+  - **equivalent order keys are canonicalised: `x IS [NOT] NULL, x` is one key on `x` with its NULLS placed**
+    (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`.
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")

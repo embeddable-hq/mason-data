@@ -57,6 +57,9 @@ const INSTANTS: Array<[number, string | null]> = [
   [23, "1999-12-31 23:59:59.999999+00"], [24, "2262-04-11 23:47:16+00"],
 ];
 const instantsInsert = `INSERT INTO public.instants VALUES ${INSTANTS.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v}'`})`).join(", ")}`;
+/** a nullable column of each kind a sort meets, NULLs among the values and ties beside them */
+const NULLISH = "INSERT INTO public.nullish VALUES (1, '2026-01-02 03:04:05', 'b', 3), (2, NULL, NULL, NULL), (3, '2025-12-31 00:00:00', 'a', 1), (4, '2026-01-02 03:04:05', NULL, 3), " +
+  "(5, NULL, 'c', 2), (6, '2027-06-01 00:00:00', 'b', NULL), (7, '2024-02-29 12:00:00', 'B', 7), (8, NULL, NULL, 1)";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-wire-"));
 let store: DuckStore;
 let api: PgApiServer;
@@ -108,6 +111,8 @@ const DDL = [
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
   "CREATE TABLE public.instants (id INTEGER PRIMARY KEY, \"at\" TIMESTAMPTZ)",
   instantsInsert,
+  "CREATE TABLE public.nullish (id INTEGER PRIMARY KEY, ts TIMESTAMP, t VARCHAR, n INTEGER)",
+  NULLISH,
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -151,6 +156,8 @@ const PG_DDL = [
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
   "CREATE TABLE public.instants (id integer PRIMARY KEY, at timestamptz)",
   instantsInsert,
+  "CREATE TABLE public.nullish (id integer PRIMARY KEY, ts timestamp, t text, n integer)",
+  NULLISH,
   "ANALYZE public.late",
   // a source's views, as the catalog has them: over the copied tables, one over another
   "CREATE VIEW public.paid_orders AS SELECT id, amount FROM public.orders WHERE status = 'paid'",
@@ -194,6 +201,7 @@ const schema: PgSchema = {
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
     { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
+    { name: "nullish", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp" }, { name: "t", type: "text" }, { name: "n", type: "int4" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -332,7 +340,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "moods"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -997,6 +1005,41 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows in Postgres's 
       const from = logged.length;
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
       assert.doesNotMatch(sent(from), /, true\)\)/, `${sql}\n${sent(from)}`);
+    }
+  } finally { await c.end(); }
+});
+
+// THE NULLS-PLACEMENT IDIOM IS ONE KEY (src/duck/rewrite.ts nullsKeyFolded): `ORDER BY (x) IS NULL ASC, x DESC` is
+// `x DESC NULLS LAST`; with the expression first DuckDB's top N read and heaped every row of a 197 M-row copy (6.4 s by
+// a timestamp), where one key with its nulls placed lets the scan skip what cannot be in the page.
+test("ORDER BY x IS [NOT] NULL, x is one key with its nulls placed, as Postgres orders it", async () => {
+  const c = await client();
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  try {
+    const folded: Array<[string, RegExp]> = [];
+    for (const col of ["ts", "t", "n"]) {
+      for (const [test, dir, nulls] of [["IS NULL", "ASC", "LAST"], ["IS NULL", "DESC", "FIRST"], ["IS NOT NULL", "ASC", "FIRST"], ["IS NOT NULL", "DESC", "LAST"]] as const) {
+        for (const second of ["DESC", "ASC", ""]) {
+          const want = new RegExp(`ORDER BY (e\\.)?${col}${second === "DESC" ? " DESC" : second === "ASC" ? " ASC" : ""} NULLS ${nulls}`);
+          folded.push([`SELECT e.id, e.${col} FROM nullish e ORDER BY (e.${col}) ${test} ${dir}, e.${col} ${second}, e.id LIMIT 5 OFFSET 0`, want]);
+          folded.push([`SELECT e.id FROM nullish e ORDER BY e.${col} ${test} ${dir}, e.${col} ${second}, e.id`, want]);
+        }
+      }
+      // a key before the pair and one after it stay where they are
+      folded.push([`SELECT e.id, e.${col} FROM nullish e ORDER BY e.id % 2, (e.${col}) IS NULL, e.${col} DESC, e.id LIMIT 6`, new RegExp(`ORDER BY e\\.id % 2, e\\.${col} DESC NULLS LAST, e\\.id`)]);
+    }
+    for (const [sql, want] of folded) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.match(sent(from), want, `${sql}\n${sent(from)}`);
+      assert.doesNotMatch(sent(from), /IS (NOT )?NULL/, `${sql}\n${sent(from)}`);
+    }
+    // what is not the idiom keeps both keys: another column second, the test alone, under a DISTINCT ON
+    for (const sql of ["SELECT e.id FROM nullish e ORDER BY e.ts IS NULL, e.t DESC, e.id", "SELECT e.id FROM nullish e ORDER BY e.ts IS NULL, e.id",
+      "SELECT DISTINCT ON (e.ts IS NULL, e.ts) e.id, e.ts FROM nullish e ORDER BY e.ts IS NULL, e.ts, e.id"]) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.match(sent(from), /ORDER BY e\.ts IS NULL/, `${sql}\n${sent(from)}`);
     }
   } finally { await c.end(); }
 });
