@@ -2,7 +2,11 @@
  * The commands beside `mason start` (src/cli/commands.ts, runs.ts): which table a command means, what `mason add`
  * reads, when `mason wait` says ready, and how every table, the stream and the request log are rendered.
  */
-import { test } from "node:test";
+import { after, test } from "node:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import pg from "pg";
 import { PLAIN } from "../src/cli/style.ts";
 import type { Failure } from "../src/cli/command.ts";
 import * as assert from "node:assert/strict";
@@ -10,6 +14,11 @@ import { addSpecs, addSteps, copyProgress, duration, findTable, paintBar, readin
 import * as commands from "../src/cli/commands.ts";
 import { jsonText } from "../src/cli/command.ts";
 import type { CopyProgressView, StreamStatus } from "../src/duck/sync.ts";
+import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
+import { connectSource, parseSource, readSourceFacts } from "../src/cli/preflight.ts";
+import { readSource } from "../src/cli/sources.ts";
+import { DemoSource } from "../src/demo/source.ts";
+import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 
 test("mason add: tables by name, every column unless --columns names them, --include on top; one table per --columns", () => {
   // the columns are an option, --columns, never a DSL of their own
@@ -273,4 +282,135 @@ test("mason logs --requests: a request a line, newest last — when, the outcome
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:14.000Z", applicationName: "Metabase", tokenName: "", user: "metabase", outcome: "ok", sqlstate: null, message: null,
     rows: 1, durationMs: 5, query: "SELECT 1 FROM orders" }, PLAIN),
     "2026-10-26 14:02:14  ok                  5 ms        1 row  Metabase (user metabase)  SELECT 1 FROM orders");
+});
+
+// ------------------------------------------------------------------ mason add and mason remove before mason start
+
+/**
+ * A PROJECT ON A REAL POSTGRES, OFFLINE: the demo database (PGlite on a loopback port, src/demo/source.ts), opened here
+ * and read by the commands as any Postgres — with a table of no primary key added, whose unique index is over a column
+ * that may be NULL (a `--key` over it is refused). The project is an ordinary one (no `demo: true`): its sources file
+ * names the URL. Opened once, lazily, by the tests that need it; closed when the file ends.
+ */
+let db: Promise<{ root: string; folder: string; file: string; url: string }> | null = null;
+const opened: Array<() => Promise<void>> = [];
+after(async () => { for (const close of opened) await close(); });
+function shop(): NonNullable<typeof db> {
+  db ??= (async () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-add-before-start-")));
+    const source = await DemoSource.open({ dir: path.join(root, "db"), port: 0, log: () => {} });
+    opened.push(async () => { await source.close(); fs.rmSync(root, { recursive: true, force: true }); });
+    const c = new pg.Client({ connectionString: source.url });
+    await c.connect();
+    try { await c.query("CREATE TABLE events (tenant_id bigint, id bigint NOT NULL, body text); CREATE UNIQUE INDEX events_tenant_id_id ON events (tenant_id, id)"); }
+    finally { await c.end(); }
+    const folder = path.join(root, "app", "mason");
+    const file = path.join(folder, "sources", "shop.yml");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(root, "app", ".mason"), { mode: 0o700 });
+    writeRunning(root, null);
+    fs.writeFileSync(file, `kind: postgres\nurl: ${source.url}\ntables: {}\n`);
+    return { root, folder, file, url: source.url };
+  })();
+  return db;
+}
+/** The project's config, with the run it records (null: none): this test process's pid, answering on `port`. */
+function writeRunning(root: string, running: { port: number; token: string } | null): void {
+  fs.writeFileSync(path.join(root, "app", ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null,
+    running: running && { pid: process.pid, controlUrl: `http://127.0.0.1:${running.port}`, token: running.token, postgresUrl: "postgresql://127.0.0.1:1/shop",
+      postgresListener: { host: "127.0.0.1", tls: null } }, lastRun: null }), { mode: 0o600 });
+}
+const nextOf = (stdout: string): string[] => (JSON.parse(stdout) as { next: Array<{ command: string }> }).next.map((n) => n.command);
+
+test("mason add and mason remove with Mason stopped: the entry written and cut as the run would, checked against the database; next, mason start", async () => {
+  const s = await shop();
+  const app = path.join(s.root, "app");
+  const run = (argv: string[]) => runMason(app, argv, matrixEnv());
+  const add = await run(["add", "orders", "--json"]);
+  assert.equal(add.code, 0, add.stdout + add.stderr);
+  assert.deepEqual(JSON.parse(add.stdout), { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false }],
+    file: s.file, next: [{ command: "mason start", what: "Mason in the background, for this project: the copy of every added table begins" },
+      { command: "mason wait", what: "then, until every added table is copied and served" }] });
+  assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n`, "the entry, every other byte as it was");
+  // as a person: the checklist's line, then Next: mason start
+  const person = await run(["add", "customers", "--columns", "name"]);
+  assert.equal(person.code, 0, person.stdout + person.stderr);
+  assert.match(person.stdout, /✓ Added public\.customers to mason\/sources\/shop\.yml: id, name\n {4}key added: id \(a copy always has its key\)\n/);
+  assert.match(person.stdout, /Next:\n {2}mason start +Mason in the background, for this project: the copy of every added table begins\n/);
+  assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n`);
+  // remove: the entry cut; the copy an earlier run made goes at the next start
+  const rm = await run(["remove", "customers", "--json"]);
+  assert.equal(rm.code, 0, rm.stdout + rm.stderr);
+  assert.deepEqual(JSON.parse(rm.stdout).removed, ["public.customers"]);
+  assert.deepEqual(nextOf(rm.stdout), ["mason start", "mason status"]);
+  const rmPerson = await run(["remove", "orders"]);
+  assert.equal(rmPerson.code, 0, rmPerson.stdout + rmPerson.stderr);
+  assert.match(rmPerson.stdout, /Removed public\.orders/);
+  assert.match(rmPerson.stdout, /a copy an earlier run made of it is dropped at the next mason start/);
+  assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables: {}\n`, "the last one gone: tables: {}");
+});
+
+test("the run and the commands refuse an edit in the SAME words, Mason up or down: one check-and-write at every entrance (src/cli/source-edit.ts)", async () => {
+  const s = await shop();
+  const app = path.join(s.root, "app");
+  // THE RUN, over the same project and database: its command server as mason start serves it, its catalog read from the
+  // database as the run reads it
+  const parsed = parseSource(s.url);
+  assert.ok("source" in parsed);
+  const conn = await connectSource(parsed.source);
+  assert.ok("pg" in conn, "the demo database answers");
+  const facts = await readSourceFacts(conn.pg);
+  conn.pg.close();
+  const read = () => readSource(s.folder, app, {});
+  // the run's edits read the file through readSource (src/cli/run-server.ts sourceOnDisk): counted, so an answer "up" is
+  // known to be the run's
+  let runEdits = 0;
+  const ctx: RunContext = {
+    page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
+    source: parsed.source, facts: () => facts, warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
+    folder: () => s.folder, root: app, sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
+    readSource: () => { runEdits++; return read(); }, runUrl: s.url,
+    duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
+      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
+  };
+  const server = createRunServer(ctx);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  ctx.port = (server.address() as { port: number }).port;
+  try {
+    /** One command line with Mason up (the run above) and down, as a person and with --json; the file unchanged by each. */
+    const both = async (argv: string[]): Promise<{ up: Answer[]; down: Answer[] }> => {
+      const was = fs.readFileSync(s.file, "utf8");
+      const once = async (up: boolean): Promise<Answer[]> => {
+        writeRunning(s.root, up ? { port: ctx.port, token: ctx.token } : null);
+        const before = runEdits;
+        const a = [await runMason(app, argv, matrixEnv()), await runMason(app, [...argv, "--json"], matrixEnv())];
+        assert.equal(runEdits - before, up ? 2 : 0, `mason ${argv.join(" ")} (Mason ${up ? "up" : "down"}): ${up ? "asked the run, each time" : "never asked the run"}`);
+        assert.equal(fs.readFileSync(s.file, "utf8"), was, `mason ${argv.join(" ")} (Mason ${up ? "up" : "down"}): refused, and nothing written`);
+        return a;
+      };
+      try { return { up: await once(true), down: await once(false) }; } finally { writeRunning(s.root, null); }
+    };
+    const same = async (argv: string[], words: RegExp): Promise<void> => {
+      const { up, down } = await both(argv);
+      for (const [i, a] of [...up, ...down].entries()) assert.equal(a.code, 1, `${i}: ${a.stdout}${a.stderr}`);
+      assert.match(up[1]!.stdout, words, "the refusal's words");
+      assert.deepEqual(JSON.parse(down[1]!.stdout), JSON.parse(up[1]!.stdout), `mason ${argv.join(" ")} --json: the same answer, Mason up or down`);
+      assert.equal(down[0]!.stderr, up[0]!.stderr, `mason ${argv.join(" ")}: the same failure for a person`);
+    };
+    // a --key over a column that may be NULL
+    await same(["add", "events", "--key", "tenant_id,id"], /tables\.events\.key: tenant_id may be NULL in public\.events, and rows with NULL there cannot be told apart — a key's columns are NOT NULL/);
+    // a --key on a table with a primary key
+    await same(["add", "customers", "--key", "id"], /public\.customers has a primary key \(id\), which Mason copies it by: leave --key out/);
+    // a column the table lacks, said with the closest
+    await same(["add", "customers", "--columns", "nme"], /public\.customers has no column \\"nme\\" — did you mean `name`\?/);
+    // A SECOND ENTRY OF THE FILE THAT FAILS against the database: the add and the remove are refused, the file as it was
+    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n  orders:\n    columns: [id, gone]\n`);
+    await same(["add", "products"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then add products/);
+    await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then remove customers/);
+    // a name the file does not have, with the closest it has
+    await same(["remove", "customer"], /shop\.yml names no table customer — did you mean `customers`\?/);
+  } finally {
+    server.close();
+    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables: {}\n`);
+  }
 });

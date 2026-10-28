@@ -12,6 +12,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { COMMANDS, STEPS, topUsage } from "../src/cli/registry.ts";
 import { GUIDES } from "../src/cli/guides.ts";
+import { PLAIN } from "../src/cli/style.ts";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const mason = (...args: string[]) => spawnSync(process.execPath, [MAIN, ...args], { encoding: "utf8", env: { ...process.env, HOME: "/nonexistent-home" } });
@@ -152,6 +153,15 @@ test("the --json shapes of the commands that change what is copied name the sour
     const c = COMMANDS.find((x) => x.name === name)!;
     assert.doesNotMatch(c.usage, /\bmodels?\b/i, `mason ${name}'s help says table and source file, never model`);
   }
+});
+
+test("mason add and mason remove need the project, not the run: their help says what each does before mason start", () => {
+  // the sources file is the list: mason init && mason add orders && mason start is a natural order
+  const c = (name: string) => COMMANDS.find((x) => x.name === name)!;
+  assert.deepEqual(["tables", "add", "remove"].map((n) => c(n).needs), ["project", "project", "project"]);
+  assert.match(c("add").usage, /Before\s+mason start \(mason init && mason add orders && mason start\) the entry is written, checked against the database as\s+the run checks it, and the copy begins at mason start/);
+  assert.match(c("remove").usage, /with Mason\s+stopped, a copy an earlier run made is dropped at the next mason start/);
+  assert.match(topUsage(PLAIN), /a project \(mason init\), add tables \(mason add, before or after the start\), start Mason \(mason start\), connect a tool/);
 });
 
 test("a failure is one shape for a person and for a program: what, why, fix, next; JSON under --json; the exit code says it", async () => {

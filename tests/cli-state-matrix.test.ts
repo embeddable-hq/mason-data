@@ -171,6 +171,28 @@ test("a demo project, stopped: mason tables says its database runs inside mason 
   }
 });
 
+test("mason add and mason remove need only the project: Mason stopped, they read the database themselves — the demo's runs inside mason start", async () => {
+  // the sources file is the list, so a table is added before mason start: with Mason stopped the command checks the
+  // edit against the database itself, and a database that does not answer is ITS refusal, as mason tables says it —
+  // never "Mason is not running"; the demo database's way out is mason start, which hosts it
+  for (const cmd of ["add", "remove"]) {
+    const stopped = await runMason(folderIn("stopped"), [cmd, "orders", "--json"], matrixEnv());
+    assert.equal(stopped.code, 1, stopped.stdout + stopped.stderr);
+    const s = JSON.parse(stopped.stdout) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string }> };
+    assert.deepEqual([s.error.code, s.error.message, s.error.fix, s.next.map((n) => n.command)], ["unreachable",
+      "could not connect to postgres://mason:****@127.0.0.1:1/shop: nothing is listening on 127.0.0.1:1",
+      "change the URL where it is (mason/sources/shop.yml) when the database's password or host changed", ["mason doctor"]], `mason ${cmd}, stopped`);
+    const root = folderIn("demo");
+    const was = fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8");
+    const demo = await runMason(root, [cmd, "orders", "--json"], matrixEnv());
+    assert.equal(demo.code, 1, demo.stdout + demo.stderr);
+    const d = JSON.parse(demo.stdout) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string }> };
+    assert.deepEqual([d.error.code, d.error.message, d.error.fix, d.next.map((n) => n.command)], ["unreachable",
+      `could not connect to postgres://demo@${demoAt}/demo: the demo database is not running on ${demoAt}`, "the demo database runs inside mason start: start it first", ["mason start"]], `mason ${cmd}, a demo project stopped`);
+    assert.equal(fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8"), was, "nothing written");
+  }
+});
+
 test("every command has a line in the matrix: a new command is run in every state by construction", () => {
   assert.deepEqual(Object.keys(MATRIX_ARGS).sort(), COMMANDS.map((c) => c.name).sort());
 });
