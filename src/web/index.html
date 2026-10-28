@@ -15,18 +15,44 @@
   <p id="where" class="where"></p>
   <p id="updated" class="updated" aria-live="polite"></p>
 </header>
+<!-- the pages: one section each, the one shown chosen by the URL's hash (src/web/app.js); the links work before the script runs -->
+<nav id="nav" aria-label="Pages"><ul><li><a href="#status">Status</a></li><li><a href="#tables">Tables</a></li><li><a href="#queries">Queries</a></li><li><a href="#users">Users</a></li><li><a href="#usage">Usage</a></li><li><a href="#logs">Logs</a></li></ul></nav>
 <div id="poll"></div>
 <main>
-  <section aria-labelledby="status-h">
+  <section id="page-status" aria-labelledby="status-h">
     <h2 id="status-h">Status</h2>
     <div id="status"><p class="dim">Asking Mason…</p></div>
   </section>
-  <section aria-labelledby="tables-h">
+  <section id="page-tables" aria-labelledby="tables-h" hidden>
     <h2 id="tables-h">Tables</h2>
     <p class="lead">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p>
+    <p class="search"><label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders"></p>
+    <div id="copies"></div>
+    <h3>The database's tables</h3>
     <div id="tables"></div>
   </section>
-  <section aria-labelledby="users-h">
+  <section id="page-queries" aria-labelledby="queries-h" hidden>
+    <h2 id="queries-h">Queries</h2>
+    <h3>Running now</h3>
+    <p class="lead">The statements running now, as <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.</p>
+    <div id="running-now"></div>
+    <h3>Request log</h3>
+    <p class="lead">The statements the Postgres API answered, refused or cancelled, as <code>mason logs --requests</code> lists them. Since is an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone.</p>
+    <form id="request-filters" autocomplete="off">
+      <label for="rq-status">Status</label>
+      <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select>
+      <label for="rq-since">Since</label>
+      <input id="rq-since" name="since" placeholder="2h" spellcheck="false">
+      <label for="rq-user">User</label>
+      <input id="rq-user" name="user" spellcheck="false">
+      <label for="rq-client">Client</label>
+      <input id="rq-client" name="client" spellcheck="false">
+      <button type="submit">Filter</button>
+      <button type="button" data-clear-filters>Clear</button>
+    </form>
+    <div id="request-log"></div>
+  </section>
+  <section id="page-users" aria-labelledby="users-h" hidden>
     <h2 id="users-h">Users</h2>
     <p class="lead">A user of the Postgres API: a name and a password that does not expire, for a BI tool or an app. The same users as <code>mason user</code>.</p>
     <div id="added"></div>
@@ -37,6 +63,22 @@
     </form>
     <div id="action"></div>
     <div id="users"></div>
+  </section>
+  <section id="page-usage" aria-labelledby="usage-h" hidden>
+    <h2 id="usage-h">Usage</h2>
+    <h3>Statements</h3>
+    <div id="usage-queries"></div>
+    <h3>The last 24 hours, an hour a line</h3>
+    <div id="usage-hourly"></div>
+    <h3>Each copy's own size</h3>
+    <div id="usage-sizes"></div>
+  </section>
+  <section id="page-logs" aria-labelledby="logs-h" hidden>
+    <h2 id="logs-h">Logs</h2>
+    <h3>The sync's events</h3>
+    <div id="logs-events"></div>
+    <h3>The run's log</h3>
+    <div id="logs-run"></div>
   </section>
 </main>
 <noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code> and <code>mason user list</code> say the same in a terminal.</p></noscript>

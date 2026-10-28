@@ -75,6 +75,18 @@ export interface UserRow { name: string; id: string; addedAt: string; removedAt:
 export const NOT_RUNNING_LAST_USED = "unknown: Mason is not running, and the request log is only read by a running Mason (mason start)";
 export const NOT_RUNNING_URL = "unknown: Mason is not running, so where its Postgres API listens is not known (mason start, then mason status)";
 
+/** A time as `mason user list` stamps it: `2026-10-27 09:10`, UTC. */
+const stamp = (iso: string): string => iso.slice(0, 16).replace("T", " ");
+
+/**
+ * WHEN A USER WAS LAST USED, as `mason user list` and the web page's Users page (src/web/pages/users.js, held equal by
+ * tests/web-page.test.ts) say it: its time, "unknown" when the note says why it cannot be known, else not used within
+ * the days the request log keeps.
+ */
+export function lastUsedText(lastUsedAt: string | null, lastUsedNote: string | null, requestLogDays: number | null): string {
+  return lastUsedAt !== null ? `${stamp(lastUsedAt)} UTC` : lastUsedNote !== null ? "unknown" : `not used in the last ${requestLogDays ?? "?"} days`;
+}
+
 /** A user just added, in `mason user add --json`'s shape (`replaced`: in place of one the API key's rotation had removed). */
 export interface AddedUser {
   user: string; id: string; addedAt: string; password: string; database: string;
@@ -240,9 +252,8 @@ export async function user(argv: string[]): Promise<number> {
     const active = users.filter((u) => u.removedAt === null);
     const gone = users.filter((u) => u.removedAt !== null);
     const width = Math.max(...users.map((u) => u.name.length));
-    const stamp = (iso: string): string => iso.slice(0, 16).replace("T", " ");
-    const used = (u: UserRow): string => u.lastUsedAt !== null ? `last used ${stamp(u.lastUsedAt)} UTC`
-      : lastUsedNote !== null ? "last used unknown" : `not used in the last ${requestLogDays ?? "?"} days`;
+    // the last use in the words the web page's Users page says it too (lastUsedText): "last used" before a time or "unknown"
+    const used = (u: UserRow): string => { const t = lastUsedText(u.lastUsedAt, lastUsedNote, requestLogDays); return t.startsWith("not used") ? t : `last used ${t}`; };
     const lines = active.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${s.dim(`id ${u.id} · added ${stamp(u.addedAt)} UTC · ${used(u)}`)}` +
       (u.live ? "" : `   ${s.yellow("does not connect: the API key was rotated since it was added")}`));
     const removedLines = gone.map((u) => `  ${s.dim(`${u.name.padEnd(width)}   id ${u.id} · added ${stamp(u.addedAt)} UTC · removed ${stamp(u.removedAt!)} UTC`)}`);

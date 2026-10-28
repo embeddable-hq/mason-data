@@ -52,8 +52,11 @@ test("the package ships the web page: every file the command server serves is un
   const server = await import("../src/cli/run-server.ts") as { PAGE_ROUTES?: Record<string, readonly [string, string]> };
   assert.ok(server.PAGE_ROUTES, "src/cli/run-server.ts exports PAGE_ROUTES");
   const files = Object.values(server.PAGE_ROUTES).map(([f]) => path.join("web", f)).sort();
-  assert.deepEqual(files, [path.join("web", "app.css"), path.join("web", "app.js"), path.join("web", "index.html")]);
-  for (const f of files) assert.ok(shipped.includes(f), `${f} is copied into dist/src/`);
+  assert.deepEqual(files, ["app.css", "app.js", "index.html", "pages/logs.js", "pages/queries.js", "pages/status.js", "pages/tables.js", "pages/usage.js", "pages/users.js", "shared.js"]
+    .map((f) => path.join("web", f)));
+  for (const f of files) assert.ok(shipped.includes(f), `${f} is copied into dist/src/ (a page module in a subfolder too)`);
+  // a module of the page that is no route would not load in the browser: every file under src/web/ is served
+  assert.deepEqual(shipped.filter((f) => f.startsWith(`web${path.sep}`)), files, "every file under src/web/ is a route of PAGE_ROUTES");
   assert.ok(shipped.every((f) => !f.endsWith(".ts")), "TypeScript is compiled, never copied");
   assert.match(fs.readFileSync(path.join(ROOT, "cli", "build.ts"), "utf8"), /for \(const f of besideCode\(path\.join\(ROOT, "src"\)\)\) copy\(/, "cli/build.ts copies what the rule names");
 });

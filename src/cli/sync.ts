@@ -39,6 +39,21 @@ export const SYNC: CommandSpec & { needs: "run" } = {
   json: ["syncedAt", "tables", "next"],
 };
 
+/**
+ * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (the web page's Sync button says the same,
+ * src/web/pages/tables.js; tests/web-page.test.ts holds the two equal): the rows written and deleted, a line per table,
+ * and for a table the passes do not keep current (`unsynced`), that it stays as of this sync.
+ */
+export function syncedReport(b: { tables: readonly PolledTable[] }, picked: readonly string[], unsynced: ReadonlyArray<{ table: string; unsynced?: { reason: string } }>):
+  { headline: string; details: Array<readonly [string, string]>; tips: string[] } {
+  const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
+  return {
+    headline: `Synced ${picked.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted.`,
+    details: b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${n(t.ms)} ms`] as const),
+    tips: unsynced.filter((t) => t.unsynced !== undefined).map((t) => `${t.table} is ${t.unsynced!.reason}: it stays as of this sync until the next mason sync (mason start --replication keeps every table current)`),
+  };
+}
+
 export async function sync(argv: string[]): Promise<number> {
   const f = parseCommand(SYNC, argv);
   if (typeof f === "number") return f;
@@ -76,13 +91,7 @@ export async function sync(argv: string[]): Promise<number> {
     const unsynced = added.filter((t) => picked.includes(t.table) && t.unsynced);
     const next: NextStep[] = [[`mason sync ${names.join(" ")}`, "sync again, whenever you need it current"], ["mason status", "each table's copy, and which the sync leaves out"]];
     if (json) { out(jsonText(SYNC, { syncedAt: b.at, tables: b.tables }, next)); return 0; }
-    const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
-    out(reportText({
-      headline: `Synced ${picked.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted.`,
-      details: b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${n(t.ms)} ms`] as const),
-      tips: unsynced.map((t) => `${t.table} is ${t.unsynced!.reason}: it stays as of this sync until the next mason sync (mason start --replication keeps every table current)`),
-      next,
-    }, styleOut()));
+    out(reportText({ ...syncedReport(b, picked, unsynced), next }, styleOut()));
     return 0;
   });
 }
