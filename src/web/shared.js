@@ -196,8 +196,89 @@ export function createAsk(fetchFn) {
 /** A request's init carrying JSON: `json("POST", { tables })`. */
 export const json = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 
-/** The last-updated line: when the page last heard from the run, in the reader's time. */
-export const updatedText = (at) => `Updated ${at.toLocaleTimeString("en-GB")}`;
+/** The last-updated line: how long ago the page last heard from the run (`Updated 3 s ago`), so a run that stopped
+ *  answering is seen ageing. `now` is the page's clock. */
+export const updatedText = (at, now = new Date()) => `Updated ${duration(Math.max(0, (now.getTime() - at.getTime()) / 1000))} ago`;
 
 /** A one-line placeholder for a page not built yet: what it will show, and the command that shows it today. */
 export const placeholder = (what, command) => `<p class="dim">${esc(what)}: not built yet. ${code(command)} shows it in a terminal.</p>`;
+
+// ------------------------------------------------------------------ the components (src/web/app.css styles them; docs/WEB-UI.md "Presentation")
+// Each returns HTML from values it escapes; a part that is already HTML (a chart's holder, a body) is said so by its name.
+
+/** What a word of the commands' says about a state, as the dot's colour: ok, warn, bad or unknown. */
+export function statusKind(word) {
+  const w = String(word ?? "").toLowerCase();
+  if (/^(ready|synced|done|copied|completed|ok|streamed|running|live|added)\b/.test(w)) return "ok";
+  if (/^(failed|error|refused|lost|not running|stopped)\b/.test(w)) return "bad";
+  if (/^(under way|syncing|copying|waiting|catching up|not streamed|not kept current|unsynced|cancelled|warning|left out|pending)\b/.test(w)) return "warn";
+  return "unknown";
+}
+
+const KINDS = new Set(["ok", "warn", "bad", "unknown"]);
+const kindOf = (k) => KINDS.has(k) ? k : "unknown";
+
+/** A state as a small coloured dot and its word — never the colour alone: `status("ok", "Synced")`; the kind from the
+ *  word when it is omitted (`status(undefined, "Failed")`). */
+export const status = (kind, word) => `<span class="indicator ${kindOf(kind ?? statusKind(word))}"><span class="dot" aria-hidden="true"></span>${esc(word)}</span>`;
+
+/** A small label: `badge("demo")`; `kind` one of accent, ok, warn, bad. */
+export const badge = (text, kind = "") => `<span class="badge${kind ? ` ${esc(kind)}` : ""}">${esc(text)}</span>`;
+
+/** A KPI card: its label small and muted, its value large, a sub-line, and a chart's holder (`spark(...)` of
+ *  src/web/charts.js: HTML) under it; `kind` warn or bad colours the value of one to act on. */
+export function card(label, value, sub = "", chartHtml = "", kind = "") {
+  return `<div class="card${kind === "warn" || kind === "bad" ? ` ${kind}` : ""}"><p class="card-label">${esc(label)}</p><p class="card-value">${esc(value)}</p>` +
+    `${sub === "" ? "" : `<p class="card-sub">${esc(sub)}</p>`}${chartHtml}</div>`;
+}
+/** The cards in a grid (each `card(...)`'s HTML). */
+export const cards = (list) => list.length ? `<div class="cards">${list.join("")}</div>` : "";
+
+/** A section's header: its title and one line of what it shows (`id` the heading's, for aria-labelledby). */
+export const pageHead = (id, title, desc) => `<div class="page-head"><h2 id="${esc(id)}">${esc(title)}</h2>${desc ? `<p class="desc">${esc(desc)}</p>` : ""}</div>`;
+
+/** A table (or any wide HTML) in a hairline card that scrolls sideways on a phone, never the page. */
+export const panel = (html) => `<div class="panel">${html}</div>`;
+
+/** A button: `button("Sync", { sync: "public.orders" }, "primary")` → data-sync="public.orders"; `variant` primary,
+ *  danger or "" (secondary), with " small" for a compact one in a row. */
+export function button(label, data = {}, variant = "") {
+  const attrs = Object.entries(data).map(([k, v]) => ` data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${esc(v)}"`).join("");
+  return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}>${esc(label)}</button>`;
+}
+
+/** Nothing to show, quietly: a title and a line under it (`hintHtml`: HTML, a command in code()). */
+export const empty = (title, hintHtml = "") => `<div class="empty"><p class="empty-title">${esc(title)}</p>${hintHtml ? `<p>${hintHtml}</p>` : ""}</div>`;
+
+/** Being asked: the words a reader (and a test) reads, over grey bars the size of what will come. */
+export const skeleton = (lines = 3, what = "Asking Mason…") => `<div class="loading" aria-busy="true"><p class="dim">${esc(what)}</p>` +
+  Array.from({ length: lines }, (_, i) => `<span class="skeleton${i === lines - 1 ? " half" : ""}"></span>`).join("") + "</div>";
+
+/**
+ * A <details> that STAYS OPEN across a refresh: a poll rewrites the part it is in, so whether it is open is the page's
+ * state (`createOpenSet`), keyed by a stable id (`key`: a request's id, a table's name), never the element's.
+ * `summary` is text, `bodyHtml` HTML. `details(key, "More", body, opened.has(key))`.
+ */
+export const details = (key, summary, bodyHtml, open = false, cls = "") =>
+  `<details${cls ? ` class="${esc(cls)}"` : ""} data-open="${esc(key)}"${open ? " open" : ""}><summary>${esc(summary)}</summary>${bodyHtml}</details>`;
+
+/**
+ * The open <details> of a page, by key: `has(key)` for the renderer; `toggle(target)` is the page's `toggle` (the shell
+ * hears every details open or close): null when it is no keyed details or nothing changed (the toggle a rewrite causes
+ * itself), else true, and the shell writes the page again.
+ */
+export function createOpenSet() {
+  const open = new Set();
+  return {
+    open,
+    has: (key) => open.has(String(key)),
+    toggle(target) {
+      const key = target?.dataset?.open;
+      if (typeof key !== "string" || key === "") return null;
+      const now = target.open === true;
+      if (now === open.has(key)) return null;
+      if (now) open.add(key); else open.delete(key);
+      return true;
+    },
+  };
+}

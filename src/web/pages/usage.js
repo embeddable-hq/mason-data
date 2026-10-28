@@ -4,7 +4,7 @@
  * each copy's own size. Reads `/api/queries`, `/api/usage` and its copy sizes every 60 s (a sample is taken a minute).
  * A page module (src/web/app.js has the contract). Never the engine's name.
  */
-import { esc, n, bytesText, fileSize, duration, renderFailure } from "../shared.js";
+import { esc, n, bytesText, fileSize, duration, renderFailure, details, createOpenSet } from "../shared.js";
 
 const EVERY_MS = 60_000;
 /** The hours, an hour a line: `step` is seconds (src/cli/run-server.ts `usage`). */
@@ -49,7 +49,7 @@ export function sampleCells(s) {
 }
 
 /** The usage answer as `mason usage` prints it: its heading, then the samples a line each (or that there are none yet), then each copy's size. */
-export function renderUsage(b) {
+export function renderUsage(b, isOpen = () => false) {
   const at = (iso) => iso.slice(0, 16).replace("T", " ");
   const span = b.stepSeconds === null ? "every sample" : `${duration(b.stepSeconds)} a line`;
   const head = `<p class="dim">From ${esc(at(b.since))} to ${esc(at(b.until))} UTC, ${esc(span)} (a sample every ${esc(duration(b.sampleSeconds))}, kept ${b.keptDays} day${b.keptDays === 1 ? "" : "s"}).</p>`;
@@ -63,8 +63,9 @@ export function renderUsage(b) {
       return `<tr><th scope="row">${esc(c.time)}</th>${[c.statements, c.errors, c.rowsSent, c.bytesSent, c.p95, c.copy, c.rows, c.failing, c.oldest, ...(withLag ? [c.lag] : [])].map(num).join("")}</tr>`;
     }).join("") + "</tbody></table>" +
       // the process's memory, an hour a line: a debugging aid, behind a closed details
-      `<details class="memory"><summary>Memory</summary><table class="samples">${th(["Time (UTC)", "Memory"])}<tbody>` +
-      b.samples.map((s) => { const c = sampleCells(s); return `<tr><th scope="row">${esc(c.time)}</th><td>${esc(c.memory)}</td></tr>`; }).join("") + "</tbody></table></details>";
+      // (keyed: a poll rewrites the hours, and an open Memory stays open)
+      details("usage-memory", "Memory", `<table class="samples">${th(["Time (UTC)", "Memory"])}<tbody>` +
+        b.samples.map((s) => { const c = sampleCells(s); return `<tr><th scope="row">${esc(c.time)}</th><td>${esc(c.memory)}</td></tr>`; }).join("") + "</tbody></table>", isOpen("usage-memory"), "memory");
   }
   return head + samples;
 }
@@ -80,6 +81,7 @@ export const page = {
   id: "usage",
   title: "Usage",
   create(ctx) {
+    const opened = createOpenSet();
     /** What a read gave: its body, or its Failure where it shows (said once, and not the first read's: that is the banner), or that it is being asked. */
     const part = (path, render, says) => {
       const r = ctx.read(path);
@@ -88,11 +90,13 @@ export const page = {
       return failure + (r.body === undefined ? "" : render(r.body));
     };
     return {
+      model: { open: opened.open },
       reads: () => [{ path: QUERIES, everyMs: EVERY_MS }, { path: HOURLY, everyMs: EVERY_MS }],
       actions: {},
+      toggle: (target) => opened.toggle(target),
       view: () => ({
         "usage-queries": part(QUERIES, (b) => renderQueries(b.queries), false),
-        "usage-hourly": part(HOURLY, renderUsage, true),
+        "usage-hourly": part(HOURLY, (b) => renderUsage(b, opened.has), true),
         "usage-sizes": part(HOURLY, (b) => renderCopySizes(b.copySizes), false),
       }),
     };

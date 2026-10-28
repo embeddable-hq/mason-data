@@ -6,22 +6,28 @@
 <title>Mason</title>
 <!-- no favicon request: an empty one, inline (img-src allows data:) -->
 <link rel="icon" href="data:,">
+<!-- every file Mason's own, from its allowlist (src/cli/run-server.ts PAGE_ROUTES): the fonts are app.css's, vendored -->
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/vendor/uplot-1.6.32/uPlot.min.css">
 <script type="module" src="/app.js"></script>
 </head>
 <body>
-<header>
-  <h1>Mason</h1>
-  <p id="where" class="where"></p>
-  <p id="updated" class="updated" aria-live="polite"></p>
+<header class="topbar">
+  <div class="topbar-in">
+    <h1 class="brand"><span class="logo" aria-hidden="true"></span>Mason</h1>
+    <span class="slash" aria-hidden="true">/</span>
+    <p id="where" class="where"></p>
+    <span id="badge"></span>
+    <p id="updated" class="updated" aria-live="polite"></p>
+  </div>
+  <!-- the pages: one section each, the one shown chosen by the URL's hash (src/web/app.js); the links work before the script runs -->
+  <nav id="nav" class="tabs" aria-label="Pages"><ul><li><a href="#status">Status</a></li><li><a href="#tables">Tables</a></li><li><a href="#queries">Queries</a></li><li><a href="#users">Users</a></li><li><a href="#usage">Usage</a></li><li><a href="#logs">Logs</a></li></ul></nav>
 </header>
-<!-- the pages: one section each, the one shown chosen by the URL's hash (src/web/app.js); the links work before the script runs -->
-<nav id="nav" aria-label="Pages"><ul><li><a href="#status">Status</a></li><li><a href="#tables">Tables</a></li><li><a href="#queries">Queries</a></li><li><a href="#users">Users</a></li><li><a href="#usage">Usage</a></li><li><a href="#logs">Logs</a></li></ul></nav>
 <div id="poll"></div>
 <main>
   <section id="page-status" aria-labelledby="status-h">
-    <h2 id="status-h">Status</h2>
-    <div id="status"><p class="dim">Asking Mason…</p></div>
+    <div class="page-head"><h2 id="status-h">Status</h2><p class="desc">What <code>mason status</code> says: whether the copy is ready, the database, the sync and the statements.</p></div>
+    <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
   <section id="page-tables" aria-labelledby="tables-h" hidden>
     <h2 id="tables-h">Tables</h2>

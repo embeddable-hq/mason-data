@@ -4,7 +4,7 @@
  * table, filtered by status, time, user and client, and paged back by Older. The words are the commands': a running
  * statement's "N rows sent" and its client, a request's duration in ms, its error, the empty log's sentence.
  */
-import { bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText } from "../shared.js";
+import { bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText, details, createOpenSet } from "../shared.js";
 
 const RUNNING = "/api/running";
 const STATE = "/api/state";
@@ -83,7 +83,7 @@ const STATUS = { completed: "Completed", failed: "Failed", cancelled: "Cancelled
  * ended, the bytes sent, the whole statement and the whole error. **Older** when the page has an older one (`before`), **Newest** when the
  * page shown is not the newest. `filtered`: the empty sentence names the filters, as the command's does.
  */
-export function renderRequests(page, { paged = false, filtered = false } = {}) {
+export function renderRequests(page, { paged = false, filtered = false, isOpen = () => false } = {}) {
   const older = page.before !== null && page.before !== undefined;
   const nav = paged || older ? `<p class="paging">${paged ? `<button type="button" data-newest>Newest</button> ` : ""}${older ? `<button type="button" data-older>Older</button>` : ""}</p>` : "";
   if (!page.requests.length) {
@@ -92,8 +92,9 @@ export function renderRequests(page, { paged = false, filtered = false } = {}) {
   const rows = [...page.requests].reverse().map((r) => {
     const error = r.sqlstate === null && !r.message ? "" : `<code>${esc(r.sqlstate ?? "")}</code> <span title="${esc(r.message ?? "")}">${esc(firstLine(r.message ?? ""))}</span>`;
     // the rest of a request is in its row's details: the whole id, when it ended, the bytes sent, the whole statement and error
-    const more = `<details><summary>More</summary>${rowsHtml([["Query id", r.requestId], ["Ended (UTC)", utcText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
-      `<pre class="stmt">${esc(r.query || "(no statement)")}</pre>${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(r.message)}</pre>` : ""}</details>`;
+    // keyed by the request's id: a poll rewrites the log, and an open one stays open
+    const more = details(`request:${r.requestId}`, "More", `${rowsHtml([["Query id", r.requestId], ["Ended (UTC)", utcText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
+      `<pre class="stmt">${esc(r.query || "(no statement)")}</pre>${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(r.message)}</pre>` : ""}`, isOpen(`request:${r.requestId}`));
     return `<tr class="s-${esc(r.status)}"><td><code title="${esc(r.requestId)}">${esc(r.requestId.slice(0, 8))}</code></td><td>${esc(utcText(r.startedAt))}</td>` +
       `<td class="num">${esc(n(r.durationMs))} ms</td><td class="status">${esc(STATUS[r.status] ?? r.status)}</td>` +
       `<td>${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</td><td>${esc(clientText(r.applicationName))}</td>` +
@@ -123,7 +124,9 @@ export const page = {
   id: "queries",
   title: "Queries",
   create(ctx) {
-    const m = { filters: { status: "", since: "", user: "", client: "" }, before: null, asking: null, outcome: null };
+    // the request rows' details open, by request id (createOpenSet): they stay open across a poll
+    const opened = createOpenSet();
+    const m = { filters: { status: "", since: "", user: "", client: "" }, before: null, asking: null, outcome: null, open: opened.open };
     const path = () => requestsPath(m.filters, m.before);
     const filtered = () => Object.values(m.filters).some((v) => v !== "");
     const actions = {
@@ -172,9 +175,10 @@ export const page = {
         return {
           "connected-now": renderSessions(ctx.read(STATE)?.body?.sessions),
           "running-now": running ? renderRunning(running.running, m.asking, m.outcome) : "",
-          "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered() }) : ""),
+          "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has }) : ""),
         };
       },
+      toggle: (target) => opened.toggle(target),
       submit(form) {
         if (form.id !== "request-filters") return null;
         const value = (k) => form.elements[k]?.value?.trim() ?? "";
