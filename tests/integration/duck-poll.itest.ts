@@ -60,6 +60,25 @@ async function rowsOlderThanEverySnapshot(url: string, table: string): Promise<v
   }
 }
 
+/**
+ * A COPY THE TEST HOLDS (the Sync's `onChunk`): every chunk of `source`'s copy waits inside its transaction, read and not
+ * committed, until `release()`, so the copy cannot end before the test lets it. A test that asserts something happens
+ * WHILE a copy runs holds it rather than betting on the copy outlasting it: a copy's time is the machine's (the
+ * 400,000-row copy "beside the polls" once raced took 0.89 s on a CI runner, one poll pass ran beside it, and the test
+ * failed). `held()` is true once a chunk waits, the copy's snapshot pinned by then (`beginCopy` precedes every
+ * chunk). Released in a `finally` before `sync.stop()`: a stop interrupts DuckDB's statements, never this promise.
+ */
+function heldCopy(source: string): { onChunk: (e: { source: string; phase: "read" | "committed" }) => Promise<void>; held: () => boolean; release: () => void } {
+  let release!: () => void;
+  const released = new Promise<void>((r) => { release = r; });
+  let held = false;
+  return {
+    onChunk: async (e) => { if (e.source === source && e.phase === "read") { held = true; await released; } },
+    held: () => held,
+    release,
+  };
+}
+
 const ITEMS: AddedTable = {
   source: "public.items", schema: "public", table: "items", key: ["id"], bytes: 0, rows: null, foreignKeys: [],
   columns: [{ name: "id", type: "integer", notNull: true, comment: null }, { name: "v", type: "text", notNull: false, comment: null },
@@ -996,16 +1015,17 @@ test("a failed catch-up waits before it is tried again, said with its time; a ch
 
 // AFTER A RESTART THE COPIED TABLES ARE SERVED AT ONCE (the test server: the catalog was empty until the start's
 // first pass ended, hours behind a large copy, and every copied table was "not added"): the catalog is rebuilt when
-// the project's tables are set, on a connection of its own that a copy's transaction never holds.
+// the project's tables are set, on a connection of its own that a copy's transaction never holds. big's copy is HELD
+// by the test (`heldCopy`) until the catalog is read, so "still copying" holds by construction, not by its size.
 test("after a restart the copied tables are in the catalog at once, while another table is still copying", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
   const db = `${tag}_r`;
   const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
   psql(adminUrl!, `CREATE DATABASE ${db}`);
   after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
-  const ROWS = 400_000;
+  const ROWS = 20_000;
   psql(url, `CREATE TABLE small (id int PRIMARY KEY, v text); INSERT INTO small VALUES (1, 'a'), (2, 'b'); ` +
     `CREATE TABLE big (id int PRIMARY KEY, v text); INSERT INTO big SELECT g, repeat(md5(g::text), 16) FROM generate_series(1, ${ROWS}) g ORDER BY (g::bigint * 7919) % ${ROWS}`);
-  // the copy reads big, so its scan is in flight for seconds
+  // the copy reads big's rows (not all left to its catch-up), so its chunks are read, and held
   await rowsOlderThanEverySnapshot(url, "big");
   const col = (name: string, type: string) => ({ name, type, notNull: false, comment: null });
   const table = (t: string, rows: number): AddedTable => ({ source: `public.${t}`, schema: "public", table: t, key: ["id"], bytes: 0, rows, foreignKeys: [], columns: [col("id", "integer"), col("v", "text")] });
@@ -1023,15 +1043,18 @@ test("after a restart the copied tables are in the catalog at once, while anothe
   } finally { await sync.stop(); store.close(); }
 
   store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "64MB" });
-  sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  const big = heldCopy("public.big");
+  sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { onChunk: big.onChunk });
   try {
     await sync.open();
     await sync.setTables([table("small", 2), table("big", ROWS)]);
     assert.notEqual(sync.state().find((s) => s.source === "public.big")?.phase, "copied", "the pass is still copying big");
     assert.deepEqual(sync.schema().tables.map((t) => t.name), ["small"], "small is served before the pass ends");
+    big.release();
     await sync.once();
+    assert.ok(big.held(), "big's copy went through the test's hold (onChunk), so it could not end before the catalog was read");
     assert.deepEqual(sync.schema().tables.map((t) => t.name).sort(), ["big", "small"]);
-  } finally { await sync.stop(); store.close(); }
+  } finally { big.release(); await sync.stop(); store.close(); }
 });
 
 // HEAP ORDER, NO INDEX (the test server's time-window queries each
@@ -1258,17 +1281,19 @@ test("a poll of a transaction that changed most of a big table writes it in comm
 // A COPY RUNS BESIDE THE POLLS (a large table's copy held every other table's freshness for its whole
 // duration). While a large table copies, the passes go on polling the table already copied — a transaction of its own per
 // table — so a change to it is in DuckDB before the copy ends; the changes to the copying table committed after its
-// snapshot are in it once it is caught up, by one poll from that snapshot.
+// snapshot are in it once it is caught up, by one poll from that snapshot. The copy is HELD by the test (`heldCopy`)
+// until small's change is polled in, so "beside" holds by construction: on a CI runner the 400,000-row copy this test
+// once raced took 0.89 s, one pass ran beside it, and the change landed after it.
 test("a table copies beside the polls: the other table is polled meanwhile, and what changed during the copy is in it once caught up", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
   const db = `${tag}_d`;
   const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
   psql(adminUrl!, `CREATE DATABASE ${db}`);
   after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
-  const ROWS = 400_000;
-  // a store at the tests' memory limit: a copy of several seconds
+  // its size decides nothing (the copy is held): enough pages for several chunks, read by more than one reader
+  const ROWS = 20_000;
   psql(url, `CREATE TABLE small (id int PRIMARY KEY, v text); INSERT INTO small VALUES (1, 'a'); ` +
     `CREATE TABLE big (id int PRIMARY KEY, v text); INSERT INTO big SELECT g, repeat(md5(g::text), 16) FROM generate_series(1, ${ROWS}) g ORDER BY (g::bigint * 7919) % ${ROWS}`);
-  // the copy reads big, so its scan is in flight for seconds
+  // the copy reads big's rows (not all left to its catch-up), so its chunks are read, and held
   await rowsOlderThanEverySnapshot(url, "big");
   const col = (name: string, type: string) => ({ name, type, notNull: false, comment: null });
   const table = (t: string, rows: number): AddedTable => ({ source: `public.${t}`, schema: "public", table: t, key: ["id"], bytes: 0, rows, foreignKeys: [], columns: [col("id", "integer"), col("v", "text")] });
@@ -1276,8 +1301,10 @@ test("a table copies beside the polls: the other table is polled meanwhile, and 
   if ("problem" in parsed) throw new Error(parsed.problem);
   const logged: string[] = [];
   const store = await DuckStore.open(path.join(dir, "beside.db"), (l) => logged.push(l), { memoryLimit: "64MB" });
+  // big's copy waits inside its chunks until the test has seen small's change polled in
+  const big = heldCopy("public.big");
   // a pass every 100 ms: the polls the copy must not hold
-  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 100, "poll");
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 100, "poll", null, { onChunk: big.onChunk });
   // read on a connection of the test's own: the sync's writer may be inside a poll's transaction
   const reader = await store.instance.connect();
   const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n");
@@ -1294,14 +1321,20 @@ test("a table copies beside the polls: the other table is polled meanwhile, and 
     await until(async () => (await read("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'small'")) === "1", "small copied");
     const from = logged.length;
     void sync.setTables([table("small", 1), table("big", ROWS)]);
-    // the copy's snapshot is pinned, so what changes now is after it, and its scan of several seconds is ahead
-    await until(() => logged.slice(from).some((l) => /^copying public\.big as of the source's snapshot /.test(l)), "big's snapshot pinned");
+    // a chunk of big's copy is read and waits uncommitted: the copy's snapshot is pinned, so what changes now is after
+    // it, and the copy cannot end until the test releases it
+    await until(big.held, "big's copy held in its first chunks");
     psql(url, "INSERT INTO small VALUES (2, 'during the copy'); UPDATE big SET v = 'changed during its copy' WHERE id = 7; DELETE FROM big WHERE id = 8; INSERT INTO big VALUES (0, 'new during its copy')");
-    await until(async () => (await read("SELECT count(*) FROM public.small")) === "2", "small polled");
-    const copied = logged.slice(from).some((l) => /^copied public\.big/.test(l));
-    assert.ok(!copied, `small's change was polled into DuckDB BEFORE big's copy ended (the passes went on beside it)\n${logged.slice(from).join("\n")}`);
-    assert.ok(logged.slice(from).some((l) => /^copying public\.big: .*beside the other tables' polls/.test(l)), "the copy's start says the polls go on");
+    // THE PASSES GO ON BESIDE THE COPY: a poll that waited for the copy would never bring this in while it is held
+    await until(async () => (await read("SELECT count(*) FROM public.small")) === "2", "small polled while big's copy is held (a poll waiting for the copy never comes)");
+    const during = logged.slice(from);
+    const pinned = during.findIndex((l) => /^copying public\.big as of the source's snapshot /.test(l));
+    const polled = during.findIndex((l) => /^poll: .*; public\.small 1 changed /.test(l));
+    assert.ok(pinned >= 0 && polled > pinned, `small's change was polled by a pass after big's copy began\n${during.join("\n")}`);
+    assert.ok(!during.some((l) => /^copied public\.big/.test(l)), `small's change was polled into DuckDB BEFORE big's copy ended (the passes went on beside it)\n${during.join("\n")}`);
+    assert.ok(during.some((l) => /^copying public\.big: .*beside the other tables' polls/.test(l)), "the copy's start says the polls go on");
 
+    big.release();
     await until(() => logged.slice(from).some((l) => /^caught up public\.big /.test(l)), "big caught up");
     const said = logged.slice(from).join("\n");
     assert.ok(logged.slice(from).some((l) => l === "caught up public.big by one poll after its copy: the poll keeps it current"), said);
@@ -1311,6 +1344,7 @@ test("a table copies beside the polls: the other table is polled meanwhile, and 
     psql(url, "UPDATE big SET v = 'polled after' WHERE id = 9");
     await until(async () => (await read("SELECT v FROM public.big WHERE id = 9")) === "polled after", "big polled after its catch-up");
   } finally {
+    big.release();
     reader.closeSync();
     await sync.stop();
     store.close();
