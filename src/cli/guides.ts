@@ -156,7 +156,7 @@ names the tables the server copies, and its url: names the variable that holds t
    at the next start, or beside the server:
      mason add public.orders                        copied at once, added to the mounted mason/sources/
      mason remove orders                            taken out of the sources file, its copy dropped
-     mason status                                   each table's copy, the slow and refused statements
+     mason status                                   each table's copy, the statements, the recent errors
    Upgrade: read the release notes, then move mason.yml and the image together. Removing Mason for good in replication mode:
    SELECT pg_drop_replication_slot('mason_dev_<name>_<source>') — the slot holds your WAL (mason status names it).
 

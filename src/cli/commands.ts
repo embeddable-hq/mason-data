@@ -348,7 +348,7 @@ const STATUS_USAGE = `usage: mason status [--json]
 export const STATUS: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "status",
-  summary: "what Mason is doing: the database, each table's copy, the Postgres API, the slow and refused statements",
+  summary: "what Mason is doing: the database, each table's copy, the Postgres API, its statements and errors",
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
