@@ -8,7 +8,7 @@
  * TABLE_ROWS that pass and "Show N more" / "Show all" (the search is over all of them, at once); a long name is cut with
  * an ellipsis, its whole the title. Reads `/api/state` every poll and `/api/usage`'s `copySizes` every minute.
  */
-import { button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText } from "../shared.js";
+import { button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, POLL_MS } from "../shared.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
 const SIZES_PATH = "/api/usage?since=1m";
@@ -51,8 +51,6 @@ const failedTable = (t) => t.added && (t.sync?.state === "failed" || Boolean(t.e
 
 /** How long a sync took, as the commands say it (`spanText`) but for one under a tenth of a second, which is not worth a digit: `<0.1 s (poll)`. */
 export const tookText = (y) => `${y.syncSeconds < 0.1 ? "<0.1 s" : spanText(y.syncSeconds)} (${y.syncedBy})`;
-
-const POLL_MS = 2000;
 
 /** A table's facts as `mason tables` says them on its line (src/cli/commands.ts `tableFacts`): its size, its key, and
  *  added or why it cannot be added as it is (null: neither). */

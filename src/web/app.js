@@ -47,7 +47,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf } from "./shared.js";
+import { esc, badge, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -65,9 +65,6 @@ export { renderRunning, renderRequests, renderSessions } from "./pages/queries.j
 
 /** The pages, in the nav's order: a page with a `parent` is a sub-tab of its parent's tab. */
 export const PAGES = [statusPage, tablesPage, usersPage, queriesPage, usagePage, logsPage];
-
-/** How often the shown page is asked while the tab is seen: its fastest reads every poll, the slower ones when due. */
-export const POLL_MS = 2000;
 
 /** The tabs a parent stands for: its title, and the first of its pages is where its tab goes. */
 const GROUPS = { observability: { title: "Observability" } };

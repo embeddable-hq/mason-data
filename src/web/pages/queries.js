@@ -10,7 +10,7 @@
  * statement's "N rows sent" and its client, a request's duration in ms, its error, the empty log's sentence.
  */
 import { agoText, bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText, details, createOpenSet, card, cards, empty, panel, status, skeleton,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE } from "../shared.js";
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText } from "../shared.js";
 
 const RUNNING = "/api/running";
 const STATE = "/api/state";
@@ -18,25 +18,16 @@ const STATE = "/api/state";
 const QUERIES = "/api/queries";
 const QUERIES_EVERY_MS = 30_000;
 const NEWEST_EVERY_MS = 5000;
-const NO_CLIENT = "(no application_name)";
 /** Who is connected: the clients with the most sessions open, this many; the rest in one row. */
 const SESSIONS_TOP = 10;
 /** The most of a statement (or an error) an expanded row writes, in characters. */
 const STATEMENT_MAX = 16 * 1024;
 
-/** A statement on one line, as mason logs says it (src/cli/commands.ts `oneLine`): whitespace collapsed, cut with an ellipsis. */
-export const oneLine = (sql, max = 120) => {
-  const line = String(sql ?? "").replace(/\s+/g, " ").trim();
-  return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
-};
 /** A statement as a cell: one line, truncated by the page's stylesheet as well, the whole of it as its title. */
 const statementCell = (query) => query === "" ? `<span class="dim">(no statement)</span>` : `<code class="stmt" title="${esc(clip(query, TITLE_MAX))}">${esc(oneLine(query))}</code>`;
 const plural = (count, word) => `${n(count)} ${word}${count === 1 ? "" : "s"}`;
 /** The key a running statement is asked about by: its session and its statement's number. */
 const keyOf = (session, statement) => `${session}:${statement}`;
-
-/** How a statement's client is said (src/cli/commands.ts `runningLine`): its application_name, else the note. */
-export const clientText = (applicationName) => applicationName || NO_CLIENT;
 
 /** What a cancel answered, as `mason cancel` says it: its headline, or the refusal as the Failure. */
 function outcomeHtml(o) {
@@ -252,7 +243,7 @@ export const page = {
       model: m,
       // the running statements every poll; the newest page of the log every 5 s, an older one only when first asked
       // (and who is connected, from the state, every 5 s; the last day's summary for the cards every 30 s)
-      reads: () => [{ path: RUNNING, everyMs: 2000 }, { path: path(), everyMs: m.before === null ? NEWEST_EVERY_MS : Infinity }, { path: STATE, everyMs: NEWEST_EVERY_MS },
+      reads: () => [{ path: RUNNING, everyMs: POLL_MS }, { path: path(), everyMs: m.before === null ? NEWEST_EVERY_MS : Infinity }, { path: STATE, everyMs: NEWEST_EVERY_MS },
         { path: QUERIES, everyMs: QUERIES_EVERY_MS }],
       afterRead() {
         // a statement that ended since it was asked about has nothing left to cancel

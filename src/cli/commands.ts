@@ -685,8 +685,9 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   return hung === null ? 0 : 1;
 }
 
-function ago(iso: string): string {
-  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+/** How long ago a time was, as mason status says it (`12s ago`, `5 min ago`, `3 h ago`; the web page's `agoText`, held equal) */
+export function ago(iso: string, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
   return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
 }
 

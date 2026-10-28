@@ -144,6 +144,11 @@ test("the helpers: a share as the commands' percent, seconds left and a span as 
   assert.deepEqual([45, 340, 7500].map(leftText), ["~45 s left", "~6 min left", "~2 h 5 min left"]);
   assert.equal(leftText(null), "");
   for (const s of [0, 0.4, 1, 44.6, 89, 90, 600, 5399, 5400, 7500, 86_400]) assert.equal(duration(s), commands.duration(s), `duration(${s}) is the commands'`);
+  const agoText = fn<[string, number], string>("agoText"), at = Date.parse("2026-10-27T09:00:00Z");
+  for (const s of [0, 1, 89, 90, 3600, 5399, 5400, 86_400, -5]) {
+    const iso = new Date(at - s * 1000).toISOString();
+    assert.equal(agoText(iso, at), commands.ago(iso, at), `agoText of ${s} s is mason status's ago`);
+  }
   assert.equal(esc(`<script>"a" & 'b'</script>`), "&lt;script&gt;&quot;a&quot; &amp; &#39;b&#39;&lt;/script&gt;");
 });
 
@@ -860,8 +865,9 @@ test("the Status page's words are mason status's: the readiness word, the copies
   }
   for (const x of [0, 0.42, 9.96, 10, 63, 754, 7500]) assert.equal(fn<[number], string>("spanText")(x), commands.spanText(x), `spanText(${x})`);
   // a line's cells, read in order, are its line (the line pads its columns: spaces aside)
-  const eventCells = of<[unknown], string[]>(statusPage, "status.js", "eventCells"), requestCells = of<[unknown], string[]>(statusPage, "status.js", "requestCells");
-  for (const e of EVENTS.events as SyncEvent[]) assert.equal(eventCells(e).join(" "), plain(commands.eventLine(e, PLAIN)));
+  const eventCells = fn<[unknown], Record<string, string>>("eventCells"), requestCells = of<[unknown], string[]>(statusPage, "status.js", "requestCells");
+  for (const e of EVENTS.events as SyncEvent[]) assert.equal(Object.values(eventCells(e)).join(" "), plain(commands.eventLine(e, PLAIN)));
+  assert.equal(statusPage.RECENT_ERRORS as unknown, commands.RECENT_ERRORS, "as many recent errors of each kind as mason status shows");
   for (const r of FAILED_REQUESTS.requests as LedgerRequest[]) {
     const cells = requestCells(r);
     assert.equal(plain(cells.slice(0, -1).join(" ") + (cells.at(-1) ? ` — ${cells.at(-1)}` : "")), plain(commands.requestLine(r, PLAIN)));
@@ -1367,7 +1373,7 @@ test("Usage: reads the day and week, and the 24 hours an hour a line, every 60 s
 });
 
 test("Logs: the sync's events are mason logs --events' lines in a table, a failure marked, NEWEST FIRST (When turns it round); none is said as the CLI says it", () => {
-  const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(logsPage, "renderEvents"), cells = fnOf<[unknown], Record<string, string>>(logsPage, "eventCells");
+  const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(logsPage, "renderEvents"), cells = fn<[unknown], Record<string, string>>("eventCells");
   for (const e of UL_EVENTS.events) {
     const c = cells(e);
     assert.equal(commands.eventLine(e as never, PLAIN_STYLE), `${c.time}  ${c.kind!.padEnd(18)}  ${c.table}  ${c.message}`, "the CLI's line, cell for cell");

@@ -18,15 +18,14 @@
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
   slow: "#observability/queries?slow=1", failedQueries: "#observability/queries?status=failed", failedEvents: "#observability/logs?failures=1" };
 import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
-  card, cards, details, createOpenSet, skeleton } from "../shared.js";
+  utcMinute, oneLine, clientText, eventCells, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
-/** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`). */
-const RECENT_ERRORS = 5;
+/** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`, held equal by the tests). */
+export const RECENT_ERRORS = 5;
 
-const POLL_MS = 2000;
-/** The last 24 hours an hour a point: the cards' sparklines (the Usage page's own read, src/web/pages/usage.js HOURLY). */
-export const HOURLY = "/api/usage?since=24h&step=3600";
+/** The last 24 hours an hour a point: the cards' sparklines (Usage's read at its default range). */
+const HOURLY = usagePath("24h");
 
 /**
  * What a copying table's line says, and how full its bar is: src/cli/readiness.ts `copyingText`, line for line, so the
@@ -67,7 +66,7 @@ export function tableLine(t) {
   }
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its copy to start" };
   if (t.unsynced) {
-    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied, NOT kept current (${t.unsynced.reason}${t.unsynced.asOf ? `; as of ${t.unsynced.asOf.slice(0, 16).replace("T", " ")} UTC` : ""}) — mason sync ${entryName(t.table)}, or mason start --replication` };
+    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied, NOT kept current (${t.unsynced.reason}${t.unsynced.asOf ? `; as of ${utcMinute(t.unsynced.asOf)} UTC` : ""}) — mason sync ${entryName(t.table)}, or mason start --replication` };
   }
   return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}` };
 }
@@ -230,17 +229,13 @@ export function renderQueries(q) {
     `<p class="dim">The slow and the refused statements, and every other, are on <a href="${LINKS.queries}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
 }
 
-/** A sync event's cells, as mason status's `Sync errors` line says them (src/cli/commands.ts `eventLine`): when, what, its table, its reason's first line. */
-export const eventCells = (e) => [utcText(e.at), e.kind, e.table ?? "(the sync)", firstLine(e.message)];
-
 /** A failed statement's cells, as mason status's `Query errors` line says them (src/cli/commands.ts `requestLine`): when,
  *  the outcome and SQLSTATE, how long, the rows sent, who, the statement on one line and the error's first line. */
 export function requestCells(r) {
-  const line = r.query.replace(/\s+/g, " ").trim();
   return [utcText(r.startedAt), r.outcome === "ok" ? "ok" : `${r.outcome} ${r.sqlstate ?? ""}`.trim(), `${n(r.durationMs)} ms`,
     r.rows === null ? "" : `${n(r.rows)} row${r.rows === 1 ? "" : "s"}`,
-    `${r.applicationName || "(no application_name)"}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`,
-    (line.length <= 120 ? line : `${line.slice(0, 119)}…`) || "(no statement)", r.message ? firstLine(r.message) : ""];
+    `${clientText(r.applicationName)}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`,
+    oneLine(r.query, 120) || "(no statement)", r.message ? firstLine(r.message) : ""];
 }
 
 const cellsRow = (cells) => `<tr><th scope="row">${esc(cells[0])}</th>${cells.slice(1).map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`;
@@ -256,7 +251,7 @@ export function renderRecentErrors(events, requests) {
     : !list(r).length ? `<h3>${title}</h3><p class="dim">None.</p>`
     : `<table class="errors"><caption>${title} (the latest, newest last; ${code(more)} lists each) <a class="see" href="${href}">See all</a></caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${list(r).map((x) => cellsRow(cells(x))).join("")}</tbody></table>`;
-  return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], eventCells, "mason logs --events", LINKS.failedEvents) +
+  return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], (e) => Object.values(eventCells(e)), "mason logs --events", LINKS.failedEvents) +
     part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed", LINKS.failedQueries);
 }
 

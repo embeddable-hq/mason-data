@@ -3,7 +3,7 @@
  * /api/users/<name>. An added user's password lives in this page's memory until the person dismisses it, never in
  * storage, a URL or a log line.
  */
-import { badge, button, code, duration, empty, esc, json, panel, renderFailure, status } from "../shared.js";
+import { badge, button, code, duration, empty, esc, json, panel, renderFailure, status, utcMinute } from "../shared.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
 const USERS = "/api/users?lastUsed=1";
@@ -11,7 +11,7 @@ const USERS_POST = "/api/users";
 const USERS_EVERY_MS = 30_000;
 
 /** A time as `mason user list` stamps it: `2026-10-27 09:10`, UTC. */
-const stamp = (iso) => iso.slice(0, 16).replace("T", " ");
+const stamp = utcMinute;
 
 /** When a user was last used, as `mason user list` says it: the time, or why not (unknown, or not within the log's days). */
 export function lastUsedText(u, lastUsedNote, requestLogDays) {

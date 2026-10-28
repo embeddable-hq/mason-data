@@ -8,7 +8,7 @@
  * `/api/events` every 10 s, and `/api/logs` every 5 s ONLY WHILE the details is open (the page's own state: nothing is
  * read when it is closed). A page module (src/web/app.js has the contract). Never the engine's name.
  */
-import { esc, firstLine, utcText, agoText, renderFailure, badge, empty, panel, n, sortTh, nextSort, moreRows, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
+import { esc, agoText, utcText, badge, empty, panel, n, sortTh, nextSort, moreRows, readPart, eventCells, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
 
 /** How many of the range's events are read (the newest), and how many of those the page writes at once. */
 const EVENTS_LIMIT = 500;
@@ -18,11 +18,6 @@ const eventsPath = (range = DEFAULT_RANGE) => `/api/events?limit=${EVENTS_LIMIT}
 const LOGS = "/api/logs?lines=200";
 
 const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
-
-/** One event's cells as `mason logs --events` says them (src/cli/commands.ts `eventLine`): when, kind, table, the reason's first line. */
-export function eventCells(e) {
-  return { time: utcText(e.at), kind: e.kind, table: e.table ?? "(the sync)", message: firstLine(e.message) };
-}
 
 /** An event's kind as a badge: a failure red (with its ✗), a copy made or a failure recovered green, any other gray. */
 const kindBadge = (e) => badge(e.failed ? `✗ ${e.kind}` : e.kind, e.failed ? "bad" : /^(copied|recovered)$/.test(e.kind) ? "ok" : "");
@@ -89,12 +84,7 @@ export const page = {
   create(ctx) {
     const m = { rawOpen: false, failuresOnly: false, kind: "", table: "", sort: { key: "time", dir: "desc" }, limit: EVENTS_SHOWN };
     const events = () => eventsPath(ctx.range());
-    /** A read's body, with its Failure where it shows (the first read's is the banner, so `says` is false for it). */
-    const part = (path, render, says) => {
-      const r = ctx.read(path);
-      if (r === undefined) return `<p class="dim">Asking Mason…</p>`;
-      return (r.failure && says ? renderFailure(r.failure) : "") + (r.body === undefined ? "" : render(r.body));
-    };
+    const part = (path, render, says) => readPart(ctx, path, render, says);
     const actions = {
       /** The details opened or closed: the log is read from then on, or no longer. */
       async showRawLog(open) {

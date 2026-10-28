@@ -9,13 +9,11 @@
  * Reads `/api/queries`, `/api/usage` and its copy sizes every 60 s (a sample is taken a minute). Every number a chart
  * draws is also text, in a card or the hours' table. A page module (src/web/app.js has the contract). Never the engine's name.
  */
-import { esc, n, bytesText, fileSize, duration, renderFailure, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, nextSort, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
+import { esc, n, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, nextSort, readPart, usagePath, utcMinute, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 import { statementCards, summaryWindow } from "./queries.js";
 
 const EVERY_MS = 60_000;
-/** The samples of a range, its step a line: `step` is seconds (src/cli/run-server.ts `usage`). */
-const usagePath = (range = DEFAULT_RANGE) => { const r = RANGES[rangeOf(range)]; return `/api/usage?since=${r.since}&step=${r.stepSeconds}`; };
 /** A step said as the charts' titles say it: `a minute`, `an hour`, `every 6 hours`. */
 const perStep = (seconds) => seconds === 60 ? "a minute" : seconds === 3600 ? "an hour" : seconds % 3600 === 0 ? `every ${seconds / 3600} hours` : `every ${duration(seconds)}`;
 const QUERIES = "/api/queries";
@@ -49,7 +47,7 @@ export function renderQueries(q) {
 export function sampleCells(s) {
   const bad = s.statementsRefused + s.statementsFailed + s.statementsCancelled;
   return {
-    time: s.at.slice(0, 16).replace("T", " "), statements: n(s.statements), errors: bad === 0 ? "" : n(bad),
+    time: utcMinute(s.at), statements: n(s.statements), errors: bad === 0 ? "" : n(bad),
     rowsSent: n(s.rowsSent), bytesSent: bytesText(s.bytesSent), p95: s.durationP95Ms === null ? "–" : `${n(s.durationP95Ms)} ms`,
     copy: s.copyBytes === null ? "–" : fileSize(s.copyBytes), rows: n(s.copyRows), failing: s.tablesFailed === 0 ? "" : n(s.tablesFailed),
     oldest: s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds), lag: s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds),
@@ -123,7 +121,7 @@ export function renderUsageKpis(queries, usage, range = DEFAULT_RANGE) {
  * memory is behind another.
  */
 export function renderUsage(b, isOpen = () => false, sort = { key: "time", dir: "desc" }) {
-  const at = (iso) => iso.slice(0, 16).replace("T", " ");
+  const at = utcMinute;
   const span = b.stepSeconds === null ? "every sample" : `${duration(b.stepSeconds)} a line`;
   const head = `<p class="dim">From ${esc(at(b.since))} to ${esc(at(b.until))} UTC, ${esc(span)} (a sample every ${esc(duration(b.sampleSeconds))}, kept ${b.keptDays} day${b.keptDays === 1 ? "" : "s"}).</p>`;
   let samples;
@@ -165,13 +163,7 @@ export const page = {
     const m = { open: opened.open, sort: { key: "time", dir: "desc" } };
     const path = () => usagePath(ctx.range());
     const actions = { sortHours() { m.sort = nextSort(m.sort, "time"); } };
-    /** What a read gave: its body, or its Failure where it shows (said once, and not the first read's: that is the banner), or that it is being asked. */
-    const part = (path, render, says) => {
-      const r = ctx.read(path);
-      if (r === undefined) return `<p class="dim">Asking Mason…</p>`;
-      const failure = r.failure && says ? renderFailure(r.failure) : "";
-      return failure + (r.body === undefined ? "" : render(r.body));
-    };
+    const part = (path, render, says) => readPart(ctx, path, render, says);
     return {
       model: m,
       reads: () => [{ path: QUERIES, everyMs: EVERY_MS }, { path: path(), everyMs: EVERY_MS }],
