@@ -363,6 +363,13 @@ production run must set and the ones worth deciding; `mason serve --help` has ev
 npm install && npm run check      # typecheck + tests, offline, a few minutes
 ```
 
+To run the checkout's `mason` from any folder, with no build or install, define an alias once. A project folder
+elsewhere (`mkdir`, then `mason-local init demo`) is the quickest way to try a change by hand.
+
+```bash
+alias mason-local="node $PWD/src/cli/main.ts"   # from the checkout's root; then mason-local works in any project folder
+```
+
 The integration tests run the real copy, stream, listener and `mason serve` against a Postgres
 of yours (`tests/integration/README.md`): a throwaway one, since each test makes and drops a
 database there.
@@ -438,7 +445,7 @@ Answered, but not as Postgres answers: each is a decided difference the oracle c
 | a select-list value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out, where no index gives the ORDER BY | raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers) | answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does | none needed for an answer; filter the bad rows out to have neither raise |
 | a numeric column whose values have several scales: an integer UNION ALL a numeric, lead(x, 1, 0) beside numeric(2,1) values, an unconstrained column holding 1 and 1.50 | each value its own scale: 1, 1.5 | one scale per column: 1.0, 1.5 | cast to numeric(p, s), or round(x, s) |
 | upper / lower of letters added in Unicode 16 | maps them (its own Unicode 16 tables) | leaves them as they are (DuckDB's ICU predates Unicode 16) | none needed for letters before Unicode 16 |
-| stddev / variance of a float, and ln, log, exp, power of a double: the last digit | its algorithm and libm's | DuckDB's: equal to about 1e-15 | round(x::numeric, 12) |
+| stddev / variance of a float, and ln, log, exp, power of a double: the last digit may differ | its algorithm and its machine's libm | DuckDB's and its machine's: alike on some pairs of machines, apart in the 16th–17th digit on others | round(x::numeric, 12), or compare within a tolerance (abs(a - b) <= 1e-12 * abs(b)) |
 | -0 beside 0 in greatest / least / percentile_disc | keeps the one it met first | may answer the other | x + 0 makes -0 into 0 |
 | exp / power of a double past its range, or so small it underflows | an error (22003) | Infinity, or 0 | bound the argument |
 | min / max of a numeric expression (a quotient) where equal values have different scales (0 / 7 and 0 / 1000000) | the last of them it reads, so the scan order decides the trailing zeros | the one whose operands are least (min) or greatest (max) | round(min(a / b), n) |

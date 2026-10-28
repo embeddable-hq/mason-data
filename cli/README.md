@@ -197,7 +197,9 @@ seeds it again.
 
 - Node 22.13 or later. The SQL parser (`libpg-query`), the catalog (`PGlite`) and the engine (DuckDB) ship as
   WebAssembly or prebuilt binaries: no native build, no Python or compiler needed.
-- Memory: the copy uses up to half the machine's by default (`MASON_DUCKDB_MEMORY=4GiB` sets it).
+- Memory: the copy may use half the container's memory limit by default, else half the machine's RAM
+  (`MASON_DUCKDB_MEMORY=4GB` sets it; `mason doctor` says it). Sizing a server:
+  [deploy/mason-data/README.md#memory](https://github.com/embeddable-hq/mason-data/blob/main/deploy/mason-data/README.md#memory).
 - Postgres 13 or later. Each table needs a primary key, or a `key:` in the sources file (polling only).
 
 ## Security
