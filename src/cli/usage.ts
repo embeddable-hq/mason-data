@@ -1,6 +1,6 @@
 /**
  * `mason usage`: what the run was and did over time — a sample a minute (src/duck/usage.ts) of the copy's size and
- * rows, the copies failed, how old the stalest copy is, the requests and their duration, the stream's lag and the
+ * rows, the copies failed, how old the stalest copy is, the statements and their duration, the stream's lag and the
  * memory — and each copy's own size. The run's `GET /api/usage` (src/cli/run-server.ts) answers it; `--json` prints that
  * answer as it is, so an agent and a chart read the same samples a person reads here.
  */
@@ -18,11 +18,11 @@ const n = (x: number): string => x.toLocaleString("en-US");
 export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>] [--step <span>] [--json]
 
   What Mason was and did over time, from a sample it takes every minute and keeps MASON_REQUEST_LOG_DAYS days
-  (default 7): a line each span — the requests of the Postgres API (how many, how many failed or were refused, their
-  p95 duration, the rows sent), the copy's size and rows, the tables whose sync failed, how old the stalest copy was,
-  the stream's lag (with --replication), and the memory of the process and of the copy against its limit
-  (MASON_DUCKDB_MEMORY). Then each copy's own size, measured every 10 minutes. A span sums its requests and shows each
-  level at its highest. Read through the running Mason.
+  (default 7): a line each span — the statements of the Postgres API (how many, how many were refused, failed or
+  cancelled — the errors column —, the completed ones' p95 duration, the rows sent), the copy's size and rows, the
+  tables whose sync is failing, how old the stalest copy was, the stream's lag (with --replication), and the memory
+  of the process and of the copy against its limit (MASON_DUCKDB_MEMORY). Then each copy's own size, measured every
+  10 minutes. A span sums its statements and shows each level at its highest. Read through the running Mason.
 
     mason usage                        the last hour, 5 minutes a line
     mason usage --since 7d --step 1h   the last week, an hour a line
@@ -33,15 +33,15 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
   --step <span>    a line per span (1m to the days kept; default 5m), or 0 for every sample as it was taken
   --json           as data: { since, until, stepSeconds (null: every sample), sampleSeconds, keptDays, samples: [{ at
                    (with a step, the span's start), seconds, copyBytes, copyRows, tablesAdded, tablesCopied,
-                   tablesFailed, oldestSyncSeconds, requests, requestsFailed, requestsRefused, rowsSent, bytesSent (null:
-                   not recorded yet), durationP50Ms, durationP95Ms, streamLagBytes, streamLagSeconds, rssBytes,
+                   tablesFailed, oldestSyncSeconds, statements, statementsRefused, statementsFailed, statementsCancelled,
+                   rowsSent, bytesSent, durationP50Ms, durationP95Ms, streamLagBytes, streamLagSeconds, rssBytes,
                    heapUsedBytes, copyMemoryBytes, copyMemoryLimitBytes }], copySizes: [{ table, bytes, at }], next }
 `;
 
 export const USAGE: CommandSpec & { needs: "run" } = {
   needs: "run",
   name: "usage",
-  summary: "what Mason did over time: requests, the copy's size and age, memory (a sample a minute; --since 7d --step 1h)",
+  summary: "what Mason did over time: statements, the copy's size and age, memory (a sample a minute; --since 7d --step 1h)",
   usage: USAGE_USAGE,
   options: { since: { type: "string" }, until: { type: "string" }, step: { type: "string" }, json: { type: "boolean" } },
   json: ["since", "until", "stepSeconds", "sampleSeconds", "keptDays", "samples", "copySizes", "next"],
@@ -65,23 +65,23 @@ export function whenOf(text: string, now: number): string | null {
   return Number.isNaN(t) ? null : new Date(t).toISOString();
 }
 
-/** One sample on one line: the time, the requests, failed and refused, p95, rows sent, the copy, its rows, the stalest copy, the lag, the memory. */
+/** One sample on one line: the time, the statements, those refused, failed or cancelled, p95, rows sent, the copy, its rows, the stalest copy, the lag, the memory. */
 export function sampleLine(s: UsageSample, withLag: boolean): string {
   const time = s.at.slice(0, 16).replace("T", " ");
   const p95 = s.durationP95Ms === null ? "–" : `${n(s.durationP95Ms)} ms`;
-  const bad = s.requestsFailed + s.requestsRefused;
+  const bad = s.statementsRefused + s.statementsFailed + s.statementsCancelled;
   const age = s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds);
   const lag = !withLag ? "" : `  ${(s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds)).padStart(9)}`;
   const memory = `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (copy ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`;
-  return `${time}  ${n(s.requests).padStart(9)}  ${(bad === 0 ? "" : n(bad)).padStart(7)}  ${p95.padStart(10)}  ${n(s.rowsSent).padStart(11)}  ` +
-    `${(s.copyBytes === null ? "–" : fileSize(s.copyBytes)).padStart(10)}  ${n(s.copyRows).padStart(13)}  ${(s.tablesFailed === 0 ? "" : n(s.tablesFailed)).padStart(6)}  ` +
+  return `${time}  ${n(s.statements).padStart(10)}  ${(bad === 0 ? "" : n(bad)).padStart(7)}  ${p95.padStart(10)}  ${n(s.rowsSent).padStart(11)}  ` +
+    `${(s.copyBytes === null ? "–" : fileSize(s.copyBytes)).padStart(10)}  ${n(s.copyRows).padStart(13)}  ${(s.tablesFailed === 0 ? "" : n(s.tablesFailed)).padStart(7)}  ` +
     `${age.padStart(10)}${lag}  ${memory}`;
 }
 
 /** The heading over `sampleLine`'s columns. */
 export function sampleHeading(withLag: boolean): string {
-  return `${"time (UTC)".padEnd(16)}  ${"requests".padStart(9)}  ${"failed".padStart(7)}  ${"p95".padStart(10)}  ${"rows sent".padStart(11)}  ` +
-    `${"copy".padStart(10)}  ${"rows".padStart(13)}  ${"failed".padStart(6)}  ${"oldest".padStart(10)}${withLag ? `  ${"lag".padStart(9)}` : ""}  memory`;
+  return `${"time (UTC)".padEnd(16)}  ${"statements".padStart(10)}  ${"errors".padStart(7)}  ${"p95".padStart(10)}  ${"rows sent".padStart(11)}  ` +
+    `${"copy".padStart(10)}  ${"rows".padStart(13)}  ${"failing".padStart(7)}  ${"oldest".padStart(10)}${withLag ? `  ${"lag".padStart(9)}` : ""}  memory`;
 }
 
 export async function usage(argv: string[], now = Date.now()): Promise<number> {

@@ -68,6 +68,7 @@ adds pages, not endpoints.
 |---|---|---|
 | The statements that ran | `GET /api/requests?limit=&failed=1` | `mason logs --requests --json` |
 | The sync's failures and events | `GET /api/events?limit=&since=&failed=1` | `mason logs --events --json`; the latest failures, `mason status --json` `recentErrors` |
+| Usage over time, each copy's own size | `GET /api/usage?since=&until=&step=` | `mason usage --json` (`samples`, re-bucketed by `step`; `copySizes`) |
 | Each table's sync, the copies in all | `GET /api/state` `tables[].sync`, `totals` | `mason status --json` |
 | The slow statements | `GET /api/slow` | `mason status --json` `slowQueries` |
 | The refused statements | `GET /api/refused` | `mason status --json` `refusedQueries`, `refusedTotal` |

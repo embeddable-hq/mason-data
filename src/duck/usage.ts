@@ -1,17 +1,19 @@
 /**
  * USAGE OVER TIME (`_mason.usage`, `_mason.copy_sizes`): every SAMPLE_SECONDS the run writes one row of what it is and
- * what it did — the copy's size and rows, the copies added, copied and failed, how old the oldest copy is, the requests
- * of the interval (how many, failed, refused, rows sent, their p50 / p95 duration), the stream's lag, and the memory of
+ * what it did — the copy's size and rows, the copies added, copied and failed, how old the oldest copy is, the statements
+ * of the interval (how many, refused, failed, cancelled, the rows and bytes sent, the completed ones' p50 / p95), the
+ * stream's lag, and the memory of
  * the process and of the copy — and every SIZE_EVERY_MS each copy's own bytes. `mason status` says the moment; this is
  * what it said over the last days (`mason usage`, `GET /api/usage`).
  *
  * ONE FACT, ONE PLACE: a sample never computes a fact a second way. The copies' facts are `/api/state`'s at the moment
  * of the sample (`take`, src/cli/run-server.ts `usageFacts`: `engine.bytes`, `totals`, `tables[].sync.ageSeconds`,
- * `stream.lag`); the requests are counted as the listener RECORDS them (`count`, fed by the one `record` the listener
- * calls, beside the request log's), so a request is in the interval it ended in, exactly once — a query of the request
- * log by `started_at` at each sample would miss a statement still running when its interval was sampled (and one
- * recorded in the second before the log's batch commits). Measured: that query is ~1 ms over a million rows, so it was
- * ruled out for exactness, not cost.
+ * `stream.lag`); the statements are counted as the listener RECORDS them (`count`, fed by the one `record` the listener
+ * calls, beside the request log's) by the request log summary's own rules (src/duck/requests.ts `summary`: no refused
+ * login, `outcomeOf`, the completed ones' `quantile_cont`), so a statement is in the interval it ended in, exactly once —
+ * a query of the request log by `started_at` at each sample would miss a statement still running when its interval was
+ * sampled (and one recorded in the second before the log's batch commits). Measured: that query is ~1 ms over a million
+ * rows, so it was ruled out for exactness, not cost.
  *
  * Kept as the request log and the sync's events are (src/duck/requests.ts, src/duck/events.ts): written on a connection
  * of the samples' own — never the sync's writer turn (`onWriter`), which a swap or a stream batch may hold for seconds;
@@ -34,7 +36,7 @@
 import type { DuckDBValue } from "@duckdb/node-api";
 import type { DuckConnection } from "./executor.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
-import { outcomeOf, type ApiLogRow } from "../api/request-log.ts";
+import { outcomeOf, type ApiLogRow, type Outcome } from "../api/request-log.ts";
 
 export const USAGE_TABLE = `${MASON_SCHEMA}.usage`;
 export const SIZES_TABLE = `${MASON_SCHEMA}.copy_sizes`;
@@ -51,13 +53,13 @@ export const SIZE_EVERY_MS = 10 * 60_000;
 const TRIM_EVERY_MS = 60 * 60 * 1000;
 
 const COLUMNS = ["sampled_at", "seconds", "copy_bytes", "copy_rows", "tables_added", "tables_copied", "tables_failed", "oldest_sync_seconds",
-  "requests", "requests_failed", "requests_refused", "rows_sent", "bytes_sent", "duration_p50_ms", "duration_p95_ms",
+  "statements", "statements_refused", "statements_failed", "statements_cancelled", "rows_sent", "bytes_sent", "duration_p50_ms", "duration_p95_ms",
   "stream_lag_bytes", "stream_lag_seconds", "rss_bytes", "heap_used_bytes", "copy_memory_bytes", "copy_memory_limit_bytes"] as const;
 
 /** the samples' DDL: one row a sample; a level is as of `sampled_at`, a count is of the `seconds` before it */
 export const USAGE_DDL = `CREATE TABLE IF NOT EXISTS ${USAGE_TABLE} (sampled_at TIMESTAMPTZ, seconds DOUBLE, copy_bytes BIGINT, copy_rows BIGINT, ` +
-  `tables_added INTEGER, tables_copied INTEGER, tables_failed INTEGER, oldest_sync_seconds DOUBLE, requests BIGINT, requests_failed BIGINT, ` +
-  `requests_refused BIGINT, rows_sent BIGINT, bytes_sent BIGINT, duration_p50_ms INTEGER, duration_p95_ms INTEGER, stream_lag_bytes BIGINT, ` +
+  `tables_added INTEGER, tables_copied INTEGER, tables_failed INTEGER, oldest_sync_seconds DOUBLE, statements BIGINT, statements_refused BIGINT, ` +
+  `statements_failed BIGINT, statements_cancelled BIGINT, rows_sent BIGINT, bytes_sent BIGINT, duration_p50_ms INTEGER, duration_p95_ms INTEGER, stream_lag_bytes BIGINT, ` +
   `stream_lag_seconds DOUBLE, rss_bytes BIGINT, heap_used_bytes BIGINT, copy_memory_bytes BIGINT, copy_memory_limit_bytes BIGINT)`;
 /** each copy's own bytes, every SIZE_EVERY_MS */
 export const SIZES_DDL = `CREATE TABLE IF NOT EXISTS ${SIZES_TABLE} (sampled_at TIMESTAMPTZ, table_name VARCHAR, bytes BIGINT)`;
@@ -96,15 +98,18 @@ export interface UsageSample {
   tablesFailed: number;
   /** how old the stalest copy is, in seconds (null before any copy) */
   oldestSyncSeconds: number | null;
-  /** the request log's rows: every statement the Postgres API answered, refused or failed, and every refused login */
-  requests: number;
-  requestsFailed: number;
-  requestsRefused: number;
+  /** the statements of the interval, as the request log's summary counts them (src/duck/requests.ts `summary`: a refused
+   *  login is none), and those refused (the statement's own fault), failed (Mason's or the machine's) and cancelled */
+  statements: number;
+  statementsRefused: number;
+  statementsFailed: number;
+  statementsCancelled: number;
   /** the rows sent to clients */
   rowsSent: number;
-  /** the bytes sent to clients: null until the request log records the bytes each statement sent (`count` adds them) */
-  bytesSent: number | null;
-  /** the requests' duration, p50 and p95, ms (nearest rank); null when there was none */
+  /** the bytes sent to clients, over every statement (the request log's `bytes_sent`) */
+  bytesSent: number;
+  /** the COMPLETED statements' duration, p50 and p95, ms, as the summary's `quantile_cont` (interpolated, rounded); null
+   *  when none completed */
   durationP50Ms: number | null;
   durationP95Ms: number | null;
   /** replication mode: the stream's lag in WAL bytes and seconds (`mason status`'s); null when polling */
@@ -124,14 +129,19 @@ export interface CopySize { table: string; bytes: number; at: string }
 /** What a reader asks of the samples: from, until (ISO), and a bucket in seconds (absent: every sample). */
 export interface UsageQuery { since: string; until: string; stepSeconds?: number }
 
-/** The requests of one interval as `count` adds them up. */
-interface Interval { requests: number; failed: number; refused: number; rowsSent: number; bytesSent: number | null; durations: number[] }
-const noInterval = (): Interval => ({ requests: 0, failed: 0, refused: 0, rowsSent: 0, bytesSent: null, durations: [] });
+/** The statements of one interval as `count` adds them up; `durations`, the completed ones'. */
+interface Interval { statements: number; outcomes: Record<Exclude<Outcome, "ok">, number>; rowsSent: number; bytesSent: number; durations: number[] }
+const noInterval = (): Interval => ({ statements: 0, outcomes: { refused: 0, failed: 0, cancelled: 0 }, rowsSent: 0, bytesSent: 0, durations: [] });
 
-/** The value at rank ⌈q·n⌉ of the sorted durations (nearest rank), or null for none. */
-export function nearestRank(sorted: readonly number[], q: number): number | null {
+/**
+ * The q-quantile of sorted values as DuckDB's `quantile_cont` gives it (linear between the two nearest ranks), rounded
+ * as the request log's summary rounds it, or null for none: the summary's own definition of a p50 and a p95
+ * (tests/duck-usage.test.ts holds the two equal).
+ */
+export function quantileCont(sorted: readonly number[], q: number): number | null {
   if (sorted.length === 0) return null;
-  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]!;
+  const at = (sorted.length - 1) * q, lo = Math.floor(at), hi = Math.ceil(at);
+  return Math.round(sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (at - lo));
 }
 
 export interface UsageOptions {
@@ -194,16 +204,17 @@ export class UsageSampler {
 
   private now(): number { return this.options.now?.() ?? Date.now(); }
 
-  /** One request of the listener's, as the request log records it: counted in the interval it ends. Never throws. */
+  /** One row of the listener's, as the request log records it: counted in the interval it ends, by the summary's rule
+   *  (a refused login is no statement; `outcomeOf`, the one outcome rule). Never throws. */
   count(row: ApiLogRow): void {
+    if (row.method === "CONNECT") return;
     const i = this.interval;
-    i.requests++;
+    i.statements++;
     const outcome = outcomeOf(row.sqlstate);
-    if (outcome === "failed") i.failed++;
-    else if (outcome === "refused") i.refused++;
-    if (row.rows !== undefined) i.rowsSent += row.rows;
-    // bytesSent: once the request log records the bytes each statement sent, they are added here (i.bytesSent)
-    i.durations.push(row.durationMs);
+    if (outcome === "ok") i.durations.push(row.durationMs);
+    else i.outcomes[outcome]++;
+    i.rowsSent += row.rows ?? 0;
+    i.bytesSent += row.bytesSent ?? 0;
   }
 
   /** Takes a sample every interval from `take` (the run's facts), and each copy's bytes every SIZE_EVERY_MS. */
@@ -253,7 +264,7 @@ export class UsageSampler {
     const sorted = i.durations.sort((a, b) => a - b);
     const mem = this.options.memory?.() ?? process.memoryUsage();
     const values: DuckDBValue[] = [new Date(now).toISOString(), seconds, facts.copyBytes, facts.totals.rows, facts.totals.added, facts.totals.copied, facts.totals.failed,
-      facts.oldestSyncSeconds, i.requests, i.failed, i.refused, i.rowsSent, i.bytesSent, nearestRank(sorted, 0.5), nearestRank(sorted, 0.95),
+      facts.oldestSyncSeconds, i.statements, i.outcomes.refused, i.outcomes.failed, i.outcomes.cancelled, i.rowsSent, i.bytesSent, quantileCont(sorted, 0.5), quantileCont(sorted, 0.95),
       facts.streamLag?.bytes ?? null, facts.streamLag?.seconds ?? null, mem.rss, mem.heapUsed, copyMemory, this.memoryLimitBytes];
     const sql = `INSERT INTO ${USAGE_TABLE} (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map((c, j) => `$${j + 1}${c === "sampled_at" ? "::TIMESTAMPTZ" : ""}`).join(", ")})`;
     try {
@@ -334,7 +345,7 @@ export class UsageSampler {
       sql = `SELECT epoch_ms(sampled_at) AS at, ${COLUMNS.slice(1).join(", ")} FROM ${USAGE_TABLE} WHERE ${range} ORDER BY sampled_at`;
     } else {
       values.push(o.stepSeconds);
-      const sum = new Set(["seconds", "requests", "requests_failed", "requests_refused", "rows_sent", "bytes_sent"]);
+      const sum = new Set(["seconds", "statements", "statements_refused", "statements_failed", "statements_cancelled", "rows_sent", "bytes_sent"]);
       sql = `SELECT epoch_ms(time_bucket(to_seconds($3::BIGINT), sampled_at, $1::TIMESTAMPTZ)) AS at, ` +
         COLUMNS.slice(1).map((c) => `${sum.has(c) ? "sum" : "max"}(${c}) AS ${c}`).join(", ") +
         ` FROM ${USAGE_TABLE} WHERE ${range} GROUP BY 1 ORDER BY 1`;
@@ -368,8 +379,8 @@ function sampleOf(r: Record<string, unknown>): UsageSample {
   return {
     at: new Date(Number(r.at)).toISOString(), seconds: Number(r.seconds), copyBytes: num(r.copy_bytes), copyRows: Number(r.copy_rows ?? 0),
     tablesAdded: Number(r.tables_added ?? 0), tablesCopied: Number(r.tables_copied ?? 0), tablesFailed: Number(r.tables_failed ?? 0), oldestSyncSeconds: num(r.oldest_sync_seconds),
-    requests: Number(r.requests ?? 0), requestsFailed: Number(r.requests_failed ?? 0), requestsRefused: Number(r.requests_refused ?? 0), rowsSent: Number(r.rows_sent ?? 0),
-    bytesSent: num(r.bytes_sent), durationP50Ms: num(r.duration_p50_ms), durationP95Ms: num(r.duration_p95_ms),
+    statements: Number(r.statements ?? 0), statementsRefused: Number(r.statements_refused ?? 0), statementsFailed: Number(r.statements_failed ?? 0),
+    statementsCancelled: Number(r.statements_cancelled ?? 0), rowsSent: Number(r.rows_sent ?? 0), bytesSent: Number(r.bytes_sent ?? 0), durationP50Ms: num(r.duration_p50_ms), durationP95Ms: num(r.duration_p95_ms),
     streamLagBytes: num(r.stream_lag_bytes), streamLagSeconds: num(r.stream_lag_seconds),
     rssBytes: Number(r.rss_bytes), heapUsedBytes: Number(r.heap_used_bytes), copyMemoryBytes: num(r.copy_memory_bytes), copyMemoryLimitBytes: Number(r.copy_memory_limit_bytes),
   };

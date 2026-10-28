@@ -317,15 +317,15 @@ type UsageCli = typeof import("../src/cli/usage.ts");
 const usageCli = await import("../src/cli/usage.ts" as string).catch(() => ({})) as Partial<UsageCli>;
 const sampleLine = (s: unknown, lag: boolean): string => usageCli.sampleLine?.(s as never, lag) ?? "(no src/cli/usage.ts)";
 const sample = { at: "2026-10-28T09:05:00.000Z", seconds: 300, copyBytes: 5 * 2 ** 30, copyRows: 12_345_678, tablesAdded: 4, tablesCopied: 4, tablesFailed: 1, oldestSyncSeconds: 75,
-  requests: 1_204, requestsFailed: 1, requestsRefused: 2, rowsSent: 98_765, bytesSent: null, durationP50Ms: 12, durationP95Ms: 1_830, streamLagBytes: null, streamLagSeconds: null,
+  statements: 1_204, statementsRefused: 2, statementsFailed: 1, statementsCancelled: 0, rowsSent: 98_765, bytesSent: 4_567_890, durationP50Ms: 12, durationP95Ms: 1_830, streamLagBytes: null, streamLagSeconds: null,
   rssBytes: 900 * 2 ** 20, heapUsedBytes: 80 * 2 ** 20, copyMemoryBytes: 300 * 2 ** 20, copyMemoryLimitBytes: 8 * 2 ** 30 };
 
-test("mason usage: a span a line under its heading — the requests, failed and refused, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
+test("mason usage: a span a line under its heading — the statements, their errors, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
   const { sampleHeading, spanSeconds, whenOf, USAGE } = usageCli as UsageCli;
-  assert.equal(sampleHeading(false), "time (UTC)         requests   failed         p95    rows sent        copy           rows  failed      oldest  memory");
-  assert.equal(sampleLine(sample, false), "2026-10-28 09:05      1,204        3    1,830 ms       98,765     5.0 GiB     12,345,678       1        75 s  900.0 MiB (copy 300.0 MiB of 8.0 GiB)");
-  assert.equal(sampleLine({ ...sample, requests: 0, requestsFailed: 0, requestsRefused: 0, durationP95Ms: null, tablesFailed: 0, oldestSyncSeconds: null, copyMemoryBytes: null, streamLagSeconds: 3, streamLagBytes: 10 }, true),
-    "2026-10-28 09:05          0                    –       98,765     5.0 GiB     12,345,678                   –        3 s  900.0 MiB", "nothing to say is blank or a dash; the lag with replication");
+  assert.equal(sampleHeading(false), "time (UTC)        statements   errors         p95    rows sent        copy           rows  failing      oldest  memory");
+  assert.equal(sampleLine(sample, false), "2026-10-28 09:05       1,204        3    1,830 ms       98,765     5.0 GiB     12,345,678        1        75 s  900.0 MiB (copy 300.0 MiB of 8.0 GiB)");
+  assert.equal(sampleLine({ ...sample, statements: 0, statementsRefused: 0, statementsFailed: 0, durationP95Ms: null, tablesFailed: 0, oldestSyncSeconds: null, copyMemoryBytes: null, streamLagSeconds: 3, streamLagBytes: 10 }, true),
+    "2026-10-28 09:05           0                    –       98,765     5.0 GiB     12,345,678                    –        3 s  900.0 MiB", "nothing to say is blank or a dash; the lag with replication");
   assert.equal(sampleHeading(true).endsWith("oldest        lag  memory"), true);
   assert.deepEqual(["90s", "30m", "6h", "7d", "0", "5", "1w", "-1h"].map(spanSeconds), [90, 1800, 21_600, 604_800, 0, null, null, null]);
   const now = Date.parse("2026-10-28T10:00:00.000Z");

@@ -1,6 +1,6 @@
 /**
  * USAGE OVER TIME (src/duck/usage.ts, `_mason.usage`, `_mason.copy_sizes`): a sample is the run's facts as `take` gives
- * them, the requests counted as the listener records them (each in the interval it ended, exactly once), the memory of
+ * them, the statements counted as the listener records them (each in the interval it ended, exactly once), the memory of
  * the process and the copy; read back as written, or re-bucketed in one query (counts summed, levels at their highest);
  * each copy's own bytes from its blocks; a failure said once and never thrown, a sample that could not be taken costing
  * no request its count. Offline: a DuckDB file of the test's own.
@@ -25,14 +25,17 @@ const facts = { copyBytes: 12_345, totals: { added: 3, copied: 2, failed: 1, row
 const row = (durationMs: number, o: Partial<ApiLogRow> = {}): ApiLogRow => ({ requestId: "r", at: new Date(), method: "QUERY", status: 200, durationMs, ...o });
 const NEVER = 3_600_000;
 
-test("a sample is the run's facts, the interval's requests (failed, refused, rows sent, p50 / p95) and the memory, read back as written", async () => {
-  const { UsageSampler, USAGE_TABLE } = await usage();
+test("a sample is the run's facts, the interval's statements by the request log summary's rules (refused, failed, cancelled, rows and bytes sent, the completed ones' p50 / p95) and the memory, read back as written", async () => {
+  const { UsageSampler, USAGE_TABLE, quantileCont } = await usage();
   let clock = Date.parse("2026-10-28T09:00:00.000Z");
   const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: NEVER, memory: () => ({ rss: 900, heapUsed: 300 }) });
   u.start(async () => facts);
-  for (let ms = 1; ms <= 20; ms++) u.count(row(ms * 10, { rows: 5 }));
-  u.count(row(7, { sqlstate: "42P01", error: "no such table" }));
-  u.count(row(9, { sqlstate: "57014", error: "canceled" }));
+  for (let ms = 1; ms <= 20; ms++) u.count(row(ms * 10, { rows: 5, bytesSent: 100 }));
+  u.count(row(7, { sqlstate: "42P01", error: "no such table", bytesSent: 50 }));
+  u.count(row(9_000, { sqlstate: "57014", error: "canceled", bytesSent: 50 }));
+  u.count(row(8_000, { sqlstate: "XX000", error: "it broke", bytesSent: 50 }));
+  // a refused login is no statement (the summary's rule)
+  u.count(row(1, { method: "CONNECT", sqlstate: "28P01", error: "password authentication failed" }));
   clock += 60_000;
   await u.sample();
   clock += 60_000;
@@ -44,12 +47,18 @@ test("a sample is the run's facts, the interval's requests (failed, refused, row
   const { copyMemoryBytes, ...rest } = a!;
   assert.deepEqual(rest, {
     at: "2026-10-28T09:01:00.000Z", seconds: 60, copyBytes: 12_345, copyRows: 1_000, tablesAdded: 3, tablesCopied: 2, tablesFailed: 1, oldestSyncSeconds: 42.5,
-    requests: 22, requestsFailed: 1, requestsRefused: 1, rowsSent: 100, bytesSent: null,
-    // 22 durations: 7, 9, 10 … 200 — the 11th is 90, the 21st (⌈0.95 · 22⌉) 190
-    durationP50Ms: 90, durationP95Ms: 190, streamLagBytes: 2_048, streamLagSeconds: 1.5, rssBytes: 900, heapUsedBytes: 300, copyMemoryLimitBytes: 512 * 2 ** 20,
+    statements: 23, statementsRefused: 1, statementsFailed: 1, statementsCancelled: 1, rowsSent: 100, bytesSent: 2_150,
+    // the 20 completed: 10 … 200 ms, interpolated as quantile_cont — 105 and 190.5, rounded as the summary rounds
+    durationP50Ms: 105, durationP95Ms: 191, streamLagBytes: 2_048, streamLagSeconds: 1.5, rssBytes: 900, heapUsedBytes: 300, copyMemoryLimitBytes: 512 * 2 ** 20,
   });
   assert.ok(typeof copyMemoryBytes === "number" && copyMemoryBytes >= 0, `the copy's memory in use is read: ${copyMemoryBytes}`);
-  assert.deepEqual([b!.at, b!.requests, b!.requestsFailed, b!.rowsSent, b!.durationP50Ms, b!.durationP95Ms], ["2026-10-28T09:02:00.000Z", 1, 0, 1, 3, 3], "the next interval counts afresh");
+  assert.deepEqual([b!.at, b!.statements, b!.statementsFailed, b!.rowsSent, b!.bytesSent, b!.durationP50Ms, b!.durationP95Ms], ["2026-10-28T09:02:00.000Z", 1, 0, 1, 0, 3, 3], "the next interval counts afresh");
+  // the p50 and p95 are the request log summary's own (DuckDB's quantile_cont, rounded), over any durations
+  for (const xs of [[5], [1, 2], [3, 1, 4, 1, 5, 9, 2, 6], Array.from({ length: 101 }, (_, k) => (k * 37) % 1000)]) {
+    const [p50, p95] = (await store.writer.runAndReadAll(`SELECT quantile_cont(x, 0.5), quantile_cont(x, 0.95) FROM (SELECT unnest($1::INTEGER[]) AS x)`, [`[${xs.join(",")}]`])).getRowsJS()[0]!.map((v) => Math.round(Number(v)));
+    const sorted = [...xs].sort((x, y) => x - y);
+    assert.deepEqual([quantileCont(sorted, 0.5), quantileCont(sorted, 0.95)], [p50, p95], `quantile_cont over ${xs.join(",")}`);
+  }
   await u.close();
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
 });
@@ -67,10 +76,10 @@ test("re-bucketed in one query: buckets of the step from since, each count summe
     await u.sample();
   }
   const raw = await u.samples({ since: "2026-10-28T10:00:00Z", until: "2026-10-28T11:00:00Z" });
-  assert.deepEqual(raw.map((s) => [s.requests, s.durationP95Ms]), [[1, 100], [1, 200], [1, 300], [0, null], [1, 500], [1, 600]]);
+  assert.deepEqual(raw.map((s) => [s.statements, s.durationP95Ms]), [[1, 100], [1, 200], [1, 300], [0, null], [1, 500], [1, 600]]);
   const buckets = await u.samples({ since: "2026-10-28T10:00:00Z", until: "2026-10-28T11:00:00Z", stepSeconds: 180 });
   // samples at 10:01 … 10:06: 10:00–10:03 holds 10:01 and 10:02, 10:03–10:06 holds 10:03 … 10:05, 10:06– the last
-  assert.deepEqual(buckets.map((s) => [s.at, s.seconds, s.requests, s.rowsSent, s.copyBytes, s.copyRows, s.durationP95Ms]), [
+  assert.deepEqual(buckets.map((s) => [s.at, s.seconds, s.statements, s.rowsSent, s.copyBytes, s.copyRows, s.durationP95Ms]), [
     ["2026-10-28T10:00:00.000Z", 120, 2, 3, 1_050, 500, 200],
     ["2026-10-28T10:03:00.000Z", 180, 2, 8, 1_005, 50, 500],
     ["2026-10-28T10:06:00.000Z", 60, 1, 6, 1_006, 60, 600],
@@ -119,7 +128,7 @@ test("each copy's own bytes are its blocks: a copy served is measured, by its sc
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
 });
 
-test("a sample that cannot be taken keeps its requests for the next; a write that fails is said once and never thrown; the samples past the retention are deleted", async () => {
+test("a sample that cannot be taken keeps its statements for the next; a write that fails is said once and never thrown; the samples past the retention are deleted", async () => {
   const { UsageSampler, USAGE_TABLE } = await usage();
   let clock = Date.parse("2026-10-28T12:00:00.000Z");
   const said: string[] = [];
@@ -138,7 +147,7 @@ test("a sample that cannot be taken keeps its requests for the next; a write tha
   clock += 60_000;
   await u.sample();
   const [s] = await u.samples({ since: "2026-10-28T00:00:00Z", until: "2026-10-29T00:00:00Z" });
-  assert.deepEqual([s!.at, s!.seconds, s!.requests], ["2026-10-28T12:03:00.000Z", 180, 2], "one sample covering the three minutes, both requests in it");
+  assert.deepEqual([s!.at, s!.seconds, s!.statements], ["2026-10-28T12:03:00.000Z", 180, 2], "one sample covering the three minutes, both statements in it");
   failWrites = true;
   for (let k = 0; k < 3; k++) { clock += 60_000; await u.sample(); }
   failWrites = false;
