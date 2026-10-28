@@ -195,11 +195,27 @@ test("a function-calling statement's answer closed after its last row and before
 // THE COPY'S THREAD DYING (V8 out of heap there, an uncaught error: src/duck/executor.ts). Every statement in flight and
 // every later one is told 57P02 with the reason and the way out, never left waiting, and the run is told (src/cli/dev.ts
 // exits for its supervisor). The worker is ended from outside here, as either would end it: the executor's is private.
+// The statement in flight is HELD on the copy's thread, never started in DuckDB: a thread ended while DuckDB has a
+// statement in flight aborts the whole process — at once when its threads were inside a Mason function call, and later
+// (DuckDB's answer reaching a dead thread) even under a call-free one: measured, a call-free join ended this way aborted
+// the test process 2 times in 12, `libc++abi: terminating due to uncaught exception of type Napi::Error` (src/duck/
+// executor.ts "NOTHING ENDS THE WORKER'S JAVASCRIPT"). The copy's own worker, its `runner.run` of a statement naming
+// `held` taken off its port (said in the log) so nothing of DuckDB's is pending when it is ended.
 test("the copy's thread dying mid-statement is said to the session (57P02, why, reconnect) and to the run, never a hang", { timeout: 60_000 }, async () => {
-  const own = await DuckStore.open(path.join(dir, "crash.db"), () => undefined);
+  const holding = path.join(dir, "holding-worker.mjs");
+  fs.writeFileSync(holding, `import { parentPort } from "node:worker_threads";
+const on = parentPort.on.bind(parentPort);
+parentPort.on = (event, f) => on(event, event !== "message" ? f : (m) => {
+  if (m.op === "runner.run" && /\\bheld\\b/.test(m.sql.text)) { parentPort.postMessage({ log: "held: " + m.sql.text }); return; }
+  f(m);
+});
+await import(${JSON.stringify(fileURLToPath(new URL("../src/duck/executor-worker.ts", import.meta.url)))});
+`);
+  const ownLog: string[] = [];
+  const own = await DuckStore.open(path.join(dir, "crash.db"), (l) => { ownLog.push(l); }, { workerFile: holding });
   const said: string[] = [];
   own.onCrash((reason) => { said.push(reason); });
-  await own.writer.run(`CREATE TABLE public.gen AS SELECT range::INTEGER AS id, '{"n": ' || range || '}' AS j FROM range(${ROWS})`);
+  await own.writer.run(`CREATE TABLE public.gen AS SELECT range::INTEGER AS id, '{"n": ' || range || '}' AS j FROM range(10)`);
   const server = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
     authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
@@ -212,8 +228,8 @@ test("the copy's thread dying mid-statement is said to the session (57P02, why, 
   };
   const c = await connect();
   try {
-    const running = c.query(CALLING).then(() => null, (e: pg.DatabaseError) => e);
-    await sleep(300);
+    const running = c.query("SELECT count(*) AS held FROM gen").then(() => null, (e: pg.DatabaseError) => e);
+    for (const t = Date.now(); !ownLog.some((l) => l.startsWith("held: ")); await sleep(20)) if (Date.now() - t > 20_000) throw new Error(`the statement did not reach the copy's thread within 20 s\n${ownLog.join("\n")}`);
     await (own as unknown as { executor: { worker: Worker } }).executor.worker.terminate();
     const gone = (e: pg.DatabaseError | null): boolean => e !== null && e.code === "57P02" && /the copy's engine stopped/.test(e.message) &&
       /exited with code 1/.test(e.detail ?? "") && /reconnect/.test(e.hint ?? "");
@@ -450,14 +466,21 @@ test("cancelling a function-calling statement again and again never deadlocks th
 });
 
 // EVERY CALL TO THE WORKER SETTLES (src/duck/executor.ts SILENT_MS, CLOSE_GRACE_MS): a worker that stops answering —
-// here one that answers the open and nothing after, in place of the copy's — leaves no request waiting for ever: they
-// are told 57P02 once it has been silent `silentMs`, the run is told, and a close settles within its grace.
-test("a copy's thread that stops answering: every request is told 57P02 within its bound, the run is told, and close settles within its grace", { timeout: 60_000 }, async () => {
+// here one that answers the open, then nothing but its shutdown 1.5 s late, in place of the copy's — leaves no request
+// waiting for ever: they are told 57P02 once it has been silent `silentMs`, the run is told, and a close settles within
+// its grace. And the thread is ENDED only once its shutdown answered, never at the grace (NOTHING ENDS THE WORKER'S
+// JAVASCRIPT: a terminate under a pending call of DuckDB's aborts the process).
+test("a copy's thread that stops answering: every request is told 57P02 within its bound, the run is told, close settles within its grace, and the thread is ended only once its shutdown answers", { timeout: 60_000 }, async () => {
   const silent = path.join(dir, "silent-worker.mjs");
   fs.writeFileSync(silent, `import { parentPort } from "node:worker_threads";
-parentPort.on("message", (m) => { if (m.op === "open") parentPort.postMessage({ id: m.id, ok: true, value: null }); });
+parentPort.on("message", (m) => {
+  if (m.op === "open") parentPort.postMessage({ id: m.id, ok: true, value: null });
+  if (m.op === "shutdown") setTimeout(() => parentPort.postMessage({ id: m.id, ok: true, value: null }), 1500);
+});
 `);
-  type Exec = { runner(): Promise<unknown>; writer(): { run(sql: string): Promise<unknown> }; onCrash(f: (r: string) => void): void; close(graceMs?: number): Promise<void>; abandoned?: string | null };
+  type Exec = { runner(): Promise<unknown>; writer(): { run(sql: string): Promise<unknown> }; onCrash(f: (r: string) => void): void; close(graceMs?: number): Promise<void>; abandoned?: string | null; worker: Worker };
+  /** when the thread ended, ms from `from`: -1 is a worker's threadId once it exited */
+  const endedAfter = async (ex: Exec, from: number): Promise<number> => { while (ex.worker.threadId !== -1) await sleep(20); return performance.now() - from; };
   const { Executor } = await import("../src/duck/executor.ts") as unknown as { Executor: { start(o: Record<string, unknown>): Promise<Exec> } };
   const ex = await Executor.start({ file: path.join(dir, "silent.db"), settings: {}, log: () => undefined, silentMs: 1_000, workerFile: silent });
   const crashed: string[] = [];
@@ -475,8 +498,129 @@ parentPort.on("message", (m) => { if (m.op === "open") parentPort.postMessage({ 
   assert.ok(closing.ms < 1_500, `close settled after ${Math.round(closing.ms)} ms`);
   // and a thread silent at the close itself: the close settles within its grace
   const ex2 = await Executor.start({ file: path.join(dir, "silent2.db"), settings: {}, log: () => undefined, workerFile: silent });
+  const t2 = performance.now();
   const closing2 = await timed(() => Promise.race([ex2.close(500).then(() => "closed"), sleep(10_000).then(() => "no settle within 10 s")]));
   assert.equal(closing2.value, "closed");
   assert.ok(closing2.ms < 1_500, `close settled after ${Math.round(closing2.ms)} ms (grace 500 ms)`);
   assert.match(String(ex2.abandoned ?? ""), /did not close within 0.5 s/);
+  assert.notEqual(ex2.worker.threadId, -1, "given up on at the grace, the thread is NOT ended: it may still be inside DuckDB");
+  const ended = await Promise.race([endedAfter(ex2, t2), sleep(10_000).then(() => -1)]);
+  assert.ok(ended >= 1_400 && ended < 5_000, `the thread ended ${Math.round(ended)} ms after the close began: once its shutdown answered (1.5 s), never before`);
+  // the thread given up on for its silence: ended once its shutdown (asked then) answered, too
+  assert.ok(await Promise.race([endedAfter(ex, t0), sleep(10_000).then(() => -1)]) > 0, "the silent thread ended once its shutdown answered");
+});
+
+// NOTHING ENDS THE WORKER'S JAVASCRIPT UNDER A PENDING CALL OF DuckDB'S (src/duck/executor.ts). A test file under load
+// aborted at its exit — `libc++abi: terminating due to uncaught exception of type Napi::Error` — though every test in
+// it passed: its store's close outlasted the 5 s grace, and the executor TERMINATED the worker while DuckDB's threads
+// were inside a Mason function call. Made deterministic with a grace of 1 ms (6 aborts in 6 runs before the fix: exit
+// 134, the libc++abi line or `FATAL ERROR: Error::Error napi_define_properties` from DuckDB's scalar-function callback).
+// The same abort met a process that simply ENDED while a closed answer was still drained — nothing was asked of the
+// worker, so nothing held the process (4 in 4). Each in a process of its own, which must end by itself, exit 0.
+test("a copy closed past its grace under a function-calling statement, or a process ending while an answer is drained, never ends the copy's thread under a call: the process ends by itself, exit 0", { timeout: 180_000 }, () => {
+  const at = (p: string): string => JSON.stringify(fileURLToPath(new URL(p, import.meta.url)));
+  const run = (name: string, body: string): { status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string } => {
+    const file = path.join(dir, `${name}.mjs`);
+    fs.writeFileSync(file, `
+      import { setTimeout as sleep } from "node:timers/promises";
+      const { DuckStore } = await import(${at("../src/duck/store.ts")});
+      const store = await DuckStore.open(${JSON.stringify(path.join(dir, `${name}.db`))}, () => undefined, { closeGraceMs: 1 });
+      await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(4000000)");
+      const r = await store.runner();
+      const S = { timeZone: "UTC", searchPath: "public" };
+      // the rewrite's call of json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
+      const call = "__mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false)";
+      ${body}
+    `);
+    return spawnSync(process.execPath, [file], { encoding: "utf8", timeout: 60_000 });
+  };
+  const closed = run("grace", `
+    const told = r.run({ text: "SELECT count(*) FROM t WHERE " + call + " IS NOT NULL", functions: ["__mason_json_get"] }, [], S, new AbortController().signal)
+      .then(async (a) => { await a.fetch([], { timeZone: "UTC" }); return "answered"; }).catch((e) => e.fields?.code ?? e.message);
+    // its calls under way (4 M rows: seconds of them; a request to the copy's thread would wait them out, so a time):
+    // a statement already answered here would make the test vacuous, and is said as its failure ("told answered")
+    await sleep(500);
+    await store.close();
+    console.log("closed; told " + await told);
+  `);
+  assert.equal(closed.signal, null, `the copy closed under a call: the process did not end by itself (${closed.signal})\n${closed.stderr}`);
+  assert.equal(closed.status, 0, `the copy closed under a call: exit ${closed.status} (134: the thread ended under a call)\n${closed.stderr}`);
+  assert.doesNotMatch(closed.stderr, /Napi::Error|FATAL ERROR/);
+  assert.equal(closed.stdout.trim(), "closed; told 57P02", "the statement is told the copy's engine stopped, and the process waited for the thread");
+  const left = run("leave", `
+    const a = await r.run({ text: "SELECT " + call + " FROM t", functions: ["__mason_json_get"] }, [], S, new AbortController().signal);
+    const rows = await a.fetch([], { timeZone: "UTC" });
+    a.close();   // drained on the copy's thread, its calls raising: nothing else is asked of it, and the script ends
+    console.log("left after " + rows.length + " row(s)");
+  `);
+  assert.equal(left.signal, null, `a process ending while an answer is drained did not end by itself (${left.signal})\n${left.stderr}`);
+  assert.equal(left.status, 0, `a process ending while an answer is drained: exit ${left.status} (134: the thread ended under a call)\n${left.stderr}`);
+  assert.doesNotMatch(left.stderr, /Napi::Error|FATAL ERROR/);
+  assert.equal(left.stdout.trim(), "left after 2048 row(s)");
+});
+
+// A SESSION CLOSED WHILE ITS STATEMENT STARTS (Linux CI, the test above: its "grace" child aborted, `FATAL ERROR:
+// Error::Error napi_define_properties` — 6 runs in 30 in a Linux container, 0 in 30 on the Mac). Traced: the stop met the
+// statement still in its start (DuckDB's `stream()` not yet handed back: milliseconds, longer on a loaded machine), and
+// the close RELEASED it at once — nothing to close yet — so the result DuckDB then handed back was never closed nor
+// waited on: the connection and the instance closed under its running tasks, and the thread's end met their queued
+// calls. A session closed before its statement's start even began (its zone being set) left the answer opened after it
+// the same way. Now a start's answer is drained once handed back, and a session's close closes an answer opened while
+// it waits. Told apart by ORDER, which the copy's thread's one port keeps: the statement is answered (its start), then
+// released — never released before it was even answered, nor never released. Each in a process of its own: the old
+// code may abort or hang.
+test("a session closed while its function-calling statement starts releases the answer DuckDB hands back, after it, never before or never", { timeout: 180_000 }, () => {
+  const at = (p: string): string => JSON.stringify(fileURLToPath(new URL(p, import.meta.url)));
+  // the copy's own worker, its starts handed back 300 ms late (a loaded machine's, made certain), said in the log
+  const slow = path.join(dir, "slow-start-worker.mjs");
+  fs.writeFileSync(slow, `import { parentPort } from "node:worker_threads";
+import { createRequire } from "node:module";
+const duck = createRequire(${at("../package.json")})("@duckdb/node-api");
+const stream = duck.DuckDBPreparedStatement.prototype.stream;
+duck.DuckDBPreparedStatement.prototype.stream = async function () {
+  parentPort.postMessage({ log: "starting" });
+  const r = await stream.call(this);
+  await new Promise((res) => setTimeout(res, 300));
+  return r;
+};
+await import(${at("../src/duck/executor-worker.ts")});
+`);
+  const run = (name: string, workerFile: string | null, before: string, calls = true): string[] => {
+    const file = path.join(dir, `${name}.mjs`);
+    fs.writeFileSync(file, `
+      import { setTimeout as sleep } from "node:timers/promises";
+      const { DuckStore } = await import(${at("../src/duck/store.ts")});
+      const order = [];
+      const store = await DuckStore.open(${JSON.stringify(path.join(dir, `${name}.db`))}, (l) => { if (/^statement: /.test(l)) order.push("released"); if (l === "starting") order.push("starting"); },
+        ${workerFile === null ? "{}" : `{ workerFile: ${JSON.stringify(workerFile)} }`});
+      await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(2000000)");
+      const r = await store.runner();
+      order.length = 0;
+      // a count calling json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
+      const asked = r.run(${calls
+        ? `{ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL", functions: ["__mason_json_get"] }`
+        : `{ text: "SELECT count(*) FROM t", functions: [] }`}, [], { timeZone: "UTC", searchPath: "public" }, new AbortController().signal${calls ? "" : `, [{ name: "count", oid: 20 }]`})
+        .then(() => order.push("answered"), (e) => order.push("refused " + (e.fields?.code ?? e.message)));
+      ${before}
+      await r.close();
+      await asked;
+      await store.close();
+      console.log(JSON.stringify(order.filter((x) => x !== "starting")));
+    `);
+    const ran = spawnSync(process.execPath, [file], { encoding: "utf8", timeout: 60_000 });
+    assert.equal(ran.signal, null, `${name}: the process did not end by itself (${ran.signal})\n${ran.stderr}`);
+    assert.equal(ran.status, 0, `${name}: ${ran.stderr}`);
+    return JSON.parse(ran.stdout.trim()) as string[];
+  };
+  // the close while DuckDB's start is pending: its answer opened, not yet handed back
+  assert.deepEqual(run("closed-in-start", slow, `for (const t = Date.now(); !order.includes("starting"); await sleep(5)) if (Date.now() - t > 20_000) throw new Error("no start within 20 s");`),
+    ["answered", "released"], "closed while DuckDB started it: answered, then released — never released before its start was handed back");
+  // the close asked right after the statement, before its start began (its session's zone is set first)
+  assert.deepEqual(run("closed-before-start", null, ""),
+    ["answered", "released"], "closed before its start: the answer opened after the close is released too, never left open under the closing connection");
+  // one that calls NO function, closed while DuckDB starts it: released at once (its close cancels the executor), so
+  // its release comes first, and told the cancel — never an XX000 "report it" read off the released result's 0 columns
+  // (its Postgres columns given, as the listener gives them: the check that read them)
+  assert.deepEqual(run("call-free-closed-in-start", slow, `for (const t = Date.now(); !order.includes("starting"); await sleep(5)) if (Date.now() - t > 20_000) throw new Error("no start within 20 s");`, false),
+    ["released", "refused 57014"], "a call-free statement closed while it started: released, and refused 57014 (the close), never XX000");
 });

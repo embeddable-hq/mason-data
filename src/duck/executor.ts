@@ -208,10 +208,23 @@ export interface ExecutorOptions {
  *   worker"); a deadlock is for ever, so a longer bound only says it later.
  * - THE CLOSE IS BOUNDED: `close` gives the worker's shutdown `CLOSE_GRACE_MS` (a calling statement stops at its next
  *   call, milliseconds; a call-free one at DuckDB's interrupt; and the whole stop must fit inside a platform's 10 s
- *   before SIGKILL and `mason stop`'s 15 s), then declares it stopped the same way, asks it to terminate, and resolves.
+ *   before SIGKILL and `mason stop`'s 15 s), then declares it stopped the same way and resolves; the thread is ended
+ *   once its shutdown answers (below).
  * What neither can do: end a thread blocked inside native code. Such a process does not exit by itself, nor on
  * process.exit (measured); its supervisor's SIGKILL does. The copy is not opened again in this process
  * (`abandoned`): a second instance of the file would lose writes.
+ *
+ * NOTHING ENDS THE WORKER'S JAVASCRIPT UNDER A PENDING CALL OF DuckDB'S (a test file under load aborted at its exit,
+ * `libc++abi: terminating due to uncaught exception of type Napi::Error`: its close outlasted the grace, and the
+ * executor TERMINATED the worker while DuckDB's threads were inside a Mason function call — the node API's callback met
+ * a dying environment and threw where nothing catches. Reproduced every time by a close with a 1 ms grace under a
+ * calling statement, tests/duck-executor.test.ts). So a worker given up on (the grace, the silence) is told nothing
+ * more and asked to SHUT DOWN (`shutDown`: posted once, its answer awaited outside `pending`), and is ended only once
+ * that shutdown has answered — DuckDB's statements stopped, its connections and instance closed — or it exits by
+ * itself; until then it stays REFERENCED, so the process cannot end with the worker mid-call either (a process
+ * exiting tears its workers down the same way). A drained answer is a request for the same reason (`answer.close`):
+ * DuckDB may call into the worker after the listener let go of the statement. A thread that never answers its
+ * shutdown is the deadlock above: its supervisor's SIGKILL.
  */
 export const PING_MS = 5_000;
 export const SILENT_MS = 60_000;
@@ -237,6 +250,11 @@ export class Executor {
   /** why the worker was given up on without exiting (`close`'s bound, the silence), once it was: its instance may
    *  still hold the file, which this process must never open again */
   abandoned: string | null = null;
+  /** the shutdown, once posted (`shutDown`): settled when the worker answered it, or exited */
+  private shutdown: Promise<void> | null = null;
+  private shutdownId = 0;
+  private shutdownAnswered: () => void = () => undefined;
+  private hasExited = false;
 
   private constructor(o: ExecutorOptions) {
     this.silentMs = o.silentMs ?? SILENT_MS;
@@ -249,6 +267,11 @@ export class Executor {
       this.heard = performance.now();
       if ("pong" in m) return;
       if ("log" in m) { this.log(m.log); return; }
+      if (m.id === this.shutdownId) {
+        if (!m.ok) this.log(`closing the copy failed: ${errorOf(m.error).message}`);
+        this.shutdownAnswered();
+        return;
+      }
       const p = this.pending.get(m.id);
       if (p === undefined) return;
       this.settle(m.id);
@@ -259,7 +282,9 @@ export class Executor {
       why = (e as NodeJS.ErrnoException).code === "ERR_WORKER_OUT_OF_MEMORY" ? `its thread ran out of JavaScript heap (${e.message})` : `it failed: ${e.message}`;
     });
     this.exited = new Promise<void>((resolve) => this.worker.once("exit", (code) => {
+      this.hasExited = true;
       this.die(this.closing && why === null ? "it was closed" : why ?? `it exited with code ${code}`);
+      this.shutdownAnswered();
       resolve();
     }));
     // the watch (see SILENT_MS): only while a request is pending — an idle worker has nothing to answer
@@ -274,14 +299,31 @@ export class Executor {
     this.watch.unref();
   }
 
-  /** the worker given up on without its exit: every request told so (57P02), the run told, and a terminate asked —
-   *  which a thread blocked inside native code never honours, so it is not waited for */
+  /** the worker given up on without its exit: every request told so (57P02), the run told, and its shutdown asked —
+   *  NEVER a terminate, which under a pending call of DuckDB's aborts the process (NOTHING ENDS THE WORKER'S
+   *  JAVASCRIPT above): it is ended once its shutdown answers, and holds the process until then */
   private abandon(reason: string): void {
     if (this.gone !== null) return;
     this.abandoned = reason;
     this.die(reason, false);
-    this.worker.unref();
-    void this.worker.terminate().catch((e: unknown) => this.log(`ending the copy's thread failed: ${(e as Error).message}`));
+    void this.shutDown();
+  }
+
+  /** Asks the worker to stop (executor-worker.ts `shutdown`: every statement stopped, every connection and the instance
+   *  closed once nothing runs on them), once; settles when it answered, or exited. Only then is it terminated: nothing
+   *  of DuckDB's calls into it any more. The worker stays referenced meanwhile, so the process waits for it. */
+  private shutDown(): Promise<void> {
+    if (this.shutdown !== null) return this.shutdown;
+    this.shutdown = new Promise<void>((resolve) => { this.shutdownAnswered = resolve; });
+    if (this.hasExited) this.shutdownAnswered();
+    else {
+      this.shutdownId = this.nextId++;
+      this.worker.ref();
+      this.worker.postMessage({ op: "shutdown", id: this.shutdownId });
+    }
+    void this.shutdown.then(async () => { if (!this.hasExited) await this.worker.terminate(); })
+      .catch((e: unknown) => this.log(`ending the copy's thread failed: ${(e as Error).message}`));
+    return this.shutdown;
   }
 
   static async start(o: ExecutorOptions): Promise<Executor> {
@@ -305,7 +347,8 @@ export class Executor {
 
   private settle(id: number): void {
     this.pending.delete(id);
-    if (this.pending.size === 0) this.worker.unref();
+    // a shutdown in flight holds the process until the worker ends (`shutDown`)
+    if (this.pending.size === 0 && this.shutdown === null) this.worker.unref();
   }
 
   /** a request, answered by the worker */
@@ -319,9 +362,15 @@ export class Executor {
     });
   }
 
-  /** a message needing no answer (an interrupt, a close of an answer); nothing once the worker is gone */
+  /** a message needing no answer (an interrupt, a connection's close); nothing once the worker is gone */
   post(m: Record<string, unknown>): void {
     if (this.gone === null) this.worker.postMessage(m);
+  }
+
+  /** a request whose answer nobody awaits (an answer's close: the worker answers once DuckDB handed it back), kept in
+   *  `pending` so the process does not end while the worker still drains it; a failure is logged, a stop is not one */
+  background(m: Record<string, unknown>): void {
+    this.call(m).catch((e: unknown) => { if (!(e instanceof ExecutorGone)) this.log(`${String(m.op)} failed: ${(e as Error).message}`); });
   }
 
   /** a connection of the instance */
@@ -356,19 +405,11 @@ export class Executor {
     this.closing = true;
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<"late">((resolve) => { timer = setTimeout(() => resolve("late"), graceMs); });
-    const closed = (async () => {
-      if (this.gone === null) {
-        try { await this.call({ op: "shutdown" }); }
-        catch (e) { if (!(e instanceof ExecutorGone)) this.log(`closing the copy failed: ${(e as Error).message}`); }
-      }
-      // the worker ends itself after its shutdown: a terminate is the way out when the shutdown failed
-      if (this.gone === null) await this.worker.terminate();
-      await this.exited;
-      return "closed" as const;
-    })().catch((e: unknown) => { this.log(`closing the copy failed: ${(e as Error).message}`); return "closed" as const; });
+    // the shutdown, then the terminate once it answered (`shutDown`), then the exit — or the worker's own exit
+    const closed = (async () => { await this.shutDown(); await this.exited; return "closed" as const; })();
     try {
       if (await Promise.race([closed, late]) === "late") {
-        this.log(`the copy's thread did not close within ${graceMs / 1000} s: given up on (its sessions are told 57P02); the process may need a SIGKILL to end`);
+        this.log(`the copy's thread did not close within ${graceMs / 1000} s: given up on (its sessions are told 57P02); it ends once its shutdown finishes, and the process waits for it (a thread stuck inside DuckDB needs a SIGKILL)`);
         this.abandon(`it did not close within ${graceMs / 1000} s`);
       }
     } finally { clearTimeout(timer); }
@@ -489,9 +530,10 @@ class RemoteRunner implements DuckRunner {
       close: () => {
         if (ended) return;
         end();
-        // its calls see the cancel now; the worker cancels the rest (an interrupt) and releases it once DuckDB hands it back
+        // its calls see the cancel now; the worker cancels the rest (an interrupt) and releases it once DuckDB hands it
+        // back — answered then, so the process never ends while DuckDB still calls into the worker for it
         if (calls) cancelStatement(this.ex.cancels, this.slot, seq);
-        this.ex.post({ op: "answer.close", runner: this.id, seq });
+        this.ex.background({ op: "answer.close", runner: this.id, seq });
       },
     };
   }

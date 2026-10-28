@@ -145,8 +145,8 @@ export class DuckStore {
   }
 
   /** `silentMs` and `closeGraceMs`: the executor's bounds (src/duck/executor.ts SILENT_MS, CLOSE_GRACE_MS), shorter only
-   *  in a test */
-  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; silentMs?: number; closeGraceMs?: number } = {}): Promise<DuckStore> {
+   *  in a test; `workerFile`, the executor worker's module, another only in a test */
+  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; silentMs?: number; closeGraceMs?: number; workerFile?: string } = {}): Promise<DuckStore> {
     const memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
     if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(`MASON_DUCKDB_MEMORY=${JSON.stringify(memoryLimit)} is not an amount of memory: write it as 8GB or 512MiB (unset, half the machine's RAM: ${DEFAULT_MEMORY_LIMIT})`);
     const where = path.resolve(file);
@@ -161,7 +161,7 @@ export class DuckStore {
       if (before !== undefined) await before.closed;
       // every connection's, the sync's and each session's
       executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, memory_limit: memoryLimit, temp_directory: `${file}.tmp` }, log,
-        ...(options.silentMs !== undefined ? { silentMs: options.silentMs } : {}) });
+        ...(options.silentMs !== undefined ? { silentMs: options.silentMs } : {}), ...(options.workerFile !== undefined ? { workerFile: options.workerFile } : {}) });
     } catch (e) { if (opened.get(where) === mine) opened.delete(where); throw e; }
     const store = new DuckStore(file, executor, memoryLimitBytes(memoryLimit), options.closeGraceMs);
     // closed: the file may be opened again — unless its thread was given up on (`abandoned`), which keeps it here
@@ -481,7 +481,14 @@ export class SessionRunner implements DuckRunner {
     // call raises) or read to its end, then released — the session's next statement waits for that (`releasing`)
     const drain = (): void => {
       const r = result;
-      if (!callsFunctions || r === null) { release(); return; }
+      // CLOSED WHILE DuckDB STILL STARTS IT (its `stream()` pending: an aggregate computes there whole): nothing is
+      // released under the pending start — that destroyed the prepared statement under it and, its release done, let the
+      // start's own failure skip `cleanUp`, so the connection and the instance closed while its other tasks still had
+      // calls queued for this thread, and the thread's end met them (Linux CI: `FATAL ERROR: Error::Error
+      // napi_define_properties`, 7 runs in 30 of a stop under a calling count). The start's own path releases it: its
+      // failure through `releaseAfterCleanup`, its answer drained once handed back (below `stream()`)
+      if (r === null) return;
+      if (!callsFunctions) { release(); return; }
       const done = (async () => {
         // read on until the next call raises or the result ends — an EMPTY chunk, as `fetch` reads it: past its end a
         // streamed result hands back empty chunks for ever, never null, and a result closed after its last row but
@@ -518,6 +525,15 @@ export class SessionRunner implements DuckRunner {
       const t1 = performance.now();
       try { result = await p.stream(); }
       catch (e) { throw failure(e); }
+      // CLOSED WHILE IT STARTED (`drain` above), now that DuckDB handed it back. The two differ: one that calls no
+      // function is released at once (its close cancels the executor) and so is never read after — told the cancel
+      // here, before a column of a destroyed result is asked (DuckDB answers 0 columns for one: a review finding, an
+      // XX000 "report it" where the session had closed); one that calls is drained, which holds the result open until
+      // its calls stop, so its answer below is built from a live result and its fetch tells the cancel
+      if (closed) {
+        if (!callsFunctions) { release(); throw cancelled(); }
+        drain();
+      }
       timing.duckdbMs += performance.now() - t1;
       const r = result;
       if (fields !== null && r.columnCount < fields.length) throw new StatementError({ code: "XX000", message: `DuckDB answered ${r.columnCount} column(s) where Postgres's analysis has ${fields.length}: report it (Mason's rewrite)` }, sql);
@@ -668,9 +684,22 @@ export class SessionRunner implements DuckRunner {
    *  answer released and every call of DuckDB settled (never under the executor: `drain`; a connection
    *  closed under a drain's pending fetch aborted the process). */
   async close(): Promise<void> {
-    this.openAnswer?.();
-    for (let waiting = [...this.busy, ...this.releasing]; waiting.length > 0; waiting = [...this.busy, ...this.releasing]) await Promise.allSettled(waiting);
+    // an answer left open is closed and drained — and one a statement still STARTING opens while this waits (the
+    // session closed between its ask and its answer: left open, the connection closed under it and its running tasks)
+    for (let last: (() => void) | null = null; ;) {
+      const open = this.openAnswer;
+      if (open !== null && open !== last) { last = open; open(); }
+      await this.idle();
+      // released (null), or one already closed: done; a new one opened meanwhile: closed in turn
+      if (this.openAnswer === null || this.openAnswer === last) break;
+    }
     this.conn.closeSync();
+  }
+
+  /** Settles once nothing runs on the connection: every answer released and every call of DuckDB settled (an answer
+   *  closed early is answered then: src/duck/executor-worker.ts `answer.close`). */
+  async idle(): Promise<void> {
+    for (let waiting = [...this.busy, ...this.releasing]; waiting.length > 0; waiting = [...this.busy, ...this.releasing]) await Promise.allSettled(waiting);
   }
 }
 
