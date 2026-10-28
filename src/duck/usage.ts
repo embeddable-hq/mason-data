@@ -348,6 +348,9 @@ export class UsageSampler {
           if (/does not exist/i.test((e as Error).message)) continue;
           throw e;
         }
+        // NO BLOCK of its own yet is not 0 bytes: its rows are still in the write-ahead log (a small copy is written to
+        // the file only at a checkpoint), so it is not measured this time — a page said "0.0 KiB" for a 5,000-row copy
+        if (blocks === 0) continue;
         rows.push([name, blocks * block]);
       }
       if (rows.length > 0) {

@@ -94,6 +94,24 @@ test("re-bucketed in one query: buckets of the step from since, each count summe
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
 });
 
+test("a copy with no block of its own yet (its rows still in the write-ahead log) is not measured, never said as 0 bytes", async () => {
+  const { UsageSampler } = await usage();
+  const clock = Date.parse("2026-10-28T12:00:00.000Z");
+  await store.writer.run("CHECKPOINT");
+  await store.writer.run(`CREATE SCHEMA IF NOT EXISTS app`);
+  await store.writer.run(`CREATE TABLE app.fresh AS SELECT i AS id FROM range(1000) t(i)`);
+  const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 1 });
+  try {
+    u.start(async () => ({ ...facts, copied: ["app.fresh"] }));
+    await u.sample();
+    assert.deepEqual((await u.copySizes()).filter((c) => c.table === "app.fresh"), [], "not measured until its rows are in the file");
+  } finally {
+    await u.close();
+    await store.writer.run(`DROP TABLE app.fresh`);
+    await store.writer.run(`DELETE FROM _mason.copy_sizes`);
+  }
+});
+
 test("each copy's own bytes are its blocks: a copy served is measured, by its schema.table, a table not served is not, and the latest is read back", async () => {
   const { UsageSampler, SIZES_TABLE, USAGE_TABLE } = await usage();
   let clock = Date.parse("2026-10-28T11:00:00.000Z");
