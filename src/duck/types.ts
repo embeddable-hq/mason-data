@@ -17,6 +17,7 @@ import {
   DuckDBListType, DuckDBArrayType, DuckDBTimestampSecondsValue, DuckDBTimestampMillisecondsValue, DuckDBTimestampNanosecondsValue,
 } from "@duckdb/node-api";
 import { jsonbText } from "./jsonb.ts";
+import { gapMark } from "./gaps.ts";
 import { EncodeError, encodeValue, OID, TIMESTAMP, type ApiValue, type PgSession, type WireType } from "../api/postgres/encode.ts";
 
 /** One result column as the wire describes it, and how its cells are written. */
@@ -131,7 +132,7 @@ function timestampColumn(name: string, tz: boolean): WireColumn {
       if (m < FIRST_AD_MICROS) {
         if (format === 1) { const b = Buffer.alloc(8); b.writeBigInt64BE(m - PG_EPOCH_MICROS); return b; }
         // a zone's offset before year 1 is its local mean time, which Mason does not compute
-        if (tz && s.timeZone.toUpperCase() !== "UTC") throw new EncodeError(`Mason writes a timestamptz before year 1 only in UTC, not in ${s.timeZone} (Mason gap bc-timestamptz-zone)`, "0A000");
+        if (tz && s.timeZone.toUpperCase() !== "UTC") throw new EncodeError(`Mason writes a timestamptz before year 1 only in UTC, not in ${s.timeZone} (${gapMark("bc-timestamptz-zone")})`, "0A000", "bc-timestamptz-zone");
         return Buffer.from(bcTimestampText(m, tz), "ascii");
       }
       return base.encode(v, format, s);

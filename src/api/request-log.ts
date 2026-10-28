@@ -38,6 +38,9 @@ export interface ApiLogRow {
   detail?: string | undefined;
   hint?: string | undefined;
   rows?: number | undefined;
+  /** the registry entry (src/duck/gaps.ts) that refused the statement, from the refusal itself (StatementError.gap):
+   *  absent for an answer and for any other refusal (a missing table, a syntax error) */
+  gap?: string | undefined;
   /** the copied tables' JSON paths the statement read by literal steps (src/duck/kept-route.ts readKey): what decides
    *  the paths Mason stores (src/duck/kept.ts) */
   jsonReads?: readonly string[] | undefined;

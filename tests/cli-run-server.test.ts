@@ -85,6 +85,9 @@ const listener = { openSessions: () => sessionsNow, running: () => [runningNow],
   return session === 4 ? { cancelled: runningNow } : session === 5 ? { idle: 5 } : { unknown: session };
 } };
 const lastUsedAsks: Array<{ name: string; since: string; until: string | null }> = [];
+// the refused statements grouped by the entry that refused them (src/duck/requests.ts unsupported)
+const unsupportedAsks: Array<{ since: string; limit: number }> = [];
+const unsupportedSql = { gap: "quote-ident", title: "quote_ident()", runs: 2, users: ["alice"], clients: ["Metabase"], last: "2026-10-24T10:04:00.000Z", example: "SELECT quote_ident(name) FROM orders" };
 const requests = {
   days: 7,
   lastUsed: async (u: Array<{ name: string; since: string; until: string | null }>) => { lastUsedAsks.push(...u); return u.map((x) => x.name === "metabase" ? "2026-10-24T10:04:00.000Z" : null); },
@@ -92,6 +95,7 @@ const requests = {
   summary: async () => summary,
   slow: async () => [{ route: "postgres" as const, payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-24T10:03:00.000Z" }],
   refused: async () => ({ total: 3, refused: [{ route: "postgres" as const, payload: "SELECT * FROM nope", runs: 3, last: "2026-10-24T10:04:00.000Z", code: "42P01", message: 'relation "nope" does not exist' }] }),
+  unsupported: async (q: { since: string; limit: number }) => { unsupportedAsks.push(q); return [unsupportedSql]; },
 };
 // the sync's events (src/duck/events.ts), as SyncEvents answers them, and the run's restarts (src/cli/supervise.ts)
 const eventAsks: Array<{ limit: number; since?: string; failed?: boolean }> = [];
@@ -361,6 +365,20 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     // the slow and refused statements are the request log's, in the shapes mason status renders
     assert.deepEqual((await get("/api/slow")).body, { slow: await requests.slow(), slowMs: 1000 });
     assert.deepEqual((await get("/api/refused")).body, await requests.refused());
+    // the same refusals grouped by the unsupported SQL they used: a day by default, since by the one time grammar, limit bounded
+    const before = Date.now();
+    const grouped = await get("/api/unsupported");
+    assert.deepEqual([grouped.status, grouped.body.unsupported, grouped.body.keptDays], [200, [unsupportedSql], 7]);
+    const dayAgo = Date.parse(String(grouped.body.since));
+    assert.ok(dayAgo >= before - 86_400_000 - 1000 && dayAgo <= Date.now() - 86_400_000 + 1000, `since defaults to a day ago: ${String(grouped.body.since)}`);
+    assert.deepEqual(unsupportedAsks.at(-1), { since: grouped.body.since, limit: 10 }, "10 entries unless limit says");
+    assert.equal((await get("/api/unsupported?since=2026-10-24T00:00:00Z&limit=3")).status, 200);
+    assert.deepEqual(unsupportedAsks.at(-1), { since: "2026-10-24T00:00:00.000Z", limit: 3 });
+    const badLimit = await get("/api/unsupported?limit=0");
+    assert.deepEqual([badLimit.status, badLimit.body.error], [400, 'limit is a whole number of entries of docs/SQL-SUPPORT.md, 1 to 100, not "0"']);
+    const badSince = await get("/api/unsupported?since=yesterday");
+    assert.equal(badSince.status, 400);
+    assert.match(String(badSince.body.error), /since "yesterday" is not a time/, "the time grammar's own words");
     assert.deepEqual((await get("/api/requests?limit=5&failed=1")).body, { requests: [request], keptDays: 7, before: null });
     assert.deepEqual((await get("/api/requests")).body.requests, [request]);
     assert.deepEqual(asks, [{ limit: 5, failed: true }, { limit: 40 }], "-n and --failed reach the ledger; 40 by default");

@@ -35,7 +35,7 @@ import type { SyncEvent } from "../duck/events.ts";
 import type { CopyProgressView, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
-import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery } from "../duck/requests.ts";
+import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery, UnsupportedSql } from "../duck/requests.ts";
 import type { RunningStatement, SessionsOpen } from "../api/postgres/server.ts";
 import { DEFAULT_REQUEST_LIMIT, eventLimit, MAX_SEARCH, SLOW_MS, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
@@ -304,7 +304,10 @@ const STATUS_USAGE = `usage: mason status [--json]
            application_name), open, running }] }, queries: { keptDays, day, week } (the last day's and the last 7
            days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
            failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
-           when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all),
+           when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all), unsupported: [{ gap
+           (its entry of docs/SQL-SUPPORT.md), title (what it is; null for an entry this Mason no longer has), runs
+           (the statements it refused in the last day), users, clients (application_name), last, example (the latest,
+           cut at 1,000 characters) }] (the most refused first: GET /api/unsupported) or { error },
            recentErrors: { sync: [{ at, kind, failed, table, message }] (the latest failures of the sync and restarts,
            newest last: mason logs --events), error (why they could not be read, or null), queries: [{ requestId,
            startedAt, outcome, sqlstate, message, query, … }] (the latest statements refused, failed or cancelled, newest
@@ -346,7 +349,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "recentErrors", "readiness", "ui",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui",
     "lastRun", "lastStop", "hung", "next"],
 };
 
@@ -372,6 +375,10 @@ export async function status(argv: string[]): Promise<number> {
     const refusedReply = await callRun(run, "GET", "/api/refused");
     const refused = refusedReply.status === 200 ? refusedReply.body.refused as RefusedQuery[] : [];
     const refusedTotal = typeof refusedReply.body.total === "number" ? refusedReply.body.total : null;
+    // the same refusals grouped by the unsupported SQL they used (src/duck/gaps.ts): what to rewrite
+    const unsupportedReply = await callRun(run, "GET", `/api/unsupported?limit=${STATUS_UNSUPPORTED}`);
+    const unsupported: UnsupportedSql[] | { error: string } = unsupportedReply.status === 200 ? unsupportedReply.body.unsupported as UnsupportedSql[]
+      : { error: String(unsupportedReply.body.error ?? `the run answered ${unsupportedReply.status}`) };
     // the sync's latest failures (src/duck/events.ts), and the run's restarts among them
     const eventsReply = await callRun(run, "GET", `/api/events?failed=1&limit=${RECENT_ERRORS}`);
     // and the latest statements refused, failed or cancelled: the request log's own page, the shape mason logs --requests --json prints
@@ -394,7 +401,7 @@ export async function status(argv: string[]): Promise<number> {
       : [["mason wait", "until it is done"]];
     if (json) {
       out(jsonText(STATUS, { running: true, pid: run.pid, postgres: { ...postgresLink(run.postgresUrl), listener: run.postgresListener },
-        ...s, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, recentErrors, readiness: r }, next));
+        ...s, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, unsupported, recentErrors, readiness: r }, next));
       return 0;
     }
     const rows: Array<[string, string]> = [
@@ -434,6 +441,7 @@ export async function status(argv: string[]): Promise<number> {
     for (const l of queryLines(queries, st)) out(l);
     for (const l of slowLines(slowReply.status === 200 ? slow : { error: String(slowReply.body.error ?? slowReply.status) }, st)) out(l);
     for (const l of refusedLines(refusedReply.status === 200 ? { refused, total: refusedTotal } : { error: String(refusedReply.body.error ?? refusedReply.status) }, st)) out(l);
+    for (const l of unsupportedLines(unsupported, st)) out(l);
     out("");
     // the word the web page's Status says too (readinessWord)
     const word = readinessWord(r);
@@ -563,6 +571,26 @@ export function refusedLines(r: { refused: readonly RefusedQuery[]; total: numbe
   for (const q of r.refused) {
     lines.push(`  ${q.code}, ${q.runs} time${q.runs === 1 ? "" : "s"}, last ${q.last.slice(0, 16).replace("T", " ")} — ${oneLine(q.payload)}`);
     lines.push(`    ${firstLine(q.message)}`);
+  }
+  return lines;
+}
+
+/** how many entries of the unsupported SQL mason status shows (and its --json carries) */
+const STATUS_UNSUPPORTED = 5;
+
+/**
+ * `Unsupported SQL` in mason status: the last day's refused statements grouped by the registry entry that refused them
+ * (src/duck/requests.ts unsupported), the most refused first — how many, what they used, who sent them, and the latest
+ * — so a person knows what to rewrite; docs/SQL-SUPPORT.md has each entry's way out. None: no section.
+ */
+export function unsupportedLines(u: readonly UnsupportedSql[] | { error: string }, st: Style): string[] {
+  if ("error" in u) return [`\n${st.bold("Unsupported SQL")}: could not read it (${firstLine(u.error)}; mason logs has the detail)`];
+  if (!u.length) return [];
+  const lines = [`\n${st.bold("Unsupported SQL")} ${st.dim("(the last day's refused statements by what they used, the most first; docs/SQL-SUPPORT.md has each one's way out)")}:`];
+  for (const g of u) {
+    lines.push(`  ${n(g.runs)} statement${g.runs === 1 ? "" : "s"} used ${g.title ?? "what this Mason no longer lists"} — docs/SQL-SUPPORT.md ${g.gap}`);
+    const who = [...(g.users.length ? [`as ${g.users.join(", ")}`] : []), ...(g.clients.length ? [`from ${g.clients.join(", ")}`] : [])];
+    lines.push(`    last ${g.last.slice(0, 16).replace("T", " ")}${who.length ? ` ${who.join(" ")}` : ""} — ${oneLine(g.example)}`);
   }
   return lines;
 }

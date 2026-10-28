@@ -53,6 +53,7 @@ import * as tls from "node:tls";
 import type { RawStmt } from "libpg-query";
 import { ApiError } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
+import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { databaseNameSql, PgCatalog } from "./catalog.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
@@ -205,7 +206,19 @@ export function timeoutMs(value: string): number | null {
 export class StatementError extends Error {
   readonly fields: Omit<ErrorFields, "severity">;
   readonly sql: string;
-  constructor(fields: Omit<ErrorFields, "severity">, sql = "") { super(fields.message); this.fields = fields; this.sql = sql; }
+  /** the registry entry (src/duck/gaps.ts) that refused the statement, as the refusal was built with it (`gapRefusal`,
+   *  src/duck/store.ts pgErrorOf): what the request log records as `gap`; null for every other error */
+  readonly gap: GapId | null;
+  constructor(fields: Omit<ErrorFields, "severity">, sql = "", gap: GapId | null = null) { super(fields.message); this.fields = fields; this.sql = sql; this.gap = gap; }
+}
+
+/**
+ * A REFUSAL BY A REGISTRY ENTRY (src/duck/gaps.ts), the one way one is built: 0A000, `Mason gap <id>` in its DETAIL (what
+ * the oracle and a reader read), followed by `detail` (docs/SQL-SUPPORT.md, or what it names), and the id itself on the
+ * error, so the request log records which entry refused it without reading the text back.
+ */
+export function gapRefusal(gap: GapId, message: string, hint: string, sql = "", detail = " (docs/SQL-SUPPORT.md)"): StatementError {
+  return new StatementError({ code: "0A000", message, hint, detail: `${gapMark(gap)}${detail}` }, sql, gap);
 }
 export const SERVER_VERSION = "18.6";
 export const SERVER_VERSION_NUM = "180006";
@@ -356,10 +369,13 @@ class PgError extends Error {
   readonly fields: ErrorFields;
   /** the HTTP-like status the request log records (400 for a refusal, 401 a refused login, 500 Mason's failure) */
   readonly status: number;
-  constructor(fields: Omit<ErrorFields, "severity"> & { severity?: string }, status = 400) {
+  /** the registry entry that refused it (StatementError.gap): the request log's `gap` */
+  readonly gap: GapId | null;
+  constructor(fields: Omit<ErrorFields, "severity"> & { severity?: string }, status = 400, gap: GapId | null = null) {
     super(fields.message);
     this.fields = { severity: "ERROR", ...fields };
     this.status = status;
+    this.gap = gap;
   }
 }
 
@@ -394,17 +410,17 @@ export function refusalLine(session: number, f: Omit<ErrorFields, "severity">, s
 
 function asPgError(err: unknown, sql: string): PgError {
   if (err instanceof PgError) return err;
-  if (err instanceof StatementError) return new PgError({ ...err.fields, position: err.fields.position ?? undefined }, err.fields.code.startsWith("XX") ? 500 : 400);
+  if (err instanceof StatementError) return new PgError({ ...err.fields, position: err.fields.position ?? undefined }, err.fields.code.startsWith("XX") ? 500 : 400, err.gap);
   if (err instanceof Unsupported) {
-    return new PgError({ code: err.sqlstate, message: err.message, position: positionOf(sql, err.offset), hint: err.hint, detail: "Mason answers the Postgres subset in docs/POSTGRES-API.md" });
+    return new PgError({ code: err.sqlstate, message: err.message, position: positionOf(sql, err.offset), hint: err.hint, detail: "Mason answers the Postgres subset in docs/POSTGRES-API.md" }, 400, err.gap);
   }
   if (err instanceof PostgresSyntaxError) return new PgError({ code: "42601", message: err.message, position: positionOf(sql, err.offset) });
   if (err instanceof ApiError) return new PgError({ code: sqlstateOf(err.status, err.code), message: err.message, detail: `Mason: ${err.code}` }, err.status);
   // Postgres's own error for a numeric (a division by zero, 22012; a field overflow, 22003), raised as Postgres raises it
-  if (err instanceof NumericError) return new PgError({ code: err.sqlstate, message: err.message }, err.sqlstate === "XX000" ? 500 : 400);
+  if (err instanceof NumericError) return new PgError({ code: err.sqlstate, message: err.message }, err.sqlstate === "XX000" ? 500 : 400, err.gap);
   if (err instanceof EncodeError) return err.code === "XX000"
     ? new PgError({ code: "XX000", message: err.message, detail: "Mason: a value the column's Postgres type cannot carry; report it" }, 500)
-    : new PgError({ code: err.code, message: err.message }, 400);
+    : new PgError({ code: err.code, message: err.message }, 400, err.gap);
   if (err instanceof ProtocolError) return new PgError({ code: "08P01", message: err.message }, 500);
   const message = err instanceof Error ? err.message : String(err);
   return new PgError({ code: "XX000", message }, 500);
@@ -1037,7 +1053,8 @@ class Session {
       ...(asked?.jsonReads !== undefined && asked.jsonReads.length > 0 ? { jsonReads: asked.jsonReads } : {}),
       ...(answer instanceof PgError
         ? { status: answer.status, sqlstate: answer.fields.code, error: answer.fields.message,
-            ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}) }
+            ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}),
+            ...(answer.gap !== null ? { gap: answer.gap } : {}) }
         : { status: 200, rows: answer.rows }),
     });
   }

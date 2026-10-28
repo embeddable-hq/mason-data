@@ -32,7 +32,7 @@ import { decodeLibcOrder, encodeLibcOrder, type LibcOrder } from "./libc-order.t
 import { dataRow } from "../api/postgres/protocol.ts";
 import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } from "./types.ts";
 import type { ExactColumn } from "./rewrite.ts";
-import { gapMark } from "./gaps.ts";
+import { gapIn, gapMark, type GapId } from "./gaps.ts";
 import { cellsOf, evaluateText, NumericError } from "../lib/pg-numeric.ts";
 import { explainJson, explainText, planNodes, scannedTables, type Copy, type Explained, type PlanNode } from "./explain.ts";
 import type { ExplainOptions } from "../api/postgres/explain.ts";
@@ -255,7 +255,9 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   const kind = /^([A-Za-z ]+) Error: /.exec(full)?.[1] ?? "";
   const message = full.replace(/^[A-Za-z ]+ Error: /, "").replace(/\n\n?LINE \d+:[\s\S]*$/, "").trim();
   const pg = postgresWording(kind, message);
-  if (pg !== null) return new StatementError({ ...pg, detail: `DuckDB: ${message}` }, sql);
+  // a refusal raised inside DuckDB (a Mason function's, the rewrite's error() call) crossed it as its text alone: the
+  // entry its text names (gapIn), read here, the one place that text becomes a statement's error
+  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, detail: `DuckDB: ${message}` }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
   const fn = /(?:Scalar|Aggregate|Table) Function with name "?([A-Za-z_][\w]*)"? does not exist/.exec(message)?.[1];
   if (fn !== undefined) {
     // what reaches DuckDB was verified against Postgres (src/duck/verified.ts), so a function DuckDB lacks is a gap in
@@ -299,7 +301,7 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
 }
 
 /** The errors DuckDB raises for what Postgres raises too, in Postgres's code and words (a tool or a person matches them). */
-function postgresWording(kind: string, message: string): { code: string; message: string } | null {
+function postgresWording(kind: string, message: string): { code: string; message: string; gap?: GapId | null } | null {
   if (/^Division by zero\b/i.test(message) || message === "division by zero") return { code: "22012", message: "division by zero" };
   const zone = /Unknown TimeZone '([^']*)'/.exec(message);
   if (zone) return { code: "22023", message: `time zone "${zone[1]}" not recognized` };
@@ -314,10 +316,10 @@ function postgresWording(kind: string, message: string): { code: string; message
   // a cast to numeric(p, s) of a value with more than p - s integer digits
   if (/Casting value "[^"]*" to type DECIMAL\(\d+,\s*\d+\) failed: value is out of range/.test(message)) return { code: "22003", message: "numeric field overflow" };
   // an exact sum past DuckDB's 38 digits (a text read as numeric is summed as a DECIMAL(38,18), src/duck/rewrite.ts summed)
-  if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past DuckDB's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})` };
+  if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past DuckDB's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})`, gap: "numeric-exact-sum" };
   // a numeric(p, s) read from a text holding NaN or Infinity (src/duck/rewrite.ts pgInput): DuckDB's decimal has none
   const special = /Could not convert string ['"](NaN|-?Infinity)['"] to DECIMAL/.exec(message);
-  if (special) return { code: "0A000", message: `a numeric ${special[1]} read from a text is not supported by Mason (${gapMark("numeric-special")})` };
+  if (special) return { code: "0A000", message: `a numeric ${special[1]} read from a text is not supported by Mason (${gapMark("numeric-special")})`, gap: "numeric-special" };
   const conv = /Could not convert string '((?:[^']|'')*)' to (INT16|INT32|INT64|DOUBLE|FLOAT|DATE|TIMESTAMP|UUID|BOOL)/.exec(message);
   if (conv) {
     const t = { INT16: "smallint", INT32: "integer", INT64: "bigint", DOUBLE: "double precision", FLOAT: "real", DATE: "date", TIMESTAMP: "timestamp", UUID: "uuid", BOOL: "boolean" }[conv[2] as "INT16"];
@@ -738,7 +740,7 @@ function exactRows(computed: ComputedColumns, rows: DuckDBValue[][], base: numbe
     for (const e of computed.columns) {
       try { out[e.column] = evaluateText(e.program, values); }
       catch (err) {
-        if (err instanceof NumericError) throw new StatementError({ code: err.sqlstate, message: err.message }, sql);
+        if (err instanceof NumericError) throw new StatementError({ code: err.sqlstate, message: err.message }, sql, err.gap);
         throw err;
       }
     }

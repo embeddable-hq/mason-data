@@ -65,7 +65,8 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   query of the request log.
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
-  `application_name`, a token's NAME (never the token) or the user's name. A refused statement is recorded in
+  `application_name`, a token's NAME (never the token) or the user's name, and the registry entry that refused it
+  (`gap`, from `PgError.gap`: the error's own field, never the text the client was sent). A refused statement is recorded in
   `Session.refuse` alone, the one sender of a statement's ErrorResponse, so no refusal can go unrecorded.
 - **A 64-bit integer, a numeric and a float are Postgres's TEXT** (`encode.ts`; `src/lib/pg-numeric.ts` for what
   Postgres computes exactly): the wire carries text, so a value's digits are the oracle's business, never JSON's.

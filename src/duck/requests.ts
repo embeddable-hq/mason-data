@@ -20,6 +20,7 @@ import type { DuckDBValue } from "@duckdb/node-api";
 import type { DuckConnection } from "./executor.ts";
 import { OUTCOMES, outcomeOf, outcomeSql, statusOf, type ApiLogRow, type Outcome, type RequestStatus } from "../api/request-log.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
+import { GAPS, type GapId } from "./gaps.ts";
 import type { RefusedQuery, SlowQuery } from "../cli/run-server.ts";
 
 export const REQUESTS_TABLE = `${MASON_SCHEMA}.requests`;
@@ -86,7 +87,7 @@ export interface LedgerRequest {
 }
 
 const COLUMNS = ["request_id", "started_at", "session", "application_name", "token_name", "user_name", "method", "sqlstate", "message", "detail", "hint",
-  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent"] as const;
+  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent", "gap"] as const;
 
 /** the ledger's DDL: one row per request, named for a developer who knows pg_stat_activity */
 /** a ledger made before `mason user` gains its column; a column added last is named in every INSERT */
@@ -111,9 +112,13 @@ export const REQUESTS_JSON_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NO
  *  its old rows are NULL, never 0. */
 export const REQUESTS_BYTES_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS bytes_sent BIGINT`;
 
+/** THE REGISTRY ENTRY THAT REFUSED EACH STATEMENT (ApiLogRow.gap, src/duck/gaps.ts): NULL for an answer and for any
+ *  other refusal; what `unsupported` groups by. A ledger made before gains it; its old rows are NULL. */
+export const REQUESTS_GAP_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS gap VARCHAR`;
+
 export const REQUESTS_DDL = `CREATE TABLE IF NOT EXISTS ${REQUESTS_TABLE} (request_id VARCHAR, started_at TIMESTAMPTZ, session INTEGER, ` +
   `application_name VARCHAR, token_name VARCHAR, user_name VARCHAR, method VARCHAR, sqlstate VARCHAR, message VARCHAR, detail VARCHAR, hint VARCHAR, ` +
-  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT)`;
+  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT, gap VARCHAR)`;
 
 /** a row as the ledger buffers it: the listener's row and its number in arrival order */
 interface Numbered { row: ApiLogRow; seq: number }
@@ -124,7 +129,7 @@ function valuesOf({ row: r, seq }: Numbered): DuckDBValue[] {
   return [r.requestId, r.at.toISOString(), r.session ?? null, app === "unnamed" ? "" : app, r.tokenName ?? "", r.user ?? "", r.method,
     r.sqlstate ?? null, r.error === undefined || r.error === "" ? null : r.error, r.detail ?? null, r.hint ?? null,
     r.rows === undefined ? null : r.rows, Math.round(r.durationMs), r.payload ?? "", r.payloadTruncated === true, seq,
-    r.jsonReads === undefined || r.jsonReads.length === 0 ? null : JSON.stringify(r.jsonReads), r.bytesSent === undefined ? null : r.bytesSent];
+    r.jsonReads === undefined || r.jsonReads.length === 0 ? null : JSON.stringify(r.jsonReads), r.bytesSent === undefined ? null : r.bytesSent, r.gap ?? null];
 }
 
 /** A ledger row as the commands read it. */
@@ -192,6 +197,25 @@ export interface QueryWindow {
   durationMs: { avg: number; p50: number; p95: number } | null;
 }
 
+/** The statements one registry entry refused (RequestLedger.unsupported): what to rewrite, and who sends it. */
+export interface UnsupportedSql {
+  /** the entry's id (src/duck/gaps.ts, docs/SQL-SUPPORT.md) */
+  gap: string;
+  /** what it is, in SQL's words (the entry's `what`); null for an id the registry no longer has (a row from an older Mason) */
+  title: string | null;
+  /** how many statements it refused */
+  runs: number;
+  /** the mason users and the clients (application_name) that sent them, each once, sorted ('' ones left out) */
+  users: string[]; clients: string[];
+  /** when the latest was refused, ISO 8601 UTC */
+  last: string;
+  /** the latest statement it refused, cut at UNSUPPORTED_EXAMPLE_CHARS (`…` says it was cut) */
+  example: string;
+}
+
+/** how much of a statement `unsupported` shows as its example */
+export const UNSUPPORTED_EXAMPLE_CHARS = 1000;
+
 /** The query summary: the last day and the last week, and the days the log keeps. */
 export interface QuerySummary { keptDays: number; day: QueryWindow; week: QueryWindow }
 
@@ -236,6 +260,7 @@ export class RequestLedger {
     await writer.run(REQUESTS_SEQ_DDL);
     await writer.run(REQUESTS_JSON_DDL);
     await writer.run(REQUESTS_BYTES_DDL);
+    await writer.run(REQUESTS_GAP_DDL);
     const reader = await store.instance.connect();
     const ledger = new RequestLedger(writer, reader, log, options);
     ledger.next = Number((await reader.runAndReadAll(`SELECT coalesce(max(seq), -1) + 1 FROM ${REQUESTS_TABLE}`)).getRowsJS()[0]![0]);
@@ -395,6 +420,28 @@ export class RequestLedger {
     const total = Number((await this.reader.runAndReadAll(`SELECT count(*) FROM ${REQUESTS_TABLE} WHERE ${day}`)).getRowsJS()[0]?.[0] ?? 0);
     return { total, refused: rows.map((r) => ({ route: "postgres", payload: String(r.query), runs: Number(r.runs), last: new Date(String(r.last)).toISOString(),
       code: String(r.code), message: String(r.message ?? "") })) };
+  }
+
+  /**
+   * THE REFUSED STATEMENTS GROUPED BY THE UNSUPPORTED SQL THEY USED (`/api/unsupported`, `mason status`): for each
+   * registry entry that refused a statement started at or after `since`, how many it refused, by whom (users and
+   * clients), when last, and the latest of them — the most refused first, `limit` entries, in ONE query. A statement
+   * refused for any other reason (a missing table, a syntax error) has no entry, so it is not here. Committed rows only.
+   */
+  async unsupported(q: { since: string; limit: number }): Promise<UnsupportedSql[]> {
+    const rows = (await this.reader.runAndReadAll(`SELECT gap, count(*) AS runs, ` +
+      `coalesce(list_sort(list(DISTINCT user_name) FILTER (WHERE user_name <> '')), []) AS users, ` +
+      `coalesce(list_sort(list(DISTINCT application_name) FILTER (WHERE application_name <> '')), []) AS clients, ` +
+      `max(started_at) AS last, arg_max(query, started_at) AS example ` +
+      `FROM ${REQUESTS_TABLE} WHERE gap IS NOT NULL AND started_at >= $1::TIMESTAMPTZ GROUP BY gap ORDER BY runs DESC, last DESC, gap LIMIT $2`,
+    [q.since, q.limit])).getRowObjectsJson();
+    return rows.map((r) => {
+      const gap = String(r.gap);
+      const query = String(r.example ?? "");
+      return { gap, title: Object.hasOwn(GAPS, gap) ? GAPS[gap as GapId].what : null, runs: Number(r.runs),
+        users: (r.users as unknown[]).map(String), clients: (r.clients as unknown[]).map(String), last: new Date(String(r.last)).toISOString(),
+        example: query.length > UNSUPPORTED_EXAMPLE_CHARS ? `${query.slice(0, UNSUPPORTED_EXAMPLE_CHARS)}…` : query };
+    });
   }
 
   /** Writes what is waiting and closes the ledger's connections (mason stop). */

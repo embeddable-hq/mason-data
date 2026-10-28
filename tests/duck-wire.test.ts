@@ -1287,6 +1287,32 @@ test("the request log's bytes are the bytes the client read for the statement: a
   } finally { s.end(); }
 });
 
+// THE REQUEST LOG RECORDS WHICH ENTRY REFUSED A STATEMENT (ApiLogRow.gap, src/duck/gaps.ts): taken from the refusal as
+// it was built (StatementError.gap), on each path a refusal takes — the rewrite's and the allowlist's at plan time, a
+// view's from the plan of its expansion, a refusal raised inside DuckDB from the worker — and none for any other refusal
+test("the request log records the registry entry that refused a statement, on every path a refusal takes; another refusal has none", async () => {
+  const c = await client();
+  try {
+    const refusedBy = async (sql: string): Promise<{ code: string; gap: string | undefined }> => {
+      const e = await c.query(sql).then(() => assert.fail(`${sql} was answered`), (x: pg.DatabaseError) => x);
+      const rows = recorded.filter((r) => r.payload === sql);
+      assert.equal(rows.length, 1, `one row for ${sql}`);
+      assert.equal(rows[0]!.sqlstate, e.code);
+      return { code: e.code!, gap: rows[0]!.gap };
+    };
+    assert.deepEqual(await refusedBy("SELECT degrees(qty) FROM orders WHERE id > -1"), { code: "0A000", gap: "unverified" }, "the allowlist's");
+    assert.deepEqual(await refusedBy("SELECT paid_orders FROM paid_orders WHERE true"), { code: "0A000", gap: "view-forms" }, "a view's, from the plan of what it expands to");
+    assert.deepEqual(await refusedBy("SELECT json_agg(DISTINCT id) FROM orders"), { code: "0A000", gap: "json-agg-distinct" }, "the rewrite's");
+    assert.deepEqual(await refusedBy("EXPLAIN (FORMAT XML) SELECT id FROM orders WHERE id > -2"), { code: "0A000", gap: "explain-option" }, "the translation's");
+    assert.deepEqual(await refusedBy("SELECT width_bucket(qty, 10, 0, 5) FROM orders"), { code: "0A000", gap: "width-bucket-forms" }, "raised by DuckDB, as its text alone");
+    await c.query("SET TimeZone = 'Europe/Rome'");
+    assert.deepEqual(await refusedBy("SELECT timestamptz '0044-03-15 12:00:00+00 BC' FROM orders WHERE id = 2"), { code: "0A000", gap: "bc-timestamptz-zone" },
+      "raised inside DuckDB, across the executor's worker");
+    assert.deepEqual(await refusedBy("SELECT * FROM nope_gapless"), { code: "42P01", gap: undefined }, "a missing table is no entry's");
+    assert.deepEqual(await refusedBy("SELEC 1 gapless"), { code: "42601", gap: undefined }, "nor a syntax error");
+  } finally { await c.end(); }
+});
+
 // A PAGED PORTAL'S BYTES ARE ITS OWN (src/api/postgres/server.ts `bytesFor`, `Portal.bytes`): its pages and its tag,
 // however many statements ran between two of its Executes — it was counted as the session's bytes since its first
 // Execute, so a portal paged around another statement counted that statement's bytes twice (a review finding)

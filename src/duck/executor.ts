@@ -144,13 +144,13 @@ export function valueFromClone(v: DuckDBValue, t: DuckDBType): DuckDBValue {
 
 /** what the worker answers a failure with: the error's own class where the listener tells it apart (a StatementError's
  *  fields, an EncodeError's or a NumericError's code: src/api/postgres/server.ts pgErrorOf), else its message */
-export type WireError = { kind: "statement"; fields: StatementError["fields"]; sql: string } | { kind: "encode"; message: string; code: string }
-  | { kind: "numeric"; message: string; sqlstate: string } | { kind: "error"; message: string; name: string };
+export type WireError = { kind: "statement"; fields: StatementError["fields"]; sql: string; gap: StatementError["gap"] } | { kind: "encode"; message: string; code: string; gap: EncodeError["gap"] }
+  | { kind: "numeric"; message: string; sqlstate: string; gap: NumericError["gap"] } | { kind: "error"; message: string; name: string };
 
 export function wireError(e: unknown): WireError {
-  if (e instanceof StatementError) return { kind: "statement", fields: e.fields, sql: e.sql };
-  if (e instanceof EncodeError) return { kind: "encode", message: e.message, code: e.code };
-  if (e instanceof NumericError) return { kind: "numeric", message: e.message, sqlstate: e.sqlstate };
+  if (e instanceof StatementError) return { kind: "statement", fields: e.fields, sql: e.sql, gap: e.gap };
+  if (e instanceof EncodeError) return { kind: "encode", message: e.message, code: e.code, gap: e.gap };
+  if (e instanceof NumericError) return { kind: "numeric", message: e.message, sqlstate: e.sqlstate, gap: e.gap };
   return { kind: "error", message: e instanceof Error ? e.message : String(e), name: e instanceof Error ? e.name : "Error" };
 }
 export type Reply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: WireError } | { log: string } | { pong: true };
@@ -168,9 +168,9 @@ export const STOPPING: StatementError["fields"] = { code: "57P01", message: "ter
   detail: "Mason is stopping (mason stop, or a shutdown)", hint: "connect again once Mason runs again (mason status says whether it does)" };
 
 const errorOf = (e: WireError): Error => {
-  if (e.kind === "statement") return new StatementError(e.fields, e.sql);
-  if (e.kind === "encode") return new EncodeError(e.message, e.code);
-  if (e.kind === "numeric") return new NumericError(e.message, e.sqlstate);
+  if (e.kind === "statement") return new StatementError(e.fields, e.sql, e.gap);
+  if (e.kind === "encode") return new EncodeError(e.message, e.code, e.gap);
+  if (e.kind === "numeric") return new NumericError(e.message, e.sqlstate, e.gap);
   const err = new Error(e.message);
   err.name = e.name;
   return err;
