@@ -10,6 +10,13 @@
         "      TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [
+        "date_trunc",
+        "make_timestamptz",
+        "make_timestamp",
+        "epoch_us",
+        "current_setting"
+      ],
       "delim_join": false,
       "full_sort": false
     },
@@ -24,6 +31,13 @@
         "      TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [
+        "date_trunc",
+        "make_timestamptz",
+        "make_timestamp",
+        "epoch_us",
+        "current_setting"
+      ],
       "delim_join": false,
       "full_sort": false
     },
@@ -35,9 +49,15 @@
         "ORDER_BY",
         "  HASH_GROUP_BY",
         "    PROJECTION",
-        "      TABLE_SCAN public.orders [zone-map filter]"
+        "      TABLE_SCAN public.orders [zone-map filter: created_at >= constant]"
       ],
       "calls": [],
+      "sends": [
+        "make_timestamptz",
+        "epoch_us",
+        "timezone",
+        "current_setting"
+      ],
       "delim_join": false,
       "full_sort": true
     },
@@ -51,6 +71,10 @@
         "      TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [
+        "date_trunc",
+        "timezone"
+      ],
       "delim_join": false,
       "full_sort": true
     },
@@ -66,6 +90,7 @@
         "__mason_json_keys",
         "__mason_json_values"
       ],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -82,6 +107,7 @@
         "__mason_json_values",
         "__mason_jsonb_text"
       ],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -98,6 +124,7 @@
         "__mason_json_elements",
         "__mason_json_get"
       ],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -109,7 +136,7 @@
         "  ORDER_BY",
         "    PROJECTION",
         "      CTE",
-        "        TABLE_SCAN public.orders [zone-map filter]",
+        "        TABLE_SCAN public.orders [zone-map filter: id < constant]",
         "        HASH_JOIN",
         "          CTE_SCAN",
         "          PROJECTION",
@@ -123,6 +150,7 @@
         "__mason_json_keys",
         "__mason_json_values"
       ],
+      "sends": [],
       "delim_join": true,
       "full_sort": true
     },
@@ -139,6 +167,7 @@
         "          TABLE_SCAN public.orders [top-N filter: shipped_at]"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -155,6 +184,7 @@
         "          TABLE_SCAN public.orders [top-N filter: notes]"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -171,6 +201,7 @@
         "          TABLE_SCAN public.orders [top-N filter: created_at]"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -187,6 +218,7 @@
         "          TABLE_SCAN public.orders [top-N filter: shipped_at]"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -200,6 +232,7 @@
         "      TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -215,6 +248,7 @@
         "          TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -230,6 +264,7 @@
         "          TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -241,6 +276,7 @@
         "  TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -257,6 +293,7 @@
         "          TABLE_SCAN public.orders [top-N filter: id]"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -275,6 +312,7 @@
         "              TABLE_SCAN public.customers"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -288,6 +326,7 @@
         "      TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -306,6 +345,7 @@
         "              TABLE_SCAN public.customers"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -331,6 +371,7 @@
         "__mason_to_char_number",
         "__mason_to_char_time"
       ],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -344,6 +385,7 @@
         "      TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -359,6 +401,7 @@
         "        UNNEST"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -379,6 +422,7 @@
         "              REC_CTE_SCAN"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -396,6 +440,7 @@
         "              TABLE_SCAN public.customers"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -404,9 +449,10 @@
       "sql": "SELECT c.name FROM customers c WHERE c.name IS NOT NULL ORDER BY c.name LIMIT 5",
       "plan": [
         "TOP_N",
-        "  TABLE_SCAN public.customers [top-N filter: name]"
+        "  TABLE_SCAN public.customers [top-N filter: name] [zone-map filter: name IS NOT NULL]"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -437,6 +483,7 @@
         "                            CTE_SCAN"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -467,6 +514,7 @@
         "                            CTE_SCAN"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -506,6 +554,7 @@
         "                      CTE_SCAN"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -522,6 +571,7 @@
         "            TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -536,6 +586,7 @@
         "        TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -552,6 +603,13 @@
         "            TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [
+        "date_trunc",
+        "make_timestamptz",
+        "make_timestamp",
+        "epoch_us",
+        "current_setting"
+      ],
       "delim_join": false,
       "full_sort": true
     },
@@ -567,6 +625,7 @@
         "          TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -578,10 +637,11 @@
         "  ORDER_BY",
         "    PROJECTION",
         "      HASH_JOIN",
-        "        TABLE_SCAN public.orders [zone-map filter]",
+        "        TABLE_SCAN public.orders [zone-map filter: customer_id IS NOT NULL; status = constant]",
         "        TABLE_SCAN public.customers"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -605,6 +665,7 @@
         "              TABLE_SCAN public.customers"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -623,10 +684,11 @@
         "              HASH_GROUP_BY",
         "                PROJECTION",
         "                  PROJECTION",
-        "                    TABLE_SCAN public.orders [zone-map filter]",
+        "                    TABLE_SCAN public.orders [zone-map filter: customer_id IS NOT NULL]",
         "            TABLE_SCAN public.customers"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -642,6 +704,7 @@
         "        COLUMN_DATA_SCAN"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -652,10 +715,11 @@
         "UNGROUPED_AGGREGATE",
         "  FILTER",
         "    HASH_JOIN",
-        "      TABLE_SCAN public.orders [zone-map filter]",
+        "      TABLE_SCAN public.orders [zone-map filter: id IN constants]",
         "      COLUMN_DATA_SCAN"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -671,6 +735,7 @@
         "          TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -684,10 +749,13 @@
         "      PROJECTION",
         "        TOP_N",
         "          PROJECTION",
-        "            TABLE_SCAN public.orders [top-N filter: id] [zone-map filter]"
+        "            TABLE_SCAN public.orders [top-N filter: id] [zone-map filter: notes IS NOT NULL]"
       ],
       "calls": [
         "__mason_pg_bool"
+      ],
+      "sends": [
+        "current_setting"
       ],
       "delim_join": false,
       "full_sort": false
@@ -709,6 +777,7 @@
         "                  DUMMY_SCAN"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -734,6 +803,7 @@
         "__mason_json_get",
         "__mason_jsonb_text"
       ],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -757,6 +827,7 @@
       "calls": [
         "__mason_jsonb_contains"
       ],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -776,6 +847,7 @@
         "                TABLE_SCAN public.customers"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -795,6 +867,7 @@
         "__mason_json_values",
         "__mason_jsonb_text"
       ],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -810,7 +883,7 @@
         "          CTE",
         "            CTE",
         "              UNNEST",
-        "                TABLE_SCAN public.orders [zone-map filter]",
+        "                TABLE_SCAN public.orders [zone-map filter: id < constant]",
         "              HASH_JOIN",
         "                CTE_SCAN",
         "                PROJECTION",
@@ -838,6 +911,7 @@
         "__mason_json_values",
         "__mason_jsonb_text"
       ],
+      "sends": [],
       "delim_join": true,
       "full_sort": true
     },
@@ -849,7 +923,7 @@
         "  ORDER_BY",
         "    PROJECTION",
         "      CTE",
-        "        TABLE_SCAN public.orders [zone-map filter]",
+        "        TABLE_SCAN public.orders [zone-map filter: id < constant]",
         "        HASH_JOIN",
         "          CTE_SCAN",
         "          INOUT_FUNCTION",
@@ -862,6 +936,7 @@
         "__mason_json_elements",
         "__mason_json_get"
       ],
+      "sends": [],
       "delim_join": true,
       "full_sort": true
     },
@@ -880,6 +955,7 @@
         "              TABLE_SCAN public.customers"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -900,6 +976,7 @@
       "calls": [
         "__mason_numeric_div"
       ],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     },
@@ -921,6 +998,7 @@
         "                      TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -936,6 +1014,9 @@
       ],
       "calls": [
         "__mason_numeric_div"
+      ],
+      "sends": [
+        "epoch_us"
       ],
       "delim_join": false,
       "full_sort": true
@@ -963,6 +1044,7 @@
         "                                TABLE_SCAN public.orders"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
@@ -972,9 +1054,10 @@
       "plan": [
         "UNGROUPED_AGGREGATE",
         "  PROJECTION",
-        "    TABLE_SCAN public.orders [zone-map filter]"
+        "    TABLE_SCAN public.orders [zone-map filter: created_at >= constant]"
       ],
       "calls": [],
+      "sends": [],
       "delim_join": false,
       "full_sort": false
     }

@@ -13,12 +13,12 @@
  * Per statement: Mason's EXPLAIN (VERBOSE, FORMAT JSON) through the listener — the statement planned as it runs
  * (src/duck/plan.ts) and DuckDB's own `EXPLAIN (FORMAT JSON)` of the SQL Mason sends — reduced to a COARSE skeleton
  * that should survive a DuckDB upgrade: the operators in tree order, per scan its table and whether a top-N dynamic
- * filter or a table filter DuckDB checks against the zone maps is attached, the Mason functions (`__mason_*`) an
- * operator's details print a call of and the statement's whole list (DuckDB's EXPLAIN names a projection by its alias,
- * so a projection's calls are only in that list), and whether a delimiter join (DuckDB 2.0's has no DELIM operator:
- * `joinsBack`) or a full sort appears. No cost, estimate or row count. An expression's own cost is not in it: ICU's
- * date_trunc and the instant's arithmetic are both a PROJECTION, so `truncInstant` is held by its SQL
- * (tests/duck-wire.test.ts), its plan here only by its operators.
+ * filter or a table filter DuckDB checks against the zone maps is attached (and what that filter compares: a bare
+ * column with a constant, or an expression no zone map prunes), the Mason functions (`__mason_*`) an operator's details
+ * print a call of and the statement's whole list (DuckDB's EXPLAIN names a projection by its alias, so a projection's
+ * calls are only in that list), the time functions the SQL Mason sends calls (the same alias hides ICU's date_trunc
+ * of a timestamptz against `truncInstant`'s arithmetic: both are one PROJECTION), and whether a delimiter join
+ * (DuckDB 2.0's has no DELIM operator: `delimiterJoin`) or a full sort appears. No cost, estimate or row count.
  *
  * A DIFF MEANS THE PLAN CHANGED. Read it, decide whether the new plan is a REGRESSION (a delimiter join, an expression
  * key under a top N, a full sort, a lost filter, more Mason calls: fix the change) or a BETTER plan (regenerate with
@@ -182,6 +182,11 @@ interface Skeleton {
   /** the Mason functions the statement calls (`PlannedSql.functions`, the rewritten tree's): DuckDB's EXPLAIN names a
    *  projection by its alias, so a projection's calls are only this list's */
   calls: string[];
+  /** the time functions the SQL Mason sends calls (`TIME_CALLS`), read from that SQL: DuckDB's EXPLAIN names a
+   *  projection by its alias, so ICU's date_trunc of a timestamptz and the instant's arithmetic (`truncInstant`:
+   *  `make_timestamptz(epoch_us(…))` under a CASE on `current_setting('TimeZone')`) are the same PROJECTION in `plan` */
+  sends: string[];
+  /** a reading aid, never the guard: the tree in `plan` is what a changed plan changes */
   delim_join: boolean;
   /** an ORDER_BY with no TOP_N or LIMIT beneath it: the sort of everything its input yields (a late-materialized
    *  page's ORDER_BY sorts the winners a TOP_N found, and is no full sort) */
@@ -195,45 +200,86 @@ const strings = (v: unknown): string[] => typeof v === "string" ? [v] : Array.is
  *  thread streams the LEFT lateral preview's limit, two or more do not), so a machine's cores never change a skeleton */
 const opOf = (n: JsonNode): string => { const op = n["Node Type"].toUpperCase().replace(/ /g, "_"); return op === "STREAMING_LIMIT" ? "LIMIT" : op; };
 const under = (n: JsonNode, p: (n: JsonNode) => boolean): boolean => (n.Plans ?? []).some((c) => p(c) || under(c, p));
-const isCteScan = (n: JsonNode): boolean => opOf(n) === "CTE_SCAN";
-/** DuckDB 2.0's delimiter join, which it plans without the name: the outer rows materialized as a CTE, what the
- *  lateral computes over their DISTINCT values (a HASH_GROUP_BY of the CTE's scan), and a join of the CTE's rows back
- *  to it — measured: PR #13's LEFT lateral preview at 3ad6493 is `CTE > HASH_JOIN(CTE_SCAN, UNNEST > HASH_GROUP_BY >
- *  CTE_SCAN)`, no operator named DELIM */
-const joinsBack = (n: JsonNode): boolean => {
-  const [a, b, ...rest] = n.Plans ?? [];
-  const groupsCte = (x: JsonNode): boolean => [x, ...descendants(x)].some((d) => opOf(d) === "HASH_GROUP_BY" && under(d, isCteScan));
-  return /JOIN/.test(opOf(n)) && a !== undefined && b !== undefined && rest.length === 0 && ((isCteScan(a) && groupsCte(b)) || (isCteScan(b) && groupsCte(a)));
-};
 const descendants = (n: JsonNode): JsonNode[] => (n.Plans ?? []).flatMap((c) => [c, ...descendants(c)]);
+/**
+ * DuckDB 2.0's delimiter join, which it plans with no operator named DELIM: the outer rows materialized as a CTE
+ * (`DuckDB CTE Name` `__duckdb_delim_<n>`), what the lateral computes over their DISTINCT values (a hash group by of
+ * that CTE's scan), and a join of the CTE's rows back to it — measured: PR #13's LEFT lateral preview at 3ad6493 is
+ * `CTE > HASH_JOIN(CTE_SCAN, UNNEST > HASH_GROUP_BY > CTE_SCAN)`. Read by the CTE's name, or by that shape over ONE CTE
+ * (its `Table Index` the scans' `CTE Index`; a PERFECT_HASH_GROUP_BY or a PROJECTION between counts). `delim_join` is a
+ * reading aid: the tree in `plan` is the guard, so a form this misses still changes the fixture's lines.
+ */
+function delimiterJoin(cte: JsonNode): boolean {
+  if (opOf(cte) !== "CTE") return false;
+  if (/^__duckdb_delim/.test(String(cte["DuckDB CTE Name"] ?? ""))) return true;
+  const index = cte["DuckDB Table Index"];
+  const scansIt = (n: JsonNode): boolean => opOf(n) === "CTE_SCAN" && n["DuckDB CTE Index"] === index;
+  const outer = (n: JsonNode): boolean => scansIt(n) || (opOf(n) === "PROJECTION" && (n.Plans ?? []).length === 1 && outer(n.Plans![0]!));
+  const distinct = (n: JsonNode): boolean => [n, ...descendants(n)].some((d) => /^(PERFECT_)?HASH_GROUP_BY$/.test(opOf(d)) && under(d, scansIt));
+  return index !== undefined && descendants(cte).some((j) => /JOIN/.test(opOf(j)) && (j.Plans ?? []).some((a) => outer(a) && (j.Plans ?? []).some((b) => b !== a && distinct(b))));
+}
+
+/** the functions a truncation of a time is spelled with in the SQL Mason sends (`sends`) */
+const TIME_CALLS = ["date_trunc", "make_timestamptz", "make_timestamp", "epoch_us", "timezone", "current_setting"];
+
+/** what a scan's filter other than the top N's is, from DuckDB's text: a column against a constant (what a zone map
+ *  prunes by), a null test, a list, or an expression (a cast around the column, a function: no zone map prunes it) */
+function filterOf(f: string): string[] {
+  const bare = (s: string): string => { let t = s.trim().replace(/^optional: /, ""); while (/^\(.*\)$/.test(t) && balanced(t.slice(1, -1))) t = t.slice(1, -1).trim(); return t; };
+  const conjuncts: string[] = [];
+  let depth = 0, from = 0, quoted = false;
+  const t = bare(f);
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (ch === "'") quoted = !quoted;
+    else if (!quoted && ch === "(") depth++;
+    else if (!quoted && ch === ")") depth--;
+    else if (!quoted && depth === 0 && t.startsWith(" AND ", i)) { conjuncts.push(t.slice(from, i)); from = i + 5; }
+  }
+  conjuncts.push(t.slice(from));
+  const constant = /^('(?:[^']|'')*'(::[A-Z ]+)?|-?\d+(\.\d+)?)$/;
+  return conjuncts.map(bare).filter((x) => !/Dynamic Filter/.test(x)).map((x) => {
+    let m = /^(\w+) (IS NOT NULL|IS NULL)$/.exec(x);
+    if (m) return `${m[1]} ${m[2]}`;
+    m = /^(\w+) (=|!=|<>|<=|>=|<|>) (.+)$/.exec(x);
+    if (m && constant.test(m[3]!)) return `${m[1]} ${m[2]} constant`;
+    m = /^(\w+) IN \((.*)\)$/.exec(x);
+    if (m && m[2]!.split(",").every((v) => constant.test(v.trim()))) return `${m[1]} IN constants`;
+    return "an expression";
+  });
+}
+const balanced = (s: string): boolean => { let d = 0, q = false; for (const ch of s) { if (ch === "'") q = !q; else if (!q && ch === "(") d++; else if (!q && ch === ")" && --d < 0) return false; } return d === 0; };
 
 /** Mason's EXPLAIN (VERBOSE, FORMAT JSON) plan (src/duck/explain.ts explainJson: DuckDB's operator as `Top N`, its
  *  details as `DuckDB <key>`) as its skeleton, the operator named as DuckDB names it (`TOP_N`) */
-function skeletonOf(root: JsonNode, calls: readonly string[]): Skeleton {
+function skeletonOf(root: JsonNode, calls: readonly string[], sent: string): Skeleton {
   const plan: string[] = [];
   let delim = false, sort = false;
   const walk = (n: JsonNode, depth: number): void => {
     const op = opOf(n);
-    if (/DELIM/.test(op) || joinsBack(n)) delim = true;
+    if (/DELIM/.test(op) || delimiterJoin(n)) delim = true;
     if (op === "ORDER_BY" && !under(n, (c) => /^(TOP_N|LIMIT|STREAMING_LIMIT)$/.test(opOf(c)))) sort = true;
     const parts = [op];
     if (typeof n["Relation Name"] === "string") parts.push(`${String(n.Schema)}.${n["Relation Name"]}`);
     // a scan's filters: DuckDB's top N pushes its bound into the scan as an optional Dynamic Filter, which skips a row
-    // group whose zone map cannot beat it; any other filter is checked against the zone maps too
+    // group whose zone map cannot beat it; any other filter is checked against the zone maps too, where it compares
+    // a bare column with a constant (said per filter: a cast around the column keeps the filter and loses the pruning)
     const filters = strings(n["DuckDB Filters"]);
     const dynamic = filters.flatMap((f) => [...f.matchAll(/Dynamic Filter \(([^()]*)\)/g)].map((m) => m[1]!));
     if (dynamic.length > 0) parts.push(`[top-N filter: ${dynamic.join(", ")}]`);
-    if (filters.some((f) => !/Dynamic Filter/.test(f))) parts.push("[zone-map filter]");
+    const others = filters.flatMap(filterOf);
+    if (others.length > 0) parts.push(`[zone-map filter: ${others.join("; ")}]`);
     const called = [...new Set(Object.entries(n).filter(([k]) => k.startsWith("DuckDB ")).flatMap(([, v]) => strings(v)).flatMap((s) => [...s.matchAll(/(__mason_\w+)\(/g)].map((m) => m[1]!)))].sort();
     if (called.length > 0) parts.push(`calls ${called.join(", ")}`);
     plan.push(`${"  ".repeat(depth)}${parts.join(" ")}`);
     for (const c of n.Plans ?? []) walk(c, depth + 1);
   };
   walk(root, 0);
-  return { plan, calls: [...calls].sort(), delim_join: delim, full_sort: sort };
+  return { plan, calls: [...calls].sort(), sends: TIME_CALLS.filter((f) => new RegExp(`\\b${f}\\(`).test(sent)), delim_join: delim, full_sort: sort };
 }
 
 const lines = (s: Skeleton): string[] => [...s.plan, `Mason functions: ${s.calls.length === 0 ? "none" : s.calls.join(", ")}`,
+  `time functions sent: ${s.sends.length === 0 ? "none" : s.sends.join(", ")}`,
   `delimiter join: ${s.delim_join ? "yes" : "no"}; full sort: ${s.full_sort ? "yes" : "no"}`];
 
 /** a line diff (`-` the fixture's, `+` this run's), by the longest common subsequence: a plan is a few dozen lines */
@@ -290,8 +336,8 @@ async function explained(sql: string, zone = "UTC"): Promise<{ plan: JsonNode; s
 
 for (const shape of SHAPES) {
   test(`plan: ${shape.name}`, async () => {
-    const { plan, functions } = await explained(shape.sql, shape.zone);
-    const now: Held = { name: shape.name, sql: shape.sql, ...(shape.zone === undefined ? {} : { zone: shape.zone }), ...skeletonOf(plan, functions) };
+    const { plan, functions, sent } = await explained(shape.sql, shape.zone);
+    const now: Held = { name: shape.name, sql: shape.sql, ...(shape.zone === undefined ? {} : { zone: shape.zone }), ...skeletonOf(plan, functions, sent) };
     measured.set(shape.name, now);
     if (UPDATE) return;
     const was = fixture.statements.find((s) => s.name === shape.name);
@@ -337,7 +383,11 @@ async function scans(sql: string, table: string): Promise<Scan[]> {
   assert.ok(sent !== undefined, `no statement logged for ${sql}:\n${logged.slice(from).join("\n")}`);
   assert.equal(sent, (await explained(sql)).sent, "the SQL Mason's EXPLAIN plans is the SQL the statement ran");
   // the session's settings, as the session runner settles them (src/duck/store.ts `settle`); this test's writer runs
-  // nothing else. A Mason function's session argument is NULL here: a connection without the variable, never cancelled
+  // nothing else. A Mason function's session argument is NULL here: a connection without the variable, never cancelled.
+  // The writer is NOT a session's connection: it lacks the session's `default_null_order`, which a sort that leaves
+  // its NULLs to the default would read differently. nullsKeyFolded spells NULLS FIRST / LAST on every key it writes,
+  // so the sort measured is the sort that runs; a later rewrite that relies on the default null order is measured on
+  // a session's connection instead.
   await store.writer.run("SET TimeZone = 'UTC'");
   await store.writer.run("SET search_path = 'public'");
   const r = await store.writer.runAndReadAll(`EXPLAIN (ANALYZE, FORMAT JSON) ${sent}`);
@@ -345,12 +395,18 @@ async function scans(sql: string, table: string): Promise<Scan[]> {
   const walk = (n: Record<string, unknown>): void => {
     const extra = (n.extra_info ?? {}) as Record<string, unknown>;
     if (n.type === "TABLE_SCAN" && typeof extra.Table === "string" && extra.Table.endsWith(`.${table}`)) {
-      out.push({ rowGroups: Number(n.row_groups_scanned), of: Number(n.total_row_groups_to_scan), rows: Number(n.rows_scanned) });
+      // a metric DuckDB did not write is a failure, never a 0 (Number(null) is 0, and 0 rows would pass)
+      const metric = (k: string): number => {
+        const v = n[k];
+        assert.ok(typeof v === "number" && Number.isFinite(v), `DuckDB's profile of a scan of ${table} has no ${k} (${JSON.stringify(v)}) for ${sent}`);
+        return v;
+      };
+      out.push({ rowGroups: metric("row_groups_scanned"), of: metric("total_row_groups_to_scan"), rows: metric("rows_scanned") });
     }
     for (const ch of (n.children ?? []) as Array<Record<string, unknown>>) walk(ch);
   };
   for (const op of (JSON.parse(String(r.getRows()[0]![1])) as { operator: Array<Record<string, unknown>> }).operator) walk(op);
-  assert.ok(out.length > 0 && out.every((s) => Number.isFinite(s.rowGroups) && Number.isFinite(s.rows)), `no scan of ${table} with its row groups and rows profiled for ${sent}`);
+  assert.ok(out.length > 0, `no scan of ${table} profiled for ${sent}`);
   return out;
 }
 const sqlOf = (name: string): string => SHAPES.find((s) => s.name === name)!.sql;
@@ -369,13 +425,17 @@ for (const name of ["nulls idiom: a timestamp, LIMIT 100 OFFSET 0", "nulls idiom
     t.diagnostic(said(ss));
     for (const s of ss) {
       assert.equal(s.of, ROW_GROUPS, `a scan was offered ${s.of} row groups: the table is not the ${ROW_GROUPS} row groups this measures`);
-      assert.ok(s.rowGroups <= 3, `a 100-row page read ${said(ss)}: the top N no longer prunes the scan`);
+      // loose on purpose: how many row groups a scan reads is how many threads claimed one before the top N's bound
+      // reached it (1–3 measured, more on a loaded runner), and the old plan reads all 9; 6 keeps a margin both ways
+      assert.ok(s.rowGroups <= 6, `a 100-row page read ${said(ss)}: the top N no longer prunes the scan`);
     }
   });
 }
 
 // leftLateral: DuckDB's LEFT lateral was a delimiter join over the whole base, its LIMIT reached only once every row
-// was read (37.9 s for a 100-row preview over 22 M rows); the INNER one is a streaming UNNEST that stops at the LIMIT
+// was read (37.9 s for a 100-row preview over 22 M rows); the INNER one is a streaming UNNEST that stops at the LIMIT.
+// The bound grows with the threads: each reads about one 2,048-row vector before the LIMIT stops it (18,432 rows on
+// nine), so past ~48 threads, or if DuckDB ever hands threads finer tasks, the fast plan would cross a tenth too
 for (const name of ["LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", "LEFT lateral preview: json_each, LIMIT 100 OFFSET 200"]) {
   test(`a LEFT lateral of json rows under a LIMIT reads few rows of the base, never all: ${name}`, async (t) => {
     const ss = await scans(sqlOf(name), "orders");
