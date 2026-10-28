@@ -1914,7 +1914,10 @@ class Rewriter {
           const zone = this.zoneArg(args[2]!);
           const instant = this.asInstant(ts, argType(1));
           const fast = this.truncInstant((constString(unit) ?? "").toLowerCase(), instant, zone, constString(zone));
-          if (fast !== null) return fast;
+          // date_trunc is strict and reads its zone first: a zone not a constant name (a row's, a NULL) is read here
+          // (`__mason_zone`, which refuses a name Postgres would) and a NULL one is NULL, whatever the part — a second
+          // or less never names the zone, and a minute's or an hour's ±infinity is the instant's own
+          if (fast !== null) return constString(zone) !== null ? fast : caseWhen([[isNull(zone), nullConst()]], fast);
           return fn("timezone", [zone, this.truncWall(unit, fn("timezone", [this.clone(zone), instant]), TIMESTAMP)]);
         }
         if (args.length !== 2) return null;
@@ -2727,12 +2730,39 @@ function nullsKeyFolded(keys: AstNode[], select: Body): AstNode[] {
     const first = keys[i]!, second = keys[i + 1];
     const a = kindOf(first) === "SortBy" ? bodyOf(first) : null, b = second !== undefined && kindOf(second) === "SortBy" ? bodyOf(second) : null;
     const test = a !== null && isNode(a.node) && kindOf(a.node) === "NullTest" ? bodyOf(a.node) : null;
-    if (a === null || b === null || test === null || a.useOp !== undefined || b.useOp !== undefined || !isNode(test.arg) || !alikeTree(test.arg, b.node)) { out.push(first); continue; }
+    if (a === null || b === null || test === null || a.useOp !== undefined || b.useOp !== undefined || !isNode(test.arg) || !alikeTree(test.arg, b.node)
+      || !bareKeyIsInput(test.arg, b.node as AstNode, select)) { out.push(first); continue; }
     const last = (test.nulltesttype === "IS_NULL") === (a.sortby_dir !== "SORTBY_DESC");
     out.push({ SortBy: { ...b, sortby_nulls: last ? "SORTBY_NULLS_LAST" : "SORTBY_NULLS_FIRST" } });
     i++;
   }
   return out;
+}
+
+/**
+ * Whether an ORDER BY key read BARE is the same value as the same tree read inside an expression (the `x` of `x IS
+ * NULL`), where Postgres reads them by two rules (findTargetlistEntrySQL92, parse_clause.c): inside an expression a name
+ * is always an input column, while a bare key that is an integer constant is an output column by its position (`ORDER
+ * BY 2`), and a bare one-part name that is an output column's name is that output column (`SELECT coalesce(x, 0) AS x
+ * … ORDER BY x`). Every other node is read alike either way. So a constant is never, and a one-part name is only
+ * where no output column may bear its name or every one that may is the same tree as the input's (`SELECT x … ORDER BY
+ * x`). An output column's name is its alias, else Postgres's FigureColname (a CASE's may be its ELSE's).
+ */
+function bareKeyIsInput(inner: AstNode, bare: AstNode, select: Body): boolean {
+  if (kindOf(bare) === "A_Const") return false;
+  if (kindOf(bare) !== "ColumnRef") return true;
+  const fields = (bodyOf(bare).fields ?? []) as AstNode[];
+  if (fields.length !== 1 || kindOf(fields[0]!) !== "String") return true;
+  const name = String(bodyOf(fields[0]!).sval);
+  return ((select.targetList ?? []) as AstNode[]).every((t) => {
+    const r = bodyOf(t), val = r.val as AstNode | undefined;
+    if (val === undefined) return true;
+    // `*` and `t.*` are the input columns themselves
+    const last = kindOf(val) === "ColumnRef" ? ((bodyOf(val).fields ?? []) as AstNode[]).at(-1) : undefined;
+    if (last !== undefined && kindOf(last) === "A_Star") return true;
+    // every target is named by now: its alias, else Postgres's name for it (nameTargets, figureColname)
+    return (typeof r.name === "string" && r.name !== name) || alikeTree(val, inner);
+  });
 }
 
 /** two trees alike but for where their text stood (`location`): `(x)` and `x` are one tree, parentheses no node */
@@ -3331,17 +3361,35 @@ function strptimeFormat(fmt: AstNode): string {
  * …) s`). Every unnamed target is given this name (`nameTargets`).
  */
 export function figureColname(n: AstNode): string {
+  const [name, strength] = colnameOf(n);
+  return strength === 0 ? "?column?" : name;
+}
+
+/** FigureColnameInternal: the name and its strength — 2 a name of the expression's own (a column's, a function's), 1 a
+ *  kind's (`case`, a cast's type), 0 none. A CASE is named by its ELSE where that name is strong (`CASE … ELSE n END`
+ *  is `n`), and a cast by its argument where that one's is, else by its type */
+function colnameOf(n: AstNode): [string, number] {
+  const k = kindOf(n), b = bodyOf(n);
+  switch (k) {
+    case "TypeCast": { const inner = isNode(b.arg) ? colnameOf(b.arg) : ["?column?", 0] as [string, number]; return inner[1] > 1 ? inner : [lastName(b.typeName?.names), 1]; }
+    case "CollateClause": return isNode(b.arg) ? colnameOf(b.arg) : ["?column?", 0];
+    case "CaseExpr": { const d = isNode(b.defresult) ? colnameOf(b.defresult) : ["?column?", 0] as [string, number]; return d[1] > 1 ? d : ["case", 1]; }
+    case "A_Expr": return b.kind === "AEXPR_NULLIF" ? ["nullif", 2] : ["?column?", 0];
+    case "A_Indirection": {
+      const ind = ((b.indirection ?? []) as AstNode[]);
+      for (let i = ind.length - 1; i >= 0; i--) { if (kindOf(ind[i]!) === "String") return [String(bodyOf(ind[i]!).sval), 2]; if (kindOf(ind[i]!) === "A_Star") break; }
+      return isNode(b.arg) ? colnameOf(b.arg) : ["?column?", 0];
+    }
+    default: { const name = strongColname(n); return name === "?column?" ? [name, 0] : [name, 2]; }
+  }
+}
+
+/** the kinds whose name is their own (strength 2), or none */
+function strongColname(n: AstNode): string {
   const k = kindOf(n), b = bodyOf(n);
   switch (k) {
     case "ColumnRef": { const f = (b.fields ?? []) as AstNode[]; const last = f[f.length - 1]; return last !== undefined && kindOf(last) === "String" ? String(bodyOf(last).sval) : "?column?"; }
-    case "A_Indirection": {
-      const ind = ((b.indirection ?? []) as AstNode[]);
-      for (let i = ind.length - 1; i >= 0; i--) { if (kindOf(ind[i]!) === "String") return String(bodyOf(ind[i]!).sval); if (kindOf(ind[i]!) === "A_Star") break; }
-      return isNode(b.arg) ? figureColname(b.arg) : "?column?";
-    }
     case "FuncCall": return lastName(b.funcname);
-    case "TypeCast": { const inner = isNode(b.arg) ? figureColname(b.arg) : "?column?"; return inner !== "?column?" ? inner : lastName(b.typeName?.names); }
-    case "CollateClause": return isNode(b.arg) ? figureColname(b.arg) : "?column?";
     case "GroupingFunc": return "grouping";
     case "SubLink": {
       if (b.subLinkType === "EXISTS_SUBLINK") return "exists";
@@ -3350,7 +3398,6 @@ export function figureColname(n: AstNode): string {
       const first = ((bodyOf(b.subselect).targetList ?? []) as AstNode[])[0];
       return first !== undefined ? (bodyOf(first).name ?? (isNode(bodyOf(first).val) ? figureColname(bodyOf(first).val as AstNode) : "?column?")) : "?column?";
     }
-    case "CaseExpr": return "case";
     case "A_ArrayExpr": return "array";
     case "RowExpr": return "row";
     case "CoalesceExpr": return "coalesce";

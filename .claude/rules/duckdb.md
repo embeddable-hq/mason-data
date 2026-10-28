@@ -48,6 +48,8 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     100-row preview) and whose order kept other rows than Postgres's; the INNER one is its streaming UNNEST;
   - **equivalent order keys are canonicalised: `x IS [NOT] NULL, x` is one key on `x` with its NULLS placed**
     (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
+    Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's
+    (findTargetlistEntrySQL92), the same tree inside an expression the input's (`bareKeyIsInput`);
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`.
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")

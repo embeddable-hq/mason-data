@@ -408,10 +408,10 @@ rendered from the code, names each). The copy is read-only.
 
 ### Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 2,864 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 2,885 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 2,864 statements | Mason | DuckDB alone |
+| Of 2,885 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 95% | 32% |
 | answered differently by a decision the registry lists (the known differences below) | 1% | — |

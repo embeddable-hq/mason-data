@@ -988,6 +988,26 @@ test("date_trunc of a timestamptz in a prepared statement truncates in the zone 
   }
 });
 
+// date_trunc(part, timestamptz, zone) is strict and reads its zone before the part: a second or less never needs the
+// zone to compute, so the arithmetic once left it out, and a NULL zone (a literal, a row's) answered the instant, a
+// row's unknown zone no error (a review finding)
+test("date_trunc in a zone of its own is NULL in a NULL zone and reads a row's zone, whatever the part", async () => {
+  const c = await client();
+  const rowZone = "CASE WHEN id % 3 = 0 THEN NULL WHEN id % 3 = 1 THEN 'Europe/Berlin' ELSE 'asia/kathmandu' END";
+  try {
+    for (const unit of ["microseconds", "milliseconds", "second", "minute", "hour", "day"]) {
+      for (const zone of ["NULL", "NULL::text", rowZone, "'Europe/Berlin'"]) {
+        const sql = `SELECT id, date_trunc('${unit}', at, ${zone}) AS t FROM instants ORDER BY id`;
+        assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      }
+      // a row's zone Postgres does not know: its error, though the part never needs the zone
+      const bad = `SELECT id, date_trunc('${unit}', at, CASE WHEN id = 5 THEN 'Nowhere/Land' ELSE 'UTC' END) FROM instants ORDER BY id`;
+      await assert.rejects(c.query(bad), (e: pg.DatabaseError) => e.code === "22023", bad);
+      await assert.rejects(postgres(bad), /time zone "Nowhere\/Land" not recognized/);
+    }
+  } finally { await c.end(); }
+});
+
 // A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE IS AN INNER LATERAL OF A LIST NEVER EMPTY (src/duck/rewrite.ts
 // leftLateral): DuckDB planned the LEFT one as a delimiter join over the whole base (a BI tool's "expand the JSON"
 // preview, LIMIT 100 over 22 M rows: 37.9 s), handing its rows back in an order of its own, so a LIMIT kept other rows
@@ -1067,6 +1087,40 @@ test("ORDER BY x IS [NOT] NULL, x is one key with its nulls placed, as Postgres 
       const from = logged.length;
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
       assert.match(sent(from), /ORDER BY e\.ts IS NULL/, `${sql}\n${sent(from)}`);
+    }
+  } finally { await c.end(); }
+});
+
+// A BARE ORDER BY KEY IS READ BY ANOTHER RULE THAN THE SAME TREE INSIDE THE TEST (findTargetlistEntrySQL92): an integer
+// is an output position and a one-part name an output column's, where inside `x IS NULL` each is the constant or the
+// input column. So the pair is folded only where both read alike (a review finding: `SELECT coalesce(n, 0) AS n …
+// ORDER BY n IS NULL, n` was sorted by the coalesce with its NULLs placed).
+test("ORDER BY x IS NULL, x is not one key where the bare x is an output column or a position", async () => {
+  const c = await client();
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  try {
+    for (const sql of [
+      "SELECT e.id, coalesce(e.n, 0) AS n FROM nullish e ORDER BY n IS NULL, n, e.id",
+      "SELECT e.id, e.t AS n FROM nullish e ORDER BY n IS NULL, n DESC, e.id",
+      "SELECT e.id, CASE WHEN e.id > 4 THEN 0 ELSE e.n END FROM nullish e ORDER BY n IS NULL, n, e.id",
+      "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NULL, 2 DESC, 1",
+      "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NOT NULL, 2, 1",
+    ]) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.match(sent(from), /ORDER BY .*IS (NOT )?NULL/, `${sql}\n${sent(from)}`);
+    }
+    // where the output column is the input's own tree, or a star's, it is the idiom still
+    for (const sql of ["SELECT id, n FROM nullish ORDER BY n IS NULL, n DESC, id", "SELECT * FROM nullish ORDER BY n IS NULL, n DESC, id"]) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.match(sent(from), /ORDER BY n DESC NULLS LAST, id/, `${sql}\n${sent(from)}`);
+    }
+    // an unnamed CASE is named by its ELSE where that name is strong, a cast of a CASE by its type (FigureColname):
+    // read by those names from a subquery
+    for (const sql of ["SELECT s.n FROM (SELECT e.id, CASE WHEN e.id > 4 THEN 0 ELSE e.n END FROM nullish e) s ORDER BY s.id",
+      "SELECT s.text, s.case FROM (SELECT e.id, (CASE WHEN e.id > 4 THEN 1 END)::text, CASE WHEN e.id > 4 THEN e.n ELSE 0 END FROM nullish e) s ORDER BY s.id"]) {
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
     }
   } finally { await c.end(); }
 });

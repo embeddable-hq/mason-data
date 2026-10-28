@@ -321,7 +321,10 @@ there, read back), whose zone lookup no form here makes cheaper. ±infinity is i
 the one the statement EXECUTES in, read by `current_setting('TimeZone')` under a CASE on UTC's names (`UTC_NAMES`,
 `src/lib/timezone.ts`), never the zone it was planned in: a prepared statement is planned at its Parse and run after any
 later `SET TimeZone`, so a plan that baked in the Parse's zone truncated by UTC's days in Berlin. DuckDB folds the
-CASE to one branch when it plans what it runs (the histogram's times below are unchanged by it).
+CASE to one branch when it plans what it runs (the histogram's times below are unchanged by it). The three-argument
+form is strict and reads its zone first: a zone that is not a constant name (a row's, a NULL) is read by `__mason_zone`
+under `CASE WHEN zone IS NULL THEN NULL`, whatever the part, since a second or less never names the zone in its
+arithmetic (a review finding: a NULL zone answered the instant, a row's unknown zone no error).
 
 **Why.** On the test server a BI tool's monthly histogram (`DATE_TRUNC('month', t.ts) … GROUP BY 1 ORDER BY 1
 DESC LIMIT 100`) over 197 M rows took 7.9 s, every core busy and the disk idle: the Projection holding `date_trunc` took
@@ -410,6 +413,12 @@ executor worker's cost ("The executor worker"), and the stored JSON paths' remed
 node of it) is ONE key on `<e>` with the second key's direction and the nulls where the first put them: `IS NULL ASC`
 and `IS NOT NULL DESC` last, `IS NULL DESC` and `IS NOT NULL ASC` first (`nullsKeyFolded`, a canonicalisation of
 equivalent order keys). Every other key stays in place; never under a DISTINCT ON, and never a window's ORDER BY.
+The two keys must also be READ alike (`bareKeyIsInput`): Postgres reads a bare ORDER BY key by the SQL92 rule
+(findTargetlistEntrySQL92), an integer as an output position and a one-part name as an output column's name, where the
+same tree inside `IS NULL` is the constant or the input column. So `ORDER BY 2 IS NULL, 2` is never folded, nor `SELECT
+coalesce(x, 0) AS x … ORDER BY x IS NULL, x` (sorted by the input's test, then the output's value: a review finding);
+`SELECT x … ORDER BY x IS NULL, x` and `SELECT * …` are. An output column's name is Postgres's FigureColname, which
+names a CASE by its ELSE where that name is strong (`CASE … ELSE x END` is `x`, Mason once named it `case`).
 
 **Why.** It is how nulls-last is written in MySQL-compatible SQL, which has no NULLS LAST, so several tools emit it for
 every sort of a nullable column: `ORDER BY (e.col) IS NULL ASC, e.col DESC`. With an expression as its first key,

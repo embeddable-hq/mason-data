@@ -146,8 +146,12 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   // mean time (1880), the first instant of a week, a century and a millennium, a microsecond, ±infinity and NULL
   `CREATE TABLE public.instants (id int PRIMARY KEY, at timestamptz); INSERT INTO public.instants VALUES ${INSTANTS.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v}'`})`).join(", ")};` +
   // DOCUMENTS A PREVIEW EXPANDS (a LEFT JOIN LATERAL json_each … ON TRUE): objects of several keys, a key twice in a
-  // json, an empty object, NULL, an array and a string the tool's CASE passes over
-  "CREATE TABLE public.docs (id int PRIMARY KEY, j json, jb jsonb, tags text[]); INSERT INTO public.docs SELECT g, d::json, d::jsonb, CASE WHEN g % 6 = 0 THEN NULL WHEN g % 6 = 1 THEN '{}' ELSE ARRAY['t' || (g % 4), 'u' || (g % 3)] END " +
+  // json, an empty object, NULL, an array and a string the tool's CASE passes over; and arrays of other element types
+  // (an unnest's padding NULL is of each), empty, NULL, or holding a NULL
+  "CREATE TABLE public.docs (id int PRIMARY KEY, j json, jb jsonb, tags text[], ia int[], da date[], ua uuid[]); INSERT INTO public.docs SELECT g, d::json, d::jsonb, CASE WHEN g % 6 = 0 THEN NULL WHEN g % 6 = 1 THEN '{}' ELSE ARRAY['t' || (g % 4), 'u' || (g % 3)] END, " +
+  "CASE WHEN g % 5 = 0 THEN NULL WHEN g % 5 = 1 THEN '{}' WHEN g % 5 = 2 THEN ARRAY[g, NULL] ELSE ARRAY[g, g % 3] END, " +
+  "CASE WHEN g % 4 = 0 THEN NULL WHEN g % 4 = 1 THEN '{}' ELSE ARRAY[date '2026-01-01' + g, NULL] END, " +
+  "CASE WHEN g % 7 = 0 THEN NULL WHEN g % 7 = 1 THEN '{}' ELSE ARRAY[('00000000-0000-0000-0000-' || lpad(g::text, 12, '0'))::uuid] END " +
   "FROM (SELECT g, CASE WHEN g % 13 = 0 THEN NULL WHEN g % 17 = 0 THEN '[1, 2, 3]' WHEN g % 19 = 0 THEN '{}' WHEN g % 23 = 0 THEN '\"s\"' WHEN g % 29 = 0 THEN '{\"a\": 1, \"a\": 2, \"bb\": null}' " +
   "ELSE json_build_object('event', 'e' || (g % 7), 'n', g, 'ok', g % 2 = 0, 'nested', json_build_object('k', g % 3), 'z', CASE WHEN g % 3 = 0 THEN NULL ELSE 'x' || g END)::text END AS d FROM generate_series(1, 300) g) s;" +
   // A NULLABLE COLUMN OF EACH KIND A SORT MEETS (the nulls-placement idiom): NULLs among ties
@@ -621,6 +625,16 @@ function* matrix(): Generator<Matrixed> {
       "date_trunc('month', at, 'UTC'), date_trunc('century', at, 'Europe/Berlin'), date_trunc('week', at, 'utc'), date_trunc('second', at, 'Australia/Lord_Howe'), date_trunc('quarter', at, 'Etc/UTC') FROM instants ORDER BY id", zone);
     yield q(`date_trunc of a date as a timestamptz, in ${zone}`, "SELECT id, date_trunc('week', at::date), date_trunc('hour', at::date) FROM instants WHERE isfinite(at) ORDER BY id", zone);
   }
+  // date_trunc is strict and reads its zone before the part: a NULL zone is NULL for every part (an infinite instant's
+  // too), a row's zone is read for every row, and a zone it does not know is its error, whichever the part
+  const parts = ["microseconds", "milliseconds", "second", "minute", "hour", "day"];
+  yield q("date_trunc in a NULL zone, every part", `SELECT id, ${parts.map((u) => `date_trunc('${u}', at, NULL) AS "${u}"`).join(", ")}, date_trunc('second', at, NULL::text) FROM instants ORDER BY id`);
+  const rowZone = "CASE WHEN id % 3 = 0 THEN NULL WHEN id % 3 = 1 THEN 'Europe/Berlin' ELSE 'asia/kathmandu' END";
+  yield q("date_trunc in a row's zone, NULL in some", `SELECT id, ${parts.map((u) => `date_trunc('${u}', at, ${rowZone}) AS "${u}"`).join(", ")} FROM instants ORDER BY id`);
+  for (const u of ["milliseconds", "second", "hour"]) {
+    yield q(`date_trunc('${u}') in a zone it does not know (its error)`, `SELECT id, date_trunc('${u}', at, 'Nowhere/Land') FROM instants ORDER BY id`);
+    yield q(`date_trunc('${u}') in a row's zone it does not know (its error)`, `SELECT id, date_trunc('${u}', at, CASE WHEN id = 5 THEN 'Nowhere/Land' ELSE 'UTC' END) FROM instants ORDER BY id`);
+  }
 
   // ---- a LEFT JOIN LATERAL of a list's rows ON TRUE (src/duck/rewrite.ts leftLateral): the preview a BI tool sends,
   // limited, its rows and their order Postgres's; and what is NOT so written (an INNER lateral, a lateral sorted,
@@ -641,6 +655,13 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb_each INNER lateral, limited", `SELECT q.id, d.key, d.value::text FROM docs q CROSS JOIN LATERAL jsonb_each(${objectJsonb}) d LIMIT 30 OFFSET 5`);
   yield q("json_each INNER JOIN ON TRUE, limited", `SELECT q.id, d.key FROM docs q JOIN json_each(${objectJson}) d ON TRUE LIMIT 30`);
   yield q("jsonb_each LEFT JOIN on a condition", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON d.key <> 'n' ORDER BY 1, 2`);
+  // the lateral's whole row, which is NULL on the padding row (a row of key and value elsewhere: refused by name)
+  yield q("jsonb_each LEFT JOIN ON TRUE, its whole row", `SELECT q.id, d FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE`);
+  // an array of each element type unnested beside a never-empty list: the padding NULL is of the array's element type
+  for (const [limit, label] of [["LIMIT 50 OFFSET 7", "limited"], ["", "whole"]] as const) {
+    yield q(`unnest of int[], date[], uuid[] LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, a, b, c FROM docs q LEFT JOIN unnest(q.ia) a ON TRUE LEFT JOIN unnest(q.da) b ON TRUE LEFT JOIN unnest(q.ua) c ON TRUE ${limit}`);
+  }
+  yield q("unnest of an enum array LEFT JOIN ON TRUE", "SELECT m.id, u, u::text FROM moods m LEFT JOIN unnest(m.ms) u ON TRUE ORDER BY 1, 3");
   yield q("count(*) over a LEFT JOIN json_each expansion", `SELECT count(*), count(s.key), count(DISTINCT s.key) FROM (SELECT q.*, d.key, d.value FROM (SELECT t.id, t.j FROM docs t) AS q LEFT JOIN json_each(${objectJson}) d ON TRUE) s`);
 
   // ---- the nulls-placement idiom as one key (src/duck/rewrite.ts nullsKeyFolded): `x IS [NOT] NULL, x` in each
@@ -658,6 +679,17 @@ function* matrix(): Generator<Matrixed> {
   yield q("ORDER BY ts IS NULL alone", "SELECT e.id FROM nullish e ORDER BY e.ts IS NULL, e.id");
   yield q("ORDER BY ts IS NULL, ts under DISTINCT ON", "SELECT DISTINCT ON (e.ts IS NULL, e.ts) e.id, e.ts FROM nullish e ORDER BY e.ts IS NULL, e.ts, e.id");
   yield q("SELECT DISTINCT, ORDER BY t IS NULL, t", "SELECT DISTINCT e.t, e.t IS NULL AS missing FROM nullish e ORDER BY e.t IS NULL, e.t LIMIT 5");
+  // a bare key Postgres reads as an OUTPUT column, where the same name in the test is the input's: not the idiom
+  yield q("ORDER BY n IS NULL, n where the output n is another expression", "SELECT e.id, coalesce(e.n, 0) AS n FROM nullish e ORDER BY n IS NULL, n, e.id");
+  yield q("ORDER BY n IS NULL, n DESC where the output n is another column", "SELECT e.id, e.t AS n FROM nullish e ORDER BY n IS NULL, n DESC, e.id");
+  yield q("ORDER BY n IS NULL, n where the output n is an unnamed CASE", "SELECT e.id, CASE WHEN e.id > 30 THEN 0 ELSE e.n END FROM nullish e ORDER BY n IS NULL, n, e.id");
+  yield q("a subquery's unnamed CASE and cast of a CASE read by Postgres's names for them", "SELECT s.n, s.text, s.case FROM (SELECT e.id, CASE WHEN e.id > 30 THEN 0 ELSE e.n END, (CASE WHEN e.id > 4 THEN 1 END)::text, CASE WHEN e.id > 4 THEN e.n ELSE 0 END FROM nullish e) s ORDER BY s.id");
+  yield q("ORDER BY n IS NULL, n DESC where the output n is the column itself", "SELECT id, n FROM nullish ORDER BY n IS NULL, n DESC, id LIMIT 20");
+  yield q("ORDER BY n IS NOT NULL, n where the output n is the qualified column", "SELECT e.id, e.n AS n FROM nullish e ORDER BY n IS NOT NULL, n, e.id");
+  yield q("ORDER BY n IS NULL, n under SELECT *", "SELECT * FROM nullish ORDER BY n IS NULL, n DESC, id LIMIT 20");
+  // an integer constant is an output position bare, a constant inside the test
+  yield q("ORDER BY 2 IS NULL, 2 DESC", "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NULL, 2 DESC, 1");
+  yield q("ORDER BY 2 IS NOT NULL, 2", "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NOT NULL, 2, 1");
   yield q("window frames", "SELECT id, sum(i4) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND CURRENT ROW), count(*) OVER (ORDER BY ts RANGE BETWEEN interval '1 day' PRECEDING AND interval '1 day' FOLLOWING), sum(i4) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), max(i4) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW), sum(i4) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW), sum(i4) OVER (ORDER BY id RANGE UNBOUNDED PRECEDING) FROM typed WHERE id < 100 ORDER BY id");
 }
 
