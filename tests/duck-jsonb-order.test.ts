@@ -248,6 +248,17 @@ test("under ICU and a libc locale a jsonb's strings sort by the collation's key 
       // the rest of jsonb's order is none of the collation's business: the types, the sizes, the numbers
       const stringless = "SELECT id FROM jo WHERE j IS NOT NULL AND NOT j::text ~ '\"' ORDER BY j, id";
       assert.deepEqual(await s.rows(stringless), await postgres(stringless), `${name}: values holding no string`);
+      // A GROUP BY KEY SORTED BY ITS OWN TREE (`GROUP BY e.j ORDER BY e.j`): the group is the equality key, the sort the
+      // collation's; answered as its output name's form answers (the sort over the group's value), in each spelling
+      for (const [qualified, byName] of [
+        ["SELECT e.j, count(*) FROM jo e GROUP BY e.j ORDER BY e.j", "SELECT e.j AS v, count(*) FROM jo e GROUP BY 1 ORDER BY v"],
+        ["SELECT e.j, count(*) FROM jo e GROUP BY e.j ORDER BY e.j DESC, 2", "SELECT e.j AS v, count(*) FROM jo e GROUP BY 1 ORDER BY v DESC, 2"],
+        ["SELECT e.j, count(*) FROM jo e GROUP BY e.j ORDER BY e.j IS NULL, e.j DESC", "SELECT e.j AS v, count(*) FROM jo e GROUP BY 1 ORDER BY v DESC NULLS LAST"],
+      ] as const) {
+        const got = await s.rows(qualified);
+        assert.ok(got.length > 5, `${name}: ${qualified}`);
+        assert.deepEqual(got, await s.rows(byName), `${name}: ${qualified}`);
+      }
       if (name === "libc") {
         // a string the libc order does not cover refuses inside a jsonb as it does as text: by name, never a guess
         const e = await s.refusal(`SELECT t FROM jo, (VALUES ('"a"'), ('{"k": ["x${String.fromCodePoint(0x0E40)}"]}')) v(t) WHERE jo.id = 1 ORDER BY t::jsonb`);
