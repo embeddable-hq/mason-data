@@ -31,7 +31,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type Typed } from "./pgtree.ts";
-import { canonicalRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
+import { canonicalRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 
@@ -187,6 +187,8 @@ const arrayCast = (arg: AstNode, element: string): AstNode => ({ TypeCast: { arg
 const op = (name: string, l: AstNode | null, r: AstNode): AstNode => ({ A_Expr: { kind: "AEXPR_OP", name: [S(name)], ...(l === null ? {} : { lexpr: l }), rexpr: r } });
 const not = (n: AstNode): AstNode => ({ BoolExpr: { boolop: "NOT_EXPR", args: [n] } });
 const and = (args: AstNode[]): AstNode => ({ BoolExpr: { boolop: "AND_EXPR", args } });
+/** the call that raises a marked row's error (src/duck/kept-route.ts `markedError`), over the column read */
+const markedRaise = (name: string, column: AstNode, e: { code: string; message: string }): AstNode => fn(name, [column, strConst(e.code), strConst(e.message)]);
 const caseWhen = (arms: Array<[AstNode, AstNode]>, otherwise: AstNode | null): AstNode => ({
   CaseExpr: { args: arms.map(([expr, result]) => ({ CaseWhen: { expr, result } })), ...(otherwise === null ? {} : { defresult: otherwise }) },
 });
@@ -315,7 +317,7 @@ class Rewriter {
     const recompute = (): AstNode => op("||", nul(), strConst("!"));
     const value = asText ? keptText(column, canonical) : caseWhen([[op("=", column(), nul()), nullConst()]], column());
     // a row marked since the path was counted exact is never read as its value: it raises (kept-route.ts markedError)
-    if (ready.exact) return caseWhen([[op("=", column(), recompute()), fn("error", [strConst(markedError(read, false))])]], value);
+    if (ready.exact) return caseWhen([[op("=", column(), recompute()), markedRaise(MARKED_FUNCTIONS.value, column(), markedError(read, false))]], value);
     // (a copied table's column, checked above: a jsonb's text is the copy's canonical one)
     return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), jsonGet(this.cp, l, steps, either, canonical, asText, canonical)]], value);
   }
@@ -1635,7 +1637,10 @@ class Rewriter {
     const recompute = (): AstNode => fn("unhex", [strConst(KEY_RECOMPUTE_HEX)]);
     const isNullKey = (): AstNode => op("=", column(), fn("unhex", [strConst(KEY_NULL_HEX)]));
     // a row marked since the key was counted exact is never read as a key: it raises (kept-route.ts markedError)
-    if (ready.exact) return caseWhen([[isNullKey(), nullConst()], [op("=", column(), recompute()), fn("error", [strConst(markedError(read, this.collation.kind === "libc"))])]], column());
+    if (ready.exact) {
+      const raise = markedRaise(MARKED_FUNCTIONS.key, fn("hex", [column()]), markedError(read, this.collation.kind === "libc"));
+      return caseWhen([[isNullKey(), nullConst()], [op("=", column(), recompute()), raise]], column());
+    }
     return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), this.jsonbKeyCall(e)]], caseWhen([[isNullKey(), nullConst()]], column()));
   }
 

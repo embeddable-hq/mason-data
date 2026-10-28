@@ -12,6 +12,7 @@
  */
 import { BIGINT, BLOB, BOOLEAN, DATE, DOUBLE, DuckDBBlobValue, DuckDBDateValue, DuckDBIntervalValue, DuckDBScalarFunction, DuckDBTimestampTZValue, DuckDBTimestampValue, INTEGER, INTERVAL, LIST, TIMESTAMP, TIMESTAMPTZ, VARCHAR, listValue, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
 import { pgEvalSync, PgEvalError } from "./pg-eval.ts";
+import { MARKED_FUNCTIONS } from "./kept-route.ts";
 import { libcKept, libcKey, type LibcOrder } from "./libc-order.ts";
 import { formatFloat } from "../api/postgres/encode.ts";
 import { floatAsNumeric } from "./types.ts";
@@ -663,6 +664,11 @@ export function registerFunctions(conn: DuckDBConnection): void {
   // jsonb's order and equality as bytes (src/duck/jsonb-order.ts): under C, and under ICU from ICU's keys of the
   // document's strings, which the rewrite has DuckDB make of `__mason_jsonb_strings` (src/duck/rewrite.ts jsonbKey)
   keyScalar(conn, JSONB_KEY_FUNCTIONS.bytes.key, [VARCHAR], BLOB, ([j]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "bytes" })));
+  // a stored column's marked row read exact raises its error (src/duck/kept-route.ts markedError): never DuckDB's
+  // volatile error(), which a window's ORDER BY refuses
+  const marked = ([, code, message]: DuckDBValue[]): never => { throw new PgEvalError(String(code), String(message)); };
+  scalar(conn, MARKED_FUNCTIONS.key, [VARCHAR, VARCHAR, VARCHAR], BLOB, marked);
+  scalar(conn, MARKED_FUNCTIONS.value, [VARCHAR, VARCHAR, VARCHAR], VARCHAR, marked);
   keyScalar(conn, JSONB_KEY_FUNCTIONS.icu.strings, [VARCHAR], LIST(VARCHAR), ([j]) => listValue(jsonbStrings(String(j))));
   keyScalar(conn, JSONB_KEY_FUNCTIONS.icu.key, [VARCHAR, LIST(VARCHAR)], BLOB, ([j, keys]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "icu", icuKeys: icuKeysOf(keys!) })));
   // jsonb's @>, ?, ?| and ?& (DuckDB's json_contains and json_exists answer otherwise on arrays), json(b)_array_length

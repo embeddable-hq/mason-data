@@ -260,7 +260,7 @@ test("a read is answered from its stored column only once it is ready, every rea
     assert.match(on.sql.text, new RegExp(`CASE WHEN ${route.hiddenName(s)} = chr\\(0\\) OR ${route.hiddenName(s)} = 'null' THEN NULL`), on.sql.text);
     // a qualified column is read through its qualifier, and a chain of reads off it is one stored path
     // (a row marked since it was counted exact raises, never read as its value: kept-route.ts markedError)
-    assert.match(on.sql.text, /CASE WHEN d\.(__mason_json_[0-9a-f]{12}) = \(chr\(0\) \|\| '!'\) THEN error\('mason\[XX000\]: (?:[^']|'')*'\) ELSE CASE WHEN d\.\1 = chr\(0\) THEN NULL ELSE d\.\1 END END AS first/, on.sql.text);
+    assert.match(on.sql.text, /CASE WHEN d\.(__mason_json_[0-9a-f]{12}) = \(chr\(0\) \|\| '!'\) THEN __mason_marked_value\(getvariable\('__mason_session'\), d\.\1, 'XX000', '(?:[^']|'')*'\) ELSE CASE WHEN d\.\1 = chr\(0\) THEN NULL ELSE d\.\1 END END AS first/, on.sql.text);
     // and no document is named: the function and DuckDB's own read are of the stored text, never of j
     assert.doesNotMatch(on.sql.text, /\(getvariable\('__mason_session'\), (d\.)?j,|json_type\((d\.)?j,/, on.sql.text);
     assert.deepEqual(await answer(on.sql.text), await answer(off.sql.text), "the stored reads answer what the calls answer");
@@ -514,7 +514,7 @@ test("a READY path is read from its stored column alone: the plan reads no docum
     const [on, off] = [await plan(sql, keeper), await plan(sql, null)];
     // every read stored and exact: the scan reads the stored columns and the key, never j or k
     const cols = await scanned(reader, on.sql.text, "docs");
-    assert.deepEqual(cols.filter((c) => /^(j|k)$|\b(j|k)\b(?!_)/.test(c.replace(/__mason_json_[0-9a-f]{12}/g, ""))), [], `the documents are not read: ${cols.join(", ")}\n${on.sql.text}`);
+    assert.deepEqual(cols.filter((c) => /^(j|k)$|\b(j|k)\b(?!_)/.test(c.replace(/__mason_json_[0-9a-f]{12}/g, "").replace(/'(?:[^']|'')*'/g, "''"))), [], `the documents are not read: ${cols.join(", ")}\n${on.sql.text}`);
     assert.ok(cols.some((c) => /__mason_json_[0-9a-f]{12}/.test(c)), cols.join(", "));
     assert.ok((await scanned(reader, off.sql.text, "docs")).some((c) => /^j$/.test(c)), "without the stored columns the plan reads j (the measurement is real)");
     assert.deepEqual(await answer(on.sql.text), await answer(off.sql.text), "and answers what the calls answer");
@@ -721,6 +721,11 @@ test("a jsonb's key marked by a write after it was counted exact is never read a
     // the rows without it are sorted from the key alone, as the function sorts them
     const others = "SELECT id FROM docs WHERE id NOT IN (1, 300000) ORDER BY j DESC, id";
     assert.deepEqual(await answer((await plan(others, keeper)).sql.text), await answer((await plan(others, null)).sql.text));
+    // and a window's ORDER BY, which refuses a volatile expression (DuckDB's error() was: the eager oracle's rank())
+    const ranked = "SELECT id, rank() OVER (ORDER BY j) FROM docs WHERE id NOT IN (1, 300000) ORDER BY id";
+    const r = await answer((await plan(ranked, keeper)).sql.text);
+    assert.ok(Array.isArray(r) && r.length > 0, String(r));
+    assert.deepEqual(r, await answer((await plan(ranked, null)).sql.text));
     // equality reads the C key under every collation (no stored key of it here): grouped, the marked rows are answered
     const grouped = "SELECT count(*), min(id) FROM docs GROUP BY j ORDER BY 2";
     const g = await answer((await plan(grouped, keeper)).sql.text);

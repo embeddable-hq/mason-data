@@ -132,17 +132,21 @@ export interface ReadyPath { name: string; exact: boolean }
  * as a value: the exact read raises at it, by the column alone. A jsonb's key under a libc collation is marked where
  * its strings hold a character the measured order does not cover, the gap the statement's own key refuses by name
  * (`libc-uncovered`); any other mark is a Mason bug. Once counted (a minute at most), the CASE computes the row from its
- * document, and raises the function's own error (the character named) or answers.
+ * document, and raises the function's own error (the character named) or answers. Raised by `MARKED_FUNCTIONS`, never
+ * DuckDB's `error()`, which is volatile (a window's ORDER BY refuses it: the eager oracle's `rank() OVER (ORDER BY j)`).
  */
-export function markedError(r: Omit<JsonRead, "source">, libc: boolean): string {
+export function markedError(r: Omit<JsonRead, "source">, libc: boolean): { code: string; message: string } {
   if (isOrderRead(r) && libc) {
-    return `mason[0A000]: a jsonb compared or sorted here holds a string Mason cannot order as the database's collation does (a combining mark, a Thai or Lao ` +
-      `vowel written before its consonant, a private-use or unassigned code point), in a row written since its stored keys were counted; asked again in a ` +
-      `minute, the error names the character (Mason gap libc-uncovered)`;
+    return { code: "0A000", message: "a jsonb compared or sorted here holds a string Mason cannot order as the database's collation does (a combining mark, a Thai or " +
+      "Lao vowel written before its consonant, a private-use or unassigned code point), in a row written since its stored keys were counted; asked again " +
+      "in a minute, the error names the character (Mason gap libc-uncovered)" };
   }
-  return `mason[XX000]: a stored value of ${pathText(r)} could not be computed when its row was written (a Mason bug: report it, with mason logs); asked ` +
-    "again in a minute, it is computed from the row's document";
+  return { code: "XX000", message: `a stored value of ${pathText(r)} could not be computed when its row was written (a Mason bug: report it, with mason logs); ` +
+    "asked again in a minute, it is computed from the row's document" };
 }
+/** the functions that raise `markedError` at a marked row (src/duck/functions.ts): of the column read (a key as its hex,
+ *  so neither is a constant DuckDB would fold), the code and the message; a key's answers a BLOB, a path's a VARCHAR */
+export const MARKED_FUNCTIONS = { key: "__mason_marked_key", value: "__mason_marked_value" } as const;
 
 /** What a statement's plan asks of the stored JSON paths (src/duck/kept.ts `KeptJsonPaths`). */
 export interface KeptRoutes {
