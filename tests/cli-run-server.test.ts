@@ -71,6 +71,11 @@ const requests = {
   slow: async () => [{ route: "postgres" as const, payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-24T10:03:00.000Z" }],
   refused: async () => ({ total: 3, refused: [{ route: "postgres" as const, payload: "SELECT * FROM nope", runs: 3, last: "2026-10-24T10:04:00.000Z", code: "42P01", message: 'relation "nope" does not exist' }] }),
 };
+// the sync's events (src/duck/events.ts), as SyncEvents answers them, and the run's restarts (src/cli/supervise.ts)
+const eventAsks: Array<{ limit: number; since?: string; failed?: boolean }> = [];
+const syncEvent = { at: new Date(Date.now() - 120_000).toISOString(), kind: "poll_failed" as const, failed: true, table: "public.customers", message: "the poll failed, and is tried again at the next one" };
+const events = { days: 7, recent: async (o: { limit: number; since?: string; failed?: boolean }) => { eventAsks.push(o); return [syncEvent]; } };
+let restarts: Array<{ at: string; reason: string; upSeconds: number }> = [];
 const usersFile = path.join(root, "app", ".mason", "users.json");
 const API_KEY = "k".repeat(48);
 const ctx: RunContext = {
@@ -81,7 +86,7 @@ const ctx: RunContext = {
   // the file as the run reads it: its URL resolved from no environment (the test's file writes it whole)
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app",
-  duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, requests },
+  duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, requests, events, restarts: () => restarts },
 };
 const server = createRunServer(ctx);
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -328,6 +333,58 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.deepEqual((await get("/api/ping")).body, { pid: process.pid });
     for (const p of ["/api/builds", "/api/built-from", "/api/memory"]) assert.equal((await get(p)).status, 404, `${p} was the ClickHouse run's`);
   } finally { copies = []; }
+});
+
+test("each table's sync: its state in one word, when it was last brought current, by what and how long it took, its age now; and the copies in all", async () => {
+  const runServer = await import("../src/cli/run-server.ts");
+  const at = "2026-10-24T10:00:00.000Z", now = Date.parse(at) + 90_500;
+  const base = { rows: 3, bytes: 8192, seconds: 1, copiedAt: at, error: null };
+  // read as the state's own fields: at a commit without them the test fails by name
+  const states = [
+    { source: "public.customers", phase: "copied", ...base, rows: 1_000, synced: { at, seconds: 0.04, by: "poll" } },
+    { source: "public.orders", phase: "copied", ...base, rows: 20, synced: { at: "2026-10-24T09:00:00.000Z", seconds: 12.5, by: "copy" }, behind: "after its copy", rebuilding: "catch-up" },
+    { source: "public.logs", phase: "copied", ...base, error: "the poll failed, and is tried again at the next one", synced: { at: "2026-10-24T09:30:00.000Z", seconds: null, by: "poll" } },
+    { source: "public.Shouty", phase: "waiting", ...base, rows: null, seconds: null, copiedAt: null },
+  ] as unknown as CopyState[];
+  const s = runServer.runState(ctx, states, null, now) as { tables: Array<{ table: string; sync?: unknown }>; totals?: unknown };
+  const sync = new Map(s.tables.map((t) => [t.table, t.sync]));
+  assert.deepEqual(sync.get("public.customers"), { state: "synced", syncedAt: at, syncSeconds: 0.04, syncedBy: "poll", ageSeconds: 90.5 }, "its poll's own time, and its age at the moment asked");
+  assert.deepEqual(sync.get("public.orders"), { state: "syncing", syncedAt: "2026-10-24T09:00:00.000Z", syncSeconds: 12.5, syncedBy: "copy", ageSeconds: 3690.5 }, "copied, caught up by one poll now: syncing");
+  assert.deepEqual(sync.get("public.logs"), { state: "failed", syncedAt: "2026-10-24T09:30:00.000Z", syncSeconds: null, syncedBy: "poll", ageSeconds: 1890.5 }, "copied, its poll failed: failed, the copy as old as its last poll");
+  assert.deepEqual(sync.get("public.Shouty"), { state: "waiting", syncedAt: null, syncSeconds: null, syncedBy: null, ageSeconds: null }, "not reached yet");
+  assert.equal(sync.get("public.events"), undefined, "a table neither added nor copied has no sync");
+  // copied: the three copies served; failed: their syncs that failed; rows: the copies' rows; the latest sync of any
+  assert.deepEqual(s.totals, { added: 0, copied: 3, failed: 1, rows: 1_023, syncedAt: at });
+  const { syncStateOf } = await import("../src/cli/readiness.ts") as unknown as { syncStateOf: (c: unknown) => string };
+  assert.deepEqual([{ phase: "copying", error: null }, { phase: "failed", error: "x" }, { phase: "copied", error: null, rebuilding: "copy" }, { phase: "copied", error: null }].map(syncStateOf),
+    ["syncing", "failed", "syncing", "synced"], "copying, a failed copy, a copy made again (the old one serves), served and kept current");
+});
+
+test("the sync's events: /api/events passes its filters to the record, merges the run's restarts newest last, and refuses a bad limit or time by name", async () => {
+  const get = async (p: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}${p}`, { headers: { Authorization: "Bearer t0ken-of-this-run" } });
+    return { status: r.status, body: await r.json() as Record<string, unknown> };
+  };
+  eventAsks.length = 0;
+  const recent = new Date(Date.now() - 60_000).toISOString();
+  restarts = [{ at: "2020-01-01T00:00:00.000Z", reason: "older than the retention", upSeconds: 1 }, { at: recent, reason: "it was killed (SIGKILL: often the system out of memory)", upSeconds: 3600 }];
+  try {
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+    const all = await get(`/api/events?limit=5&failed=1&since=${since}`);
+    assert.equal(all.status, 200);
+    assert.deepEqual(all.body, { keptDays: 7, events: [syncEvent,
+      { at: recent, kind: "restart", failed: true, table: null, message: "the run stopped (it was killed (SIGKILL: often the system out of memory)) after 3600 s up, and its supervisor started it again" }] },
+      "newest last; a restart older than the retention is not one of them");
+    assert.deepEqual(eventAsks, [{ limit: 5, failed: true, since }]);
+    assert.deepEqual((await get("/api/events")).body.events, [syncEvent, (all.body.events as unknown[])[1]]);
+    assert.deepEqual(eventAsks[1], { limit: 40, failed: false }, "40 by default, every kind");
+    const one = await get("/api/events?limit=1");
+    assert.equal((one.body.events as Array<{ kind: string }>).map((e) => e.kind).join(), "restart", "the newest `limit` of the two together");
+    const bad = await get("/api/events?limit=0");
+    assert.deepEqual([bad.status, bad.body.error], [400, "limit is a whole number of events, 1 to 10000"]);
+    const when = await get("/api/events?since=yesterday");
+    assert.deepEqual([when.status, when.body.error], [400, 'since is a time, as ISO 8601 (2026-10-28T09:00:00Z), not "yesterday"']);
+  } finally { restarts = []; }
 });
 
 test("a table of any size on a database elsewhere can be added, and mason tables says nothing against it (a 22 M-row table could not be)", async () => {

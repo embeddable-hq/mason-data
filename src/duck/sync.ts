@@ -63,6 +63,7 @@ import { createSlot, currentLsn, dropSlot, readSlot } from "../cdc/source.ts";
 import { addCounts, countsText, duckValue, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { namedPublicationVerdict, readNamedPublication } from "./publication.ts";
+import type { SyncEventInput } from "./events.ts";
 
 /** how a copied table is kept current: Mason's xmin poll (step 1), a whole copy again (step 0), or the database's
  *  logical replication stream (`mason start --replication`, src/duck/stream.ts) */
@@ -133,7 +134,28 @@ export interface CopyState {
   /** the copy is in a layout this Mason no longer keeps (`RETIRED_LAYOUT`): it serves as it was until it is copied
    *  again, in heap order */
   retired?: string;
+  /** when the copy was last brought current, how long that took and by what (`Synced`); absent before its first copy */
+  synced?: Synced;
+  /** copied, and caught up by one poll before the polls or the stream keep it current again (`behind`): why */
+  behind?: string;
+  /** a copy or a catch-up of it is running now (one rebuild at a time): a table copied before serves that copy meanwhile */
+  rebuilding?: "copy" | "catch-up";
 }
+
+/**
+ * WHEN A COPY WAS LAST BROUGHT CURRENT (`CopyState.synced`; mason status, `/api/state` `tables[].sync`). `at` is the
+ * moment the copy held everything the database had committed as of the sync that brought it there:
+ *  - `copy`: its swap (the whole copy in, as of its first snapshot; its catch-up follows);
+ *  - `poll`, `catch-up`: the poll's commit — its rows and its watermark are one transaction (a catch-up is the one poll
+ *    that brings a new copy current);
+ *  - `stream` (replication mode): the commit of the last batch the stream applied while the table was streamed — the
+ *    position that batch records covers every table streamed, changed in it or not. A database that commits nothing
+ *    sends no batch, so this ages while nothing changes, as `stream.lag.seconds` does.
+ * `seconds` is how long that sync took: the copy's whole time, THIS table's poll (never the pass's), the batch's apply;
+ * null when not known (read back at a start: the ledger keeps when a poll committed, not how long it took). Nothing here
+ * is relative to now: a reader derives the age (`ageSeconds`, src/cli/run-server.ts).
+ */
+export interface Synced { at: string; seconds: number | null; by: "copy" | "poll" | "catch-up" | "stream" }
 
 /**
  * WHERE THE STREAM IS, for `mason status`, `mason wait` and their `--json` (`Sync.streamStatus`; the test server's
@@ -711,8 +733,11 @@ export class Sync {
    *  (a pass kicked sooner leaves it stopped) */
   private streamFailures = 0;
   private streamAt = 0;
-  /** when each streamed table's rows were last counted for the ledger */
-  private readonly countedAt = new Map<string, number>();
+  /** when each copy was last brought current, and how (`Synced`): seeded at `open` from the ledger, moved by every
+   *  swap, poll commit and stream batch */
+  private readonly synced = new Map<string, Synced>();
+  /** where the sync's failures and notable events go (src/duck/events.ts `SyncEvents.record`): never the writer's turn */
+  private readonly onEvent: (e: SyncEventInput) => void;
   /** when each table was last copied or polled (`_mason.poll_state.polled_at`), as an unsynced table's state says it */
   private readonly polledAt = new Map<string, string>();
   /** the tables over the poll's row limit already said in the log (said once, when first left out) */
@@ -774,7 +799,9 @@ export class Sync {
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
     options: { streamReportMs?: number; copyChunkRows?: number; copyParallel?: number; copyChunkSeconds?: number; onChunk?: (e: ChunkEvent) => void | Promise<void>; diskFree?: (dir: string) => number;
-      json?: Partial<KeptOptions> } = {}) {
+      json?: Partial<KeptOptions>;
+      /** each failure and notable event of the sync, as it happens (src/duck/events.ts): the run records them */
+      onEvent?: (e: SyncEventInput) => void } = {}) {
     this.store = store; this.source = source; this.database = database; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
     this.streamReportMs = options.streamReportMs ?? 60_000;
     this.copyChunkRows = options.copyChunkRows ?? COPY_CHUNK_ROWS;
@@ -785,6 +812,7 @@ export class Sync {
     this.copyChunkSeconds = options.copyChunkSeconds ?? COPY_CHUNK_SECONDS;
     if (!(this.copyChunkSeconds > 0)) throw new Error(`a copy's chunk takes a positive number of seconds, not ${this.copyChunkSeconds} (Mason bug: report it; copyChunkSecondsOf reads MASON_COPY_CHUNK_SECONDS)`);
     this.onChunk = options.onChunk;
+    this.onEvent = options.onEvent ?? (() => undefined);
     this.diskFree = options.diskFree ?? ((dir) => { const st = fs.statfsSync(dir); return st.bavail * st.bsize; });
     if (mode === "replication" && replication === null) throw new Error("replication mode needs its slot and publication (Mason bug: report it)");
     this.replication = replication;
@@ -804,6 +832,13 @@ export class Sync {
   private get rebuilder(): Lane {
     if (this.rebuilderLane === null) throw new Error("the sync's rebuild connection is not open (Mason bug: report it)");
     return this.rebuilderLane;
+  }
+
+  /** an event of the sync, to its record (src/duck/events.ts), which never throws into the sync; a sink that does is
+   *  said, and the sync goes on (its state and its log line hold what happened) */
+  private event(e: SyncEventInput): void {
+    try { this.onEvent(e); }
+    catch (x) { this.log(`the sync's event (${e.kind}${e.table ? ` ${e.table}` : ""}) could not be recorded: ${x instanceof Error ? x.message : String(x)}`); }
   }
 
   /** `f` on the writer's next turn: once every job queued before it has ended, so no other job's statement lands inside
@@ -851,6 +886,7 @@ export class Sync {
       if (columns !== null) { const c = JSON.parse(columns) as SourceColumnInfo[]; this.copiedAs.set(source, columnsKey(c)); this.copiedColumns.set(source, c); }
       this.states.set(source, { source, phase: phase === "copying" ? "waiting" : phase, rows: rows === null ? null : Number(rows), bytes: bytes === null ? null : Number(bytes), seconds, copiedAt, error });
     }
+    await this.readSynced();
     await this.findRetired();
     this.removeStageLeftovers();
     // the stored JSON paths, before the catalog serves anything: each served copy's view, what the file holds
@@ -931,7 +967,13 @@ export class Sync {
       .map((s) => this.retired.has(s.source) ? { ...s, retired: RETIRED_LAYOUT } : s)
       // a copy's chunks as they are NOW: the rows the ones in flight have read by now at the measured rate
       .map((s) => { const l = this.copyLive.get(s.source); return s.phase === "copying" && l !== undefined ? { ...s, progress: copyProgressNow(l, Date.now()) } : s; })
-      .map((s) => this.mode === "poll" && overPollLimit(this.tables.get(s.source)!) ? { ...s, unsynced: { reason: OVER_POLL_LIMIT, asOf: this.polledAt.get(s.source) ?? null } } : s);
+      .map((s) => this.mode === "poll" && overPollLimit(this.tables.get(s.source)!) ? { ...s, unsynced: { reason: OVER_POLL_LIMIT, asOf: this.polledAt.get(s.source) ?? null } } : s)
+      // when it was last brought current, whether it waits for its catch-up, and whether it is being rebuilt now
+      .map((s) => {
+        const synced = this.synced.get(s.source), behind = this.behind.get(s.source)?.why;
+        const rebuilding = this.rebuildingNow?.source === s.source ? this.rebuildingNow.kind : undefined;
+        return { ...s, ...(synced ? { synced } : {}), ...(behind !== undefined ? { behind } : {}), ...(rebuilding ? { rebuilding } : {}) };
+      });
   }
 
   /** each table's last copy or poll, from the ledger (a copy writes its watermark there too) */
@@ -939,6 +981,27 @@ export class Sync {
     const r = await this.store.writer.runAndReadAll(`SELECT source, epoch_ms(polled_at) FROM ${MASON_SCHEMA}.poll_state WHERE polled_at IS NOT NULL`);
     this.polledAt.clear();
     for (const [source, ms] of r.getRowsJS() as [string, number | bigint][]) this.polledAt.set(source, new Date(Number(ms)).toISOString());
+  }
+  /**
+   * EACH COPY'S LAST SYNC AS THE LEDGER KEEPS IT, at a start (`Synced`): the swap and every poll write
+   * `poll_state.polled_at` in their own transaction, and a copy's `copied_at` is recorded right after its swap — so a
+   * copy recorded at or after its table's `polled_at` was last brought current by that copy (its time the copy's
+   * `seconds`), else by a poll (its time unknown: null). In replication mode the stream's last batch
+   * (`stream_state.applied_at`) is newer for a table it streamed; a table not caught up is left at its copy.
+   */
+  private async readSynced(): Promise<void> {
+    const r = await this.store.writer.runAndReadAll(`SELECT p.source, epoch_ms(p.polled_at), epoch_ms(c.copied_at), c.seconds FROM ${MASON_SCHEMA}.poll_state p ` +
+      `LEFT JOIN ${MASON_SCHEMA}.copy_state c USING (source) WHERE p.polled_at IS NOT NULL`);
+    const streamed = this.replication === null ? [] : (await this.store.writer.runAndReadAll(`SELECT epoch_ms(applied_at) FROM ${MASON_SCHEMA}.stream_state ` +
+      `WHERE slot = $1 AND applied_at IS NOT NULL`, [this.replication.slot])).getRowsJS();
+    const streamMs = streamed.length ? Number(streamed[0]![0]) : null;
+    this.synced.clear();
+    for (const [source, polled, copied, seconds] of r.getRowsJS() as Array<[string, bigint | number, bigint | number | null, number | null]>) {
+      const at = Number(polled);
+      const s: Synced = copied !== null && Number(copied) >= at ? { at: new Date(Number(copied)).toISOString(), seconds, by: "copy" }
+        : { at: new Date(at).toISOString(), seconds: null, by: "poll" };
+      this.synced.set(source, streamMs !== null && streamMs > Date.parse(s.at) && !this.behind.has(source) ? { at: new Date(streamMs).toISOString(), seconds: null, by: "stream" } : s);
+    }
   }
   schema(): PgSchema { return this.currentSchema; }
 
@@ -1192,7 +1255,7 @@ export class Sync {
         const gap = this.unpublished.get(t.source);
         if (gap !== undefined) {
           const error = `replication: ${gap}`;
-          if (st.error !== error) this.log(`${t.source} is not copied or streamed: ${error}`);
+          if (st.error !== error) { this.log(`${t.source} is not copied or streamed: ${error}`); this.event({ kind: "stream_failed", table: t.source, message: `not copied or streamed: ${error}` }); }
           await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error });
         } else if (st.error?.startsWith("replication: ")) await this.record({ ...st, error: null });
       }
@@ -1296,6 +1359,9 @@ export class Sync {
       this.streamAt = Date.now() + wait - 50;
       this.streamFailure = { error: m, retryAt: this.streamAt };
       this.log(`${m} (the stream starts again in ${wait / 1000} s, failure ${this.streamFailures} in a row; the copies serve as they are)`);
+      // one event for the stream, never one per table it kept current (each table's error says it); its failures in a
+      // row are left out of the words, so a stream failing for good is one event, not one per restart
+      this.event({ kind: "stream_failed", table: null, message: `${m} (the stream starts again by itself; the copies serve as they are)` });
       // on the tables the stream kept current when it failed (one being caught up says its own)
       await this.onWriter(async () => { for (const source of this.streamed.keys()) if (!this.held.has(source)) await this.record({ ...this.states.get(source)!, error: m }); });
       this.timer = setTimeout(() => this.kick(), wait);
@@ -1326,6 +1392,7 @@ export class Sync {
         `so its changes are not applied: it is caught up by one poll again after ${when}. The way out: remove ${cols} from its columns in the sources file (mason add ${source} --columns … ` +
         `picks the columns it has; it is copied again at once)${this.replication!.owned ? "" : `, or publish ${missing.length === 1 ? "it" : "them"} again (ALTER PUBLICATION ${pub} …)`}`;
       this.log(`${source}: ${m}`);
+      this.event({ kind: "stream_failed", table: source, message: m });
       await this.record({ ...this.states.get(source)!, error: m });
       this.refreshStreamed();
     });
@@ -1514,6 +1581,12 @@ export class Sync {
   private async applyChanges(batch: ReadonlyMap<string, TableChanges>, lsn: bigint | null, committedAt: Date | null = null): Promise<void> {
     const w = this.store.writer;
     let source: PgConnection | null = null;
+    const started = Date.now();
+    // EACH TABLE'S ROWS AFTER THE BATCH, kept current at every batch (it was counted at most every 5 s, so a table's
+    // count missed the batches after one until another came): what its writes added and removed, which DuckDB says
+    // (`rowsChanged`) — never a count(*), which a write by key's deletes make a scan (12 ms on 20 M rows, measured) —
+    // written to the ledger IN the batch's transaction, so a run that dies keeps a count equal to its rows
+    const rowsAfter = new Map<string, number>();
     await w.run("BEGIN TRANSACTION");
     try {
       for (const [name, changes] of batch) {
@@ -1531,7 +1604,7 @@ export class Sync {
           if (scale !== undefined && v !== null && widerThan(v, scale, declared(c))) throw new Error(`${WIDER} [${name}]: ${c} = ${v}`);
           return duckValue(v, types.get(c)!);
         };
-        if (changes.truncated) await w.run(`DELETE FROM ${target}`);
+        let delta = changes.truncated ? -Number((await w.run(`DELETE FROM ${target}`)).rowsChanged) : 0;
         const whole: Array<Array<string | null>> = [];
         const fetch: Array<Array<string | null>> = [];
         const gone: Array<Array<string | null>> = [];
@@ -1551,7 +1624,12 @@ export class Sync {
           source ??= await PgConnection.connect(this.pgOptions());
           whole.push(...await this.sourceRows(source, t, fetch));
         }
-        await this.writeByKey(t, target, gone, whole, value);
+        delta += await this.writeByKey(t, target, gone, whole, value);
+        // a copy whose rows the ledger does not know (none should be: its copy counts them) is counted, once
+        const known = this.states.get(name)?.rows ?? null;
+        const rows = known === null ? Number((await w.runAndReadAll(`SELECT count(*) FROM ${target}`)).getRowsJS()[0]![0] as bigint) : known + delta;
+        if (rows !== known) await w.run(`UPDATE ${MASON_SCHEMA}.copy_state SET "rows" = $1 WHERE source = $2`, [rows, name]);
+        rowsAfter.set(name, rows);
       }
       if (lsn !== null) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.stream_state VALUES ($1, $2, now())`, [this.replication!.slot, formatLsn(lsn)]);
       await w.run("COMMIT");
@@ -1572,14 +1650,18 @@ export class Sync {
       moved = true;
     }
     if (moved && committedAt !== null && committedAt.getTime() > 0) this.lastBatch = { appliedAt: Date.now(), committedAt: committedAt.getTime() };
-    // the ledger's row counts, for mason status: each changed table counted at most every 5 s
-    for (const name of batch.keys()) {
+    // the rows, as the ledger has them now; a table the batch wrote is current again (its error, if any, cleared)
+    for (const [name, rows] of rowsAfter) {
       const st = this.states.get(name);
-      if (st === undefined || Date.now() - (this.countedAt.get(name) ?? 0) < 5_000) continue;
-      const t = this.tables.get(name)!;
-      const rows = Number((await w.runAndReadAll(`SELECT count(*) FROM ${ident(t.schema)}.${ident(t.table)}`)).getRowsJS()[0]![0] as bigint);
-      this.countedAt.set(name, Date.now());
-      if (rows !== st.rows || st.error !== null) await this.record({ ...st, rows, error: null });
+      if (st === undefined) continue;
+      if (st.error !== null) await this.record({ ...st, rows, error: null });
+      else this.states.set(name, { ...st, rows });
+    }
+    // every table the stream keeps current is current as of this batch's position (`Synced`); a piece of a large
+    // transaction (no position) and the changes a catch-up held are not a position
+    if (lsn !== null) {
+      const at = new Date().toISOString();
+      for (const source of this.joinedNow) this.synced.set(source, { at, seconds: (Date.now() - started) / 1000, by: "stream" });
     }
   }
 
@@ -1613,10 +1695,12 @@ export class Sync {
    * join against the table's key column (`deleteKeys`), then the rows inserted. No copy has a primary key,
    * so there is no `INSERT OR REPLACE`; a key's row is the source's at the batch's end
    * whatever the table held, as replaying needs (src/duck/stream.ts). A table with no key (none can be added:
-   * src/cli/preflight.ts) is only appended to.
+   * src/cli/preflight.ts) is only appended to. Answers what it did to the table's count: the rows inserted less the rows
+   * its deletes removed (DuckDB's own count of each).
    */
-  private async writeByKey(t: AddedTable, target: string, gone: ReadonlyArray<Array<string | null>>, whole: ReadonlyArray<Array<string | null>>, value: (c: string, v: string | null) => string): Promise<void> {
-    if (gone.length === 0 && whole.length === 0) return;
+  private async writeByKey(t: AddedTable, target: string, gone: ReadonlyArray<Array<string | null>>, whole: ReadonlyArray<Array<string | null>>, value: (c: string, v: string | null) => string): Promise<number> {
+    if (gone.length === 0 && whole.length === 0) return 0;
+    let delta = 0;
     const w = this.store.writer;
     const cols = t.columns.map((c) => c.name);
     const list = cols.map(ident).join(", ");
@@ -1633,15 +1717,16 @@ export class Sync {
         await w.run(`INSERT INTO ${WRITE_KEYS} VALUES ${gone.slice(i, i + 500).map((k) => `(${t.key.map((c, j) => value(c, k[j] ?? null)).join(", ")})`).join(", ")}`);
       }
       if (whole.length) await w.run(`INSERT INTO ${WRITE_KEYS} SELECT ${keys} FROM ${WRITE_ROWS}`);
-      await deleteKeys(w, t, target, WRITE_KEYS, t.key);
+      delta -= await deleteKeys(w, t, target, WRITE_KEYS, t.key);
       await w.run(`DROP TABLE ${WRITE_KEYS}`);
     }
     if (whole.length) {
       // and its stored JSON paths, computed from the rows' JSON (src/duck/kept.ts)
       const stored = this.kept.stored(t.source, ident);
-      await w.run(`INSERT INTO ${target} (${[list, ...stored.names.map(ident)].join(", ")}) SELECT ${[list, ...stored.values].join(", ")} FROM ${WRITE_ROWS}`);
+      delta += Number((await w.run(`INSERT INTO ${target} (${[list, ...stored.names.map(ident)].join(", ")}) SELECT ${[list, ...stored.values].join(", ")} FROM ${WRITE_ROWS}`)).rowsChanged);
       await w.run(`DROP TABLE ${WRITE_ROWS}`);
     }
+    return delta;
   }
 
   /** a copied table's columns' DuckDB types, as DESCRIBE spells them (what `duckValue` casts a value's text to) */
@@ -1763,6 +1848,7 @@ export class Sync {
       this.copiedAs.delete(source);
       this.copiedColumns.delete(source);
       this.states.delete(source);
+      this.synced.delete(source);
       this.log(`dropped ${source}'s copy: it is no longer added (mason add ${source} copies it again from the source, whole)`);
     }
     if (this.tables.size === 0) { await this.rebuildSchema(); return; }
@@ -1770,6 +1856,7 @@ export class Sync {
       try { await this.prepareReplication(); }
       catch (e) {
         const m = `replication: ${e instanceof Error ? e.message : String(e)}`;
+        this.event({ kind: "stream_failed", table: null, message: m });
         // a table copied before keeps serving its copy; one never copied is failed, so mason status says why
         await this.onWriter(async () => {
           for (const t of this.tables.values()) { const st = this.states.get(t.source)!; await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }); }
@@ -1783,6 +1870,7 @@ export class Sync {
     try { await this.onWriter(() => this.attach()); }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e);
+      this.event({ kind: "source_unreachable", table: null, message: `could not attach the database: ${m}` });
       // a table copied before keeps serving its copy (and its place in the catalog): the source being away is its error,
       // not a reason to copy it whole again when the source is back; one never copied is failed
       await this.onWriter(async () => {
@@ -1845,6 +1933,7 @@ export class Sync {
         // tables are polled as ever
         const m = `the poll failed, and is tried again at the next one (the copy serves as it was): ${e instanceof Error ? e.message : String(e)}`;
         this.log(`${t.source}: ${m}`);
+        this.event({ kind: "poll_failed", table: t.source, message: m });
         await this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
       }
     }
@@ -1903,6 +1992,7 @@ export class Sync {
         // the next pass says the same of every table, and queues it again
         const m = `could not attach the database: ${e instanceof Error ? e.message : String(e)}`;
         this.log(`${r.kind} of ${t.source} waits: ${m}`);
+        this.event({ kind: "source_unreachable", table: t.source, message: `its ${r.kind} waits: ${m}` });
         const st = this.states.get(t.source)!;
         await this.onWriter(() => this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }));
         return null;
@@ -1946,6 +2036,7 @@ export class Sync {
       const when = this.backOff(t.source, Date.now() - started);
       const m = `${what} (the copy serves as it was; it is caught up by one poll again after ${when}): ${e instanceof Error ? e.message : String(e)}`;
       this.log(`${t.source}: ${m}`);
+      this.event({ kind: "catch_up_failed", table: t.source, message: m });
       return this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
     };
     // the catch-up's poll reads the columns the copy holds (`asCopied`)
@@ -2157,13 +2248,15 @@ export class Sync {
       throw named(e);
     }
     // committed: the watermarks and the row counts move together (a pieced table's with its last piece)
-    const committed = async (source: string, rows: number): Promise<void> => {
+    // and the table's last sync (`Synced`): this poll's commit, and how long THIS table's poll took
+    const committed = async (source: string, rows: number, ms: number): Promise<void> => {
       const st = this.states.get(source)!;
       if (st.rows !== rows || st.error !== null) await this.record({ ...st, rows, error: null }, undefined, w);
       this.snapshots.set(source, snapshot);
+      this.synced.set(source, { at: new Date().toISOString(), seconds: ms / 1000, by: lane === this.writerLane ? "poll" : "catch-up" });
     };
     try {
-      for (const [source, rows] of pending) if (!pieced.some((p) => p.t.source === source)) await committed(source, rows);
+      for (const [source, rows] of pending) if (!pieced.some((p) => p.t.source === source)) await committed(source, rows, found.find((f) => f.table === source)?.ms ?? 0);
       this.log(`poll: ${timed.join("; ")}`);
       for (const { t, target, stage, staged, deleted, started } of pieced) {
         const p0 = Date.now();
@@ -2184,7 +2277,7 @@ export class Sync {
           }
         }
         const rows = pending.get(t.source)!;
-        await committed(t.source, rows);
+        await committed(t.source, rows, Date.now() - started);
         found.push({ table: t.source, changed: staged, deleted, rows, ms: Date.now() - started });
         this.log(`poll: ${t.source}: ${staged.toLocaleString("en-US")} changed row(s), written in ${n} pieces in ${Date.now() - p0} ms`);
       }
@@ -2292,7 +2385,10 @@ export class Sync {
       const seconds = (Date.now() - started) / 1000;
       this.log(`copied ${t.source}: ${p.rows} row(s), ${t.bytes} source bytes, in ${seconds.toFixed(2)} s (read in ${read.seconds.toFixed(2)} s` +
         `${resumed === null ? "" : `, resumed at page ${readThrough(resumed.done) ?? p.pages} of ${resumed.pages}${pastPages(resumed.done)} with ${resumed.rows} row(s) in`}), stored as the source's scan delivered them, with no index`);
-      await this.record({ source: t.source, phase: "copied", rows: p.rows, bytes: t.bytes, seconds, copiedAt: new Date().toISOString(), error: null }, t.columns, w);
+      const copiedAt = new Date().toISOString();
+      await this.record({ source: t.source, phase: "copied", rows: p.rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, w);
+      this.synced.set(t.source, { at: copiedAt, seconds, by: "copy" });
+      this.event({ kind: "copied", table: t.source, message: `copied: ${p.rows.toLocaleString("en-US")} row(s) in ${seconds.toFixed(2)} s` });
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();
@@ -2325,6 +2421,7 @@ export class Sync {
       const when = `tried again after ${new Date(at).toISOString().slice(11, 16)} UTC (failure ${failures} in a row), or at once when Mason starts again or its columns or key change` +
         (where === null ? "" : `; it continues ${where}`);
       this.log(`copy of ${t.source} failed: ${m}; ${when}`);
+      this.event({ kind: "copy_failed", table: t.source, message: `${m}; ${when}` });
       // a table that was copied keeps serving its last copy; one never copied is failed
       await this.record({ ...this.states.get(t.source)!, phase: first ? "failed" : "copied", error: `${m} (${when})` }, undefined, w);
     }
@@ -2692,6 +2789,12 @@ export class Sync {
    *  writer only on its turn: a statement on a connection lands inside the transaction open there). The table's row is
    *  that flow's alone while it writes it (a rebuild's table is not polled or streamed until caught up) */
   private async record(s: CopyState, columns?: readonly SourceColumnInfo[], c: DuckConnection = this.store.writer): Promise<void> {
+    // A COPY CURRENT AGAIN after its poll, catch-up or stream failed (its error cleared by the flow that keeps it current,
+    // never by a copy of it: that is its own `copied` event) — the one place an error is cleared, so the one place said
+    const was = this.states.get(s.source);
+    if (was !== undefined && was.error !== null && s.error === null && was.phase === "copied" && s.phase === "copied" && was.copiedAt === s.copiedAt) {
+      this.event({ kind: "recovered", table: s.source, message: `current again (it had failed: ${was.error.split("\n")[0]})` });
+    }
     this.states.set(s.source, s);
     const v = (x: string | number | null): string => x === null ? "NULL" : typeof x === "number" ? String(x) : literal(x);
     const sql = `INSERT OR REPLACE INTO ${MASON_SCHEMA}.copy_state (source, phase, "rows", bytes, seconds, copied_at, error, columns) VALUES (${literal(s.source)}, ${literal(s.phase)}, ${v(s.rows)}, ${v(s.bytes)}, ${v(s.seconds)}, ` +

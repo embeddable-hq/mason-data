@@ -73,7 +73,7 @@ before(async () => {
     slot: "", changes: "poll", port: 0, token: TOKEN, page: false, users: { file: path.join(dir, "users.json"), apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" }, folder: () => null, root: dir, sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined,
     readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined,
     duck: { copies: () => [], file: path.join(dir, "duck.db"), pollSeconds: 5, poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
+      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) }, events: { days: 7, recent: async () => [] }, restarts: () => [] },
   };
   control = createRunServer(ctx);
   await new Promise<void>((r) => control.listen(0, "127.0.0.1", () => r()));

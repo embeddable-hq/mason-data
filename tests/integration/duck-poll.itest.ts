@@ -116,7 +116,15 @@ test("the copy and the xmin poll keep DuckDB equal to the source through every k
 
     psql(dbUrl, "INSERT INTO items VALUES (51, 'new', 9.99, NULL); UPDATE items SET v = 'changed', n = NULL WHERE id = 2; DELETE FROM items WHERE id = 3; " +
       "UPDATE shop.lines SET qty = -1 WHERE order_id = 1; DELETE FROM shop.lines WHERE order_id = 2");
+    // each copy's last sync: after its copy, the one poll that caught it up; once polled, that table's own poll
+    // (src/duck/sync.ts Synced), and its rows the copy's after it
+    const lastSync = (): unknown[] => sync.state().map((s) => { const x = (s as { synced?: { by: string; seconds: number | null } }).synced; return [s.source, x?.by, typeof x?.seconds]; });
+    assert.deepEqual(lastSync(), [["public.items", "catch-up", "number"], ["shop.lines", "catch-up", "number"]]);
+    const syncedBefore = (sync.state()[0] as { synced?: { at: string } }).synced?.at ?? "";
     await same("an insert, an update to NULL, a delete");
+    assert.deepEqual(lastSync(), [["public.items", "poll", "number"], ["shop.lines", "poll", "number"]]);
+    assert.ok(((sync.state()[0] as { synced?: { at: string } }).synced?.at ?? "") > syncedBefore, "a poll moves it");
+    assert.deepEqual(sync.state().map((s) => s.rows), [50, 27], "the rows after the poll: 50 + 1 - 1, 30 - 3");
 
     psql(dbUrl, "UPDATE items SET id = 1000 WHERE id = 4; UPDATE shop.lines SET line = 9 WHERE order_id = 3 AND line = 0");
     await same("a primary-key change");
@@ -906,12 +914,16 @@ test("a failed copy waits before it is tried again, and a change of its columns 
   const since = (from: number, re: RegExp): number => logged.slice(from).filter((l) => re.test(l)).length;
   const tablesLeft = async (store: DuckStore): Promise<unknown> => (await store.writer.runAndReadAll("SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'public'")).getRowsJS();
   let store = await DuckStore.open(file, (l) => logged.push(l));
-  let sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  // the sync's events (src/duck/events.ts): the failure is one, with the log's words
+  const events: Array<{ kind: string; table: string | null; message: string }> = [];
+  let sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => { events.push(e); } });
   try {
     await sync.open();
     let from = logged.length;
     void sync.setTables([T(true)]);
     await sync.once();
+    assert.deepEqual(events.map((e) => [e.kind, e.table]), [["copy_failed", "public.t"]]);
+    assert.equal(`copy of public.t failed: ${events[0]!.message}`, logged.find((l) => l.startsWith("copy of public.t failed: ")));
     assert.equal(since(from, /^copying public\.t:/), 1, logged.slice(from).join("\n"));
     assert.equal(since(from, /^copy of public\.t failed: [\s\S]*; tried again after \d\d:\d\d UTC \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
     const [st] = sync.state();

@@ -5,7 +5,7 @@
  * re-exports it).
  */
 import type { RunState } from "./commands.ts";
-import type { CopyProgressView } from "../duck/sync.ts";
+import type { CopyProgressView, CopyState, Synced } from "../duck/sync.ts";
 
 const n = (x: number): string => x.toLocaleString("en-US");
 const firstLine = (s: string): string => s.split("\n")[0]!.trim();
@@ -68,6 +68,42 @@ export function copyingText(copied: number, rowsEstimate: number | null, p?: Cop
 export function copyProgress(source: string, copied: number, rowsEstimate: number | null, p?: CopyProgressView): string {
   const c = copyingText(copied, rowsEstimate, p);
   return `${source}: ${c.fraction !== null ? `copying ${Math.floor(c.fraction * 100)}% · ` : /^\d/.test(c.text) ? "copying " : ""}${c.text}`;
+}
+
+/**
+ * A TABLE'S SYNC IN ONE WORD, from what the sync has of its copy — the one place it is decided (`/api/state`
+ * `tables[].sync.state`, so mason status, the web page and an agent say one thing):
+ *  - `waiting`: no copy yet, nor one under way (the sync has not reached it);
+ *  - `failed`: its copy failed, or the poll, catch-up or stream keeping it current did (its `error` says why; a table
+ *    copied before still serves that copy);
+ *  - `syncing`: being copied, copied again, or caught up by its one poll before it is kept current;
+ *  - `synced`: its copy is served and kept current — or, for a table over the poll's row limit, served as copied and
+ *    NOT kept current (its `unsynced` says so, and `syncedAt` how old the copy is).
+ */
+export type TableSyncState = "synced" | "syncing" | "failed" | "waiting";
+export function syncStateOf(c: CopyState | undefined): TableSyncState {
+  if (c === undefined || c.phase === "waiting") return "waiting";
+  if (c.phase === "failed" || c.error !== null) return "failed";
+  if (c.phase === "copying" || c.rebuilding !== undefined || c.behind !== undefined) return "syncing";
+  return "synced";
+}
+
+/** A table's sync as `/api/state` says it (`tables[].sync`): its state, when it was last brought current and how
+ *  (src/duck/sync.ts `Synced`), and how old that is NOW — the one value here relative to the moment it is asked. */
+export interface TableSync { state: TableSyncState; syncedAt: string | null; syncSeconds: number | null; syncedBy: Synced["by"] | null; ageSeconds: number | null }
+export function tableSync(c: CopyState | undefined, now: number): TableSync {
+  const s = c?.synced;
+  return { state: syncStateOf(c), syncedAt: s?.at ?? null, syncSeconds: s?.seconds ?? null, syncedBy: s?.by ?? null,
+    ageSeconds: s === undefined ? null : Math.max(0, Math.round((now - Date.parse(s.at)) / 100) / 10) };
+}
+
+/** The run's copies in all (`/api/state` `totals`): the tables added, those copied (served), those whose sync failed,
+ *  the copies' rows, and the most recent sync of any (the copy file's size is `engine.bytes`). */
+export interface SyncTotals { added: number; copied: number; failed: number; rows: number; syncedAt: string | null }
+export function syncTotals(added: number, copies: readonly CopyState[]): SyncTotals {
+  const copied = copies.filter((c) => c.phase === "copied");
+  const latest = copies.flatMap((c) => c.synced === undefined ? [] : [c.synced.at]).sort().pop() ?? null;
+  return { added, copied: copied.length, failed: copies.filter((c) => syncStateOf(c) === "failed").length, rows: copied.reduce((n, c) => n + (c.rows ?? 0), 0), syncedAt: latest };
 }
 
 /**
