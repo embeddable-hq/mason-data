@@ -17,6 +17,8 @@ import type { CopyProgressView, StreamStatus } from "../src/duck/sync.ts";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { connectSource, parseSource, readSourceFacts } from "../src/cli/preflight.ts";
 import { readSource } from "../src/cli/sources.ts";
+// read from the module's namespace: at a commit without timeOf the file loads, and the test fails by name
+const { timeOf } = await import("../src/cli/request-filter.ts") as unknown as { timeOf: (name: string, text: string, now: number) => string | { message: string } };
 import { DemoSource } from "../src/demo/source.ts";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 
@@ -321,7 +323,7 @@ const sample = { at: "2026-10-28T09:05:00.000Z", seconds: 300, copyBytes: 5 * 2 
   rssBytes: 900 * 2 ** 20, heapUsedBytes: 80 * 2 ** 20, copyMemoryBytes: 300 * 2 ** 20, copyMemoryLimitBytes: 8 * 2 ** 30 };
 
 test("mason usage: a span a line under its heading — the statements, their errors, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
-  const { sampleHeading, spanSeconds, whenOf, USAGE } = usageCli as UsageCli;
+  const { sampleHeading, spanSeconds, USAGE } = usageCli as UsageCli;
   assert.equal(sampleHeading(false), "time (UTC)        statements   errors         p95    rows sent        copy           rows  failing      oldest  memory");
   assert.equal(sampleLine(sample, false), "2026-10-28 09:05       1,204        3    1,830 ms       98,765     5.0 GiB     12,345,678        1        75 s  900.0 MiB (copy 300.0 MiB of 8.0 GiB)");
   assert.equal(sampleLine({ ...sample, statements: 0, statementsRefused: 0, statementsFailed: 0, durationP95Ms: null, tablesFailed: 0, oldestSyncSeconds: null, copyMemoryBytes: null, streamLagSeconds: 3, streamLagBytes: 10 }, true),
@@ -329,8 +331,11 @@ test("mason usage: a span a line under its heading — the statements, their err
   assert.equal(sampleHeading(true).endsWith("oldest        lag  memory"), true);
   assert.deepEqual(["90s", "30m", "6h", "7d", "0", "5", "1w", "-1h"].map(spanSeconds), [90, 1800, 21_600, 604_800, 0, null, null, null]);
   const now = Date.parse("2026-10-28T10:00:00.000Z");
-  assert.deepEqual(["1h", "2026-10-28T09:00:00Z", "2026-10-28", "yesterday", "12"].map((t) => whenOf(t, now)),
-    ["2026-10-28T09:00:00.000Z", "2026-10-28T09:00:00.000Z", "2026-10-28T00:00:00.000Z", null, null]);
+  // --since and --until are read by the ONE time grammar of every entrance (timeOf): a time with no zone is refused
+  const times = ["1h", "2026-10-28T09:00:00Z", "2026-10-28", "2026-10-28T09:00:00", "yesterday", "12", "0"].map((t) => timeOf("--since", t, now));
+  assert.deepEqual(times.map((t) => typeof t === "string" ? t : t.message),
+    ["2026-10-28T09:00:00.000Z", "2026-10-28T09:00:00.000Z", "2026-10-28T00:00:00.000Z", '--since "2026-10-28T09:00:00" is not a time', '--since "yesterday" is not a time', '--since "12" is not a time', '--since "0" is not a time']);
+  assert.equal("whenOf" in usageCli, false, "no second parser beside timeOf");
   for (const k of USAGE.json ?? []) if (k !== "next") assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names ${k}`);
   for (const k of Object.keys(sample)) assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names a sample's ${k}`);
 });
@@ -491,7 +496,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       const asked = usageAsks.length;
       const bad = await runMason(app, ["usage", "--since", "yesterday"], matrixEnv());
       assert.equal(bad.code, 2);
-      assert.match(bad.stderr, /mason usage: --since is a span ago \(90s, 30m, 6h, 7d\) or a time \(2026-10-28T09:00:00Z\), not "yesterday"/);
+      assert.match(bad.stderr, /mason usage: --since "yesterday" is not a time/);
       assert.equal(usageAsks.length, asked, "refused before the run is asked");
     } finally { writeRunning(s.root, null); }
   } finally {
@@ -569,6 +574,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
       [["logs", "--requests", "--failed", "--outcome", "ok"], /mason logs: --failed is every outcome but ok: name it or --outcome, never both/],
       [["logs", "--since", "2h"], /mason logs: --since is a filter of --requests/],
       [["logs", "--running", "--requests"], /mason logs: --running lists the statements running now; --requests is the request log's/],
+      [["usage", "--since", "2026-10-28T09:00:00"], /mason usage: --since "2026-10-28T09:00:00" is not a time/],
       [["logs", "--events", "-n", "20000"], /mason logs: -n is a whole number of events, 1 to 10000/],
       [["logs", "--events", "-n", "0"], /mason logs: -n is a whole number of events, 1 to 10000/],
       [["logs", "--running", "-n", "5"], /mason logs: --running lists every statement running now: -n \(--lines\) does not apply to it/],

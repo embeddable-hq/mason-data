@@ -8,7 +8,8 @@ import { failed, jsonText, parseCommand, endText, type CommandSpec, type NextSte
 import { out as styleOut } from "./style.ts";
 import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
-import { fileSize, guarded } from "./commands.ts";
+import { fileSize, guarded, runFailure } from "./commands.ts";
+import { timeOf } from "./request-filter.ts";
 import { duration } from "./readiness.ts";
 import { SIZE_EVERY_MS, type CopySize, type UsageSample } from "../duck/usage.ts";
 
@@ -28,7 +29,7 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
     mason usage --since 7d --step 1h   the last week, an hour a line
     mason usage --since 2026-10-28T09:00:00Z --until 2026-10-28T10:00:00Z --step 0
 
-  --since <when>   from when: a span ago (90s, 30m, 6h, 7d) or a time (ISO 8601); default 1h
+  --since <when>   from when: an age (90s, 30m, 6h, 7d) or an ISO 8601 date or time with its zone; default 1h
   --until <when>   until when, the same way; default now
   --step <span>    a line per span (1m to the days kept; default 5m), or 0 for every sample as it was taken
   --json           as data: { since, until, stepSeconds (null: every sample), sampleSeconds, keptDays, samples: [{ at
@@ -56,15 +57,6 @@ export function spanSeconds(text: string): number | null {
   return m ? Number(m[1]) * UNIT[m[2]!]! : null;
 }
 
-/** A --since or --until: a span ago, or a time; as ISO 8601, or null when it is neither. */
-export function whenOf(text: string, now: number): string | null {
-  const span = spanSeconds(text);
-  if (span !== null) return new Date(now - span * 1000).toISOString();
-  if (!/^\d{4}-\d\d-\d\d/.test(text.trim())) return null;
-  const t = Date.parse(text);
-  return Number.isNaN(t) ? null : new Date(t).toISOString();
-}
-
 /** One sample on one line: the time, the statements, those refused, failed or cancelled, p95, rows sent, the copy, its rows, the stalest copy, the lag, the memory. */
 export function sampleLine(s: UsageSample, withLag: boolean): string {
   const time = s.at.slice(0, 16).replace("T", " ");
@@ -90,23 +82,19 @@ export async function usage(argv: string[], now = Date.now()): Promise<number> {
   const v = f.values as { since?: string; until?: string; step?: string; json?: boolean };
   const json = v.json === true;
   if (f.positionals.length) return failed("usage", { message: `it takes no ${f.positionals.length === 1 ? "argument" : "arguments"}: ${f.positionals.join(" ")}`, code: "usage", usage: USAGE_USAGE }, { json });
-  const since = whenOf(v.since ?? "1h", now), until = v.until === undefined ? new Date(now).toISOString() : whenOf(v.until, now);
-  for (const [k, t, w] of [["--since", v.since, since], ["--until", v.until, until]] as const) {
-    if (w === null) return failed("usage", { message: `${k} is a span ago (90s, 30m, 6h, 7d) or a time (2026-10-28T09:00:00Z), not ${JSON.stringify(t)}`, code: "usage", usage: USAGE_USAGE }, { json });
-  }
+  // the one time grammar (src/cli/request-filter.ts timeOf): an age, or an ISO 8601 date or time WITH its zone
+  const since = timeOf("--since", v.since ?? "1h", now), until = v.until === undefined ? new Date(now).toISOString() : timeOf("--until", v.until, now);
+  for (const t of [since, until]) if (typeof t !== "string") return failed("usage", { ...t, usage: USAGE_USAGE }, { json });
   const step = spanSeconds(v.step ?? "5m");
   if (step === null) return failed("usage", { message: `--step is a span (1m, 5m, 1h, 1d) or 0 for every sample, not ${JSON.stringify(v.step)}`, code: "usage", usage: USAGE_USAGE }, { json });
   const w = await reach(USAGE, json);
   if (w === null || !("run" in w)) return 1;
   const run = w.run;
   return guarded("usage", json, async () => {
-    const q = new URLSearchParams({ since: since!, until: until!, ...(step === 0 ? {} : { step: String(step) }) });
+    const q = new URLSearchParams({ since: since as string, until: until as string, ...(step === 0 ? {} : { step: String(step) }) });
     const r = await callRun(run, "GET", `/api/usage?${q}`);
-    if (r.status !== 200) {
-      // the run's refusal (a step past the days kept, a since after until) in its own words
-      return failed("usage", { message: String(r.body.error ?? `the run answered ${r.status}`), code: r.status === 400 ? "usage" : "failed",
-        next: [["mason usage --help", "the spans and times it takes"], ["mason logs", "the run's log"]] }, { json });
-    }
+    // the run's refusal (a step past the days kept, a since after until) in its own words and code
+    if (r.status !== 200) return failed("usage", runFailure(r, [["mason usage --help", "the spans and times it takes"], ["mason logs", "the run's log"]]), { json });
     const b = r.body as unknown as { since: string; until: string; stepSeconds: number | null; sampleSeconds: number; keptDays: number; samples: UsageSample[]; copySizes: CopySize[] };
     const next: NextStep[] = [["mason usage --since 7d --step 1h", "the week, an hour a line"], ["mason status", "where everything is now"]];
     if (json) { out(jsonText(USAGE, b, next)); return 0; }

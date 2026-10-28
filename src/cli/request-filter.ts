@@ -42,8 +42,12 @@ const usage = (message: string, fix?: string): Failure => ({ message, code: "usa
 export type FilterKey = keyof RequestFilterText;
 export const QUERY_NAMES = (k: FilterKey): string => k;
 
-/** A time the filters name: an ISO 8601 date or time with its zone, or an age before `now` (30m, 2h, 7d). */
-function timeOf(name: string, text: string, now: number): string | Failure {
+/**
+ * THE TIME GRAMMAR, ONE FOR EVERY ENTRANCE (`--since` / `--until` of mason logs and mason usage, and the run's `since` and
+ * `until` of /api/requests, /api/events, /api/usage and /api/logs): an ISO 8601 date or time with its zone, or an age
+ * before `now` (30s, 30m, 2h, 7d), as an ISO time; a time with no zone is refused, as is anything else.
+ */
+export function timeOf(name: string, text: string, now: number): string | Failure {
   const age = AGE.exec(text.trim());
   if (age !== null) return new Date(now - Number(age[1]) * AGE_MS[age[2]!]!).toISOString();
   const t = ISO.test(text.trim()) ? Date.parse(text.trim()) : NaN;
