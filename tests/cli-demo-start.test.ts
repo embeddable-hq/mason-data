@@ -1,7 +1,8 @@
 /**
  * `mason init demo` END TO END: every command a real process (tests/cli-matrix.ts `runMason`), against the real demo
  * database the run hosts (PGlite on a loopback port, src/demo/source.ts) — init, a command while the run is down, the
- * background start with its demo step, the copy of the four tables, the writer's orders reaching the copy and the
+ * background start with its demo step, the copy of the three tables init adds, the fourth added by the person with
+ * `mason add order_items` while the run is up and copied, the writer's orders reaching the copy and the
  * Postgres API, the stop that keeps the demo database, a second start that opens it again (and answers --json with its
  * Postgres API), the three refusals before a run (a held port, an edited URL, --replication), and the destroy that
  * removes it and the start that seeds it again.
@@ -98,7 +99,7 @@ after(async () => {
 // a skipped suite counts no test in the runner's summary: one skipped test carries the reason to `ℹ skipped`
 if (skip !== false) test("mason init demo end to end, as a person drives it", { skip }, () => undefined);
 describe("mason init demo, then the run as a person drives it", { timeout: 150_000, skip }, () => {
-  test("mason init demo writes the demo's URL to .env, its four tables to the sources file, demo: true to the config", async () => {
+  test("mason init demo writes the demo's URL to .env, three of its four tables to the sources file (order_items left to add), demo: true to the config", async () => {
     const init = await mason(["init", "demo"]);
     assert.equal(init.code, 0, said(init));
     demoUrl = envUrl();
@@ -108,7 +109,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.notEqual(demoPort, pgPort);
     const sources = fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8");
     assert.match(sources, /^url: \$\{DATABASE_URL\}/m);
-    for (const t of ["customers", "products", "orders", "order_items"]) assert.match(sources, new RegExp(`^ {2}${t}: \\{\\}$`, "m"));
+    for (const t of ["customers", "products", "orders"]) assert.match(sources, new RegExp(`^ {2}${t}: \\{\\}$`, "m"));
+    assert.doesNotMatch(sources, /order_items/, "order_items is the person's to add");
     assert.equal(config().demo, true);
     assert.ok(!fs.existsSync(demoDir), "nothing is hosted before mason start");
   });
@@ -145,22 +147,44 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.equal(v.pid, config().running?.pid);
   });
 
-  test("mason wait, then mason status: the four tables copied, the demo database polled", async () => {
+  test("mason wait, then mason status: the three added tables copied, the demo database polled", async () => {
     const w = await mason(["wait", "--timeout", "60"]);
     assert.equal(w.code, 0, said(w));
     assert.match(w.stdout, /^Ready: every added table is copied and served\.$/m);
     const j = await mason(["status", "--json"]);
     assert.equal(j.code, 0, said(j));
-    const st = JSON.parse(j.stdout) as { source: { demo: boolean; changes: string }; tables: { table: string; copy: { phase: string } | null }[] };
+    const st = JSON.parse(j.stdout) as { source: { demo: boolean; changes: string }; tables: { table: string; added: boolean; copy: { phase: string } | null }[] };
     assert.equal(st.source.demo, true);
     assert.equal(st.source.changes, "poll");
-    assert.deepEqual(st.tables.map((t) => [t.table, t.copy?.phase]).sort(),
-      [["public.customers", "done"], ["public.order_items", "done"], ["public.orders", "done"], ["public.products", "done"]]);
+    // the database's four, the three init added copied, order_items there and not added: no copy
+    assert.deepEqual(st.tables.map((t) => [t.table, t.added, t.copy?.phase ?? null]).sort(),
+      [["public.customers", true, "done"], ["public.order_items", false, null], ["public.orders", true, "done"], ["public.products", true, "done"]]);
     const text = await mason(["status"]);
     assert.equal(text.code, 0, said(text));
     assert.match(text.stdout, new RegExp(`the demo database Mason hosts \\(postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo · Postgres 18[.\\d]*\\)`));
     assert.match(text.stdout, /the demo database is read by polling only/);
-    for (const t of ["customers", "products", "orders", "order_items"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · copied$`, "m"));
+    assert.match(text.stdout, /^Tables \(3 of 4 added\):$/m);
+    for (const t of ["customers", "products", "orders"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · copied$`, "m"));
+  });
+
+  test("mason add order_items while the run is up, then mason wait: the fourth table lands in the sources file and is copied", async () => {
+    const a = await mason(["add", "order_items"]);
+    assert.equal(a.code, 0, said(a));
+    assert.match(fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8"), /^ {2}order_items: \{\}$/m);
+    const w = await mason(["wait", "--timeout", "60"]);
+    assert.equal(w.code, 0, said(w));
+    assert.match(w.stdout, /^Ready: every added table is copied and served\.$/m);
+    const j = await mason(["status", "--json"]);
+    assert.equal(j.code, 0, said(j));
+    const st = JSON.parse(j.stdout) as { tables: { table: string; added: boolean; copy: { phase: string } | null; duck: { rows: number } | null }[] };
+    assert.deepEqual(st.tables.map((t) => [t.table, t.added, t.copy?.phase ?? null]).sort(),
+      [["public.customers", true, "done"], ["public.order_items", true, "done"], ["public.orders", true, "done"], ["public.products", true, "done"]]);
+    const items = st.tables.find((t) => t.table === "public.order_items");
+    assert.ok((items?.duck?.rows ?? 0) > 12_000, `about 15,000 order items copied: ${JSON.stringify(items)}`);
+    const text = await mason(["status"]);
+    assert.equal(text.code, 0, said(text));
+    assert.match(text.stdout, /^Tables \(4 of 4 added\):$/m);
+    assert.match(text.stdout, /^ {2}public\.order_items +█+ 100% +[\d,]+ rows · copied$/m);
   });
 
   test("the writer: its orders in the log, in the copy and through the Postgres API", async () => {

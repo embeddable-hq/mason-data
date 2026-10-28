@@ -92,9 +92,11 @@ CLI lacks).
   src/cli/project.ts, as git finds `.git`). Nothing is kept in the home folder. Never a guess at "the only run on the
   machine".
 - **`mason init demo` is an ordinary project on a database Mason hosts** (src/cli/demo.ts; the database is
-  src/demo/source.ts): the files init always writes — `url: ${DATABASE_URL}`, here with the demo's four tables added,
-  its URL in `.env` — and `demo: true` in the config; `mason start` hosts it in `.mason/demo/` before it connects, reads
-  it over the wire as any Postgres, and changes it every `MASON_DEMO_CHANGE_MS`; `mason destroy` removes it with the copy.
+  src/demo/source.ts): the files init always writes — `url: ${DATABASE_URL}`, here with three of the demo's four tables
+  added (`DEMO_ADDED_TABLES`; `order_items` is left for the person's first `mason add`, so they see a copy begin — one
+  list, src/demo/seed.ts), its URL in `.env` — and `demo: true` in the config; `mason start` hosts it in `.mason/demo/`
+  before it connects, reads it over the wire as any Postgres, and changes it every `MASON_DEMO_CHANGE_MS`; `mason
+  destroy` removes it with the copy.
   Why: a first try must need nothing installed, and must run the read path production runs. **Its port is in the URL
   alone** (chosen free at init, read back by `demoPort`): a second record would disagree with an edited `.env`, which the
   run refuses with the way out. **Poll only**: the demo database has no change log, so `--replication` is refused before
