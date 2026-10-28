@@ -75,6 +75,14 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   a request pending is given up on — every request told 57P02, the run told (`onCrash`) — and `close` settles within
   5 s whatever the worker does. A thread blocked inside native code is never ended by `terminate` or `process.exit`
   (measured), so a file given up on is never opened again in the process (`abandoned`); its supervisor's SIGKILL ends it.
+- **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
+  exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a
+  Mason function call; a 1 ms grace reproduced it 6 times in 6). A worker given up on (the grace, the silence) is asked
+  to SHUT DOWN (`shutDown`) and terminated only once that shutdown answered or it exited; until then it stays
+  referenced, so the process cannot exit under it either — and an answer's close is a request, answered once DuckDB
+  handed it back (`answer.close`). Never `worker.terminate()` a copy's worker that may have a statement in flight:
+  even a call-free one aborted the process 2 times in 12. `tests/duck-executor.test.ts` "never ends the copy's thread
+  under a call" holds it (a close with a 1 ms grace, a process ending while an answer drains).
 - **A statement that calls a Mason function starves the executor worker for its whole run, and with it every other
   statement on the copy**: DuckDB's threads queue their calls faster than the worker answers, and Node's
   threadsafe-function loop runs up to a thousand calls between two turns of anything else (4.5 µs a row on the test

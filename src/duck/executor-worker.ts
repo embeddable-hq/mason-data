@@ -163,10 +163,14 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       return { value: { bytes, ends }, transfer: [bytes] };
     }
     case "answer.close": {
+      // answered once DuckDB handed the answer back (its drain, src/duck/store.ts): until then the main thread holds the
+      // process open, which must never end while DuckDB calls into this thread (src/duck/executor.ts "NOTHING ENDS")
       const k = key(Number(m.runner), Number(m.seq));
       statements.get(k)?.answer?.close();
       statements.delete(k);
-      return undefined;
+      await (runners.get(Number(m.runner)) ?? null)?.idle();
+      await closing.get(Number(m.runner));
+      return { value: null };
     }
     case "runner.explain": {
       const runner = need(runners, Number(m.runner), "session");
