@@ -54,6 +54,17 @@ export function planNodes(json: unknown): PlanNode[] {
   });
 }
 
+/** a profile DuckDB's profiler wrote (`enable_profiling = 'json'`): the statement it timed, as it names it (`query.sql`,
+ *  the text it was given), and its plan. The name is what holds a profile to its statement (src/duck/store.ts
+ *  `explained`): the file is the last profiled statement's on the connection, whichever that was */
+export function profiled(doc: unknown): { sql: string | null; plan: PlanNode[] } {
+  const d = doc as { query?: { sql?: unknown }; operator?: unknown[] };
+  return { sql: typeof d.query?.sql === "string" ? d.query.sql : null, plan: planNodes(d.operator ?? []) };
+}
+
+/** what EXPLAIN ANALYZE says of a statement DuckDB's profiler timed no operator of */
+export const UNPROFILED = "DuckDB's profiler recorded no operator of this statement: DuckDB answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered";
+
 /** DuckDB's operator as DuckDB's own plan prints it (`HASH_GROUP_BY` is `Hash Group By`), a scan `Table Scan` as its
  *  profiler names it: DuckDB's EXPLAIN says SEQ_SCAN for the same operator, and Postgres's `Seq Scan` says otherwise */
 export const operatorName = (type: string): string => type.toLowerCase().split("_").map((w) => w === "n" ? "N" : w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
@@ -87,6 +98,8 @@ export interface Explained {
   plan: PlanNode[];
   analyzed?: {
     rows: number;
+    /** the plan is DuckDB's profile of the statement; false: it wrote none (`UNPROFILED`), the plan is its EXPLAIN */
+    profiled: boolean;
     planning: { analysisMs: number; rewriteMs: number; duckdbMs: number };
     execution: { duckdbMs: number; masonMs: number };
   };
@@ -113,7 +126,8 @@ export function explainText(e: Explained, o: ExplainOptions): string[] {
   lines.push(`  Computed by Mason after DuckDB: ${e.computed.length === 0 ? "nothing" : e.computed.join("; ")}`);
   if (e.functions.length > 0) lines.push(`  Mason's functions DuckDB calls: ${e.functions.join(", ")}`);
   for (const name of o.ignored) lines.push(`  Note: ${name} has no DuckDB meaning: ignored`);
-  if (e.analyzed !== undefined && o.timing) lines.push("  Note: an operator's thread time is DuckDB's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time");
+  if (e.analyzed?.profiled === false) lines.push(`  Note: ${UNPROFILED}`);
+  else if (e.analyzed !== undefined && o.timing) lines.push("  Note: an operator's thread time is DuckDB's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time");
   const walk = (n: PlanNode, depth: number): void => {
     const lead = depth === 0 ? "" : `${" ".repeat(6 * depth - 4)}->  `;
     const on = scannedTable(n);
@@ -159,6 +173,7 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
       "Computed After DuckDB": e.computed,
       "Mason Functions DuckDB Calls": e.functions,
       ...(o.ignored.length === 0 ? {} : { Ignored: o.ignored.map((n) => `${n} has no DuckDB meaning`) }),
+      ...(e.analyzed?.profiled === false ? { Note: UNPROFILED } : {}),
     },
   };
   if (e.analyzed !== undefined && o.summary) {
