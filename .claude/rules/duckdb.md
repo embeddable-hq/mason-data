@@ -57,6 +57,16 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's
     (findTargetlistEntrySQL92), the same tree inside an expression the input's (`bareKeyIsInput`);
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`.
+- **A new rewrite for speed is held by the PLAN fixture too** (`tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`):
+  its statement in the tool's own spelling, over the shop's million orders, its plan's skeleton in the fixture (the
+  operators, each scan's table and top-N / zone-map filter, the Mason functions, a delimiter join, a full sort), and
+  where the skeleton cannot show the gain an invariant DuckDB's EXPLAIN ANALYZE measures (the row groups or rows a
+  scan read). The oracle is blind to the plan: each of the three forms above was a BI tool's slow path with every
+  answer right. A diff of the fixture is a plan changed: a regression is fixed, a better plan regenerated
+  (`UPDATE_FIXTURE=1 npm test`) and said so in the commit. DuckDB's EXPLAIN names a projection by its alias, so an
+  expression's cost (ICU's date_trunc against the arithmetic) is not in the skeleton: that one is held by its SQL alone.
+  DuckDB 2.0 plans a delimiter join as a CTE joined back to a HASH_GROUP_BY of its own scan, no operator named DELIM
+  (`joinsBack`). ("The plan fixture")
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
 - **DuckDB lives on the executor worker; the main thread never runs a Mason function and never waits for the

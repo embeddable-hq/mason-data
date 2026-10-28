@@ -288,6 +288,41 @@ table (and the source password) through the attachment. Others, each fixed with 
 | a catalog portal closed by another session's Sync (every six-card Metabase dashboard) | a catalog statement's portal runs whole at its Bind |
 | one node placed in two arms of a CASE, the second left unqualified | a node is placed once (`nodesPlacedTwice`, held to none) |
 
+### The plan fixture (2026-10-28)
+
+**Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
+53 statements (17 of PR #13's shapes, their controls, a count by a column and a table's previews, each in the tool's
+spelling; 36 of `oracle/bi-shapes.ts`, one of each structure) explained through the
+listener over the shop with a million orders in nine row groups, each reduced to a coarse skeleton — the operators in
+tree order, each scan's table and whether a top-N dynamic filter or a zone-map filter is attached, the Mason functions
+called, a delimiter join, a full sort; no cost, estimate or row count, so a DuckDB upgrade that keeps the plan keeps
+the fixture. Five invariants are measured with DuckDB's EXPLAIN ANALYZE, where a skeleton cannot show the gain: a
+100-row page by a column reads at most 3 of the 9 row groups in each scan, a LEFT lateral preview of json rows under a
+LIMIT at most a tenth of the base's rows.
+
+**Why.** The oracle holds every answer to Postgres's and is blind to the plan. On 2026-10-28 three regressions of the
+rewrite were found only by a BI tool's slow statements on the test server, each with every answer right: a LEFT JOIN
+LATERAL of json rows planned as a delimiter join under a LIMIT (37.9 s for a 100-row page), an expression sort key that
+stopped DuckDB's top N pruning the scan (6.4 s and 91 s), date_trunc of a timestamptz through ICU's calendar (7.9 s over
+197 M rows). Rewritten in PR #13, nothing held their plans: a change turning the streaming UNNEST back into a delimiter
+join, or the bare key back into an expression, passed every test. With `src/` at 3ad6493 (main before PR #13) the
+fixture fails 8 statements by name — the three LEFT lateral previews, the three nulls-idiom pages, two BI shapes with
+a LEFT lateral — and the invariants measure what the plans cost: the idiom's page read 9 of 9 row groups (1,000,000
+rows) in its top N's scan, against 1 of 9 (16,960 rows) by created_at and 3 of 9 (262,720) by shipped_at with the
+rewrite; the lateral preview read all 1,000,000 rows of its base, against 18,432 on a laptop's nine threads (a 2,048-row vector each; 2,048 on one thread).
+
+**What it found, and what it cannot see.** DuckDB 2.0 plans a delimiter join without the name: the outer rows as a
+CTE, the lateral over a HASH_GROUP_BY of the CTE's scan (their distinct values), joined back, no operator named DELIM
+— so a plan checked for `DELIM` alone passes the very plan that read all 1,000,000 rows; the skeleton names that form
+a delimiter join too (`joinsBack`).
+A NULL in every row group defeats the top N's pruning even with one key (a timestamp NULL every ninth row, DESC NULLS
+LAST: 9 of 9 row groups; the same column NULL only for its latest rows: 1–3, whatever the threads), and a text column
+whose values spread over every row group is never pruned (9 of 9 either way): both are DuckDB's, and a page sorted by
+such a column gains only the fetch of the winners' columns. DuckDB's EXPLAIN names a projection by its alias, so the
+cost of an expression — ICU's date_trunc against the instant's arithmetic — is not in any skeleton (at 3ad6493 the
+histogram's plan is the same operators); `truncInstant` is held by its SQL (`tests/duck-wire.test.ts`) alone.
+**Where.** `tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`.
+
 ### EXPLAIN
 
 **Decision.** Postgres's shape, DuckDB's plan inside. An EXPLAIN is the statement it explains: options read in Postgres's
