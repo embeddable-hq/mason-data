@@ -122,8 +122,12 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   FROM, NULLIF, CASE x WHEN, count(DISTINCT) — is rewritten to compare `__mason_jsonb_key*` (`jsonbKey` in
   src/duck/rewrite.ts), and every other form refuses with `jsonb-compare`. A rule that compares values (a new
   construct, a sort) asks `comparable`, which refuses a jsonb, or keys it; the allowlist does not see a sort's or a
-  group's operator, so nothing else stops DuckDB's text equality. A string inside is keyed by the collation's key of
-  that string (ICU's, or the measured libc order's), as text is. `tests/duck-jsonb-order.test.ts` holds the key to
+  group's operator, so nothing else stops DuckDB's text equality. **Equality reads the C key, an order the
+  collation's**: the database's collation is deterministic (equal strings are equal bytes), so =, IN, GROUP BY,
+  DISTINCT, PARTITION BY … read `equalKey` under every collation, and only ORDER BY, <, >, BETWEEN read the
+  collation's key of each string (ICU's, or the measured libc order's, which refuses a character it does not cover:
+  equality must never refuse what it never had to order). A node the rewrite typed as another (`typedLike`) keeps
+  that type through `clone`. `tests/duck-jsonb-order.test.ts` holds the key to
   Postgres's order under C, ICU and libc, and the oracle's `jorder` every form. ("jsonb's order")
 
 ## Stored JSON paths (src/duck/kept.ts, src/duck/kept-route.ts; docs/DESIGN.md "Stored JSON paths")

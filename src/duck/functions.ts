@@ -406,7 +406,11 @@ function contains(a: Json, b: Json): boolean {
 
 /** `a @> b` on jsonb (jsonb_contains): their roots must both be objects or both not, then JsonbDeepContains */
 export function jsonbContains(a: string, b: string): boolean {
-  const x = root(parseJson(a)), y = root(parseJson(b));
+  const pa = parseJson(a), pb = parseJson(b);
+  const x = root(pa), y = root(pb);
+  // a raw scalar (stored as a one-element array) contains no array: `'1' @> '[1]'` is false, `'[1]' @> '1'` true
+  // (JsonbDeepContains refuses a raw scalar on the left of a real array)
+  if (pa.t !== "arr" && pa.t !== "obj" && pb.t === "arr") return false;
   return (x.t === "obj") === (y.t === "obj") && contains(x, y);
 }
 
