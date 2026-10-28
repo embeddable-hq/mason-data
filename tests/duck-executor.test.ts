@@ -585,7 +585,7 @@ duck.DuckDBPreparedStatement.prototype.stream = async function () {
 };
 await import(${at("../src/duck/executor-worker.ts")});
 `);
-  const run = (name: string, workerFile: string | null, before: string): string[] => {
+  const run = (name: string, workerFile: string | null, before: string, calls = true): string[] => {
     const file = path.join(dir, `${name}.mjs`);
     fs.writeFileSync(file, `
       import { setTimeout as sleep } from "node:timers/promises";
@@ -597,9 +597,10 @@ await import(${at("../src/duck/executor-worker.ts")});
       const r = await store.runner();
       order.length = 0;
       // a count calling json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
-      const asked = r.run({ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL",
-        functions: ["__mason_json_get"] }, [], { timeZone: "UTC", searchPath: "public" }, new AbortController().signal)
-        .then(() => order.push("answered"), () => order.push("refused"));
+      const asked = r.run(${calls
+        ? `{ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL", functions: ["__mason_json_get"] }`
+        : `{ text: "SELECT count(*) FROM t", functions: [] }`}, [], { timeZone: "UTC", searchPath: "public" }, new AbortController().signal${calls ? "" : `, [{ name: "count", oid: 20 }]`})
+        .then(() => order.push("answered"), (e) => order.push("refused " + (e.fields?.code ?? e.message)));
       ${before}
       await r.close();
       await asked;
@@ -617,4 +618,9 @@ await import(${at("../src/duck/executor-worker.ts")});
   // the close asked right after the statement, before its start began (its session's zone is set first)
   assert.deepEqual(run("closed-before-start", null, ""),
     ["answered", "released"], "closed before its start: the answer opened after the close is released too, never left open under the closing connection");
+  // one that calls NO function, closed while DuckDB starts it: released at once (its close cancels the executor), so
+  // its release comes first, and told the cancel — never an XX000 "report it" read off the released result's 0 columns
+  // (its Postgres columns given, as the listener gives them: the check that read them)
+  assert.deepEqual(run("call-free-closed-in-start", slow, `for (const t = Date.now(); !order.includes("starting"); await sleep(5)) if (Date.now() - t > 20_000) throw new Error("no start within 20 s");`, false),
+    ["released", "refused 57014"], "a call-free statement closed while it started: released, and refused 57014 (the close), never XX000");
 });
