@@ -403,6 +403,8 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   at that moment (`usageFacts`, src/cli/run-server.ts), the statements are counted as the listener records them (the one
   `record`, by the summary's rules: no CONNECT, `outcomeOf`, the completed ones' `quantile_cont`, held equal to DuckDB's
   by tests/duck-usage.test.ts) — so a statement is in the interval it ENDED in, which a query by `started_at` would miss.
+  An interval keeps at most `DURATIONS_KEPT` completed durations (a sample not taken carries its interval on, for as
+  long as samples fail): exact up to it, a uniform reservoir past it.
   The copy's memory is `duckdb_memory()` (under 1 ms); a copy's bytes are its distinct blocks from
   `pragma_storage_info` (61–72 ms cold on 30 M rows × 14 columns, metadata only; it grows with rows × columns, so never
   per request). `mason usage` and `GET /api/usage` read them.
