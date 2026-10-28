@@ -209,3 +209,9 @@ test("a failure to stderr is styled as stderr is, with a red ✘ and a bold mess
   assert.equal(failed("x", f, { json: false, io: { out: () => undefined, err: (m) => { plain.push(m); } } }), 1);
   assert.match(plain.join(""), /^✗ mason x: it broke\n/);
 });
+
+test("mason init --help says the demo adds three of its tables and leaves order_items for the first mason add", () => {
+  const r = mason("init", "--help");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /\n {2}orders, order_items\): mason start makes it in \.mason\/demo\/ and changes it every few seconds\. Three of its tables are\n {2}added; the fourth is yours to add after mason start \(mason add order_items\), to watch its copy begin\.\n/);
+});

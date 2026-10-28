@@ -35,8 +35,8 @@ argument or it was only in the shell, and gitignores that file): change it there
 database is required.
 
 **No database at hand?** `mason init demo && mason start`, in a new folder, makes a project on a demo database Mason
-hosts itself — a small shop (`customers`, `products`, `orders`, `order_items`, all four added), kept in `.mason/demo/`,
-served on a port of this machine, with a new order every few seconds (`MASON_DEMO_CHANGE_MS`, default 5000) so
+hosts itself — a small shop (`customers`, `products`, `orders`, `order_items`; the first three added, `order_items`
+left for your first `mason add order_items` after `mason start`), kept in `.mason/demo/`, served on a port of this machine, with a new order every few seconds (`MASON_DEMO_CHANGE_MS`, default 5000) so
 `mason status` shows the copy keeping up. Nothing to install. It is read by polling only (it has no change log), and
 `mason destroy` removes it with the copy.
 

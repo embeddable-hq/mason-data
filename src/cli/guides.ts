@@ -7,6 +7,7 @@
  *
  * A guide's name is never a command's (tests/cli-help.test.ts): one word never means two pages.
  */
+import { DEMO_ADDED_TABLES, DEMO_TABLES, DEMO_TABLE_TO_ADD } from "../demo/seed.ts";
 
 /** The guides, by the name `mason help <guide>` takes. */
 export const GUIDES = {
@@ -90,7 +91,8 @@ ${codes}
     mason user add my-tool --json             the URL and password a tool connects with
     mason status --json                       each table's copy, and the last day's slow and refused statements
   With no database to hand, in a new folder: mason init demo --json && mason start --json — a demo database Mason
-  hosts itself (customers, products, orders, order_items, all added), changed every few seconds, read by polling only.
+  hosts itself (${DEMO_TABLES.join(", ")}), changed every few seconds, read by polling only. Init adds
+  ${DEMO_ADDED_TABLES.join(", ")}; ${DEMO_TABLE_TO_ADD} is left to add: mason add ${DEMO_TABLE_TO_ADD} --json && mason wait --json, after mason start.
 `;
 }
 

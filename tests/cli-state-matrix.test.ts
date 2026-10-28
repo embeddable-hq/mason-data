@@ -8,7 +8,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -34,23 +33,19 @@ after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true 
 /**
  * A STOPPED DEMO PROJECT, written by `mason init demo` itself (its sources file, its `.env` naming a port free now,
  * `demo: true`), once, and copied for each command: its database runs inside mason start, so nothing answers there.
+ * Its port is then moved to 1, where nothing listens (as SOURCE's): the port init picks is the demo's preferred one,
+ * which tests/cli-demo-start.test.ts's run, beside this file under `node --test`, picks too and hosts its demo database
+ * on — and a `mason tables`, `add` or `remove` here would read that one.
  */
 const demoTemplate = fs.mkdtempSync(path.join(os.tmpdir(), "mason-matrix-demo-template-"));
 made.push(demoTemplate);
 const demoInit = await runMason(demoTemplate, ["init", "demo", "--json"], matrixEnv());
 if (demoInit.code !== 0) throw new Error(`mason init demo, for the matrix's demo project: exit ${demoInit.code}\n${demoInit.stdout}${demoInit.stderr}`);
-const initAt = /^DATABASE_URL=postgres:\/\/demo@(127\.0\.0\.1:\d+)\/demo$/m.exec(fs.readFileSync(path.join(demoTemplate, ".env"), "utf8"))?.[1];
+const demoEnv = path.join(demoTemplate, ".env");
+const initAt = /^DATABASE_URL=postgres:\/\/demo@(127\.0\.0\.1:\d+)\/demo$/m.exec(fs.readFileSync(demoEnv, "utf8"))?.[1];
 if (initAt === undefined) throw new Error("mason init demo wrote no demo URL in .env");
-// the demo's port moved to one the system hands out (the URL is its one record, src/cli/demo.ts demoPort): init prefers
-// 5434, where tests/cli-demo-start.test.ts, beside this file in npm test, hosts its own demo database — which then
-// answered this "stopped" demo project, and mason tables, add and remove connected
-const freeAt = await new Promise<number>((resolve, reject) => {
-  const s = net.createServer();
-  s.once("error", reject);
-  s.listen(0, "127.0.0.1", () => { const port = (s.address() as net.AddressInfo).port; s.close(() => resolve(port)); });
-});
-const demoAt = `127.0.0.1:${freeAt}`;
-fs.writeFileSync(path.join(demoTemplate, ".env"), fs.readFileSync(path.join(demoTemplate, ".env"), "utf8").replace(`@${initAt}/`, `@${demoAt}/`));
+const demoAt = "127.0.0.1:1";
+fs.writeFileSync(demoEnv, fs.readFileSync(demoEnv, "utf8").replace(`@${initAt}/`, `@${demoAt}/`));
 /** The commands' lines in a state: a demo project's start asks for replication, refused before anything starts (a
  *  plain start there would host the demo database and run, which the matrix must not leave behind). */
 const argsIn = (state: string, cmd: string): readonly string[] => state === "demo" && cmd === "start" ? ["--replication"] : MATRIX_ARGS[cmd]!;
