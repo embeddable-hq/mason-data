@@ -15,6 +15,7 @@ import { DESTROY, destroy } from "./machine.ts";
 import { INIT, init } from "./init.ts";
 import { SYNC, sync } from "./sync.ts";
 import { USAGE, usage } from "./usage.ts";
+import { CANCEL, cancel } from "./cancel.ts";
 import { SERVE, serve } from "./serve.ts";
 import { PROJECT_LINE } from "./dev.ts";
 import { version } from "./version.ts";
@@ -139,7 +140,7 @@ export const STEPS: ReadonlyArray<[step: string, commands: readonly Command[]]> 
   ["Set up", [{ ...DOCTOR, run: (argv) => doctor(argv) }, { ...INIT, run: (argv) => init(argv) }, { ...DEV, run: runDev }]],
   ["Add your tables", [{ ...TABLES, run: tables }, { ...ADD, run: add }, { ...REMOVE, run: remove }, { ...WAIT, run: wait }]],
   ["Connect", [{ ...USER, run: user }]],
-  ["Run", [{ ...STATUS, run: status }, { ...UI, run: ui }, { ...SYNC, run: sync }, { ...LOGS, run: logs }, { ...USAGE, run: (argv) => usage(argv) }, { ...STOP, run: stop }, { ...DESTROY, run: (argv) => destroy(argv) }]],
+  ["Run", [{ ...STATUS, run: status }, { ...UI, run: ui }, { ...SYNC, run: sync }, { ...LOGS, run: logs }, { ...CANCEL, run: cancel }, { ...USAGE, run: (argv) => usage(argv) }, { ...STOP, run: stop }, { ...DESTROY, run: (argv) => destroy(argv) }]],
   ["Go to production", [{ ...SERVE, run: serve }]],
 ];
 

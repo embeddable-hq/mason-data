@@ -246,11 +246,12 @@ name, and how a tool connects.
 
 **4. Keep an eye on it.** `mason status` says what Mason is doing: the database and how its
 changes are read, each table's copy, the Postgres API and how it listens, the statements it
-answered slowly in the last day and the ones it refused, each with its reason.
+answered in the last day and week, the ones it answered slowly and the ones it refused, each with its reason.
 
 ```bash
 mason status
-mason logs --requests --failed       # every statement the Postgres API refused or failed, with why
+mason logs --requests --failed       # every statement the Postgres API refused, failed or cancelled, with why
+mason logs --running                 # the statements running now; mason cancel <session> stops one
 mason stop                           # the copy stays; the next `mason start` resumes in seconds
 mason destroy                        # removes this project's copy and state, never its files or users
 ```
@@ -284,7 +285,7 @@ your Postgres  ──SELECTs (or its change log)──▶  the copy, kept curren
   continues with the ranges it did not commit. Small tables are copied first, and a copy runs
   beside the stream and the polls, never instead of them.
 - **Every statement is a row of the request log** (`mason logs --requests`): when, the outcome
-  and SQLSTATE, how long, the rows sent, the tool's `application_name` and the user's name.
+  and SQLSTATE, how long, the rows and bytes sent, the tool's `application_name` and the user's name.
 
 [`docs/DESIGN.md`](docs/DESIGN.md) is the design: how a statement is
 answered, what was decided and why, what was measured.

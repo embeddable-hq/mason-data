@@ -380,7 +380,10 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   fails no statement. `mason logs --requests` and `mason status` read it through the run's command server, never the
   file. **Its order is `started_at`, then `seq`** (the row's number in arrival order, continuing across restarts):
   `request_id` is a random uuid and the clock a millisecond, so a refused login and the statement before it read back
-  in either order until a number broke the tie. ("The request log")
+  in either order until a number broke the tie; a page's cursor is that order's position (`requestCursor`). **An
+  outcome is ONE rule** (`outcomeOf`, src/api/request-log.ts: ok, refused, failed, cancelled = 57014), read as SQL by
+  the ledger's filters and summary through `outcomeSql`, held equal code for code by tests/duck-requests.test.ts. Every
+  row carries the bytes the listener sent for the statement (`bytes_sent`). ("The request log")
 - **Every sync failure is a row of `_mason.sync_events`, kept as the request log is** (src/duck/events.ts: a failure
   was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
   says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy

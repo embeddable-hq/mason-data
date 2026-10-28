@@ -195,10 +195,20 @@ Postgres refused) and every refused login is a row of the run's request log, `_m
 The catalog never lists `_mason`, so a connected tool cannot read it. A catalog read, a `SET`, a `SHOW` or a `BEGIN`
 that was answered is the protocol's chatter and is not recorded (`MASON_PG_TRACE=1` logs every statement). A row has
 the session, `application_name`, the `mason user`, the method (`QUERY`, `PARSE`, `BIND`, `DESCRIBE`, `EXECUTE`,
-`CONNECT`), the SQLSTATE, message, detail and hint sent, the rows sent, the duration and the statement (cut at 64 KiB,
-flagged when cut). It is kept `MASON_REQUEST_LOG_DAYS` days (default 7). `mason logs --requests` reads it, a request
-a line (`--failed` for the refused and failed only, `--json` for every column), and `mason status` shows the last
-day's slow and refused statements (docs/DESIGN.md "The request log").
+`CONNECT`), the SQLSTATE, message, detail and hint sent, the rows sent, the bytes sent (every frame of the answer, its
+CommandComplete or ErrorResponse included, the ReadyForQuery after it not), the duration and the statement (cut at 64
+KiB, flagged when cut). Its outcome is the SQLSTATE's: `ok`, `refused` (the statement's own fault), `failed` (Mason's
+or the machine's: classes XX, 53, 57, 58) or `cancelled` (57014: a cancel or a statement timeout). It is kept
+`MASON_REQUEST_LOG_DAYS` days (default 7). `mason logs --requests` reads it, a request a line, filtered by
+`--outcome`, `--since` / `--until`, `--user` and `--client` (`--failed` for every one not answered), a page at a time
+(`--before`, the position the last page answered with), `--json` for every column; `mason status` shows the last
+day's and week's statements (each outcome, the completed ones' average / p50 / p95 time, the rows and bytes sent) and
+the last day's slow and refused statements (docs/DESIGN.md "The request log").
+
+`mason logs --running` lists the statements running now, one per session (its user, `application_name`, when it
+started, the rows sent so far), and `mason cancel <session>` stops one exactly as the client's own cancel would: the
+client is told 57014 "canceling statement due to user request", its session goes on, and the request log keeps it as
+cancelled.
 
 ## Settings
 
