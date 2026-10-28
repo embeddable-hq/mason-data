@@ -164,9 +164,9 @@ export interface Synced { at: string; seconds: number | null; by: "copy" | "poll
  */
 export interface StreamStatus {
   /** the replication slot's name (the one object Mason makes on the database) */
-  slotName: string;
+  slot: string;
   /** the WAL the slot holds on the database (`SlotWal`), read at most every SLOT_READ_MS on the position's connection */
-  slot: SlotWal;
+  slotWal: SlotWal;
   publication: string;
   /** a stream is running now; when not, `failure` says why and when it starts again (null: it has not started yet) */
   running: boolean;
@@ -1552,7 +1552,7 @@ export class Sync {
       return { table: t.source, state: "waiting", why: this.notStreamedWhy(t.source), applied };
     });
     return {
-      slotName: r.slot, slot: this.slotWal?.wal ?? { error: "not read yet: the database did not answer within 3 s" }, publication: r.publication, running: s !== null,
+      slot: r.slot, slotWal: this.slotWal?.wal ?? { error: "not read yet: the database did not answer within 3 s" }, publication: r.publication, running: s !== null,
       failure: s === null && this.streamFailure !== null ? { error: this.streamFailure.error, retryAt: iso(this.streamFailure.retryAt) } : null,
       position: formatLsn(position), applied: formatLsn(this.appliedLsn),
       database: "lsn" in db ? { lsn: formatLsn(db.lsn), at: iso(db.at) } : { error: db.error },

@@ -435,7 +435,7 @@ test("a usage sample reads /api/state's own facts: the copy file's bytes, the to
   ] as unknown as CopyState[];
   const lag = { bytes: 4096, seconds: 2.5 };
   const slot = { walHeldBytes: 65_536, walStatus: "reserved" as const, safeWalSizeBytes: null, at };
-  const stream = { slotName: "s", slot, publication: "p", running: true, failure: null, position: "0/1", applied: "0/1", database: { lsn: "0/2", at }, lag, lastBatch: null, tables: [] };
+  const stream = { slot: "s", slotWal: slot, publication: "p", running: true, failure: null, position: "0/1", applied: "0/1", database: { lsn: "0/2", at }, lag, lastBatch: null, tables: [] };
   const added = { file: { name: "app", file: sourceFile, tables: ["customers", "orders", "Shouty"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null } as unknown as ReturnType<RunContext["sources"]>;
   const c: RunContext = { ...ctx, sources: () => added, duck: { ...ctx.duck, copies: () => states, stream: async () => stream } };
   const facts = await runServer.usageFacts!(c, now);
@@ -446,7 +446,7 @@ test("a usage sample reads /api/state's own facts: the copy file's bytes, the to
   const polled = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => null } }, now) as { streamLag: unknown; slotWalHeldBytes: unknown };
   assert.equal(polled.streamLag, null, "no stream when polling");
   assert.equal(polled.slotWalHeldBytes, null, "no slot when polling");
-  const unread = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => ({ ...stream, slot: { error: "the database could not be reached: connect ECONNREFUSED" } }) } }, now) as { slotWalHeldBytes: unknown };
+  const unread = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => ({ ...stream, slotWal: { error: "the database could not be reached: connect ECONNREFUSED" } }) } }, now) as { slotWalHeldBytes: unknown };
   assert.equal(unread.slotWalHeldBytes, null, "a slot that could not be read is unknown, never a 0");
 });
 
@@ -468,6 +468,8 @@ test("the run itself in /api/state: its version, since when it is up, and its su
   assert.match(restartsRows(engine({ ...ctx, duck: { ...ctx.duck, restarts: () => two } }).restarts)[0]![1], /^2, the last .* ago: it ran out of JavaScript heap \(V8: heap out of memory\), after 120 s up/);
   assert.deepEqual(restartsRows(none.restarts), [], "none: no line");
   assert.deepEqual(restartsRows(unreadable), [["Restarts", unreadable.error]]);
+  const { masonRow } = await import("../src/cli/commands.ts") as unknown as { masonRow: (e: unknown, pid: number) => [string, string] };
+  assert.deepEqual(masonRow(none, 4242), ["Mason", "9.9.9, pid 4242 · one process · up 1 h 30 min, since 2026-10-28 08:00:00 UTC"]);
 });
 
 test("the sync's events: /api/events passes its filters to the record, merges the run's restarts newest last, and refuses a bad limit or time by name", async () => {

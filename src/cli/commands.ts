@@ -235,7 +235,7 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
     ? `the database is at ${st.database.lsn}: ${n(st.lag.bytes ?? 0)} bytes behind (read ${spanText(since(st.database.at))} ago)`
     : `the database's position could not be read: ${st.database.error.split("\n")[0]}`;
   rows.push(["position", `${st.position} · ${db}`]);
-  rows.push(["slot", slotText(st.slot, since)]);
+  rows.push(["slot", slotText(st.slotWal, since)]);
   rows.push(["last change", st.lastBatch === null ? "none applied this run"
     : `committed ${spanText(since(st.lastBatch.committedAt))} ago, applied ${spanText((Date.parse(st.lastBatch.appliedAt) - Date.parse(st.lastBatch.committedAt)) / 1000)} after its commit`]);
   const total = (t: StreamStatus["tables"][number]): number => t.applied.inserts + t.applied.updates + t.applied.deletes + t.applied.truncates;
@@ -255,11 +255,11 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
 }
 
 /**
- * THE WAL THE SLOT HOLDS ON THE DATABASE, in a line (`StreamStatus.slot`): how much, Postgres's status of it, and the cap —
+ * THE WAL THE SLOT HOLDS ON THE DATABASE, in a line (`StreamStatus.slotWal`): how much, Postgres's status of it, and the cap —
  * or, with `max_slot_wal_keep_size` unset, that nothing caps it: while nothing reads the slot it holds WAL for ever, until
  * the database's disk fills (CLAUDE.md "Hard-won gotchas"). A read that failed is said, never a 0.
  */
-export function slotText(w: StreamStatus["slot"], since: (iso: string) => number): string {
+export function slotText(w: StreamStatus["slotWal"], since: (iso: string) => number): string {
   if ("error" in w) return `the WAL it holds could not be read: ${w.error.split("\n")[0]}`;
   const read = `(read ${spanText(since(w.at))} ago)`;
   if (w.walStatus === "lost") return `lost: Postgres invalidated it (it held more WAL than max_slot_wal_keep_size), so Mason makes it again and catches the copies up by one poll ${read}`;
@@ -307,7 +307,7 @@ const STATUS_USAGE = `usage: mason status [--json]
            readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
            { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
-           exit 1. In replication mode stream: { slotName, slot: { walHeldBytes (the WAL the slot holds on the
+           exit 1. In replication mode stream: { slot, slotWal: { walHeldBytes (the WAL the slot holds on the
            database), walStatus (reserved, extended, unreserved, lost), safeWalSizeBytes (the WAL left before Postgres
            invalidates it; null: max_slot_wal_keep_size unset, nothing caps it), at } or { error }, publication, running, failure, position,
            applied, database: { lsn, at } or { error }, lag: { bytes, seconds }, lastBatch: { appliedAt, committedAt },
@@ -395,8 +395,7 @@ export async function status(argv: string[]): Promise<number> {
     const rows: Array<[string, string]> = [
       ["Project", `${run.name}, files in ${s.folder ?? "(none chosen)"}`],
       ...sourceRows(s),
-      // the run's own version and how long it has been up (a CLI of another version says the run's)
-      ["Mason", `${s.engine.version ?? version()}, pid ${run.pid} · one process${s.engine.startedAt ? ` · up ${spanText(s.engine.uptimeSeconds ?? 0)}, since ${s.engine.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`],
+      masonRow(s.engine, run.pid),
       ["Copy", `${s.engine.file}${s.engine.bytes === null ? "" : ` · ${fileSize(s.engine.bytes)}`}`],
       ...diskRows(s.disk),
       // the copies in all (src/cli/readiness.ts syncTotals): a run from before them has none
@@ -417,7 +416,7 @@ export async function status(argv: string[]): Promise<number> {
       return 0;
     }
     if (s.stream) {
-      out(st.bold(`Stream (slot ${s.stream.slotName}):`));
+      out(st.bold(`Stream (slot ${s.stream.slot}):`));
       for (const l of streamLines(s.stream)) out(`  ${l}`);
       out("");
     }
@@ -565,6 +564,12 @@ export function refusedLines(r: { refused: readonly RefusedQuery[]; total: numbe
 /** A file's size, as a person reads one (mason status's copy, mason usage's) */
 export function fileSize(b: number): string {
   return b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GiB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`;
+}
+
+/** `Mason` in mason status: the run's own version (a CLI of another version says the run's), its pid, and how long it
+ *  has been up (a run from before it: the CLI's version, no uptime) */
+export function masonRow(e: Pick<RunState["engine"], "version" | "startedAt" | "uptimeSeconds">, pid: number): [string, string] {
+  return ["Mason", `${e.version ?? version()}, pid ${pid} · one process${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`];
 }
 
 /** `Disk` in mason status: the bytes free where the copy is, and what the copies running are projected to add (none: no

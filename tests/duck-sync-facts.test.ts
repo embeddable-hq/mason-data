@@ -193,7 +193,7 @@ test("the slot's WAL is read with the database's position, at most every 30 s, a
   assert.match(String((m.slotWalOf!({ ...row, exists: false }, "mason_x", at) as { error?: string }).error), /^replication slot mason_x does not exist on the database/);
   await aRun(async ({ sync }) => {
     const s = sync as unknown as { slotWal: { wal: unknown; at: number } | null };
-    const status = async (): Promise<unknown> => (await sync.streamStatus())!.slot;
+    const status = async (): Promise<unknown> => (await sync.streamStatus())!.slotWal;
     // the source is not there: the position and the slot are each said as their error
     assert.match(String((await status() as { error: string }).error), /^the database could not be reached: /);
     // read 10 s ago: not again (the position is read again, at most every 5 s; the slot is not due)

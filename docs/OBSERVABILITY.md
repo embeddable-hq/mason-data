@@ -25,10 +25,10 @@ same JSON; the web page and the managed service read those endpoints, never a se
 `/api/state` also says the run's health beyond the copies (each `mason status` says on a line of its own, and each
 sampled once a minute where it moves):
 
-- `stream.slot` (replication): the WAL the slot holds on the database — `{ walHeldBytes, walStatus, safeWalSizeBytes, at }`
+- `stream.slotWal` (replication): the WAL the slot holds on the database — `{ walHeldBytes, walStatus, safeWalSizeBytes, at }`
   or `{ error }`; `safeWalSizeBytes` null is `max_slot_wal_keep_size` unset, nothing capping it. One row of
   `pg_replication_slots`, read on the connection the database's position is read on, at most every 30 s. Sampled as
-  `slotWalHeldBytes`. (`stream.slotName` is the slot's name.)
+  `slotWalHeldBytes`. (`stream.slot` is the slot's name.)
 - `engine.version`, `engine.startedAt`, `engine.uptimeSeconds`: the run's own (a supervisor's restart is a new run), and
   `engine.restarts` — `{ count, last: { at, why, upSeconds } | null }` or `{ error }` — its supervisor's record
   (`.mason/restarts.json`, the last 20), read by ONE function (src/cli/supervise.ts `restartsFact`) that `mason status`

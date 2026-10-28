@@ -196,7 +196,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
   // the first replication run on a server: one stream line in 35 minutes, and status showed no position, lag or count
   const now = Date.parse("2026-10-26T12:00:10.000Z");
   const stream: StreamStatus = {
-    slotName: "mason_shop", slot: { walHeldBytes: 3 * 2 ** 30, walStatus: "extended", safeWalSizeBytes: 2 ** 30, at: "2026-10-26T12:00:08.000Z" },
+    slot: "mason_shop", slotWal: { walHeldBytes: 3 * 2 ** 30, walStatus: "extended", safeWalSizeBytes: 2 ** 30, at: "2026-10-26T12:00:08.000Z" },
     publication: "mason_shop", running: true, failure: null,
     position: "0/1A2B3C8", applied: "0/1A2B300",
     database: { lsn: "0/1A2B4F0", at: "2026-10-26T12:00:08.000Z" },
@@ -223,14 +223,14 @@ test("mason status and wait in replication mode say where the stream is: its pos
   ]);
   // a stream that failed says why and when it starts again; a database that could not be asked says so, never a lag of 0
   assert.deepEqual(streamLines({ ...stream, running: false, failure: { error: "replication: the slot is in use\nmore", retryAt: "2026-10-26T12:00:40.000Z" },
-    database: { error: "connect ECONNREFUSED" }, slot: { error: "the database could not be reached: connect ECONNREFUSED" }, lag: { bytes: null, seconds: null }, lastBatch: null, tables: [] }, now), [
+    database: { error: "connect ECONNREFUSED" }, slotWal: { error: "the database could not be reached: connect ECONNREFUSED" }, lag: { bytes: null, seconds: null }, lastBatch: null, tables: [] }, now), [
     "stream       not running: replication: the slot is in use · it starts again in 30 s",
     "position     0/1A2B3C8 · the database's position could not be read: connect ECONNREFUSED",
     "slot         the WAL it holds could not be read: the database could not be reached: connect ECONNREFUSED",
     "last change  none applied this run",
   ]);
   // THE SLOT'S WAL, with no cap: said plainly, since a slot nothing reads then holds WAL until the database's disk fills
-  const slotLine = (slot: StreamStatus["slot"]): string => streamLines({ ...stream, slot, tables: [] }, now)[1]!;
+  const slotLine = (slotWal: StreamStatus["slotWal"]): string => streamLines({ ...stream, slotWal, tables: [] }, now)[1]!;
   assert.equal(slotLine({ walHeldBytes: 512 * 2 ** 20, walStatus: "reserved", safeWalSizeBytes: null, at: "2026-10-26T12:00:00.000Z" }),
     "slot         holds 512.0 MiB of the database's WAL (reserved) · max_slot_wal_keep_size is unset, so nothing caps it: while nothing reads the slot it holds WAL for ever, " +
     "until the database's disk fills (set max_slot_wal_keep_size on the database) (read 10 s ago)");

@@ -78,7 +78,7 @@ export interface UsageFacts {
   streamLag: { bytes: number | null; seconds: number | null } | null;
   /** the copies served (`schema.table`): those whose own bytes are measured */
   copied: string[];
-  /** replication mode: the WAL the slot holds on the database (`stream.slot.walHeldBytes`); null when polling or not read */
+  /** replication mode: the WAL the slot holds on the database (`stream.slotWal.walHeldBytes`); null when polling or not read */
   slotWalHeldBytes: number | null;
   /** the bytes free where the copy's file is (`disk.freeBytes`); null when it could not be read */
   diskFreeBytes: number | null;

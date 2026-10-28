@@ -200,7 +200,7 @@ export async function usageFacts(ctx: RunContext, now = Date.now()): Promise<Usa
   const s = runState(ctx, copies, await ctx.duck.stream(), now) as { totals: SyncTotals; engine: { bytes: number | null }; disk: { freeBytes: number | null };
     tables: Array<{ added: boolean; sync?: TableSync }>; stream?: StreamStatus };
   const ages = s.tables.flatMap((t) => (t.added && t.sync?.ageSeconds != null ? [t.sync.ageSeconds] : []));
-  const slot = s.stream?.slot;
+  const slot = s.stream?.slotWal;
   return { copyBytes: s.engine.bytes, totals: s.totals, oldestSyncSeconds: ages.length ? Math.max(...ages) : null, streamLag: s.stream?.lag ?? null,
     copied: copies.filter((c) => c.phase === "copied").map((c) => c.source), slotWalHeldBytes: slot !== undefined && "walHeldBytes" in slot ? slot.walHeldBytes : null,
     diskFreeBytes: s.disk.freeBytes };
