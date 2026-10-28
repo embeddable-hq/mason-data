@@ -199,6 +199,16 @@ The managed service reads these from `mason serve`, which today answers `/health
 `mason start`'s command server (loopback, the run's token). It needs them served from `mason serve` behind a service
 token, and TLS off loopback. Not designed yet.
 
+## To come back to
+
+- **The slow statements have no page.** The Status clean-up dropped the "Slow queries: N in the last day" line and
+  pointed to the Queries page, which has no slow filter; `/api/slow` and `mason status` still say them. The way back:
+  a "Slow (1 s or more)" option in the Queries page's status filter, or a "slowest" sort of the request log (~30 min).
+- **The oracle's measurement fixture** (`tests/fixtures/oracle-duckdb-alone.json`) fails on `main` as on this branch
+  against a local Postgres 18.3 (913 exact where it has 850): recorded elsewhere, to regenerate where CI runs.
+- **Access** for the managed service (above): not designed.
+- **Rows scanned**: deferred (it may add cost to every statement).
+
 ## Decided
 
 - "User", never "credential" (the CLI's word).
