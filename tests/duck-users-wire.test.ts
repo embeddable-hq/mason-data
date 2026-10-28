@@ -255,6 +255,6 @@ test("mason user list with Mason NOT running still lists, removed ones too: last
     const human = await runMason(root, ["user", "list"], env);
     assert.equal(human.code, 0, human.stderr);
     assert.match(human.stdout, /removed 20\d\d-\d\d-\d\d \d\d:\d\d UTC/);
-    assert.match(human.stdout, /last used unknown: Mason is not running/);
+    assert.match(human.stdout, /last used unknown\b[\s\S]*Last used: unknown: Mason is not running/);
   } finally { fs.writeFileSync(file, was, { mode: 0o600 }); }
 });

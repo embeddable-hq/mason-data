@@ -242,7 +242,7 @@ export async function user(argv: string[]): Promise<number> {
     const width = Math.max(...users.map((u) => u.name.length));
     const stamp = (iso: string): string => iso.slice(0, 16).replace("T", " ");
     const used = (u: UserRow): string => u.lastUsedAt !== null ? `last used ${stamp(u.lastUsedAt)} UTC`
-      : lastUsedNote !== null ? "last used unknown: Mason is not running" : `not used in the last ${requestLogDays ?? "?"} days`;
+      : lastUsedNote !== null ? "last used unknown" : `not used in the last ${requestLogDays ?? "?"} days`;
     const lines = active.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${s.dim(`id ${u.id} · added ${stamp(u.addedAt)} UTC · ${used(u)}`)}` +
       (u.live ? "" : `   ${s.yellow("does not connect: the API key was rotated since it was added")}`));
     const removedLines = gone.map((u) => `  ${s.dim(`${u.name.padEnd(width)}   id ${u.id} · added ${stamp(u.addedAt)} UTC · removed ${stamp(u.removedAt!)} UTC`)}`);

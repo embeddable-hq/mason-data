@@ -271,15 +271,18 @@ export class RequestLedger {
    * it was a user in: `since` its addedAt, `until` its removedAt or null), the time of its newest request in that
    * window, ISO 8601, or null when the log has none. The window tells a user from an earlier one of the same name. A
    * refused login (28P01, 57P03) or an ended session (28000) is no use, so it does not count. Committed rows only.
+   * ONE scan of the log for every user (a `max … FILTER` per user), never one per user: `/api/users` is asked at every
+   * poll of the web page.
    */
   async lastUsed(users: ReadonlyArray<{ name: string; since: string; until: string | null }>): Promise<Array<string | null>> {
-    const out: Array<string | null> = [];
-    for (const u of users) {
-      const row = (await this.reader.runAndReadAll(`SELECT max(started_at) AS last FROM ${REQUESTS_TABLE} WHERE user_name = $1 ` +
-        `AND (sqlstate IS NULL OR sqlstate NOT IN ('28P01', '57P03', '28000')) AND started_at >= CAST($2 AS TIMESTAMPTZ) AND ($3 IS NULL OR started_at <= CAST($3 AS TIMESTAMPTZ))`,
-        [u.name, u.since, u.until])).getRowObjectsJson()[0];
-      out.push(row === undefined || row.last === null || row.last === undefined ? null : new Date(String(row.last)).toISOString());
-    }
-    return out;
+    if (users.length === 0) return [];
+    const params: DuckDBValue[] = [];
+    const at = (v: string): string => { params.push(v); return `$${params.length}`; };
+    const cols = users.map((u, i) => `epoch_ms(max(started_at) FILTER (WHERE user_name = ${at(u.name)} AND started_at >= CAST(${at(u.since)} AS TIMESTAMPTZ)` +
+      (u.until === null ? "" : ` AND started_at <= CAST(${at(u.until)} AS TIMESTAMPTZ)`) + `)) AS u${i}`);
+    const names = [...new Set(users.map((u) => u.name))].map(at).join(", ");
+    const row = (await this.reader.runAndReadAll(`SELECT ${cols.join(", ")} FROM ${REQUESTS_TABLE} WHERE user_name IN (${names}) ` +
+      `AND (sqlstate IS NULL OR sqlstate NOT IN ('28P01', '57P03', '28000'))`, params)).getRowsJS()[0] ?? [];
+    return users.map((_, i) => (row[i] === null || row[i] === undefined ? null : new Date(Number(row[i])).toISOString()));
   }
 }
