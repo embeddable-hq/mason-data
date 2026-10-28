@@ -233,6 +233,10 @@ required**, then **C** for teams that already run Prometheus.
   file and the copy starts, but nothing on the row moves, so it looks as if nothing happened. The row should show a
   progress bar and the % copied (`tables[].copy.progress.share`, the rows, the time left — what `mason wait` prints,
   `copyingText`), above all on a table's first copy, from the click until the copy is served; then its sync state.
+- **NEXT: a vertical left sidebar with icons** in place of the horizontal top nav (Overview, Tables, Users, and
+  Observability with Queries / Usage / Logs under it), as Vercel's and Supabase's dashboards do; collapsing to icons
+  on a narrow window and to a menu on a phone. Icons served by Mason like everything else: inline SVG, or a small icon
+  set vendored whole with its license (e.g. Lucide, ISC) under `src/web/vendor/`.
 
 - ✅ **The slow statements have a page**: Observability › Queries' **Slow (1 s or more)** filter — the request log's
   `slow` (`--slow`, `slow=1`, src/cli/request-filter.ts `SLOW_MS`, the constant `mason status` lists them by) — and the
