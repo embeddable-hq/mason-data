@@ -448,7 +448,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => facts, warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
-    folder: () => s.folder, root: app, sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
+    folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }) },
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
@@ -564,7 +564,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0,
-    token: "t0ken-of-the-run", folder: () => path.join(app, "mason"), root: app, sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
+    token: "t0ken-of-the-run", folder: () => path.join(app, "mason"), root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
     readSource: () => ({ message: "not read here", code: "bad_source" }), runUrl: "postgres://me@localhost:5432/shop",
     listener: { running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);
       return session === 4 && statement !== undefined && statement !== 9 ? { other: running, asked: statement } : session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session }; } },

@@ -142,6 +142,8 @@ async function closeDemo(hosted: Hosted, closed: string | null): Promise<void> {
 }
 
 async function run(o: DevOptions, hosted: Hosted): Promise<number> {
+  // when this run began: the uptime /api/state says (engine.startedAt, a supervisor's restart is a new run)
+  const startedAt = Date.now();
   const t = theProject(process.cwd());
   if ("problem" in t) { say(`mason start: ${t.problem}`); return 1; }
   const project = t.project;
@@ -427,7 +429,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const token = newToken();
   const runCtx: RunContext = {
     source, facts: () => facts, warnings,
-    slot: changes === "replication" ? repl.slot : "", changes, port: setupPort, token, folder: () => folder, root: project.root,
+    slot: changes === "replication" ? repl.slot : "", changes, port: setupPort, token, folder: () => folder, root: project.root, home,
+    version: o.version, startedAt,
     // the web page (mason ui) is mason start's alone: mason serve's run serves none (src/cli/run-server.ts RunContext.page)
     page: o.serve === undefined,
     demo: cfg.demo === true,

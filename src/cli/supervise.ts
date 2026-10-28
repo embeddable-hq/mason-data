@@ -46,6 +46,21 @@ export function readRestarts(home: string): Restart[] {
   return Array.isArray(v.restarts) ? v.restarts : [];
 }
 
+/**
+ * THE RUN'S RESTARTS AS ONE FACT (`/api/state` `engine.restarts`, mason status's `Restarts` line, with Mason up or
+ * stopped): how many its supervisor recorded (it keeps the last 20) and the last one — when, why, after how long up —
+ * or why the record could not be read (said, never taken as none).
+ */
+export type RestartsFact = { count: number; last: { at: string; why: string; upSeconds: number } | null } | { error: string };
+
+export function restartsFact(home: string, read: () => Restart[] = () => readRestarts(home)): RestartsFact {
+  let r: Restart[];
+  try { r = read(); }
+  catch (e) { return { error: `${path.join(home, RESTARTS_FILE)} could not be read: ${(e as Error).message}` }; }
+  const last = r[r.length - 1];
+  return { count: r.length, last: last === undefined ? null : { at: last.at, why: last.reason, upSeconds: last.upSeconds } };
+}
+
 /** Why a run died, in the words a person reads: V8's own fatal line when it printed one */
 export function crashReason(code: number | null, signal: NodeJS.Signals | null, fatal: string | null): string {
   // Mason's own fatal line (src/cli/dev.ts: the copy's thread stopped) is said as Mason said it

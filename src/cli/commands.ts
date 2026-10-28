@@ -18,7 +18,7 @@ import { asFailure, endText, errorJson, failed, jsonText, nextBlock, parseComman
 import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from "./style.ts";
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
-import { readRestarts, signalSupervisor, stopSupervisor, supervisorGone, type Restart } from "./supervise.ts";
+import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
 import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresLink } from "./pg-url.ts";
@@ -82,7 +82,11 @@ export interface RunState {
   /** the copies in all (src/cli/readiness.ts syncTotals); a run from before it has none */
   totals?: SyncTotals;
   /** the run's copy: its file and how often it polls */
-  engine: { name: "duckdb"; file: string; bytes: number | null; pollSeconds: number };
+  engine: { name: "duckdb"; file: string; bytes: number | null; pollSeconds: number;
+    /** the run's version, when it started (ISO), and how long it has been up; a run from before them has none */
+    version?: string; startedAt?: string; uptimeSeconds?: number;
+    /** its supervisor's restarts (src/cli/supervise.ts restartsFact): how many, and the last one */
+    restarts?: RestartsFact };
   /** replication mode: where the stream is, its lag, what it applied (src/duck/sync.ts streamStatus) */
   stream?: StreamStatus;
   /** the JSON paths stored as columns of the copies (src/duck/kept.ts): a run from before them has none */
@@ -286,8 +290,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            bytes, key, added, addedColumns, copy, error, sync: { state (synced, syncing, failed, waiting), syncedAt (when
            the copy was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
            ageSeconds (how old the copy is now) }, … }], totals: { added, copied, failed, rows (the copies' rows),
-           syncedAt (the latest sync of any) }, engine: { file, bytes, pollSeconds, restarts (each time its supervisor started the
-           run again: { at, reason, upSeconds }) }, queries: { keptDays, day, week } (the last day's and the last 7
+           syncedAt (the latest sync of any) }, engine: { file, bytes, pollSeconds, version (the run's), startedAt,
+           uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
+           or null }, or { error }) }, queries: { keptDays, day, week } (the last day's and the last 7
            days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
            failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
            when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all),
@@ -378,21 +383,21 @@ export async function status(argv: string[]): Promise<number> {
       : r.ready ? [...READY_STEPS]
       : r.failed.length ? [["mason logs", "the detail of each failure"], ["mason wait", "each failure, with the way out"]]
       : [["mason wait", "until it is done"]];
-    // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
-    const restarts = restartsOf(run.home);
     if (json) {
       out(jsonText(STATUS, { running: true, pid: run.pid, postgres: { ...postgresLink(run.postgresUrl), listener: run.postgresListener },
-        ...s, engine: { ...s.engine, restarts }, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, recentErrors, readiness: r }, next));
+        ...s, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, recentErrors, readiness: r }, next));
       return 0;
     }
     const rows: Array<[string, string]> = [
       ["Project", `${run.name}, files in ${s.folder ?? "(none chosen)"}`],
       ...sourceRows(s),
-      ["Mason", `${version()}, pid ${run.pid} · one process`],
+      // the run's own version and how long it has been up (a CLI of another version says the run's)
+      ["Mason", `${s.engine.version ?? version()}, pid ${run.pid} · one process${s.engine.startedAt ? ` · up ${spanText(s.engine.uptimeSeconds ?? 0)}, since ${s.engine.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`],
       ["Copy", `${s.engine.file}${s.engine.bytes === null ? "" : ` · ${fileSize(s.engine.bytes)}`}`],
       // the copies in all (src/cli/readiness.ts syncTotals): a run from before them has none
       ...(s.totals ? [["Copies", totalsText(s.totals)] as [string, string]] : []),
-      ...restartsRows(restarts),
+      // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
+      ...restartsRows(s.engine.restarts),
       ["Postgres API", `${withPlaceholders(run.postgresUrl)}  (mason user add <name> makes a user)`],
       // what it serves: its address, TLS or plain (src/cli/pg-tls.ts)
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
@@ -557,18 +562,13 @@ export function fileSize(b: number): string {
   return b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GiB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`;
 }
 
-/** The restarts recorded for a run, or why they could not be read (a file nobody can read is said, never taken as none). */
-function restartsOf(home: string): Restart[] | { error: string } {
-  try { return readRestarts(home); }
-  catch (e) { return { error: `${path.join(home, "restarts.json")} could not be read: ${(e as Error).message}` }; }
-}
-
-/** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) */
-function restartsRows(r: Restart[] | { error: string }): Array<[string, string]> {
-  if (!Array.isArray(r)) return [["Restarts", r.error]];
-  const last = r[r.length - 1];
-  if (last === undefined) return [];
-  return [["Restarts", `${r.length}, the last ${ago(last.at)}: ${last.reason}, after ${last.upSeconds} s up (mason logs --start has its last lines)`]];
+/** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) —
+ *  the run's own `engine.restarts` while it is up, the same fact read from the file while it is not (`restartsFact`) */
+export function restartsRows(r: RestartsFact | undefined): Array<[string, string]> {
+  if (r === undefined) return [];
+  if ("error" in r) return [["Restarts", r.error]];
+  if (r.last === null) return [];
+  return [["Restarts", `${r.count}, the last ${ago(r.last.at)}: ${r.last.why}, after ${r.last.upSeconds} s up (mason logs --start has its last lines)`]];
 }
 
 /**
@@ -586,7 +586,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const duckFile = path.join(project.dir, DUCK_FILE);
   // the copy's file, when a run has made one: its size says what the next mason start resumes with
   const bytes = fs.existsSync(duckFile) ? fs.statSync(duckFile).size : null;
-  const restarts = restartsOf(project.dir);
+  const restarts = restartsFact(project.dir);
   const lastStop = project.config.lastStop ?? null;
   const next: readonly NextStep[] = hung === null ? ("message" in src && src.next?.length ? src.next : [["mason start", "start Mason for this project: what it copied is kept, and polled again"]])
     : hung.problem.next ?? [["mason stop", "end it"], ["mason logs", "what it was doing"]];

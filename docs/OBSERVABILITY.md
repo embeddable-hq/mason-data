@@ -29,6 +29,10 @@ sampled once a minute where it moves):
   or `{ error }`; `safeWalSizeBytes` null is `max_slot_wal_keep_size` unset, nothing capping it. One row of
   `pg_replication_slots`, read on the connection the database's position is read on, at most every 30 s. Sampled as
   `slotWalHeldBytes`. (`stream.slotName` is the slot's name.)
+- `engine.version`, `engine.startedAt`, `engine.uptimeSeconds`: the run's own (a supervisor's restart is a new run), and
+  `engine.restarts` — `{ count, last: { at, why, upSeconds } | null }` or `{ error }` — its supervisor's record
+  (`.mason/restarts.json`, the last 20), read by ONE function (src/cli/supervise.ts `restartsFact`) that `mason status`
+  reads with Mason stopped too.
 
 `mason status --json` `recentErrors` holds the latest sync failures (`sync`) and the latest statements refused, failed or
 cancelled (`queries`, the request log's own shape). `since` and `until` are read everywhere by one grammar: an age (30m,

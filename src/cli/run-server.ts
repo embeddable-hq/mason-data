@@ -28,7 +28,7 @@ import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { readiness, syncTotals, tableSync, type SyncTotals, type TableSync } from "./readiness.ts";
-import type { Restart } from "./supervise.ts";
+import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT, withLastUsed } from "./user.ts";
 import { postgresLink } from "./pg-url.ts";
@@ -70,6 +70,11 @@ export interface RunContext {
   folder: () => string | null;
   /** the project's root (where .mason/ is): what messages name files from */
   root: string;
+  /** the run's own folder (.mason/): where its supervisor records its restarts */
+  home: string;
+  /** the run's version (src/cli/version.ts) and when this process started, ms: `engine.version`, `startedAt`, uptime */
+  version: string;
+  startedAt: number;
   /** the sources file the run copies from as it last read it, and what is wrong with it now (null: nothing) */
   sources: () => { file: SourceFile | null; problem: string | null };
   /** the sources file changed (a table added or removed): the run reads it again */
@@ -158,7 +163,11 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     folder, project, tables,
     // the copies in all: tables added, copied, failed, their rows, the latest sync (the file's size is engine.bytes)
     totals: syncTotals(tables.filter((t) => t.added).length, copies),
-    engine: { name: "duckdb", file: ctx.duck.file, bytes: fileBytes(ctx.duck.file), pollSeconds: ctx.duck.pollSeconds },
+    // the run itself: its version, since when it is up, and its supervisor's restarts (ONE reader, restartsFact, which
+    // mason status reads with Mason stopped too)
+    engine: { name: "duckdb", file: ctx.duck.file, bytes: fileBytes(ctx.duck.file), pollSeconds: ctx.duck.pollSeconds,
+      version: ctx.version, startedAt: new Date(ctx.startedAt).toISOString(), uptimeSeconds: Math.max(0, Math.round((now - ctx.startedAt) / 1000)),
+      restarts: restartsFact(ctx.home, ctx.duck.restarts) },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
     // replication mode: where the stream is, its lag and what it applied (mason status and wait render it, streamLines)
     ...(stream !== null ? { stream } : {}),
