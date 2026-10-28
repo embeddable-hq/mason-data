@@ -26,6 +26,33 @@ same JSON; the web page and the managed service read those endpoints, never a se
 cancelled (`queries`, the request log's own shape). `since` and `until` are read everywhere by one grammar: an age (30m,
 2h, 7d) or an ISO 8601 time with its zone.
 
+## Pages (the web UI's structure)
+
+One page per concern (`.claude/rules/web-ui.md`), each rendered from the endpoints above in the commands' words, as
+plain tables first; how they look comes after. The page stays `mason start`'s (`mason ui`); the managed service renders
+the same endpoints its own way.
+
+- **The shell**: `index.html` with a nav — Status · Tables · Queries · Users · Usage · Logs — and one section per page,
+  chosen by the URL's hash (`#status`, the default). Each page is an ES module of its own, a route of `PAGE_ROUTES`.
+  ONLY THE PAGE SHOWN polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.
+- **Status** (`#status`): one word (Healthy / Syncing / Error, from `readiness`); a table of the facts — tables synced N
+  of M, rows, last sync, the copy's size, statements in the last day and week, their p50 / p95 — and a table of the
+  recent errors (sync and statements). Reads `/api/state` (2 s), `/api/queries`, `/api/events?failed=1`,
+  `/api/requests?failed=1` (30 s).
+- **Tables** (`#tables`): the database's tables (today's list, Add / Columns… / Remove kept), each added one with its
+  state (Synced / Syncing / Failed / Waiting), rows, last sync and its age, how long it took, its error, the copy's own
+  size, and **Sync** (`POST /api/sync`); a search box over the names. Reads `/api/state` (2 s), `/api/usage`
+  `copySizes` (60 s).
+- **Queries** (`#queries`): the statements running now, each with **Cancel** (asks first; `POST /api/cancel`), and the
+  request log as a table — id, started, ended, duration, status, user, client, rows, bytes, the statement, its error —
+  filtered by status, time, user and client, paged by **Older**. Rows scanned is not a column: decide later, it may add
+  cost to every statement. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, never on an older one).
+- **Users** (`#users`): today's add form and Remove, and each user's status (Active / Removed), when it was added, its
+  last use, and its URL without the password (**Copy**). Reads `/api/users?lastUsed=1` (on opening, then 30 s).
+- **Usage** (`#usage`): the last day's and week's statements (`/api/queries`), the last 24 h hour by hour
+  (`/api/usage?since=24h&step=1h`), and each copy's own size (60 s).
+- **Logs** (`#logs`): the sync's events (`/api/events`, 10 s) and the run's last log entries (`/api/logs`, 5 s).
+
 ## Who reads it
 
 - **Every Mason run collects it**, with nothing to turn on: `mason start` on a laptop and `mason serve` in production.
