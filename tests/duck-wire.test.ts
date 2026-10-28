@@ -45,6 +45,18 @@ const JDOCS: Array<[number, string | null, string | null]> = [
   [7, '{"1": "one", "1 ": "trailing", " 1": "leading", "+1": "plus", "01": "zero-one"}', '{"1": "one", "1 ": "trailing", " 1": "leading", "+1": "plus", "01": "zero-one"}'],
 ];
 const jdocsInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jdocs VALUES ${JDOCS.map(([id, b, j]) => `(${id}, ${b === null ? "NULL" : `'${asHeld(b)}'`}, ${j === null ? "NULL" : `'${j}'`})`).join(", ")}`;
+/** instants a truncation meets at its edges: each side of a daylight-saving change (Europe/Berlin's 2026-03-29 02:00
+ *  and 2026-10-25 03:00, America/New_York's), a repeated hour's two halves, before 1970, a zone's local mean time
+ *  (1880), a week's and a century's first instant, a microsecond, ±infinity and NULL (as UTC text: both sides read it so) */
+const INSTANTS: Array<[number, string | null]> = [
+  [1, "2026-03-29 00:59:59.999999+00"], [2, "2026-03-29 01:00:00+00"], [3, "2026-03-29 01:30:00+00"], [4, "2026-10-25 00:30:00+00"],
+  [5, "2026-10-25 01:00:00+00"], [6, "2026-10-25 01:30:00+00"], [7, "2026-10-25 02:00:00+00"], [8, "2026-03-08 06:59:59+00"],
+  [9, "2026-03-08 07:00:00+00"], [10, "2026-11-01 05:30:00+00"], [11, "2026-11-01 06:30:00+00"], [12, "1969-12-31 23:59:59.5+00"],
+  [13, "1960-02-29 12:34:56.789+00"], [14, "1880-06-15 12:00:30+00"], [15, "2000-12-31 23:00:00+00"], [16, "2001-01-01 00:00:00+00"],
+  [17, "2026-01-04 23:59:59+00"], [18, "2026-01-05 00:00:00+00"], [19, "2026-07-01 12:34:56.123456+00"], [20, "infinity"], [21, "-infinity"], [22, null],
+  [23, "1999-12-31 23:59:59.999999+00"], [24, "2262-04-11 23:47:16+00"],
+];
+const instantsInsert = `INSERT INTO public.instants VALUES ${INSTANTS.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v}'`})`).join(", ")}`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-wire-"));
 let store: DuckStore;
 let api: PgApiServer;
@@ -94,6 +106,8 @@ const DDL = [
   // a jsonb column whose name is jdocs.b's in another case: a bare "B" beside b is ambiguous to DuckDB
   "CREATE TABLE public.jcase (id INTEGER PRIMARY KEY, \"B\" JSON)",
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
+  "CREATE TABLE public.instants (id INTEGER PRIMARY KEY, \"at\" TIMESTAMPTZ)",
+  instantsInsert,
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -135,6 +149,8 @@ const PG_DDL = [
   jdocsInsert((doc) => doc),
   "CREATE TABLE public.jcase (id integer PRIMARY KEY, \"B\" jsonb)",
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
+  "CREATE TABLE public.instants (id integer PRIMARY KEY, at timestamptz)",
+  instantsInsert,
   "ANALYZE public.late",
   // a source's views, as the catalog has them: over the copied tables, one over another
   "CREATE VIEW public.paid_orders AS SELECT id, amount FROM public.orders WHERE status = 'paid'",
@@ -177,6 +193,7 @@ const schema: PgSchema = {
     { name: "late_c", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "name", type: "text" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
+    { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -315,7 +332,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "moods"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "moods"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -893,6 +910,94 @@ test("a timestamptz before year 1 is written in UTC as Postgres does, and refuse
     assert.deepEqual((await answer(c, sql)).rows, (await postgres(sql)).rows);
     await c.query("SET TimeZone = 'Europe/Rome'");
     await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap bc-timestamptz-zone/.test(`${e.message} ${e.detail ?? ""}`));
+  } finally { await c.end(); }
+});
+
+// DATE_TRUNC OF A TIMESTAMPTZ IS THE INSTANT'S OWN ARITHMETIC where that is Postgres's answer (src/duck/rewrite.ts
+// truncInstant): DuckDB's date_trunc of a TIMESTAMPTZ is ICU's calendar, ~45 ns a row a thread even in UTC (a BI tool's
+// monthly histogram over 197 M rows took 7.9 s on the test server), and its sub-day parts in another zone re-read the
+// wall clock, so an instant in a repeated hour (02:30 CEST on 2026-10-25) was truncated to the OTHER 02:00 (+01).
+test("date_trunc of a timestamptz is Postgres's in every zone and part, by the instant's arithmetic where that is Postgres's", async () => {
+  const c = await client();
+  const units = ["microseconds", "milliseconds", "second", "minute", "hour", "day", "week", "month", "quarter", "year", "decade", "century", "millennium"];
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  try {
+    for (const zone of ["UTC", "Europe/Berlin", "America/New_York", "Australia/Lord_Howe", "Asia/Kathmandu"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      for (const unit of units) {
+        const sql = `SELECT id, date_trunc('${unit}', at) AS t FROM instants ORDER BY id`;
+        const from = logged.length;
+        assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+        const duck = sent(from);
+        // in UTC every part is the instant's arithmetic; elsewhere up to the hour (the offset kept), and from the day on
+        // DuckDB's own truncation in the session's zone
+        const arithmetic = zone === "UTC" ? unit !== "microseconds" : ["milliseconds", "second", "minute", "hour"].includes(unit);
+        if (arithmetic) assert.match(duck, /make_timestamptz\(/, `${unit} in ${zone}: ${duck}`);
+        if (arithmetic) assert.doesNotMatch(duck, /date_trunc\('\w+', (?!make_timestamp\()/, `${unit} in ${zone}: ${duck}`);
+      }
+      // the three-argument form, in a zone of its own, whatever the session's
+      for (const [unit, z] of [["hour", "Europe/Berlin"], ["minute", "Asia/Kathmandu"], ["day", "America/New_York"], ["month", "UTC"], ["century", "Europe/Berlin"], ["week", "utc"]]) {
+        const sql = `SELECT id, date_trunc('${unit}', at, '${z}') AS t FROM instants ORDER BY id`;
+        assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+      }
+    }
+    // the histogram a BI tool sends, grouped and ordered by the truncation
+    await c.query("SET TimeZone = 'UTC'");
+    await truth.exec("SET TimeZone = 'UTC'");
+    const histogram = "SELECT DATE_TRUNC('month', i.at) AS m, count(*) FROM instants i GROUP BY 1 ORDER BY 1 DESC LIMIT 100";
+    assert.deepEqual(await answer(c, histogram), await postgres(histogram));
+  } finally {
+    await truth.exec("SET TimeZone = 'UTC'");
+    await c.end();
+  }
+});
+
+// A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE IS AN INNER LATERAL OF A LIST NEVER EMPTY (src/duck/rewrite.ts
+// leftLateral): DuckDB planned the LEFT one as a delimiter join over the whole base (a BI tool's "expand the JSON"
+// preview, LIMIT 100 over 22 M rows: 37.9 s), handing its rows back in an order of its own, so a LIMIT kept other rows
+// than Postgres's; the INNER one is DuckDB's streaming UNNEST, in the base's order, stopping at the LIMIT.
+test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows in Postgres's order, and stops at its LIMIT", async () => {
+  const c = await client();
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  try {
+    const left = [
+      // the preview, over jsonb and json, guarded to objects as the tool guards it, with and without an OFFSET
+      "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.b FROM jdocs t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b ELSE NULL END) d ON TRUE LIMIT 6 OFFSET 0",
+      "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.b FROM jdocs t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b ELSE NULL END) d ON TRUE LIMIT 9 OFFSET 11",
+      "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.j FROM jdocs t) AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(q.j::text), 1, 1) = '{' THEN q.j::json ELSE NULL END) d ON TRUE LIMIT 7 OFFSET 2",
+      "SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN LATERAL jsonb_each_text(CASE WHEN jsonb_typeof(t.b -> 'o') = 'object' THEN t.b -> 'o' END) AS d ON true",
+      "SELECT t.id, e.v FROM jdocs t LEFT JOIN jsonb_array_elements(t.b -> 'arr') AS e(v) ON TRUE ORDER BY t.id DESC, e.v::text",
+      "SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements_text(CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END) AS e ON TRUE LIMIT 4 OFFSET 3",
+      "SELECT t.id, k FROM jdocs t LEFT JOIN jsonb_object_keys(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) AS k ON TRUE WHERE t.id > 1 LIMIT 5",
+      "SELECT o.id, tag FROM orders o LEFT JOIN unnest(o.tags) AS tag ON TRUE ORDER BY o.id, tag",
+      "SELECT o.id, u FROM orders o LEFT JOIN unnest(o.tags) u ON TRUE LIMIT 3",
+      // sorted by the lateral's column, and counted: the same rows
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY d.key NULLS FIRST, q.id LIMIT 8",
+      "SELECT count(*), count(d.key) FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE",
+    ];
+    for (const sql of left) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      // an INNER lateral of a list never empty: the last argument of each list's function, or the array's CASE
+      assert.match(sent(from), /CROSS JOIN LATERAL \( SELECT unnest\((CAST\()?(__mason_json_\w+\(getvariable\('__mason_session'\), .*, true\)|CASE WHEN len\()/, `${sql}\n${sent(from)}`);
+      assert.doesNotMatch(sent(from), /LEFT JOIN/, sql);
+    }
+    // DuckDB runs it as its UNNEST, no delimiter join over the base
+    const plan = (await c.query({ text: `EXPLAIN ${left[0]}`, rowMode: "array" })).rows.map((r) => String(r[0])).join("\n");
+    assert.doesNotMatch(plan, /delim/i, plan);
+    assert.match(plan, /unnest/i, plan);
+    // not a document's rows the function refuses (an array to jsonb_each): Postgres's error, whichever row it is
+    await assert.rejects(c.query("SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(t.b) d ON TRUE"), (e: pg.DatabaseError) => e.code === "22023");
+    await assert.rejects(postgres("SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(t.b) d ON TRUE"), /cannot call jsonb_each on a non-object/);
+    // what is not a LEFT … ON TRUE of a list keeps its own plan: an INNER lateral (a row with no members has none), a
+    // condition, a series
+    for (const sql of ["SELECT q.id, d.key FROM jdocs q CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d LIMIT 5",
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON d.key <> 'a' ORDER BY 1, 2"]) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.doesNotMatch(sent(from), /, true\)\)/, `${sql}\n${sent(from)}`);
+    }
   } finally { await c.end(); }
 });
 

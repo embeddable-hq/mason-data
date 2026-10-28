@@ -32,7 +32,7 @@ import { pathIndex, SESSION_VARIABLE, type CaseMode, type JsonKind, type PgKind 
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, type Typed } from "./pgtree.ts";
 import { canonicalRead, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
-import { atTimeZoneOf } from "../lib/timezone.ts";
+import { atTimeZoneOf, isUtc } from "../lib/timezone.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -244,6 +244,8 @@ class Rewriter {
   private readonly answering = new Set<Body>();
   /** the function calls a FROM reads (a set-returning function there is a table, not unnest's) */
   private readonly inFrom = new WeakSet<Body>();
+  /** the set-returning functions in FROM a LEFT JOIN … ON TRUE reads, written as a list never empty (leftLateral) */
+  private readonly nonEmpty = new WeakSet<Body>();
   /** how the database changes a letter's case */
   private readonly caseMode: CaseMode;
 
@@ -488,6 +490,7 @@ class Rewriter {
       case "ParamRef": return this.param(b);
       case "SortBy": return this.sortBy(b, null, null);
       case "RangeFunction": return this.rangeFunction(b);
+      case "JoinExpr": return this.leftLateral(b);
       case "CollateClause": return this.collateClause(b);
       case "MinMaxExpr": return this.minMax(b);
       case "SQLValueFunction": return this.sqlValueFunction(b);
@@ -1900,10 +1903,14 @@ class Rewriter {
         return null;
       case "date_trunc":
         if (args.length === 3) {
-          // in a zone: the wall clock there truncated, read back as an instant in that zone
+          // in a zone: the instant's own arithmetic where that is Postgres's answer (truncInstant), else the wall clock
+          // there truncated, read back as an instant in that zone
           const [unit, ts] = args as [AstNode, AstNode, AstNode];
           const zone = this.zoneArg(args[2]!);
-          return fn("timezone", [zone, fn("date_trunc", [unit, fn("timezone", [this.clone(zone), this.asInstant(ts, argType(1))])])]);
+          const instant = this.asInstant(ts, argType(1));
+          const fast = this.truncInstant((constString(unit) ?? "").toLowerCase(), instant, zone, constString(zone));
+          if (fast !== null) return fast;
+          return fn("timezone", [zone, this.truncWall(unit, fn("timezone", [this.clone(zone), instant]), TIMESTAMP)]);
         }
         if (args.length !== 2) return null;
         {
@@ -1912,21 +1919,12 @@ class Rewriter {
           if (own === TIME) throw new Unrewritable("date_trunc() of a time is not supported by Mason", "date_trunc a timestamp, or extract the parts", "time-date-trunc");
           if (argType(1) === INTERVAL && unit === "week") throw new Unrewritable(`unit "week" not supported for type interval`, "", { postgres: "0A000" });
           const x = argType(1) === TIMESTAMPTZ && own === DATE ? cast(args[1]!, ["timestamptz"]) : args[1]!;
-          // Postgres's centuries and millennia begin in a year 1 (2001-01-01), DuckDB's in a year 0 (DT_CENTURY)
-          // (and a decade before year 1 is counted back as Postgres counts it: timestamp_trunc's DTK_DECADE)
-          if ((unit === "century" || unit === "millennium" || unit === "decade") && argType(1) !== INTERVAL) {
-            const y = fn("year", [this.clone(x)]);
-            const first = unit === "decade"
-              ? caseWhen([[op(">", y, intConst(0)), op("*", op("//", this.clone(y), intConst(10)), intConst(10))]],
-                op("*", op("-", intConst(0), op("//", op("-", intConst(8), op("-", this.clone(y), intConst(1))), intConst(10))), intConst(10)))
-              : (() => {
-                const n = unit === "century" ? 100 : 1000;
-                return caseWhen([[op(">", y, intConst(0)), op("-", op("*", op("//", op("+", this.clone(y), intConst(n - 1)), intConst(n)), intConst(n)), intConst(n - 1))]],
-                  op("+", op("*", op("-", intConst(0), op("//", op("-", intConst(n - 1), op("-", this.clone(y), intConst(1))), intConst(n))), intConst(n)), intConst(1)));
-              })();
-            const truncated = op("+", fn("date_trunc", [strConst("year"), this.clone(x)]), fn("to_years", [cast(op("-", first, this.clone(y)), ["integer"])]));
-            return caseWhen([[fn("isfinite", [this.clone(x)]), truncated]], argType(1) === TIMESTAMPTZ ? cast(x, ["timestamptz"]) : cast(x, ["timestamp"]));
+          // a timestamptz in the session's zone: the instant's own arithmetic where that is Postgres's answer
+          if (argType(1) === TIMESTAMPTZ) {
+            const fast = this.truncInstant(unit, x, strConst(this.timeZone), this.timeZone);
+            if (fast !== null) return fast;
           }
+          if ((unit === "century" || unit === "millennium" || unit === "decade") && argType(1) !== INTERVAL) return this.truncWall(args[0]!, x, argType(1) === TIMESTAMPTZ ? TIMESTAMPTZ : TIMESTAMP);
           return x === args[1] ? null : fn("date_trunc", [args[0]!, x]);
         }
       case "make_interval": return makeInterval(args);
@@ -2026,7 +2024,7 @@ class Rewriter {
       }
       case "jsonb_object_keys": case "json_object_keys":
         if (this.inFrom.has(b)) return null;
-        return fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(name.startsWith("jsonb"))])]);
+        return fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(name.startsWith("jsonb")), boolConst(false)])]);
       case "jsonb_array_elements": case "json_array_elements": case "jsonb_array_elements_text": case "json_array_elements_text":
       case "jsonb_each": case "json_each": case "jsonb_each_text": case "json_each_text":
         throw new Unrewritable(`${name}() in a SELECT list is not supported by Mason`, `read it in FROM: SELECT … FROM ${name}(…) AS e`, "json-rows-in-select");
@@ -2121,6 +2119,68 @@ class Rewriter {
   private asInstant(n: AstNode, wanted: number | null): AstNode {
     const own = this.typeOf(n);
     return wanted === TIMESTAMPTZ && own !== null && own !== TIMESTAMPTZ && own !== UNKNOWN ? cast(n, ["timestamptz"]) : n;
+  }
+
+  /**
+   * A TIMESTAMPTZ TRUNCATED AS THE INSTANT'S OWN ARITHMETIC (docs/DESIGN.md "date_trunc of a timestamptz"), where
+   * that is exactly Postgres's `timestamptz_trunc_internal` and cheaper than DuckDB's: DuckDB's `date_trunc(part,
+   * TIMESTAMPTZ)` is ICU's calendar, ~45 ns a row a thread even in UTC (and its sub-day parts in another zone re-read the
+   * wall clock, so an instant in a repeated hour lands on the other side of the transition, where Postgres keeps its
+   * offset), while the instant's microseconds (`epoch_us`, `make_timestamptz`) are ~7. Postgres truncates the wall clock
+   * in `zone` and, for a day or longer, reads the truncated wall clock back in that zone (`redotz`), else keeps the
+   * instant's own offset. So, the instant's microseconds `u`, floored by integer arithmetic (`%` is truncating, hence
+   * `((u % k) + k) % k`):
+   *  - microseconds: the instant itself;
+   *  - milliseconds, second: `u` floored, in every zone (an offset is whole seconds);
+   *  - minute, hour: in UTC `u` floored; elsewhere `u` less the wall clock's remainder (one zone conversion, the
+   *    offset kept);
+   *  - day, week (Monday's, ISO: 1970-01-01 was a Thursday), month and up: in UTC only — `u` floored by a day or a
+   *    week, or the naive calendar (`make_timestamp(u)`, no zone) truncated as a timestamp is (`truncWall`); in
+   *    another zone the wall clock read back is a zone lookup DuckDB's own call makes as cheaply, so null (the caller's
+   *    path).
+   * `zoneName` is the zone as a constant (UTC and its aliases: `isUtc`), null for a zone a row holds. ±infinity is
+   * itself (Postgres 14+) and NULL is NULL: the CASE's ELSE. null where the unit is not a constant this handles.
+   */
+  private truncInstant(unit: string, value: AstNode, zone: AstNode, zoneName: string | null): AstNode | null {
+    // a literal Postgres read as a timestamptz is one to DuckDB too (in the session's zone, as Postgres reads it)
+    const x = this.typeOf(value) === UNKNOWN ? cast(value, ["timestamptz"]) : value;
+    const utc = zoneName !== null && isUtc(zoneName);
+    const DAY = 86_400_000_000n;
+    const k = ({ milliseconds: 1000n, second: 1_000_000n, minute: 60_000_000n, hour: 3_600_000_000n, day: DAY } as Record<string, bigint>)[unit];
+    const big = (n: bigint): AstNode => n <= 2_147_483_647n ? intConst(Number(n)) : numConst(String(n));
+    const u = (): AstNode => fn("epoch_us", [this.clone(x)]);
+    const floorMod = (v: () => AstNode, by: bigint, plus = 0n): AstNode => op("%", op("+", op("%", v(), big(by)), big(by + plus)), big(by));
+    let micros: AstNode;
+    if (unit === "microseconds") return x;
+    if (k !== undefined && (utc || unit === "milliseconds" || unit === "second")) micros = op("-", u(), floorMod(u, k));
+    else if (k !== undefined && unit !== "day") micros = op("-", u(), floorMod(() => fn("epoch_us", [fn("timezone", [this.clone(zone), this.clone(x)])]), k));
+    else if (!utc) return null;
+    // Monday's: u - ((u + 3 days) mod 7 days), as ((u % 7d) + 10d) % 7d, which no instant overflows
+    else if (unit === "week") micros = op("-", u(), floorMod(u, 7n * DAY, 3n * DAY));
+    else if (["month", "quarter", "year", "decade", "century", "millennium"].includes(unit)) micros = fn("epoch_us", [this.truncWall(strConst(unit), fn("make_timestamp", [u()]), TIMESTAMP)]);
+    else return null;
+    return caseWhen([[fn("isfinite", [this.clone(x)]), fn("make_timestamptz", [micros])]], x);
+  }
+
+  /**
+   * `date_trunc(unit, x)` of a wall clock (a timestamp, or a timestamptz read in the session's zone: `type`), DuckDB's
+   * except where Postgres counts otherwise: its centuries and millennia begin in a year 1 (2001-01-01), DuckDB's in a
+   * year 0 (DT_CENTURY), and a decade before year 1 is counted back as timestamp_trunc's DTK_DECADE counts it.
+   */
+  private truncWall(unitNode: AstNode, x: AstNode, type: number): AstNode {
+    const unit = (constString(unitNode) ?? "").toLowerCase();
+    if (unit !== "century" && unit !== "millennium" && unit !== "decade") return fn("date_trunc", [unitNode, x]);
+    const y = fn("year", [this.clone(x)]);
+    const first = unit === "decade"
+      ? caseWhen([[op(">", y, intConst(0)), op("*", op("//", this.clone(y), intConst(10)), intConst(10))]],
+        op("*", op("-", intConst(0), op("//", op("-", intConst(8), op("-", this.clone(y), intConst(1))), intConst(10))), intConst(10)))
+      : (() => {
+        const n = unit === "century" ? 100 : 1000;
+        return caseWhen([[op(">", y, intConst(0)), op("-", op("*", op("//", op("+", this.clone(y), intConst(n - 1)), intConst(n)), intConst(n)), intConst(n - 1))]],
+          op("+", op("*", op("-", intConst(0), op("//", op("-", intConst(n - 1), op("-", this.clone(y), intConst(1))), intConst(n))), intConst(n)), intConst(1)));
+      })();
+    const truncated = op("+", fn("date_trunc", [strConst("year"), this.clone(x)]), fn("to_years", [cast(op("-", first, this.clone(y)), ["integer"])]));
+    return caseWhen([[fn("isfinite", [this.clone(x)]), truncated]], type === TIMESTAMPTZ ? cast(x, ["timestamptz"]) : cast(x, ["timestamp"]));
   }
 
   private textMinMax(name: string, b: Body, args: AstNode[]): AstNode | null {
@@ -2499,6 +2559,40 @@ class Rewriter {
 
   // --------------------------------------------------------------------------------------------- FROM
 
+  /**
+   * A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE (docs/DESIGN.md "A LEFT lateral of a list"): `FROM base LEFT JOIN
+   * json_each(base.doc) d ON TRUE` is every base row with each of its members, or once with NULLs where it has none.
+   * DuckDB plans a LEFT lateral as a delimiter join — the whole base grouped, the function called for every distinct
+   * argument, a hash join back — so a LIMIT over it reads every row (a BI tool's "expand the JSON" preview: 37.9 s over
+   * 22 M rows), and the join hands its rows back in an order of its own, so the LIMIT kept OTHER rows than Postgres's
+   * (Postgres walks the base and each row's members in order). Written as an INNER lateral over a list that is never
+   * empty — the members, or one NULL (`orNull`) — it is the same rows, and DuckDB runs it as a streaming UNNEST: in the
+   * base's order, the members in theirs, stopping at the LIMIT. That holds whatever stands above the join (a WHERE, an
+   * ORDER BY, an aggregate), so the condition is the join's alone: LEFT, ON a literal TRUE, its right side one function
+   * of a list Mason writes (the json rows, an array column's unnest), without ORDINALITY. A RIGHT or FULL join, another
+   * condition, or another function keeps DuckDB's own plan.
+   */
+  private leftLateral(b: Body): AstNode | null {
+    const quals = b.quals as AstNode | undefined;
+    if (b.jointype !== "JOIN_LEFT" || b.isNatural === true || b.usingClause !== undefined || quals === undefined || kindOf(quals) !== "A_Const" || bodyOf(quals).boolval?.boolval !== true) return null;
+    const rarg = b.rarg as AstNode | undefined;
+    if (rarg === undefined || kindOf(rarg) !== "RangeFunction") return null;
+    const r = bodyOf(rarg);
+    const items = (r.functions ?? []) as AstNode[];
+    const calls = items.length === 1 ? (bodyOf(items[0]!).items ?? []) as AstNode[] : [];
+    const call = calls[0];
+    if (r.ordinality === true || r.is_rowsfrom === true || r.coldeflist !== undefined || call === undefined || kindOf(call) !== "FuncCall") return null;
+    const c = bodyOf(call);
+    const args = (c.args ?? []) as AstNode[];
+    const name = lastName(c.funcname);
+    if (args.length !== 1 || c.agg_star === true || c.func_variadic === true || kindOf(args[0]!) === "NamedArgExpr") return null;
+    // an array's unnest is the list itself, named twice in its CASE (never empty): a column's alone, which costs nothing twice
+    if (!LIST_ROWS.has(name) && !(name === "unnest" && kindOf(args[0]!) === "ColumnRef")) return null;
+    this.nonEmpty.add(r);
+    const { quals: _true, ...rest } = b;
+    return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
+  }
+
   private rangeFunction(b: Body): AstNode | null {
     const items = (b.functions ?? []) as AstNode[];
     const first = items[0] !== undefined ? (bodyOf(items[0]).items as AstNode[] | undefined)?.[0] : undefined;
@@ -2511,6 +2605,8 @@ class Rewriter {
     const colnames = names(alias?.colnames);
     for (const item of items) for (const f of (bodyOf(item).items ?? []) as AstNode[]) if (isNode(f) && kindOf(f) === "FuncCall") this.inFrom.add(bodyOf(f));
     const canonical = name.startsWith("jsonb");
+    // the right side of a LEFT JOIN … ON TRUE whose rows are a list: written never empty (leftLateral)
+    const orNull = this.nonEmpty.has(b);
     switch (name) {
       // jsonpath's rows, as Postgres finds them (src/duck/pg-eval.ts), unnested
       case "jsonb_path_query": {
@@ -2524,11 +2620,12 @@ class Rewriter {
       case "jsonb_array_elements": case "json_array_elements": case "jsonb_array_elements_text": case "json_array_elements_text": {
         if (b.ordinality === true) throw new Unrewritable(`${name}() WITH ORDINALITY is not supported by Mason`, "number the elements with row_number() OVER () instead", "with-ordinality");
         const text = name.endsWith("_text");
-        const elements = fn("__mason_json_elements", [jsonArg(args[0]!), boolConst(canonical), boolConst(text)]);
+        const elements = fn("__mason_json_elements", [jsonArg(args[0]!), boolConst(canonical), boolConst(text), boolConst(orNull)]);
         const list = text ? elements : arrayCast(elements, "json");
         // a scalar function's column is named by its alias (or `value`), and so is DuckDB's unnest column here
         const column = colnames[0] ?? aliasName ?? "value";
         const unnest: AstNode = fn("unnest", [list]);
+        if (orNull) return listLateral([{ name: column, list }], aliasName ?? name, this.done);
         const item = bodyOf(items[0]!);
         return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [unnest, ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
       }
@@ -2566,21 +2663,24 @@ class Rewriter {
         if (b.ordinality === true) throw new Unrewritable(`${name}() WITH ORDINALITY is not supported by Mason`, "number the members with row_number() OVER () instead", "with-ordinality");
         const text = name.endsWith("_text");
         // each member's key and value, two lists of one length that unnest side by side
-        const sub: Body = {
-          targetList: [
-            { ResTarget: { name: colnames[0] ?? "key", val: fn("unnest", [fn("__mason_json_keys", [jsonArg(args[0]!), boolConst(canonical)])]) } },
-            { ResTarget: { name: colnames[1] ?? "value", val: fn("unnest", [fn("__mason_json_values", [this.clone(args[0]!), boolConst(canonical), boolConst(text)])]) } },
-          ],
-          op: "SETOP_NONE",
-        };
-        this.done.add(sub);
-        return { RangeSubselect: { lateral: true, subquery: { SelectStmt: sub }, alias: { aliasname: aliasName ?? name } } };
+        return listLateral([
+          { name: colnames[0] ?? "key", list: fn("__mason_json_keys", [jsonArg(args[0]!), boolConst(canonical), boolConst(orNull)]) },
+          { name: colnames[1] ?? "value", list: fn("__mason_json_values", [this.clone(args[0]!), boolConst(canonical), boolConst(text), boolConst(orNull)]) },
+        ], aliasName ?? name, this.done);
       }
       case "jsonb_object_keys": case "json_object_keys": {
         const column = colnames[0] ?? aliasName ?? name;
-        const unnest = fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(canonical)])]);
+        const keys = fn("__mason_json_keys", [args[0]!, boolConst(canonical), boolConst(orNull)]);
+        if (orNull) return listLateral([{ name: column, list: keys }], aliasName ?? name, this.done);
         const item = bodyOf(items[0]!);
-        return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [unnest, ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
+        return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [fn("unnest", [keys]), ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
+      }
+      // an array column's elements, never empty: its list where it has one, else one NULL (leftLateral)
+      case "unnest": {
+        if (!orNull) return null;
+        const list = args[0]!;
+        const column = colnames[0] ?? aliasName ?? name;
+        return listLateral([{ name: column, list: caseWhen([[op(">", fn("len", [this.clone(list)]), intConst(0)), list]], arrayOf([nullConst()])) }], aliasName ?? name, this.done);
       }
       default: return null;
     }
@@ -2591,6 +2691,19 @@ class Rewriter {
 
 /** a deep copy that stays the statement's own: each helper below that uses a node twice is handed its rewriter's */
 type Copy = <T>(n: T) => T;
+
+/** the json functions whose rows Mason writes as lists in FROM (src/duck/rewrite.ts rangeFunction), each with an
+ *  `orNull` form (src/duck/functions.ts) */
+const LIST_ROWS = new Set(["jsonb_each", "json_each", "jsonb_each_text", "json_each_text", "jsonb_array_elements", "json_array_elements",
+  "jsonb_array_elements_text", "json_array_elements_text", "jsonb_object_keys", "json_object_keys"]);
+
+/** `LATERAL (SELECT unnest(<list>) AS <name>, …) AS <alias>`: lists of one length unnested side by side, a subquery
+ *  DuckDB runs as its UNNEST operator when the join is INNER (leftLateral) */
+function listLateral(columns: Array<{ name: string; list: AstNode }>, alias: string, done: WeakSet<Body>): AstNode {
+  const sub: Body = { targetList: columns.map((c) => ({ ResTarget: { name: c.name, val: fn("unnest", [c.list]) } })), op: "SETOP_NONE" };
+  done.add(sub);
+  return { RangeSubselect: { lateral: true, subquery: { SelectStmt: sub }, alias: { aliasname: alias } } };
+}
 
 type Built = { p: NumericProgram; kind: "int" | "numeric" };
 /** a cell an exact program cannot take (in a grouped SELECT, a column not grouped): the column stays DuckDB's */
