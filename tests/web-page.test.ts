@@ -1009,7 +1009,7 @@ test("running now: a row each in the commands' words — held equal to mason log
       assert.ok(text.includes(words), `and so does the page`);
     }
   }
-  assert.match(html, /<button type="button" data-ask-cancel="12:45">Cancel<\/button>/);
+  assert.match(html, /<button type="button" class="danger small" data-ask-cancel="12:45">Cancel<\/button>/, "Cancel is a small danger button");
   const asking = renderRunning(RUNNING_NOW, "12:45");
   assert.match(textOf(asking), /Cancel session 12's statement 45\? Its client is told so \(57014\)\. Cancel statement 45 Keep it running/);
   assert.match(asking, /data-confirm-cancel="12:45"/);
@@ -1029,17 +1029,29 @@ test("running now: the answer to a cancel is said under its row, a refusal as th
 
 test("the request log: a row each, newest first, in the commands' words — held equal to mason logs --requests' line — Older and Newest", () => {
   const renderRequests = fn<[unknown, unknown?], string>("renderRequests");
-  const html = renderRequests({ requests: REQUESTS, keptDays: 7, before: "2026-10-28T09:00:00.000Z~5" });
+  const html = renderRequests({ requests: REQUESTS, keptDays: 7, before: "2026-10-28T09:00:00.000Z~5" }, { now: Date.parse("2026-10-28T09:05:00.000Z") });
   const text = textOf(html);
-  assert.match(text, /^Query id Started \(UTC\) Duration Status User Client Rows Statement Error /, "no Ended or Bytes column: they are in the row's details");
-  assert.match(text, /r-new 2026-10-28 09:01:00 90,000 ms Cancelled metabase \(no application_name\) SELECT pg_sleep\(100\) 57014 canceling statement due to user request More Query id r-new Ended \(UTC\) 2026-10-28 09:02:30 Bytes sent SELECT pg_sleep\(100\) 57014 canceling statement due to user request more r-old 2026-10-28 09:00:00 1,234 ms Completed ana psql 1 row SELECT count\(\*\) FROM orders More Query id r-old Ended \(UTC\) 2026-10-28 09:00:01 Bytes sent 2\.0 KiB SELECT count\(\*\) FROM orders Older$/);
-  assert.equal([...html.matchAll(/<details data-open="request:r-(new|old)"><summary>More<\/summary>/g)].length, 2, "a details per row, closed, keyed by its request");
-  assert.ok(!/<details open/.test(html));
+  assert.match(text, /^Status Query id Started Duration User Client Rows Statement /, "no Ended or Bytes column: they are in the row's details");
+  assert.match(text, /Cancelled r-new 4 min ago 90,000 ms metabase \(no application_name\) SELECT pg_sleep\(100\) 57014 canceling statement due to user request Completed r-old 5 min ago 1,234 ms ana psql 1 SELECT count\(\*\) FROM orders Older$/);
+  assert.equal([...html.matchAll(/<details data-open="request:r-(new|old)"><summary>r-(new|old)<\/summary><\/details>/g)].length, 2, "a details per row, closed, keyed by its request, its id the toggle");
+  assert.ok(!/<details[^>]* open/.test(html) && !html.includes("Bytes sent"), "closed: the row's details are not written");
+  // the status is a dot AND the word: completed ok, failed bad, cancelled warn
+  assert.match(html, /<tr class="s-cancelled"><td><span class="indicator warn"><span class="dot" aria-hidden="true"><\/span>Cancelled<\/span>/);
+  assert.match(html, /<tr class="s-completed"><td><span class="indicator ok">/);
+  assert.match(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }), /<span class="indicator bad"><span class="dot" aria-hidden="true"><\/span>Failed<\/span>/);
+  // started: how long ago, the UTC time its title
+  assert.match(html, /<time datetime="2026-10-28T09:01:00.000Z" title="2026-10-28 09:01:00 UTC">/);
+  assert.match(renderRequests({ requests: [REQUESTS[0]], keptDays: 7, before: null }, { now: Date.parse("2026-10-28T09:05:00.000Z") }), /<time [^>]*>5 min ago<\/time>/);
+  // opened: the expanded row holds the whole id, when it started and ended, the bytes, the whole statement and error
+  const opened = textOf(renderRequests({ requests: REQUESTS, keptDays: 7, before: null }, { isOpen: (k: string) => k === "request:r-old" }));
+  assert.match(opened, /Completed r-old .* SELECT count\(\*\) FROM orders Query id r-old Started \(UTC\) 2026-10-28 09:00:00 Ended \(UTC\) 2026-10-28 09:00:01 Bytes sent 2\.0 KiB SELECT count\(\*\) FROM orders$/);
+  assert.ok(!/Query id r-new/.test(opened), "only the one opened");
   // the id is its first 8 characters, the whole one its title and in the details
   const long = renderRequests({ requests: [{ ...REQUESTS[0], requestId: "0b9e5c1e-0000-4000-8000-000000000001", query: "SELECT\n 1", message: "boom\nline 2", sqlstate: "XX000" }], keptDays: 7, before: null });
-  assert.match(long, /<code title="0b9e5c1e-0000-4000-8000-000000000001">0b9e5c1e<\/code>/);
-  assert.match(textOf(long), /Query id 0b9e5c1e-0000-4000-8000-000000000001 Ended \(UTC\) 2026-10-28 09:00:01 Bytes sent 2\.0 KiB SELECT 1 XX000 boom line 2/);
-  assert.match(long, /<pre class="stmt">SELECT\n 1<\/pre><pre class="error">XX000 boom\nline 2<\/pre>/, "the whole statement and the whole error");
+  assert.match(long, /<summary>0b9e5c1e<\/summary>/, "the id is its first 8 characters");
+  const longOpen = renderRequests({ requests: [{ ...REQUESTS[0], requestId: "0b9e5c1e-0000-4000-8000-000000000001", query: "SELECT\n 1", message: "boom\nline 2", sqlstate: "XX000" }], keptDays: 7, before: null }, { isOpen: () => true });
+  assert.match(textOf(longOpen), /Query id 0b9e5c1e-0000-4000-8000-000000000001 Started \(UTC\) 2026-10-28 09:00:00 Ended \(UTC\) 2026-10-28 09:00:01 Bytes sent 2\.0 KiB SELECT 1 XX000 boom line 2/);
+  assert.match(longOpen, /<pre class="stmt">SELECT\n 1<\/pre><pre class="error">XX000 boom\nline 2<\/pre>/, "the whole statement and the whole error");
   assert.ok(!html.includes("data-newest"), "the newest page has no Newest");
   for (const r of REQUESTS) {
     const line = commands.requestLine(r as never, PLAIN);
@@ -1047,7 +1059,8 @@ test("the request log: a row each, newest first, in the commands' words — held
     for (const w of words) { assert.ok(line.includes(w), `the CLI's line says ${w}`); assert.ok(text.includes(w), "and so does the page"); }
   }
   assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Failed .* 42P01 relation "nope" does not exist Newest$/);
-  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<p class="dim">No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.<\/p>$/);
+  assert.match(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true }), /<div class="paging"><button type="button" data-newest>Newest<\/button><\/div>/);
+  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<div class="empty"><p class="empty-title">No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.<\/p><\/div>$/);
   assert.equal(textOf(renderRequests({ requests: [], keptDays: 1, before: null }, { filtered: true })), "No request that passes the filters in the last 1 day (MASON_REQUEST_LOG_DAYS).");
 });
 
@@ -1104,18 +1117,18 @@ test("the app: the newest page is read every 5 s; Older reads the page before wi
   const app = fn<[unknown, () => Date], QueriesApp>("createApp")(run.fetch, () => new Date(t));
   app.show("queries");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests", "GET /api/state"], "who is connected is the state's `sessions`");
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests", "GET /api/state", "GET /api/queries"], "who is connected is the state's `sessions`; the cards' last day is /api/queries");
   t += 2000;
   assert.deepEqual(await asked(), ["GET /api/running"], "the statements every 2 s");
   t += 3000;
-  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests", "GET /api/state"], "the newest page and who is connected every 5 s");
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests", "GET /api/state"], "the newest page and who is connected every 5 s (the last day's summary, every 30 s)");
   assert.ok(textOf(app.view()["request-log"]!).endsWith("Older"));
   run.asked.length = 0;
   await app.olderRequests();
   assert.deepEqual(run.asked, ["GET /api/requests?before=CURSOR.1"], "Older asks with the cursor the page answered with");
   assert.match(textOf(app.view()["request-log"]!), /r-old .* Newest$/);
   t += 60_000;
-  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/state"], "an older page is never read again while paging");
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/state", "GET /api/queries"], "an older page is never read again while paging");
   await app.newestRequests();
   assert.match(textOf(app.view()["request-log"]!), /r-new .* Older$/);
   t += 5000;
@@ -1286,14 +1299,21 @@ test("Usage: reads the day and week, and the 24 hours an hour a line, every 60 s
 });
 
 test("Logs: the sync's events are mason logs --events' lines in a table, a failure marked, newest last; none is said as the CLI says it", () => {
-  const renderEvents = fnOf<[unknown], string>(logsPage, "renderEvents"), cells = fnOf<[unknown], Record<string, string>>(logsPage, "eventCells");
+  const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(logsPage, "renderEvents"), cells = fnOf<[unknown], Record<string, string>>(logsPage, "eventCells");
   for (const e of UL_EVENTS.events) {
     const c = cells(e);
     assert.equal(commands.eventLine(e as never, PLAIN_STYLE), `${c.time}  ${c.kind!.padEnd(18)}  ${c.table}  ${c.message}`, "the CLI's line, cell for cell");
   }
   const html = renderEvents(UL_EVENTS);
-  assert.equal(textOf(html), "Time (UTC) Kind Table Message 2026-10-28 09:00:00 copied public.orders copied 2,000,000 rows 2026-10-28 09:01:00 ✗ copy_failed (failed) public.events the source closed the connection the sync tries it again in 5 min 2026-10-28 09:05:00 ✗ restart (failed) (the sync) the run stopped <b>after</b> 42 s");
+  const at = Date.parse("2026-10-28T09:10:00.000Z");
+  const timeline = renderEvents(UL_EVENTS, { now: at });
+  assert.equal(textOf(timeline), "When Kind Table Message 10 min ago copied public.orders copied 2,000,000 rows 9 min ago ✗ copy_failed public.events the source closed the connection the sync tries it again in 5 min 5 min ago ✗ restart (the sync) the run stopped <b>after</b> 42 s");
+  assert.match(timeline, /<time datetime="2026-10-28T09:00:00.000Z" title="2026-10-28 09:00:00 UTC">10 min ago<\/time>/, "how long ago, the UTC time as the command prints it its title");
+  assert.match(timeline, /<span class="badge ok">copied<\/span>/); assert.equal([...timeline.matchAll(/<span class="badge bad">✗ /g)].length, 2, "a failure is a red badge with its ✗");
   assert.equal([...html.matchAll(/class="t-failed"/g)].length, 2, "the failures are marked");
+  // Failures only: what was read, narrowed in the page alone
+  assert.equal(textOf(renderEvents(UL_EVENTS, { failuresOnly: true, now: at })), "When Kind Table Message 9 min ago ✗ copy_failed public.events the source closed the connection the sync tries it again in 5 min 5 min ago ✗ restart (the sync) the run stopped <b>after</b> 42 s");
+  assert.equal(textOf(renderEvents({ keptDays: 7, events: [UL_EVENTS.events[0]] }, { failuresOnly: true })), "None of the 1 sync event shown failed.");
   assert.doesNotMatch(html, /<b>/, "a message is escaped");
   assert.equal(textOf(renderEvents({ events: [], keptDays: 7 })), "No sync event in the last 7 days (MASON_REQUEST_LOG_DAYS).");
   assert.equal(textOf(renderEvents({ events: [], keptDays: 1 })), "No sync event in the last 1 day (MASON_REQUEST_LOG_DAYS).");
@@ -1302,10 +1322,11 @@ test("Logs: the sync's events are mason logs --events' lines in a table, a failu
 test("Logs: the run's entries are rows, oldest first so the newest is at the bottom, a multi-line entry kept as one preformatted row", () => {
   const renderLogs = fnOf<[unknown], string>(logsPage, "renderLogs");
   const html = renderLogs(LOG);
-  assert.equal([...html.matchAll(/<th scope="row">/g)].length, 2, "two entries, two rows");
+  assert.equal([...html.matchAll(/<div class="log-line">/g)].length, 2, "two entries, two lines");
   assert.ok(html.indexOf("mason started") < html.indexOf("copy: public.orders"));
   assert.match(html, /<pre>copy: public\.orders\n {2}chunk 3 of 20 &lt;read&gt;<\/pre>/);
-  assert.match(textOf(html), /^Time \(UTC\) Entry 2026-10-28 09:00:00 mason started copy: public\.orders chunk 3 of 20 <read> The last 2 of at most 2000 entries/);
+  assert.match(html, /^<div class="terminal" role="log">/, "a terminal's lines");
+  assert.match(textOf(html), /^2026-10-28 09:00:00 mason started copy: public\.orders chunk 3 of 20 <read> The last 2 of at most 2000 entries/);
   assert.match(textOf(renderLogs({ lines: [], kept: 2000 })), /The run has logged nothing yet\./);
 });
 
@@ -1334,7 +1355,7 @@ test("Logs: the events every 10 s; the run's raw log sits behind a closed detail
   app.show("logs");
   run.answers.set("GET /api/logs?lines=200", answer({ error: "lines is a whole number of log entries, 1 to 2000", failure: { code: "failed", message: "lines is a whole number of log entries, 1 to 2000", next: [] } }, 400));
   t += 10_000; await app.poll();
-  assert.match(textOf(app.view()["logs-run"]!), /^The run's raw log \(for debugging\) ✗ lines is a whole number of log entries, 1 to 2000 Time \(UTC\) Entry/);
+  assert.match(textOf(app.view()["logs-run"]!), /^The run's raw log \(for debugging\) ✗ lines is a whole number of log entries, 1 to 2000 2026-10-28 09:00:00 mason started/);
   assert.equal(app.view().poll, "");
   // closed again: no read
   await app.showRawLog(false);
@@ -1728,4 +1749,116 @@ test("the charts are an addition: the cards say every number as text, a holder o
   assert.equal(loads, 1); assert.equal(warned.length, 1);
   assert.match(warned[0]!, /charts are not drawn \(its numbers are in its tables\): no such file/);
   assert.equal(broken.count(), 0);
+});
+
+// ------------------------------------------------------------------ the restyled Queries, Usage and Logs pages (docs/WEB-UI.md "Presentation")
+
+const queriesModule = await import(path.join(WEB, "pages", "queries.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
+
+test("Queries: the cards say the sessions, what runs now and the last day's statements, the failed ones and p95; an unreadable fact is unknown with its reason", () => {
+  const kpis = fnOf<[unknown, unknown, unknown], string>(queriesModule, "renderQueryKpis");
+  const sessions = { open: 3, byClient: [{ user: "metabase", client: "Metabase v0.50", open: 2, running: 1 }, { user: "", client: "", open: 1, running: 0 }] };
+  assert.equal(textOf(kpis(sessions, RUNNING_NOW, QUERIES)),
+    "Connected sessions 3 2 clients Running now 2 the longest for 2 min Statements, last 24 hours 1,234 1,200 completed Failed, last 24 hours 33 30 refused, 3 failed, 1 cancelled p95, last 24 hours 380 ms average 42 ms · p50 12 ms");
+  assert.match(kpis(sessions, [], QUERIES), /Running now<\/p><p class="card-value">0<\/p><p class="card-sub">no statement is running<\/p>/);
+  assert.match(kpis(sessions, [], QUERIES), /<div class="card warn"><p class="card-label">Failed, last 24 hours/, "a failure colours the one to act on");
+  assert.equal(textOf(kpis({ error: "the listener is closed\nmore" }, undefined, { failure: { code: "failed", message: "no ledger\nmore" } })),
+    "Connected sessions unknown the listener is closed Statements, last 24 hours unknown could not read them: no ledger");
+  assert.equal(kpis(undefined, undefined, undefined), "", "what the run did not say draws no card");
+  assert.equal(textOf(kpis(undefined, undefined, { queries: { keptDays: 3, day: { ...QUERIES.queries.day, durationMs: null } } })).includes("p95, last 24 hours – no statement completed"), true);
+});
+
+test("Queries: the page reads the last day's summary every 30 s for its cards, and writes them with the sessions and the running", async () => {
+  const run = fakeRun();
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  run.answers.set("GET /api/running", answer({ running: RUNNING_NOW }));
+  run.answers.set("GET /api/queries", answer(QUERIES));
+  run.answers.set("GET /api/state", answer({ ...COPYING, sessions: { open: 1, byClient: [{ user: "ana", client: "psql", open: 1, running: 0 }] } }));
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  app.show("queries");
+  assert.match(textOf(app.view()["queries-kpis"]!), /Asking Mason/, "before any read");
+  const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
+  assert.ok((await asked()).includes("GET /api/queries"));
+  assert.match(textOf(app.view()["queries-kpis"]!), /^Connected sessions 1 1 client Running now 2 .* Statements, last 24 hours 1,234 /);
+  t += 5000; assert.ok(!(await asked()).includes("GET /api/queries"), "not at 5 s");
+  t += 25_000; assert.ok((await asked()).includes("GET /api/queries"), "30 s on");
+});
+
+test("Usage: the cards are the last 24 hours with a sparkline each where two hours can be drawn; their numbers are text either way", () => {
+  const kpis = fnOf<[unknown, unknown], string>(usagePage, "renderUsageKpis"), specs = fnOf<[unknown], Record<string, { kind: string; x: number[]; y: Array<number | null> }>>(usagePage, "usageSpecs");
+  const plain = kpis(UL_QUERIES, undefined), drawn = kpis(UL_QUERIES, UL_USAGE);
+  assert.equal(textOf(plain), "Statements, last 24 hours 1,204 1,190 completed Failed, last 24 hours 12 10 refused, 2 failed, 2 cancelled p95, last 24 hours 900 ms average 120 ms · p50 40 ms Rows sent, last 24 hours 52,000 Bytes sent, last 24 hours 3.0 MiB");
+  assert.equal(textOf(drawn), textOf(plain), "the same words with the charts as without");
+  assert.deepEqual([...drawn.matchAll(/data-chart="([^"]+)"/g)].map((m) => m[1]), ["usage-spark-statements", "usage-spark-failed", "usage-spark-rows", "usage-spark-bytes"], "no sparkline for one hour of p95");
+  assert.deepEqual(specs(UL_USAGE)["usage-spark-failed"]!.y, [3, 0], "the failed ones are the samples' refused and failed");
+  assert.deepEqual(specs(undefined), {}); assert.deepEqual(specs({ failure: {} }), {});
+});
+
+test("Usage: four charts of the hours — statements as bars, p95, the copy's size and its rows as lines — each its own series, its numbers the hours' table", () => {
+  const specs = fnOf<[unknown], Record<string, { kind: string; label: string; x: number[]; y: Array<number | null>; format(v: number): string }>>(usagePage, "usageSpecs");
+  const renderCharts = fnOf<[unknown], string>(usagePage, "renderCharts"), renderUsage = fnOf<[unknown, ((k: string) => boolean)?], string>(usagePage, "renderUsage");
+  assert.deepEqual(Object.keys(specs(UL_USAGE)).filter((k) => !k.includes("spark")), ["usage-statements", "usage-copy-rows"], "p95 and the copy's size have one value in two hours: no trend, no chart");
+  const s = specs({ ...UL_USAGE, samples: [SAMPLE, { ...IDLE, copyBytes: 6 * 2 ** 30, durationP95Ms: 40 }] });
+  assert.deepEqual(Object.keys(s).filter((k) => !k.includes("spark")), ["usage-statements", "usage-p95", "usage-copy-bytes", "usage-copy-rows"], "in the page's order");
+  assert.equal(s["usage-p95"]!.format(1830.4), "1,830 ms");
+  assert.equal(s["usage-statements"]!.kind, "bars"); assert.deepEqual(s["usage-statements"]!.y, [1204, 0]);
+  assert.equal(s["usage-copy-bytes"]!.kind, "line"); assert.equal(s["usage-copy-bytes"]!.format(3 * 2 ** 30), "3.0 GiB", "a value as the tables say it");
+  assert.deepEqual(s["usage-copy-rows"]!.y, [12_345_678, 12_345_678]);
+  assert.deepEqual(s["usage-statements"]!.x, [Date.parse(SAMPLE.at) / 1000, Date.parse(IDLE.at) / 1000]);
+  const html = renderCharts(UL_USAGE);
+  assert.deepEqual([...html.matchAll(/data-chart="([^"]+)"/g)].map((m) => m[1]), ["usage-statements", "usage-copy-rows"]);
+  assert.match(html, /<div class="chart-card"><p class="card-label">Statements an hour<\/p><div class="chart series" data-chart="usage-statements" role="img" aria-label="Statements an hour, the last 24 hours an hour a point"><\/div><\/div>/);
+  assert.equal(renderCharts({ ...UL_USAGE, samples: [SAMPLE] }), "", "one hour is no trend: no chart, no title");
+  assert.equal(renderCharts(undefined), "");
+  // the hours' numbers sit behind a closed details once there are charts, keyed so a poll keeps it open; plain with none
+  const closed = renderUsage(UL_USAGE);
+  assert.match(closed, /<details class="hours" data-open="usage-hours"><summary>The numbers, hour by hour<\/summary>/);
+  assert.match(renderUsage(UL_USAGE, (k) => k === "usage-hours"), /<details class="hours" data-open="usage-hours" open>/);
+  assert.doesNotMatch(renderUsage({ ...UL_USAGE, samples: [SAMPLE] }), /usage-hours/, "with no chart the hours are the page's content");
+  assert.match(textOf(renderUsage({ ...UL_USAGE, samples: [SAMPLE] })), /Time \(UTC\) Statements Errors .* 2026-10-28 09:05 1,204 3 /);
+});
+
+test("Usage: the page hands its charts to the shell from the hours it read, and keeps the hours' details open across polls", async () => {
+  const run = fakeRun(); withUsageAnswers(run);
+  const app = fn<[unknown], App & { pages: Map<string, { charts(): Record<string, unknown>; toggle(t: unknown): unknown }> }>("createApp")(run.fetch);
+  app.show("usage");
+  assert.deepEqual(app.pages.get("usage")!.charts(), {}, "nothing read: nothing to draw");
+  await app.poll();
+  assert.ok("usage-statements" in app.pages.get("usage")!.charts() && "usage-spark-statements" in app.pages.get("usage")!.charts());
+  assert.match(textOf(app.view()["usage-kpis"]!), /^Statements, last 24 hours 1,204 /);
+  assert.match(app.view()["usage-charts"]!, /data-chart="usage-copy-rows"/);
+  assert.equal(app.pages.get("usage")!.toggle({ dataset: { open: "usage-hours" }, open: true }), true);
+  await app.poll();
+  assert.match(app.view()["usage-hourly"]!, /data-open="usage-hours" open>/);
+  const keys = [...Object.keys(app.pages.get("usage")!.charts()), ...Object.keys(app.pages.get("status")!.charts?.() ?? {})];
+  assert.equal(new Set(keys).size, keys.length, "a chart key is one holder's in the whole document");
+});
+
+test("Logs: 'Failures only' narrows the events read, in the page alone; the events' kinds are badges and their times how long ago", async () => {
+  const run = fakeRun(); withUsageAnswers(run);
+  let t = Date.parse("2026-10-28T09:10:00.000Z");
+  const app = fn<[unknown, () => Date], App & { pages: Map<string, { input(t: unknown): unknown }> }>("createApp")(run.fetch, () => new Date(t));
+  app.show("logs");
+  await app.poll();
+  assert.match(textOf(app.view()["logs-events"]!), /^When Kind Table Message 10 min ago copied public\.orders .* ✗ copy_failed .* ✗ restart/);
+  run.asked.length = 0;
+  assert.equal(app.pages.get("logs")!.input({ id: "logs-failures-only", checked: true }), true);
+  assert.doesNotMatch(textOf(app.view()["logs-events"]!), /copied public\.orders/);
+  assert.match(textOf(app.view()["logs-events"]!), /✗ copy_failed/);
+  assert.deepEqual(run.asked, [], "the page alone: nothing is asked");
+  assert.equal(app.pages.get("logs")!.input({ id: "somewhere-else", checked: true }), null, "another input is not this page's");
+  app.pages.get("logs")!.input({ id: "logs-failures-only", checked: false });
+  assert.match(textOf(app.view()["logs-events"]!), /copied public\.orders/);
+  t += 60_000; await app.poll();
+  assert.match(textOf(app.view()["logs-events"]!), /11 min ago/, "the ages move with the clock");
+});
+
+test("Queries, Usage and Logs: the index.html carries the parts the restyled pages write — a header each, the filter toolbar, the failures toggle", () => {
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  for (const id of ["queries-kpis", "usage-kpis", "usage-charts"]) assert.match(html, new RegExp(`<div id="${id}"></div>`), id);
+  for (const [id, title] of [["queries-h", "Queries"], ["usage-h", "Usage"], ["logs-h", "Logs"]]) assert.match(html, new RegExp(`<div class="page-head"><h2 id="${id}">${title}</h2><p class="desc">`), `${title}'s header`);
+  assert.match(html, /<form id="request-filters" class="toolbar"[^>]*>[\s\S]*<button type="submit" class="primary">Filter<\/button>\s*<button type="button" data-clear-filters>Clear<\/button>/);
+  assert.match(html, /<input type="checkbox" id="logs-failures-only"> Failures only/);
+  const view = (ids: string[]) => ids.every((id) => html.includes(`id="${id}"`));
+  assert.ok(view(["queries-kpis", "connected-now", "running-now", "request-log", "usage-kpis", "usage-charts", "usage-queries", "usage-hourly", "usage-sizes", "logs-events", "logs-run"]));
 });

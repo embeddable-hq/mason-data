@@ -265,3 +265,46 @@ details.memory, details#logs-raw { margin: var(--space-4) 0; }
   caption { display: block; padding: var(--space-3) var(--space-3) var(--space-1); }
   input { min-width: 0; flex: 1 1 10em; }
 }
+
+/* ---------------------------------------------------------------- Queries, Usage and Logs (appended; scoped to those pages) */
+/* a filter toolbar: each field a small label over its control, the actions at the end */
+.toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-3); margin: 0 0 var(--space-4); padding: var(--space-3) var(--space-4);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.toolbar .field { display: flex; flex-direction: column; gap: var(--space-1); }
+.toolbar .actions { display: flex; gap: var(--space-2); margin-left: auto; }
+.toolbar label.check { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--fg); font-size: var(--text-sm); }
+.toolbar input[type="checkbox"] { margin: 0; }
+#page-queries .table-title { margin: var(--space-3) 0 var(--space-2); font-size: var(--text-sm); color: var(--muted); }
+#page-queries .paging { justify-content: flex-end; margin: 0 0 var(--space-4); }
+#page-queries table.requests td.id { white-space: nowrap; }
+#page-queries table.requests td.id summary { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg); }
+#page-queries table.requests td.id details { margin: 0; }
+#page-queries table.requests td.when { white-space: nowrap; color: var(--muted); }
+#page-queries table.requests td.stmt-cell { min-width: 16em; }
+#page-queries .err { margin-top: 2px; font-size: var(--text-xs); color: var(--bad); overflow-wrap: anywhere; }
+#page-queries tr.detail > td { background: var(--sunken); }
+#page-queries tr.detail:hover > td { background: var(--sunken); }
+#page-queries tr.detail pre.stmt { font-family: var(--font-mono); color: var(--fg); }
+#page-queries tr.detail pre.error { color: var(--bad); }
+#page-queries table.sessions td:first-child { font-weight: 500; }
+
+/* Usage: four small charts in a grid, each under its title; a card with no drawn chart takes no room */
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: var(--space-3); margin: 0 0 var(--space-5); }
+.chart-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: var(--space-4); min-width: 0; }
+.chart-card:not(:has(.chart.drawn)) { display: none; }
+.chart-card .chart.series { margin: var(--space-2) 0 0; }
+details.hours { margin: var(--space-3) 0; }
+details.hours > summary { margin-bottom: var(--space-2); }
+@media (max-width: 640px) { .chart-grid { grid-template-columns: 1fr; } }
+
+/* Logs: the run's raw log as a terminal's lines, in mono, the newest at the bottom */
+#page-logs table.events th[scope="row"] time { font-weight: 400; }
+#page-logs table.events code { color: var(--fg); }
+.terminal { background: var(--sunken); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4);
+  max-height: 480px; overflow: auto; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.6; }
+.terminal .log-line { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-3); }
+.terminal time { color: var(--subtle); white-space: nowrap; }
+.terminal pre { margin: 0; color: var(--fg); font-size: inherit; overflow-wrap: anywhere; }
+#page-queries table.running code.stmt { max-width: 16em; }
+#page-queries table.running td:nth-child(5) { white-space: nowrap; }
+#page-queries table.requests code.stmt { max-width: 24em; }
