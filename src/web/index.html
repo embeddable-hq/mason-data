@@ -34,20 +34,25 @@
   <section id="page-tables" aria-labelledby="tables-h" hidden>
     <div class="page-head"><h2 id="tables-h">Tables</h2><p class="desc">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p></div>
     <div id="tables-cards"></div>
+    <!-- each label in a field with its control, as the request filters are: on a phone a field is a row, never a label left at a line's end -->
     <div class="toolbar">
-      <label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders">
-      <label for="tables-show">Show</label> <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="failed">Failed</option><option value="not-added">Not added</option></select>
+      <div class="field grow"><label for="tables-filter">Search the tables</label>
+        <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders"></div>
+      <div class="field"><label for="tables-show">Show</label>
+        <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="failed">Failed</option><option value="not-added">Not added</option></select></div>
     </div>
     <div id="tables"></div>
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>
-    <div class="page-head"><h2 id="queries-h">Queries</h2><p class="desc">The statements the Postgres API answers: who is connected, what runs now, and every statement that ran, as <code>mason logs</code> lists them.</p></div>
+    <div class="page-head"><h2 id="queries-h">Queries</h2><p class="desc">The statements the Postgres API answers: who is connected, what runs now, the SQL it refused as unsupported, and every statement that ran, as <code>mason status</code> and <code>mason logs</code> list them.</p></div>
     <div id="queries-kpis"></div>
     <h3>Connected now</h3>
     <div id="connected-now"></div>
     <h3>Running now</h3>
     <p class="lead">As <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.</p>
     <div id="running-now"></div>
+    <h3>Unsupported SQL</h3>
+    <div id="unsupported"></div>
     <h3>Request log</h3>
     <p class="lead">The statements answered, refused or cancelled, as <code>mason logs --requests</code> lists them, newest first, over the time range above. Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone.</p>
     <form id="request-filters" class="toolbar" autocomplete="off">
@@ -96,6 +101,6 @@
     <div id="logs-run"></div>
   </section>
 </main>
-<noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code> and <code>mason user list</code> say the same in a terminal.</p></noscript>
+<noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code>, <code>mason user list</code>, <code>mason logs</code> and <code>mason usage</code> say the same in a terminal.</p></noscript>
 </body>
 </html>

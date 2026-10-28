@@ -90,7 +90,7 @@ ${codes}
     mason add orders customers --json         added to the sources file, checked against the database
     mason start --json && mason wait --json   Mason in the background; until every added table is copied
     mason user add my-tool --json             the URL and password a tool connects with
-    mason status --json                       each table's copy, and the last day's slow and refused statements
+    mason status --json                       each table's copy, and the last day's slow, refused and unsupported statements
   WATCHING IT, once it runs (every one with --json; --since and --until take an age, 30m or 2h or 7d, or an ISO 8601 time WITH
   its zone):
     mason status --json                       recentErrors: the sync's latest failures and the statements latest refused, failed or cancelled
@@ -156,7 +156,7 @@ names the tables the server copies, and its url: names the variable that holds t
    at the next start, or beside the server:
      mason add public.orders                        copied at once, added to the mounted mason/sources/
      mason remove orders                            taken out of the sources file, its copy dropped
-     mason status                                   each table's copy, the slow and refused statements
+     mason status                                   each table's copy, the statements, the recent errors
    Upgrade: read the release notes, then move mason.yml and the image together. Removing Mason for good in replication mode:
    SELECT pg_drop_replication_slot('mason_dev_<name>_<source>') — the slot holds your WAL (mason status names it).
 

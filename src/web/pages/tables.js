@@ -8,16 +8,16 @@
  * TABLE_ROWS that pass and "Show N more" / "Show all" (the search is over all of them, at once); a long name is cut with
  * an ellipsis, its whole the title. Reads `/api/state` every poll and `/api/usage`'s `copySizes` every minute.
  */
-import { button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText } from "../shared.js";
+import { button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, POLL_MS } from "../shared.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
-export const SIZES_PATH = "/api/usage?since=1m";
+const SIZES_PATH = "/api/usage?since=1m";
 
 /** A table's sync in one word (`/api/state` `tables[].sync.state`, src/cli/readiness.ts `syncStateOf`). */
-export const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", failed: "Failed", waiting: "Waiting" };
+const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", failed: "Failed", waiting: "Waiting" };
 
 /** Whether a table's name has the search box's text (any case; nothing typed: every table). */
-export const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(filter.trim().toLowerCase());
+const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(filter.trim().toLowerCase());
 
 /**
  * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (src/cli/sync.ts `syncedReport`, held equal
@@ -34,7 +34,7 @@ export function syncedReport(b, picked, unsynced) {
 }
 
 /** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current. */
-export function renderSynced(b, table, s) {
+function renderSynced(b, table, s) {
   const r = syncedReport(b, [table], s.tables.filter((t) => t.table === table));
   return `<div class="done" role="status"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissSynced: "" }, "small")}</div>`;
@@ -44,15 +44,13 @@ export function renderSynced(b, table, s) {
 export const SHOWS = { all: "All", added: "Added", failed: "Failed", "not-added": "Not added" };
 
 /** How many of the tables that pass the filters the page writes at once; "Show N more" writes as many again. */
-export const TABLE_ROWS = 100;
+const TABLE_ROWS = 100;
 
 /** Whether an added table's copy or sync failed (the Failed filter, the Overview's failed card). */
 const failedTable = (t) => t.added && (t.sync?.state === "failed" || Boolean(t.error));
 
 /** How long a sync took, as the commands say it (`spanText`) but for one under a tenth of a second, which is not worth a digit: `<0.1 s (poll)`. */
 export const tookText = (y) => `${y.syncSeconds < 0.1 ? "<0.1 s" : spanText(y.syncSeconds)} (${y.syncedBy})`;
-
-const POLL_MS = 2000;
 
 /** A table's facts as `mason tables` says them on its line (src/cli/commands.ts `tableFacts`): its size, its key, and
  *  added or why it cannot be added as it is (null: neither). */
@@ -86,16 +84,22 @@ export function removedReport(removed, file) {
  */
 export const pickBody = (table, columns = [], key = []) => ({ table, picked: true, ...(columns.length ? { columns } : {}), ...(key.length ? { key } : {}) });
 
-/** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): the line and notes `mason add` prints. */
-export function renderTableAdded(b) {
-  const l = addedLines(b, b.file);
+/** The sources file as the commands name it, from the project's root (`/api/state` `source.shownFile`), when it is the
+ *  one the state names: the page never shows an absolute path. */
+const shownFileOf = (s, file) => s?.source?.file === file && typeof s.source.shownFile === "string" ? s.source.shownFile : file;
+
+/** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): the line and notes `mason add` prints,
+ *  the sources file named as `file` (as `mason add` names it: from the project's root). */
+export function renderTableAdded(b, file = b.file) {
+  const l = addedLines(b, file);
   return `<div class="done" role="status"><p class="headline">${esc(l.line)}</p>${l.notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "" }, "small")}</div>`;
 }
 
-/** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): what `mason remove` prints. */
-export function renderTablesRemoved(b) {
-  const r = removedReport(b.removed, b.file);
+/** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): what `mason remove` prints, the file named
+ *  as `file`. */
+export function renderTablesRemoved(b, file = b.file) {
+  const r = removedReport(b.removed, file);
   return `<div class="done" role="status"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "" }, "small")}</div>`;
 }
@@ -169,7 +173,7 @@ export function renderTables(s, ui = {}) {
     const note = t.added
       ? t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : ""
       : `<span class="dim">${esc(f.state ?? "")}</span>`;
-    const said = (outcome?.table !== t.table ? "" : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added) : renderTablesRemoved(outcome.removed))) +
+    const said = (outcome?.table !== t.table ? "" : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added, shownFileOf(s, outcome.added.file)) : renderTablesRemoved(outcome.removed, shownFileOf(s, outcome.removed.file)))) +
       (synced?.table !== t.table ? "" : under("failure" in synced ? renderFailure(synced.failure) : renderSynced(synced.synced, t.table, s)));
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td>${state}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +
@@ -216,7 +220,7 @@ export const page = {
       if (m.choosing === null) m.ticked = null;
     };
     const actions = {
-      /** Add a table (`mason add`): the answer under its line, then the state read again — the Status shows its copy starting. */
+      /** Add a table (`mason add`): the answer under its line, then the state read again — the Overview shows its copy starting. */
       async addTable(table, columns = [], key = []) {
         const r = await ctx.ask("/api/pick", json("POST", pickBody(table, columns, key)));
         // refused: said under the form, which is written again with the boxes the person had ticked

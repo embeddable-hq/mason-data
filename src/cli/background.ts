@@ -25,6 +25,7 @@ import { demoChangesRefusal, demoPort } from "./demo.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
 import { DEV } from "./registry.ts";
+import { UI } from "./ui.ts";
 import { out as styleOut, stepRenderer } from "./style.ts";
 import { postgresLink, withoutPlaceholders, type PostgresLink } from "./pg-url.ts";
 
@@ -136,7 +137,7 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
           // the run's line (src/cli/dev.ts: "Postgres  <url>", the URL in its shown form, `withPlaceholders`: postgres://<user>:<password>@…)
           const pgLine = /^\s+Postgres\s+(postgres:\/\/<user>:<password>@\S+)/.exec(l);
           if (pgLine) { postgres = postgresLink(withoutPlaceholders(pgLine[1]!)); steps.print(`  ${st.dim("Postgres API")}  ${pgLine[1]!}  ${st.dim("(mason user add <name> makes a user)")}`); continue; }
-          if (/^\s+Web UI\s+mason ui\b/.test(l)) { steps.print(`  ${st.dim("Web UI".padEnd("Postgres API".length))}  ${st.cyan("mason ui")}  ${st.dim("(the status page and the users, in your browser)")}`); continue; }
+          if (/^\s+Web UI\s+mason ui\b/.test(l)) { steps.print(`  ${st.dim("Web UI".padEnd("Postgres API".length))}  ${st.cyan("mason ui")}  ${st.dim(`(${UI.summary})`)}`); continue; }
           // a demo project's line (src/cli/dev.ts: "Demo  a new order lands every <n> s: …"), in the same column
           const demoLine = /^\s+Demo\s{2}(.+)$/.exec(l);
           if (demoLine) { steps.print(`  ${st.dim("Demo".padEnd("Postgres API".length))}  ${demoLine[1]!}`); continue; }

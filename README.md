@@ -234,7 +234,7 @@ password once, with the URL to paste into the tool's datasource form:
 
 ```bash
 mason user add metabase              # postgres://metabase:<password>@127.0.0.1:5433/your-app
-mason ui                             # the status page and the users, in your browser
+mason ui                             # the status, tables, users and statements, in your browser
 ```
 
 The tool sends the SQL it sends Postgres — the same names, types and text come back — and

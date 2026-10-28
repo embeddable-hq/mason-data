@@ -66,7 +66,6 @@ pre { white-space: pre-wrap; margin: var(--space-2) 0 0; color: var(--muted); }
 .mono, .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .count { margin: var(--space-3) 0 0; }
 .warn { color: var(--warn); }
-.bullets { margin: 0; padding-left: 20px; }
 
 /* ---------------------------------------------------------------- the top bar and the tabs */
 .topbar { background: var(--surface); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10; }
@@ -88,7 +87,7 @@ pre { white-space: pre-wrap; margin: var(--space-2) 0 0; color: var(--muted); }
 /* ---------------------------------------------------------------- the page and its header */
 main { padding-top: var(--space-6); padding-bottom: var(--space-7); }
 section { margin: 0; }
-section > h2, .page-head h2 { font-size: var(--text-xl); margin: 0 0 var(--space-2); }
+.page-head h2 { font-size: var(--text-xl); margin: 0 0 var(--space-2); }
 .page-head { margin: 0 0 var(--space-5); }
 .page-head .desc { margin: 0; }
 #poll:empty { display: none; }
@@ -103,7 +102,7 @@ section > h2, .page-head h2 { font-size: var(--text-xl); margin: 0 0 var(--space
 @keyframes pulse { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .indicator.warn .dot, .skeleton { animation: none; } }
 
-/* the run's word at the top of the Status page: a big dot and the CLI's word */
+/* the run's word at the top of the Overview: a big dot and the CLI's word */
 .health { display: flex; align-items: center; gap: var(--space-3); margin: 0 0 var(--space-5); padding: var(--space-4) var(--space-5);
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); font-size: var(--text-xl); font-weight: 600; }
 .health .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 4px var(--warn-soft); flex: none; }
@@ -143,7 +142,6 @@ input:hover, select:hover { border-color: var(--subtle); }
 input:focus-visible, select:focus-visible { outline: none; border-color: var(--fg); box-shadow: 0 0 0 3px var(--accent-soft); }
 input::placeholder { color: var(--subtle); }
 input[type="checkbox"] { min-width: 0; height: auto; accent-color: var(--fg); }
-.search { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-4); }
 form#request-filters input { min-width: 8em; }
 form.pick { display: block; margin: var(--space-1) 0 var(--space-2); }
 form.pick fieldset { border: 1px solid var(--line); border-radius: var(--radius); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); }
@@ -200,7 +198,6 @@ table.queries thead th:not(:first-child) { text-align: right; }
 td.act { text-align: right; white-space: nowrap; }
 .confirm { white-space: normal; }
 tr.under > td { border-top: 0; padding-top: 0; }
-code.stmt { display: inline-block; max-width: 28em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .paging { margin: var(--space-3) 0 0; display: flex; gap: var(--space-2); }
 
 /* the facts: a label column and a value column */
@@ -220,12 +217,9 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: 3px; }
 .t-failed progress::-webkit-progress-value { background: var(--bad); } .t-failed progress::-moz-progress-bar { background: var(--bad); }
 .t-unsynced progress::-webkit-progress-value { background: var(--warn); } .t-unsynced progress::-moz-progress-bar { background: var(--warn); }
 .pct { display: inline-block; min-width: 3.2em; text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--muted); }
-.t-failed .what, .s-failed .what, .s-failed .status, tr.t-failed .mark { color: var(--bad); }
-.t-unsynced .what, .s-cancelled .status { color: var(--warn); }
-.c-added .state { color: var(--ok); }
-.c-cannot .state { color: var(--warn); font-size: var(--text-sm); }
+.t-failed .what, .s-failed .what { color: var(--bad); }
+.t-unsynced .what { color: var(--warn); }
 .readiness { font-weight: 600; margin: var(--space-4) 0 var(--space-1); }
-.readiness.ok { color: var(--ok); } .readiness.bad { color: var(--bad); }
 
 /* ---------------------------------------------------------------- details: an expandable row */
 details > summary { cursor: pointer; color: var(--muted); font-size: var(--text-sm); list-style: none; display: inline-flex; align-items: center; gap: 6px; user-select: none; }
@@ -281,7 +275,6 @@ details.memory, details#logs-raw { margin: var(--space-4) 0; }
 }
 
 /* ---------------------------------------------------------------- the Tables and Users pages */
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin: 0 0 var(--space-4); }
 .toolbar input[type="search"] { width: 18em; }
 #page-tables th.num, #page-users th.num { text-align: right; }
 #page-tables td.mono { white-space: nowrap; color: var(--muted); }
@@ -302,13 +295,13 @@ form.formcard input { width: 18em; }
 #page-users .added .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }
 #page-users .added .tip { margin: 0 0 var(--space-3); }
 
-/* ---------------------------------------------------------------- Queries, Usage and Logs (appended; scoped to those pages) */
+/* ---------------------------------------------------------------- Queries, Usage and Logs (scoped to those pages) */
 /* a filter toolbar: each field a small label over its control, the actions at the end */
 .toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-3); margin: 0 0 var(--space-4); padding: var(--space-3) var(--space-4);
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
 .toolbar .field { display: flex; flex-direction: column; gap: var(--space-1); }
 .toolbar .actions { display: flex; gap: var(--space-2); margin-left: auto; }
-.toolbar label.check { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--fg); font-size: var(--text-sm); }
+.toolbar label.check { display: inline-flex; align-items: center; gap: var(--space-2); min-height: 32px; color: var(--fg); font-size: var(--text-sm); }
 .toolbar input[type="checkbox"] { margin: 0; }
 #page-queries .table-title { margin: var(--space-3) 0 var(--space-2); font-size: var(--text-sm); color: var(--muted); }
 #page-queries .paging { justify-content: flex-end; margin: 0 0 var(--space-4); }
@@ -341,9 +334,7 @@ details.hours > summary { margin-bottom: var(--space-2); }
 .terminal .log-line { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-3); }
 .terminal time { color: var(--subtle); white-space: nowrap; }
 .terminal pre { margin: 0; color: var(--fg); font-size: inherit; overflow-wrap: anywhere; }
-#page-queries table.running code.stmt { max-width: 16em; }
 #page-queries table.running td:nth-child(5) { white-space: nowrap; }
-#page-queries table.requests code.stmt { max-width: 24em; }
 
 /* A chart's live legend reads the hovered hour: hidden at rest, where it would only say "-" (its space kept, so nothing moves). */
 .uplot:not(:hover) .u-legend { visibility: hidden; }
@@ -382,8 +373,8 @@ th.num button.sort { flex-direction: row-reverse; }
 code.name { display: inline-block; max-width: 36ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .clip { display: inline-block; max-width: 28em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 /* a statement in its cell: one or two lines, never the whole of it (its expanded row has it, capped) */
-code.stmt, #page-queries table.requests code.stmt, #page-queries table.running code.stmt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
-  line-clamp: 2; white-space: normal; overflow: hidden; overflow-wrap: anywhere; max-width: 40em; }
+code.stmt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  line-clamp: 2; white-space: normal; overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; max-width: 40em; vertical-align: bottom; }
 #page-queries table.running code.stmt { max-width: 24em; }
 .more { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); margin: calc(-1 * var(--space-2)) 0 var(--space-4); }
 .more p { margin: 0 auto 0 0; }
@@ -407,6 +398,15 @@ table.sessions tr.others td { color: var(--muted); font-style: italic; }
   code.name { max-width: 22ch; }
 }
 form#request-filters input[type="checkbox"] { min-width: 0; }
-.toolbar label.check { min-height: 32px; }
 #page-queries table.requests .clip { max-width: 12em; }
 #page-queries tr.detail pre { max-height: 320px; overflow: auto; }
+
+/* ---------------------------------------------------------------- the unsupported SQL (Queries; a line on the Overview) */
+ul.unsupported { list-style: none; margin: 0; padding: 0; }
+ul.unsupported li { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line); }
+ul.unsupported li:first-child { border-top: 0; }
+ul.unsupported p { margin: 0; overflow-wrap: anywhere; }
+ul.unsupported .headline { font-weight: 500; }
+ul.unsupported .clip { max-width: min(40em, 100%); }
+.unsupported-line { margin: var(--space-4) 0 0; overflow-wrap: anywhere; }
+.unsupported-line a.see { margin-left: var(--space-2); font-size: var(--text-sm); }

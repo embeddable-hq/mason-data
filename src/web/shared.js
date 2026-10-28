@@ -20,6 +20,12 @@ export const RANGES = {
 export const DEFAULT_RANGE = "24h";
 /** A range's key as the hash gave it: one of RANGES, else the default. */
 export const rangeOf = (text) => Object.hasOwn(RANGES, String(text ?? "")) ? String(text) : DEFAULT_RANGE;
+/** The usage samples of a range, its step a point (src/cli/run-server.ts `usage`): Usage's read, and the Overview's
+ *  sparklines (the 24 hours'). */
+export const usagePath = (range = DEFAULT_RANGE) => { const r = RANGES[rangeOf(range)]; return `/api/usage?since=${r.since}&step=${r.stepSeconds}`; };
+
+/** How often the shown page is asked while the tab is seen (src/web/app.js polls; a page's every-poll reads use it). */
+export const POLL_MS = 2000;
 
 /** A count as the commands print it: `1,234`. */
 export const n = (x) => x.toLocaleString("en-US");
@@ -49,6 +55,32 @@ export const bytesText = (b) => b < 1024 ? `${n(b)} B` : fileSize(b);
 
 /** An ISO time as the commands' lines print it: `2026-10-27 09:04:00` (UTC). */
 export const utcText = (iso) => iso.slice(0, 19).replace("T", " ");
+/** The same to the minute, as the commands' lists print it: `2026-10-27 09:04` (UTC). */
+export const utcMinute = (iso) => iso.slice(0, 16).replace("T", " ");
+
+/** A statement on one line, as mason logs says it (src/cli/commands.ts `oneLine`): whitespace collapsed, cut with an ellipsis. */
+export const oneLine = (sql, max = 120) => {
+  const line = String(sql ?? "").replace(/\s+/g, " ").trim();
+  return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
+};
+/** How a statement's client is said (src/cli/commands.ts `runningLine`, `requestLine`): its application_name, else the note. */
+export const clientText = (applicationName) => applicationName || "(no application_name)";
+
+/** A sync event's cells as `mason logs --events` and mason status's `Sync errors` say them (src/cli/commands.ts
+ *  `eventLine`): when, kind, table, the reason's first line. */
+export const eventCells = (e) => ({ time: utcText(e.at), kind: e.kind, table: e.table ?? "(the sync)", message: firstLine(e.message) });
+
+/**
+ * AN ENTRY OF THE UNSUPPORTED SQL (`/api/unsupported`'s `unsupported[]`: { gap, title, runs, users, clients, last,
+ * example }) in mason status's two lines (src/cli/commands.ts `unsupportedLines`, held equal by the tests): how many
+ * statements used what, and its entry of docs/SQL-SUPPORT.md (the page cannot link into the repository: it names it);
+ * then when the latest was, who sent them, and the latest on one line (`example`, cut as the CLI cuts it).
+ */
+export function unsupportedEntry(g) {
+  const who = [...(g.users.length ? [`as ${g.users.join(", ")}`] : []), ...(g.clients.length ? [`from ${g.clients.join(", ")}`] : [])];
+  return { headline: `${n(g.runs)} statement${g.runs === 1 ? "" : "s"} used ${g.title ?? "what this Mason no longer lists"} — docs/SQL-SUPPORT.md ${g.gap}`,
+    last: `last ${utcMinute(g.last)}${who.length ? ` ${who.join(" ")}` : ""}`, example: oneLine(g.example, 100) };
+}
 
 /** A share (0 to 1) as the commands print it beside a bar: whole percent, rounded down (`12%`). */
 export const percent = (share) => `${Math.floor(Math.max(0, Math.min(1, share)) * 100)}%`;
@@ -146,7 +178,7 @@ export function streamRows(st, now = Date.now()) {
     const c = t.catchUp;
     tables.push([t.table, t.state === "streamed" ? `streamed${counts}`
       : t.state === "catching-up" && c !== undefined
-        ? `catching up by one poll ${c.from ? `from ${c.from.slice(0, 16).replace("T", " ")} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
+        ? `catching up by one poll ${c.from ? `from ${utcMinute(c.from)} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
           `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (mason logs says why)` : "waiting its turn") : c.phase === "polling" ? "polling" : "applying what the stream held meanwhile"}` +
           `${c.startedAt ? `, for ${spanText(since(c.startedAt))}` : ""} · the stream holds ${n(c.held)} change${c.held === 1 ? "" : "s"} of it meanwhile${total(t) ? counts : ""}`
       : t.state === "left-out" ? `left out: ${t.why ?? ""}`
@@ -194,6 +226,14 @@ export function failureOf(status, text) {
     next: [{ command: "mason status", what: "whether Mason runs, and why it stopped" }, { command: "mason start", what: "start it" }, { command: "mason ui", what: "this page, for the Mason that is running" }] };
 }
 
+/** A part of a page written from one read: its body rendered, its Failure said where it shows when `says` (not the
+ *  page's first read's: that is the banner), or that it is being asked. */
+export function readPart(ctx, path, render, says) {
+  const r = ctx.read(path);
+  if (r === undefined) return `<p class="dim">Asking Mason…</p>`;
+  return (r.failure && says ? renderFailure(r.failure) : "") + (r.body === undefined ? "" : render(r.body));
+}
+
 /** One request to the run over `fetchFn`: `{ body }`, its JSON, or `{ failure }` when it was refused or nothing answered. */
 export function createAsk(fetchFn) {
   return async (path, init) => {
@@ -213,9 +253,6 @@ export const json = (method, body) => ({ method, headers: { "Content-Type": "app
 /** The last-updated line: how long ago the page last heard from the run (`Updated 3 s ago`), so a run that stopped
  *  answering is seen ageing. `now` is the page's clock. */
 export const updatedText = (at, now = new Date()) => `Updated ${duration(Math.max(0, (now.getTime() - at.getTime()) / 1000))} ago`;
-
-/** A one-line placeholder for a page not built yet: what it will show, and the command that shows it today. */
-export const placeholder = (what, command) => `<p class="dim">${esc(what)}: not built yet. ${code(command)} shows it in a terminal.</p>`;
 
 // ------------------------------------------------------------------ the components (src/web/app.css styles them; docs/WEB-UI.md "Presentation")
 // Each returns HTML from values it escapes; a part that is already HTML (a chart's holder, a body) is said so by its name.
@@ -252,9 +289,6 @@ export function card(label, value, sub = "", chartHtml = "", kind = "", href = "
 /** The cards in a grid (each `card(...)`'s HTML), its class saying how many (`cards n6`), so the stylesheet lays every
  *  count out without a card alone on a row: six in one row or two of three, five as three over two. */
 export const cards = (list) => list.length ? `<div class="cards n${list.length}">${list.join("")}</div>` : "";
-
-/** A section's header: its title and one line of what it shows (`id` the heading's, for aria-labelledby). */
-export const pageHead = (id, title, desc) => `<div class="page-head"><h2 id="${esc(id)}">${esc(title)}</h2>${desc ? `<p class="desc">${esc(desc)}</p>` : ""}</div>`;
 
 /** A table (or any wide HTML) in a hairline card that scrolls sideways on a phone, never the page. */
 export const panel = (html) => `<div class="panel">${html}</div>`;

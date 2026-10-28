@@ -162,6 +162,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     ui: ctx.page,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
       version: facts.versionText, standby: facts.standby, changes: ctx.changes, name: sources.file?.name ?? null, file: sources.file?.file ?? null,
+      shownFile: sources.file ? shownPath(ctx.root, sources.file.file) : null,
       ...(ctx.publication ? { replication: { slot: ctx.slot, publication: ctx.publication.name, owned: ctx.publication.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
     warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason copies the tables it read before; mason start reads the file again)`] : [])],

@@ -42,6 +42,7 @@ import { RequestLedger, REQUESTS_TABLE, requestLogDays } from "../duck/requests.
 import { EVENTS_TABLE, SyncEvents } from "../duck/events.ts";
 import { USAGE_TABLE, UsageSampler } from "../duck/usage.ts";
 import { withPlaceholders } from "./pg-url.ts";
+import { UI } from "./ui.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION } from "../duck/store.ts";
@@ -528,7 +529,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   say("");
   say(`  Postgres  ${withPlaceholders(postgresUrl)}  (mason user add <name> makes a user)`);
   // the web page by its command, never its URL: the URL carries the run's token, and this goes to dev.log
-  if (o.serve === undefined) say("  Web UI  mason ui  (the status page and the users, in your browser)");
+  // its words are mason ui's summary (mason --help's), so the two never drift
+  if (o.serve === undefined) say(`  Web UI  mason ui  (${UI.summary})`);
   if (demoChangeMs !== null) say(`  Demo  a new order lands every ${demoChangeMs / 1000} s: mason status shows the copy keeping up`);
   const elsewhere = elsewhereTip(pgTls.listener);
   if (elsewhere) say(`  ${elsewhere}`);

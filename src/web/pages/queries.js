@@ -1,7 +1,8 @@
 /**
  * THE QUERIES VIEW (#observability/queries, a sub-tab of Observability; `#queries`, its old address, lands here): KPI cards (the sessions open, the statements running, the last day's statements, failed ones
  * and p95), then who is connected now (`/api/state` `sessions`), the statements running now (`mason logs --running`, GET /api/running) with a Cancel that
- * asks first (`mason cancel`, POST /api/cancel), and the request log (`mason logs --requests`, GET /api/requests) as a
+ * asks first (`mason cancel`, POST /api/cancel), the unsupported SQL of the range (mason status's, GET /api/unsupported,
+ * read once a minute), and the request log (`mason logs --requests`, GET /api/requests) as a
  * table (a status dot and word, each row expanding in place and staying open across polls), newest first, filtered by
  * status, slow (SLOW_MS or more), a piece of the statement's text, since, user and client — since is the shared time
  * range unless the filter names its own — and paged back by Older; Started, Duration and Rows sort the page shown (the
@@ -10,33 +11,28 @@
  * statement's "N rows sent" and its client, a request's duration in ms, its error, the empty log's sentence.
  */
 import { agoText, bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText, details, createOpenSet, card, cards, empty, panel, status, skeleton,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE } from "../shared.js";
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText, unsupportedEntry, rangeOf, readPart } from "../shared.js";
 
 const RUNNING = "/api/running";
 const STATE = "/api/state";
-/** The request log's summary (the Status page's read too): the last day's statements, for the cards. */
+/** The request log's summary (the Overview's read too): the range's window of it, for the cards. */
 const QUERIES = "/api/queries";
 const QUERIES_EVERY_MS = 30_000;
+/** The unsupported SQL of a range (`/api/unsupported`: its 10 entries the most refused first), read once a minute: it
+ *  moves as statements are refused, and says what to rewrite, not what runs now. */
+const unsupportedPath = (range = DEFAULT_RANGE) => `/api/unsupported?since=${RANGES[rangeOf(range)].since}`;
+const UNSUPPORTED_EVERY_MS = 60_000;
 const NEWEST_EVERY_MS = 5000;
-const NO_CLIENT = "(no application_name)";
 /** Who is connected: the clients with the most sessions open, this many; the rest in one row. */
-export const SESSIONS_TOP = 10;
+const SESSIONS_TOP = 10;
 /** The most of a statement (or an error) an expanded row writes, in characters. */
-export const STATEMENT_MAX = 16 * 1024;
+const STATEMENT_MAX = 16 * 1024;
 
-/** A statement on one line, as mason logs says it (src/cli/commands.ts `oneLine`): whitespace collapsed, cut with an ellipsis. */
-export const oneLine = (sql, max = 120) => {
-  const line = String(sql ?? "").replace(/\s+/g, " ").trim();
-  return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
-};
 /** A statement as a cell: one line, truncated by the page's stylesheet as well, the whole of it as its title. */
 const statementCell = (query) => query === "" ? `<span class="dim">(no statement)</span>` : `<code class="stmt" title="${esc(clip(query, TITLE_MAX))}">${esc(oneLine(query))}</code>`;
 const plural = (count, word) => `${n(count)} ${word}${count === 1 ? "" : "s"}`;
 /** The key a running statement is asked about by: its session and its statement's number. */
 const keyOf = (session, statement) => `${session}:${statement}`;
-
-/** How a statement's client is said (src/cli/commands.ts `runningLine`): its application_name, else the note. */
-export const clientText = (applicationName) => applicationName || NO_CLIENT;
 
 /** What a cancel answered, as `mason cancel` says it: its headline, or the refusal as the Failure. */
 function outcomeHtml(o) {
@@ -83,15 +79,16 @@ export function renderQueryKpis(sessions, running, queries, range = DEFAULT_RANG
   return cards(list);
 }
 
-/**
- * THE LAST DAY'S THREE CARDS from the request log's summary (`day`: a window of `/api/queries`): the statements, the failed
- * ones (the log's Failed: refused or failed; its sub-line names each and the cancelled) and the completed ones' p95.
- * `line(key)` is a card's sparkline holder (the Usage page draws them; "" for none): ONE place derives these facts.
- */
 /** The window of the request log's summary a range's cards say: the week for 7 days, else the day (the summary has no
  *  hour: the cards of the last hour say the last 24 hours, by name). */
 export const summaryWindow = (range) => range === "7d" ? { key: "week", label: "last 7 days" } : { key: "day", label: "last 24 hours" };
 
+/**
+ * THE THREE CARDS of a window of the request log's summary (`day`: `/api/queries`' `day` or `week`, `label` its name): the
+ * statements, the failed ones (the log's Failed: refused or failed; its sub-line names each and the cancelled) and the
+ * completed ones' p95. `line(key)` is a card's sparkline holder (the Usage page draws them; "" for none): ONE place
+ * derives these facts.
+ */
 export function statementCards(day, line = () => "", label = "last 24 hours") {
   const failed = day.refused + day.failed;
   return [
@@ -131,6 +128,23 @@ export function renderRunning(running, asking = null, outcome = null) {
   return table + (!shown && outcome !== null ? outcomeHtml(outcome) : "");
 }
 
+/**
+ * THE UNSUPPORTED SQL of the range (`/api/unsupported`'s body: { since, unsupported, keptDays }): the statements Mason
+ * refused because they used SQL it does not support, grouped by its entry of docs/SQL-SUPPORT.md, the most refused first
+ * — each in mason status's two lines (`unsupportedEntry`): how many used what and the entry's name, then when the latest
+ * was, who sent them, and the latest statement on a line (its whole, up to TITLE_MAX, is the title). `span` is the range's
+ * words. None: the empty sentence, with how long the log keeps them.
+ */
+export function renderUnsupported(b, span = RANGES[DEFAULT_RANGE].span) {
+  const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
+  if (!b.unsupported.length) return empty(`No statement refused for unsupported SQL in ${span} (the request log keeps ${days}: MASON_REQUEST_LOG_DAYS).`);
+  return `<p class="lead">The statements refused in ${esc(span)} by the SQL they used that Mason does not support, the most first; docs/SQL-SUPPORT.md has each one's way out.</p>` +
+    panel(`<ul class="unsupported">${b.unsupported.map((g) => {
+      const e = unsupportedEntry(g);
+      return `<li><p class="headline">${esc(e.headline)}</p><p class="dim">${esc(e.last)} — <code class="clip" title="${esc(clip(g.example, TITLE_MAX))}">${esc(e.example)}</code></p></li>`;
+    }).join("")}</ul>`);
+}
+
 /** The status column's word: the ledger's `status` (completed, failed, cancelled), capitalised; its dot says the same (ok, bad, warn). */
 const STATUS = { completed: "Completed", failed: "Failed", cancelled: "Cancelled" };
 
@@ -139,7 +153,7 @@ const REQUEST_COLUMNS = [["Status"], ["Query id"], ["Started", "started"], ["Dur
 /** What each sortable column sorts by. */
 const REQUEST_SORTS = { started: (r) => Date.parse(r.startedAt), duration: (r) => r.durationMs, rows: (r) => r.rows };
 /** The request log's order unless a header is clicked: newest first. */
-export const NEWEST_FIRST = { key: "started", dir: "desc" };
+const NEWEST_FIRST = { key: "started", dir: "desc" };
 
 /**
  * THE REQUEST LOG (`mason logs --requests --json`'s shape: { requests, keptDays, before }), newest first (the command
@@ -191,7 +205,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
 const STATUS_OUTCOMES = { completed: "ok", failed: "refused,failed", cancelled: "cancelled" };
 
 /** The filters as they are before any is set. */
-export const NO_FILTERS = { status: "", since: "", user: "", client: "", slow: false, search: "" };
+const NO_FILTERS = { status: "", since: "", user: "", client: "", slow: false, search: "" };
 
 /** The path of one view of the request log: its filters as the server reads them (it judges since and search), since the
  *  range's (`range`, a key of RANGES) unless the filter names its own, and the cursor of an older page. */
@@ -252,8 +266,8 @@ export const page = {
       model: m,
       // the running statements every poll; the newest page of the log every 5 s, an older one only when first asked
       // (and who is connected, from the state, every 5 s; the last day's summary for the cards every 30 s)
-      reads: () => [{ path: RUNNING, everyMs: 2000 }, { path: path(), everyMs: m.before === null ? NEWEST_EVERY_MS : Infinity }, { path: STATE, everyMs: NEWEST_EVERY_MS },
-        { path: QUERIES, everyMs: QUERIES_EVERY_MS }],
+      reads: () => [{ path: RUNNING, everyMs: POLL_MS }, { path: path(), everyMs: m.before === null ? NEWEST_EVERY_MS : Infinity }, { path: STATE, everyMs: NEWEST_EVERY_MS },
+        { path: QUERIES, everyMs: QUERIES_EVERY_MS }, { path: unsupportedPath(ctx.range()), everyMs: UNSUPPORTED_EVERY_MS }],
       afterRead() {
         // a statement that ended since it was asked about has nothing left to cancel
         const r = ctx.read(RUNNING)?.body?.running;
@@ -269,6 +283,7 @@ export const page = {
           "queries-kpis": !running && !sessions && !q ? skeleton(2) : renderQueryKpis(sessions, running?.running, q === undefined ? undefined : q.body ? q.body : { failure: q.failure }, ctx.range()),
           "connected-now": renderSessions(ctx.read(STATE)?.body?.sessions),
           "running-now": running ? renderRunning(running.running, m.asking, m.outcome) : "",
+          unsupported: readPart(ctx, unsupportedPath(ctx.range()), (b) => renderUnsupported(b, (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span), true),
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
             span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span }) : ""),
         };

@@ -3,8 +3,8 @@
  * database and how its changes arrive, Mason's version, uptime and restarts, the copies in all, the copy's file, the
  * disk, the sessions open, the warnings), the changes the stream carries (replication mode: its position, lag, last
  * batch and the slot's hold on the database's WAL), the statements of the last day and week, the copies not finished (a
- * bar each, only while there are any), and the recent errors (the sync's and the statements'). The slow and the refused
- * statements are the Queries page's. Reads `/api/state` every poll, the request log's every 30 s, the last 24 hours of
+ * bar each, only while there are any), and the recent errors (the sync's and the statements', and the last day's
+ * unsupported SQL in a line). The slow and the refused statements are the Queries page's. Reads `/api/state` every poll, the request log's every 30 s, the last 24 hours of
  * usage (the cards' sparklines) every 60 s. Never the engine's name.
  *
  * Laid out as a dashboard (docs/WEB-UI.md "Presentation"): the word with a big dot, then KPI cards (the copies in all,
@@ -15,18 +15,17 @@
  */
 
 /** Where each card leads: the views that list what it counts (src/web/app.js hashes). */
-export const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
+const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
   slow: "#observability/queries?slow=1", failedQueries: "#observability/queries?status=failed", failedEvents: "#observability/logs?failures=1" };
 import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
-  card, cards, details, createOpenSet, skeleton } from "../shared.js";
+  utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
-/** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`). */
+/** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`, held equal by the tests). */
 export const RECENT_ERRORS = 5;
 
-const POLL_MS = 2000;
-/** The last 24 hours an hour a point: the cards' sparklines (the Usage page's own read, src/web/pages/usage.js HOURLY). */
-export const HOURLY = "/api/usage?since=24h&step=3600";
+/** The last 24 hours an hour a point: the cards' sparklines (Usage's read at its default range). */
+const HOURLY = usagePath("24h");
 
 /**
  * What a copying table's line says, and how full its bar is: src/cli/readiness.ts `copyingText`, line for line, so the
@@ -67,15 +66,16 @@ export function tableLine(t) {
   }
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its copy to start" };
   if (t.unsynced) {
-    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied, NOT kept current (${t.unsynced.reason}${t.unsynced.asOf ? `; as of ${t.unsynced.asOf.slice(0, 16).replace("T", " ")} UTC` : ""}) — mason sync ${entryName(t.table)}, or mason start --replication` };
+    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied, NOT kept current (${t.unsynced.reason}${t.unsynced.asOf ? `; as of ${utcMinute(t.unsynced.asOf)} UTC` : ""}) — mason sync ${entryName(t.table)}, or mason start --replication` };
   }
   return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}` };
 }
 
-/** `mason status`'s rows for the database (src/cli/commands.ts `sourceRows`): its sources file, its URL as the run masked it, how its changes arrive. */
+/** `mason status`'s rows for the database (src/cli/commands.ts `sourceRows`): its sources file (from the project's root:
+ *  the page never shows an absolute path), its URL as the run masked it, how its changes arrive. */
 export function sourceRows(s) {
   return [
-    ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`]] : []),
+    ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
@@ -104,7 +104,7 @@ export function renderHealth(s) {
 }
 
 /** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
-export const SPARKS = { rows: ["copyRows", "Rows copied"], "copy-bytes": ["copyBytes", "The copy's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
+const SPARKS = { rows: ["copyRows", "Rows copied"], "copy-bytes": ["copyBytes", "The copy's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
 
 /** The sparklines' specs from the usage answer (`/api/usage`'s body; anything else draws none): what `charts()` returns. */
 export function sparkSpecs(usage) {
@@ -158,7 +158,7 @@ const lagText = (lag) => `${lag.bytes === null || lag.bytes === undefined ? "byt
  * runs and why not, its position, its lag, the last batch applied (`streamRows`, held equal to `mason status`'s
  * `streamLines`), and the WAL the slot holds on the database (`slotText`, one of its rows). Each table's own stream state is the Tables page's.
  */
-export function renderStream(s, now = Date.now()) {
+function renderStream(s, now = Date.now()) {
   const st = s.stream;
   if (!st) return "";
   const { head } = streamRows(st, now);
@@ -191,7 +191,7 @@ export function renderFacts(s, now = Date.now()) {
  * failed, or copied but not kept current — and nothing once every copy is done. With no table added, the commands'
  * sentence and what adds one.
  */
-export function renderProgress(s, isOpen = () => false) {
+function renderProgress(s, isOpen = () => false) {
   const picked = s.tables.filter((t) => t.added);
   if (!picked.length) {
     return `<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>` +
@@ -230,38 +230,50 @@ export function renderQueries(q) {
     `<p class="dim">The slow and the refused statements, and every other, are on <a href="${LINKS.queries}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
 }
 
-/** A sync event's cells, as mason status's `Sync errors` line says them (src/cli/commands.ts `eventLine`): when, what, its table, its reason's first line. */
-export const eventCells = (e) => [utcText(e.at), e.kind, e.table ?? "(the sync)", firstLine(e.message)];
-
 /** A failed statement's cells, as mason status's `Query errors` line says them (src/cli/commands.ts `requestLine`): when,
  *  the outcome and SQLSTATE, how long, the rows sent, who, the statement on one line and the error's first line. */
 export function requestCells(r) {
-  const line = r.query.replace(/\s+/g, " ").trim();
   return [utcText(r.startedAt), r.outcome === "ok" ? "ok" : `${r.outcome} ${r.sqlstate ?? ""}`.trim(), `${n(r.durationMs)} ms`,
     r.rows === null ? "" : `${n(r.rows)} row${r.rows === 1 ? "" : "s"}`,
-    `${r.applicationName || "(no application_name)"}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`,
-    (line.length <= 120 ? line : `${line.slice(0, 119)}…`) || "(no statement)", r.message ? firstLine(r.message) : ""];
+    `${clientText(r.applicationName)}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`,
+    oneLine(r.query, 120) || "(no statement)", r.message ? firstLine(r.message) : ""];
 }
 
 const cellsRow = (cells) => `<tr><th scope="row">${esc(cells[0])}</th>${cells.slice(1).map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`;
 
 /**
+ * THE UNSUPPORTED SQL OF THE LAST DAY in one line, as mason status heads it (`/api/unsupported`'s body, its default day):
+ * the most refused entry's line (`unsupportedEntry`), how many others there are, and See all (Observability › Queries
+ * lists each). Nothing when none was refused; one that could not be read says why, as mason status does.
+ */
+export function renderUnsupportedLine(u) {
+  if (u === undefined) return "";
+  if ("failure" in u) return `<p class="count">Unsupported SQL: could not read it (${esc(firstLine(u.failure.message))}; ${code("mason logs")} has the detail)</p>`;
+  const [top, ...rest] = u.unsupported;
+  if (top === undefined) return "";
+  return `<p class="unsupported-line"><strong>Unsupported SQL, the last day:</strong> ${esc(unsupportedEntry(top).headline)}` +
+    `${rest.length ? ` (and ${n(rest.length)} other${rest.length === 1 ? "" : "s"})` : ""} <a class="see" href="${LINKS.queries}">See all</a></p>`;
+}
+
+/**
  * THE RECENT ERRORS, as mason status lists them (`recentErrors`): the sync's latest failures (`/api/events?failed=1`)
  * and the latest statements refused, failed or cancelled (`/api/requests?failed=1`), newest last; a kind with none
- * says so, one that could not be read says why. Each argument is the body, or `{ failure }`.
+ * says so, one that could not be read says why; then the last day's unsupported SQL in a line, when there is any
+ * (`renderUnsupportedLine`). Each argument is the body, or `{ failure }`.
  */
-export function renderRecentErrors(events, requests) {
+export function renderRecentErrors(events, requests, unsupported) {
   const part = (title, r, list, head, cells, more, href) => r === undefined ? ""
     : "failure" in r ? `<h3>${title}</h3><p class="count">Could not read them (${esc(firstLine(r.failure.message))}; ${code("mason logs")} has the detail)</p>`
     : !list(r).length ? `<h3>${title}</h3><p class="dim">None.</p>`
     : `<table class="errors"><caption>${title} (the latest, newest last; ${code(more)} lists each) <a class="see" href="${href}">See all</a></caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${list(r).map((x) => cellsRow(cells(x))).join("")}</tbody></table>`;
-  return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], eventCells, "mason logs --events", LINKS.failedEvents) +
-    part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed", LINKS.failedQueries);
+  return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], (e) => Object.values(eventCells(e)), "mason logs --events", LINKS.failedEvents) +
+    part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed", LINKS.failedQueries) +
+    renderUnsupportedLine(unsupported);
 }
 
 /**
- * THE STATUS SECTION from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`, `o.usage`:
+ * THE OVERVIEW from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`, `o.unsupported`, `o.usage`:
  * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the cards,
  * the copies not finished, the facts, the stream, the statements, the recent errors. Never the engine's name.
  */
@@ -269,11 +281,16 @@ export function renderStatus(s, o = {}) {
   const now = o.now ?? Date.now();
   const added = s.tables.some((t) => t.added);
   return renderHealth(s) + renderKpis(s, { ...o, now }) + renderProgress(s, o.open) + renderFacts(s, now) + renderStream(s, now) +
-    (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests) : "");
+    (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }
 
-/** What the page reads every 30 s beside the state: the request log's summary and the recent errors. */
-const SLOWER = ["/api/queries", `/api/events?failed=1&limit=${RECENT_ERRORS}`, `/api/requests?failed=1&limit=${RECENT_ERRORS}`];
+/** The most entries of the unsupported SQL `/api/unsupported` answers (src/cli/run-server.ts MAX_UNSUPPORTED_LIMIT, held
+ *  equal by the tests): the Overview says the first and counts the others, so it reads them all. */
+export const UNSUPPORTED_LIMIT = 100;
+
+/** What the page reads every 30 s beside the state: the request log's summary, the recent errors, and the last day's
+ *  unsupported SQL. */
+const SLOWER = ["/api/queries", `/api/events?failed=1&limit=${RECENT_ERRORS}`, `/api/requests?failed=1&limit=${RECENT_ERRORS}`, `/api/unsupported?limit=${UNSUPPORTED_LIMIT}`];
 
 /** A read as `renderStatus` takes it: the body, or `{ failure }` when it could not be read; undefined before any read. */
 const asRequest = (r) => r === undefined ? undefined : r.failure ? { failure: r.failure } : r.body;
@@ -292,8 +309,8 @@ export const page = {
       view() {
         const st = ctx.read("/api/state");
         if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
-        const [queries, events, requests] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, usage: ctx.read(HOURLY)?.body, open: opened.has }) };
+        const [queries, events, requests, unsupported] = SLOWER.map((p) => asRequest(ctx.read(p)));
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, usage: ctx.read(HOURLY)?.body, open: opened.has }) };
       },
       toggle: (target) => opened.toggle(target),
       charts: () => sparkSpecs(ctx.read(HOURLY)?.body),

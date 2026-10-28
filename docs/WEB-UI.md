@@ -41,7 +41,9 @@ and nothing while the tab is hidden. How long ago Mason last answered is in the 
 - **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime
   and restarts, free disk, and sessions open. In replication mode, a Changes table shows the stream and the WAL its slot holds.
 - **Overview**, the statements and errors: the last day and week in one table, then the latest sync errors and the
-  refused or failed statements, each with **See all** (Logs, failures only; Queries, the failed ones).
+  refused or failed statements, each with **See all** (Logs, failures only; Queries, the failed ones), and — when a
+  statement used SQL Mason does not support in the last day — one line naming the most refused entry of
+  `docs/SQL-SUPPORT.md`, with **See all** (Queries).
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /
   Added / Failed / Not added filter. With hundreds of tables the first 100 that pass are written, then **Show 100 more**
   and **Show all**; the search is over every table, at once. A long name is cut with an ellipsis, its whole the tooltip.
@@ -60,6 +62,9 @@ and nothing while the tab is hidden. How long ago Mason last answered is in the 
   the others.
 - **Queries**, running now: each statement with **Cancel**, which asks first and stops that one statement, as
   `mason cancel` does.
+- **Queries**, unsupported SQL: the statements of the range Mason refused for SQL it does not support, grouped by their
+  entry of `docs/SQL-SUPPORT.md` (named, as the page cannot link into the repository), the most refused first — how
+  many, when the latest was, who sent them and the latest statement on a line, as `mason status` says them.
 - **Queries**, the request log: newest first, with a status dot per row. Filter by status, **Slow (1 s or more)**, a
   piece of the statement's text (**Statement has**), since (`2h`, `7d`, or a date: used instead of the range), user and
   client; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
@@ -95,7 +100,7 @@ Every colour, space, radius, font and size is a CSS custom property on `:root` i
 `--surface`, `--line`, `--fg`, `--muted`, `--accent`, `--ok`, `--warn`, `--bad`, `--unknown`, `--chart-*`,
 `--font-sans`, `--font-mono`, `--space-1…7`, `--radius*`, `--text-*`), set again for dark mode, so a page is restyled
 by its tokens. The components are helpers of `src/web/shared.js` (`status`, `card`, `cards`, `badge`, `button`,
-`panel`, `pageHead`, `empty`, `skeleton`, `details`, `sortTh`, `moreRows`); the charts, `src/web/charts.js`.
+`panel`, `empty`, `skeleton`, `details`, `sortTh`, `moreRows`); the charts, `src/web/charts.js`.
 
 **Buttons say what they do**: every button has a visible label (no icon alone); a primary action is filled dark, a
 destructive one red-lettered and its confirm filled red; each has hover, focus and disabled states and is at least 28 px

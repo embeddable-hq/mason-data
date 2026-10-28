@@ -47,7 +47,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf } from "./shared.js";
+import { esc, badge, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -58,7 +58,6 @@ import { page as logsPage } from "./pages/logs.js";
 
 // every renderer the tests import from here, wherever it lives now
 export * from "./shared.js";
-export { spark, seriesChart, seriesOf, drawable, chartOptions, createCharts } from "./charts.js";
 export { copyingText, tableLine, sourceRows, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
 export { renderUsers, renderAdded } from "./pages/users.js";
@@ -67,11 +66,8 @@ export { renderRunning, renderRequests, renderSessions } from "./pages/queries.j
 /** The pages, in the nav's order: a page with a `parent` is a sub-tab of its parent's tab. */
 export const PAGES = [statusPage, tablesPage, usersPage, queriesPage, usagePage, logsPage];
 
-/** How often the shown page is asked while the tab is seen: its fastest reads every poll, the slower ones when due. */
-export const POLL_MS = 2000;
-
 /** The tabs a parent stands for: its title, and the first of its pages is where its tab goes. */
-export const GROUPS = { observability: { title: "Observability" } };
+const GROUPS = { observability: { title: "Observability" } };
 
 /** The hashes of before the Observability tab, and the tab's own: each lands on the view it was (`#status` the Overview). */
 const ALIASES = { status: "status", queries: "queries", usage: "usage", logs: "logs", observability: "queries" };
@@ -90,9 +86,6 @@ export function parseHash(hash) {
   const page = PAGES.find((p) => hashOfPage(p) === where)?.id ?? ALIASES[where] ?? "status";
   return { id: page, params };
 }
-
-/** The page a hash shows: `#tables` → tables; `#observability/logs` → logs; none or one unknown → status (the Overview). */
-export const routeOf = (hash) => parseHash(hash).id;
 
 /** A page's address with its parameters (`hashOf("queries", { range: "7d" })` → `#observability/queries?range=7d`); the
  *  default range is left out, so the plain address is the 24 hours. */
@@ -137,7 +130,7 @@ export function renderSubnav(shown, range = DEFAULT_RANGE) {
 }
 
 /** The heading's line: the database the run copies, and its sources file's name when that is another. */
-export function renderWhere(s) {
+function renderWhere(s) {
   return `${esc(s.source.database)}${s.source.name && s.source.name !== s.source.database ? ` · source ${esc(s.source.name)}` : ""}`;
 }
 

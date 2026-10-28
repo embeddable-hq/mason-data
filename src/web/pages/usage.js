@@ -9,17 +9,13 @@
  * Reads `/api/queries`, `/api/usage` and its copy sizes every 60 s (a sample is taken a minute). Every number a chart
  * draws is also text, in a card or the hours' table. A page module (src/web/app.js has the contract). Never the engine's name.
  */
-import { esc, n, bytesText, fileSize, duration, renderFailure, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, nextSort, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
+import { esc, n, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, nextSort, readPart, usagePath, utcMinute, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 import { statementCards, summaryWindow } from "./queries.js";
 
 const EVERY_MS = 60_000;
-/** The samples of a range, its step a line: `step` is seconds (src/cli/run-server.ts `usage`). The 24 hours' is the
- *  Overview's read too (src/web/pages/status.js HOURLY), so the two pages share it. */
-export const usagePath = (range = DEFAULT_RANGE) => { const r = RANGES[rangeOf(range)]; return `/api/usage?since=${r.since}&step=${r.stepSeconds}`; };
-export const HOURLY = usagePath("24h");
 /** A step said as the charts' titles say it: `a minute`, `an hour`, `every 6 hours`. */
-export const perStep = (seconds) => seconds === 60 ? "a minute" : seconds === 3600 ? "an hour" : seconds % 3600 === 0 ? `every ${seconds / 3600} hours` : `every ${duration(seconds)}`;
+const perStep = (seconds) => seconds === 60 ? "a minute" : seconds === 3600 ? "an hour" : seconds % 3600 === 0 ? `every ${seconds / 3600} hours` : `every ${duration(seconds)}`;
 const QUERIES = "/api/queries";
 /** How often a copy's own size is measured, in seconds (src/duck/usage.ts SIZE_EVERY_MS, held equal by the tests). */
 export const SIZE_EVERY_SECONDS = 600;
@@ -51,7 +47,7 @@ export function renderQueries(q) {
 export function sampleCells(s) {
   const bad = s.statementsRefused + s.statementsFailed + s.statementsCancelled;
   return {
-    time: s.at.slice(0, 16).replace("T", " "), statements: n(s.statements), errors: bad === 0 ? "" : n(bad),
+    time: utcMinute(s.at), statements: n(s.statements), errors: bad === 0 ? "" : n(bad),
     rowsSent: n(s.rowsSent), bytesSent: bytesText(s.bytesSent), p95: s.durationP95Ms === null ? "–" : `${n(s.durationP95Ms)} ms`,
     copy: s.copyBytes === null ? "–" : fileSize(s.copyBytes), rows: n(s.copyRows), failing: s.tablesFailed === 0 ? "" : n(s.tablesFailed),
     oldest: s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds), lag: s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds),
@@ -61,7 +57,7 @@ export function sampleCells(s) {
 
 /** The charts, in order: [holder key, title, sample field, kind, how a hovered value is said (exactly, as the table
  *  says it), the axis's unit]. One series each, from a zero baseline. "Statements" is "Statements an hour" by the step. */
-export const CHARTS = [
+const CHARTS = [
   ["usage-statements", "Statements", "statements", "bars", n, "count"],
   ["usage-p95", "p95 duration", "durationP95Ms", "line", (v) => `${n(Math.round(v))} ms`, "ms"],
   ["usage-copy-bytes", "Size of the copy", "copyBytes", "line", fileSize, "bytes"],
@@ -70,7 +66,7 @@ export const CHARTS = [
 /** A chart's title at a step: the statements are counted per step, the rest are levels. */
 const chartTitle = (key, title, step) => key === "usage-statements" ? `Statements ${perStep(step ?? 3600)}` : title;
 /** The sparklines of the cards, by card: [holder key, title, sample field]. The failed ones are the samples' refused and failed together. */
-export const SPARKS = { statements: ["usage-spark-statements", "Statements", "statements"], failed: ["usage-spark-failed", "Failed statements", "failedCount"],
+const SPARKS = { statements: ["usage-spark-statements", "Statements", "statements"], failed: ["usage-spark-failed", "Failed statements", "failedCount"],
   p95: ["usage-spark-p95", "p95", "durationP95Ms"], rows: ["usage-spark-rows", "Rows sent", "rowsSent"], bytes: ["usage-spark-bytes", "Bytes sent", "bytesSent"] };
 
 const samplesOf = (usage) => usage && Array.isArray(usage.samples) ? usage.samples.map((s) => ({ ...s, failedCount: s.statementsRefused + s.statementsFailed })) : [];
@@ -125,7 +121,7 @@ export function renderUsageKpis(queries, usage, range = DEFAULT_RANGE) {
  * memory is behind another.
  */
 export function renderUsage(b, isOpen = () => false, sort = { key: "time", dir: "desc" }) {
-  const at = (iso) => iso.slice(0, 16).replace("T", " ");
+  const at = utcMinute;
   const span = b.stepSeconds === null ? "every sample" : `${duration(b.stepSeconds)} a line`;
   const head = `<p class="dim">From ${esc(at(b.since))} to ${esc(at(b.until))} UTC, ${esc(span)} (a sample every ${esc(duration(b.sampleSeconds))}, kept ${b.keptDays} day${b.keptDays === 1 ? "" : "s"}).</p>`;
   let samples;
@@ -167,13 +163,7 @@ export const page = {
     const m = { open: opened.open, sort: { key: "time", dir: "desc" } };
     const path = () => usagePath(ctx.range());
     const actions = { sortHours() { m.sort = nextSort(m.sort, "time"); } };
-    /** What a read gave: its body, or its Failure where it shows (said once, and not the first read's: that is the banner), or that it is being asked. */
-    const part = (path, render, says) => {
-      const r = ctx.read(path);
-      if (r === undefined) return `<p class="dim">Asking Mason…</p>`;
-      const failure = r.failure && says ? renderFailure(r.failure) : "";
-      return failure + (r.body === undefined ? "" : render(r.body));
-    };
+    const part = (path, render, says) => readPart(ctx, path, render, says);
     return {
       model: m,
       reads: () => [{ path: QUERIES, everyMs: EVERY_MS }, { path: path(), everyMs: EVERY_MS }],
