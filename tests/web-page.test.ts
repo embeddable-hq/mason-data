@@ -680,8 +680,9 @@ test("the shell: a page per hash (#status the default, an unknown hash Status), 
   assert.deepEqual([...nav.matchAll(/<a href="(#\w+)"( aria-current="page")?>/g)].filter((m) => m[2]).map((m) => m[1]), ["#tables"], "the page shown is the current one");
   // a page not built yet says so in one line, with the command that shows it today
   const app = fn<[unknown], App>("createApp")(fakeRun().fetch);
-  assert.match(textOf(app.view().usage!), /not built yet\. mason usage shows it/);
-  assert.match(textOf(app.view().logs!), /not built yet\. mason logs --events shows it/);
+  // (Usage and Logs are built: before their first read they say they are asking)
+  assert.match(textOf(app.view()["usage-queries"]!), /Asking Mason/);
+  assert.match(textOf(app.view()["logs-events"]!), /Asking Mason/);
 });
 
 test("the shell: only the page shown is asked, each endpoint at its own rate — the state every poll, the slower ones when due", async () => {
@@ -1117,4 +1118,151 @@ test("the users: read with their last use, every 30 s; Copy puts the URL without
   run.asked.length = 0;
   assert.equal(await app.confirmRemove("metabase"), true);
   assert.deepEqual(run.asked, ["DELETE /api/users/metabase", U]);
+});
+
+// ------------------------------------------------------------------ the Usage and Logs pages
+
+// read when the tests run: at a commit without the pages the file still loads, and each test fails by name
+const usagePage = await import(path.join(WEB, "pages", "usage.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
+const logsPage = await import(path.join(WEB, "pages", "logs.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
+const fnOf = <A extends unknown[], R>(mod: Record<string, unknown>, name: string): Fn<A, R> => { assert.equal(typeof mod[name], "function", `the page exports ${name}`); return mod[name] as Fn<A, R>; };
+const PLAIN_STYLE = (await import("../src/cli/style.ts")).PLAIN;
+
+const usageCliModule = await import("../src/cli/usage.ts");
+const usageCliLine = (s: unknown, lag: boolean): string => usageCliModule.sampleLine(s as never, lag);
+const WINDOW = (days: number, covered: number) => ({ days, covered, statements: 1204, completed: 1190, refused: 10, failed: 2, cancelled: 2, rows: 52_000, bytesSent: 3 * 1024 * 1024, durationMs: { avg: 120, p50: 40, p95: 900 } });
+const UL_QUERIES = { queries: { keptDays: 3, day: WINDOW(1, 1), week: { ...WINDOW(7, 3), statements: 9, durationMs: null, bytesSent: 512 } } };
+const SAMPLE = { at: "2026-10-28T09:05:00.000Z", seconds: 3600, copyBytes: 5 * 2 ** 30, copyRows: 12_345_678, tablesAdded: 4, tablesCopied: 4, tablesFailed: 1, oldestSyncSeconds: 75,
+  statements: 1204, statementsRefused: 2, statementsFailed: 1, statementsCancelled: 0, rowsSent: 98_765, bytesSent: 4_567_890, durationP50Ms: 12, durationP95Ms: 1830, streamLagBytes: null, streamLagSeconds: null,
+  rssBytes: 900 * 2 ** 20, heapUsedBytes: 80 * 2 ** 20, copyMemoryBytes: 300 * 2 ** 20, copyMemoryLimitBytes: 8 * 2 ** 30 };
+const IDLE = { ...SAMPLE, at: "2026-10-28T10:05:00.000Z", statements: 0, statementsRefused: 0, statementsFailed: 0, durationP95Ms: null, tablesFailed: 0, oldestSyncSeconds: null, copyBytes: null, copyMemoryBytes: null };
+const UL_USAGE = { since: "2026-10-27T09:05:00.000Z", until: "2026-10-28T09:05:00.000Z", stepSeconds: 3600, sampleSeconds: 60, keptDays: 7, samples: [SAMPLE, IDLE],
+  copySizes: [{ table: "public.orders", bytes: 3 * 2 ** 30, at: "2026-10-28T09:00:12.000Z" }, { table: "public.customers", bytes: 40_000, at: "2026-10-28T09:00:12.000Z" }] };
+const UL_EVENTS = { keptDays: 7, events: [
+  { at: "2026-10-28T09:00:00.000Z", kind: "copied", failed: false, table: "public.orders", message: "copied 2,000,000 rows" },
+  { at: "2026-10-28T09:01:00.000Z", kind: "copy_failed", failed: true, table: "public.events", message: "the source closed the connection\nthe sync tries it again in 5 min" },
+  { at: "2026-10-28T09:05:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped <b>after</b> 42 s" }] };
+const LOG = { kept: 2000, lines: [{ at: "2026-10-28T09:00:00.000Z", text: "mason started" }, { at: null, text: "copy: public.orders\n  chunk 3 of 20 <read>" }] };
+const withUsageAnswers = (run: ReturnType<typeof fakeRun>) => {
+  run.answers.set("GET /api/queries", answer(UL_QUERIES));
+  run.answers.set("GET /api/usage?since=24h&step=3600", answer(UL_USAGE));
+  run.answers.set("GET /api/events?limit=100", answer(UL_EVENTS));
+  run.answers.set("GET /api/logs?lines=200", answer(LOG));
+};
+
+test("Usage: the statements of the last day and week are mason status's words in a table with the windows as columns, and a short log says so", () => {
+  const renderQueries = fnOf<[unknown], string>(usagePage, "renderQueries");
+  const cli = commands.queryLines(UL_QUERIES.queries as never, PLAIN_STYLE).join("\n");
+  const text = textOf(renderQueries(UL_QUERIES.queries));
+  assert.match(text, /^Last day Last week Statements 1,204 9 Completed 1,190 1,190 Refused 10 10 Failed 2 2 Cancelled 2 2 Rows 52,000 52,000 Bytes sent 3\.0 MiB 512 B Duration, average \/ p50 \/ p95 \(the completed ones'\) 120 \/ 40 \/ 900 ms – /);
+  // each cell the page re-says is the CLI's, held equal
+  for (const piece of ["1,204 statements: 1,190 completed, 10 refused, 2 failed, 2 cancelled", "120 / 40 / 900 ms", "52,000 rows, 3.0 MiB sent", "512 B sent", "(the request log keeps 3 days: MASON_REQUEST_LOG_DAYS)"]) assert.ok(cli.includes(piece), piece);
+  assert.equal(fnOf<[unknown], string>(usagePage, "durationsText")(UL_QUERIES.queries.day.durationMs), "120 / 40 / 900 ms");
+  assert.equal(fnOf<[unknown], string>(usagePage, "coveredText")(UL_QUERIES.queries.week), "the request log keeps 3 days: MASON_REQUEST_LOG_DAYS");
+  assert.equal(fnOf<[unknown], string>(usagePage, "coveredText")(UL_QUERIES.queries.day), "", "a window the log covers has no caveat");
+  assert.match(text, /Last week: the request log keeps 3 days: MASON_REQUEST_LOG_DAYS/);
+  assert.doesNotMatch(text, /Last day: the request log keeps/);
+});
+
+test("Usage: each hour's cells are mason usage's (sampleLine), no sample yet is said, and each copy's own size is listed", async () => {
+  const renderUsage = fnOf<[unknown], string>(usagePage, "renderUsage"), cells = fnOf<[unknown], Record<string, string>>(usagePage, "sampleCells");
+  for (const s of [SAMPLE, IDLE, { ...SAMPLE, streamLagSeconds: 3, streamLagBytes: 10 }]) {
+    const c = cells(s), line = usageCliLine(s, true);
+    for (const k of ["time", "statements", "p95", "copy", "oldest", "memory"] as const) assert.ok(line.includes(c[k]!), `${k}: ${c[k]} in ${line}`);
+    assert.ok(line.includes(c.rows!) && line.includes(c.rowsSent!));
+    assert.equal(c.errors, s.statementsRefused + s.statementsFailed + s.statementsCancelled === 0 ? "" : String(s.statementsRefused + s.statementsFailed + s.statementsCancelled));
+  }
+  assert.equal(cells(SAMPLE).bytesSent, "4.4 MiB");
+  const text = textOf(renderUsage(UL_USAGE));
+  assert.match(text, /^From 2026-10-27 09:05 to 2026-10-28 09:05 UTC, 60 min a line \(a sample every 60 s, kept 7 days\)\./);
+  assert.match(text, /Time \(UTC\) Statements Errors Rows sent Bytes sent p95 Copy Rows Failing Oldest Memory 2026-10-28 09:05 1,204 3 98,765 4\.4 MiB 1,830 ms 5\.0 GiB 12,345,678 1 75 s 900\.0 MiB \(copy 300\.0 MiB of 8\.0 GiB\) 2026-10-28 10:05 0 98,765 4\.4 MiB – – 12,345,678 – 900\.0 MiB/);
+  assert.doesNotMatch(text, /Lag/, "no lag column without a stream");
+  assert.match(textOf(renderUsage({ ...UL_USAGE, samples: [{ ...SAMPLE, streamLagSeconds: 3, streamLagBytes: 10 }] })), /Oldest Lag Memory .* 3 s 900/);
+  assert.match(textOf(renderUsage({ ...UL_USAGE, samples: [] })), /No sample in this time: Mason takes the first a minute after it starts\./);
+  const sizes = textOf(fnOf<[unknown], string>(usagePage, "renderCopySizes")(UL_USAGE.copySizes));
+  assert.match(sizes, /^Measured every 10 min\. Table Size Measured at \(UTC\) public\.orders 3\.0 GiB 09:00 public\.customers 39\.1 KiB 09:00$/);
+  assert.equal(usagePage.SIZE_EVERY_SECONDS as unknown, (await import("../src/duck/usage.ts")).SIZE_EVERY_MS / 1000, "as often as src/duck/usage.ts measures");
+  assert.match(textOf(fnOf<[unknown], string>(usagePage, "renderCopySizes")([])), /No copy measured yet/);
+});
+
+test("Usage: reads the day and week, and the 24 hours an hour a line, every 60 s and only while shown; a refusal is the CLI's Failure", async () => {
+  const run = fakeRun(); withUsageAnswers(run);
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  app.show("usage");
+  const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
+  assert.deepEqual(await asked(), ["GET /api/queries", "GET /api/usage?since=24h&step=3600"]);
+  const v = app.view();
+  assert.match(textOf(v["usage-queries"]!), /Statements 1,204/);
+  assert.match(textOf(v["usage-hourly"]!), /2026-10-28 09:05 1,204 3/);
+  assert.match(textOf(v["usage-sizes"]!), /public\.orders 3\.0 GiB/);
+  t += 2000; assert.deepEqual(await asked(), [], "2 s on: nothing is due");
+  t += 58_000; assert.deepEqual(await asked(), ["GET /api/queries", "GET /api/usage?since=24h&step=3600"], "60 s on: both again");
+  app.show("status"); assert.deepEqual((await asked()).includes("GET /api/queries"), false, "not while another page is shown");
+  // the hours refused (a step the run does not take): the server's Failure, said once under the hours; the first read's is the banner
+  app.show("usage");
+  const refusal = { error: "step is a whole number of seconds", failure: { code: "usage", message: "step is a whole number of seconds", why: "too short", fix: "mason usage --step 1h", next: [{ command: "mason usage --help", what: "the spans it takes" }] } };
+  run.answers.set("GET /api/usage?since=24h&step=3600", answer(refusal, 400));
+  t += 60_000; await app.poll();
+  const w = app.view();
+  assert.match(textOf(w["usage-hourly"]!), /^✗ step is a whole number of seconds why too short fix mason usage --step 1h Next: mason usage --help the spans it takes /, "the Failure, then the last hours it knew");
+  assert.doesNotMatch(textOf(w["usage-sizes"]!), /✗/, "said once");
+  assert.equal(w.poll, "", "the queries read answered");
+  run.answers.set("GET /api/queries", answer({ error: "the request log cannot be read", failure: { code: "failed", message: "the request log cannot be read", next: [] } }, 500));
+  t += 60_000; await app.poll();
+  assert.match(textOf(app.view().poll!), /✗ the request log cannot be read/);
+  assert.match(textOf(app.view()["usage-queries"]!), /Statements 1,204/, "the last counts stay under the banner");
+});
+
+test("Logs: the sync's events are mason logs --events' lines in a table, a failure marked, newest last; none is said as the CLI says it", () => {
+  const renderEvents = fnOf<[unknown], string>(logsPage, "renderEvents"), cells = fnOf<[unknown], Record<string, string>>(logsPage, "eventCells");
+  for (const e of UL_EVENTS.events) {
+    const c = cells(e);
+    assert.equal(commands.eventLine(e as never, PLAIN_STYLE), `${c.time}  ${c.kind!.padEnd(18)}  ${c.table}  ${c.message}`, "the CLI's line, cell for cell");
+  }
+  const html = renderEvents(UL_EVENTS);
+  assert.equal(textOf(html), "Time (UTC) Kind Table Message 2026-10-28 09:00:00 copied public.orders copied 2,000,000 rows 2026-10-28 09:01:00 ✗ copy_failed (failed) public.events the source closed the connection the sync tries it again in 5 min 2026-10-28 09:05:00 ✗ restart (failed) (the sync) the run stopped <b>after</b> 42 s");
+  assert.equal([...html.matchAll(/class="t-failed"/g)].length, 2, "the failures are marked");
+  assert.doesNotMatch(html, /<b>/, "a message is escaped");
+  assert.equal(textOf(renderEvents({ events: [], keptDays: 7 })), "No sync event in the last 7 days (MASON_REQUEST_LOG_DAYS).");
+  assert.equal(textOf(renderEvents({ events: [], keptDays: 1 })), "No sync event in the last 1 day (MASON_REQUEST_LOG_DAYS).");
+});
+
+test("Logs: the run's entries are rows, oldest first so the newest is at the bottom, a multi-line entry kept as one preformatted row", () => {
+  const renderLogs = fnOf<[unknown], string>(logsPage, "renderLogs");
+  const html = renderLogs(LOG);
+  assert.equal([...html.matchAll(/<th scope="row">/g)].length, 2, "two entries, two rows");
+  assert.ok(html.indexOf("mason started") < html.indexOf("copy: public.orders"));
+  assert.match(html, /<pre>copy: public\.orders\n {2}chunk 3 of 20 &lt;read&gt;<\/pre>/);
+  assert.match(textOf(html), /^Time \(UTC\) Entry 2026-10-28 09:00:00 mason started copy: public\.orders chunk 3 of 20 <read> The last 2 of at most 2000 entries/);
+  assert.match(textOf(renderLogs({ lines: [], kept: 2000 })), /The run has logged nothing yet\./);
+});
+
+test("Logs: reads the events every 10 s and the log every 5 s, only while shown; a refusal of the log is its Failure under it, the events' the banner", async () => {
+  const run = fakeRun(); withUsageAnswers(run);
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  app.show("logs");
+  const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
+  assert.deepEqual(await asked(), ["GET /api/events?limit=100", "GET /api/logs?lines=200"]);
+  assert.match(textOf(app.view()["logs-events"]!), /✗ copy_failed/);
+  assert.match(textOf(app.view()["logs-run"]!), /mason started/);
+  t += 2000; assert.deepEqual(await asked(), [], "2 s on: neither is due");
+  t += 3000; assert.deepEqual(await asked(), ["GET /api/logs?lines=200"], "5 s on: the log alone");
+  t += 5000; assert.deepEqual(await asked(), ["GET /api/events?limit=100", "GET /api/logs?lines=200"], "10 s on: both");
+  app.show("usage"); assert.deepEqual((await asked()).some((p) => p.includes("/api/logs")), false, "not while another page is shown");
+  app.show("logs");
+  run.answers.set("GET /api/logs?lines=200", answer({ error: "lines is a whole number of log entries, 1 to 2000", failure: { code: "failed", message: "lines is a whole number of log entries, 1 to 2000", next: [] } }, 400));
+  t += 10_000; await app.poll();
+  assert.match(textOf(app.view()["logs-run"]!), /^✗ lines is a whole number of log entries, 1 to 2000 Time \(UTC\) Entry/);
+  assert.equal(app.view().poll, "");
+  run.answers.set("GET /api/events?limit=100", answer({ error: "no", failure: { code: "failed", message: "the events cannot be read", next: [] } }, 500));
+  t += 10_000; await app.poll();
+  assert.match(textOf(app.view().poll!), /✗ the events cannot be read/);
+});
+
+test("Usage and Logs: the index.html has the parts the pages write, the placeholders' parts are gone", () => {
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  for (const id of ["usage-queries", "usage-hourly", "usage-sizes", "logs-events", "logs-run"]) assert.match(html, new RegExp(`<div id="${id}"></div>`), id);
+  assert.doesNotMatch(html, /<div id="usage"><\/div>|<div id="logs"><\/div>/);
 });

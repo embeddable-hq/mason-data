@@ -94,3 +94,11 @@ code.stmt { display: inline-block; max-width: 28em; overflow: hidden; text-overf
 .paging { margin: 10px 0 0; }
 select { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
 form#request-filters input { min-width: 8em; }
+
+/* Usage and Logs: plain tables */
+table.queries td.num, table.samples td.num, table.sizes td.num { white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+table.samples, table.log, table.events { font-size: 13px; }
+table.samples th[scope="row"], table.events th[scope="row"], table.log th[scope="row"] { white-space: nowrap; }
+table.log pre { margin: 0; color: var(--fg); }
+table.events td pre { margin: 2px 0 0; }
+tr.t-failed .mark { color: var(--bad); }
