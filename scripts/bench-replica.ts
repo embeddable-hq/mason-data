@@ -20,6 +20,19 @@
  *     --reserve-gb 60     # a size whose estimate would leave less free disk than this is skipped, said
  *     --keep-postgres     # leave the bench-pg container (and its data) for the next run
  *
+ * A LAYOUT OF THE COPY, MEASURED (bench-only, issue #9's measurement; none of these is in a published run):
+ *     --order "<expr>, …" # the copy of public.orders rewritten in this physical order after it lands and its stored
+ *                         # JSON path is ready: with Mason's store open by the bench alone (the sync, the request log and
+ *                         # the listener closed), CREATE TABLE … AS SELECT * … ORDER BY <expr> and a swap by name, so
+ *                         # _mason's bookkeeping is untouched and only the row groups' order changes; recorded in the
+ *                         # fixture (environment.mason.order, sizes[].reorder: its time, row groups, bytes)
+ *     --mason-only        # Postgres still makes the data and the answers are still compared; only Mason's cells are
+ *                         # measured (a grid only: the sweep is Postgres's)
+ *     --reuse-postgres    # adopt the bench-pg container a --keep-postgres run left (its URL read from docker), as
+ *                         # this run's own: stopped while Mason is measured, as the run that made it did
+ *     --keep-copy         # leave Mason's copy (the work dir) at the end, with statements.json beside it: the DuckDB
+ *                         # SQL Mason plans for each statement (its EXPLAIN), to time them on the file alone
+ *
  * THE SWEEP TO A MINUTE (both the concurrency and the row count are pushed until Postgres takes at least a minute to
  * answer): with `--target-postgres-seconds <n>` (the published run: 60) the
  * sizes and client counts are not a grid but two sweeps, Mason measured at every cell Postgres is:
@@ -161,18 +174,34 @@ export interface SizeResult {
   jsonPathReadySeconds: number | null;
   /** every statement's answer equal on both before measuring; the differences when not */
   answersEqual: boolean; differences: string[];
+  /** --order: the copy of orders rewritten in that order before the answers were compared and the cells measured */
+  reorder?: Reordered;
+}
+/** a copy rewritten in another physical order (--order): what it took and what it changed */
+export interface Reordered {
+  table: string; order: string;
+  /** the rewrite's wall time (the sort, the new table written, the swap and a checkpoint), s */
+  seconds: number;
+  rows: number; rowGroupsBefore: number; rowGroupsAfter: number;
+  /** the file's blocks in use (pragma_database_size: used_blocks × block_size), before and after; the dropped table's
+   *  blocks are free after it, so the file itself grows by the new table (fileBytesAfter) */
+  usedBytesBefore: number; usedBytesAfter: number; fileBytesAfter: number;
 }
 export interface Fixture {
   environment: {
     label: string; date: string;
     machine: { cpus: number; cpuModel: string; ramBytes: number; memoryBytes: number; os: string; arch: string; node: string };
     postgres: { version: string; where: string; containerMemoryBytes: number | null; settings: Record<string, string> };
-    mason: { commit: string; duckdb: string; memoryLimit: string; memoryLimitBytes: number; copyParallel: number; storeJsonPaths: boolean };
+    mason: { commit: string; duckdb: string; memoryLimit: string; memoryLimitBytes: number; copyParallel: number; storeJsonPaths: boolean;
+      /** --order: the physical order public.orders was rewritten in (absent: the copy's own, the source's heap order) */
+      order?: string };
     method: { sizes: number[]; clients: number[]; seconds: number; warmupSeconds: number; runs: number; statementTimeoutSeconds: number; clientProcess: string;
       /** the sweep to a target (null: the grid of sizes × clients) */
       targetPostgresSeconds: number | null; maxClients: number | null; sweepClients: number | null;
       /** what ran beside each engine's measurement */
-      isolation: string };
+      isolation: string;
+      /** --mason-only: Postgres made the data and the answers, and no Postgres cell was measured */
+      masonOnly?: boolean };
   };
   /** the two sweeps' verdicts, with --target-postgres-seconds */
   sweeps?: { rows: SweepVerdict | null; clients: SweepVerdict | null };
@@ -189,6 +218,7 @@ interface Options {
   sizes: number[]; clients: number[]; seconds: number; warmup: number; runs: number; postgres: string | null; out: string; label: string;
   memory: string | null; work: string; reserveGb: number; keepPostgres: boolean; timeoutSeconds: number | null;
   targetSeconds: number | null; maxClients: number; maxRows: number; clientsRows: number | null; sweepClients: number;
+  order: string | null; masonOnly: boolean; reusePostgres: boolean; keepCopy: boolean;
 }
 export function parseCount(s: string): number {
   const m = /^(\d+(?:\.\d+)?)([kKmM]?)$/.exec(s.trim());
@@ -200,7 +230,7 @@ class Usage extends Error {}
 function parseArgs(argv: string[]): Options {
   const o: Options = { sizes: [1e6, 1e7, 5e7], clients: [1, 8, 32, 128], seconds: 30, warmup: 5, runs: 2, postgres: null,
     out: path.join(REPO, "tests/fixtures/bench-replica.json"), label: os.hostname(), memory: null, work: os.tmpdir(), reserveGb: 60, keepPostgres: false, timeoutSeconds: null,
-    targetSeconds: null, maxClients: 1024, maxRows: 1e9, clientsRows: null, sweepClients: 8 };
+    targetSeconds: null, maxClients: 1024, maxRows: 1e9, clientsRows: null, sweepClients: 8, order: null, masonOnly: false, reusePostgres: false, keepCopy: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const v = (): string => { const x = argv[++i]; if (x === undefined) throw new Usage(`${a} needs a value`); return x; };
@@ -224,6 +254,10 @@ function parseArgs(argv: string[]): Options {
       case "--max-rows": o.maxRows = parseCount(v()); break;
       case "--clients-rows": o.clientsRows = parseCount(v()); break;
       case "--sweep-clients": o.sweepClients = Math.round(num()); break;
+      case "--order": o.order = v(); reorderSql("public", "orders", o.order); break;
+      case "--mason-only": o.masonOnly = true; break;
+      case "--reuse-postgres": o.reusePostgres = true; break;
+      case "--keep-copy": o.keepCopy = true; break;
       case "--help": case "-h":
         process.stdout.write(fs.readFileSync(SCRIPT, "utf8").split(" */")[0]!.replace(/^#!.*\n\/\*\*\n/, "").replace(/^ \* ?/gm, "") + "\n");
         process.exit(0);
@@ -235,11 +269,36 @@ function parseArgs(argv: string[]): Options {
     throw new Usage(`--timeout ${o.timeoutSeconds} is under 5 × --target-postgres-seconds ${o.targetSeconds}: a statement past the target must be able to finish. ` +
       `Leave --timeout out (it is then ${5 * o.targetSeconds}) or give at least ${5 * o.targetSeconds}`);
   }
+  if (o.masonOnly && o.targetSeconds !== null) throw new Usage("--mason-only measures a grid: the sweep to a target is Postgres's (leave out --target-postgres-seconds)");
+  if (o.reusePostgres && o.postgres !== null) throw new Usage("--reuse-postgres adopts the bench's own container; --postgres names a server instead: give one of them");
   if (o.targetSeconds !== null && [...o.clients, o.sweepClients].some((c) => c > o.maxClients)) throw new Usage(`--clients ${o.clients.join(",")} or --sweep-clients ${o.sweepClients} goes past --max-clients ${o.maxClients}`);
   return o;
 }
 /** a statement's limit, s: --timeout, else 120, else 5 × the target */
 const timeoutOf = (o: Options): number => o.timeoutSeconds ?? (o.targetSeconds === null ? 120 : 5 * o.targetSeconds);
+
+/**
+ * THE COPY REWRITTEN IN ANOTHER PHYSICAL ORDER (--order): a side table made by `CREATE TABLE … AS SELECT * … ORDER BY`
+ * (every column, the stored JSON paths' hidden ones too, with the types the copy gave them; no key, as the copy has
+ * none), swapped in by name in one transaction, then a checkpoint so the new row groups are on disk. The time zone is
+ * UTC so a `date_trunc` of a timestamptz buckets as the data's own instants do. `order` is the ORDER BY list as written
+ * (DuckDB's SQL); one statement only.
+ */
+export function reorderSql(schema: string, table: string, order: string): string[] {
+  if (order.trim() === "" || order.includes(";")) throw new Usage(`--order ${JSON.stringify(order)}: an ORDER BY list, e.g. "date_trunc('month', created_at), tenant_id, created_at"`);
+  const q = (s: string): string => `"${s.replace(/"/g, '""')}"`;
+  const target = `${q(schema)}.${q(table)}`, side = `${q(schema)}.${q(`${table}__bench_order`)}`;
+  return [
+    "SET TimeZone = 'UTC'",
+    `DROP TABLE IF EXISTS ${side}`,
+    `CREATE TABLE ${side} AS SELECT * FROM ${target} ORDER BY ${order}`,
+    "BEGIN TRANSACTION",
+    `DROP TABLE ${target}`,
+    `ALTER TABLE ${side} RENAME TO ${q(table)}`,
+    "COMMIT",
+    "CHECKPOINT",
+  ];
+}
 
 /** the rows sweep's next size: about √10 a step, on 1-3-10 (1M, 3M, 10M, 30M, …); another start keeps its own digits */
 export function nextSize(n: number): number {
@@ -433,6 +492,23 @@ async function startContainer(memoryBytes: number, cpus: number, maxClients: num
   return { url, id };
 }
 
+/** --reuse-postgres: the bench-pg container a --keep-postgres run left, adopted as this run's own (started if stopped);
+ *  its URL from its own settings, its memory held to this run's */
+async function adoptContainer(memoryBytes: number, log: (l: string) => void): Promise<{ url: string; id: string }> {
+  const id = docker(["ps", "-a", "--filter", `name=^/${CONTAINER}$`, "--format", "{{.ID}}"]);
+  if (id === "") throw new Usage(`--reuse-postgres: there is no container named ${CONTAINER} (a run with --keep-postgres leaves one)`);
+  const info = (JSON.parse(docker(["inspect", id])) as Array<{ Config: { Env: string[]; Image: string }; HostConfig: { Memory: number; PortBindings: Record<string, Array<{ HostPort: string }>> }; State: { Running: boolean } }>)[0]!;
+  const password = info.Config.Env.find((e) => e.startsWith("POSTGRES_PASSWORD="))?.slice("POSTGRES_PASSWORD=".length);
+  const port = info.HostConfig.PortBindings["5432/tcp"]?.[0]?.HostPort;
+  if (password === undefined || port === undefined) throw new Error(`${CONTAINER} (${id}) has no POSTGRES_PASSWORD or no published 5432: not a container this script made`);
+  if (info.HostConfig.Memory !== memoryBytes) throw new Usage(`${CONTAINER} was given --memory ${info.HostConfig.Memory} bytes and this run's is ${memoryBytes}: pass the --memory the run that made it had`);
+  if (!info.State.Running) docker(["start", id]);
+  log(`adopted ${CONTAINER} (${info.Config.Image}, ${id}) on 127.0.0.1:${port}, --memory ${(memoryBytes / 2 ** 30).toFixed(1)} GiB (--reuse-postgres)`);
+  const url = `postgres://postgres:${password}@127.0.0.1:${port}/postgres`;
+  await waitReady(url, log);
+  return { url, id };
+}
+
 /** until the Postgres at `url` answers (a container started, or started again), at most two minutes */
 async function waitReady(url: string, log: (l: string) => void): Promise<void> {
   const deadline = Date.now() + 120_000;
@@ -511,6 +587,8 @@ interface MasonServed {
   suspend: () => Promise<void>;
   /** opens the same file again, as `mason start` after a stop does (the source must be up): no copy, said if there was */
   resume: () => Promise<{ seconds: number; copied: boolean }>;
+  /** --order: while suspended, the copy of public.orders rewritten in `order` with the store open by the bench alone */
+  reorder: (order: string) => Promise<Reordered>;
   close: () => Promise<void>;
 }
 
@@ -606,6 +684,41 @@ async function serveMason(sourceUrl: string, database: string, memoryLimit: stri
       if (!up.sync.kept.status().some((p) => p.column === "payload" && p.state === "ready")) log(`  the stored JSON path is not ready after the restart: ${JSON.stringify(up.sync.kept.status())}`);
       return { seconds: round((performance.now() - t) / 1000, 1), copied };
     },
+    reorder: async (order) => {
+      if (up !== null) throw new Error("the copy is rewritten with Mason suspended (a bench bug)");
+      // the store alone: no sync (no poll, no copy, no JSON path's fill), no request log, no listener beside the rewrite
+      const store = await DuckStore.open(file, say, { memoryLimit });
+      try {
+        const w = store.writer;
+        const one = async (sql: string): Promise<unknown[]> => (await w.runAndReadAll(sql)).getRowsJS()[0]!;
+        const facts = async (): Promise<{ columns: string; rows: number; rowGroups: number; used: number; keys: number }> => ({
+          columns: JSON.stringify((await w.runAndReadAll("SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = 'public' AND table_name = 'orders' ORDER BY column_index")).getRowsJS()),
+          rows: Number((await one("SELECT count(*) FROM public.orders"))[0]),
+          rowGroups: Number((await one("SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('public.orders')"))[0]),
+          used: Number((await one("SELECT used_blocks * block_size FROM pragma_database_size() WHERE database_name = current_database()"))[0]),
+          keys: Number((await one("SELECT count(*) FROM duckdb_constraints() WHERE database_name = current_database() AND schema_name = 'public' AND table_name = 'orders' AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')"))[0]),
+        });
+        const before = await facts();
+        const t = performance.now();
+        let open = false;
+        try {
+          for (const sql of reorderSql("public", "orders", order)) {
+            await w.run(sql);
+            if (sql === "BEGIN TRANSACTION") open = true; else if (sql === "COMMIT") open = false;
+          }
+        } catch (e) { if (open) await w.run("ROLLBACK"); throw e; }
+        const seconds = round((performance.now() - t) / 1000, 1);
+        const after = await facts();
+        // only the order may change: the same columns and types, the same rows, still no key (src/duck/sync.ts findRetired)
+        if (after.columns !== before.columns || after.rows !== before.rows || after.keys !== 0) {
+          throw new Error(`the rewrite changed more than the order: columns ${before.columns} → ${after.columns}; rows ${before.rows} → ${after.rows}; keys ${after.keys}`);
+        }
+        log(`  rewrote public.orders ORDER BY ${order} in ${seconds} s: ${before.rowGroups} → ${after.rowGroups} row groups, ` +
+          `${(before.used / 2 ** 20).toFixed(0)} → ${(after.used / 2 ** 20).toFixed(0)} MiB of the file in use`);
+        return { table: "public.orders", order, seconds, rows: after.rows, rowGroupsBefore: before.rowGroups, rowGroupsAfter: after.rowGroups,
+          usedBytesBefore: before.used, usedBytesAfter: after.used, fileBytesAfter: size(file) + size(`${file}.wal`) };
+      } finally { await store.close(); }
+    },
     close: async () => { if (up !== null) { const u = up; up = null; await stop(u); } },
   };
 }
@@ -626,6 +739,28 @@ async function answers(conn: pg.ClientConfig, rows: number): Promise<Map<string,
       } catch (e) { out.set(q.name, `error ${(e as pg.DatabaseError).code ?? ""} ${(e as Error).message}`); }
     }
     return out;
+  } finally { await c.end(); }
+}
+
+/** --keep-copy: the DuckDB SQL Mason plans for each statement (`EXPLAIN (FORMAT JSON)` over its listener, the point
+ *  lookup at the answers' id), written beside the copy so the statements can be timed over the file alone */
+async function plannedSql(conn: pg.ClientConfig, rows: number, file: string, log: (l: string) => void): Promise<void> {
+  const c = new pg.Client(conn);
+  await c.connect();
+  try {
+    await c.query("SET TimeZone = 'UTC'");
+    const out: Array<{ name: string; sql: string; params: string[]; duckdb: string; functions: unknown }> = [];
+    for (const q of QUERIES) {
+      const params = q.params === "id" ? [String(Math.ceil(rows / 3))] : [];
+      const r = await c.query({ text: `EXPLAIN (FORMAT JSON) ${q.sql}`, values: params, rowMode: "array", types: raw } as pg.QueryConfig);
+      const json = JSON.parse(String((r.rows[0] as unknown[])[0])) as unknown;
+      const top = (Array.isArray(json) ? json[0] : json) as { Mason?: { "Sent To DuckDB"?: string; "Mason Functions DuckDB Calls"?: unknown } };
+      const duckdb = top.Mason?.["Sent To DuckDB"];
+      if (typeof duckdb !== "string") throw new Error(`Mason's EXPLAIN of ${q.name} says no DuckDB SQL: ${JSON.stringify(json).slice(0, 300)}`);
+      out.push({ name: q.name, sql: q.sql, params, duckdb, functions: top.Mason?.["Mason Functions DuckDB Calls"] ?? [] });
+    }
+    fs.writeFileSync(file, JSON.stringify(out, null, 2) + "\n");
+    log(`  wrote the statements' DuckDB SQL, as Mason plans them, to ${file}`);
   } finally { await c.end(); }
 }
 
@@ -680,7 +815,7 @@ async function main(): Promise<number> {
 
   try {
     let adminUrl = o.postgres;
-    if (adminUrl === null) { container = await startContainer(memoryBytes, cpus, target === null ? 0 : o.maxClients, log); adminUrl = container.url; }
+    if (adminUrl === null) { container = o.reusePostgres ? await adoptContainer(memoryBytes, log) : await startContainer(memoryBytes, cpus, target === null ? 0 : o.maxClients, log); adminUrl = container.url; }
     const admin: string = adminUrl;
     const pgFacts = await postgresFacts(admin);
     if (target !== null) {
@@ -697,17 +832,21 @@ async function main(): Promise<number> {
         machine: { cpus, cpuModel: os.cpus()[0]?.model.trim() ?? "unknown", ramBytes: os.totalmem(), memoryBytes: machineMemoryBytes(), os: `${os.type()} ${os.release()}`, arch: os.arch(), node: process.version },
         postgres: { version: pgFacts.version, where: container !== null ? `Docker (${IMAGE}) on the same machine` : `${whereOf(admin)} (--postgres)`,
           containerMemoryBytes: container !== null ? memoryBytes : null, settings: pgFacts.settings },
-        mason: { commit: version, duckdb: DUCKDB_VERSION, memoryLimit, memoryLimitBytes: memoryBytes, copyParallel: COPY_PARALLEL, storeJsonPaths: true },
+        mason: { commit: version, duckdb: DUCKDB_VERSION, memoryLimit, memoryLimitBytes: memoryBytes, copyParallel: COPY_PARALLEL, storeJsonPaths: true, ...(o.order === null ? {} : { order: o.order }) },
         method: { sizes: o.sizes, clients: o.clients, seconds: o.seconds, warmupSeconds: o.warmup, runs: o.runs, statementTimeoutSeconds: timeoutSeconds,
           clientProcess: "one Node process apart from Mason's, N node-postgres clients on its event loop",
           targetPostgresSeconds: target, maxClients: target === null ? null : o.maxClients, sweepClients: target === null ? null : o.sweepClients,
-          isolation: container !== null ? "each engine measured with the other stopped: Mason closed while Postgres ran, Postgres's container stopped while Mason ran"
-            : "Mason closed while Postgres ran; the --postgres server stayed up while Mason ran (not this script's to stop)" },
+          isolation: o.masonOnly ? (container !== null ? "Mason alone (--mason-only): Postgres's container stopped while Mason ran, Mason open from its first cell to its last"
+            : "Mason alone (--mason-only); the --postgres server stayed up while Mason ran (not this script's to stop)")
+            : container !== null ? "each engine measured with the other stopped: Mason closed while Postgres ran, Postgres's container stopped while Mason ran"
+            : "Mason closed while Postgres ran; the --postgres server stayed up while Mason ran (not this script's to stop)",
+          ...(o.masonOnly ? { masonOnly: true } : {}) },
       },
       queries: QUERIES.map((q) => ({ name: q.name, title: q.title, sql: q.sql })),
       sizes: [], skipped: [], cells: [], complete: false,
       ...(target === null ? {} : { sweeps: { rows: null, clients: null } }),
     };
+    if (o.order !== null) log(`  the copy of public.orders is rewritten ORDER BY ${o.order} before it is measured (--order)`);
     log(`bench-replica: ${o.label}; ${cpus} CPUs, ${(os.totalmem() / 2 ** 30).toFixed(0)} GiB; ${pgFacts.version.split(" on ")[0]}; Mason ${version}, DuckDB ${DUCKDB_VERSION} at ${memoryLimit}`);
     log(`  Postgres settings: ${Object.entries(pgFacts.settings).map(([k, v]) => `${k}=${v}`).join(" ")}`);
     log(target === null ? `  the grid: sizes ${o.sizes.map(fmtRows).join(", ")} × clients ${o.clients.join(", ")}`
@@ -765,19 +904,35 @@ async function main(): Promise<number> {
       log(`  served in ${mason.copySeconds} s (${Object.entries(mason.copyTables).map(([t, s]) => `${t} ${s} s`).join(", ")}); file ${(mason.fileBytes() / 2 ** 20).toFixed(0)} MiB`);
       const jsonReady = await mason.jsonReady();
       log(`  the stored JSON path payload ->> 'source': ${jsonReady === null ? "NOT ready" : `ready ${jsonReady} s after its first reads`}`);
+      // --order: the copy rewritten before anything is compared or measured, Mason closed meanwhile and opened again as
+      // `mason start` after a stop opens it (no copy: said if there was)
+      let reorder: Reordered | undefined;
+      if (o.order !== null) {
+        await mason.suspend();
+        reorder = await mason.reorder(o.order);
+        const r = await mason.resume();
+        log(`  Mason opened again in ${r.seconds} s${r.copied ? " — and COPIED AGAIN: the rewrite was undone" : ""}`);
+        if (r.copied) throw new Error("Mason copied the table again after its rewrite: the layout measured would not be the one asked for");
+      }
       const pgConn: pg.ClientConfig = { connectionString: data.url };
       const masonConn: pg.ClientConfig = { host: "127.0.0.1", port: mason.port, database: db, user: "bench", password: "bench" };
       const a = await answers(pgConn, rows), b = await answers(masonConn, rows);
       const differences = QUERIES.filter((q) => a.get(q.name) !== b.get(q.name)).map((q) => `${q.name}: Postgres ${a.get(q.name)!.slice(0, 300)} — Mason ${b.get(q.name)!.slice(0, 300)}`);
       log(differences.length === 0 ? "  every statement's answer is the same on both" : `  ANSWERS DIFFER (a Mason defect; measured anyway):\n    ${differences.join("\n    ")}`);
+      if (o.keepCopy) await plannedSql(masonConn, rows, path.join(workDir, "statements.json"), log);
       // a size served again (the clients sweep's) keeps its first record
       if (!fixture.sizes.some((x) => x.rows === rows)) {
         fixture.sizes.push({ rows, customers: customersOf(rows), generatedSeconds: data.generatedSeconds, postgresBytes, copySeconds: mason.copySeconds, copyTables: mason.copyTables,
-          masonFileBytes: mason.fileBytes(), jsonPathReadySeconds: jsonReady, answersEqual: differences.length === 0, differences });
+          masonFileBytes: mason.fileBytes(), jsonPathReadySeconds: jsonReady, answersEqual: differences.length === 0, differences, ...(reorder === undefined ? {} : { reorder }) });
       }
       return { rows, pgConn, masonConn, mason, workDir };
     };
-    const closeSize = async (ctx: SizeCtx): Promise<void> => { await ctx.mason.close(); fs.rmSync(ctx.workDir, { recursive: true, force: true }); await pgUp(); };
+    const closeSize = async (ctx: SizeCtx): Promise<void> => {
+      await ctx.mason.close();
+      if (o.keepCopy) log(`  kept Mason's copy (--keep-copy): ${path.join(ctx.workDir, "duck.db")}, its statements' DuckDB SQL in ${path.join(ctx.workDir, "statements.json")}`);
+      else fs.rmSync(ctx.workDir, { recursive: true, force: true });
+      await pgUp();
+    };
 
     // ---- one cell: both engines, --runs times, the median kept -------------------------------------------------------
     /** the cell's window: 3 × the target after a cell whose Postgres p95 was over a tenth of it */
@@ -811,9 +966,10 @@ async function main(): Promise<number> {
           `p50 ${ms(mix.p50Ms)}, p95 ${ms(mix.p95Ms)}, ${mix.qps} q/s${mix.errors ? `, ${mix.errors} FAILED ${JSON.stringify(mix.codes)}` : ""}; ` +
           `the clients' loop p99 ${ms(r.loopDelayP99Ms)}, CPU ${round(r.cpuPct, 0)} %` + (r.brokenClients.length ? `; ${r.brokenClients.length} client(s) broke: ${r.brokenClients[0]}` : ""));
       };
-      // the engines alternate which goes first, so a drift in the machine's load falls on both
-      for (let n = 0; n < o.runs; n++) for (const e of (n % 2 === 0 ? ["postgres", "mason"] : ["mason", "postgres"]) as Engine[]) await runOne(e, n);
-      for (const e of ["postgres", "mason"] as const) {
+      // the engines alternate which goes first, so a drift in the machine's load falls on both (--mason-only: Mason alone)
+      const engines: Engine[] = o.masonOnly ? ["mason"] : ["postgres", "mason"];
+      for (let n = 0; n < o.runs; n++) for (const e of (n % 2 === 0 ? engines : [...engines].reverse())) await runOne(e, n);
+      for (const e of engines) {
         while (disagree(runs[e].map((m) => m.get("mix")!)) && runs[e].length < o.runs + 2) {
           log(`  ${e}'s runs disagree by more than 30 %: another`);
           await runOne(e, runs[e].length);
@@ -831,6 +987,7 @@ async function main(): Promise<number> {
         if (slowest !== undefined) cells[0]!.slowest = { query: slowest.query, p50Ms: slowest.p50Ms };
         fixture.cells.push(...cells);
       }
+      // (--mason-only has no Postgres cell, and measures a grid, which reads neither)
       return { pg: mixOf(rows, clients, "postgres")!, mason: mixOf(rows, clients, "mason")! };
     };
     const verdictAt = (rows: number, clients: number): SweepVerdict["at"] => {
@@ -924,9 +1081,10 @@ async function dropData(adminUrl: string, rows: number, log: (l: string) => void
 
 function printTable(f: Fixture, log: (l: string) => void): void {
   log(`\n${"rows".padStart(6)} ${"clients".padStart(7)}  ${"query".padEnd(14)} ${"PG p50".padStart(9)} ${"PG p95".padStart(9)} ${"PG q/s".padStart(9)}  ${"Mason p50".padStart(9)} ${"Mason p95".padStart(9)} ${"Mason q/s".padStart(9)}`);
-  for (const p of f.cells.filter((c) => c.engine === "postgres")) {
-    const m = f.cells.find((c) => c.engine === "mason" && c.rows === p.rows && c.clients === p.clients && c.query === p.query);
-    if (m === undefined) continue;
+  for (const m of f.cells.filter((c) => c.engine === "mason")) {
+    // --mason-only: no Postgres cell, its columns "-"
+    const p = f.cells.find((c) => c.engine === "postgres" && c.rows === m.rows && c.clients === m.clients && c.query === m.query)
+      ?? { ...m, p50Ms: NaN, p95Ms: NaN, qps: NaN };
     log(`${fmtRows(p.rows).padStart(6)} ${String(p.clients).padStart(7)}  ${p.query.padEnd(14)} ${ms(p.p50Ms).padStart(9)} ${ms(p.p95Ms).padStart(9)} ${String(p.qps).padStart(9)}  ${ms(m.p50Ms).padStart(9)} ${ms(m.p95Ms).padStart(9)} ${String(m.qps).padStart(9)}`);
   }
   for (const s of f.sizes) log(`copy of ${fmtRows(s.rows)}: ${s.copySeconds} s; answers ${s.answersEqual ? "equal" : "DIFFER"}`);

@@ -10,9 +10,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { Cell, Fixture, SweepVerdict } from "../scripts/bench-replica.ts";
-import { QUERIES, clientSteps, nextSize } from "../scripts/bench-replica.ts";
+import { QUERIES, clientSteps, nextSize, reorderSql } from "../scripts/bench-replica.ts";
+import { DuckStore } from "../src/duck/store.ts";
 
 /** A SQLSTATE a reader of the README can place: Postgres's condition name beside the code it recorded (the fixture keeps
  *  the code alone), for the codes a bench has met; any other code is printed as it is. */
@@ -353,4 +355,42 @@ test("the sweeps' steps: sizes about √10 apart, clients doubling past the list
   assert.deepEqual(clientSteps([1, 8, 32, 128], 1024), [1, 8, 32, 128, 256, 512, 1024]);
   assert.deepEqual(clientSteps([1], 16), [1, 2, 4, 8, 16]);
   assert.deepEqual(clientSteps([8, 1, 2000], 64), [1, 8, 16, 32, 64]);
+});
+
+test("--order: the copy rewritten by one CREATE TABLE AS … ORDER BY and a swap by name, in UTC, refusing anything but an ORDER BY list", () => {
+  assert.deepEqual(reorderSql("public", "orders", "date_trunc('month', created_at), tenant_id, created_at"), [
+    "SET TimeZone = 'UTC'",
+    'DROP TABLE IF EXISTS "public"."orders__bench_order"',
+    `CREATE TABLE "public"."orders__bench_order" AS SELECT * FROM "public"."orders" ORDER BY date_trunc('month', created_at), tenant_id, created_at`,
+    "BEGIN TRANSACTION",
+    'DROP TABLE "public"."orders"',
+    'ALTER TABLE "public"."orders__bench_order" RENAME TO "orders"',
+    "COMMIT",
+    "CHECKPOINT",
+  ]);
+  assert.match(reorderSql("s", 'we"ird', "id")[2]!, /^CREATE TABLE "s"\."we""ird__bench_order" AS SELECT \* FROM "s"\."we""ird" ORDER BY id$/);
+  assert.throws(() => reorderSql("public", "orders", "  "), /an ORDER BY list/);
+  assert.throws(() => reorderSql("public", "orders", "id; DROP TABLE x"), /an ORDER BY list/);
+});
+
+test("--order over a real store: the rows in the new order, the same columns and types (a hidden one too), no key, month buckets in UTC", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-reorder-"));
+  const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined);
+  try {
+    const w = store.writer;
+    const read = async (sql: string): Promise<unknown[][]> => (await w.runAndReadAll(sql)).getRowsJS();
+    await w.run("CREATE TABLE public.orders (id BIGINT, tenant_id INTEGER, created_at TIMESTAMPTZ, amount DECIMAL(12,2), __mason_kept_1 VARCHAR)");
+    // heap order is id order; in UTC all three are February's, so the order is by tenant; in New York the first two are
+    // January's, which would put id 1 (tenant 2) before id 3 — the session's zone must not decide the buckets
+    await w.run("INSERT INTO public.orders VALUES (1, 2, '2026-02-01 00:30:00+00', 1.50, 'a'), (2, 1, '2026-02-01 02:00:00+00', 2.25, 'b'), (3, 1, '2026-02-01 06:00:00+00', 3.00, NULL)");
+    const columns = "SELECT column_name, data_type FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = 'orders' ORDER BY column_index";
+    const before = await read(columns);
+    await w.run("SET TimeZone = 'America/New_York'");
+    for (const sql of reorderSql("public", "orders", "date_trunc('month', created_at), tenant_id, created_at")) await w.run(sql);
+    assert.deepEqual((await read("SELECT id FROM public.orders ORDER BY rowid")).map((r) => Number(r[0])), [2, 3, 1]);
+    assert.deepEqual(await read(columns), before);
+    assert.deepEqual((await read("SELECT id, amount::VARCHAR, __mason_kept_1 FROM public.orders ORDER BY id")).map((r) => r.map(String)), [["1", "1.50", "a"], ["2", "2.25", "b"], ["3", "3.00", "null"]]);
+    assert.deepEqual(await read("SELECT table_name FROM duckdb_tables() WHERE schema_name = 'public'"), [["orders"]]);
+    assert.deepEqual(await read("SELECT count(*) FROM duckdb_constraints() WHERE schema_name = 'public' AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')"), [[0n]]);
+  } finally { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
