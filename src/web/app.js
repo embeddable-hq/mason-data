@@ -49,6 +49,7 @@ export * from "./shared.js";
 export { copyingText, tableLine, sourceRows, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
 export { renderUsers, renderAdded } from "./pages/users.js";
+export { renderRunning, renderRequests } from "./pages/queries.js";
 
 /** The pages, in the nav's order. */
 export const PAGES = [statusPage, tablesPage, queriesPage, usersPage, usagePage, logsPage];

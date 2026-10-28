@@ -30,7 +30,24 @@
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>
     <h2 id="queries-h">Queries</h2>
-    <div id="queries"></div>
+    <h3>Running now</h3>
+    <p class="lead">The statements running now, as <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.</p>
+    <div id="running-now"></div>
+    <h3>Request log</h3>
+    <p class="lead">The statements the Postgres API answered, refused or cancelled, as <code>mason logs --requests</code> lists them. Since is an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone.</p>
+    <form id="request-filters" autocomplete="off">
+      <label for="rq-status">Status</label>
+      <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select>
+      <label for="rq-since">Since</label>
+      <input id="rq-since" name="since" placeholder="2h" spellcheck="false">
+      <label for="rq-user">User</label>
+      <input id="rq-user" name="user" spellcheck="false">
+      <label for="rq-client">Client</label>
+      <input id="rq-client" name="client" spellcheck="false">
+      <button type="submit">Filter</button>
+      <button type="button" data-clear-filters>Clear</button>
+    </form>
+    <div id="request-log"></div>
   </section>
   <section id="page-users" aria-labelledby="users-h" hidden>
     <h2 id="users-h">Users</h2>
