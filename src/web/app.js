@@ -56,6 +56,9 @@ import { page as usersPage } from "./pages/users.js";
 import { page as usagePage } from "./pages/usage.js";
 import { page as logsPage } from "./pages/logs.js";
 
+/** The longest a pointer's press holds the page's writes (a click is well under it): see `pressedAt`. */
+export const PRESS_HOLD_MS = 2000;
+
 // every renderer the tests import from here, wherever it lives now
 export * from "./shared.js";
 export { copyingText, tableLine, sourceRows, renderStatus } from "./pages/status.js";
@@ -221,12 +224,14 @@ export function start(doc, win) {
   // (data-x becomes data-x=""), and a part rewritten at every poll replaces the button under a click
   const written = new Map();
   // a part is not rewritten while a pointer is pressed: a row whose age moves every poll would replace the button
-  // between its press and its release, and the click would be lost
-  let pressed = false;
+  // between its press and its release, and the click would be lost. At most PRESS_HOLD_MS: a press whose release the
+  // page never sees (released outside the window, a gesture the browser took over) froze every part for good
+  let pressedAt = null;
   // the shown page's charts, drawn after each write (src/web/charts.js); a document that cannot hold one draws none
   const charts = typeof doc.querySelectorAll === "function" && typeof win.getComputedStyle === "function" ? createCharts({ doc, win }) : null;
   const paint = () => {
-    if (pressed) return;
+    if (pressedAt !== null && Date.now() - pressedAt < PRESS_HOLD_MS) return;
+    pressedAt = null;
     for (const p of PAGES) { const section = doc.getElementById(`page-${p.id}`); if (section) section.hidden = p.id !== app.model.shown; }
     for (const [id, html] of Object.entries(app.view())) {
       const el = doc.getElementById(id);
@@ -272,8 +277,8 @@ export function start(doc, win) {
     await r;
     paint();
   }, true);
-  doc.addEventListener("pointerdown", () => { pressed = true; });
-  for (const type of ["pointerup", "pointercancel"]) doc.addEventListener(type, () => { pressed = false; win.setTimeout(paint, 0); });
+  doc.addEventListener("pointerdown", () => { pressedAt = Date.now(); });
+  for (const type of ["pointerup", "pointercancel"]) doc.addEventListener(type, () => { pressedAt = null; win.setTimeout(paint, 0); });
   win.addEventListener?.("hashchange", () => { app.show(win.location.hash, { doc }); paint(); void poll(); });
   if (charts !== null) {
     win.addEventListener?.("resize", () => charts.resize());

@@ -841,6 +841,28 @@ test("in the browser: no part is written while a pointer is pressed — a row th
   assert.match(status.html, HEALTH("ok", "Ready"));
 });
 
+test("in the browser: a press whose release never comes holds the writes for PRESS_HOLD_MS at most, never for good", async () => {
+  const hold = (await import(path.join(WEB, "app.js") as string) as { PRESS_HOLD_MS?: number }).PRESS_HOLD_MS;
+  assert.equal(typeof hold, "number", "src/web/app.js exports PRESS_HOLD_MS");
+  const run = fakeRun();
+  const { el, on, settle, tick } = fakeBrowser(run);
+  await settle();
+  const status = el("status");
+  const realNow = Date.now;
+  try {
+    let clock = realNow();
+    Date.now = () => clock;
+    await on.get("pointerdown")!({});
+    run.answers.set("GET /api/state", answer(RUNNING));
+    tick(); await settle();
+    assert.match(textOf(status.html), /public\.orders 15% copying/, "pressed: the new state waits");
+    // the release is never seen (released outside the window): past the hold, the page is written again
+    clock += hold! + 1;
+    tick(); await settle();
+    assert.match(status.html, HEALTH("ok", "Ready"));
+  } finally { Date.now = realNow; }
+});
+
 // ------------------------------------------------------------------ the Overview: the word, the facts, the recent errors
 
 // the pages' own modules, imported when the tests run (at a commit without them each test fails by name)
