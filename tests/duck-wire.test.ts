@@ -1319,6 +1319,34 @@ test("a paged portal's bytes are its own Executes' frames, never those of a stat
   } finally { s.end(); }
 });
 
+// THE SESSIONS LOGGED IN NOW (`openSessions`, `/api/state` `sessions`): from the listener's sessions in memory, by user
+// and client, with how many run a statement
+test("the sessions logged in now, by user and client, and how many of each run a statement; a closed one is gone", async () => {
+  const has = (api as unknown as { openSessions?: unknown }).openSessions;
+  assert.equal(typeof has, "function", "src/api/postgres/server.ts PgApiServer.openSessions");
+  const before = api.openSessions().open;
+  const a = await rawSession(), b = await rawSession(), c = await rawSession();
+  try {
+    for (const x of [a, b]) { x.socket.write(wire.query("SET application_name = 'Metabase'")); await x.untilReady(); }
+    const open = api.openSessions();
+    assert.equal(open.open, before + 3);
+    assert.deepEqual(open.byClient.find((g) => g.client === "Metabase"), { user: "", client: "Metabase", open: 2, running: 0 }, "a token's sessions: no user");
+    assert.ok(open.byClient.some((g) => g.client === "" && g.open >= 1), JSON.stringify(open));
+    a.socket.write(wire.query(SLOW));
+    for (const deadline = Date.now() + 10_000; api.openSessions().byClient.find((g) => g.client === "Metabase")?.running !== 1;) {
+      if (Date.now() > deadline) throw new Error("the statement never showed as running");
+      await sleep(20);
+    }
+    api.cancel(a.pid);
+    await a.untilReady();
+    c.end();
+    for (const deadline = Date.now() + 5_000; api.openSessions().open !== before + 2;) {
+      if (Date.now() > deadline) throw new Error(`a closed session is still counted: ${JSON.stringify(api.openSessions())}`);
+      await sleep(20);
+    }
+  } finally { a.end(); b.end(); c.end(); }
+});
+
 // THE STATEMENTS RUNNING NOW, AND A CANCEL BY SESSION (`/api/running`, `POST /api/cancel`): the listener's own, and the
 // cancel is the CancelRequest's path — the client told 57014 "due to user request", recorded cancelled, the session on
 test("the statements running now, by session; a cancel by session stops one as a CancelRequest does, and says when there is nothing to stop", async () => {

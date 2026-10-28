@@ -87,7 +87,7 @@ export interface RunContext {
   /** the run's last log entries (src/lib/log-buffer.ts), fed by the one writer of its log: `/api/logs` */
   logs: Pick<LogBuffer, "recent" | "capacity">;
   /** the Postgres listener: the statements running now, and a cancel of one (`/api/running`, `POST /api/cancel`) */
-  listener: Pick<PgApiServer, "running" | "cancel">;
+  listener: Pick<PgApiServer, "running" | "cancel" | "openSessions">;
   /** the run's copy: each added table's copy as the sync has it, the file it is in, how often it polls */
   duck: { copies: () => CopyState[]; file: string; pollSeconds: number;
     /** a poll of exactly these tables, now (mason sync; src/duck/sync.ts pollNow) */
@@ -174,6 +174,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       restarts: restartsFact(ctx.home, ctx.duck.restarts) },
     // the disk under the copy: free where its file is (the sync's own measure, the one a copy is held to), the file
     // (engine.bytes), and what the copies running are projected to add (copyDiskProjection) — mason status says it
+    // the sessions logged in now, by user and client (the listener's own, in memory): mason status says how many
+    sessions: ctx.listener.openSessions(),
     disk: { path: disk.path, freeBytes: disk.freeBytes, copyBytes: bytes, projectedBytes: disk.projectedBytes, ...(disk.error !== undefined ? { error: disk.error } : {}) },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
     // replication mode: where the stream is, its lag and what it applied (mason status and wait render it, streamLines)
@@ -193,17 +195,17 @@ async function state(ctx: RunContext): Promise<unknown> {
 /**
  * WHAT A USAGE SAMPLE READS OF THE RUN (src/duck/usage.ts): `/api/state` at that moment, never a second computation of
  * any of it — the copy file's bytes (`engine.bytes`), `totals`, the stalest added table's `sync.ageSeconds`, the
- * stream's `lag` and its slot's `walHeldBytes`, the bytes free under the copy (`disk.freeBytes`), and the copies served.
+ * stream's `lag` and its slot's `walHeldBytes`, the bytes free under the copy (`disk.freeBytes`), the sessions open (`sessions.open`), and the copies served.
  */
 export async function usageFacts(ctx: RunContext, now = Date.now()): Promise<UsageFacts> {
   const copies = ctx.duck.copies();
-  const s = runState(ctx, copies, await ctx.duck.stream(), now) as { totals: SyncTotals; engine: { bytes: number | null }; disk: { freeBytes: number | null };
+  const s = runState(ctx, copies, await ctx.duck.stream(), now) as { totals: SyncTotals; engine: { bytes: number | null }; disk: { freeBytes: number | null }; sessions: { open: number };
     tables: Array<{ added: boolean; sync?: TableSync }>; stream?: StreamStatus };
   const ages = s.tables.flatMap((t) => (t.added && t.sync?.ageSeconds != null ? [t.sync.ageSeconds] : []));
   const slot = s.stream?.slotWal;
   return { copyBytes: s.engine.bytes, totals: s.totals, oldestSyncSeconds: ages.length ? Math.max(...ages) : null, streamLag: s.stream?.lag ?? null,
     copied: copies.filter((c) => c.phase === "copied").map((c) => c.source), slotWalHeldBytes: slot !== undefined && "walHeldBytes" in slot ? slot.walHeldBytes : null,
-    diskFreeBytes: s.disk.freeBytes };
+    diskFreeBytes: s.disk.freeBytes, sessionsOpen: s.sessions.open };
 }
 
 /** A `since` / `until` of a query string, read by the one time grammar (src/cli/request-filter.ts timeOf), as an ISO time. */

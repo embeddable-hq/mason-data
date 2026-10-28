@@ -37,7 +37,8 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
                    tablesFailed, oldestSyncSeconds, statements, statementsRefused, statementsFailed, statementsCancelled,
                    rowsSent, bytesSent, durationP50Ms, durationP95Ms, streamLagBytes, streamLagSeconds, rssBytes,
                    heapUsedBytes, copyMemoryBytes, copyMemoryLimitBytes, slotWalHeldBytes (replication: the WAL the
-                   slot holds on the database), diskFreeBytes (free where the copy is; with a step, the lowest) }],
+                   slot holds on the database), diskFreeBytes (free where the copy is; with a step, the lowest),
+                   sessionsOpen (the Postgres API's sessions logged in) }],
                    copySizes: [{ table, bytes, at }], next }
 `;
 

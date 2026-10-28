@@ -342,7 +342,7 @@ const usageCli = await import("../src/cli/usage.ts" as string).catch(() => ({}))
 const sampleLine = (s: unknown, lag: boolean): string => usageCli.sampleLine?.(s as never, lag) ?? "(no src/cli/usage.ts)";
 const sample = { at: "2026-10-28T09:05:00.000Z", seconds: 300, copyBytes: 5 * 2 ** 30, copyRows: 12_345_678, tablesAdded: 4, tablesCopied: 4, tablesFailed: 1, oldestSyncSeconds: 75,
   statements: 1_204, statementsRefused: 2, statementsFailed: 1, statementsCancelled: 0, rowsSent: 98_765, bytesSent: 4_567_890, durationP50Ms: 12, durationP95Ms: 1_830, streamLagBytes: null, streamLagSeconds: null,
-  rssBytes: 900 * 2 ** 20, heapUsedBytes: 80 * 2 ** 20, copyMemoryBytes: 300 * 2 ** 20, copyMemoryLimitBytes: 8 * 2 ** 30, slotWalHeldBytes: null, diskFreeBytes: null };
+  rssBytes: 900 * 2 ** 20, heapUsedBytes: 80 * 2 ** 20, copyMemoryBytes: 300 * 2 ** 20, copyMemoryLimitBytes: 8 * 2 ** 30, slotWalHeldBytes: null, diskFreeBytes: null, sessionsOpen: 2 };
 
 test("mason usage: a span a line under its heading — the statements, their errors, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
   const { sampleHeading, spanSeconds, USAGE } = usageCli as UsageCli;
@@ -449,7 +449,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => facts, warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
     folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
-    readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }) },
+    readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); },
@@ -566,7 +566,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0,
     token: "t0ken-of-the-run", folder: () => path.join(app, "mason"), root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
     readSource: () => ({ message: "not read here", code: "bad_source" }), runUrl: "postgres://me@localhost:5432/shop",
-    listener: { running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);
+    listener: { openSessions: () => ({ open: 1, byClient: [{ user: "metabase", client: "Metabase", open: 1, running: 1 }] }), running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);
       return session === 4 && statement !== undefined && statement !== 9 ? { other: running, asked: statement } : session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session }; } },
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
@@ -667,4 +667,15 @@ test("mason status's Disk line: free where the copy is, and what the copies runn
   assert.deepEqual(diskRows!({ path: "/data", freeBytes: null, copyBytes: null, projectedBytes: null, error: "the free space where the copy is could not be read: EACCES" }),
     [["Disk", "the free space where the copy is could not be read: EACCES"]]);
   assert.deepEqual(diskRows!(undefined), [], "a run from before it: no line");
+});
+
+test("mason status's Sessions line: how many are open and running a statement, and by whom — the three with the most, then how many others", async () => {
+  const { sessionsRows } = await import("../src/cli/commands.ts") as unknown as { sessionsRows?: (s: unknown) => Array<[string, string]> };
+  assert.equal(typeof sessionsRows, "function", "src/cli/commands.ts sessionsRows");
+  assert.deepEqual(sessionsRows!({ open: 0, byClient: [] }), [["Sessions", "none open"]]);
+  assert.deepEqual(sessionsRows!({ open: 7, byClient: [
+    { user: "metabase", client: "Metabase", open: 3, running: 1 }, { user: "", client: "", open: 2, running: 0 },
+    { user: "agent", client: "psql", open: 1, running: 1 }, { user: "grafana", client: "Grafana", open: 1, running: 0 }] }),
+    [["Sessions", "7 open, 2 running a statement · 3 as metabase (Metabase), 2 by a token, 1 as agent (psql), and 1 other client (mason logs --running lists the statements)"]]);
+  assert.deepEqual(sessionsRows!(undefined), [], "a run from before it: no line");
 });

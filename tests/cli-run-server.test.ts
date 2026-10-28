@@ -77,7 +77,9 @@ const summary: QuerySummary = { keptDays: 7, day: window(1), week: window(7) };
 const runningNow: RunningStatement = { session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-24T10:04:30.000Z", runningMs: 1500,
   rows: 0, query: "SELECT count(*) FROM orders", queryTruncated: false };
 const cancels: Array<number | [number, number]> = [];
-const listener = { running: () => [runningNow], cancel: (session: number, statement?: number): CancelAnswer => {
+// the sessions logged in, as the listener counts them (src/api/postgres/server.ts openSessions)
+const sessionsNow = { open: 3, byClient: [{ user: "metabase", client: "Metabase", open: 2, running: 1 }, { user: "", client: "", open: 1, running: 0 }] };
+const listener = { openSessions: () => sessionsNow, running: () => [runningNow], cancel: (session: number, statement?: number): CancelAnswer => {
   cancels.push(statement === undefined ? session : [session, statement]);
   if (session === 4 && statement !== undefined && statement !== runningNow.statement) return { other: runningNow, asked: statement };
   return session === 4 ? { cancelled: runningNow } : session === 5 ? { idle: 5 } : { unknown: session };
@@ -351,6 +353,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.match(String(refused.body.error), /public\.logs is not copied yet/);
     assert.equal((await post("/api/sync", { tables: [] })).status, 400);
     assert.deepEqual(asked, [["public.customers"], ["public.logs"]]);
+    assert.deepEqual(s.body.sessions, sessionsNow, "the listener's own count, by user and client");
     assert.deepEqual(s.body.disk, { path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 10, projectedBytes: null }, "the disk under the copy: its file is engine.bytes, one fact");
     const { uptimeSeconds, ...engine } = s.body.engine as { uptimeSeconds: number };
     assert.deepEqual(engine, { name: "duckdb", file: duckFile, bytes: 10, pollSeconds: 5, version: "9.9.9", startedAt: "2026-10-28T08:00:00.000Z", restarts: { count: 0, last: null } });
@@ -441,7 +444,7 @@ test("a usage sample reads /api/state's own facts: the copy file's bytes, the to
   const facts = await runServer.usageFacts!(c, now);
   const state = runServer.runState(c, states, stream, now) as { totals: unknown; engine: { bytes: number } };
   assert.deepEqual(facts, { copyBytes: state.engine.bytes, totals: { added: 3, copied: 3, failed: 0, rows: 1_023, syncedAt: at }, oldestSyncSeconds: 3690.5, streamLag: lag,
-    copied: ["public.customers", "public.orders", "public.logs"], slotWalHeldBytes: 65_536, diskFreeBytes: 75 * 2 ** 30 });
+    copied: ["public.customers", "public.orders", "public.logs"], slotWalHeldBytes: 65_536, diskFreeBytes: 75 * 2 ** 30, sessionsOpen: 3 });
   assert.equal(state.engine.bytes, 10, "the copy file's size, as engine.bytes says it");
   const polled = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => null } }, now) as { streamLag: unknown; slotWalHeldBytes: unknown };
   assert.equal(polled.streamLag, null, "no stream when polling");

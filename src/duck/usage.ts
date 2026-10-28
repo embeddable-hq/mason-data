@@ -54,7 +54,7 @@ const TRIM_EVERY_MS = 60 * 60 * 1000;
 
 const COLUMNS = ["sampled_at", "seconds", "copy_bytes", "copy_rows", "tables_added", "tables_copied", "tables_failed", "oldest_sync_seconds",
   "statements", "statements_refused", "statements_failed", "statements_cancelled", "rows_sent", "bytes_sent", "duration_p50_ms", "duration_p95_ms",
-  "stream_lag_bytes", "stream_lag_seconds", "rss_bytes", "heap_used_bytes", "copy_memory_bytes", "copy_memory_limit_bytes", "slot_wal_held_bytes", "disk_free_bytes"] as const;
+  "stream_lag_bytes", "stream_lag_seconds", "rss_bytes", "heap_used_bytes", "copy_memory_bytes", "copy_memory_limit_bytes", "slot_wal_held_bytes", "disk_free_bytes", "sessions_open"] as const;
 
 /** the samples' DDL: one row a sample; a level is as of `sampled_at`, a count is of the `seconds` before it */
 export const USAGE_DDL = `CREATE TABLE IF NOT EXISTS ${USAGE_TABLE} (sampled_at TIMESTAMPTZ, seconds DOUBLE, copy_bytes BIGINT, copy_rows BIGINT, ` +
@@ -62,7 +62,7 @@ export const USAGE_DDL = `CREATE TABLE IF NOT EXISTS ${USAGE_TABLE} (sampled_at 
   `statements_failed BIGINT, statements_cancelled BIGINT, rows_sent BIGINT, bytes_sent BIGINT, duration_p50_ms INTEGER, duration_p95_ms INTEGER, stream_lag_bytes BIGINT, ` +
   `stream_lag_seconds DOUBLE, rss_bytes BIGINT, heap_used_bytes BIGINT, copy_memory_bytes BIGINT, copy_memory_limit_bytes BIGINT)`;
 /** the columns added since the first samples (a file a run before them made): each added where it is missing */
-export const USAGE_ADDED = ["slot_wal_held_bytes BIGINT", "disk_free_bytes BIGINT"] as const;
+export const USAGE_ADDED = ["slot_wal_held_bytes BIGINT", "disk_free_bytes BIGINT", "sessions_open INTEGER"] as const;
 /** each copy's own bytes, every SIZE_EVERY_MS */
 export const SIZES_DDL = `CREATE TABLE IF NOT EXISTS ${SIZES_TABLE} (sampled_at TIMESTAMPTZ, table_name VARCHAR, bytes BIGINT)`;
 
@@ -82,6 +82,8 @@ export interface UsageFacts {
   slotWalHeldBytes: number | null;
   /** the bytes free where the copy's file is (`disk.freeBytes`); null when it could not be read */
   diskFreeBytes: number | null;
+  /** the sessions logged in to the Postgres API (`sessions.open`) */
+  sessionsOpen: number;
 }
 
 /**
@@ -134,6 +136,8 @@ export interface UsageSample {
   /** the bytes free on the disk the copy is on (`mason status`'s Disk line); re-bucketed, the LOWEST in the bucket (the
    *  one level a bucket's worst is its least) */
   diskFreeBytes: number | null;
+  /** the sessions logged in to the Postgres API as of `at` (null: a sample from before it was taken) */
+  sessionsOpen: number | null;
 }
 
 /** One copy's own bytes, as last measured. */
@@ -299,7 +303,7 @@ export class UsageSampler {
     const mem = this.options.memory?.() ?? process.memoryUsage();
     const values: DuckDBValue[] = [new Date(now).toISOString(), seconds, facts.copyBytes, facts.totals.rows, facts.totals.added, facts.totals.copied, facts.totals.failed,
       facts.oldestSyncSeconds, i.statements, i.outcomes.refused, i.outcomes.failed, i.outcomes.cancelled, i.rowsSent, i.bytesSent, quantileCont(sorted, 0.5), quantileCont(sorted, 0.95),
-      facts.streamLag?.bytes ?? null, facts.streamLag?.seconds ?? null, mem.rss, mem.heapUsed, copyMemory, this.memoryLimitBytes, facts.slotWalHeldBytes, facts.diskFreeBytes];
+      facts.streamLag?.bytes ?? null, facts.streamLag?.seconds ?? null, mem.rss, mem.heapUsed, copyMemory, this.memoryLimitBytes, facts.slotWalHeldBytes, facts.diskFreeBytes, facts.sessionsOpen];
     const sql = `INSERT INTO ${USAGE_TABLE} (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map((c, j) => `$${j + 1}${c === "sampled_at" ? "::TIMESTAMPTZ" : ""}`).join(", ")})`;
     try {
       if (this.options.insert !== undefined) await this.options.insert(sql, values);
@@ -417,6 +421,6 @@ function sampleOf(r: Record<string, unknown>): UsageSample {
     statementsCancelled: Number(r.statements_cancelled ?? 0), rowsSent: Number(r.rows_sent ?? 0), bytesSent: Number(r.bytes_sent ?? 0), durationP50Ms: num(r.duration_p50_ms), durationP95Ms: num(r.duration_p95_ms),
     streamLagBytes: num(r.stream_lag_bytes), streamLagSeconds: num(r.stream_lag_seconds),
     rssBytes: Number(r.rss_bytes), heapUsedBytes: Number(r.heap_used_bytes), copyMemoryBytes: num(r.copy_memory_bytes), copyMemoryLimitBytes: Number(r.copy_memory_limit_bytes),
-    slotWalHeldBytes: num(r.slot_wal_held_bytes), diskFreeBytes: num(r.disk_free_bytes),
+    slotWalHeldBytes: num(r.slot_wal_held_bytes), diskFreeBytes: num(r.disk_free_bytes), sessionsOpen: num(r.sessions_open),
   };
 }

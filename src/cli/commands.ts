@@ -36,7 +36,7 @@ import type { CopyProgressView, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery } from "../duck/requests.ts";
-import type { RunningStatement } from "../api/postgres/server.ts";
+import type { RunningStatement, SessionsOpen } from "../api/postgres/server.ts";
 import { DEFAULT_REQUEST_LIMIT, eventLimit, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 
@@ -92,6 +92,9 @@ export interface RunState {
   /** the disk under the copy (src/duck/sync.ts diskStatus): free where its file is, the file, what the copies running
    *  are projected to add; a run from before it has none */
   disk?: { path: string; freeBytes: number | null; copyBytes: number | null; projectedBytes: number | null; error?: string };
+  /** the Postgres API's sessions logged in now, by user and client (src/api/postgres/server.ts openSessions); a run from
+   *  before it has none */
+  sessions?: SessionsOpen;
   /** the JSON paths stored as columns of the copies (src/duck/kept.ts): a run from before them has none */
   jsonPaths?: KeptPathStatus[];
   /** what mason wait waits on (src/cli/readiness.ts), said by the run: a run from before it has none */
@@ -296,7 +299,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            syncedAt (the latest sync of any) }, engine: { file, bytes, pollSeconds, version (the run's), startedAt,
            uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
            or null }, or { error }) }, disk: { path (where the copy's file is), freeBytes, copyBytes (the file),
-           projectedBytes (what the copies running are projected to add; null: none, or too early to say), error }, queries: { keptDays, day, week } (the last day's and the last 7
+           projectedBytes (what the copies running are projected to add; null: none, or too early to say), error },
+           sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
+           application_name), open, running }] }, queries: { keptDays, day, week } (the last day's and the last 7
            days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
            failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
            when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all),
@@ -340,7 +345,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   summary: "what Mason is doing: the database, each table's copy, the Postgres API, the slow and refused statements",
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
-  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
+  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
     "refusedTotal", "recentErrors", "readiness", "ui",
     "lastRun", "lastStop", "hung", "next"],
 };
@@ -403,6 +408,7 @@ export async function status(argv: string[]): Promise<number> {
       // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
       ...restartsRows(s.engine.restarts),
       ["Postgres API", `${withPlaceholders(run.postgresUrl)}  (mason user add <name> makes a user)`],
+      ...sessionsRows(s.sessions),
       // what it serves: its address, TLS or plain (src/cli/pg-tls.ts)
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
@@ -570,6 +576,17 @@ export function fileSize(b: number): string {
  *  has been up (a run from before it: the CLI's version, no uptime) */
 export function masonRow(e: Pick<RunState["engine"], "version" | "startedAt" | "uptimeSeconds">, pid: number): [string, string] {
   return ["Mason", `${e.version ?? version()}, pid ${pid} · one process${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`];
+}
+
+/** `Sessions` in mason status: how many are logged in to the Postgres API, how many run a statement, and by whom (the
+ *  three with the most, then how many others) */
+export function sessionsRows(s: SessionsOpen | undefined): Array<[string, string]> {
+  if (s === undefined) return [];
+  if (s.open === 0) return [["Sessions", "none open"]];
+  const running = s.byClient.reduce((n, c) => n + c.running, 0);
+  const who = s.byClient.slice(0, 3).map((c) => `${c.open} ${c.user === "" ? "by a token" : `as ${c.user}`}${c.client === "" ? "" : ` (${c.client})`}`);
+  const others = s.byClient.length - who.length;
+  return [["Sessions", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
 }
 
 /** `Disk` in mason status: the bytes free where the copy is, and what the copies running are projected to add (none: no

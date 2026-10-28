@@ -275,14 +275,23 @@ export interface PgApiOptions {
 export interface PgApiServer {
   readonly port: number;
   close(): Promise<void>;
-  /** sessions open now */
+  /** sessions open now (every connection, its login under way included) */
   readonly sessions: number;
+  /** the sessions logged in now, by user and client, and how many of each run a statement (`/api/state` `sessions`) */
+  openSessions(): SessionsOpen;
   /** the statements running now, one per session, oldest first (`/api/running`, `mason logs --running`) */
   running(): RunningStatement[];
   /** cancels a session's statement exactly as a CancelRequest does (`POST /api/cancel`, `mason cancel`); `statement`
    *  (RunningStatement.statement): only while the session runs that one, else nothing is cancelled (`other`) */
   cancel(session: number, statement?: number): CancelAnswer;
 }
+
+/**
+ * THE SESSIONS LOGGED IN NOW (`openSessions`; `/api/state` `sessions`, mason status, the usage samples): how many, and
+ * by user and client — the `mason user` ('' for a token's session) and the application_name ('' when it sent none) —
+ * with how many of them run a statement now. Read from the sessions in memory: no query, no ledger.
+ */
+export interface SessionsOpen { open: number; byClient: Array<{ user: string; client: string; open: number; running: number }> }
 
 /**
  * A statement running now: one a session's DuckDB is running, or whose rows it is sending — what a CancelRequest (and
@@ -1826,6 +1835,24 @@ class Server {
     return { cancelled: stopped };
   }
 
+  /** The sessions logged in now, by user and client, the most open first (`SessionsOpen`). */
+  openSessions(): SessionsOpen {
+    const now = Date.now();
+    const by = new Map<string, { user: string; client: string; open: number; running: number }>();
+    let open = 0;
+    for (const s of this.sessions.values()) {
+      if (s.phase !== "ready") continue;
+      open++;
+      const user = s.token?.user ?? "", client = s.vars.applicationName;
+      const k = JSON.stringify([user, client]);
+      const g = by.get(k) ?? { user, client, open: 0, running: 0 };
+      g.open++;
+      if (s.runningNow(now) !== null) g.running++;
+      by.set(k, g);
+    }
+    return { open, byClient: [...by.values()].sort((a, b) => b.open - a.open || (a.user < b.user ? -1 : a.user > b.user ? 1 : a.client < b.client ? -1 : a.client > b.client ? 1 : 0)) };
+  }
+
   /** The statements running now, oldest first. */
   running(): RunningStatement[] {
     const now = Date.now();
@@ -1851,6 +1878,7 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
   return {
     port,
     get sessions() { return server.sessions.size; },
+    openSessions: () => server.openSessions(),
     running: () => server.running(),
     cancel: (session, statement) => server.cancelSession(session, statement),
     async close() {

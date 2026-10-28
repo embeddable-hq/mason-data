@@ -37,6 +37,12 @@ sampled once a minute where it moves):
   `diskFree`, the measure a copy is held to), the file (`engine.bytes`), and while copies run what their pages left are
   projected to add (`copyDiskProjection`, as each chunk's check last computed it; null while none can say). A `statfs`, no
   query. Sampled as `diskFreeBytes` (re-bucketed, the lowest).
+- `sessions` — `{ open, byClient: [{ user, client, open, running }] }`: the Postgres API's sessions logged in now, by
+  `mason user` ('' a token's) and application_name, and how many of each run a statement; the listener's own, in memory
+  (`openSessions`). Sampled as `sessionsOpen`.
+
+The lines `mason status` prints for them are exported renderers (src/cli/commands.ts `slotText`, `masonRow`,
+`restartsRows`, `diskRows`, `sessionsRows`), so the web page is held equal to them.
 
 `mason status --json` `recentErrors` holds the latest sync failures (`sync`) and the latest statements refused, failed or
 cancelled (`queries`, the request log's own shape). `since` and `until` are read everywhere by one grammar: an age (30m,
@@ -161,7 +167,7 @@ Key: ✅ built · ⏸ deferred
 1. **How old each copy is**, in seconds: "can I trust this number?"
 2. ✅ **Stream lag, and the WAL the replication slot holds on the source**: a slot nobody reads fills the source's disk.
 3. **Refused statements grouped by the unsupported SQL they used** (`src/duck/gaps.ts`), so users know what to rewrite.
-4. **Sessions open now, restarts, memory against the limit** (`store.memoryLimitBytes`).
+4. ✅ **Sessions open now, restarts** (`sessions`, `engine.restarts`); memory against the limit is a usage sample (`copyMemoryBytes`).
 5. ✅ **Free disk against the copy's projected size** (`disk`, from `copyDiskProjection`).
 
 ## Steps (data and endpoints; presentation later)
