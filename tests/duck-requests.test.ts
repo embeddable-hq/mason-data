@@ -228,6 +228,43 @@ test("the request log read by filters and in pages: outcome (cancelled among the
   await store.writer.run(`DELETE FROM ${REQUESTS_TABLE}`);
 });
 
+test("the request log's slow and search filters: the ones that took SLOW_MS or more; a piece of the statement's text in any case, taken as it is; both compose with the rest and the pages", async () => {
+  const ledger = await RequestLedger.open(store, () => undefined, { days: 7 });
+  const { requestFilter, SLOW_MS } = await import("../src/cli/request-filter.ts");
+  const base = Date.now() - 3_600_000;
+  const at = (s: number): Date => new Date(base + s * 1000);
+  ledger.record(row({ requestId: "fast", at: at(0), durationMs: SLOW_MS - 1, payload: "SELECT * FROM public.orders" }));
+  ledger.record(row({ requestId: "edge", at: at(1), durationMs: SLOW_MS, payload: "select count(*) from ORDERS" }));
+  ledger.record(row({ requestId: "slow", at: at(2), durationMs: 60_000, payload: "SELECT sum(total) FROM invoices", user: "grafana" }));
+  // a LIKE pattern's own characters are text here, never a wildcard
+  ledger.record(row({ requestId: "pct", at: at(3), durationMs: 5, payload: "SELECT '100%_done'" }));
+  ledger.record(row({ requestId: "big", at: at(4), durationMs: 2_000, payload: `SELECT ${"x, ".repeat(20_000)}needle FROM orders` }));
+  await ledger.flush();
+  const ids = async (text: Record<string, string | boolean>): Promise<string[]> => {
+    const q = requestFilter({ limit: "10", ...text });
+    assert.ok(!("message" in q), JSON.stringify(q));
+    return (await ledger.recent(q)).map((r) => r.requestId);
+  };
+  assert.deepEqual(await ids({ slow: true }), ["edge", "slow", "big"], "SLOW_MS or more: the edge itself is slow");
+  assert.deepEqual(await ids({ search: "orders" }), ["fast", "edge", "big"], "any case");
+  assert.deepEqual(await ids({ search: "%_" }), ["pct"], "% and _ are the text's own");
+  assert.deepEqual(await ids({ search: "needle" }), ["big"], "a long statement is searched whole");
+  assert.deepEqual(await ids({ slow: true, search: "ORDERS" }), ["edge", "big"], "they compose");
+  assert.deepEqual(await ids({ slow: true, user: "grafana" }), ["slow"]);
+  const first = await ledger.page({ ...(requestFilter({ limit: "1", slow: true }) as { limit: number }) });
+  assert.deepEqual(first.requests.map((r) => r.requestId), ["big"]);
+  const { parseRequestCursor } = await import("../src/duck/requests.ts");
+  const second = await ledger.page({ ...(requestFilter({ limit: "1", slow: true }) as { limit: number }), before: parseRequestCursor(first.before!)! });
+  assert.deepEqual(second.requests.map((r) => r.requestId), ["slow"], "the page before keeps the filter");
+  // a mistake is the filter's own, worded once
+  for (const [f, words] of [[{ search: "  " }, /search is a piece of a statement's text: it is empty/], [{ search: "x".repeat(201) }, /at most 200 characters: it has 201/]] as const) {
+    const q = requestFilter(f);
+    assert.ok("message" in q && words.test(q.message), JSON.stringify(q));
+  }
+  await ledger.close();
+  await store.writer.run(`DELETE FROM ${REQUESTS_TABLE}`);
+});
+
 test("the query summary: the last day's and week's statements, each outcome, the completed ones' times, rows and bytes, in one read; a short log says so", async () => {
   const day = 86_400_000;
   const ledger = await RequestLedger.open(store, () => undefined, { days: 7 });
