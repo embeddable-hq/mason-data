@@ -41,12 +41,20 @@
  *   every write knows the columns of the table it writes.
  * - HIDDEN: a statement that lists a table's columns without naming them reads the copy's view of its visible columns
  *   (src/duck/kept-route.ts `hideKept`, `VISIBLE_CATALOG`); the catalog Postgres never knows the column.
+ * - A JSONB'S ORDER (src/duck/kept-route.ts `ORDER_STEPS`): `ORDER BY j`, `GROUP BY j`, `j = k` compare a key of the
+ *   whole document, stored as a read like a path's — a BLOB column of the key (`orderKeySql`), under the collation the
+ *   listener tells (`orderBy`): `ORDER_STEPS:<id>`, so a key of another collation is another column, dropped.
  * - OFF (`enabled: false`, `.mason/config.json` `storeJsonPaths: false`, `MASON_STORE_JSON_PATHS=off` for a serve): at
  *   open every stored column is dropped and its row marked dropped, and nothing is recorded, stored or routed.
  */
 import type { DuckConnection } from "./executor.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
-import { canonicalRead, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, pathKey, pathText, readOfKey, VISIBLE_CATALOG, type JsonRead, type KeptRoutes, type ReadyPath } from "./kept-route.ts";
+import { createHash } from "node:crypto";
+import { canonicalRead, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isOrderRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, ORDER_STEPS, pathKey, pathText, readOfKey, VISIBLE_CATALOG,
+  type JsonRead, type KeptRoutes, type ReadyPath } from "./kept-route.ts";
+import { JSONB_KEY_FUNCTIONS, STORED_SUFFIX } from "./jsonb-order.ts";
+import { encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
+import { icuNameOf, type DuckCollation } from "./rewrite.ts";
 
 /** a path read by this many statements in the request log is stored (a larger table's also needs `KEEP_FILL_SHARE`) */
 export const KEEP_AFTER_STATEMENTS = 3;
@@ -204,6 +212,32 @@ export function keptValueSql(p: Omit<JsonRead, "asText">, value: string): string
   return `coalesce(__mason_json_kept(NULL, ${value}, ${literal(p.steps)}, ${p.either}, ${p.canonical}, false), ${NULL_SQL})`;
 }
 
+/**
+ * A JSONB'S STORED KEY, from its column's `value` (src/duck/kept-route.ts `ORDER_STEPS`): the key the statement would
+ * compute (src/duck/rewrite.ts `jsonbKeyCall`), by the same functions (src/duck/jsonb-order.ts `JSONB_KEY_FUNCTIONS`,
+ * their stored twins), never NULL — `KEY_NULL_HEX` for a NULL document (the column's NULL is a row not stored yet), and
+ * `KEY_RECOMPUTE_HEX` where the key raised, which its read computes (and raises) again.
+ */
+export function orderKeySql(c: DuckCollation, value: string): string {
+  const call = (name: string, ...args: string[]): string => `${name}${STORED_SUFFIX}(NULL, ${args.join(", ")})`;
+  const key = c.kind === "bytes" ? call(JSONB_KEY_FUNCTIONS.bytes.key, value)
+    : call(JSONB_KEY_FUNCTIONS[c.kind].key, value, `list_transform(${call(JSONB_KEY_FUNCTIONS[c.kind].strings, value)}, __mason_s -> icu_sort_key(__mason_s, ${literal(icuNameOf(c))}))`);
+  return `CASE WHEN (${value}) IS NULL THEN unhex('${KEY_NULL_HEX}') ELSE coalesce(${key}, unhex('${KEY_RECOMPUTE_HEX}')) END`;
+}
+
+/** a collation's id in a stored key's `steps` (`ORDER_STEPS:<id>`): a key is its collation's, and a libc one its
+ *  measured order's (a glibc whose order moved is another collation) */
+export function orderId(c: DuckCollation, libc: LibcOrder | undefined): string {
+  if (c.kind === "bytes") return "c";
+  if (c.kind === "icu") return `icu:${c.name}`;
+  if (libc === undefined) throw new Error("a libc collation's order was not read (Mason bug: report it)");
+  return `libc:${c.icu}:${createHash("sha256").update(encodeLibcOrder(libc)).digest("hex").slice(0, 16)}`;
+}
+
+/** a stored column's type, and its mark of a value computed at read time, as SQL */
+const columnType = (p: { steps: string }): string => isOrderRead(p) ? "BLOB" : "VARCHAR";
+const recomputeSql = (p: { steps: string }): string => isOrderRead(p) ? `unhex('${KEY_RECOMPUTE_HEX}')` : RECOMPUTE_SQL;
+
 /** a read as its stored path's `->` read (src/duck/kept-route.ts pathKey): what the ledger holds */
 export const pathOf = (r: JsonRead): JsonRead => ({ ...canonicalRead(r), asText: false });
 
@@ -296,13 +330,53 @@ export class KeptJsonPaths implements KeptRoutes {
 
   // --------------------------------------------------------------------------------------------- what a plan reads
 
-  ready(read: JsonRead): ReadyPath | null {
+  ready(asked: JsonRead): ReadyPath | null {
     if (!this.enabled) return null;
+    const read = this.own(asked);
     const p = this.paths.get(hiddenName(read));
     return p !== undefined && p.state === "ready" && pathKey(p) === pathKey(read) ? { name: p.name, exact: p.marked === 0 } : null;
   }
   visible(): ReadonlySet<string> { return this.views; }
   generation(): number { return this.gen; }
+
+  // --------------------------------------------------------------------------------------------- a jsonb's order
+
+  /** the collation a jsonb's key is stored under (`orderBy`), and its id (`orderId`); null until told */
+  private order: { id: string; collation: DuckCollation } | null = null;
+
+  /** a read as this keeper stores it: a jsonb's order (`ORDER_STEPS`) under the collation it was told, any other as it is */
+  private own(r: JsonRead): JsonRead {
+    return isOrderRead(r) ? { ...r, steps: `${ORDER_STEPS}:${this.order?.id ?? "?"}` } : r;
+  }
+
+  /** a stored key of the collation statements sort by now (`orderBy`): computed by writes and read by plans */
+  private current(p: { steps: string }): boolean { return this.order !== null && p.steps === `${ORDER_STEPS}:${this.order.id}`; }
+
+  /**
+   * THE COLLATION, TOLD (src/duck/store.ts `listener`, once the source's is known): a jsonb's stored key is that
+   * collation's. Until then a stored key is written unset and read by no plan (`open`); now the keys of another
+   * collation (the source's changed, or its glibc's order moved) are dropped, and those of this one filled where a
+   * write left them unset — the backfill's sweep — and ready again.
+   */
+  async orderBy(collation: DuckCollation, libc: LibcOrder | undefined): Promise<void> {
+    if (!this.enabled) return;
+    const id = orderId(collation, libc);
+    await this.host.onWriter(async () => {
+      this.order = { id, collation };
+      for (const p of [...this.paths.values()].filter((x) => isOrderRead(x) && !this.current(x) && (x.state === "backfilling" || x.state === "ready"))) {
+        await this.drop(this.store.writer, p, `stored under another collation (${p.steps.slice(ORDER_STEPS.length + 1)}, now ${id}); stored again when its reads ask for it`);
+        this.host.log(`${p.source}: ${pathText(p)} is no longer stored: ${p.why}`);
+      }
+    });
+    void this.fills();
+  }
+
+  /** what a stored column takes from its JSON column's `value`: a path's `->` answer (`keptValueSql`), or a jsonb's key
+   *  (`orderKeySql`) — unset (NULL) while its collation is not the one told (`orderBy`): the sweep fills it */
+  private valueSql(p: KeptPath, value: string): string {
+    if (!isOrderRead(p)) return keptValueSql(p, value);
+    return this.current(p) ? orderKeySql(this.order!.collation, value) : "NULL";
+  }
 
   /** every path with a row, for `mason status` */
   status(): KeptPathStatus[] {
@@ -316,12 +390,12 @@ export class KeptJsonPaths implements KeptRoutes {
    *  write of whole rows names after the copy's own columns */
   stored(source: string, valueOf: (column: string) => string): { names: string[]; values: string[] } {
     const kept = this.physical(source);
-    return { names: kept.map((p) => p.name), values: kept.map((p) => keptValueSql(p, valueOf(p.column))) };
+    return { names: kept.map((p) => p.name), values: kept.map((p) => this.valueSql(p, valueOf(p.column))) };
   }
 
   /** what an UPDATE that sets `carried` sets too: each stored column read from one of them, from its new value */
   storedSet(source: string, carried: readonly string[], valueOf: (column: string) => string): string[] {
-    return this.physical(source).filter((p) => carried.includes(p.column)).map((p) => `${ident(p.name)} = ${keptValueSql(p, valueOf(p.column))}`);
+    return this.physical(source).filter((p) => carried.includes(p.column)).map((p) => `${ident(p.name)} = ${this.valueSql(p, valueOf(p.column))}`);
   }
 
   private physical(source: string): KeptPath[] {
@@ -380,6 +454,13 @@ export class KeptJsonPaths implements KeptRoutes {
     for (const p of this.paths.values()) {
       if (p.state === "dropped" || p.state === "waiting" || named.has(`${p.source}\u0000${p.name}`)) continue;
       await this.drop(w, p, "its column is not in the copy");
+    }
+    // a jsonb's stored key is its collation's, told after this (`orderBy`): until then a write leaves it unset and no
+    // plan reads it, so a ready one is filled again where unset first — the backfill's sweep alone (its ranges are done)
+    for (const p of this.paths.values()) {
+      if (!isOrderRead(p) || p.state !== "ready") continue;
+      p.state = "backfilling";
+      this.cursors.set(p.name, Number.MAX_SAFE_INTEGER);
     }
     await w.run(`ATTACH IF NOT EXISTS ':memory:' AS ${VISIBLE_CATALOG}`);
     for (const source of this.host.served().keys()) await this.view(source);
@@ -444,14 +525,14 @@ export class KeptJsonPaths implements KeptRoutes {
     if (!this.enabled) return;
     for (const p of this.physical(source).filter((x) => columns.includes(x.column))) {
       // no default: its NULL is "not stored yet", and an ADD COLUMN writes nothing into the rows (`keep`)
-      await c.run(`ALTER TABLE ${side} ADD COLUMN IF NOT EXISTS ${ident(p.name)} VARCHAR`);
+      await c.run(`ALTER TABLE ${side} ADD COLUMN IF NOT EXISTS ${ident(p.name)} ${columnType(p)}`);
       const end = Number((await c.runAndReadAll(`SELECT coalesce(max(rowid), -1) + 1 FROM ${side}`)).getRowsJS()[0]![0]);
       for (let lo = 0; lo < end; lo += this.backfillRows) {
-        await run(`UPDATE ${side} SET ${ident(p.name)} = ${keptValueSql(p, ident(p.column))} WHERE rowid >= ${lo} AND rowid < ${lo + this.backfillRows} AND ${ident(p.name)} IS NULL`);
+        await run(`UPDATE ${side} SET ${ident(p.name)} = ${this.valueSql(p, ident(p.column))} WHERE rowid >= ${lo} AND rowid < ${lo + this.backfillRows} AND ${ident(p.name)} IS NULL`);
       }
       // rows the column cannot answer alone (KEPT_RECOMPUTE) turn its reads to the CASE before the side table serves;
       // counted again once it does (`swapped`)
-      const marked = Number((await c.runAndReadAll(`SELECT count(*) FROM ${side} WHERE ${ident(p.name)} = ${RECOMPUTE_SQL}`)).getRowsJS()[0]![0]);
+      const marked = Number((await c.runAndReadAll(`SELECT count(*) FROM ${side} WHERE ${ident(p.name)} = ${recomputeSql(p)}`)).getRowsJS()[0]![0]);
       if (marked > p.marked) { if (p.marked === 0 && p.state === "ready") this.gen++; p.marked = marked; }
     }
   }
@@ -517,7 +598,7 @@ export class KeptJsonPaths implements KeptRoutes {
     for (const [key, statement, ms] of rows) {
       const read = readOfKey(key);
       if (read === null) continue;
-      const path = pathOf(read), k = pathKey(path);
+      const path = this.own(pathOf(read)), k = pathKey(path);
       let e = by.get(k);
       if (e === undefined) by.set(k, e = { read: path, statements: new Map() });
       e.statements.set(statement, Number(ms));
@@ -666,10 +747,13 @@ export class KeptJsonPaths implements KeptRoutes {
   private storable(read: JsonRead): boolean {
     const cols = this.host.served().get(read.source);
     if (cols === undefined || !this.views.has(read.source) || this.host.rebuilding(read.source)) return false;
+    // a jsonb's key waits for its collation (`orderBy`, at the listener's start): nothing to say
+    if (isOrderRead(read) && !this.current(read)) return false;
     const name = hiddenName(read);
     const col = cols.find((c) => c.name === read.column);
     const why = col === undefined ? `${read.column} is not a column of the copy`
       : !/^jsonb?$/.test(col.type) ? `${read.column} is a ${col.type}, not a json or jsonb`
+      : isOrderRead(read) && col.type !== "jsonb" ? `${read.column} is a ${col.type}, which has no order (a jsonb's is stored)`
       : cols.some((c) => c.name.toLowerCase() === name) ? `the copy has a column named ${name} of its own` : null;
     if (why === null) return true;
     const key = pathKey(read);
@@ -726,7 +810,7 @@ export class KeptJsonPaths implements KeptRoutes {
       const target = tableOf(read.source);
       await w.run("BEGIN TRANSACTION");
       try {
-        await w.run(`ALTER TABLE ${target} ADD COLUMN ${ident(name)} VARCHAR`);
+        await w.run(`ALTER TABLE ${target} ADD COLUMN ${ident(name)} ${columnType(read)}`);
         const rows = Number((await w.runAndReadAll(`SELECT count(*) FROM ${target}`)).getRowsJS()[0]![0]);
         const p: KeptPath = { ...pathOf(read), name, state: "backfilling", rowsTotal: rows, rowsDone: 0, statements: c.statements, slowestMs: c.slowestMs, totalMs: c.totalMs,
           fill, filled: null, marked: 0, keptAt: new Date().toISOString(), readyAt: null, why };
@@ -748,6 +832,8 @@ export class KeptJsonPaths implements KeptRoutes {
   /** a backfill continued to its end, a chunk a writer's turn (paused while its table is rebuilt: the next review goes
    *  on), then the path made ready once no row of it is unset — and read by its column alone once none is marked */
   private async backfill(p: KeptPath): Promise<void> {
+    // a jsonb's key waits for its collation (`orderBy`): its rows would be filled unset
+    if (isOrderRead(p) && !this.current(p)) return;
     const target = tableOf(p.source);
     const end = await this.host.onWriter(async () => Number((await this.store.writer.runAndReadAll(`SELECT coalesce(max(rowid), -1) + 1 FROM ${target}`)).getRowsJS()[0]![0]));
     // what this fill measures: the rows its chunks filled and the time they held the writer (never the waits for its
@@ -784,7 +870,7 @@ export class KeptJsonPaths implements KeptRoutes {
 
   /** a column's rows marked to be computed at read time (KEPT_RECOMPUTE), on the caller's turn */
   private async markedRows(p: KeptPath): Promise<number> {
-    return Number((await this.store.writer.runAndReadAll(`SELECT count(*) FROM ${tableOf(p.source)} WHERE ${ident(p.name)} = ${RECOMPUTE_SQL}`)).getRowsJS()[0]![0]);
+    return Number((await this.store.writer.runAndReadAll(`SELECT count(*) FROM ${tableOf(p.source)} WHERE ${ident(p.name)} = ${recomputeSql(p)}`)).getRowsJS()[0]![0]);
   }
 
   /** a READY path's marked rows counted again (its table swapped in, the detector): a change of exactness moves the
@@ -804,7 +890,7 @@ export class KeptJsonPaths implements KeptRoutes {
     const w = this.store.writer;
     await w.run("BEGIN TRANSACTION");
     try {
-      const n = Number((await w.run(`UPDATE ${tableOf(p.source)} SET ${ident(p.name)} = ${keptValueSql(p, ident(p.column))} WHERE ${where}${ident(p.name)} IS NULL`)).rowsChanged);
+      const n = Number((await w.run(`UPDATE ${tableOf(p.source)} SET ${ident(p.name)} = ${this.valueSql(p, ident(p.column))} WHERE ${where}${ident(p.name)} IS NULL`)).rowsChanged);
       await w.run(`UPDATE ${PATHS_TABLE} SET rows_done = rows_done + ${n} WHERE name = ${literal(p.name)}`);
       await w.run("COMMIT");
       p.rowsDone += n;
@@ -834,7 +920,7 @@ export class KeptJsonPaths implements KeptRoutes {
   /** THE ORACLE'S (`eager`): every read's path stored and filled now, whatever the request log says */
   private async keepAll(reads: readonly JsonRead[]): Promise<void> {
     for (const r of reads) {
-      const read = pathOf(r);
+      const read = this.own(pathOf(r));
       const name = hiddenName(read);
       if (this.paths.get(name)?.state === "ready" || !this.storable(read)) continue;
       if (this.paths.get(name)?.state !== "backfilling") await this.keep(read, { statements: 0, slowestMs: 0, totalMs: 0 }, null, "stored at once (eager)");

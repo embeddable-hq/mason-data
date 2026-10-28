@@ -327,6 +327,33 @@ by DuckDB's text equality. Each is now keyed or refused.
 **Where.** `src/duck/jsonb-order.ts`, `jsonbKey` in `src/duck/rewrite.ts`; `tests/duck-jsonb-order.test.ts`, the oracle's
 `jorder` (tests/integration/oracle/type-matrix.ts).
 
+#### The key stored (2026-10-28)
+
+**Decision.** The key is a stored read of the keeper ("Stored JSON paths"): a BLOB hidden column per jsonb column and
+collation, recorded, weighed, filled and kept current exactly as a path is, and read by the rewrite once ready.
+
+**Why.** Measured on a laptop (10 cores, NVMe, the file in the page cache) over 20 M synthetic rows of mixed shapes
+(objects of four keys with a nested array, arrays of strings, raw numbers and strings, nested arrays, NULLs), the
+Trevor.io shape `SELECT e.id … ORDER BY e.j IS NULL, e.j DESC LIMIT 100` through the listener:
+
+| | C | libc (en_US.utf8) |
+|---|---|---|
+| by the key's function, per row | 19.2–26.1 s wall, 20–27 s CPU | 83–126 s wall, 90–132 s CPU |
+| filling the stored key (the keeper's chunks) | 20.8 s | 93.1 s |
+| from the stored key | 0.13–0.31 s wall, ~1 s CPU | 0.13–0.14 s wall, ~1.2 s CPU |
+| `GROUP BY j` from the stored key | 0.40–0.68 s | 0.62–1.21 s |
+
+A sort by the function is a call per row, and a call per row holds the executor worker for the whole statement
+("The executor worker"); a fill costs what one or four such sorts cost, and every later one is free. A key is its
+collation's (a string's key is ICU's or the measured libc order's), so it is stored under the collation's id and
+dropped when the source's collation, or its glibc's measured order, changes. The fill model (`FILL_US_PER_ROW`, made
+for paths) prices a key's fill at 13 µs a row where it measured 1.0 (C) to 4.7 (libc): a large table's key waits
+longer for its evidence than it must, the safe side, until the rate of a fill of that column is measured.
+
+**What it does not cover.** A statement that lists a copy's columns without naming them (`SELECT * … ORDER BY j`)
+reads no stored column at all (`hideKept`), so its sort is the function's: 23.2 s (C) and 84.3 s (libc) on the same
+rows.
+
 ### A query cannot take the run down
 
 **Decision.** Results stream (the next chunk read once the socket drained), an Execute's row limit pages, a cancel aborts

@@ -182,6 +182,16 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   `t.*`, a NATURAL JOIN, a whole row) reads the copy's view of its visible columns (`__mason_visible`, `hideKept`), and
   every copy served has that view. PGlite's catalog never has the column (`schemaBuilt` reads the copy's recorded
   columns), and nothing else may `SELECT *` a copy into an answer.
+- **A jsonb's order is stored as a read like a path's** (`ORDER_STEPS`, src/duck/kept-route.ts; the PR's measurement:
+  `ORDER BY j LIMIT 100` over 20 M rows, 19 s by the key's function under C and 83 s under libc, 0.14 s from the
+  stored key): the rewrite records `ORDER BY` / `GROUP BY` / `=` of a copied jsonb column as a read (`keptKey`), the
+  policy weighs it as any path, and the column (BLOB) holds the key by the functions the statement's key calls
+  (`JSONB_KEY_FUNCTIONS`, their `_stored` twins answering NULL where the key raises: the row is marked, its read
+  raises). **A key is its collation's**: stored as `ORDER_STEPS:<id>` (`orderId`, a libc order's content hashed);
+  until the listener tells the collation (`orderBy`) a write leaves it unset and no plan reads it, then the unset rows
+  are swept and it is ready; another collation's is dropped. A statement that lists the columns (`*`) reads none, so
+  its sort computes the key per row. `tests/duck-json-columns.test.ts` holds the key to the function under C, ICU and
+  libc and every write path to it; `IT_ORACLE_JSON_PATHS=eager` reads every jsonb sort from it.
 ## What is not supported, and how the list stays true
 
 - **An allowlist, not a blocklist**: DuckDB answers only a statement whose every resolved piece is in

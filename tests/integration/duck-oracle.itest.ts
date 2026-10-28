@@ -368,8 +368,12 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   if (EAGER_JSON) {
     // the run read JSON from stored columns: how many paths, and none left unfilled
     const paths = theSync.kept.status();
-    console.log(`duck oracle: ${paths.filter((p) => p.state === "ready").length} JSON path(s) stored and read from their columns, over ${new Set(paths.map((p) => p.table)).size} table(s)`);
+    const orders = paths.filter((p) => p.state === "ready" && p.steps.startsWith("order:"));
+    console.log(`duck oracle: ${paths.filter((p) => p.state === "ready").length} JSON path(s) stored and read from their columns, over ${new Set(paths.map((p) => p.table)).size} table(s); ` +
+      `${orders.length} of them a jsonb's order (${orders.map((p) => `${p.table}.${p.column}`).join(", ")})`);
     assert.ok(paths.some((p) => p.state === "ready"), "IT_ORACLE_JSON_PATHS=eager stored no JSON path: the run did not exercise them");
+    // a jsonb sorted, grouped or compared is read from its stored key (src/duck/kept-route.ts ORDER_STEPS)
+    assert.ok(orders.some((p) => p.table === "public.jorder"), "IT_ORACLE_JSON_PATHS=eager stored no jsonb's order: the run did not exercise it");
     assert.deepEqual(paths.filter((p) => p.state !== "ready").map((p) => `${p.table} ${p.column} ${p.steps}: ${p.state} ${p.why}`), [], "every path stored is ready");
   }
   // a filtered run asks only some statements: a decision it did not meet is not stale

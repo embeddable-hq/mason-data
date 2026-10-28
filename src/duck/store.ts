@@ -213,6 +213,8 @@ export class DuckStore {
       if (libc === undefined) throw new Error(`the database orders text by the libc collation ${collation!.collate}, and its order was not read (Mason bug: report it)`);
       await this.executor.registerLibcOrder(libc);
     }
+    // a jsonb's stored key is this collation's (src/duck/kept.ts `orderBy`)
+    await kept?.orderBy(c, c.kind === "libc" ? libc : undefined);
     return {
       collation: c,
       open: () => this.runner(),

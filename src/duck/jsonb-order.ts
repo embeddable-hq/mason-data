@@ -57,6 +57,19 @@ function eachString(v: Json, out: string[]): void {
 }
 
 /** The strings of a jsonb's text in the key's order (what DuckDB's ICU makes the keys of). */
+/**
+ * THE FUNCTIONS A KEY IS MADE BY, per collation kind (src/duck/functions.ts registers them): the key's, and the one
+ * listing the strings DuckDB makes ICU keys of (none under C). A statement's key (src/duck/rewrite.ts `jsonbKey`) and a
+ * stored one (src/duck/kept.ts `orderKeySql`) both read this table, so the two are one computation by construction;
+ * a stored key calls each name with `STORED_SUFFIX`, the same function answering NULL where this one raises.
+ */
+export const JSONB_KEY_FUNCTIONS = {
+  bytes: { key: "__mason_jsonb_key", strings: null },
+  icu: { key: "__mason_jsonb_key_icu", strings: "__mason_jsonb_strings" },
+  libc: { key: "__mason_jsonb_key_libc", strings: "__mason_jsonb_libc_kept" },
+} as const;
+export const STORED_SUFFIX = "_stored";
+
 export function jsonbStrings(text: string): string[] {
   const out: string[] = [];
   eachString(parseJson(text), out);

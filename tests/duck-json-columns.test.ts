@@ -27,6 +27,7 @@ import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import type { AddedTable } from "../src/duck/sync.ts";
 import type { Source } from "../src/cli/preflight.ts";
 import type { Node } from "libpg-query";
+import type { LibcOrder } from "../src/duck/libc-order.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-json-columns-"));
 after(async () => { await stopParser(); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -39,6 +40,8 @@ type Keeper = {
   /** the fills a review starts and never waits for (absent before a review stopped waiting for them) */
   fills?(): Promise<void>;
   ready(r: Read): Ready; visible(): ReadonlySet<string>; generation(): number; keepNow: ((r: readonly Read[]) => Promise<void>) | null;
+  /** the collation a jsonb's key is stored under (absent before a jsonb's order was stored) */
+  orderBy?(collation: unknown, libc: unknown): Promise<void>;
   fillSide(c: unknown, source: string, side: string, columns: readonly string[], run: (sql: string) => Promise<number>): Promise<void>;
   removed(source: string): Promise<void>;
 };
@@ -346,8 +349,10 @@ async function syncWithStored(reads: Read[]) {
   const sync = new Sync(store, source, "x", (l: string) => logged.push(l), 5_000, "poll", null, { json: { eager: true } });
   await sync.open();
   assert.ok(sync.kept !== undefined && sync.kept.keepNow !== null, "the sync keeps stored JSON paths");
+  // the collation a jsonb's key is stored under, as the listener tells it at its start (C here: the key is the bytes')
+  await sync.kept.orderBy?.({ kind: "bytes" }, undefined);
   await sync.kept.keepNow(reads);
-  for (const r of reads) assert.equal(readyName(sync.kept.ready(r)), route.hiddenName(r), `${r.steps} is stored`);
+  for (const r of reads) assert.equal(readyName(sync.kept.ready(r)), route.hiddenName(storedAs(r)), `${r.steps} is stored`);
   await sync.stop();
   await sync.setTables([DOCS]);
   return { store, sync: sync as unknown as SyncInside, logged, route };
@@ -356,9 +361,11 @@ async function syncWithStored(reads: Read[]) {
 /** each stored column of `public.docs` equal to the function on every row, none unset */
 async function current(store: DuckStore, reads: Read[], route: RouteModule): Promise<void> {
   for (const r of reads) {
-    const h = ident(route.hiddenName(r));
-    const [n, unset, wrong] = (await rows(store, `SELECT count(*), count(*) FILTER (${h} IS NULL), count(*) FILTER (${fromColumn(h, r)} ` +
-      `IS DISTINCT FROM __mason_json_get(NULL, ${ident(r.column)}, ${args(r)})) FROM public.docs`))[0] as bigint[];
+    const h = ident(route.hiddenName(storedAs(r)));
+    // a jsonb's key: the key's function under C (src/duck/rewrite.ts jsonbKeyCall), its NULL mark a NULL
+    const [stored, computed] = r.steps === "order" ? [`CASE WHEN ${h} = unhex('00') THEN NULL ELSE ${h} END`, `__mason_jsonb_key(NULL, ${ident(r.column)})`]
+      : [fromColumn(h, r), `__mason_json_get(NULL, ${ident(r.column)}, ${args(r)})`];
+    const [n, unset, wrong] = (await rows(store, `SELECT count(*), count(*) FILTER (${h} IS NULL), count(*) FILTER (${stored} IS DISTINCT FROM ${computed}) FROM public.docs`))[0] as bigint[];
     assert.ok(n! > 0n);
     assert.deepEqual([unset, wrong], [0n, 0n], `${r.column} ${r.steps}: ${unset} unset, ${wrong} not the function's`);
   }
@@ -368,7 +375,12 @@ const STORED: Read[] = [
   { source: "public.docs", column: "j", steps: '["s"]', either: false, canonical: true, asText: true },
   { source: "public.docs", column: "j", steps: '["o","a","b"]', either: true, canonical: true, asText: false },
   { source: "public.docs", column: "k", steps: '["n"]', either: false, canonical: false, asText: true },
+  // j's jsonb order (ORDER BY j, GROUP BY j, j = k): its key
+  { source: "public.docs", column: "j", steps: "order", either: false, canonical: true, asText: false },
 ];
+
+/** a read as the keeper stores it: a jsonb's order under the collation it was told (C: `orderBy` above) */
+const storedAs = (r: Read): Read => r.steps === "order" ? { ...r, steps: "order:c" } : r;
 
 test("the stream's write by key and its unchanged-TOAST updates compute each stored path", async () => {
   const { store, sync, route } = await syncWithStored(STORED);
@@ -416,7 +428,7 @@ test("a copy's side table gets every stored path before its swap; a column the n
     await sync.kept.fillSide(store.writer, "public.docs", "public.docs__mason_copy", ["id", "j", "k"], async (sql) => Number((await store.writer.run(sql)).rowsChanged));
     await sync.onWriter(() => sync.swap(DOCS, "public.docs__mason_copy", { snapshot: null, behind: null }));
     await current(store, STORED, route);
-    assert.deepEqual(sync.kept.status().map((p) => p.state), ["ready", "ready", "ready"]);
+    assert.deepEqual(sync.kept.status().map((p) => p.state), STORED.map(() => "ready"));
     // copied again without k: its path goes with it, j's stay
     const noK = { ...DOCS, columns: DOCS.columns.filter((c) => c.name !== "k") };
     await store.writer.run(`CREATE TABLE public.docs__mason_copy AS SELECT id, j FROM public.docs`);
@@ -524,6 +536,142 @@ test("a READY path is read from its stored column alone: the plan reads no docum
     reader.closeSync();
   } finally { store.close(); await pglite.close(); }
 });
+
+// A JSONB'S ORDER STORED (src/duck/kept-route.ts ORDER_STEPS): `ORDER BY j` over 20 M rows took 19 s through the key's
+// function under C and 83 s under a libc locale, 0.1 s from a stored key (the PR's measurement)
+test("a jsonb's order is stored as its key: the function's on every row under C, ICU and a libc order, sorted from it alone, a key that raised computed when read", async () => {
+  const { kept, route } = await modules();
+  const order: Read = { source: "public.docs", column: "j", steps: "order", either: false, canonical: true, asText: false };
+  const each = (strings: string) => `list_transform(${strings}(NULL, j), __mason_s -> icu_sort_key(__mason_s, 'en_us'))`;
+  const kinds = [
+    { name: "C", collation: undefined, libc: undefined, key: "__mason_jsonb_key(NULL, j)", marked: 0 },
+    { name: "ICU", collation: { provider: "i", collate: "en-US", locale: "en-US" }, libc: undefined, key: `__mason_jsonb_key_icu(NULL, j, ${each("__mason_jsonb_strings")})`, marked: 0 },
+    // the small order covers letters, digits and the space: a string holding U+0000 (SHAPES' NUL row) is not covered,
+    // its key raises (libc-uncovered), and the row is marked to be computed when read
+    { name: "libc", collation: { provider: "c", collate: "en_US.utf8", locale: null }, libc: smallLibcOrder(), key: `__mason_jsonb_key_libc(NULL, j, ${each("__mason_jsonb_libc_kept")})`, marked: 20 },
+  ];
+  for (const k of kinds) {
+    const store = await newStore();
+    const pglite = new PGlite();
+    try {
+      await documents(store, "public.docs", 20);
+      await pglite.exec("CREATE TABLE public.docs (id integer PRIMARY KEY, j jsonb, k json)");
+      const catalog = (b: Uint8Array): Promise<Uint8Array> => pglite.execProtocolRaw(b);
+      const { keeper } = await keeperOver(store, kept, { eager: true });
+      // the listener tells the keeper its collation (and registers the libc order's functions)
+      const listener = await store.listener(k.collation, null, k.libc, () => [], keeper as never);
+      const plan = async (sql: string, kk: Keeper | null) => (planDuck as (...a: unknown[]) => ReturnType<typeof planDuck>)(catalog, sql, (await parseSql(sql)).stmts![0]!.stmt as Node,
+        0, [], "public", "UTC", listener.collation, null, new Map(), () => [], 0, kk);
+      const reader = await store.instance.connect();
+      await reader.run("SET search_path = 'public'");
+      const answer = async (sql: string): Promise<unknown> => { try { return (await reader.runAndReadAll(sql)).getRowsJS(); } catch (e) { return (e as Error).message.replace(/\n[\s\S]*/, ""); } };
+      const sorted = "SELECT id FROM docs ORDER BY j DESC, id";
+      const [on, off] = [await plan(sorted, keeper), await plan(sorted, null)];
+      const hidden = (await rows(store, "SELECT column_name, data_type FROM duckdb_columns() WHERE table_name = 'docs' AND starts_with(column_name, '__mason_json_')")) as string[][];
+      assert.equal(hidden.length, 1, `${k.name}: one stored column, the key's: ${JSON.stringify(hidden)}`);
+      const [h, type] = hidden[0]!;
+      assert.equal(type, "BLOB", k.name);
+      assert.equal(readyName(keeper.ready(order)), h, `${k.name}: ready`);
+      assert.match(keeper.status().map((p) => `${p.steps} ${p.why}`).join("\n"), /^order:/, k.name);
+      // equal to the key's function on every row it does not raise on, none unset, the rows it raises on marked
+      const [n, unset, wrong, marked] = (await rows(store, `SELECT count(*), count(*) FILTER (${h} IS NULL), ` +
+        `count(*) FILTER (CASE WHEN ${h} = unhex('0021') THEN false ELSE CASE WHEN ${h} = unhex('00') THEN NULL ELSE ${h} END IS DISTINCT FROM ${k.key} END), ` +
+        `count(*) FILTER (${h} = unhex('0021')) FROM public.docs`))[0] as bigint[];
+      assert.ok(n! > 100n);
+      assert.deepEqual([unset, wrong, marked], [0n, 0n, BigInt(k.marked)], `${k.name}: unset, not the function's, marked`);
+      // recorded as the request log's read, so the keeper weighs it as a path's (`review`)
+      assert.ok(((on as unknown as { jsonReads?: readonly string[] }).jsonReads ?? []).includes(route.readKey(order)), `${k.name}: the order is one of the statement's reads`);
+      if (k.marked === 0) {
+        assert.deepEqual(keeper.ready(order), { name: h, exact: true });
+        // sorted from the key's column alone: no key computed, no document read
+        assert.doesNotMatch(on.sql.text, /__mason_jsonb_key/, on.sql.text);
+        const cols = await scanned(reader, on.sql.text, "docs");
+        assert.deepEqual(cols.filter((c) => /^j$/.test(c)), [], `${k.name}: the documents are not read: ${cols.join(", ")}`);
+        assert.ok((await scanned(reader, off.sql.text, "docs")).some((c) => /^j$/.test(c)), "without the stored key the plan reads j");
+      } else {
+        // a marked row keeps the document: the CASE computes it, and the statement raises as the call does
+        assert.deepEqual(keeper.ready(order), { name: h, exact: false });
+        assert.match(on.sql.text, new RegExp(`${h} IS NULL OR .*${h} = unhex\\('0021'\\)`), on.sql.text);
+        assert.match(String(await answer(on.sql.text)), /U\+0000.*libc-uncovered/);
+      }
+      assert.deepEqual(await answer(on.sql.text), await answer(off.sql.text), `${k.name}: sorted as the function sorts`);
+      // the other forms that compare a jsonb read the same key; the rows the libc order covers answered alike
+      const covered = k.marked === 0 ? "" : " WHERE id % 9 <> 7";
+      for (const sql of [`SELECT id FROM docs${covered} ORDER BY j, id`, `SELECT count(*), min(id) FROM docs${covered} GROUP BY j ORDER BY 2`,
+        `SELECT a.id, b.id FROM docs a JOIN docs b ON a.j = b.j WHERE a.id < 40 AND b.id < 40${covered === "" ? "" : " AND a.id % 9 <> 7 AND b.id % 9 <> 7"} ORDER BY 1, 2`,
+        `SELECT DISTINCT ON (j) id FROM docs${covered} ORDER BY j, id`, `SELECT id, j < '{"s": "m"}' FROM docs${covered} ORDER BY id`,
+        // a derived table's column sorted through its `*` is the subquery's (no stored key there): the oracle's wrapper
+        `SELECT * FROM (SELECT id, j FROM docs${covered} ORDER BY j, id) AS s ORDER BY s.j, s.id`]) {
+        const [a, b] = [await plan(sql, keeper), await plan(sql, null)];
+        assert.match(a.sql.text, new RegExp(h!), `${k.name}: ${sql} reads the stored key`);
+        const got = await answer(a.sql.text);
+        assert.ok(Array.isArray(got) && got.length > 0, `${k.name}: ${sql}: ${String(got)}`);
+        assert.deepEqual(got, await answer(b.sql.text), `${k.name}: ${sql}`);
+      }
+      reader.closeSync();
+      await keeper.stop();
+    } finally { store.close(); await pglite.close(); }
+  }
+});
+
+test("a stored jsonb key is its collation's: until the listener says which no plan reads it, rows written meanwhile are filled, another collation's is dropped", async () => {
+  const { kept, route } = await modules();
+  const order: Read = { source: "public.docs", column: "j", steps: "order", either: false, canonical: true, asText: false };
+  const store = await newStore();
+  try {
+    await documents(store, "public.docs", 5);
+    const first = await keeperOver(store, kept, { eager: true });
+    await first.keeper.orderBy!({ kind: "bytes" }, undefined);
+    await first.keeper.keepNow!([order]);
+    const h = route.hiddenName({ ...order, steps: "order:c" });
+    assert.equal(readyName(first.keeper.ready(order)), h);
+    await first.keeper.stop();
+    // the next start: the keeper open, the listener not yet started
+    const next = await keeperOver(store, kept, {});
+    assert.equal(next.keeper.ready(order), null, "no plan reads a key before its collation is told");
+    assert.equal(next.keeper.status().find((p) => p.name === h)?.state, "backfilling");
+    // a write meanwhile names the column (every write of the table names its stored columns) and leaves it unset
+    const write = (next.keeper as unknown as { stored(s: string, v: (c: string) => string): { names: string[]; values: string[] } }).stored("public.docs", (c) => c === "j" ? `'{"s": "meanwhile"}'::JSON` : "NULL");
+    assert.deepEqual(write.names, [h]);
+    await store.writer.run(`INSERT INTO public.docs (id, j, k, ${write.names.map(ident).join(", ")}) VALUES (5000, '{"s": "meanwhile"}', NULL, ${write.values.join(", ")})`);
+    assert.equal(await one(store, `SELECT ${ident(h)} IS NULL FROM public.docs WHERE id = 5000`), true);
+    // told: the rows written meanwhile filled (the backfill's sweep), and ready again
+    await next.keeper.orderBy!({ kind: "bytes" }, undefined);
+    await next.keeper.fills!();
+    assert.deepEqual(next.keeper.ready(order), { name: h, exact: true });
+    assert.deepEqual(await rows(store, `SELECT count(*) FILTER (${ident(h)} IS NULL), count(*) FILTER (${ident(h)} IS DISTINCT FROM __mason_jsonb_key(NULL, j) AND j IS NOT NULL) FROM public.docs`), [[0n, 0n]]);
+    await next.keeper.stop();
+    // a start under another collation: C's key is dropped and said, never read
+    const icu = await keeperOver(store, kept, {});
+    await store.listener({ provider: "i", collate: "en-US", locale: "en-US" }, null, undefined, () => [], icu.keeper as never);
+    assert.equal(icu.keeper.ready(order), null);
+    const was = icu.keeper.status().find((p) => p.name === h)!;
+    assert.equal(was.state, "dropped");
+    assert.match(was.why, /another collation \(c, now icu:en_us\)/);
+    assert.match(icu.host.logged.join("\n"), /ORDER BY j \(its jsonb order.*no longer stored/);
+    // and stored again under this one as any path is: the request log's statements that sorted by it
+    await store.writer.run(`CREATE TABLE ${MASON_SCHEMA}.requests (request_id VARCHAR, duration_ms INTEGER, json_reads VARCHAR)`);
+    await store.writer.run(`INSERT INTO ${MASON_SCHEMA}.requests SELECT 'r', 5, '${JSON.stringify([route.readKey(order)]).replaceAll("'", "''")}' FROM range(${kept.KEEP_AFTER_STATEMENTS})`);
+    await reviewed(icu.keeper);
+    const again = icu.keeper.ready(order);
+    assert.ok(again !== null && readyName(again) !== h, "ready again, as another column (ICU's key)");
+    assert.match(icu.keeper.status().find((p) => p.state === "ready")!.why, new RegExp(`read by ${kept.KEEP_AFTER_STATEMENTS} statements`));
+    await icu.keeper.stop();
+  } finally { store.close(); }
+});
+
+/** a libc order small enough to write by hand (as tests/duck-libc-order.test.ts writes one): letters with case and
+ *  accents at ICU's levels, the digits, and the space with no first-level weight; nothing else covered */
+function smallLibcOrder(): LibcOrder {
+  const MAX = 0x110000;
+  const l1 = new Uint32Array(MAX), l4 = new Uint32Array(MAX), uncovered = new Uint8Array(MAX).fill(1);
+  const cp = (c: string): number => c.codePointAt(0)!;
+  const letters = "abcdefghijklmnopqrstuvwxyz".split("").map((x) => x + x.toUpperCase() + (x === "e" ? "é" : ""));
+  const first = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...letters];
+  l4[cp(" ")] = 2; uncovered[cp(" ")] = 0;
+  first.forEach((cls, i) => { for (const c of cls) { l1[cp(c)] = i + 1; uncovered[cp(c)] = 0; l4[cp(c)] = 3; } });
+  return { collate: "en_US.utf8", version: "2.41", l1, l4, uncovered, expansions: new Map() };
+}
 
 test("a path's spellings and its -> and ->> are ONE stored column, each read from it; an element that reads as an index is not folded", async () => {
   const { kept, route } = await modules();
