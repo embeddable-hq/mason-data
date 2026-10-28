@@ -14,7 +14,7 @@ import { agoText, bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, s
 
 const RUNNING = "/api/running";
 const STATE = "/api/state";
-/** The request log's summary (the Status page's read too): the last day's statements, for the cards. */
+/** The request log's summary (the Overview's read too): the range's window of it, for the cards. */
 const QUERIES = "/api/queries";
 const QUERIES_EVERY_MS = 30_000;
 const NEWEST_EVERY_MS = 5000;
@@ -74,15 +74,16 @@ export function renderQueryKpis(sessions, running, queries, range = DEFAULT_RANG
   return cards(list);
 }
 
-/**
- * THE LAST DAY'S THREE CARDS from the request log's summary (`day`: a window of `/api/queries`): the statements, the failed
- * ones (the log's Failed: refused or failed; its sub-line names each and the cancelled) and the completed ones' p95.
- * `line(key)` is a card's sparkline holder (the Usage page draws them; "" for none): ONE place derives these facts.
- */
 /** The window of the request log's summary a range's cards say: the week for 7 days, else the day (the summary has no
  *  hour: the cards of the last hour say the last 24 hours, by name). */
 export const summaryWindow = (range) => range === "7d" ? { key: "week", label: "last 7 days" } : { key: "day", label: "last 24 hours" };
 
+/**
+ * THE THREE CARDS of a window of the request log's summary (`day`: `/api/queries`' `day` or `week`, `label` its name): the
+ * statements, the failed ones (the log's Failed: refused or failed; its sub-line names each and the cancelled) and the
+ * completed ones' p95. `line(key)` is a card's sparkline holder (the Usage page draws them; "" for none): ONE place
+ * derives these facts.
+ */
 export function statementCards(day, line = () => "", label = "last 24 hours") {
   const failed = day.refused + day.failed;
   return [

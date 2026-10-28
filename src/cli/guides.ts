@@ -90,7 +90,7 @@ ${codes}
     mason add orders customers --json         added to the sources file, checked against the database
     mason start --json && mason wait --json   Mason in the background; until every added table is copied
     mason user add my-tool --json             the URL and password a tool connects with
-    mason status --json                       each table's copy, and the last day's slow and refused statements
+    mason status --json                       each table's copy, and the last day's slow, refused and unsupported statements
   WATCHING IT, once it runs (every one with --json; --since and --until take an age, 30m or 2h or 7d, or an ISO 8601 time WITH
   its zone):
     mason status --json                       recentErrors: the sync's latest failures and the statements latest refused, failed or cancelled

@@ -256,7 +256,7 @@ export function renderRecentErrors(events, requests) {
 }
 
 /**
- * THE STATUS SECTION from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`, `o.usage`:
+ * THE OVERVIEW from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`, `o.usage`:
  * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the cards,
  * the copies not finished, the facts, the stream, the statements, the recent errors. Never the engine's name.
  */

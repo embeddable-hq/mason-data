@@ -214,7 +214,7 @@ export const page = {
       if (m.choosing === null) m.ticked = null;
     };
     const actions = {
-      /** Add a table (`mason add`): the answer under its line, then the state read again — the Status shows its copy starting. */
+      /** Add a table (`mason add`): the answer under its line, then the state read again — the Overview shows its copy starting. */
       async addTable(table, columns = [], key = []) {
         const r = await ctx.ask("/api/pick", json("POST", pickBody(table, columns, key)));
         // refused: said under the form, which is written again with the boxes the person had ticked
