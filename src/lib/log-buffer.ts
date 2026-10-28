@@ -24,11 +24,18 @@ export const LOG_KEPT = 2000;
 
 const HEAD = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) /;
 
-/** Text (a file's, or one entry as `textEntry` wrote it) as entries: a margin line starts one, an indented line continues it. */
+/**
+ * Text (a file's, or one entry as `textEntry` wrote it) as entries: a margin line starts one, an indented line continues it.
+ * `perLine` is a terminal's text (dev.log, `mason start`'s): a line each, a BLANK one kept as `{ at: null, text: "" }` so it
+ * prints as written. Without it (mason.log, the buffer) a blank line is no entry: `textEntry` writes none, and one would
+ * be an empty entry counted by `-n`.
+ */
 export function logEntries(text: string, o: { perLine?: boolean } = {}): LogLine[] {
   const out: LogLine[] = [];
-  for (const line of text.split("\n")) {
-    if (line.trim() === "") continue;
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();   // the file's last newline ends its last line, it does not start another
+  for (const line of lines) {
+    if (line.trim() === "") { if (o.perLine) out.push({ at: null, text: "" }); continue; }
     const last = out[out.length - 1];
     if (!o.perLine && last !== undefined && /^\s/.test(line)) { last.text += `\n${line.trimEnd()}`; continue; }
     const m = HEAD.exec(line);
