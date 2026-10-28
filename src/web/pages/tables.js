@@ -13,7 +13,7 @@
  * (POST /api/pick, `mason add`). A search box filters by name, and All / Added / Not added by state. Reads `/api/state`
  * every poll and `/api/usage`'s `copySizes` every minute (they are measured every 10 min).
  */
-import { code, entryName, esc, fileSize, firstLine, json, n, renderFailure, rowsHtml, spanText, duration, streamRows, utcText } from "../shared.js";
+import { button, card, cards, code, createOpenSet, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText } from "../shared.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
 export const SIZES_PATH = "/api/usage?since=1m";
@@ -42,7 +42,7 @@ export function syncedReport(b, picked, unsynced) {
 export function renderSynced(b, table, s) {
   const r = syncedReport(b, [table], s.tables.filter((t) => t.table === table));
   return `<div class="done" role="status"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
-    `<button type="button" data-dismiss-synced>Dismiss</button></div>`;
+    `${button("Dismiss", { dismissSynced: "" }, "small")}</div>`;
 }
 
 /** The filter beside the search box: which of the database's tables are listed. */
@@ -89,14 +89,14 @@ export const pickBody = (table, columns = [], key = []) => ({ table, picked: tru
 export function renderTableAdded(b) {
   const l = addedLines(b, b.file);
   return `<div class="done" role="status"><p class="headline">${esc(l.line)}</p>${l.notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
-    `<button type="button" data-dismiss-outcome>Dismiss</button></div>`;
+    `${button("Dismiss", { dismissOutcome: "" }, "small")}</div>`;
 }
 
 /** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): what `mason remove` prints. */
 export function renderTablesRemoved(b) {
   const r = removedReport(b.removed, b.file);
   return `<div class="done" role="status"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
-    `<button type="button" data-dismiss-outcome>Dismiss</button></div>`;
+    `${button("Dismiss", { dismissOutcome: "" }, "small")}</div>`;
 }
 
 const tick = (name, c, on) => `<label class="tick"><input type="checkbox" name="${name}" value="${esc(c.name)}"${on ? " checked" : ""}> ${code(c.name)} <span class="dim">${esc(c.type)}</span></label>`;
@@ -110,56 +110,70 @@ function pickForm(t, ticked = null) {
   return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
     (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart, as ${code(`mason add ${name} --key`)}</legend>${boxes("key")}</fieldset>`) +
     `<fieldset><legend>Its columns, as ${code(`mason add ${name} --columns`)} (none ticked: as ${code(`mason add ${name}`)}, every column)</legend>${boxes("columns")}</fieldset>` +
-    `<button type="submit">Add ${esc(name)}</button> <button type="button" data-cancel-choose>Cancel</button></form>`;
+    `<button type="submit" class="primary small">Add ${esc(name)}</button> ${button("Cancel", { cancelChoose: "" }, "small")}</form>`;
+}
+
+/** The cards over the list: the tables added of all, those synced, those failed and the copies' rows (`/api/state`
+ *  `totals`, which `mason status --json` also carries); none before the state, or with no table to count. */
+export function renderTablesCards(s) {
+  const t = s.totals;
+  if (!t || !s.tables.length) return "";
+  const added = s.tables.filter((x) => x.added).length;
+  return cards([
+    card("Tables added", `${n(added)} of ${n(s.tables.length)}`, "in the database"),
+    card("Synced", n(t.copied), `of ${n(added)} added`),
+    card("Failed", n(t.failed), `of ${n(added)} added`, "", t.failed ? "bad" : ""),
+    card("Rows", n(t.rows), "in the copies"),
+  ]);
 }
 
 /**
- * THE DATABASE'S TABLES from `/api/state` `tables` (`mason tables --json`'s list), ONE table: a row each — its state
- * (an added table's sync: Synced / Syncing / Failed / Waiting, else Not added), its rows, its key, an added table's last
- * sync, age, how long it took and the copy's own size (`ui.sizes`: `/api/usage`'s body or `{ failure }`), its stream state in
- * replication mode, and a note — its error, or why it cannot be added as it is (`tableFacts`, as `mason tables` prints it).
- * What can be done: Sync and Remove (asking first, `ui.removing`) for an added table; Add (every column, as `mason add
- * <table>`) and Columns… (the form) for one not added; Name its key… for one with no primary key. `ui.choosing` is the
- * table whose form is open (`ui.ticked` its boxes ticked: { columns, key }); `ui.outcome` what the last add or remove
- * answered ({ table, added } | { table, removed } | { table, failure }) and `ui.synced` what the last sync did, each
- * under its table; `ui.syncing` the tables whose sync is asked; `ui.filter` the search box's text and `ui.show` the
- * state filter (a key of SHOWS).
+ * THE DATABASE'S TABLES from `/api/state` `tables` (`mason tables --json`'s list), ONE table in a card: a row each — its
+ * name in mono, its state as a dot and the word (an added table's sync: Synced / Syncing / Failed / Waiting, else Not
+ * added), its rows, its key, an added table's last sync as its age (the UTC time in a title), how long it took and the
+ * copy's own size (`ui.sizes`: `/api/usage`'s body or `{ failure }`), its stream state in replication mode, and a note —
+ * its error as a red line (the whole error in a details, `ui.open(key)` whether it is open), or why it cannot be added as
+ * it is (`tableFacts`, as `mason tables` prints it). What can be done: Sync and Remove (asking first, `ui.removing`) for an
+ * added table; Add (every column, as `mason add <table>`) and Columns… (the form) for one not added; Name its key… for
+ * one with no primary key. `ui.choosing` is the table whose form is open (`ui.ticked` its boxes ticked: { columns, key });
+ * `ui.outcome` what the last add or remove answered ({ table, added } | { table, removed } | { table, failure }) and
+ * `ui.synced` what the last sync did, each under its table; `ui.syncing` the tables whose sync is asked; `ui.filter` the
+ * search box's text and `ui.show` the state filter (a key of SHOWS).
  */
 export function renderTables(s, ui = {}) {
-  const { removing = null, choosing = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], synced = null } = ui;
-  if (!s.tables.length) return `<p class="dim">${esc(s.source.database)} has no table this user can read.</p>`;
+  const { removing = null, choosing = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], synced = null, open = () => false } = ui;
+  if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
   const stream = s.stream ? new Map(streamRows(s.stream, ui.now ?? Date.now()).tables) : null;
-  const head = ["Table", "State", "Rows", "Key", "Last sync (UTC)", "Age", "Took", "Size of the copy", ...(stream ? ["Stream"] : []), "Note", ""];
+  const head = [["Table", ""], ["State", ""], ["Rows", "num"], ["Key", ""], ["Last sync", "num"], ["Took", "num"], ["Size of the copy", "num"], ...(stream ? [["Stream", ""]] : []), ["Note", ""], ["", ""]];
   const sizeOf = new Map(sizes && !("failure" in sizes) ? sizes.copySizes.map((c) => [c.table, c.bytes]) : []);
   const under = (html) => `<tr class="under"><td colspan="${head.length}">${html}</td></tr>`;
+  const cell = (v, cls = "", title = "") => `<td${cls ? ` class="${cls}"` : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(v)}</td>`;
   const line = (t) => {
     const f = tableFacts(t);
     const name = entryName(t.table);
     const y = t.sync;
     const act = t.added
-      ? (syncing.includes(t.table) ? `<button type="button" disabled>Syncing…</button>` : `<button type="button" data-sync-table="${esc(t.table)}">Sync</button>`) + " " +
+      ? (syncing.includes(t.table) ? `<button type="button" class="small" disabled>Syncing…</button>` : button("Sync", { syncTable: t.table }, "small")) + " " +
         (removing === t.table
           ? `<span class="confirm">Remove ${esc(name)}? ${esc(removedReport([t.table], "").tips[0])}.</span> ` +
-            `<button type="button" class="danger" data-confirm-remove-table="${esc(t.table)}">Remove ${esc(name)}</button> <button type="button" data-cancel-remove-table>Cancel</button>`
-          : `<button type="button" data-remove-table="${esc(t.table)}">Remove</button>`)
+            `${button(`Remove ${name}`, { confirmRemoveTable: t.table }, "danger small")} ${button("Cancel", { cancelRemoveTable: "" }, "small")}`
+          : button("Remove", { removeTable: t.table }, "danger small"))
       : t.reason === null
-        ? `<button type="button" data-add-table="${esc(t.table)}">Add</button> <button type="button" data-choose="${esc(t.table)}">Columns…</button>`
-        : t.key.length ? "" : `<button type="button" data-choose="${esc(t.table)}">Name its key…</button>`;
+        ? `${button("Add", { addTable: t.table }, "primary small")} ${button("Columns…", { choose: t.table }, "small")}`
+        : t.key.length ? "" : button("Name its key…", { choose: t.table }, "small");
     // a failed copy's rows so far are none: the copy it serves meanwhile is said by its error and mason status
     const rows = t.added && t.copy && t.copy.phase !== "failed" ? n(t.copy.rowsCopied) : f.size;
-    const cells = [
-      t.added ? (y ? SYNC_WORDS[y.state] : "") : "Not added", rows, f.key,
-      t.added && y?.syncedAt ? utcText(y.syncedAt) : "", t.added && y?.ageSeconds != null ? `${duration(y.ageSeconds)} ago` : "",
-      t.added && y?.syncSeconds != null ? tookText(y) : "", t.added && sizeOf.has(t.table) ? fileSize(sizeOf.get(t.table)) : "",
-      ...(stream ? [t.added ? stream.get(t.table) ?? "" : ""] : []),
-    ];
+    const state = t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
+    const last = t.added && y?.syncedAt && y?.ageSeconds != null ? cell(`${duration(y.ageSeconds)} ago`, "num", `${utcText(y.syncedAt)} UTC`) : cell("", "num");
     const note = t.added
-      ? t.error ? `${esc(firstLine(t.error))}${t.error.includes("\n") ? `<details><summary>the whole error</summary><pre>${esc(t.error)}</pre></details>` : ""}` : ""
-      : esc(f.state ?? "");
+      ? t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : ""
+      : `<span class="dim">${esc(f.state ?? "")}</span>`;
     const said = (outcome?.table !== t.table ? "" : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added) : renderTablesRemoved(outcome.removed))) +
       (synced?.table !== t.table ? "" : under("failure" in synced ? renderFailure(synced.failure) : renderSynced(synced.synced, t.table, s)));
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}"><th scope="row">${code(t.table)}</th>` +
-      cells.map((c, i) => `<td${i === 1 || i === 6 ? ` class="num"` : ""}>${esc(c)}</td>`).join("") + `<td class="what">${note}</td><td class="act">${act}</td></tr>` +
+      `<td>${state}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +
+      `${cell(t.added && y?.syncSeconds != null ? tookText(y) : "", "num")}${cell(t.added && sizeOf.has(t.table) ? fileSize(sizeOf.get(t.table)) : "", "num")}` +
+      `${stream ? cell(t.added ? stream.get(t.table) ?? "" : "", "stream") : ""}<td class="what">${note}</td><td class="act">${act}</td></tr>` +
       (choosing === t.table && !t.added ? under(pickForm(t, ticked)) : "") + said;
   };
   const added = s.tables.filter((t) => t.added).length;
@@ -168,11 +182,11 @@ export function renderTables(s, ui = {}) {
   // the search box's text and the state filter: the tables that pass both (the one a form or a confirm is open on stays, whatever they say)
   const passes = (t) => (show === "added" ? t.added : show === "not-added" ? !t.added : true) && nameMatches(t.table, filter);
   const shown = s.tables.filter((t) => passes(t) || t.table === choosing || t.table === removing);
-  const matching = filter.trim() ? ` · ${n(shown.length)} with “${esc(filter.trim())}” in the name` : "";
+  const matching = filter.trim() ? `<p class="count dim">${n(shown.length)} with “${esc(filter.trim())}” in the name</p>` : "";
   const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The copies' own sizes: could not read them (${esc(firstLine(sizes.failure.message))}; ${code("mason usage")} has them)</p>` : "";
-  return `${stray}<p class="count">${n(added)} of ${n(s.tables.length)} added${matching}</p>` +
-    `<div class="scroll"><table class="catalog"><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
-    `<tbody>${shown.map(line).join("")}</tbody></table></div>` +
+  return stray + (added ? "" : empty("No table added yet", `Add one from the list, as ${code("mason add <table>")} does.`)) + matching +
+    panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +
+      `<tbody>${shown.map(line).join("")}</tbody></table>`) +
     (!shown.length ? `<p class="dim">No ${show === "added" ? "added " : show === "not-added" ? "table that is not added, " : ""}table's name has “${esc(filter.trim())}”.</p>` : "") + sizesFailed +
     (added ? `<p class="dim">A copy's own size is measured every 10 minutes (${code("mason usage")}).</p>` : "");
 }
@@ -183,6 +197,8 @@ export const page = {
   create(ctx) {
     const m = { removing: null, choosing: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], synced: null };
     const state = () => ctx.read("/api/state")?.body ?? null;
+    // the details open (a copy's whole error), by key: a poll rewrites the part, and they stay open
+    const opened = createOpenSet();
     // WHILE A FORM IS OPEN OR A REMOVE ASKS, THE TABLES ARE RENDERED FROM THE STATE THEY WERE OPENED OVER (`held`): the
     // run reads the catalog again every few seconds, and a live database's row estimates move, so a part written from
     // each poll's state would be rewritten under the person — the form's ticks gone, the confirm's button replaced under
@@ -252,9 +268,11 @@ export const page = {
         const s = m.held ?? state();
         const sizes = ctx.read(SIZES_PATH);
         // held still while a form is open or a Remove asks, the search box's text and the state filter included: nothing moves under the person
+        const latest = state();
         return {
+          "tables-cards": latest ? renderTablesCards(latest) : "",
           tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, outcome: m.outcome, ticked: m.ticked, now: ctx.now().getTime(),
-            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, synced: m.synced,
+            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, synced: m.synced, open: opened.has,
             sizes: sizes === undefined ? undefined : sizes.failure ? { failure: sizes.failure } : sizes.body }) : "",
         };
       },
@@ -277,6 +295,7 @@ export const page = {
         if (d.dismissSynced !== undefined) return actions.dismissSynced() ?? true;
         return null;
       },
+      toggle: (target) => opened.toggle(target),
       input(target) {
         if (target.id === "tables-show") return actions.showTables(target.value) ?? true;
         if (target.id !== "tables-filter") return null;
