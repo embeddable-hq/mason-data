@@ -8,7 +8,7 @@ import { failed, jsonText, parseCommand, reportText, type CommandSpec, type Next
 import { out as styleOut } from "./style.ts";
 import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
-import { guarded, oneLine, runFailure } from "./commands.ts";
+import { guarded, oneLine, runFailure, spanText } from "./commands.ts";
 import type { RunningStatement } from "../api/postgres/server.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -57,7 +57,7 @@ export async function cancel(argv: string[]): Promise<number> {
     out(reportText({
       headline: `Cancelled session ${c.session}'s statement: it ends now, and its client is told so (57014).`,
       details: [["Statement", oneLine(c.query) || "(no statement)"], ["Client", `${c.applicationName || "(no application_name)"}${c.user ? ` (user ${c.user})` : ""}`],
-        ["Running", `${(c.runningMs / 1000).toFixed(1)} s, ${c.rows.toLocaleString("en-US")} row${c.rows === 1 ? "" : "s"} sent`]],
+        ["Running", `${spanText(c.runningMs / 1000)}, ${c.rows.toLocaleString("en-US")} row${c.rows === 1 ? "" : "s"} sent`]],
       next,
     }, styleOut()));
     return 0;

@@ -208,7 +208,7 @@ export function tableLines(s: RunState): string[] {
 }
 
 /** A span of seconds as the stream's lines say it: `0.3 s` under ten seconds, then as a wait reads (`duration`). */
-const spanText = (seconds: number): string => seconds < 10 ? `${Math.max(0, seconds).toFixed(1)} s` : duration(seconds);
+export const spanText = (seconds: number): string => seconds < 10 ? `${Math.max(0, seconds).toFixed(1)} s` : duration(seconds);
 
 /**
  * WHERE THE STREAM IS, a thing a line (the first replication run on a server showed nothing of it in 35

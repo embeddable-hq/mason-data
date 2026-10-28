@@ -540,7 +540,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0,
     token: "t0ken-of-the-run", folder: () => path.join(app, "mason"), root: app, sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
     readSource: () => ({ message: "not read here", code: "bad_source" }), runUrl: "postgres://me@localhost:5432/shop",
-    listener: { running: () => [running], cancel: (session) => session === 4 ? { cancelled: running } : session === 5 ? { idle: 5 } : { unknown: session } },
+    listener: { running: () => [running], cancel: (session) => session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session } },
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
       requests: { days: 7, page: async (q) => { asked.push(q); return { requests: [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
@@ -597,6 +597,8 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     assert.equal(done.code, 0, done.stderr);
     assert.deepEqual(JSON.parse(done.stdout).cancelled, running);
     assert.match((await run(["cancel", "4"])).stdout, /^Cancelled session 4's statement: it ends now, and its client is told so \(57014\)\.\n/);
+    // its running time is the line of mason logs --running's renderer (spanText), not a second one
+    assert.match((await run(["cancel", "6"])).stdout, /Running +2 min, 12 rows sent\n/);
     const idle = await run(["cancel", "5"]);
     assert.equal(idle.code, 1);
     assert.match(idle.stderr, /^✗ mason cancel: session 5 is running no statement: nothing to cancel\n/);
