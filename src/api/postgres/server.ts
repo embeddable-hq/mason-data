@@ -279,8 +279,9 @@ export interface PgApiServer {
   readonly sessions: number;
   /** the statements running now, one per session, oldest first (`/api/running`, `mason logs --running`) */
   running(): RunningStatement[];
-  /** cancels a session's statement exactly as a CancelRequest does (`POST /api/cancel`, `mason cancel`) */
-  cancel(session: number): CancelAnswer;
+  /** cancels a session's statement exactly as a CancelRequest does (`POST /api/cancel`, `mason cancel`); `statement`
+   *  (RunningStatement.statement): only while the session runs that one, else nothing is cancelled (`other`) */
+  cancel(session: number, statement?: number): CancelAnswer;
 }
 
 /**
@@ -291,6 +292,9 @@ export interface PgApiServer {
 export interface RunningStatement {
   /** the listener's session number (the log's `session <n>`, the request log's `session`): what `mason cancel` names */
   session: number;
+  /** the statement's number in this run (`statementIdOf`; one across the Executes that page a portal's rows): what
+   *  `mason cancel <session> --statement <n>` names, so the cancel stops the statement listed, never the next one */
+  statement: number;
   /** the `mason user` the session logged in as ('' for a token's session) */
   user: string;
   /** the client's application_name ('' when it sent none) */
@@ -307,9 +311,20 @@ export interface RunningStatement {
   queryTruncated: boolean;
 }
 
-/** What a cancel did: asked the statement to stop (it ends with 57014, as Postgres's does), found the session idle, or
- *  found no such session. */
-export type CancelAnswer = { cancelled: RunningStatement } | { idle: number } | { unknown: number };
+/** What a cancel did: asked the statement to stop (it ends with 57014, as Postgres's does), found the session idle,
+ *  found no such session, or — asked for one statement — found the session running another (`other`), cancelling none.
+ *  Without a statement it stops whatever the session runs, as a CancelRequest does (Postgres's own semantics). */
+export type CancelAnswer = { cancelled: RunningStatement } | { idle: number } | { unknown: number } | { other: RunningStatement; asked: number };
+
+/** EACH STATEMENT'S NUMBER IN THIS RUN, by the controller that runs it — the thing a cancel aborts, so a cursor's is one
+ *  number across the Executes that page its rows — given when first asked (`runningNow`), never reused */
+const statementIds = new WeakMap<AbortController, number>();
+let nextStatementId = 1;
+function statementIdOf(c: AbortController): number {
+  let id = statementIds.get(c);
+  if (id === undefined) { id = nextStatementId++; statementIds.set(c, id); }
+  return id;
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // bytes
@@ -497,6 +512,10 @@ interface Portal {
   cursor?: DuckCursor;
   sent: number;
   fields: FieldDescription[] | null;
+  /** THE BYTES ITS EARLIER EXECUTES SENT (a paged portal's pages, `pageSent`): its request log row, written at its
+   *  last, counts them with that one's — never the session's bytes since its first Execute, which held every other
+   *  statement's sent between two of its Executes */
+  bytes: number;
 }
 
 type TxState = "none" | "open" | "failed";
@@ -509,13 +528,13 @@ type TxState = "none" | "open" | "failed";
  */
 interface DuckCursor { answer: DuckAnswer; formats: readonly number[]; controller: AbortController; pending: Buffer[]; sent: number; done: boolean; failed?: unknown;
   /** when its statement began (the request log's duration runs from it, however many Executes page the rows) */
-  startedAt: number;
-  /** the session's bytes sent when it began (`Session.sentBytes`): its row's bytes are counted from here */
-  sentAt: number }
+  startedAt: number }
 
 /** THE STATEMENT BEING ASKED (`Session.asked`): its text, its message, when it arrived and the session's bytes sent by
- *  then (its row's bytes are counted from there), the JSON paths it reads, and the rows sent so far while it runs */
-interface Asked { sql: string; method: string; startedAt: number; sentAt: number; jsonReads?: readonly string[]; rows?: number }
+ *  then (what this message sends is counted from there: one message is handled at a time, so nothing else is sent
+ *  meanwhile), what its portal's earlier Executes sent (`carried`, `Portal.bytes`), the JSON paths it reads, and the
+ *  rows sent so far while it runs */
+interface Asked { sql: string; method: string; startedAt: number; sentAt: number; carried?: number; jsonReads?: readonly string[]; rows?: number }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
@@ -545,7 +564,7 @@ class Session {
   skipToSync = false;
   /** the query running now, for a CancelRequest and the socket closing */
   running: AbortController | null = null;
-  /** the bytes written to the client so far: a statement's are this less its mark (`Asked.sentAt`, `DuckCursor.sentAt`) */
+  /** the bytes written to the client so far: a message's are this less its mark (`Asked.sentAt`; `bytesFor`) */
   sentBytes = 0;
   /** this session's DuckDB connection, opened at its first statement over a table */
   private duckRunner: DuckRunner | null = null;
@@ -605,7 +624,7 @@ class Session {
   runningNow(now: number): RunningStatement | null {
     if (this.running === null || this.asked === null || this.phase !== "ready") return null;
     const stored = storedPayload(this.asked.sql);
-    return { session: this.id, user: this.token?.user ?? "", applicationName: this.vars.applicationName, method: this.asked.method,
+    return { session: this.id, statement: statementIdOf(this.running), user: this.token?.user ?? "", applicationName: this.vars.applicationName, method: this.asked.method,
       startedAt: new Date(this.asked.startedAt).toISOString(), runningMs: now - this.asked.startedAt, rows: this.asked.rows ?? 0,
       query: stored.text, queryTruncated: stored.truncated };
   }
@@ -994,13 +1013,10 @@ class Session {
    * statement's ErrorResponse goes out), and for a refused password (CONNECT), through `options.record`. A catalog
    * read, a SET or a SHOW answered is the protocol's chatter, not recorded. Never throws: `record` buffers.
    */
-  private recordRequest(answer: PgError | { rows: number; startedAt?: number; sentAt?: number }, sql?: string, refusedUser?: string, then: readonly Buffer[] = []): void {
+  private recordRequest(answer: PgError | { rows: number; startedAt?: number }, sql?: string, refusedUser?: string, then: readonly Buffer[] = []): void {
     const asked = this.asked;
     const startedAt = (!(answer instanceof PgError) ? answer.startedAt : undefined) ?? asked?.startedAt ?? Date.now();
-    // THE BYTES SENT for it: what the session was written since the statement's mark (its message's arrival; a cursor's
-    // first Execute), and the frames that end it, sent just after this row is built
-    const mark = (!(answer instanceof PgError) ? answer.sentAt : undefined) ?? asked?.sentAt ?? this.sentBytes;
-    const bytesSent = this.sentBytes - mark + then.reduce((n, b) => n + b.length, 0);
+    const bytesSent = this.bytesFor(then);
     // a refusal's statement is the one refuse() names (a simple Query's own statement, an Execute's portal's)
     const stored = storedPayload(sql ?? asked?.sql ?? "");
     const user = this.token?.user ?? refusedUser;
@@ -1151,7 +1167,7 @@ class Session {
       const fields = plan.fields !== null
         ? plan.fields.map((f, i) => ({ name: f.name, typeOid: a.columns[i]!.oid, typeSize: f.size, typeModifier: a.columns[i]!.oid === f.oid ? f.typmod : -1, format: formatAt(resultFormats, i) }))
         : a.columns.map((c, i) => ({ name: c.name, typeOid: c.oid, typeSize: c.size, typeModifier: -1, format: formatAt(resultFormats, i) }));
-      return { fields, cursor: { answer: a, formats: resultFormats, controller, pending: [], sent: 0, done: false, startedAt: this.asked?.startedAt ?? Date.now(), sentAt: this.asked?.sentAt ?? this.sentBytes } };
+      return { fields, cursor: { answer: a, formats: resultFormats, controller, pending: [], sent: 0, done: false, startedAt: this.asked?.startedAt ?? Date.now() } };
     } finally { this.settled(); }
   }
 
@@ -1416,7 +1432,7 @@ class Session {
       }
       this.dropPortal(m.portal);
       const rows = reply.slice(2, -2);
-      this.portals.set(m.portal, { statement, params: [], boundAt: this.server.now(), resultFormats: m.resultFormats, rows: null, sent: 0, fields: null,
+      this.portals.set(m.portal, { statement, params: [], boundAt: this.server.now(), resultFormats: m.resultFormats, rows: null, sent: 0, fields: null, bytes: 0,
         catalog: { description, rows: statement.explainCatalog === undefined ? rows : catalogExplained(rows, statement.explainCatalog), sent: 0, done } });
       return [bound];
     }
@@ -1434,7 +1450,7 @@ class Session {
     const boundAt = this.server.now();
     this.txNow ??= boundAt;
     this.dropPortal(m.portal);
-    this.portals.set(m.portal, { statement, params, boundAt, resultFormats: m.resultFormats, rows: null, sent: 0, fields: null });
+    this.portals.set(m.portal, { statement, params, boundAt, resultFormats: m.resultFormats, rows: null, sent: 0, fields: null, bytes: 0 });
     return [bindComplete()];
   }
 
@@ -1477,6 +1493,8 @@ class Session {
       c.sent += take;
       return c.sent < c.rows.length ? [...out, portalSuspended()] : [...out, c.done];
     }
+    // what its earlier Executes sent is this one's row's too (`bytesFor`)
+    if (this.asked !== null) this.asked.carried = portal.bytes;
     const statement = portal.statement;
     if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
     const t = statement.shape ?? this.classify(statement.raw.stmt, statementText(statement.sql, statement.raw));
@@ -1513,12 +1531,30 @@ class Session {
         const take = m.maxRows > 0 ? Math.min(m.maxRows, rows.length - portal.sent) : rows.length - portal.sent;
         const out = rows.slice(portal.sent, portal.sent + take);
         portal.sent += take;
-        if (portal.sent < rows.length) return [...out, portalSuspended()];
+        if (portal.sent < rows.length) return this.pageSent(portal, [...out, portalSuspended()]);
         const done = [...out, commandComplete("EXPLAIN")];
         this.recordRequest({ rows: rows.length }, undefined, undefined, done);
         return done;
       }
     }
+  }
+
+  /**
+   * THE BYTES SENT FOR THE STATEMENT BEING ASKED, `then` (the frames that end it, sent just after) among them: what its
+   * portal's earlier Executes sent (`carried`), and what the session was written since this message arrived — exact,
+   * since one message is handled at a time and a portal read aside meanwhile is read, never sent (`readAside`). Never
+   * the session's bytes since a portal's first Execute: another portal's rows sent between two of its Executes were
+   * counted in both rows.
+   */
+  private bytesFor(then: readonly Buffer[]): number {
+    const asked = this.asked;
+    return (asked?.carried ?? 0) + this.sentBytes - (asked?.sentAt ?? this.sentBytes) + then.reduce((n, b) => n + b.length, 0);
+  }
+
+  /** a page of a portal, suspended: what it sends is kept on the portal (`Portal.bytes`) for its last Execute's row */
+  private pageSent(portal: Portal, frames: Buffer[]): Buffer[] {
+    portal.bytes = this.bytesFor(frames);
+    return frames;
   }
 
   /** the statement being answered reads these JSON paths: its request log row says so, answered or failed */
@@ -1543,17 +1579,17 @@ class Session {
     if (m.maxRows <= 0) {
       try { await this.streamRest(c); } finally { c.answer.close(); }
       const done = [commandComplete(`SELECT ${c.sent}`)];
-      this.recordRequest({ rows: c.sent, startedAt: c.startedAt, sentAt: c.sentAt }, undefined, undefined, done);
+      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, undefined, undefined, done);
       return done;
     }
     // at most maxRows (JDBC's fetch size, a cursor): suspended while a row is left, read one chunk ahead to know it
     while (!c.done && c.pending.length <= m.maxRows) await this.fill(c);
     const out = c.pending.splice(0, m.maxRows);
     c.sent += out.length;
-    if (c.pending.length > 0) return [...out, portalSuspended()];
+    if (c.pending.length > 0) return this.pageSent(portal, [...out, portalSuspended()]);
     c.answer.close();
     const done = [...out, commandComplete(`SELECT ${c.sent}`)];
-    this.recordRequest({ rows: c.sent, startedAt: c.startedAt, sentAt: c.sentAt }, undefined, undefined, done);
+    this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, undefined, undefined, done);
     return done;
   }
 
@@ -1774,10 +1810,16 @@ class Server {
     return running;
   }
 
-  /** `mason cancel <session>` (`POST /api/cancel`): the session's statement stopped as a CancelRequest stops it. */
-  cancelSession(id: number): CancelAnswer {
+  /** `mason cancel <session>` (`POST /api/cancel`): the session's statement stopped as a CancelRequest stops it — with
+   *  `statement`, only while it is the one the session runs (a listing's statement may have ended, and the session
+   *  begun another, by the time the cancel arrives) */
+  cancelSession(id: number, statement?: number): CancelAnswer {
     const s = this.sessions.get(id);
     if (s === undefined) return { unknown: id };
+    if (statement !== undefined) {
+      const now = s.runningNow(Date.now());
+      if (now !== null && now.statement !== statement) return { other: now, asked: statement };
+    }
     const stopped = this.interrupt(s);
     if (stopped === null) return { idle: id };
     this.log(`session ${id}: its statement cancelled by mason cancel`);
@@ -1810,7 +1852,7 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
     port,
     get sessions() { return server.sessions.size; },
     running: () => server.running(),
-    cancel: (session) => server.cancelSession(session),
+    cancel: (session, statement) => server.cancelSession(session, statement),
     async close() {
       for (const s of [...server.sessions.values()]) s.end("server closing");
       await new Promise<void>((resolve) => listener.close(() => resolve()));

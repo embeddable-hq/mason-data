@@ -1287,6 +1287,38 @@ test("the request log's bytes are the bytes the client read for the statement: a
   } finally { s.end(); }
 });
 
+// A PAGED PORTAL'S BYTES ARE ITS OWN (src/api/postgres/server.ts `bytesFor`, `Portal.bytes`): its pages and its tag,
+// however many statements ran between two of its Executes — it was counted as the session's bytes since its first
+// Execute, so a portal paged around another statement counted that statement's bytes twice (a review finding)
+test("a paged portal's bytes are its own Executes' frames, never those of a statement run between two of them", async () => {
+  const s = await rawSession();
+  try {
+    const READY = 6;
+    const PARSE_BIND = 5 + 5;
+    s.socket.write(wire.query("BEGIN"));
+    await s.untilReady();
+    const from = recorded.length;
+    // portal a: two rows of five, suspended
+    s.socket.write(Buffer.concat([wire.parse("a", "SELECT v FROM big WHERE id < 5"), wire.bind("pa", "a", [], []), wire.execute("pa", 2), wire.sync()]));
+    const first = await s.untilReady();
+    assert.ok(first.some((m) => m.type === "PortalSuspended"), JSON.stringify(first.map((m) => m.type)));
+    let a = s.bytes - READY - PARSE_BIND;
+    // portal b, run whole between two Executes of a
+    s.socket.write(Buffer.concat([wire.parse("b", "SELECT v || repeat('z', 100) AS w FROM big WHERE id < 50"), wire.bind("pb", "b", [], []), wire.execute("pb", 0), wire.sync()]));
+    await s.untilReady();
+    const b = s.bytes - READY - PARSE_BIND;
+    // the rest of a
+    s.socket.write(Buffer.concat([wire.execute("pa", 0), wire.sync()]));
+    const rest = await s.untilReady();
+    assert.equal(dataRows(rest).length, 3);
+    a += s.bytes - READY;
+    const rows = recorded.slice(from).filter((r) => r.session === s.pid);
+    assert.deepEqual(rows.map((r) => [r.rows, r.bytesSent]), [[50, b], [5, a]], "b's bytes are b's alone, a's its two Executes'");
+    s.socket.write(wire.query("COMMIT"));
+    await s.untilReady();
+  } finally { s.end(); }
+});
+
 // THE STATEMENTS RUNNING NOW, AND A CANCEL BY SESSION (`/api/running`, `POST /api/cancel`): the listener's own, and the
 // cancel is the CancelRequest's path — the client told 57014 "due to user request", recorded cancelled, the session on
 test("the statements running now, by session; a cancel by session stops one as a CancelRequest does, and says when there is nothing to stop", async () => {
@@ -1301,10 +1333,16 @@ test("the statements running now, by session; a cancel by session stops one as a
       if (Date.now() > deadline) throw new Error("the statement never showed as running");
       await sleep(20);
     }
-    assert.deepEqual({ ...running, startedAt: "", runningMs: 0 }, { session: s.pid, user: "", applicationName: "", method: "QUERY", startedAt: "", runningMs: 0, rows: 0,
+    assert.deepEqual({ ...running, statement: 0, startedAt: "", runningMs: 0 }, { session: s.pid, statement: 0, user: "", applicationName: "", method: "QUERY", startedAt: "", runningMs: 0, rows: 0,
       query: SLOW, queryTruncated: false });
     assert.ok(Date.parse(running.startedAt) >= t0 - 5 && running.runningMs >= 0);
-    const answer = api.cancel(s.pid);
+    assert.ok(Number.isInteger(running.statement) && running.statement >= 1, JSON.stringify(running));
+    assert.equal(api.running().find((r) => r.session === s.pid)?.statement, running.statement, "one statement, one number however often it is listed");
+    // a cancel naming ANOTHER statement (the one listed ended, and the session began this one): nothing is cancelled
+    const other = api.cancel(s.pid, running.statement + 1000);
+    assert.ok("other" in other && other.other.statement === running.statement && other.asked === running.statement + 1000, JSON.stringify(other));
+    assert.ok(api.running().some((r) => r.session === s.pid), "still running");
+    const answer = api.cancel(s.pid, running.statement);
     assert.ok("cancelled" in answer && answer.cancelled.session === s.pid && answer.cancelled.query === SLOW, JSON.stringify(answer));
     const ms = await s.untilReady();
     const error = ms.find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
@@ -1315,8 +1353,20 @@ test("the statements running now, by session; a cancel by session stops one as a
     assert.ok(logged.some((l) => l === `[postgres] session ${s.pid}: its statement cancelled by mason cancel`), "the log says who cancelled it");
     assert.ok(logged.some((l) => l.startsWith(`[postgres] session ${s.pid} cancelled: 57014 canceling statement due to user request — ${SLOW}`)), "its refusal line says cancelled");
     assert.deepEqual(api.cancel(s.pid), { idle: s.pid }, "nothing running: nothing cancelled");
+    assert.deepEqual(api.cancel(s.pid, running.statement), { idle: s.pid }, "its statement ended: nothing to cancel");
     assert.deepEqual(api.cancel(999_999), { unknown: 999_999 });
     s.socket.write(wire.query("SELECT count(*) FROM big"));
     assert.equal(String(dataRows(await s.untilReady())[0]!.values[0]), "150000", "the session goes on");
+    // the next statement of the session is another number: a cancel of the first one never stops it
+    s.socket.write(wire.query(SLOW));
+    let next = api.running().find((r) => r.session === s.pid);
+    for (const deadline = Date.now() + 10_000; next === undefined; next = api.running().find((r) => r.session === s.pid)) {
+      if (Date.now() > deadline) throw new Error("the second statement never showed as running");
+      await sleep(20);
+    }
+    assert.notEqual(next.statement, running.statement);
+    assert.ok("other" in api.cancel(s.pid, running.statement), "the first statement's cancel does not stop the second");
+    assert.ok("cancelled" in api.cancel(s.pid));
+    await s.untilReady();
   } finally { s.end(); }
 });

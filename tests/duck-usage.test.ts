@@ -166,6 +166,42 @@ test("a sample that cannot be taken keeps its statements for the next; a write t
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
 });
 
+test("the durations an interval keeps are bounded while samples keep failing: exact up to the bound, a uniform sample past it", async () => {
+  const { UsageSampler, USAGE_TABLE, quantileCont } = await usage();
+  let clock = Date.parse("2026-10-28T13:00:00.000Z");
+  let away = true;
+  // a seeded draw (an LCG): the reservoir's choices, the same at every run
+  let seed = 7;
+  const random = (): number => { seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31; return seed / 2 ** 31; };
+  const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: NEVER, durationsKept: 10, random });
+  try {
+    u.start(async () => { if (away) throw new Error("the state cannot be read"); return facts; });
+    const kept = (): number => (u as unknown as { interval: { durations: number[] } }).interval.durations.length;
+    // up to the bound: every duration, the quantiles exact
+    for (let ms = 1; ms <= 10; ms++) u.count(row(ms));
+    away = false;
+    clock += 60_000;
+    await u.sample();
+    const [exact] = await u.samples({ since: "2026-10-28T13:00:00Z", until: "2026-10-28T14:00:00Z" });
+    assert.deepEqual([exact!.durationP50Ms, exact!.durationP95Ms], [quantileCont([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.5), quantileCont([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.95)]);
+    // samples failing for a long while: 50,000 statements, never more than the bound kept
+    away = true;
+    for (let k = 0; k < 10; k++) u.count(row(1));
+    for (let k = 0; k < 50_000; k++) u.count(row(1_000));
+    clock += 60_000;
+    await u.sample();
+    assert.equal(kept(), 10, "the interval keeps at most the bound");
+    away = false;
+    clock += 60_000;
+    await u.sample();
+    const [, carried] = await u.samples({ since: "2026-10-28T13:00:00Z", until: "2026-10-28T14:00:00Z" });
+    assert.deepEqual([carried!.statements, carried!.durationP50Ms], [50_010, 1_000], "every statement counted; the quantile of a uniform sample of them");
+  } finally {
+    await u.close();
+    await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
+  }
+});
+
 test("samples are taken every interval once started, one after the other, and never after close", async () => {
   const { UsageSampler, USAGE_TABLE } = await usage();
   let taken = 0;

@@ -352,11 +352,18 @@ export function createRunServer(ctx: RunContext): http.Server {
         } else if (req.method === "GET" && url.pathname === "/api/running") {
           sendJson(res, 200, { running: ctx.listener.running() });
         } else if (req.method === "POST" && url.pathname === "/api/cancel") {
-          const body = JSON.parse(await readBody(req, 64 * 1024)) as { session?: unknown };
-          if (typeof body.session !== "number" || !Number.isInteger(body.session) || body.session < 1) throw new Refusal(400, "send { session }: the session's number, as mason logs --running lists it");
-          const r = ctx.listener.cancel(body.session);
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { session?: unknown; statement?: unknown };
+          const whole = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x >= 1;
+          if (!whole(body.session)) throw new Refusal(400, "send { session }: the session's number, as mason logs --running lists it");
+          if (body.statement !== undefined && !whole(body.statement)) throw new Refusal(400, "statement is the statement's number, as mason logs --running lists it, or left out");
+          const r = ctx.listener.cancel(body.session, body.statement);
           if ("cancelled" in r) { sendJson(res, 200, r); return; }
           const running: NextStep = ["mason logs --running", "the statements running now, with their sessions"];
+          if ("other" in r) {
+            sendFailure(res, 409, { message: `session ${r.other.session} runs another statement now (statement ${r.other.statement}), not statement ${r.asked}: nothing cancelled`, code: "refused",
+              why: `statement ${r.asked} ended, and the session began another`, fix: `mason cancel ${r.other.session} --statement ${r.other.statement} stops the one it runs now`, next: [running] });
+            return;
+          }
           if ("unknown" in r) { sendFailure(res, 404, { message: `no session ${r.unknown} is open`, code: "not_found", why: "it ended, or never was", next: [running] }); return; }
           sendFailure(res, 409, { message: `session ${r.idle} is running no statement: nothing to cancel`, code: "refused", why: "its statement ended, or it is between two", next: [running] });
         } else if (req.method === "GET" && url.pathname === "/api/logs") {

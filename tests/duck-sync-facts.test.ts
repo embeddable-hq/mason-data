@@ -104,3 +104,76 @@ test("a copy's last sync is read back at a start and moved by every batch; curre
     assert.equal(events.length, 1, "current again once, never at every batch");
   });
 });
+
+test("the changes a catch-up held, replayed after its poll, are written but are no position of the stream: no table's last sync, no stream_state", async () => {
+  await aRun(async ({ store, sync, st, rows }) => {
+    const s = sync as unknown as {
+      behind: Map<string, { why: string }>; held: Map<string, TableChanges>; rebuilderLane: unknown; streamFailures: number;
+      poll: (lane: unknown, tables: readonly AddedTable[]) => Promise<unknown[]>; catchUp: (t: AddedTable) => Promise<unknown>;
+    };
+    const applied = async (): Promise<number> => Number((await store.writer.runAndReadAll(`SELECT epoch_ms(applied_at) FROM ${MASON_SCHEMA}.stream_state`)).getRowsJS()[0]![0]);
+    const before = { synced: JSON.stringify(st().synced), applied: await applied() };
+    // public.t is behind (a copy just swapped in), its catch-up poll found nothing new (the source is never reached),
+    // and the stream held two changes of it meanwhile
+    s.behind.set("public.t", { why: "after its copy" });
+    s.held.set("public.t", batch({ 11: "held", 1: null }).get("public.t")!);
+    s.rebuilderLane = { conn: store.writer, inFlight: false };
+    s.poll = async () => [{ source: "public.t" }];
+    s.streamFailures = 3;
+    await s.catchUp(T);
+    assert.deepEqual(await rows(), [10, 10, 10], "the held changes are written, and counted");
+    assert.equal(await one(store, "SELECT v FROM public.t WHERE id = 11"), "held");
+    assert.equal(await applied(), before.applied, "stream_state.applied_at is the batches' that held them, never the replay's");
+    assert.equal(JSON.stringify(st().synced), before.synced, "the replay is not the stream's last sync of the table");
+    assert.equal(s.streamFailures, 3, "a replay is not the stream working again");
+  });
+});
+
+async function one(store: DuckStore, sql: string): Promise<unknown> { return (await store.writer.runAndReadAll(sql)).getRowsJS()[0]![0]; }
+
+test("a whole-sync failure over is said, once, as a recovered of no table: the publication and slot ready, the database attached, the stream applying", async () => {
+  await aRun(async ({ sync, events, apply }) => {
+    const s = sync as unknown as Record<string, unknown> & { pass: () => Promise<void> };
+    let prepare: Error | null = new Error("the slot could not be read: connection refused");
+    let attach: Error | null = null;
+    s.prepareReplication = async () => { if (prepare !== null) throw prepare; };
+    s.attach = async () => { if (attach !== null) throw attach; };
+    s.work = async () => undefined;
+    s.detach = async () => undefined;
+    s.startStream = () => undefined;
+    const kinds = (): string[] => events.filter((e) => e.table === null).map((e) => `${e.kind}: ${e.message}`);
+    await assert.rejects(s.pass());
+    prepare = null;
+    await s.pass();
+    await s.pass();
+    attach = new Error("connection refused");
+    await assert.rejects(s.pass());
+    attach = null;
+    await s.pass();
+    await s.pass();
+    assert.deepEqual(kinds(), [
+      "stream_failed: replication: the slot could not be read: connection refused",
+      "recovered: the publication and the slot are ready again (it had failed: replication: the slot could not be read: connection refused)",
+      "source_unreachable: could not attach the database: connection refused",
+      "recovered: the database is attached again (it had failed: connection refused)",
+    ], "each over once, at the pass that did what had failed");
+    // the stream stopped (its own failure: startStream's, which needs a source): over at the next batch it applies
+    (s.wholeFailure as { stream: string | null }).stream = "replication: the source closed the connection";
+    await apply(batch({ 11: "new" }), 0x20n);
+    await apply(batch({ 12: "new" }), 0x30n);
+    assert.deepEqual(kinds().slice(4), ["recovered: the stream applies changes again (it had failed: replication: the source closed the connection)"]);
+  });
+});
+
+test("a table the named publication does not carry is never credited with the stream's last time: its last sync is its poll's", async () => {
+  await aRun(async ({ sync, st }) => {
+    const s = sync as unknown as { unpublished: Map<string, string>; readSynced: (only?: ReadonlySet<string>) => Promise<void> };
+    assert.equal((st().synced as { by: string }).by, "stream", "streamed: the stream's last batch, newer than its poll");
+    // the pass found the publication does not carry it: read again, that table alone
+    s.unpublished.set("public.t", "publication mason_x does not carry public.t");
+    await s.readSynced(new Set(["public.t"]));
+    const synced = st().synced as { at: string; by: string };
+    assert.equal(synced.by, "poll", JSON.stringify(synced));
+    assert.ok(Math.abs(Date.parse(synced.at) - (Date.now() - 60 * 60_000)) < 60_000, synced.at);
+  });
+});

@@ -109,7 +109,8 @@ export interface UsageSample {
   /** the bytes sent to clients, over every statement (the request log's `bytes_sent`) */
   bytesSent: number;
   /** the COMPLETED statements' duration, p50 and p95, ms, as the summary's `quantile_cont` (interpolated, rounded); null
-   *  when none completed */
+   *  when none completed. Exact up to DURATIONS_KEPT completed statements in the interval; past it, of a uniform
+   *  sample of that many (`count`) */
   durationP50Ms: number | null;
   durationP95Ms: number | null;
   /** replication mode: the stream's lag in WAL bytes and seconds (`mason status`'s); null when polling */
@@ -129,9 +130,19 @@ export interface CopySize { table: string; bytes: number; at: string }
 /** What a reader asks of the samples: from, until (ISO), and a bucket in seconds (absent: every sample). */
 export interface UsageQuery { since: string; until: string; stepSeconds?: number }
 
-/** The statements of one interval as `count` adds them up; `durations`, the completed ones'. */
-interface Interval { statements: number; outcomes: Record<Exclude<Outcome, "ok">, number>; rowsSent: number; bytesSent: number; durations: number[] }
-const noInterval = (): Interval => ({ statements: 0, outcomes: { refused: 0, failed: 0, cancelled: 0 }, rowsSent: 0, bytesSent: 0, durations: [] });
+/** The statements of one interval as `count` adds them up; `durations`, the completed ones' (at most DURATIONS_KEPT
+ *  of them: `completed` says how many there were). */
+interface Interval { statements: number; outcomes: Record<Exclude<Outcome, "ok">, number>; rowsSent: number; bytesSent: number; durations: number[]; completed: number }
+const noInterval = (): Interval => ({ statements: 0, outcomes: { refused: 0, failed: 0, cancelled: 0 }, rowsSent: 0, bytesSent: 0, durations: [], completed: 0 });
+
+/**
+ * THE COMPLETED STATEMENTS' DURATIONS ONE INTERVAL KEEPS, at most: an interval is a minute, but one whose sample cannot
+ * be taken is carried into the next (`sample`), so while samples keep failing it would otherwise keep every statement's
+ * duration for as long as they fail. Up to this many the p50 / p95 are exact; past it the interval keeps a uniform
+ * random sample of this many (a reservoir: the n-th duration replaces a kept one with probability KEPT / n), whose
+ * quantiles estimate the interval's — 100,000 numbers are ~800 KB, ~1,700 statements a second for a minute.
+ */
+export const DURATIONS_KEPT = 100_000;
 
 /**
  * The q-quantile of sorted values as DuckDB's `quantile_cont` gives it (linear between the two nearest ranks), rounded
@@ -156,6 +167,9 @@ export interface UsageOptions {
   now?: () => number;
   /** a test's: the process's memory (process.memoryUsage) */
   memory?: () => { rss: number; heapUsed: number };
+  /** a test's: the durations an interval keeps (DURATIONS_KEPT), and the reservoir's random draw in [0, 1) */
+  durationsKept?: number;
+  random?: () => number;
 }
 
 export class UsageSampler {
@@ -211,8 +225,15 @@ export class UsageSampler {
     const i = this.interval;
     i.statements++;
     const outcome = outcomeOf(row.sqlstate);
-    if (outcome === "ok") i.durations.push(row.durationMs);
-    else i.outcomes[outcome]++;
+    if (outcome === "ok") {
+      i.completed++;
+      const kept = this.options.durationsKept ?? DURATIONS_KEPT;
+      if (i.durations.length < kept) i.durations.push(row.durationMs);
+      else {
+        const j = Math.floor((this.options.random?.() ?? Math.random()) * i.completed);
+        if (j < kept) i.durations[j] = row.durationMs;
+      }
+    } else i.outcomes[outcome]++;
     i.rowsSent += row.rows ?? 0;
     i.bytesSent += row.bytesSent ?? 0;
   }
