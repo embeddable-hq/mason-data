@@ -69,7 +69,7 @@ export function chartOptions(spec, theme, width, height, uPlot) {
   const bars = spec.kind === "bars" && typeof uPlot?.paths?.bars === "function";
   const axisFont = `11px ${theme.font}`;
   return {
-    width, height, padding: [10, 8, 0, 0], legend: { show: true, live: true }, select: { show: false },
+    width, height, padding: [10, 24, 0, 0], legend: { show: true, live: true }, select: { show: false },
     cursor: { drag: { x: false, y: false }, points: { size: 8, fill: theme.mark } },
     ...(typeof uPlot?.tzDate === "function" ? { tzDate: (ts) => uPlot.tzDate(new Date(ts * 1000), "Etc/UTC") } : {}),
     scales: { x: { time: true }, y: { range: zero } },
