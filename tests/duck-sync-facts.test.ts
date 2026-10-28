@@ -164,3 +164,16 @@ test("a whole-sync failure over is said, once, as a recovered of no table: the p
     assert.deepEqual(kinds().slice(4), ["recovered: the stream applies changes again (it had failed: replication: the source closed the connection)"]);
   });
 });
+
+test("a table the named publication does not carry is never credited with the stream's last time: its last sync is its poll's", async () => {
+  await aRun(async ({ sync, st }) => {
+    const s = sync as unknown as { unpublished: Map<string, string>; readSynced: (only?: ReadonlySet<string>) => Promise<void> };
+    assert.equal((st().synced as { by: string }).by, "stream", "streamed: the stream's last batch, newer than its poll");
+    // the pass found the publication does not carry it: read again, that table alone
+    s.unpublished.set("public.t", "publication mason_x does not carry public.t");
+    await s.readSynced(new Set(["public.t"]));
+    const synced = st().synced as { at: string; by: string };
+    assert.equal(synced.by, "poll", JSON.stringify(synced));
+    assert.ok(Math.abs(Date.parse(synced.at) - (Date.now() - 60 * 60_000)) < 60_000, synced.at);
+  });
+});

@@ -1000,20 +1000,25 @@ export class Sync {
    * `poll_state.polled_at` in their own transaction, and a copy's `copied_at` is recorded right after its swap — so a
    * copy recorded at or after its table's `polled_at` was last brought current by that copy (its time the copy's
    * `seconds`), else by a poll (its time unknown: null). In replication mode the stream's last batch
-   * (`stream_state.applied_at`) is newer for a table it streamed; a table not caught up is left at its copy.
+   * (`stream_state.applied_at`) is newer for a table it streamed; a table not caught up is left at its copy, and one the
+   * named publication does not carry (`unpublished`: never streamed, so the stream's time is not its own) at its copy
+   * or poll. `only`: those tables alone, read again (the pass that found them out of the publication), the others'
+   * last sync kept as it is.
    */
-  private async readSynced(): Promise<void> {
+  private async readSynced(only?: ReadonlySet<string>): Promise<void> {
     const r = await this.store.writer.runAndReadAll(`SELECT p.source, epoch_ms(p.polled_at), epoch_ms(c.copied_at), c.seconds FROM ${MASON_SCHEMA}.poll_state p ` +
       `LEFT JOIN ${MASON_SCHEMA}.copy_state c USING (source) WHERE p.polled_at IS NOT NULL`);
     const streamed = this.replication === null ? [] : (await this.store.writer.runAndReadAll(`SELECT epoch_ms(applied_at) FROM ${MASON_SCHEMA}.stream_state ` +
       `WHERE slot = $1 AND applied_at IS NOT NULL`, [this.replication.slot])).getRowsJS();
     const streamMs = streamed.length ? Number(streamed[0]![0]) : null;
-    this.synced.clear();
+    if (only === undefined) this.synced.clear();
     for (const [source, polled, copied, seconds] of r.getRowsJS() as Array<[string, bigint | number, bigint | number | null, number | null]>) {
+      if (only !== undefined && !only.has(source)) continue;
       const at = Number(polled);
       const s: Synced = copied !== null && Number(copied) >= at ? { at: new Date(Number(copied)).toISOString(), seconds, by: "copy" }
         : { at: new Date(at).toISOString(), seconds: null, by: "poll" };
-      this.synced.set(source, streamMs !== null && streamMs > Date.parse(s.at) && !this.behind.has(source) ? { at: new Date(streamMs).toISOString(), seconds: null, by: "stream" } : s);
+      const streamedIt = !this.behind.has(source) && !this.unpublished.has(source);
+      this.synced.set(source, streamMs !== null && streamMs > Date.parse(s.at) && streamedIt ? { at: new Date(streamMs).toISOString(), seconds: null, by: "stream" } : s);
     }
   }
   schema(): PgSchema { return this.currentSchema; }
@@ -1272,6 +1277,10 @@ export class Sync {
           await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error });
         } else if (st.error?.startsWith("replication: ")) await this.record({ ...st, error: null });
       }
+      // a table the publication does not carry was never streamed: its last sync is its copy's or its poll's, never
+      // the stream's time a start credited it with (`readSynced` at `open`, before the publication was read)
+      const credited = tables.filter((t) => this.unpublished.has(t.source) && this.synced.get(t.source)?.by === "stream").map((t) => t.source);
+      if (credited.length) await this.readSynced(new Set(credited));
       // a table the publication stopped carrying leaves the stream; one it carries now may join
       this.refreshStreamed();
     });
