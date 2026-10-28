@@ -23,6 +23,7 @@ import { Sync, type AddedTable, type StreamStatus } from "../../src/duck/sync.ts
 import { parseLsn } from "../../src/cdc/pg-wire.ts";
 import { connectSource, parseSource, readSourceFacts, type Source } from "../../src/cli/preflight.ts";
 import { addedTables, entryName, newSourceText, readSource, sourcesDir, withTable, type ProjectSource } from "../../src/cli/sources.ts";
+import { heldCopy } from "./held-copy.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_dstream_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
@@ -312,13 +313,10 @@ test("a table copies beside the stream: the others stay current and the slot mov
   const names = { slot: `${tag}_x`, publication: `${tag}_x`, owned: true };
   const logged: string[] = [];
   const store = await DuckStore.open(path.join(dir, "x.db"), (l) => logged.push(l), { memoryLimit: "64MB" });
-  // the copy's one chunk is HELD inside its transaction (onChunk, as the parallel-copy test holds chunks) until the
-  // stream's work beside it is seen: the copy's speed decides nothing here (strings stored ZSTD took this copy from
-  // seconds to 0.6 s, and the test raced)
-  let release!: () => void;
-  const held = new Promise<void>((r) => { release = r; });
-  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", names,
-    { onChunk: async (e) => { if (e.source === "public.big" && e.phase === "read") await Promise.race([held, new Promise((r) => setTimeout(r, 30_000))]); } });
+  // the copy's chunks are HELD inside their transactions (`heldCopy`) until the stream's work beside it is seen: the
+  // copy's speed decides nothing here (strings stored ZSTD took this copy from seconds to 0.6 s, and the test raced)
+  const big = heldCopy("public.big");
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", names, { onChunk: big.onChunk });
   // read on a connection of the test's own: the sync's writer may be inside a transaction
   const reader = await store.instance.connect();
   const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n");
@@ -343,7 +341,7 @@ test("a table copies beside the stream: the others stay current and the slot mov
     assert.ok(flushed() > before, "the slot's confirmed position moved during the copy: it does not hold the database's WAL for it");
     assert.ok(logged.slice(from).some((l) => /^copying public\.big: .*beside the stream, which goes on keeping the other tables current/.test(l)), "the copy's start says the stream goes on");
 
-    release();
+    big.release();
     await sync.once();
     await sync.caughtUp();
     assert.ok(logged.slice(from).some((l) => /^caught up public\.big by one poll after its copy: it joins the stream at [0-9A-F]+\/[0-9A-F]+, which carries what follows$/.test(l)), logged.slice(from).join("\n"));
@@ -355,7 +353,7 @@ test("a table copies beside the stream: the others stay current and the slot mov
     assert.equal(await read("SELECT v FROM public.big WHERE id = 9"), "streamed after");
     assert.equal(logged.filter((l) => /^streaming /.test(l)).length, 1, `the stream was never stopped and started again:\n${logged.filter((l) => /^streaming /.test(l)).join("\n")}`);
   } finally {
-    release();
+    big.release();
     reader.closeSync();
     await sync.stop();
     store.close();
@@ -596,17 +594,11 @@ test("a table's columns changed in the sources file while its table copies: copi
   const FULL = ["id", "v", "big", "dropme"], NARROW = ["id", "v", "big"];
   const logged: string[] = [];
   const store = await DuckStore.open(path.join(dir, "n.db"), (l) => logged.push(l), { memoryLimit: "64MB" });
-  // A COPY HELD BY THE TEST (onChunk, as duck-poll.itest.ts heldCopy): from `hold()` to `release()` every chunk of
-  // public.t's copy waits inside its transaction, read and not committed, so what the test does meanwhile lands DURING
-  // the copy whatever the machine's speed (a copy that ended first left the restored entry nothing to copy again)
-  const gate: { released: Promise<void> | null; release: () => void; held: boolean } = { released: null, release: () => {}, held: false };
-  const hold = (): void => { gate.held = false; gate.released = new Promise<void>((r) => { gate.release = r; }); };
-  const release = (): void => { gate.release(); gate.released = null; };
-  const onChunk = async (e: { source: string; phase: "read" | "committed" }): Promise<void> => {
-    const waiting = gate.released;
-    if (waiting !== null && e.source === "public.t" && e.phase === "read") { gate.held = true; await waiting; }
-  };
-  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", { slot: `${tag}_n`, publication: "every_column", owned: false }, { onChunk });
+  // A COPY HELD BY THE TEST (`heldCopy`, armed only when a step needs it): from `copyOfT.hold()` to `copyOfT.release()`
+  // every chunk of public.t's copy waits inside its transaction, so what the test does meanwhile lands DURING the copy
+  // whatever the machine's speed (a narrowed copy that ended first left the restored entry nothing to copy again)
+  const copyOfT = heldCopy("public.t", false);
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", { slot: `${tag}_n`, publication: "every_column", owned: false }, { onChunk: copyOfT.onChunk });
   const reader = await store.instance.connect();
   const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map((x) => x === null ? "" : String(x)).join("\t")).join("\n");
   const since = (from: number, re: RegExp): number => logged.slice(from).filter((l) => re.test(l)).length;
@@ -635,12 +627,12 @@ test("a table's columns changed in the sources file while its table copies: copi
 
     // THE TEST SERVER'S SEQUENCE: a column removed from the sources file, and restored while the narrowed copy runs
     let from = logged.length;
-    hold();
+    copyOfT.hold();
     void sync.setTables(await pick(parsed.source, folder, [["public.t", NARROW]]));
-    await until(() => gate.held, "the narrowed copy held in its chunks", logged);
+    await until(copyOfT.held, "the narrowed copy held in its chunks", logged);
     // restored while the narrowed copy is held: it cannot have ended first
     void sync.setTables(await pick(parsed.source, folder, [["public.t", FULL]]));
-    release();
+    copyOfT.release();
     await until(() => since(from, /^caught up public\.t by one poll after its copy/) > 0, "copied again and caught up", logged, 120_000);
     assert.equal(since(from, /^copied public\.t:/), 2, `the narrowed copy, then the restored one at once\n${logged.slice(from).join("\n")}`);
     assert.equal(since(from, /could not be applied|failed/), 0, logged.slice(from).join("\n"));
@@ -650,25 +642,25 @@ test("a table's columns changed in the sources file while its table copies: copi
 
     // NARROWED, under a publication that still sends the column: what changes during the copy, and after it
     from = logged.length;
-    hold();
+    copyOfT.hold();
     void sync.setTables(await pick(parsed.source, folder, [["public.t", NARROW]]));
     // the narrowed copy's snapshot is pinned and its chunks wait: the changes below are made DURING it
-    await until(() => gate.held, "the narrowed copy held in its chunks", logged);
+    await until(copyOfT.held, "the narrowed copy held in its chunks", logged);
     const changes = (n: number): string => `INSERT INTO t VALUES (${ROWS + n}, 'new ${n}', NULL, 'dn'); ` +
       // one touching only the column the copy lacks, one leaving the TOASTed value unchanged, a delete
       `UPDATE t SET dropme = 'only the dropped column ${n}' WHERE id = ${n}; UPDATE t SET v = 'changed ${n}' WHERE id = ${n + 1}; DELETE FROM t WHERE id = ${n + 2}`;
     psql(url, changes(3));
-    release();
+    copyOfT.release();
     await until(() => since(from, /^caught up public\.t by one poll after its copy/) > 0, "the narrowed copy caught up", logged, 120_000);
     await same(NARROW, "narrowed, the changes during its copy caught up", from);
     psql(url, changes(7));
     await same(NARROW, "narrowed, the next batch", from);
     assert.equal(since(from, /could not be applied|failed/), 0, logged.slice(from).join("\n"));
   } finally {
+    // first: a stop interrupts DuckDB's statements, never the test's hold
+    copyOfT.release();
     // a test that failed early stops the writing app too; its own exit code is that failure's to explain, not this one's
     if (trickle.exitCode === null) { psql(url, "INSERT INTO stop_writing VALUES (1)"); await trickled.catch((e: unknown) => { console.error(`the writing app: ${String(e)}`); }); }
-    // a stop interrupts DuckDB's statements, never the test's hold
-    release();
     reader.closeSync();
     await sync.stop();
     store.close();

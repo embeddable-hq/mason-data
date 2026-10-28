@@ -409,7 +409,7 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   finding of the review did. Synthetic data only: the BI shapes were RANKED from a real database's saved statements,
   and every statement in the repo is written over the shop.
 - **A test that needs something to happen WHILE a copy runs holds the copy** (the Sync's `onChunk` awaiting a promise
-  the test releases: `heldCopy` in `duck-poll.itest.ts`, `hold` in `duck-stream.itest.ts`) and asserts the ORDER of the
+  the test releases: `heldCopy`, `tests/integration/held-copy.ts`) and asserts the ORDER of the
   sync's lines, never that a copy of N rows outlasts a poll, a batch or a `setTables`: a copy's time is the runner's (the
   400,000-row copy in "copies beside the polls" took 0.89 s on a CI runner, one poll pass ran beside it, and it failed). Its
   check: the test still passes with the table cut to 50 rows. Release the hold in a `finally` before `sync.stop()`,

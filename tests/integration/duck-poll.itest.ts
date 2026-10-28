@@ -21,6 +21,7 @@ import { DuckStore } from "../../src/duck/store.ts";
 import { Sync, type AddedTable } from "../../src/duck/sync.ts";
 import * as syncModule from "../../src/duck/sync.ts";
 import { parseSource, type Source } from "../../src/cli/preflight.ts";
+import { heldCopy } from "./held-copy.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 const { POLL_ROW_LIMIT, PollRefused } = syncModule as unknown as { POLL_ROW_LIMIT: number; PollRefused: typeof import("../../src/duck/sync.ts").PollRefused };
@@ -58,25 +59,6 @@ async function rowsOlderThanEverySnapshot(url: string, table: string): Promise<v
     }
     await new Promise((r) => setTimeout(r, 200));
   }
-}
-
-/**
- * A COPY THE TEST HOLDS (the Sync's `onChunk`): every chunk of `source`'s copy waits inside its transaction, read and not
- * committed, until `release()`, so the copy cannot end before the test lets it. A test that asserts something happens
- * WHILE a copy runs holds it rather than betting on the copy outlasting it: a copy's time is the machine's (the
- * 400,000-row copy "beside the polls" once raced took 0.89 s on a CI runner, one poll pass ran beside it, and the test
- * failed). `held()` is true once a chunk waits, the copy's snapshot pinned by then (`beginCopy` precedes every
- * chunk). Released in a `finally` before `sync.stop()`: a stop interrupts DuckDB's statements, never this promise.
- */
-function heldCopy(source: string): { onChunk: (e: { source: string; phase: "read" | "committed" }) => Promise<void>; held: () => boolean; release: () => void } {
-  let release!: () => void;
-  const released = new Promise<void>((r) => { release = r; });
-  let held = false;
-  return {
-    onChunk: async (e) => { if (e.source === source && e.phase === "read") { held = true; await released; } },
-    held: () => held,
-    release,
-  };
 }
 
 const ITEMS: AddedTable = {
@@ -1050,9 +1032,16 @@ test("after a restart the copied tables are in the catalog at once, while anothe
     await sync.setTables([table("small", 2), table("big", ROWS)]);
     assert.notEqual(sync.state().find((s) => s.source === "public.big")?.phase, "copied", "the pass is still copying big");
     assert.deepEqual(sync.schema().tables.map((t) => t.name), ["small"], "small is served before the pass ends");
+    // and while big's copy is in flight: held in its chunks
+    const deadline = Date.now() + 60_000;
+    while (!big.held()) {
+      if (Date.now() > deadline) throw new Error(`big's copy never reached its first chunk within 60 s\n${logged.slice(-12).join("\n")}`);
+      await sleep(20);
+    }
+    assert.equal(sync.state().find((s) => s.source === "public.big")?.phase, "copying", "big is copying");
+    assert.deepEqual(sync.schema().tables.map((t) => t.name), ["small"], "small is served while big copies");
     big.release();
     await sync.once();
-    assert.ok(big.held(), "big's copy went through the test's hold (onChunk), so it could not end before the catalog was read");
     assert.deepEqual(sync.schema().tables.map((t) => t.name).sort(), ["big", "small"]);
   } finally { big.release(); await sync.stop(); store.close(); }
 });
@@ -1289,7 +1278,7 @@ test("a table copies beside the polls: the other table is polled meanwhile, and 
   const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
   psql(adminUrl!, `CREATE DATABASE ${db}`);
   after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
-  // its size decides nothing (the copy is held): enough pages for several chunks, read by more than one reader
+  // its size decides nothing (the copy is held; the test passes at 50 rows): a few chunks, as a copy usually is
   const ROWS = 20_000;
   psql(url, `CREATE TABLE small (id int PRIMARY KEY, v text); INSERT INTO small VALUES (1, 'a'); ` +
     `CREATE TABLE big (id int PRIMARY KEY, v text); INSERT INTO big SELECT g, repeat(md5(g::text), 16) FROM generate_series(1, ${ROWS}) g ORDER BY (g::bigint * 7919) % ${ROWS}`);
@@ -1325,13 +1314,17 @@ test("a table copies beside the polls: the other table is polled meanwhile, and 
     // it, and the copy cannot end until the test releases it
     await until(big.held, "big's copy held in its first chunks");
     psql(url, "INSERT INTO small VALUES (2, 'during the copy'); UPDATE big SET v = 'changed during its copy' WHERE id = 7; DELETE FROM big WHERE id = 8; INSERT INTO big VALUES (0, 'new during its copy')");
-    // THE PASSES GO ON BESIDE THE COPY: a poll that waited for the copy would never bring this in while it is held
-    await until(async () => (await read("SELECT count(*) FROM public.small")) === "2", "small polled while big's copy is held (a poll waiting for the copy never comes)");
+    // THE PASSES GO ON BESIDE THE COPY: a poll that waited for the copy would never bring this in while it is held. Waited
+    // for by the pass's line, said once its transaction has committed (the row is visible to a reader BEFORE the line)
+    const smallPolled = (l: string): boolean => /^poll: .*; public\.small 1 changed /.test(l);
+    await until(() => logged.slice(from).some(smallPolled), "small's change polled while big's copy is held (a poll waiting for the copy never comes)");
+    assert.equal(await read("SELECT id, v FROM public.small ORDER BY 1"), "1\ta\n2\tduring the copy", "small's change is in DuckDB");
+    // the sync's own lines, in order: big's copy began, a pass polled small's change, and big's copy had not ended
     const during = logged.slice(from);
     const pinned = during.findIndex((l) => /^copying public\.big as of the source's snapshot /.test(l));
-    const polled = during.findIndex((l) => /^poll: .*; public\.small 1 changed /.test(l));
-    assert.ok(pinned >= 0 && polled > pinned, `small's change was polled by a pass after big's copy began\n${during.join("\n")}`);
-    assert.ok(!during.some((l) => /^copied public\.big/.test(l)), `small's change was polled into DuckDB BEFORE big's copy ended (the passes went on beside it)\n${during.join("\n")}`);
+    const polled = during.findIndex(smallPolled);
+    const copied = during.findIndex((l) => /^copied public\.big/.test(l));
+    assert.ok(pinned >= 0 && polled > pinned && copied === -1, `small's change was polled by a pass after big's copy began and before it ended (the passes went on beside it)\n${during.join("\n")}`);
     assert.ok(during.some((l) => /^copying public\.big: .*beside the other tables' polls/.test(l)), "the copy's start says the polls go on");
 
     big.release();
