@@ -600,6 +600,7 @@ async function serveMason(sourceUrl: string, database: string, memoryLimit: stri
   const { RequestLedger } = await import("../src/duck/requests.ts");
   const { readLibcOrder } = await import("../src/duck/libc-order.ts");
   const { isLibcCollation } = await import("../src/duck/rewrite.ts");
+  const { REVIEW_MS: KEEP_REVIEW_MS } = await import("../src/duck/kept.ts");
   const mlog: string[] = [];
   const say = (l: string): void => { mlog.push(l); if (/failed|error/i.test(l)) log(`  [mason] ${l}`); };
   const parsed = parseSource(sourceUrl);
@@ -659,19 +660,33 @@ async function serveMason(sourceUrl: string, database: string, memoryLimit: stri
     copySeconds,
     copyTables: Object.fromEntries(states.map((s) => [s.source, s.seconds])),
     fileBytes: () => size(file) + size(`${file}.wal`),
-    /** the JSON path read as a dashboard reads it (three statements), then until the keeper has it stored and ready */
+    /** the JSON path read as a dashboard reads it (three statements), then until the keeper has it stored and ready —
+     *  read again while the keeper leaves it `waiting` a review after the last read: a larger table's fill is weighed
+     *  against the reads' time (src/duck/kept.ts KEEP_FILL_SHARE: at 30 M rows three reads are 14 s against a 6.6-minute
+     *  fill), and a dashboard goes on reading it, so the path is stored before the cells, never by a fill beside them */
     jsonReady: async () => {
       const u = served();
       const c = new pg.Client({ host: "127.0.0.1", port, database, user: "bench", password: "bench" });
       await c.connect();
+      const sql = QUERIES.find((q) => q.name === "json_source")!.sql;
+      const keptPath = (): { state: string } | undefined => u.sync.kept.status().find((p) => p.table === "public.orders" && p.column === "payload");
       const t = performance.now();
-      try { for (let i = 0; i < 3; i++) await c.query(QUERIES.find((q) => q.name === "json_source")!.sql); } finally { await c.end(); }
-      const deadline = Date.now() + 15 * 60_000;
-      while (Date.now() < deadline) {
-        if (u.sync.kept.status().some((p) => p.table === "public.orders" && p.column === "payload" && p.state === "ready")) return round((performance.now() - t) / 1000, 1);
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      log(`  the stored JSON path was not ready in 15 minutes: ${JSON.stringify(u.sync.kept.status())}`);
+      let reads = 0;
+      try {
+        for (; reads < 3; reads++) await c.query(sql);
+        const deadline = Date.now() + 15 * 60_000;
+        let lastRead = Date.now();
+        while (Date.now() < deadline) {
+          const p = keptPath();
+          if (p?.state === "ready") {
+            if (reads > 3) log(`  (the path was read ${reads} times before the keeper stored it: its fill is weighed against the reads' time)`);
+            return round((performance.now() - t) / 1000, 1);
+          }
+          if ((p === undefined || p.state === "waiting") && Date.now() - lastRead > KEEP_REVIEW_MS + 5_000) { await c.query(sql); reads++; lastRead = Date.now(); }
+          await new Promise((r) => setTimeout(r, 500));
+        }
+      } finally { await c.end(); }
+      log(`  the stored JSON path was not ready in 15 minutes (${reads} reads): ${JSON.stringify(u.sync.kept.status())}`);
       return null;
     },
     suspend: async () => { if (up !== null) { const u = up; up = null; await stop(u); } },
