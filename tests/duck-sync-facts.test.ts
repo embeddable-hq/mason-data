@@ -130,3 +130,37 @@ test("the changes a catch-up held, replayed after its poll, are written but are 
 });
 
 async function one(store: DuckStore, sql: string): Promise<unknown> { return (await store.writer.runAndReadAll(sql)).getRowsJS()[0]![0]; }
+
+test("a whole-sync failure over is said, once, as a recovered of no table: the publication and slot ready, the database attached, the stream applying", async () => {
+  await aRun(async ({ sync, events, apply }) => {
+    const s = sync as unknown as Record<string, unknown> & { pass: () => Promise<void> };
+    let prepare: Error | null = new Error("the slot could not be read: connection refused");
+    let attach: Error | null = null;
+    s.prepareReplication = async () => { if (prepare !== null) throw prepare; };
+    s.attach = async () => { if (attach !== null) throw attach; };
+    s.work = async () => undefined;
+    s.detach = async () => undefined;
+    s.startStream = () => undefined;
+    const kinds = (): string[] => events.filter((e) => e.table === null).map((e) => `${e.kind}: ${e.message}`);
+    await assert.rejects(s.pass());
+    prepare = null;
+    await s.pass();
+    await s.pass();
+    attach = new Error("connection refused");
+    await assert.rejects(s.pass());
+    attach = null;
+    await s.pass();
+    await s.pass();
+    assert.deepEqual(kinds(), [
+      "stream_failed: replication: the slot could not be read: connection refused",
+      "recovered: the publication and the slot are ready again (it had failed: replication: the slot could not be read: connection refused)",
+      "source_unreachable: could not attach the database: connection refused",
+      "recovered: the database is attached again (it had failed: connection refused)",
+    ], "each over once, at the pass that did what had failed");
+    // the stream stopped (its own failure: startStream's, which needs a source): over at the next batch it applies
+    (s.wholeFailure as { stream: string | null }).stream = "replication: the source closed the connection";
+    await apply(batch({ 11: "new" }), 0x20n);
+    await apply(batch({ 12: "new" }), 0x30n);
+    assert.deepEqual(kinds().slice(4), ["recovered: the stream applies changes again (it had failed: replication: the source closed the connection)"]);
+  });
+});

@@ -790,6 +790,11 @@ export class Sync {
   private catchingUp: { source: string; phase: "polling" | "applying"; startedAt: number } | null = null;
   /** the stream's last failure and when it starts again; cleared when it starts */
   private streamFailure: { error: string; retryAt: number } | null = null;
+  /** A WHOLE-SYNC FAILURE NOT YET OVER, as its event said it (`table: null`): the stream stopped, over when it next applies
+   *  a batch; the publication and slot could not be made ready, over when a pass makes them so; the database's attach,
+   *  over when an attach succeeds. Its end is a `recovered` event of no table, which lets the next such failure be said again
+   *  (src/duck/events.ts: a failure said word for word within an hour is one event unless it recovered between) */
+  private readonly wholeFailure: { stream: string | null; prepare: string | null; attach: string | null } = { stream: null, prepare: null, attach: null };
   /** the database's position as last read (`databasePosition`), and the read in flight */
   private dbPosition: { lsn: bigint; at: number } | { error: string; at: number } | null = null;
   private dbPositionRead: Promise<void> | null = null;
@@ -839,6 +844,14 @@ export class Sync {
   private event(e: SyncEventInput): void {
     try { this.onEvent(e); }
     catch (x) { this.log(`the sync's event (${e.kind}${e.table ? ` ${e.table}` : ""}) could not be recorded: ${x instanceof Error ? x.message : String(x)}`); }
+  }
+
+  /** a whole-sync failure (`wholeFailure`) is over: said once, as a `recovered` event of no table */
+  private recovered(what: keyof Sync["wholeFailure"], words: string): void {
+    const was = this.wholeFailure[what];
+    if (was === null) return;
+    this.wholeFailure[what] = null;
+    this.event({ kind: "recovered", table: null, message: `${words} (it had failed: ${was.split("\n")[0]})` });
   }
 
   /** `f` on the writer's next turn: once every job queued before it has ended, so no other job's statement lands inside
@@ -1362,6 +1375,7 @@ export class Sync {
       // one event for the stream, never one per table it kept current (each table's error says it); its failures in a
       // row are left out of the words, so a stream failing for good is one event, not one per restart
       this.event({ kind: "stream_failed", table: null, message: `${m} (the stream starts again by itself; the copies serve as they are)` });
+      this.wholeFailure.stream = m;
       // on the tables the stream kept current when it failed (one being caught up says its own)
       await this.onWriter(async () => { for (const source of this.streamed.keys()) if (!this.held.has(source)) await this.record({ ...this.states.get(source)!, error: m }); });
       this.timer = setTimeout(() => this.kick(), wait);
@@ -1644,7 +1658,7 @@ export class Sync {
       throw e;
     } finally { source?.close(); }
     if (lsn !== null) this.appliedLsn = lsn;
-    if (from !== "held") this.streamFailures = 0;
+    if (from !== "held") { this.streamFailures = 0; this.recovered("stream", "the stream applies changes again"); }
     let moved = false;
     for (const [name, changes] of batch) {
       if (!this.tables.has(name)) continue;
@@ -1863,6 +1877,7 @@ export class Sync {
       catch (e) {
         const m = `replication: ${e instanceof Error ? e.message : String(e)}`;
         this.event({ kind: "stream_failed", table: null, message: m });
+        this.wholeFailure.prepare = m;
         // a table copied before keeps serving its copy; one never copied is failed, so mason status says why
         await this.onWriter(async () => {
           for (const t of this.tables.values()) { const st = this.states.get(t.source)!; await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }); }
@@ -1870,6 +1885,7 @@ export class Sync {
         await this.rebuildSchema();
         throw e;
       }
+      this.recovered("prepare", "the publication and the slot are ready again");
       // the stream starts once the slot is known, and runs from then on whatever the passes and rebuilds do
       this.startStream();
     }
@@ -1877,6 +1893,7 @@ export class Sync {
     catch (e) {
       const m = e instanceof Error ? e.message : String(e);
       this.event({ kind: "source_unreachable", table: null, message: `could not attach the database: ${m}` });
+      this.wholeFailure.attach = m;
       // a table copied before keeps serving its copy (and its place in the catalog): the source being away is its error,
       // not a reason to copy it whole again when the source is back; one never copied is failed
       await this.onWriter(async () => {
@@ -1889,6 +1906,7 @@ export class Sync {
       await this.rebuildSchema();
       throw new Error(`DuckDB could not attach ${this.source.database} on ${this.source.host}:${this.source.port}: ${m}`);
     }
+    this.recovered("attach", "the database is attached again");
     try { await this.work(); }
     finally { await this.onWriter(() => this.detach()); }
     await this.rebuildSchema();
