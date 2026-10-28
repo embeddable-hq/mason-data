@@ -30,7 +30,7 @@ import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type 
 import { changesOf } from "./replication-mode.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import { reach } from "./state.ts";
-import { copyingText, copyProgress, duration, readiness, type Readiness, type SyncTotals, type TableSync } from "./readiness.ts";
+import { copyingText, copyProgress, duration, readiness, readinessWord, type Readiness, type SyncTotals, type TableSync } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
 import type { CopyProgressView, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -158,7 +158,7 @@ export function addSteps(tables: readonly CatalogTable[], from: "tables" | null 
 
 // ------------------------------------------------------------------ readiness (mason wait, mason status): src/cli/readiness.ts
 
-export { copyingText, copyProgress, duration, readiness, type Readiness };
+export { copyingText, copyProgress, duration, readiness, readinessWord, type Readiness };
 
 /** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work. */
 export function paintBar(line: string, s: Style): string {
@@ -401,9 +401,11 @@ export async function status(argv: string[]): Promise<number> {
     for (const l of slowLines(slowReply.status === 200 ? slow : { error: String(slowReply.body.error ?? slowReply.status) }, st)) out(l);
     for (const l of refusedLines(refusedReply.status === 200 ? { refused, total: refusedTotal } : { error: String(refusedReply.body.error ?? refusedReply.status) }, st)) out(l);
     out("");
-    if (r.ready) out(withEnd(st.green("Ready: every added table is copied and served."), { next }));
-    else if (r.failed.length) out(withEnd(`${st.red("Failed:")}\n${bullets(r.failed)}`, { next }));
-    else out(withEnd(`Under way:\n${r.waiting.map((x) => `  - ${x}`).join("\n")}`, { next }));
+    // the word the web page's Status says too (readinessWord)
+    const word = readinessWord(r);
+    if (r.ready) out(withEnd(st.green(`${word}: every added table is copied and served.`), { next }));
+    else if (r.failed.length) out(withEnd(`${st.red(`${word}:`)}\n${bullets(r.failed)}`, { next }));
+    else out(withEnd(`${word}:\n${r.waiting.map((x) => `  - ${x}`).join("\n")}`, { next }));
     return 0;
   });
 }
@@ -485,8 +487,8 @@ export function queryErrorLines(r: Pick<RecentErrors, "queries" | "queriesError"
   return [`\n${st.bold("Query errors")} ${st.dim("(the latest refused, failed or cancelled, newest last; mason logs --requests --failed lists each)")}:`, ...r.queries.map((q) => `  ${requestLine(q, st)}`)];
 }
 
-/** Bytes as a person reads them: B, KiB, MiB, GiB. */
-function bytesText(b: number): string { return b < 1024 ? `${n(b)} B` : fileSize(b); }
+/** Bytes as a person reads them: B, KiB, MiB, GiB (the web page's statements say the same, src/web/shared.js). */
+export function bytesText(b: number): string { return b < 1024 ? `${n(b)} B` : fileSize(b); }
 
 /**
  * mason status's queries (src/duck/requests.ts summary): the last day's and the last week's statements, a line each —

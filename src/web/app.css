@@ -77,3 +77,9 @@ label.tick { display: inline-flex; align-items: baseline; gap: 4px; margin: 2px 
 nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 12px 0 0; padding: 0; }
 nav a { color: var(--fg); }
 nav a[aria-current="page"] { font-weight: bold; text-decoration: none; }
+.health { font-size: 20px; font-weight: bold; margin: 8px 0; }
+.health.ok { color: var(--ok); } .health.bad { color: var(--bad); }
+caption { text-align: left; font-weight: 600; padding: 12px 0 4px; }
+td.num { font-variant-numeric: tabular-nums; }
+.s-failed .what { color: var(--bad); }
+.search { margin: 10px 0; }

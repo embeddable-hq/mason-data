@@ -170,6 +170,8 @@ export function start(doc, win) {
     const r = shownPage().submit?.(e.target, win.FormData) ?? null;
     if (r === null) return;
     e.preventDefault();
+    // written at once (what the action set before it asked: Syncing…), and again when it is answered
+    paint();
     await r;
     paint();
   });
@@ -178,6 +180,7 @@ export function start(doc, win) {
     if (!b) return;
     const r = shownPage().click?.(b.dataset, b, { doc, win }) ?? null;
     if (r === null) return;
+    paint();
     await r;
     paint();
   });

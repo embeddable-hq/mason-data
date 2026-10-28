@@ -24,7 +24,9 @@ their spec). The full UI is built on it, page by page, under these rules.
   wait` prints — never a vocabulary of its own, and never the engine's name. Where the page re-says a CLI line (a copy's
   progress, the database's rows, a table's line, what an add or a remove did) it is held EQUAL to the CLI's function by
   a test (`tests/web-page.test.ts`: `copyingText`, `tableLines`, `duration`, `sourceRows`, `tableFacts`, `addedLines`,
-  `removedReport`), so the two cannot drift.
+  `removedReport`, `readinessWord`, `totalsText`, `fileSize`, `bytesText`, `spanText`, `eventLine`, `requestLine`,
+  `queryLines`, `syncedReport`), so the two cannot drift. A line the page splits into a table's cells is held equal
+  cell by cell: its cells, read in order, are the CLI's line (spaces aside).
 - **Nothing on the page that `mason status --json` (or the command whose `--json` it renders) cannot also say.** A page
   that needs a fact gets it by adding it to the JSON first, computed ONCE on the server (`readiness` is the run's, in
   `/api/state`, src/cli/readiness.ts): the CLI and the page stay equal, and an agent reads what a person sees.
@@ -40,6 +42,8 @@ their spec). The full UI is built on it, page by page, under these rules.
   Remove asks first, as a user's Remove does. The answer and a refusal are said under their table. While a form is
   open or a Remove asks, the list is FROZEN at the state it opened over (`held`, src/web/pages/tables.js: no refresh, however
   long), so a poll never rewrites it under the person; it is written from the latest state again at Add, Cancel or confirm.
+  Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said under its copy as `mason sync` says it
+  (`syncedReport`, src/cli/sync.ts); the search box filters by name in the page alone (the endpoint returns every table).
 - **No framework, no build step, no dependency, no CDN, no fetched font**: plain HTML, CSS and ES modules importing each
   other by relative paths, served as they are (cli/build.ts copies `src/**` that is not TypeScript, subfolders too,
   cli/beside.ts). The CSP (`default-src 'self'`,

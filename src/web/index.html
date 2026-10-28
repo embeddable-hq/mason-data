@@ -26,6 +26,9 @@
   <section id="page-tables" aria-labelledby="tables-h" hidden>
     <h2 id="tables-h">Tables</h2>
     <p class="lead">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p>
+    <p class="search"><label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders"></p>
+    <div id="copies"></div>
+    <h3>The database's tables</h3>
     <div id="tables"></div>
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>

@@ -18,6 +18,10 @@ import { parseSourceText } from "../src/cli/sources.ts";
 import type { CopyProgressView, CopyState } from "../src/duck/sync.ts";
 import type { RunState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
+import * as syncCommand from "../src/cli/sync.ts";
+import { PLAIN } from "../src/cli/style.ts";
+import type { SyncEvent } from "../src/duck/events.ts";
+import type { LedgerRequest } from "../src/duck/requests.ts";
 
 const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "web");
 // imported when the tests run: at a commit without the page the file still loads, and each test fails by name
@@ -55,7 +59,7 @@ const sourceFile = parseSourceText("kind: postgres\nurl: x\ntables:\n  customers
 assert.ok(!("problems" in sourceFile));
 
 /** The state /api/state answers for these copies (src/cli/run-server.ts runState), as JSON travels. */
-function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: boolean; tables?: SourceTable[]; sources?: typeof sourceFile; demo?: boolean } = {}): RunState {
+function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: boolean; tables?: SourceTable[]; sources?: typeof sourceFile; demo?: boolean; now?: number } = {}): RunState {
   const ctx = {
     source: o.demo ? demoSource : source, ...(o.demo ? { demo: true } : {}),
     facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: o.tables ?? TABLES, systemIdentifier: null }),
@@ -64,7 +68,7 @@ function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: bo
     page: true, folder: () => "/app/mason", root: "/app", sources: () => ({ file: o.sources ?? sourceFile, problem: null }),
     duck: { file: "/app/.mason/duck.db", pollSeconds: 5 },
   } as unknown as RunContext;
-  return JSON.parse(JSON.stringify(runState(ctx, copies, null))) as RunState;
+  return JSON.parse(JSON.stringify(runState(ctx, copies, null, o.now))) as RunState;
 }
 const copied = (source: string, rows: number, at: string): CopyState => ({ source, phase: "copied", rows, bytes: 1, seconds: 1, copiedAt: at, error: null });
 const progress: CopyProgressView = { chunksDone: 3, chunksTotal: 20, reading: 2, readingSeconds: 14, rowsReading: 41_000, rowsPerSecond: 52_300.4, bytesPerSecond: 1e6, secondsLeft: 340, share: 0.157 };
@@ -103,6 +107,28 @@ const PICKED = {
 };
 const answer = (v: unknown, status = 200) => () => new Response(JSON.stringify(v), { status });
 
+// the copies with their syncs (src/duck/sync.ts Synced), as of 09:05:30: one kept current by the poll 30 s ago, one whose
+// poll failed (its copy served as it was), one over the poll's row limit copied 90 s ago
+const NOW = Date.parse("2026-10-27T09:05:30.000Z");
+const SYNCED = stateOf([{ ...copied("public.customers", 1200, "2026-10-27T09:00:01.000Z"), synced: { at: "2026-10-27T09:05:00.000Z", seconds: 0.42, by: "poll" } },
+  { ...copied("public.orders", 2_000_000, "2026-10-27T09:00:09.000Z"), phase: "failed", error: "poll: connection reset\nthe sync tries it again in 5 s", synced: { at: "2026-10-27T08:00:09.000Z", seconds: 63, by: "copy" } },
+  { ...copied("public.events", 30_000_000, "2026-10-27T09:04:00.000Z"), unsynced: { reason: "over the poll's row limit", asOf: "2026-10-27T09:04:00.000Z" }, synced: { at: "2026-10-27T09:04:00.000Z", seconds: 754, by: "copy" } }],
+  { now: NOW });
+const QUERIES = { queries: { keptDays: 3,
+  day: { days: 1, covered: 1, statements: 1234, completed: 1200, refused: 30, failed: 3, cancelled: 1, rows: 98_765, bytesSent: 5_400_000, durationMs: { avg: 42, p50: 12, p95: 380 } },
+  week: { days: 7, covered: 3, statements: 5000, completed: 4900, refused: 90, failed: 9, cancelled: 1, rows: 400_000, bytesSent: 900, durationMs: { avg: 40, p50: 11, p95: 1_250 } } } };
+const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s" };
+const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
+const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", tokenName: "", user: "metabase",
+  method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: "relation \"nope\" does not exist\nLINE 1", detail: null, hint: null, rows: null, durationMs: 3,
+  endedAt: "2026-10-27T09:02:00.503Z", bytesSent: 120, query: "SELECT *\n  FROM nope", queryTruncated: false };
+const FAILED_REQUESTS = { requests: [REQUEST, { ...REQUEST, requestId: "0b9e5c1e-0000-4000-8000-000000000002", applicationName: "", user: "", outcome: "cancelled", sqlstate: "57014",
+  message: "canceling statement due to user request", rows: 10, durationMs: 12_345, query: `SELECT ${"x, ".repeat(60)}1` }], keptDays: 7 };
+const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.000Z", stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [],
+  copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
+
+/** What the Status page reads, in order: the state every poll, the request log's every 30 s. */
+const STATUS_READS = ["GET /api/state", "GET /api/slow", "GET /api/refused", "GET /api/queries", "GET /api/events?failed=1&limit=5", "GET /api/requests?failed=1&limit=5"];
 const SLOW = { slow: [{ route: "postgres", payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-27T09:03:00.000Z" }], slowMs: 1000 };
 const REFUSED = { total: 7, refused: [{ route: "postgres", code: "42P01", message: "relation \"nope\" does not exist", runs: 7, last: "2026-10-27T09:04:00.000Z", payload: "SELECT * FROM nope" }] };
 
@@ -325,6 +351,10 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   answers.set("GET /api/slow", json(SLOW));
   answers.set("GET /api/refused", json(REFUSED));
   answers.set("GET /api/users", json({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true }] }));
+  answers.set("GET /api/queries", json(QUERIES));
+  answers.set("GET /api/events?failed=1&limit=5", json(EVENTS));
+  answers.set("GET /api/requests?failed=1&limit=5", json(FAILED_REQUESTS));
+  answers.set("GET /api/usage?since=1m", json(USAGE));
   return {
     asked, answers,
     fetch: async (p, init) => {
@@ -347,7 +377,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   assert.equal(v.updated, "Updated 14:03:05");
   assert.equal(v.poll, "");
   assert.match(textOf(v.status!), /public\.orders 15% copying/);
-  assert.deepEqual(run.asked, ["GET /api/state", "GET /api/slow", "GET /api/refused"], "the Status page's reads, no other page's");
+  assert.deepEqual(run.asked, STATUS_READS, "the Status page's reads, no other page's");
   assert.equal(v.users, "", "the users are not read while Status is shown");
   // the Users page shown: its read alone
   app.show("users");
@@ -540,7 +570,7 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
   const onWin = new Map<string, () => void>();
   let tick: (() => void) | null = null;
   class FormData { readonly ticked: Record<string, string[]>; constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; } getAll(name: string) { return this.ticked[name] ?? []; } }
-  fn<[unknown, unknown], void>("start")(doc, { fetch: run.fetch, FormData, location, addEventListener: (type: string, f: () => void) => { onWin.set(type, f); },
+  fn<[unknown, unknown], void>("start")(doc, { fetch: (p: string, i?: { method?: string; body?: string }) => run.fetch(p, i), FormData, location, addEventListener: (type: string, f: () => void) => { onWin.set(type, f); },
     setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms) });
   /** the reader follows a link of the nav: the hash changes, and the browser says so */
   const go = (to: string) => { location.hash = to; onWin.get("hashchange")!(); };
@@ -649,13 +679,15 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
   let t = Date.UTC(2026, 9, 27, 9, 0, 0);
   const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), ["GET /api/state", "GET /api/slow", "GET /api/refused"], "Status, first: everything it reads");
+  assert.deepEqual(await asked(), STATUS_READS, "Status, first: everything it reads");
   t += 2000;
-  assert.deepEqual(await asked(), ["GET /api/state"], "2 s on: the state alone; the request log's counts are read every 30 s");
+  assert.deepEqual(await asked(), ["GET /api/state"], "2 s on: the state alone; the request log's are read every 30 s");
   t += 28_000;
-  assert.deepEqual(await asked(), ["GET /api/state", "GET /api/slow", "GET /api/refused"], "30 s on: the counts again");
+  assert.deepEqual(await asked(), STATUS_READS, "30 s on: the request log's again");
   app.show("tables");
-  assert.deepEqual(await asked(), ["GET /api/state"], "Tables: its own reads");
+  assert.deepEqual(await asked(), ["GET /api/state", "GET /api/usage?since=1m"], "Tables: its own reads");
+  t += 2000;
+  assert.deepEqual(await asked(), ["GET /api/state"], "the copies' sizes once a minute: they are measured every 10 min");
   app.show("users");
   assert.deepEqual(await asked(), ["GET /api/users"]);
   app.show("queries");
@@ -702,4 +734,171 @@ test("in the browser: no part is written while a pointer is pressed — a row th
   await settle();
   assert.ok(status.writes > writes);
   assert.match(textOf(status.html), /Ready: every added table is copied and served/);
+});
+
+// ------------------------------------------------------------------ the Status page: the word, the facts, the recent errors
+
+// the pages' own modules, imported when the tests run (at a commit without them each test fails by name)
+const statusPage = await import(path.join(WEB, "pages", "status.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
+const tablesPage = await import(path.join(WEB, "pages", "tables.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
+const of = <A extends unknown[], R>(mod: Record<string, unknown>, file: string, name: string): Fn<A, R> => {
+  assert.equal(typeof mod[name], "function", `src/web/pages/${file} exports ${name}`);
+  return mod[name] as Fn<A, R>;
+};
+const plain = (line: string) => line.replace(/\s+/g, " ").trim();
+
+test("the Status page's words are mason status's: the readiness word, the copies' line, a size, a span, an event's and a statement's line", () => {
+  const readinessWord = (commands as unknown as { readinessWord?: (r: unknown) => string }).readinessWord;
+  assert.equal(typeof readinessWord, "function", "src/cli/commands.ts exports readinessWord");
+  const word = of<[unknown], string>(statusPage, "status.js", "readinessWord");
+  for (const s of [RUNNING, COPYING, FAILED]) assert.equal(word(s.readiness), readinessWord!(s.readiness), "the word mason status heads its last line with");
+  assert.deepEqual([RUNNING, COPYING, FAILED].map((s) => word(s.readiness)), ["Ready", "Under way", "Failed"]);
+  const totalsText = of<[unknown, number], string>(statusPage, "status.js", "totalsText");
+  for (const s of [RUNNING, SYNCED, NONE]) assert.equal(totalsText(s.totals, NOW), commands.totalsText(s.totals!, NOW));
+  const cli = commands as unknown as { bytesText?: (b: number) => string };
+  assert.equal(typeof cli.bytesText, "function", "src/cli/commands.ts exports bytesText");
+  for (const b of [0, 900, 1024, 5_400_000, 3_221_225_472]) {
+    assert.equal(fn<[number], string>("fileSize")(b), commands.fileSize(b), `fileSize(${b})`);
+    assert.equal(fn<[number], string>("bytesText")(b), cli.bytesText!(b), `bytesText(${b})`);
+  }
+  for (const x of [0, 0.42, 9.96, 10, 63, 754, 7500]) assert.equal(fn<[number], string>("spanText")(x), commands.spanText(x), `spanText(${x})`);
+  // a line's cells, read in order, are its line (the line pads its columns: spaces aside)
+  const eventCells = of<[unknown], string[]>(statusPage, "status.js", "eventCells"), requestCells = of<[unknown], string[]>(statusPage, "status.js", "requestCells");
+  for (const e of EVENTS.events as SyncEvent[]) assert.equal(eventCells(e).join(" "), plain(commands.eventLine(e, PLAIN)));
+  for (const r of FAILED_REQUESTS.requests as LedgerRequest[]) {
+    const cells = requestCells(r);
+    assert.equal(plain(cells.slice(0, -1).join(" ") + (cells.at(-1) ? ` — ${cells.at(-1)}` : "")), plain(commands.requestLine(r, PLAIN)));
+  }
+});
+
+test("Status: the word, the facts (tables synced N of M, rows, the last sync and its age, the copy's file), the statements, the recent errors", () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(SYNCED));
+  const a = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(NOW));
+  return a.poll().then(() => {
+    const html = a.view().status!;
+    const text = textOf(html);
+    assert.match(html, /^<p class="health bad">Failed<\/p>/, "the word first: mason status's");
+    assert.match(text, /^Failed The copies Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 2026-10-27 09:05:00 UTC · 30 s ago The copy's file /);
+    assert.match(html, /<caption>The copies<\/caption><tbody><tr><th scope="row">Tables synced<\/th><td>2 of 3 added, 1 failed<\/td><\/tr>/, "a table, each fact a row headed by its name");
+    // the statements: a row per window, each count as mason status says it
+    assert.match(text, /Statements \(the completed ones' time; mason logs --requests lists each\) Statements Completed Refused Failed Cancelled Average p50 p95 Rows sent Sent /);
+    assert.match(text, /Last day 1,234 1,200 30 3 1 42 ms 12 ms 380 ms 98,765 5\.1 MiB Last week 5,000 4,900 90 9 1 40 ms 11 ms 1,250 ms 400,000 900 B /);
+    assert.match(text, /The request log keeps 3 days: MASON_REQUEST_LOG_DAYS\./);
+    const cliQueries = plain(commands.queryLines(QUERIES.queries as never, PLAIN).join(" "));
+    for (const v of ["1,234 statements: 1,200 completed, 30 refused, 3 failed, 1 cancelled", "42 / 12 / 380 ms", "98,765 rows, 5.1 MiB sent", "400,000 rows, 900 B sent"]) assert.ok(cliQueries.includes(v), `mason status says ${v}`);
+    // today's Status kept: the database, the bars, the counts, readiness
+    assert.match(text, /Database postgres:\/\/shop:\*\*\*\*@db\.example\.com:5432\/shop · Postgres 16\.4/);
+    assert.match(text, /public\.orders 100% its copy failed: poll: connection reset/);
+    assert.match(text, /Slow queries: 1 in the last day .* Refused queries: 7 in the last day/);
+    // the recent errors: each a table, its cells mason status's line
+    assert.match(text, /Sync errors \(the latest, newest last; mason logs --events lists each\) At \(UTC\) What Table Why 2026-10-27 09:03:10 poll_failed public\.orders poll: connection reset 2026-10-27 09:04:00 restart \(the sync\) the run was started again after it stopped/);
+    assert.match(text, /Query errors \(the latest, newest last; mason logs --requests --failed lists each\) Started \(UTC\) Outcome Took Rows Who Statement Error 2026-10-27 09:02:00 refused 42P01 3 ms Metabase \(user metabase\) SELECT \* FROM nope relation "nope" does not exist /);
+    assert.match(text, /cancelled 57014 12,345 ms 10 rows \(no application_name\) SELECT (x, )+x… canceling statement due to user request/);
+    assert.ok(!/duckdb/i.test(html), "never the engine's name");
+  });
+});
+
+test("Status: Ready and Under way in mason status's words; nothing added says so once; an error list that could not be read, or is empty, says so", async () => {
+  const renderHealth = of<[unknown], string>(statusPage, "status.js", "renderHealth");
+  assert.equal(textOf(renderHealth(RUNNING)), "Ready");
+  assert.equal(textOf(renderHealth(COPYING)), "Under way");
+  assert.equal(renderHealth(NONE), "", "no table added: renderStatus says it, with what adds one");
+  const renderRecentErrors = of<[unknown, unknown], string>(statusPage, "status.js", "renderRecentErrors");
+  assert.equal(textOf(renderRecentErrors({ events: [] }, { failure: { code: "failed", message: "the request log cannot be read\nmore" } })),
+    "Sync errors None. Query errors Could not read them (the request log cannot be read; mason logs has the detail)");
+  assert.equal(renderRecentErrors(undefined, undefined), "", "not read yet: nothing");
+  const renderFacts = of<[unknown, number], string>(statusPage, "status.js", "renderFacts");
+  assert.match(textOf(renderFacts({ ...NONE, totals: { added: 0, copied: 0, failed: 0, rows: 0, syncedAt: null }, engine: { ...NONE.engine, bytes: 2_097_152 } }, NOW)),
+    /Tables synced 0 of 0 added Rows 0 Last sync none yet The copy's file 2\.0 MiB/);
+  assert.match(textOf(of<[unknown], string>(statusPage, "status.js", "renderQueries")({ failure: { code: "failed", message: "no ledger" } })), /^Queries: could not read them \(no ledger; mason logs has the detail\)$/);
+  // the app with nothing added: the commands' sentence, no word or facts above it
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(NONE));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  await app.poll();
+  assert.match(textOf(app.view().status!), /^Source .* No table added yet \(4 in the database\)\./);
+});
+
+// ------------------------------------------------------------------ the Tables page: each copy's sync, Sync, the search box
+
+test("Tables: each added table's state, rows, last sync and its age, how long it took, its copy's size and error, and Sync", () => {
+  const renderCopies = of<[unknown, unknown, unknown?], string>(tablesPage, "tables.js", "renderCopies");
+  const html = renderCopies(SYNCED, USAGE);
+  const text = textOf(html);
+  assert.match(text, /^The copies \(3 added; mason status says the same\) Table State Rows Last sync \(UTC\) Age Took Size of the copy Error /);
+  assert.match(text, /public\.customers Synced 1,200 2026-10-27 09:05:00 30 s ago 0\.4 s \(poll\) 512\.0 KiB Sync /);
+  assert.match(text, /public\.orders Failed 2026-10-27 08:00:09 65 min ago 63 s \(copy\) poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s Sync /);
+  assert.match(text, /public\.events Synced 30,000,000 2026-10-27 09:04:00 2 min ago 13 min \(copy\) 3\.0 GiB Sync /);
+  assert.ok(!text.includes("public.audit"), "a table not added has no copy");
+  assert.match(html, /<button type="button" data-sync-table="public\.customers">Sync<\/button>/);
+  assert.match(html, /<th scope="row"><code>public\.customers<\/code><\/th>/);
+  // the cells are the commands': the age's and the span's functions, the size's
+  const ages = SYNCED.tables.filter((t) => t.added).map((t) => `${commands.duration(t.sync!.ageSeconds!)} ago`);
+  for (const a of ages) assert.ok(text.includes(a), a);
+  assert.ok(text.includes(commands.fileSize(3_221_225_472)) && text.includes(commands.spanText(0.42)));
+  // the states, as the run decides them: copying is Syncing, a table not reached Waiting
+  assert.match(textOf(renderCopies(COPYING, USAGE)), /public\.orders Syncing 280,000 .* public\.events Waiting /);
+  // the sizes could not be read: said once, the rest shown
+  assert.match(textOf(renderCopies(SYNCED, { failure: { code: "failed", message: "the samples cannot be read" } })), /The copies' own sizes: could not read them \(the samples cannot be read; mason usage has them\)/);
+  assert.equal(renderCopies(NONE, USAGE), "", "nothing added: no copies");
+  // a sync asked: its button says so, no second one
+  assert.match(renderCopies(SYNCED, USAGE, { syncing: ["public.customers"] }), /<button type="button" disabled>Syncing…<\/button>/);
+});
+
+test("Tables: what a sync did is said as mason sync says it, under its table; a refusal is the server's Failure", async () => {
+  const cli = syncCommand as unknown as { syncedReport?: (b: unknown, picked: string[], unsynced: unknown[]) => unknown };
+  assert.equal(typeof cli.syncedReport, "function", "src/cli/sync.ts exports syncedReport");
+  const syncedReport = of<[unknown, string[], unknown[]], unknown>(tablesPage, "tables.js", "syncedReport");
+  const answered = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.events", changed: 1234, deleted: 5, rows: 30_001_229, ms: 8_500 }] };
+  for (const picked of [["public.events"], ["public.customers"]]) {
+    const named = SYNCED.tables.filter((t) => picked.includes(t.table));
+    assert.deepEqual(syncedReport(answered, picked, named), cli.syncedReport!(answered, picked, named));
+  }
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(SYNCED));
+  const app = fn<[unknown], App>("createApp")(run.fetch) as App & { syncTable(t: string): Promise<boolean>; dismissSynced(): void };
+  app.show("tables");
+  await app.poll();
+  run.answers.set("POST /api/sync", answer(answered));
+  run.asked.length = 0;
+  assert.equal(await app.syncTable("public.events"), true);
+  assert.deepEqual(run.asked, [`POST /api/sync ${JSON.stringify({ tables: ["public.events"] })}`, "GET /api/state"], "mason sync events; then the state again");
+  assert.match(textOf(app.view().copies!), /public\.events Synced .* Sync Synced public\.events: 1,234 row\(s\) written, 5 deleted\. public\.events 1,234 changed, 5 deleted, 30,001,229 rows now · 8,500 ms Tip: public\.events is over the poll's row limit: it stays as of this sync until the next mason sync \(mason start --replication keeps every table current\) Dismiss A copy's/);
+  app.dismissSynced();
+  assert.ok(!/Synced public\.events:/.test(app.view().copies!));
+  const message = "public.orders has no copy yet: it is synced once it is copied";
+  run.answers.set("POST /api/sync", answer({ error: message, code: "nothing_yet", failure: { code: "nothing_yet", message, next: [] } }, 409));
+  assert.equal(await app.syncTable("public.orders"), false);
+  assert.ok(app.view().copies!.includes(`<div class="failure" role="alert"><p class="message"><span class="mark" aria-hidden="true">✗</span> ${message}</p></div>`), "the server's words, as renderFailure says them");
+});
+
+test("Tables: the search box filters both lists by name, its text kept across polls; a form open keeps its table and its list still", async () => {
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^3 of 7 added · 1 with “ORD” in the name Table Rows Key public\.orders ~2,000,000 rows key id added Remove$/);
+  assert.equal(renderTables(CATALOG_STATE, { filter: "" }), renderTables(CATALOG_STATE), "nothing typed: every table, as before");
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit" })), /^3 of 7 added · 1 with “zzz” in the name .* public\.audit ~50 rows key id Add Columns… Its columns/, "the table whose form is open stays");
+  assert.match(textOf(of<[unknown, unknown, unknown?], string>(tablesPage, "tables.js", "renderCopies")(SYNCED, USAGE, { filter: "nope" })), /No added table's name has “nope”\./);
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(SYNCED));
+  const { el, on, tick, settle } = fakeBrowser(run, "#tables");
+  await settle();
+  await on.get("input")!({ target: { id: "tables-filter", value: "cust" } });
+  assert.match(textOf(el("copies").html), /public\.customers Synced/);
+  assert.ok(!/public\.orders/.test(el("copies").html) && !/public\.orders/.test(el("tables").html), "both lists filtered");
+  tick(); await settle();
+  tick(); await settle();
+  assert.ok(!/public\.orders/.test(el("tables").html) && /public\.customers/.test(el("tables").html), "the text is kept across polls");
+  // Sync clicked: its button says Syncing… at once (written before the answer comes), the answer under it once it does
+  let release!: () => void;
+  const answered = new Promise<void>((r) => { release = r; });
+  run.answers.set("POST /api/sync", () => new Response(JSON.stringify({ at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] })));
+  const fetchNow = run.fetch;
+  run.fetch = async (p, init) => { if (p === "/api/sync") await answered; return fetchNow(p, init); };
+  const click = on.get("click")!({ target: { closest: () => ({ dataset: { syncTable: "public.customers" } }) } });
+  await settle();
+  assert.match(el("copies").html, /<button type="button" disabled>Syncing…<\/button>/, "said while it runs");
+  release();
+  await click;
+  assert.match(textOf(el("copies").html), /Synced public\.customers: 1 row\(s\) written, 0 deleted\./);
 });

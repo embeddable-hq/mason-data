@@ -106,6 +106,12 @@ export function syncTotals(added: number, copies: readonly CopyState[]): SyncTot
   return { added, copied: copied.length, failed: copies.filter((c) => syncStateOf(c) === "failed").length, rows: copied.reduce((n, c) => n + (c.rows ?? 0), 0), syncedAt: latest };
 }
 
+/** WHERE A RUN IS IN ONE WORD, as `mason status` heads its last line and the web page's Status says it: every added
+ *  table copied and served, a failure, or still under way. */
+export function readinessWord(r: Readiness): "Ready" | "Failed" | "Under way" {
+  return r.ready ? "Ready" : r.failed.length ? "Failed" : "Under way";
+}
+
 /**
  * WHERE A RUN IS. Ready when every added table's copy has ended well: `mason add` followed by `mason wait` returns
  * once the table is served. A copy that failed is a failure (the sync tries again by itself, and says so in the log),

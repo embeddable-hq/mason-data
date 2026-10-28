@@ -32,10 +32,14 @@ One page per concern (`.claude/rules/web-ui.md`), each rendered from the endpoin
 plain tables first; how they look comes after. The page stays `mason start`'s (`mason ui`); the managed service renders
 the same endpoints its own way.
 
+Built: the shell, Status and Tables (src/web/app.js, src/web/pages/); Queries, Usage and Logs say they are not built yet,
+and Users is today's form and list.
+
 - **The shell**: `index.html` with a nav — Status · Tables · Queries · Users · Usage · Logs — and one section per page,
   chosen by the URL's hash (`#status`, the default). Each page is an ES module of its own, a route of `PAGE_ROUTES`.
   ONLY THE PAGE SHOWN polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.
-- **Status** (`#status`): one word (Healthy / Syncing / Error, from `readiness`); a table of the facts — tables synced N
+- **Status** (`#status`): one word, `mason status`'s (Ready / Under way / Failed: `readinessWord` of `readiness`, said
+  by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); a table of the facts — tables synced N
   of M, rows, last sync, the copy's size, statements in the last day and week, their p50 / p95 — and a table of the
   recent errors (sync and statements). Reads `/api/state` (2 s), `/api/queries`, `/api/events?failed=1`,
   `/api/requests?failed=1` (30 s).
