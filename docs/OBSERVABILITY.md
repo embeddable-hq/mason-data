@@ -208,7 +208,21 @@ Each adds fields to a command's `--json` and the endpoint with the same JSON, wi
 
 The managed service reads these from `mason serve`, which today answers `/healthz` alone: the endpoints above are
 `mason start`'s command server (loopback, the run's token). It needs them served from `mason serve` behind a service
-token, and TLS off loopback. Not designed yet.
+token, and TLS off loopback. Not designed yet: the options, for the owner to choose.
+
+| | A. Pull: the endpoints on `mason serve` | B. Push: `mason serve` sends to the service | C. `/metrics` (Prometheus) |
+|---|---|---|---|
+| What | the same `GET /api/*` JSON, read-only, on the health port (`MASON_HEALTH_PORT`) | samples, events and failed statements posted every minute to `MASON_OBSERVE_URL` | numbers only (counts, lag, ages, sizes), no statement text |
+| Auth | a bearer secret, `MASON_OBSERVE_TOKEN`; no token set → the routes answer 404 | the same secret, sent outbound | the same secret, or none (numbers only) |
+| TLS | required off loopback (`MASON_HEALTH_TLS_CERT` / `_KEY`, or the listener's), refused at start without it | the service's HTTPS | as A |
+| Network | an inbound port the service reaches | outbound only: works behind NAT and in a VPC that takes no inbound | inbound, scraped |
+| Cost | ~2 days: the routes, the guard, the start check, tests | ~4 days: a buffer that survives restarts, retries, back-off | ~1 day |
+| Risk | the request log's statement text (customer literals) leaves the box when asked | the same, every minute, by default once set | none of the statement text |
+
+Decisions it needs: pull or push (A or B); whether statement text is served at all or only on a second, narrower
+token; whether actions (Cancel, Sync) are ever served there or read-only for good; one secret or a list of named ones
+(as `mason user` is for the Postgres API). Recommended: **A, read-only, one secret, statement text included, TLS
+required**, then **C** for teams that already run Prometheus.
 
 ## To come back to
 
