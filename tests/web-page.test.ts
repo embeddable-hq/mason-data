@@ -300,19 +300,27 @@ test("a Failure renders as the CLI's four parts: ✗ what is wrong, why, fix, th
   assert.equal(textOf(fn<[Failure], string>("renderFailure")({ code: "failed", message: "only this" })), "✗ only this", "no empty why, fix or Next");
 });
 
-test("the users: a line each with when it was added, one rotated away said so; Remove asks first; none is said", () => {
+test("the users: a row each, active first then removed without Remove; Remove asks first; none is said", () => {
   const renderUsers = fn<[unknown, string | null], string>("renderUsers");
-  const list = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true },
-    { name: "grafana", id: "fedcba9876543210", addedAt: "2026-10-20T08:00:00.000Z", live: false }] };
+  const list = { users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },
+    { name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: "2026-10-28T08:15:59.000Z", url: "postgres://metabase@127.0.0.1:5433/shop" },
+    { name: "grafana", id: "fedcba9876543210", addedAt: "2026-10-20T08:00:00.000Z", removedAt: null, live: false, lastUsedAt: null, url: "postgres://grafana@127.0.0.1:5433/shop" }],
+  lastUsedNote: null, urlNote: null, requestLogDays: 7 };
   const html = renderUsers(list, null);
-  assert.match(textOf(html), /metabase 2026-10-27 09:10 UTC · id 0123456789abcdef Remove grafana does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC/);
-  assert.match(html, /<button type="button" data-remove="metabase">Remove<\/button>/);
+  assert.match(textOf(html), /User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC 2026-10-28 08:15 UTC postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove grafana id fedcba9876543210 Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days postgres:\/\/grafana@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
+  assert.match(html, /<code id="user-url-metabase">postgres:\/\/metabase@127\.0\.0\.1:5433\/shop<\/code> <button type="button" data-copy="user-url-metabase">Copy<\/button>/);
+  assert.ok(!/data-remove="old"/.test(html), "a removed user has no Remove");
+  assert.ok(!/password/i.test(html.replace(/the API key/g, "")), "no password is shown: the URL is the one without it");
   const asking = renderUsers(list, "metabase");
   assert.match(textOf(asking), /Remove metabase\? It connects no more, and the sessions it holds end at their next statement\. Remove metabase Cancel/);
   assert.match(asking, /data-confirm-remove="metabase"/);
   assert.ok(!/data-confirm-remove="grafana"/.test(asking), "only the one asked");
   assert.equal(textOf(renderUsers({ users: [] }, null)), "No users yet.");
-  assert.equal(textOf(renderUsers({ users: [{ name: "old", id: "0123456789abcdef", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false }] }, null)), "No users yet.", "a removed user is not listed as one");
+  // last use unknown, or the URL unknown: the note why, as mason user list says it
+  const unknown = textOf(renderUsers({ ...list, lastUsedNote: "unknown: the request log could not be read (busy)", urlNote: "Mason is not running" }, null));
+  assert.match(unknown, /Active 2026-10-27 09:10 UTC 2026-10-28 08:15 UTC/);
+  assert.match(unknown, /Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC unknown /);
+  assert.match(unknown, /Last used: unknown: the request log could not be read \(busy\)\. URL: Mason is not running\.$/);
 });
 
 test("a user just added: the password and the URL to paste, each with a copy button, and that it will not be shown again", () => {
@@ -355,6 +363,9 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   answers.set("GET /api/events?failed=1&limit=5", json(EVENTS));
   answers.set("GET /api/requests?failed=1&limit=5", json(FAILED_REQUESTS));
   answers.set("GET /api/usage?since=1m", json(USAGE));
+  answers.set("GET /api/running", json({ running: [] }));
+  answers.set("GET /api/requests", json({ requests: [], keptDays: 7, before: null }));
+  answers.set("GET /api/users?lastUsed=1", json({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true }] }));
   return {
     asked, answers,
     fetch: async (p, init) => {
@@ -383,8 +394,8 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   app.show("users");
   run.asked.length = 0;
   await app.poll();
-  assert.deepEqual(run.asked, ["GET /api/users"]);
-  assert.match(textOf(app.view().users!), /^User Added metabase 2026-10-27 09:10 UTC/);
+  assert.deepEqual(run.asked, ["GET /api/users?lastUsed=1"]);
+  assert.match(textOf(app.view().users!), /^User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC not used in the last \? days Remove$/);
   app.show("status");
   // the run stops
   run.answers.clear();
@@ -430,10 +441,10 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE
   assert.ok(!/It connects no more/.test(app.view().users!));
   app.askRemove("metabase");
   run.answers.set("DELETE /api/users/metabase", () => new Response(JSON.stringify({ removed: { name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z" }, next: [] }), { status: 200 }));
-  run.answers.set("GET /api/users", () => new Response(JSON.stringify({ users: [] }), { status: 200 }));
+  run.answers.set("GET /api/users?lastUsed=1", () => new Response(JSON.stringify({ users: [] }), { status: 200 }));
   run.asked.length = 0;
   assert.equal(await app.confirmRemove("metabase"), true);
-  assert.deepEqual(run.asked, ["DELETE /api/users/metabase", "GET /api/users"]);
+  assert.deepEqual(run.asked, ["DELETE /api/users/metabase", "GET /api/users?lastUsed=1"]);
   assert.equal(textOf(app.view().users!), "No users yet.");
   assert.equal(app.model.confirming, null);
 });
@@ -669,7 +680,6 @@ test("the shell: a page per hash (#status the default, an unknown hash Status), 
   assert.deepEqual([...nav.matchAll(/<a href="(#\w+)"( aria-current="page")?>/g)].filter((m) => m[2]).map((m) => m[1]), ["#tables"], "the page shown is the current one");
   // a page not built yet says so in one line, with the command that shows it today
   const app = fn<[unknown], App>("createApp")(fakeRun().fetch);
-  assert.equal(textOf(app.view().queries!), "The statements running now and the request log: not built yet. mason logs --requests shows it in a terminal.");
   assert.match(textOf(app.view().usage!), /not built yet\. mason usage shows it/);
   assert.match(textOf(app.view().logs!), /not built yet\. mason logs --events shows it/);
 });
@@ -689,9 +699,9 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
   t += 2000;
   assert.deepEqual(await asked(), ["GET /api/state"], "the copies' sizes once a minute: they are measured every 10 min");
   app.show("users");
-  assert.deepEqual(await asked(), ["GET /api/users"]);
+  assert.deepEqual(await asked(), ["GET /api/users?lastUsed=1"]);
   app.show("queries");
-  assert.deepEqual(await asked(), [], "a page not built reads nothing");
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests"], "Queries: the statements running, the newest requests");
   // the page's own read failing is the banner; a slower one failing is said where it is shown, never as the banner
   app.show("status");
   run.answers.set("GET /api/slow", answer({ error: "the request log cannot be read", failure: { code: "failed", message: "the request log cannot be read", next: [] } }, 500));
@@ -711,11 +721,11 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   run.asked.length = 0;
   go("#users"); await settle();
   assert.deepEqual(shown(), ["users"]);
-  assert.deepEqual(run.asked, ["GET /api/users"], "the users at once, not at the next tick");
+  assert.deepEqual(run.asked, ["GET /api/users?lastUsed=1"], "the users at once, not at the next tick");
   assert.match(el("nav").html, /<a href="#users" aria-current="page">Users<\/a>/);
   run.asked.length = 0;
   tick(); await settle();
-  assert.deepEqual(run.asked, ["GET /api/users"], "and only they while Users is shown");
+  assert.deepEqual(run.asked, [], "the users are read every 30 s, not at every tick");
 });
 
 test("in the browser: no part is written while a pointer is pressed — a row that moves every poll keeps the button under the press", async () => {
@@ -901,4 +911,210 @@ test("Tables: the search box filters both lists by name, its text kept across po
   release();
   await click;
   assert.match(textOf(el("copies").html), /Synced public\.customers: 1 row\(s\) written, 0 deleted\./);
+});
+
+// ------------------------------------------------------------------ the Queries and Users pages
+
+type QueriesApp = App & {
+  askCancelStatement(session: number, statement: number): void; dismissCancelStatement(): void; confirmCancelStatement(session: number, statement: number): Promise<boolean>;
+  filterRequests(f: Record<string, string>): Promise<void>; olderRequests(): Promise<void>; newestRequests(): Promise<void>;
+};
+const RUNNING_NOW = [
+  { session: 12, statement: 45, user: "metabase", applicationName: "Metabase v0.50", method: "QUERY", startedAt: "2026-10-28T09:04:00.000Z", runningMs: 134_000, rows: 1200,
+    query: "SELECT customer_id,\n  sum(total)\nFROM orders\nGROUP BY 1", queryTruncated: false },
+  { session: 13, statement: 7, user: "", applicationName: "", method: "EXECUTE", startedAt: "2026-10-28T09:05:50.000Z", runningMs: 1500, rows: 1, query: "SELECT 1 <b>", queryTruncated: false },
+];
+const REQUESTS = [
+  { requestId: "r-old", startedAt: "2026-10-28T09:00:00.000Z", session: 3, applicationName: "psql", tokenName: "", user: "ana", method: "QUERY", outcome: "ok", status: "completed", sqlstate: null, message: null,
+    detail: null, hint: null, rows: 1, durationMs: 1234, endedAt: "2026-10-28T09:00:01.234Z", bytesSent: 2048, query: "SELECT count(*) FROM orders", queryTruncated: false },
+  { requestId: "r-new", startedAt: "2026-10-28T09:01:00.000Z", session: 4, applicationName: "", tokenName: "", user: "metabase", method: "QUERY", outcome: "cancelled", status: "cancelled", sqlstate: "57014",
+    message: "canceling statement due to user request\nmore", detail: null, hint: null, rows: null, durationMs: 90_000, endedAt: "2026-10-28T09:02:30.000Z", bytesSent: null, query: "SELECT pg_sleep(100)", queryTruncated: false },
+];
+const failedRequest = { ...REQUESTS[1]!, requestId: "r-bad", outcome: "refused", status: "failed", sqlstate: "42P01", message: "relation \"nope\" does not exist", rows: null };
+
+test("running now: a row each in the commands' words — held equal to mason logs --running's line — and Cancel; none is said", () => {
+  const renderRunning = fn<[unknown[], string | null, unknown?], string>("renderRunning");
+  const html = renderRunning(RUNNING_NOW, null);
+  const text = textOf(html);
+  assert.match(text, /^Running now \(2\): Session Statement User Client Started \(UTC\) Running for Rows Statement text /);
+  assert.match(text, /12 45 metabase Metabase v0\.50 2026-10-28 09:04:00 2 min 1,200 rows sent SELECT customer_id, sum\(total\) FROM orders GROUP BY 1 Cancel/);
+  assert.match(text, /13 7 \(no application_name\) 2026-10-28 09:05:50 1\.5 s 1 row sent SELECT 1 <b> Cancel/);
+  assert.ok(!html.includes("<b>"), "the statement is escaped");
+  assert.match(html, /<code class="stmt" title="SELECT customer_id,\n {2}sum\(total\)\nFROM orders\nGROUP BY 1">/, "the whole statement is its title");
+  // the words the page re-says are the CLI's: its line for each statement carries them
+  for (const r of RUNNING_NOW) {
+    const line = commands.runningLine(r as never);
+    const rows = `${r.rows.toLocaleString("en-US")} row${r.rows === 1 ? "" : "s"} sent`;
+    for (const words of [rows, commands.spanText(r.runningMs / 1000), r.applicationName || "(no application_name)", commands.oneLine(r.query, 120)]) {
+      assert.ok(line.includes(words), `the CLI's line says ${words}`);
+      assert.ok(text.includes(words), `and so does the page`);
+    }
+  }
+  assert.match(html, /<button type="button" data-ask-cancel="12:45">Cancel<\/button>/);
+  const asking = renderRunning(RUNNING_NOW, "12:45");
+  assert.match(textOf(asking), /Cancel session 12's statement 45\? Its client is told so \(57014\)\. Cancel statement 45 Keep it running/);
+  assert.match(asking, /data-confirm-cancel="12:45"/);
+  assert.ok(!/data-confirm-cancel="13:7"/.test(asking), "only the one asked");
+  assert.equal(textOf(renderRunning([], null)), "No statement is running now.");
+});
+
+test("running now: the answer to a cancel is said under its row, a refusal as the CLI's Failure, and under the table once the statement ended", () => {
+  const renderRunning = fn<[unknown[], string | null, unknown], string>("renderRunning");
+  const done = renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0] });
+  assert.match(textOf(done), /Cancel Cancelled session 12's statement: it ends now, and its client is told so \(57014\)\. 13 7 /, "under the row it was for");
+  const refused = { key: "12:45", failure: { code: "refused", message: "session 12 runs another statement now (statement 46), not statement 45: nothing cancelled", why: "statement 45 ended, and the session began another",
+    fix: "mason cancel 12 --statement 46 stops the one it runs now", next: [{ command: "mason logs --running", what: "the statements running now, with their sessions" }] } };
+  assert.match(textOf(renderRunning(RUNNING_NOW.slice(0, 1), null, refused)), /^Running now \(1\):.* ✗ session 12 runs another statement now \(statement 46\), not statement 45: nothing cancelled why statement 45 ended, and the session began another fix mason cancel 12 --statement 46 stops the one it runs now Next: mason logs --running the statements running now, with their sessions$/);
+  assert.equal(textOf(renderRunning([], null, { key: "12:45", cancelled: RUNNING_NOW[0] })), "No statement is running now. Cancelled session 12's statement: it ends now, and its client is told so (57014).");
+});
+
+test("the request log: a row each, newest first, in the commands' words — held equal to mason logs --requests' line — Older and Newest", () => {
+  const renderRequests = fn<[unknown, unknown?], string>("renderRequests");
+  const html = renderRequests({ requests: REQUESTS, keptDays: 7, before: "2026-10-28T09:00:00.000Z~5" });
+  const text = textOf(html);
+  assert.match(text, /^Query id Started \(UTC\) Ended \(UTC\) Duration Status User Client Rows Bytes Statement Error /);
+  assert.match(text, /r-new 2026-10-28 09:01:00 2026-10-28 09:02:30 90,000 ms Cancelled metabase \(no application_name\) SELECT pg_sleep\(100\) 57014 canceling statement due to user request r-old 2026-10-28 09:00:00 2026-10-28 09:00:01 1,234 ms Completed ana psql 1 row 2\.0 KiB SELECT count\(\*\) FROM orders Older$/);
+  assert.ok(!html.includes("data-newest"), "the newest page has no Newest");
+  for (const r of REQUESTS) {
+    const line = commands.requestLine(r as never, PLAIN);
+    const words = [`${r.durationMs.toLocaleString("en-US")} ms`, r.query, ...(r.message ? [r.message.split("\n")[0]!] : [])];
+    for (const w of words) { assert.ok(line.includes(w), `the CLI's line says ${w}`); assert.ok(text.includes(w), "and so does the page"); }
+  }
+  assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Failed .* 42P01 relation "nope" does not exist Newest$/);
+  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<p class="dim">No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.<\/p>$/);
+  assert.equal(textOf(renderRequests({ requests: [], keptDays: 1, before: null }, { filtered: true })), "No request that passes the filters in the last 1 day (MASON_REQUEST_LOG_DAYS).");
+});
+
+test("the request log's filters: each view has its own path — status as the server's outcomes, since, user, client", async () => {
+  const run = fakeRun();
+  const app = fn<[unknown], QueriesApp>("createApp")(run.fetch);
+  app.show("queries");
+  const asked = async (f: Record<string, string>) => { run.asked.length = 0; await app.filterRequests(f); return [...run.asked]; };
+  run.answers.set("GET /api/requests?outcome=ok", answer({ requests: [], keptDays: 7, before: null }));
+  run.answers.set("GET /api/requests?outcome=refused%2Cfailed&since=2h&user=ana&client=psql", answer({ requests: [failedRequest], keptDays: 7, before: null }));
+  assert.deepEqual(await asked({ status: "completed" }), ["GET /api/requests?outcome=ok"]);
+  assert.match(textOf(app.view()["request-log"]!), /^No request that passes the filters in the last 7 days/);
+  assert.deepEqual(await asked({ status: "failed", since: "2h", user: "ana", client: "psql" }), ["GET /api/requests?outcome=refused%2Cfailed&since=2h&user=ana&client=psql"]);
+  assert.match(textOf(app.view()["request-log"]!), /42P01 relation "nope"/);
+  assert.deepEqual(await asked({}), ["GET /api/requests"], "cleared: every request again");
+});
+
+test("the app: Cancel asks first; the confirm posts { session, statement } and reads the statements again; a 409 renders as its Failure", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/running", answer({ running: RUNNING_NOW }));
+  const app = fn<[unknown], QueriesApp>("createApp")(run.fetch);
+  app.show("queries");
+  await app.poll();
+  assert.match(textOf(app.view()["running-now"]!), /Running now \(2\)/);
+  app.askCancelStatement(12, 45);
+  assert.match(textOf(app.view()["running-now"]!), /Cancel session 12's statement 45\? Its client is told so/);
+  run.asked.length = 0;
+  await app.poll();
+  assert.match(textOf(app.view()["running-now"]!), /Cancel session 12's statement 45\?/, "a poll keeps the question");
+  app.dismissCancelStatement();
+  assert.ok(!/Its client is told so/.test(textOf(app.view()["running-now"]!)));
+  assert.ok(!run.asked.some((a) => a.startsWith("POST")), "asking posts nothing");
+  app.askCancelStatement(12, 45);
+  run.answers.set("POST /api/cancel", answer({ cancelled: RUNNING_NOW[0], next: [] }));
+  run.answers.set("GET /api/running", answer({ running: RUNNING_NOW.slice(1) }));
+  run.asked.length = 0;
+  assert.equal(await app.confirmCancelStatement(12, 45), true);
+  assert.deepEqual(run.asked, [`POST /api/cancel ${JSON.stringify({ session: 12, statement: 45 })}`, "GET /api/running"]);
+  assert.match(textOf(app.view()["running-now"]!), /^Running now \(1\):.* 13 7 .*Cancelled session 12's statement: it ends now/, "the statement ended: said under the table");
+  // the session began another statement: the server refuses, and the page renders its Failure under the row
+  const failure = { code: "refused", message: "session 13 runs another statement now (statement 8), not statement 7: nothing cancelled", why: "statement 7 ended, and the session began another",
+    fix: "mason cancel 13 --statement 8 stops the one it runs now", next: [{ command: "mason logs --running", what: "the statements running now, with their sessions" }] };
+  run.answers.set("POST /api/cancel", answer({ error: failure.message, failure }, 409));
+  app.askCancelStatement(13, 7);
+  assert.equal(await app.confirmCancelStatement(13, 7), false);
+  assert.match(textOf(app.view()["running-now"]!), /13 7 .* Cancel ✗ session 13 runs another statement now \(statement 8\), not statement 7: nothing cancelled why statement 7 ended, and the session began another fix mason cancel 13 --statement 8 stops the one it runs now Next: mason logs --running/);
+});
+
+test("the app: the newest page is read every 5 s; Older reads the page before with its cursor and stops polling it; Newest returns", async () => {
+  const run = fakeRun();
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  run.answers.set("GET /api/requests", answer({ requests: [REQUESTS[1]], keptDays: 7, before: "CURSOR.1" }));
+  run.answers.set("GET /api/requests?before=CURSOR.1", answer({ requests: [REQUESTS[0]], keptDays: 7, before: null }));
+  const app = fn<[unknown, () => Date], QueriesApp>("createApp")(run.fetch, () => new Date(t));
+  app.show("queries");
+  const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests"]);
+  t += 2000;
+  assert.deepEqual(await asked(), ["GET /api/running"], "the statements every 2 s");
+  t += 3000;
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests"], "the newest page every 5 s");
+  assert.ok(textOf(app.view()["request-log"]!).endsWith("Older"));
+  run.asked.length = 0;
+  await app.olderRequests();
+  assert.deepEqual(run.asked, ["GET /api/requests?before=CURSOR.1"], "Older asks with the cursor the page answered with");
+  assert.match(textOf(app.view()["request-log"]!), /r-old .* Newest$/);
+  t += 60_000;
+  assert.deepEqual(await asked(), ["GET /api/running"], "never read again while paging");
+  await app.newestRequests();
+  assert.match(textOf(app.view()["request-log"]!), /r-new .* Older$/);
+  t += 5000;
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests"], "the newest page is polled again");
+});
+
+test("the app: a filter the server refuses renders its Failure, not a table: the page validates nothing", async () => {
+  const run = fakeRun();
+  const failure = { code: "usage", message: "since \"yesterday\" is not a time", fix: "an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone (2026-10-28, 2026-10-28T09:00:00Z)" };
+  run.answers.set("GET /api/requests?since=yesterday", answer({ error: failure.message, failure }, 400));
+  const app = fn<[unknown], QueriesApp>("createApp")(run.fetch);
+  app.show("queries");
+  await app.filterRequests({ since: "yesterday" });
+  assert.equal(textOf(app.view()["request-log"]!), `✗ since "yesterday" is not a time fix an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone (2026-10-28, 2026-10-28T09:00:00Z)`);
+  assert.ok(!fs.readFileSync(path.join(WEB, "index.html"), "utf8").includes("pattern="), "no input mirrors a server rule");
+});
+
+test("in the browser: the filter form filters (blanks are no filter) and Cancel is a click", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/running", answer({ running: RUNNING_NOW }));
+  run.answers.set("GET /api/requests", answer({ requests: [REQUESTS[1]], keptDays: 7, before: "CURSOR.1" }));
+  run.answers.set("GET /api/requests?outcome=cancelled&user=metabase", answer({ requests: [REQUESTS[1]], keptDays: 7, before: null }));
+  const { el, on, settle } = fakeBrowser(run, "#queries");
+  await settle();
+  assert.match(textOf(el("running-now").html), /Running now \(2\)/);
+  assert.match(textOf(el("request-log").html), /Older$/);
+  const form = { id: "request-filters", elements: { status: { value: "cancelled" }, since: { value: " " }, user: { value: "metabase" }, client: { value: "" } } };
+  let prevented = false;
+  run.asked.length = 0;
+  await on.get("submit")!({ target: form, preventDefault: () => { prevented = true; } });
+  assert.ok(prevented);
+  assert.deepEqual(run.asked, ["GET /api/requests?outcome=cancelled&user=metabase"]);
+  assert.ok(!/Older/.test(textOf(el("request-log").html)));
+  await on.get("click")!({ target: { closest: () => ({ dataset: { askCancel: "13:7" } }) } });
+  assert.match(textOf(el("running-now").html), /Cancel session 13's statement 7\?/);
+});
+
+test("the users: read with their last use, every 30 s; Copy puts the URL without the password on the clipboard; Remove sends DELETE", async () => {
+  const run = fakeRun();
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  const U = "GET /api/users?lastUsed=1";
+  run.answers.set(U, answer({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url: "postgres://metabase@127.0.0.1:5433/shop" },
+    { name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null }],
+  lastUsedNote: null, urlNote: null, requestLogDays: 7 }));
+  const app = fn<[unknown, () => Date], App & { pages: Map<string, { click(d: unknown, b: unknown, w: unknown): Promise<void> | null }> }>("createApp")(run.fetch, () => new Date(t));
+  app.show("users");
+  const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
+  assert.deepEqual(await asked(), [U], "on opening");
+  t += 2000;
+  assert.deepEqual(await asked(), [], "not at the 2 s poll");
+  t += 28_000;
+  assert.deepEqual(await asked(), [U], "then every 30 s");
+  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC not used in the last 7 days postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC$/);
+  // Copy: the page's own handler writes the URL as shown, and keeps it nowhere
+  const written: string[] = [];
+  const doc = { getElementById: (id: string) => id === "user-url-metabase" ? { textContent: "postgres://metabase@127.0.0.1:5433/shop" } : null };
+  const win = { navigator: { clipboard: { writeText: async (s: string) => { written.push(s); } } } };
+  const button = { textContent: "Copy" };
+  await app.pages.get("users")!.click({ copy: "user-url-metabase" }, button, { doc, win });
+  assert.deepEqual(written, ["postgres://metabase@127.0.0.1:5433/shop"]);
+  assert.equal(button.textContent, "Copied");
+  // Remove: asks, then DELETE and the list again with the last use
+  app.askRemove("metabase");
+  run.answers.set("DELETE /api/users/metabase", answer({ removed: { name: "metabase" }, next: [] }));
+  run.asked.length = 0;
+  assert.equal(await app.confirmRemove("metabase"), true);
+  assert.deepEqual(run.asked, ["DELETE /api/users/metabase", U]);
 });

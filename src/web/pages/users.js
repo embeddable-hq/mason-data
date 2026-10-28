@@ -5,23 +5,39 @@
  */
 import { code, esc, json, renderFailure } from "../shared.js";
 
-const POLL_MS = 2000;
+/** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
+const USERS = "/api/users?lastUsed=1";
+const USERS_POST = "/api/users";
+const USERS_EVERY_MS = 30_000;
+
+/** A time as `mason user list` stamps it: `2026-10-27 09:10`, UTC. */
+const stamp = (iso) => iso.slice(0, 16).replace("T", " ");
+
+/** When a user was last used, as `mason user list` says it: the time, or why not (unknown, or not within the log's days). */
+export function lastUsedText(u, lastUsedNote, requestLogDays) {
+  return u.lastUsedAt != null ? `${stamp(u.lastUsedAt)} UTC` : lastUsedNote != null ? "unknown" : `not used in the last ${requestLogDays ?? "?"} days`;
+}
 
 /**
- * THE USERS from `/api/users` (`mason user list --json`'s shape): a line each — its name, when it was added, whether it
- * connects — with a Remove button; the one being removed asks first (`confirming`, its name).
+ * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape): a row each — its name, Active or Removed,
+ * when it was added, when it was last used, its URL without the password (Copy), and Remove. The active ones first;
+ * a removed user is listed after them, without Remove. The one being removed asks first (`confirming`, its name).
  */
 export function renderUsers(list, confirming = null) {
-  // a removed user stays in the list (removedAt): the page shows the live ones until its presentation is built
-  const users = list.users.filter((u) => u.removedAt == null);
+  const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
   if (!users.length) return `<p class="dim">No users yet.</p>`;
-  return `<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Added</th><th scope="col"></th></tr></thead><tbody>${users.map((u) =>
-    `<tr><th scope="row">${code(u.name)}${u.live ? "" : ` <span class="warn">does not connect: the API key was rotated since it was added</span>`}</th>` +
-    `<td class="dim">${esc(u.addedAt.slice(0, 16).replace("T", " "))} UTC · id ${esc(u.id)}</td>` +
-    `<td class="act">${confirming === u.name
-      ? `<span class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</span> ` +
-        `<button type="button" class="danger" data-confirm-remove="${esc(u.name)}">Remove ${esc(u.name)}</button> <button type="button" data-cancel-remove>Cancel</button>`
-      : `<button type="button" data-remove="${esc(u.name)}">Remove</button>`}</td></tr>`).join("")}</tbody></table>`;
+  const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
+  return `<div class="scroll"><table class="users"><thead><tr><th scope="col">User</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col">Last used</th><th scope="col">URL</th><th scope="col"></th></tr></thead><tbody>${users.map((u) => {
+    const active = u.removedAt == null;
+    return `<tr><th scope="row">${code(u.name)} <span class="dim">id ${esc(u.id)}</span></th>` +
+      `<td>${active ? "Active" : `Removed ${esc(stamp(u.removedAt))} UTC`}${active && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
+      `<td>${esc(stamp(u.addedAt))} UTC</td><td>${active ? esc(lastUsedText(u, list.lastUsedNote, list.requestLogDays)) : ""}</td>` +
+      `<td>${active && u.url ? `<code id="user-url-${esc(u.name)}">${esc(u.url)}</code> <button type="button" data-copy="user-url-${esc(u.name)}">Copy</button>` : ""}</td>` +
+      `<td class="act">${!active ? "" : confirming === u.name
+        ? `<span class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</span> ` +
+          `<button type="button" class="danger" data-confirm-remove="${esc(u.name)}">Remove ${esc(u.name)}</button> <button type="button" data-cancel-remove>Cancel</button>`
+        : `<button type="button" data-remove="${esc(u.name)}">Remove</button>`}</td></tr>`;
+  }).join("")}</tbody></table></div>${note("Last used", list.lastUsedNote)}${note("URL", list.urlNote)}`;
 }
 
 /**
@@ -43,14 +59,14 @@ export const page = {
   title: "Users",
   create(ctx) {
     const m = { actionFailure: null, added: null, confirming: null };
-    const users = () => ctx.read("/api/users")?.body ?? null;
+    const users = () => ctx.read(USERS)?.body ?? null;
     const actions = {
       async addUser(name) {
         m.actionFailure = null;
-        const r = await ctx.ask("/api/users", json("POST", { name }));
+        const r = await ctx.ask(USERS_POST, json("POST", { name }));
         if ("failure" in r) { m.actionFailure = r.failure; return false; }
         m.added = r.body;
-        await ctx.refresh(["/api/users"]);
+        await ctx.refresh([USERS]);
         return true;
       },
       askRemove(name) { m.confirming = name; m.actionFailure = null; },
@@ -60,14 +76,14 @@ export const page = {
         const r = await ctx.ask(`/api/users/${encodeURIComponent(name)}`, json("DELETE"));
         m.confirming = null;
         if ("failure" in r) { m.actionFailure = r.failure; return false; }
-        await ctx.refresh(["/api/users"]);
+        await ctx.refresh([USERS]);
         return true;
       },
       dismissAdded() { m.added = null; },
     };
     return {
       model: m,
-      reads: () => [{ path: "/api/users", everyMs: POLL_MS }],
+      reads: () => [{ path: USERS, everyMs: USERS_EVERY_MS }],
       afterRead() {
         const u = users();
         if (m.confirming !== null && u !== null && !u.users.some((x) => x.name === m.confirming && x.removedAt == null)) m.confirming = null;
