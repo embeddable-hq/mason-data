@@ -655,6 +655,15 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb_each INNER lateral, limited", `SELECT q.id, d.key, d.value::text FROM docs q CROSS JOIN LATERAL jsonb_each(${objectJsonb}) d LIMIT 30 OFFSET 5`);
   yield q("json_each INNER JOIN ON TRUE, limited", `SELECT q.id, d.key FROM docs q JOIN json_each(${objectJson}) d ON TRUE LIMIT 30`);
   yield q("jsonb_each LEFT JOIN on a condition", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON d.key <> 'n' ORDER BY 1, 2`);
+  // json(b)_array_elements(_text)'s column is `value` under a FROM name too, and the FROM name alone is the element
+  const arrays = "CASE WHEN jsonb_typeof(q.jb) = 'array' THEN q.jb END";
+  for (const join of ["JOIN", "LEFT JOIN"]) {
+    yield q(`jsonb_array_elements ${join} ON TRUE, e.value and e`, `SELECT q.id, e.value, e, e::text FROM docs q ${join} jsonb_array_elements(${arrays}) e ON TRUE`);
+    yield q(`jsonb_array_elements_text ${join} ON TRUE, e.value and e`, `SELECT q.id, e.value, e FROM docs q ${join} jsonb_array_elements_text(${arrays}) e ON TRUE`);
+    yield q(`json_array_elements ${join} ON TRUE, unaliased, by its own name`, `SELECT q.id, value::text, json_array_elements::text FROM docs q ${join} json_array_elements(CASE WHEN json_typeof(q.j) = 'array' THEN q.j END) ON TRUE`);
+    yield q(`jsonb_array_elements ${join} ON TRUE, its column named, and the FROM name`, `SELECT q.id, e.v, e FROM docs q ${join} jsonb_array_elements(${arrays}) AS e(v) ON TRUE`);
+  }
+  yield q("jsonb_array_elements in a comma join, e.value and e", `SELECT q.id, e.value, e FROM docs q, jsonb_array_elements(${arrays}) e`);
   // the lateral's whole row, which is NULL on the padding row (a row of key and value elsewhere: refused by name)
   yield q("jsonb_each LEFT JOIN ON TRUE, its whole row", `SELECT q.id, d FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE`);
   // an array of each element type unnested beside a never-empty list: the padding NULL is of the array's element type

@@ -506,6 +506,10 @@ class Rewriter {
         // and a column its subquery has twice in two cases (`"T"`, `t`) is that subquery's renamed one (caseTwins)
         const fields = (b.fields ?? []) as AstNode[];
         const last = fields.at(-1);
+        // a function's whole row by its FROM name alone, where the function is one column and no row (`e` of
+        // `jsonb_array_elements(x) e`, whose column is `value`): that column, which DuckDB would read as a struct
+        const whole = k === "ColumnRef" && t?.node === "VAR" && fields.length === 1 && last !== undefined && kindOf(last) === "String" ? t.functionColumn : undefined;
+        if (whole !== undefined && String(bodyOf(last!).sval) !== whole.column) return { ColumnRef: { ...b, fields: [S(whole.alias), S(t!.renamed ?? whole.column)] } };
         if (k === "ColumnRef" && t?.node === "VAR" && last !== undefined && kindOf(last) === "String" && (t.renamed !== null || (t.qualifier !== null && fields.length === 1))) {
           const prefix = fields.length === 1 && t.qualifier !== null ? [S(t.qualifier)] : fields.slice(0, -1);
           return { ColumnRef: { ...b, fields: [...prefix, t.renamed !== null ? S(t.renamed) : last] } };
@@ -2641,8 +2645,9 @@ class Rewriter {
         const text = name.endsWith("_text");
         const elements = fn("__mason_json_elements", [jsonArg(args[0]!), boolConst(canonical), boolConst(text), boolConst(orNull)]);
         const list = text ? elements : arrayCast(elements, "json");
-        // a scalar function's column is named by its alias (or `value`), and so is DuckDB's unnest column here
-        const column = colnames[0] ?? aliasName ?? "value";
+        // its column is its OUT parameter's, `value`, under a FROM name too (`e.value`), unless the alias names it;
+        // the FROM name alone is the element (the ColumnRef rule: Typed.functionColumn)
+        const column = colnames[0] ?? "value";
         const unnest: AstNode = fn("unnest", [list]);
         if (orNull) return listLateral([{ name: column, list }], aliasName ?? name, this.done);
         const item = bodyOf(items[0]!);

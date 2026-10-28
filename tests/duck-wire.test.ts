@@ -1091,6 +1091,33 @@ test("ORDER BY x IS [NOT] NULL, x is one key with its nulls placed, as Postgres 
   } finally { await c.end(); }
 });
 
+// json(b)_array_elements(_text)'s column is its OUT parameter's, `value`, under a FROM name too, and the FROM name
+// alone is the element (a function of one column that is no row is read whole as that column): Mason named the
+// column by the FROM name, so `e.value` was NULL or an error, in the INNER form and the LEFT one alike
+test("jsonb_array_elements' column is value under a FROM name, and the FROM name alone is the element", async () => {
+  const c = await client();
+  const arrays = "CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END";
+  // the rows as a set: a json text's order is the collation's, which is not what is tested here
+  const sorted = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: r.rows.map((x) => JSON.stringify(x)).sort() });
+  try {
+    for (const fn of ["jsonb_array_elements", "jsonb_array_elements_text"]) {
+      for (const join of ["JOIN", "LEFT JOIN"]) {
+        for (const sql of [
+          `SELECT t.id, e.value FROM jdocs t ${join} ${fn}(${arrays}) e ON TRUE`,
+          `SELECT t.id, e FROM jdocs t ${join} ${fn}(${arrays}) e ON TRUE`,
+          `SELECT t.id, e::text, e IS NULL FROM jdocs t ${join} ${fn}(${arrays}) AS e ON TRUE`,
+          `SELECT t.id, e, e.v FROM jdocs t ${join} ${fn}(${arrays}) AS e(v) ON TRUE`,
+          `SELECT t.id, value FROM jdocs t ${join} ${fn}(${arrays}) ON TRUE`,
+          `SELECT t.id, ${fn}, ${fn}.value FROM jdocs t ${join} ${fn}(${arrays}) ON TRUE`,
+        ]) assert.deepEqual(sorted(await answer(c, sql)), sorted(await postgres(sql)), sql);
+      }
+    }
+    // the comma form, the element counted and compared by the FROM name alone
+    const comma = `SELECT count(e), count(e.value), count(*) FILTER (WHERE e.value ->> 0 IS NULL), max(e #>> '{}') FROM jdocs t, jsonb_array_elements(${arrays}) e`;
+    assert.deepEqual(await answer(c, comma), await postgres(comma), comma);
+  } finally { await c.end(); }
+});
+
 // A BARE ORDER BY KEY IS READ BY ANOTHER RULE THAN THE SAME TREE INSIDE THE TEST (findTargetlistEntrySQL92): an integer
 // is an output position and a one-part name an output column's, where inside `x IS NULL` each is the constant or the
 // input column. So the pair is folded only where both read alike (a review finding: `SELECT coalesce(n, 0) AS n …
