@@ -30,10 +30,12 @@
     <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
   <section id="page-tables" aria-labelledby="tables-h" hidden>
-    <h2 id="tables-h">Tables</h2>
-    <p class="lead">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p>
-    <p class="search"><label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders">
-      <label for="tables-show">Show</label> <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="not-added">Not added</option></select></p>
+    <div class="page-head"><h2 id="tables-h">Tables</h2><p class="desc">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p></div>
+    <div id="tables-cards"></div>
+    <div class="toolbar">
+      <label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders">
+      <label for="tables-show">Show</label> <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="not-added">Not added</option></select>
+    </div>
     <div id="tables"></div>
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>
@@ -61,15 +63,14 @@
     <div id="request-log"></div>
   </section>
   <section id="page-users" aria-labelledby="users-h" hidden>
-    <h2 id="users-h">Users</h2>
-    <p class="lead">A user of the Postgres API: a name and a password that does not expire, for a BI tool or an app. The same users as <code>mason user</code>.</p>
-    <div id="added"></div>
-    <form id="add-user" autocomplete="off">
+    <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">A user of the Postgres API: a name and a password that does not expire, for a BI tool or an app. The same users as <code>mason user</code>.</p></div>
+    <form id="add-user" class="formcard" autocomplete="off">
       <label for="user-name">Name</label>
       <input id="user-name" name="name" required placeholder="metabase" spellcheck="false" autocapitalize="off">
-      <button type="submit">Add a user</button>
+      <button type="submit" class="primary">Add a user</button>
     </form>
     <div id="action"></div>
+    <div id="added"></div>
     <div id="users"></div>
   </section>
   <section id="page-usage" aria-labelledby="usage-h" hidden>

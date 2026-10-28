@@ -268,26 +268,31 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const html = renderTables(CATALOG_STATE);
   const text = textOf(html);
   // ONE table: an added table shows its sync columns, one not added its rows and key
-  assert.match(text, /^3 of 7 added Table State Rows Key Last sync \(UTC\) Age Took Size of the copy Note /);
+  assert.match(text, /^Table State Rows Key Last sync Took Size of the copy Note /);
   assert.equal([...html.matchAll(/<table /g)].length, 1, "the added tables are not listed twice");
   assert.match(text, /public\.customers Synced 1,200 key id Sync Remove public\.orders /);
+  assert.equal([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`).join(", "),
+    "ok Synced, ok Synced, ok Synced, unknown Not added, unknown Not added, unknown Not added, unknown Not added", "a state is a dot AND the CLI's word");
+  assert.match(html, /^<div class="panel"><table class="catalog">/, "one table, in a card");
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… public\.accounts /);
   assert.match(text, /public\.event_log Not added ~900 rows no key cannot be added as it is: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id \(its unique index event_log_tenant_id_id_key\) Name its key… public\.staging /);
   assert.match(text, /public\.staging Not added rows unknown key id Add Columns… A copy's own size/);
-  assert.match(html, /<button type="button" data-sync-table="public\.customers">Sync<\/button>/);
+  assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers">Sync<\/button>/);
   assert.ok(!/data-sync-table="public\.(audit|event_log)"/.test(html), "no Sync for a table not added");
-  assert.match(html, /<button type="button" data-add-table="public\.audit">Add<\/button>/);
+  assert.match(html, /<button type="button" class="primary small" data-add-table="public\.audit">Add<\/button>/);
   assert.ok(!/data-add-table="public\.(event_log|customers)"/.test(html), "no Add for a table that cannot be added as it is, nor for one added");
-  assert.match(html, /<button type="button" data-remove-table="public\.customers">Remove<\/button>/);
+  assert.match(html, /<button type="button" class="danger small" data-remove-table="public\.customers">Remove<\/button>/);
   assert.ok(!/duckdb/i.test(html), "never the engine's name");
   // Remove asks first, on its own line only
   const asking = renderTables(CATALOG_STATE, { removing: "public.customers" });
   assert.match(textOf(asking), /public\.customers Synced 1,200 key id Sync Remove customers\? Mason stops copying it and drops its copy\. Remove customers Cancel public\.orders /);
+  assert.match(asking, /<button type="button" class="danger small" data-confirm-remove-table="public\.customers">Remove customers<\/button>/);
   assert.match(asking, /data-confirm-remove-table="public\.customers"/);
   assert.ok(!/data-confirm-remove-table="public\.orders"/.test(asking), "only the one asked");
   // the form: a table with no primary key ticks its key and its columns, one with a key its columns only
   const keyForm = renderTables(CATALOG_STATE, { choosing: "public.event_log" });
   assert.match(keyForm, /<form class="pick" data-pick-form="public\.event_log"/);
+  assert.match(keyForm, /<button type="submit" class="primary small">Add event_log<\/button>/);
   assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart, as mason add event_log --key tenant_id bigint id bigint payload jsonb Its columns, as mason add event_log --columns \(none ticked: as mason add event_log ?, every column\) tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
   assert.deepEqual([...keyForm.matchAll(/name="(key|columns)" value="([^"]*)"/g)].map((m) => `${m[1]}=${m[2]}`),
     ["key=tenant_id", "key=id", "key=payload", "columns=tenant_id", "columns=id", "columns=payload"]);
@@ -299,8 +304,9 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const said = renderTables(CATALOG_STATE, { outcome: { table: "public.accounts", added: PICKED.secret } });
   assert.match(textOf(said), /public\.accounts Not added ~300 rows key id Add Columns… Added public\.accounts to \/app\/mason\/sources\/shop\.yml: every column but password_hash .* public\.event_log /);
   const gone = renderTables(CATALOG_STATE, { outcome: { table: "public.gone", failure: { code: "not_found", message: "public.gone is not a table of shop that this user can read" } } });
-  assert.match(textOf(gone), /^✗ public\.gone is not a table of shop that this user can read 3 of 7 added/);
+  assert.match(textOf(gone), /^✗ public\.gone is not a table of shop that this user can read Table State /);
   assert.equal(textOf(renderTables({ ...NONE, tables: [] })), "shop has no table this user can read.");
+  assert.match(renderTables({ ...NONE, tables: [] }), /^<div class="empty">/, "nothing to list is the empty state");
 });
 
 test("a Failure renders as the CLI's four parts: ✗ what is wrong, why, fix, then Next with each command and what it does", () => {
@@ -312,24 +318,32 @@ test("a Failure renders as the CLI's four parts: ✗ what is wrong, why, fix, th
 });
 
 test("the users: a row each, active first then removed without Remove; Remove asks first; none is said", () => {
-  const renderUsers = fn<[unknown, string | null], string>("renderUsers");
+  const renderUsers = fn<[unknown, string | null, number?], string>("renderUsers");
   const list = { users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },
     { name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: "2026-10-28T08:15:59.000Z", url: "postgres://metabase@127.0.0.1:5433/shop" },
     { name: "grafana", id: "fedcba9876543210", addedAt: "2026-10-20T08:00:00.000Z", removedAt: null, live: false, lastUsedAt: null, url: "postgres://grafana@127.0.0.1:5433/shop" }],
   lastUsedNote: null, urlNote: null, requestLogDays: 7 };
-  const html = renderUsers(list, null);
-  assert.match(textOf(html), /User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC 2026-10-28 08:15 UTC postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove grafana id fedcba9876543210 Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days postgres:\/\/grafana@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
-  assert.match(html, /<code id="user-url-metabase">postgres:\/\/metabase@127\.0\.0\.1:5433\/shop<\/code> <button type="button" data-copy="user-url-metabase">Copy<\/button>/);
+  const NOW_U = Date.parse("2026-10-28T09:15:59.000Z");
+  const html = renderUsers(list, null, NOW_U);
+  assert.match(textOf(html), /User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC 60 min ago postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove grafana id fedcba9876543210 Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days postgres:\/\/grafana@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
+  assert.match(html, /<code id="user-url-metabase">postgres:\/\/metabase@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="user-url-metabase">Copy<\/button>/);
+  // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
+  assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
+  assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
+    ["ok Active", "ok Active", "unknown Removed 2026-10-02 10:00 UTC"]);
+  assert.match(html, /<button type="button" class="danger small" data-remove="metabase">Remove<\/button>/);
+  assert.equal([...html.matchAll(/<tr( class="removed")?><th scope="row">/g)].map((m) => m[1] ? "removed" : "active").join(" "), "active active removed", "a removed user is listed last, muted");
   assert.ok(!/data-remove="old"/.test(html), "a removed user has no Remove");
   assert.ok(!/password/i.test(html.replace(/the API key/g, "")), "no password is shown: the URL is the one without it");
-  const asking = renderUsers(list, "metabase");
+  const asking = renderUsers(list, "metabase", NOW_U);
   assert.match(textOf(asking), /Remove metabase\? It connects no more, and the sessions it holds end at their next statement\. Remove metabase Cancel/);
   assert.match(asking, /data-confirm-remove="metabase"/);
   assert.ok(!/data-confirm-remove="grafana"/.test(asking), "only the one asked");
-  assert.equal(textOf(renderUsers({ users: [] }, null)), "No users yet.");
+  assert.equal(textOf(renderUsers({ users: [] }, null)), "No users yet Add one above, as mason user add <name> does.");
+  assert.match(renderUsers({ users: [] }, null), /^<div class="empty">/);
   // last use unknown, or the URL unknown: the note why, as mason user list says it
-  const unknown = textOf(renderUsers({ ...list, lastUsedNote: "unknown: the request log could not be read (busy)", urlNote: "Mason is not running" }, null));
-  assert.match(unknown, /Active 2026-10-27 09:10 UTC 2026-10-28 08:15 UTC/);
+  const unknown = textOf(renderUsers({ ...list, lastUsedNote: "unknown: the request log could not be read (busy)", urlNote: "Mason is not running" }, null, NOW_U));
+  assert.match(unknown, /Active 2026-10-27 09:10 UTC 60 min ago/);
   assert.match(unknown, /Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC unknown /);
   assert.match(unknown, /Last used: unknown: the request log could not be read \(busy\)\. URL: Mason is not running\.$/);
 });
@@ -338,9 +352,11 @@ test("a user just added: the password and the URL to paste, each with a copy but
   const html = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
     database: "shop", url: `postgres://metabase:mason_0123456789abcdef_${"a".repeat(32)}@127.0.0.1:5433/shop`, host: "127.0.0.1", port: 5433, sslmode: "disable" });
   const text = textOf(html);
-  assert.match(text, /^The user metabase added: its password is shown this once url postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy user metabase password mason_0123456789abcdef_a{32} Copy database shop host 127\.0\.0\.1 port 5433 /);
+  assert.match(text, /^The user metabase added: its password is shown this once Shown once url postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy user metabase password mason_0123456789abcdef_a{32} Copy database shop host 127\.0\.0\.1 port 5433 /);
   assert.match(text, /Paste it into the tool now: Mason keeps no copy of the password, and this page will not show it again\./);
-  assert.match(html, /<code id="added-password">mason_0123456789abcdef_a{32}<\/code> <button type="button" data-copy="added-password">Copy<\/button>/);
+  assert.match(html, /<code id="added-password">mason_0123456789abcdef_a{32}<\/code> <button type="button" class="small" data-copy="added-password">Copy<\/button>/);
+  assert.match(html, /<span class="badge warn">Shown once<\/span>/, "a clear note that it is shown once");
+  assert.match(html, /<button type="button" class="primary" data-dismiss-added="">I have copied it<\/button>/);
   assert.ok(!/ssl mode/.test(text), "disable is said by leaving it out, as mason user add does");
 });
 
@@ -460,7 +476,7 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE
   run.asked.length = 0;
   assert.equal(await app.confirmRemove("metabase"), true);
   assert.deepEqual(run.asked, ["DELETE /api/users/metabase", "GET /api/users?lastUsed=1"]);
-  assert.equal(textOf(app.view().users!), "No users yet.");
+  assert.equal(textOf(app.view().users!), "No users yet Add one above, as mason user add <name> does.");
   assert.equal(app.model.confirming, null);
 });
 
@@ -873,13 +889,19 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const html = renderTables(SYNCED, { sizes: USAGE });
   const text = textOf(html);
-  assert.match(text, /^3 of 4 added Table State Rows Key Last sync \(UTC\) Age Took Size of the copy Note /);
-  assert.match(text, /public\.customers Synced 1,200 key id 2026-10-27 09:05:00 30 s ago 0\.4 s \(poll\) 512\.0 KiB Sync Remove /);
-  assert.match(text, /public\.orders Failed ~2,000,000 rows key id 2026-10-27 08:00:09 65 min ago 63 s \(copy\) poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s Sync Remove /);
-  assert.match(text, /public\.events Synced 30,000,000 key id 2026-10-27 09:04:00 2 min ago 13 min \(copy\) 3\.0 GiB Sync Remove /);
+  assert.match(text, /^Table State Rows Key Last sync Took Size of the copy Note /);
+  assert.match(text, /public\.customers Synced 1,200 key id 30 s ago 0\.4 s \(poll\) 512\.0 KiB Sync Remove /);
+  assert.match(text, /public\.orders Failed ~2,000,000 rows key id 65 min ago 63 s \(copy\) poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s Sync Remove /);
+  assert.match(text, /public\.events Synced 30,000,000 key id 2 min ago 13 min \(copy\) 3\.0 GiB Sync Remove /);
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… /, "a table not added has no sync, and is in the same table");
   assert.equal([...html.matchAll(/<table /g)].length, 1);
-  assert.match(html, /<button type="button" data-sync-table="public\.customers">Sync<\/button>/);
+  // the last sync is an age, its UTC time in a title; rows, age, span and size are mono and right-aligned
+  assert.match(html, /<td class="num" title="2026-10-27 09:05:00 UTC">30 s ago<\/td><td class="num">0\.4 s \(poll\)<\/td><td class="num">512\.0 KiB<\/td>/);
+  assert.match(html, /<td class="num">1,200<\/td>/);
+  // a failed copy's error is a red line, its whole error in a details
+  assert.match(html, /<span class="err">poll: connection reset<\/span><details data-open="error:public\.orders"><summary>the whole error<\/summary><pre>poll: connection reset\nthe sync tries it again in 5 s<\/pre><\/details>/);
+  assert.match(html, /<td><span class="indicator bad"><span class="dot" aria-hidden="true"><\/span>Failed<\/span><\/td>/);
+  assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers">Sync<\/button>/);
   assert.match(html, /<th scope="row"><code>public\.customers<\/code><\/th>/);
   // the cells are the commands': the age's and the span's functions, the size's
   const ages = SYNCED.tables.filter((t) => t.added).map((t) => `${commands.duration(t.sync!.ageSeconds!)} ago`);
@@ -894,7 +916,7 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   assert.match(textOf(renderTables(SYNCED, { sizes: { failure: { code: "failed", message: "the samples cannot be read" } } })), /The copies' own sizes: could not read them \(the samples cannot be read; mason usage has them\)/);
   assert.ok(!/own size is measured/.test(textOf(renderTables(NONE, { sizes: USAGE }))), "nothing added: no copies to measure");
   // a sync asked: its button says so, no second one
-  assert.match(renderTables(SYNCED, { sizes: USAGE, syncing: ["public.customers"] }), /<button type="button" disabled>Syncing…<\/button>/);
+  assert.match(renderTables(SYNCED, { sizes: USAGE, syncing: ["public.customers"] }), /<button type="button" class="small" disabled>Syncing…<\/button>/);
 });
 
 test("Tables: what a sync did is said as mason sync says it, under its table; a refusal is the server's Failure", async () => {
@@ -926,9 +948,9 @@ test("Tables: what a sync did is said as mason sync says it, under its table; a 
 
 test("Tables: the search box and the state filter narrow the one list, their text kept across polls; a form open keeps its table and its list still", async () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^3 of 7 added · 1 with “ORD” in the name Table State Rows Key Last sync \(UTC\) Age Took Size of the copy Note public\.orders Synced 2,000,000 key id Sync Remove /);
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Table State Rows Key Last sync Took Size of the copy Note public\.orders Synced 2,000,000 key id Sync Remove /);
   assert.equal(renderTables(CATALOG_STATE, { filter: "" }), renderTables(CATALOG_STATE), "nothing typed: every table, as before");
-  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit" })), /^3 of 7 added · 1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… Its columns/, "the table whose form is open stays");
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit" })), /^1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… Its columns/, "the table whose form is open stays");
   assert.match(textOf(renderTables(SYNCED, { filter: "nope" })), /No table's name has “nope”\./);
   // All / Added / Not added
   const names = (html: string) => [...html.matchAll(/<th scope="row"><code>([^<]*)<\/code>/g)].map((m) => m[1]);
@@ -961,7 +983,7 @@ test("Tables: the search box and the state filter narrow the one list, their tex
   run.fetch = async (p, init) => { if (p === "/api/sync") await answered; return fetchNow(p, init); };
   const click = on.get("click")!({ target: { closest: () => ({ dataset: { syncTable: "public.customers" } }) } });
   await settle();
-  assert.match(el("tables").html, /<button type="button" disabled>Syncing…<\/button>/, "said while it runs");
+  assert.match(el("tables").html, /<button type="button" class="small" disabled>Syncing…<\/button>/, "said while it runs");
   release();
   await click;
   assert.match(textOf(el("tables").html), /Synced public\.customers: 1 row\(s\) written, 0 deleted\./);
@@ -1539,6 +1561,77 @@ test("Tables: in replication mode each added table's stream state is a column, i
   assert.match(text, /not streamed yet: it is not copied yet/);
   assert.ok(!text.includes("left out: the publication"), "a table not added is not streamed: left-out is for the added ones the publication lacks");
   assert.doesNotMatch(textOf(renderTables(RUNNING)), /Stream/);
+});
+
+// ------------------------------------------------------------------ the Tables and Users pages, restyled
+
+test("Tables and Users: the sections are a page head, the cards' part and a toolbar over the list; the users' add form is a card", () => {
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  const section = (id: string) => html.slice(html.indexOf(`<section id="page-${id}"`), html.indexOf("</section>", html.indexOf(`<section id="page-${id}"`)));
+  const tables = section("tables"), users = section("users");
+  assert.match(tables, /<div class="page-head"><h2 id="tables-h">Tables<\/h2><p class="desc">/);
+  assert.ok(tables.indexOf('id="tables-cards"') < tables.indexOf('class="toolbar"') && tables.indexOf('class="toolbar"') < tables.indexOf('id="tables"'), "cards, then the toolbar, then the list");
+  assert.match(tables, /<input type="search" id="tables-filter"[^>]*>\s*<label for="tables-show">Show<\/label> <select id="tables-show">/);
+  assert.match(users, /<div class="page-head"><h2 id="users-h">Users<\/h2>/);
+  assert.match(users, /<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" class="primary">Add a user<\/button>/);
+  assert.ok(users.indexOf('id="add-user"') < users.indexOf('id="added"') && users.indexOf('id="added"') < users.indexOf('id="users"'), "the form, the password just shown, the users");
+});
+
+test("Tables: the cards are the tables added of all, those synced, those failed and the copies' rows; none before there is a table", () => {
+  const cardsOf = of<[unknown], string>(tablesPage, "tables.js", "renderTablesCards");
+  const tot = SYNCED.totals!;
+  assert.equal(textOf(cardsOf(SYNCED)), `Tables added 3 of 4 in the database Synced ${tot.copied} of 3 added Failed ${tot.failed} of 3 added Rows ${tot.rows.toLocaleString("en-US")} in the copies`);
+  assert.match(cardsOf(SYNCED), /<div class="card bad"><p class="card-label">Failed<\/p>/, "a failed copy colours its card");
+  assert.doesNotMatch(cardsOf(RUNNING), /card bad/);
+  assert.equal(cardsOf({ ...NONE, tables: [] }), "");
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(SYNCED));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("tables");
+  return app.poll().then(() => assert.match(app.view()["tables-cards"]!, /^<div class="cards">/));
+});
+
+test("Tables: nothing added is the empty state above the list that still offers Add; a stream's column is in the same table", () => {
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  const html = renderTables(NONE);
+  assert.match(html, /^<div class="empty"><p class="empty-title">No table added yet<\/p><p>Add one from the list, as <code>mason add &lt;table&gt;<\/code> does\.<\/p><\/div>/);
+  assert.match(html, /data-add-table="public\.customers"/, "the list is still there to add from");
+  assert.doesNotMatch(renderTables(SYNCED, { sizes: USAGE }), /class="empty"/);
+});
+
+test("Tables: a copy's whole error stays open across the polls that rewrite the list; the filter's count and the buttons are the page's own", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(SYNCED));
+  let t = Date.UTC(2026, 9, 28, 9, 5, 0);
+  const app = fn<[unknown, () => Date], App & { pages: Map<string, { toggle?: (target: unknown) => unknown }> }>("createApp")(run.fetch, () => new Date(t));
+  app.show("tables");
+  await app.poll();
+  const opens = () => [...app.view().tables!.matchAll(/<details[^>]*data-open="([^"]+)"[^>]* open>/g)].map((m) => m[1]);
+  assert.deepEqual(opens(), []);
+  assert.equal(app.pages.get("tables")!.toggle!({ dataset: { open: "error:public.orders" }, open: true }), true, "opened: the page is written again");
+  for (let i = 0; i < 3; i++) { t += 2000; await app.poll(); }
+  assert.deepEqual(opens(), ["error:public.orders"], "a poll later, still open");
+  assert.equal(app.pages.get("tables")!.toggle!({ dataset: { open: "error:public.orders" }, open: true }), null, "the toggle a rewrite causes itself changes nothing");
+  assert.equal(app.pages.get("tables")!.toggle!({ id: "logs-raw", open: true }), null, "a details with no key is not this page's");
+});
+
+test("Users: the add form's password is a prominent card marked shown once; the active users come first, a removed one muted last, and the age ticks with the page's clock", async () => {
+  const added = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
+    database: "shop", url: "postgres://metabase@127.0.0.1:5433/shop" });
+  assert.match(added, /^<div class="added" role="status"><p class="headline">The user metabase added: its password is shown this once <span class="badge warn">Shown once<\/span><\/p>/);
+  assert.equal([...added.matchAll(/data-copy="/g)].length, 2, "the URL and the password each have a Copy");
+  const run = fakeRun();
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  run.answers.set("GET /api/users?lastUsed=1", answer({ users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },
+    { name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: "2026-10-28T08:59:30.000Z", url: "postgres://metabase@127.0.0.1:5433/shop" }],
+  lastUsedNote: null, urlNote: null, requestLogDays: 7 }));
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  app.show("users");
+  await app.poll();
+  assert.match(app.view().users!, /<span title="2026-10-28 08:59 UTC">30 s ago<\/span>/);
+  t += 60_000;
+  assert.match(app.view().users!, /<span title="2026-10-28 08:59 UTC">2 min ago<\/span>/, "an age moves with the clock between reads");
+  assert.ok(app.view().users!.indexOf("metabase") < app.view().users!.indexOf(">old<"), "removed users are listed last");
 });
 
 // ------------------------------------------------------------------ the presentation: components, vendored files, details kept open, charts as an addition

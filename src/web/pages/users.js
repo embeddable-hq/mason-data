@@ -3,7 +3,7 @@
  * /api/users/<name>. An added user's password lives in this page's memory until the person dismisses it, never in
  * storage, a URL or a log line.
  */
-import { code, esc, json, renderFailure } from "../shared.js";
+import { badge, button, code, duration, empty, esc, json, panel, renderFailure, status } from "../shared.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
 const USERS = "/api/users?lastUsed=1";
@@ -18,40 +18,48 @@ export function lastUsedText(u, lastUsedNote, requestLogDays) {
   return u.lastUsedAt != null ? `${stamp(u.lastUsedAt)} UTC` : lastUsedNote != null ? "unknown" : `not used in the last ${requestLogDays ?? "?"} days`;
 }
 
+/** A user's URL (or the password-less one) with its Copy: `<code id>` is what the button copies. */
+const copyable = (id, text) => `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small")}</span>`;
+
 /**
- * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape): a row each — its name, Active or Removed,
- * when it was added, when it was last used, its URL without the password (Copy), and Remove. The active ones first;
- * a removed user is listed after them, without Remove. The one being removed asks first (`confirming`, its name).
+ * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape), in a table in a card: a row each — its name
+ * in mono with its id muted, its status as a dot and the word (Active, or Removed and when), when it was added, when it
+ * was last used (an age, `lastUsedText`'s UTC time in a title; or the note why it is not known), its URL without the
+ * password (Copy), and Remove. The active ones first; a removed user is listed after them, muted, without Remove. The
+ * one being removed asks first (`confirming`, its name). `now` is the page's clock, in ms.
  */
-export function renderUsers(list, confirming = null) {
+export function renderUsers(list, confirming = null, now = Date.now()) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
-  if (!users.length) return `<p class="dim">No users yet.</p>`;
+  if (!users.length) return empty("No users yet", `Add one above, as ${code("mason user add <name>")} does.`);
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
-  return `<div class="scroll"><table class="users"><thead><tr><th scope="col">User</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col">Last used</th><th scope="col">URL</th><th scope="col"></th></tr></thead><tbody>${users.map((u) => {
+  return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col" class="num">Last used</th><th scope="col">URL</th><th scope="col"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
-    return `<tr><th scope="row">${code(u.name)} <span class="dim">id ${esc(u.id)}</span></th>` +
-      `<td>${active ? "Active" : `Removed ${esc(stamp(u.removedAt))} UTC`}${active && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
-      `<td>${esc(stamp(u.addedAt))} UTC</td><td>${active ? esc(lastUsedText(u, list.lastUsedNote, list.requestLogDays)) : ""}</td>` +
-      `<td>${active && u.url ? `<code id="user-url-${esc(u.name)}">${esc(u.url)}</code> <button type="button" data-copy="user-url-${esc(u.name)}">Copy</button>` : ""}</td>` +
+    const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays);
+    const lastCell = !active ? "" : u.lastUsedAt != null
+      ? `<span title="${esc(last)}">${esc(duration(Math.max(0, (now - Date.parse(u.lastUsedAt)) / 1000)))} ago</span>` : esc(last);
+    return `<tr${active ? "" : ` class="removed"`}><th scope="row">${code(u.name)} <span class="dim">id ${esc(u.id)}</span></th>` +
+      `<td>${active ? status("ok", "Active") : status("unknown", `Removed ${stamp(u.removedAt)} UTC`)}${active && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
+      `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
+      `<td>${active && u.url ? copyable(`user-url-${u.name}`, u.url) : ""}</td>` +
       `<td class="act">${!active ? "" : confirming === u.name
         ? `<span class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</span> ` +
-          `<button type="button" class="danger" data-confirm-remove="${esc(u.name)}">Remove ${esc(u.name)}</button> <button type="button" data-cancel-remove>Cancel</button>`
-        : `<button type="button" data-remove="${esc(u.name)}">Remove</button>`}</td></tr>`;
-  }).join("")}</tbody></table></div>${note("Last used", list.lastUsedNote)}${note("URL", list.urlNote)}`;
+          `${button(`Remove ${u.name}`, { confirmRemove: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "" }, "small")}`
+        : button("Remove", { remove: u.name }, "danger small")}</td></tr>`;
+  }).join("")}</tbody></table>`) + `${note("Last used", list.lastUsedNote)}${note("URL", list.urlNote)}`;
 }
 
 /**
- * A USER JUST ADDED (`mason user add --json`'s shape): its password, shown this once, in a box with a copy button,
- * beside the URL to paste — the rows `mason user add` prints. Mason keeps no copy, so it is never shown again.
+ * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card with its password, shown this once, beside the
+ * URL to paste, each with a Copy button — the rows `mason user add` prints. Mason keeps no copy, so it is never shown again.
  */
 export function renderAdded(a) {
   const rows = [["url", a.url, "added-url"], ["user", a.user], ["password", a.password, "added-password"], ["database", a.database],
     ...(a.host !== undefined ? [["host", a.host], ["port", String(a.port)]] : []), ...(a.sslmode && a.sslmode !== "disable" ? [["ssl mode", a.sslmode]] : [])]
     .filter(([, v]) => v !== undefined);
-  return `<div class="added" role="status"><p class="headline">The user ${esc(a.user)} added: its password is shown this once</p>` +
-    `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${id ? `<code id="${id}">${esc(v)}</code> <button type="button" data-copy="${id}">Copy</button>` : esc(v)}</dd>`).join("")}</dl>` +
+  return `<div class="added" role="status"><p class="headline">The user ${esc(a.user)} added: its password is shown this once ${badge("Shown once", "warn")}</p>` +
+    `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${id ? copyable(id, v) : esc(v)}</dd>`).join("")}</dl>` +
     `<p class="tip">Paste it into the tool now: Mason keeps no copy of the password, and this page will not show it again. Lost, remove the user and add it again.</p>` +
-    `<button type="button" data-dismiss-added>I have copied it</button></div>`;
+    `${button("I have copied it", { dismissAdded: "" }, "primary")}</div>`;
 }
 
 export const page = {
@@ -92,7 +100,7 @@ export const page = {
       view() {
         const u = users();
         return {
-          users: u ? renderUsers(u, m.confirming) : "",
+          users: u ? renderUsers(u, m.confirming, ctx.now().getTime()) : "",
           added: m.added ? renderAdded(m.added) : "",
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",
         };
