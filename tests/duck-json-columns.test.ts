@@ -326,7 +326,8 @@ const source = { url: "postgresql://x@127.0.0.1:1/x", remote: false, host: "127.
 /** what these tests reach inside the sync: its write paths, as the stream, the poll and the copy call them */
 type SyncInside = {
   kept: Keeper;
-  applyChanges(batch: unknown, lsn: null): Promise<void>;
+  /** a batch of the stream, here a piece of a large transaction (no position): src/duck/sync.ts `applyChanges` */
+  applyChanges(batch: unknown, from: { lsn: null; committedAt: null }): Promise<void>;
   onWriter<T>(f: () => Promise<T>): Promise<T>;
   swap(t: AddedTable, side: string, o: { snapshot: null; behind: null }): Promise<void>;
 };
@@ -380,15 +381,15 @@ test("the stream's write by key and its unchanged-TOAST updates compute each sto
       change(100_000, ["100000", '{"s": "new", "o": {"a": {"b": [9]}}}', '{"n": 1.50}']),
       change(3, ["3", '{"s": "changed"}', '{"n": "x"}']),
       [JSON.stringify(["4"]), { key: ["4"], change: { kind: "delete" } }],
-    ), null);
+    ), { lsn: null, committedAt: null });
     await current(store, STORED, route);
     assert.equal(await one(store, `SELECT ${ident(route.hiddenName(STORED[0]!))} FROM public.docs WHERE id = 3`), '"changed"');
     // an UPDATE that left j unchanged (TOAST, not sent): k carried, j's stored paths as they were
-    await sync.applyChanges(batch(change(100_000, ["100000", undefined, '{"n": 2.25}'])), null);
+    await sync.applyChanges(batch(change(100_000, ["100000", undefined, '{"n": 2.25}'])), { lsn: null, committedAt: null });
     assert.equal(await one(store, `SELECT ${ident(route.hiddenName(STORED[2]!))} FROM public.docs WHERE id = 100000`), "2.25");
     assert.equal(await one(store, `SELECT ${ident(route.hiddenName(STORED[0]!))} FROM public.docs WHERE id = 100000`), '"new"');
     // and one that carried j, leaving k unsent
-    await sync.applyChanges(batch(change(100_000, ["100000", '{"s": "carried", "o": {"a": {"b": {"c": 1}}}}', undefined])), null);
+    await sync.applyChanges(batch(change(100_000, ["100000", '{"s": "carried", "o": {"a": {"b": {"c": 1}}}}', undefined])), { lsn: null, committedAt: null });
     assert.equal(await one(store, `SELECT ${ident(route.hiddenName(STORED[0]!))} FROM public.docs WHERE id = 100000`), '"carried"');
     assert.equal(await one(store, `SELECT ${ident(route.hiddenName(STORED[1]!))} FROM public.docs WHERE id = 100000`), '{"c": 1}');
     await current(store, STORED, route);

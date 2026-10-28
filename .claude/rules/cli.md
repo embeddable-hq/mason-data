@@ -115,7 +115,9 @@ CLI lacks).
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
   worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint
   (`/api/queries`, one scan of the ledger), never part of `/api/state`, which the page asks every 2 s. `mason cancel`
-  cancels through the listener's one path, the CancelRequest's (`interrupt`, src/api/postgres/server.ts). **A time is read by ONE
+  cancels through the listener's one path, the CancelRequest's (`interrupt`, src/api/postgres/server.ts); what it
+  names is the statement `mason logs --running` listed (`--statement`, `RunningStatement.statement`), refused 409 when
+  the session runs another by then — a session's number alone is whatever it runs at the moment. **A time is read by ONE
   grammar** (`timeOf`, src/cli/request-filter.ts: an age 30m / 2h / 7d, or an ISO 8601 time WITH its zone; none without one)
   for `--since` / `--until` of `mason logs` and `mason usage` and the `since` / `until` of `/api/requests`, `/api/events`,
   `/api/usage` and `/api/logs`; `/api/users` reads the request log only with `?lastUsed=1` (`mason user list`), because the

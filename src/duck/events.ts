@@ -11,8 +11,11 @@
  * sync's own state and log line are written either way). Kept `MASON_REQUEST_LOG_DAYS` days.
  *
  * A failure repeated word for word is ONE event (`REPEAT_MS`): a database away fails every pass, every few seconds,
- * and a list of the same line buries the one before it. It is written again once its table is current again in
- * between (`recovered`), or an hour later. While it lasts, the table's own `error` (mason status) says it.
+ * and a list of the same line buries the one before it. It is written again once it was over in between, or an hour
+ * later: a table's failure is over when the table is current again (`recovered`) or copied anew (`copied`); a failure
+ * of the whole sync (`table: null`: the stream, the database) when the sync says it is (`recovered` of no table: the
+ * stream applied a batch again, the database attached again), which ends every whole-sync failure's repeat at once —
+ * an extra event at worst, never a failure dropped. While it lasts, the table's own `error` (mason status) says it.
  *
  * The run's RESTARTS are not here: the supervisor that records them is a process of its own, which cannot open the
  * file DuckDB holds, so it writes `.mason/restarts.json` (src/cli/supervise.ts) and the reader merges them
@@ -33,7 +36,7 @@ export const EVENTS_DDL = `CREATE TABLE IF NOT EXISTS ${EVENTS_TABLE} (happened_
  * current), `stream_failed` (the stream stopped, or refused a table: `table` says which), `source_unreachable` (the
  * database could not be attached), `restart` (the supervisor started the run again after it died) — each a failure;
  * `copied` (a copy finished and was swapped in) and `recovered` (a table whose poll, catch-up or stream failed is
- * current again).
+ * current again; of no table, the stream applying changes or the database attached again after it failed).
  */
 export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "restart", "copied", "recovered"] as const;
 export type SyncEventKind = (typeof EVENT_KINDS)[number];
@@ -59,7 +62,7 @@ export interface SyncEventInput { kind: Exclude<SyncEventKind, "restart">; table
 const FLUSH_MS = 1000;
 const BATCH_ROWS = 500;
 const TRIM_EVERY_MS = 60 * 60 * 1000;
-/** a failure said word for word again within this is the event already written (unless its table recovered between) */
+/** a failure said word for word again within this is the event already written (unless it was over between: `record`) */
 export const REPEAT_MS = 60 * 60 * 1000;
 
 interface Pending { at: Date; seq: number; e: SyncEventInput }
@@ -118,7 +121,8 @@ export class SyncEvents {
   record(e: SyncEventInput): void {
     if (this.closed) { this.log(`sync events: an event after they closed, not recorded (${e.kind}${e.table ? ` ${e.table}` : ""}: ${e.message.split("\n")[0]})`); return; }
     const now = this.now();
-    if (e.kind === "recovered") { for (const k of [...this.lastFailure.keys()]) if (k.endsWith(`\0${e.table ?? ""}`)) this.lastFailure.delete(k); }
+    // a failure over (its table current again or copied anew; of no table, the whole sync's) is said again when it recurs
+    if (e.kind === "recovered" || e.kind === "copied") { for (const k of [...this.lastFailure.keys()]) if (k.endsWith(`\0${e.table ?? ""}`)) this.lastFailure.delete(k); }
     else if (isFailure(e.kind)) {
       const key = `${e.kind}\0${e.table ?? ""}`;
       const last = this.lastFailure.get(key);

@@ -74,10 +74,14 @@ const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:0
 const window = (days: number) => ({ days, covered: days, statements: 3, completed: 1, refused: 1, failed: 0, cancelled: 1, rows: 20, bytesSent: 900, durationMs: { avg: 5, p50: 5, p95: 5 } });
 const summary: QuerySummary = { keptDays: 7, day: window(1), week: window(7) };
 // the listener's statements running now, and its cancel (src/api/postgres/server.ts): a session running one, another idle
-const runningNow: RunningStatement = { session: 4, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-24T10:04:30.000Z", runningMs: 1500,
+const runningNow: RunningStatement = { session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-24T10:04:30.000Z", runningMs: 1500,
   rows: 0, query: "SELECT count(*) FROM orders", queryTruncated: false };
-const cancels: number[] = [];
-const listener = { running: () => [runningNow], cancel: (session: number): CancelAnswer => { cancels.push(session); return session === 4 ? { cancelled: runningNow } : session === 5 ? { idle: 5 } : { unknown: session }; } };
+const cancels: Array<number | [number, number]> = [];
+const listener = { running: () => [runningNow], cancel: (session: number, statement?: number): CancelAnswer => {
+  cancels.push(statement === undefined ? session : [session, statement]);
+  if (session === 4 && statement !== undefined && statement !== runningNow.statement) return { other: runningNow, asked: statement };
+  return session === 4 ? { cancelled: runningNow } : session === 5 ? { idle: 5 } : { unknown: session };
+} };
 const lastUsedAsks: Array<{ name: string; since: string; until: string | null }> = [];
 const requests = {
   days: 7,
@@ -642,5 +646,13 @@ test("the query summary, the statements running now and a cancel: the ledger's a
   assert.deepEqual([gone.status, JSON.parse(gone.text).failure], [404, { code: "not_found", message: "no session 77 is open", why: "it ended, or never was", next: running }]);
   const bad = await cancel({ session: "4" });
   assert.deepEqual([bad.status, JSON.parse(bad.text).failure.message], [400, "send { session }: the session's number, as mason logs --running lists it"]);
-  assert.deepEqual(cancels, [4, 5, 77]);
+  // a statement named: cancelled only while it is the one the session runs
+  const named = await cancel({ session: 4, statement: 9 });
+  assert.deepEqual([named.status, JSON.parse(named.text)], [200, { cancelled: runningNow }]);
+  const moved = await cancel({ session: 4, statement: 8 });
+  assert.deepEqual([moved.status, JSON.parse(moved.text).failure], [409, { code: "refused", message: "session 4 runs another statement now (statement 9), not statement 8: nothing cancelled",
+    why: "statement 8 ended, and the session began another", fix: "mason cancel 4 --statement 9 stops the one it runs now", next: running }]);
+  const badStatement = await cancel({ session: 4, statement: 0 });
+  assert.deepEqual([badStatement.status, JSON.parse(badStatement.text).failure.message], [400, "statement is the statement's number, as mason logs --running lists it, or left out"]);
+  assert.deepEqual(cancels, [4, 5, 77, [4, 9], [4, 8]]);
 });
