@@ -512,6 +512,10 @@ interface Portal {
   cursor?: DuckCursor;
   sent: number;
   fields: FieldDescription[] | null;
+  /** THE BYTES ITS EARLIER EXECUTES SENT (a paged portal's pages, `pageSent`): its request log row, written at its
+   *  last, counts them with that one's — never the session's bytes since its first Execute, which held every other
+   *  statement's sent between two of its Executes */
+  bytes: number;
 }
 
 type TxState = "none" | "open" | "failed";
@@ -524,13 +528,13 @@ type TxState = "none" | "open" | "failed";
  */
 interface DuckCursor { answer: DuckAnswer; formats: readonly number[]; controller: AbortController; pending: Buffer[]; sent: number; done: boolean; failed?: unknown;
   /** when its statement began (the request log's duration runs from it, however many Executes page the rows) */
-  startedAt: number;
-  /** the session's bytes sent when it began (`Session.sentBytes`): its row's bytes are counted from here */
-  sentAt: number }
+  startedAt: number }
 
 /** THE STATEMENT BEING ASKED (`Session.asked`): its text, its message, when it arrived and the session's bytes sent by
- *  then (its row's bytes are counted from there), the JSON paths it reads, and the rows sent so far while it runs */
-interface Asked { sql: string; method: string; startedAt: number; sentAt: number; jsonReads?: readonly string[]; rows?: number }
+ *  then (what this message sends is counted from there: one message is handled at a time, so nothing else is sent
+ *  meanwhile), what its portal's earlier Executes sent (`carried`, `Portal.bytes`), the JSON paths it reads, and the
+ *  rows sent so far while it runs */
+interface Asked { sql: string; method: string; startedAt: number; sentAt: number; carried?: number; jsonReads?: readonly string[]; rows?: number }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
@@ -560,7 +564,7 @@ class Session {
   skipToSync = false;
   /** the query running now, for a CancelRequest and the socket closing */
   running: AbortController | null = null;
-  /** the bytes written to the client so far: a statement's are this less its mark (`Asked.sentAt`, `DuckCursor.sentAt`) */
+  /** the bytes written to the client so far: a message's are this less its mark (`Asked.sentAt`; `bytesFor`) */
   sentBytes = 0;
   /** this session's DuckDB connection, opened at its first statement over a table */
   private duckRunner: DuckRunner | null = null;
@@ -1009,13 +1013,10 @@ class Session {
    * statement's ErrorResponse goes out), and for a refused password (CONNECT), through `options.record`. A catalog
    * read, a SET or a SHOW answered is the protocol's chatter, not recorded. Never throws: `record` buffers.
    */
-  private recordRequest(answer: PgError | { rows: number; startedAt?: number; sentAt?: number }, sql?: string, refusedUser?: string, then: readonly Buffer[] = []): void {
+  private recordRequest(answer: PgError | { rows: number; startedAt?: number }, sql?: string, refusedUser?: string, then: readonly Buffer[] = []): void {
     const asked = this.asked;
     const startedAt = (!(answer instanceof PgError) ? answer.startedAt : undefined) ?? asked?.startedAt ?? Date.now();
-    // THE BYTES SENT for it: what the session was written since the statement's mark (its message's arrival; a cursor's
-    // first Execute), and the frames that end it, sent just after this row is built
-    const mark = (!(answer instanceof PgError) ? answer.sentAt : undefined) ?? asked?.sentAt ?? this.sentBytes;
-    const bytesSent = this.sentBytes - mark + then.reduce((n, b) => n + b.length, 0);
+    const bytesSent = this.bytesFor(then);
     // a refusal's statement is the one refuse() names (a simple Query's own statement, an Execute's portal's)
     const stored = storedPayload(sql ?? asked?.sql ?? "");
     const user = this.token?.user ?? refusedUser;
@@ -1166,7 +1167,7 @@ class Session {
       const fields = plan.fields !== null
         ? plan.fields.map((f, i) => ({ name: f.name, typeOid: a.columns[i]!.oid, typeSize: f.size, typeModifier: a.columns[i]!.oid === f.oid ? f.typmod : -1, format: formatAt(resultFormats, i) }))
         : a.columns.map((c, i) => ({ name: c.name, typeOid: c.oid, typeSize: c.size, typeModifier: -1, format: formatAt(resultFormats, i) }));
-      return { fields, cursor: { answer: a, formats: resultFormats, controller, pending: [], sent: 0, done: false, startedAt: this.asked?.startedAt ?? Date.now(), sentAt: this.asked?.sentAt ?? this.sentBytes } };
+      return { fields, cursor: { answer: a, formats: resultFormats, controller, pending: [], sent: 0, done: false, startedAt: this.asked?.startedAt ?? Date.now() } };
     } finally { this.settled(); }
   }
 
@@ -1431,7 +1432,7 @@ class Session {
       }
       this.dropPortal(m.portal);
       const rows = reply.slice(2, -2);
-      this.portals.set(m.portal, { statement, params: [], boundAt: this.server.now(), resultFormats: m.resultFormats, rows: null, sent: 0, fields: null,
+      this.portals.set(m.portal, { statement, params: [], boundAt: this.server.now(), resultFormats: m.resultFormats, rows: null, sent: 0, fields: null, bytes: 0,
         catalog: { description, rows: statement.explainCatalog === undefined ? rows : catalogExplained(rows, statement.explainCatalog), sent: 0, done } });
       return [bound];
     }
@@ -1449,7 +1450,7 @@ class Session {
     const boundAt = this.server.now();
     this.txNow ??= boundAt;
     this.dropPortal(m.portal);
-    this.portals.set(m.portal, { statement, params, boundAt, resultFormats: m.resultFormats, rows: null, sent: 0, fields: null });
+    this.portals.set(m.portal, { statement, params, boundAt, resultFormats: m.resultFormats, rows: null, sent: 0, fields: null, bytes: 0 });
     return [bindComplete()];
   }
 
@@ -1492,6 +1493,8 @@ class Session {
       c.sent += take;
       return c.sent < c.rows.length ? [...out, portalSuspended()] : [...out, c.done];
     }
+    // what its earlier Executes sent is this one's row's too (`bytesFor`)
+    if (this.asked !== null) this.asked.carried = portal.bytes;
     const statement = portal.statement;
     if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
     const t = statement.shape ?? this.classify(statement.raw.stmt, statementText(statement.sql, statement.raw));
@@ -1528,12 +1531,30 @@ class Session {
         const take = m.maxRows > 0 ? Math.min(m.maxRows, rows.length - portal.sent) : rows.length - portal.sent;
         const out = rows.slice(portal.sent, portal.sent + take);
         portal.sent += take;
-        if (portal.sent < rows.length) return [...out, portalSuspended()];
+        if (portal.sent < rows.length) return this.pageSent(portal, [...out, portalSuspended()]);
         const done = [...out, commandComplete("EXPLAIN")];
         this.recordRequest({ rows: rows.length }, undefined, undefined, done);
         return done;
       }
     }
+  }
+
+  /**
+   * THE BYTES SENT FOR THE STATEMENT BEING ASKED, `then` (the frames that end it, sent just after) among them: what its
+   * portal's earlier Executes sent (`carried`), and what the session was written since this message arrived — exact,
+   * since one message is handled at a time and a portal read aside meanwhile is read, never sent (`readAside`). Never
+   * the session's bytes since a portal's first Execute: another portal's rows sent between two of its Executes were
+   * counted in both rows.
+   */
+  private bytesFor(then: readonly Buffer[]): number {
+    const asked = this.asked;
+    return (asked?.carried ?? 0) + this.sentBytes - (asked?.sentAt ?? this.sentBytes) + then.reduce((n, b) => n + b.length, 0);
+  }
+
+  /** a page of a portal, suspended: what it sends is kept on the portal (`Portal.bytes`) for its last Execute's row */
+  private pageSent(portal: Portal, frames: Buffer[]): Buffer[] {
+    portal.bytes = this.bytesFor(frames);
+    return frames;
   }
 
   /** the statement being answered reads these JSON paths: its request log row says so, answered or failed */
@@ -1558,17 +1579,17 @@ class Session {
     if (m.maxRows <= 0) {
       try { await this.streamRest(c); } finally { c.answer.close(); }
       const done = [commandComplete(`SELECT ${c.sent}`)];
-      this.recordRequest({ rows: c.sent, startedAt: c.startedAt, sentAt: c.sentAt }, undefined, undefined, done);
+      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, undefined, undefined, done);
       return done;
     }
     // at most maxRows (JDBC's fetch size, a cursor): suspended while a row is left, read one chunk ahead to know it
     while (!c.done && c.pending.length <= m.maxRows) await this.fill(c);
     const out = c.pending.splice(0, m.maxRows);
     c.sent += out.length;
-    if (c.pending.length > 0) return [...out, portalSuspended()];
+    if (c.pending.length > 0) return this.pageSent(portal, [...out, portalSuspended()]);
     c.answer.close();
     const done = [...out, commandComplete(`SELECT ${c.sent}`)];
-    this.recordRequest({ rows: c.sent, startedAt: c.startedAt, sentAt: c.sentAt }, undefined, undefined, done);
+    this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, undefined, undefined, done);
     return done;
   }
 

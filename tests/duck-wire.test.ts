@@ -1287,6 +1287,38 @@ test("the request log's bytes are the bytes the client read for the statement: a
   } finally { s.end(); }
 });
 
+// A PAGED PORTAL'S BYTES ARE ITS OWN (src/api/postgres/server.ts `bytesFor`, `Portal.bytes`): its pages and its tag,
+// however many statements ran between two of its Executes — it was counted as the session's bytes since its first
+// Execute, so a portal paged around another statement counted that statement's bytes twice (a review finding)
+test("a paged portal's bytes are its own Executes' frames, never those of a statement run between two of them", async () => {
+  const s = await rawSession();
+  try {
+    const READY = 6;
+    const PARSE_BIND = 5 + 5;
+    s.socket.write(wire.query("BEGIN"));
+    await s.untilReady();
+    const from = recorded.length;
+    // portal a: two rows of five, suspended
+    s.socket.write(Buffer.concat([wire.parse("a", "SELECT v FROM big WHERE id < 5"), wire.bind("pa", "a", [], []), wire.execute("pa", 2), wire.sync()]));
+    const first = await s.untilReady();
+    assert.ok(first.some((m) => m.type === "PortalSuspended"), JSON.stringify(first.map((m) => m.type)));
+    let a = s.bytes - READY - PARSE_BIND;
+    // portal b, run whole between two Executes of a
+    s.socket.write(Buffer.concat([wire.parse("b", "SELECT v || repeat('z', 100) AS w FROM big WHERE id < 50"), wire.bind("pb", "b", [], []), wire.execute("pb", 0), wire.sync()]));
+    await s.untilReady();
+    const b = s.bytes - READY - PARSE_BIND;
+    // the rest of a
+    s.socket.write(Buffer.concat([wire.execute("pa", 0), wire.sync()]));
+    const rest = await s.untilReady();
+    assert.equal(dataRows(rest).length, 3);
+    a += s.bytes - READY;
+    const rows = recorded.slice(from).filter((r) => r.session === s.pid);
+    assert.deepEqual(rows.map((r) => [r.rows, r.bytesSent]), [[50, b], [5, a]], "b's bytes are b's alone, a's its two Executes'");
+    s.socket.write(wire.query("COMMIT"));
+    await s.untilReady();
+  } finally { s.end(); }
+});
+
 // THE STATEMENTS RUNNING NOW, AND A CANCEL BY SESSION (`/api/running`, `POST /api/cancel`): the listener's own, and the
 // cancel is the CancelRequest's path — the client told 57014 "due to user request", recorded cancelled, the session on
 test("the statements running now, by session; a cancel by session stops one as a CancelRequest does, and says when there is nothing to stop", async () => {
