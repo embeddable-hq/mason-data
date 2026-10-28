@@ -85,6 +85,24 @@ node scripts/bench-replica.ts --label "m7g.xlarge, EBS" --target-postgres-second
 The output prints a line per run as it ends, and the fixture is written after each size and at the end, so an
 interrupted run keeps the sizes it finished.
 
+## Measuring a layout of the copy (never a published run)
+
+Four bench-only options measure Mason over a copy in another physical order (issue #9) against the same data, the same
+statements and the same machine, one thing changed per run:
+
+- `--order "<ORDER BY list>"` rewrites the copy of `public.orders` once it has landed and its stored JSON path is
+  ready: Mason is closed, its store opened by the bench alone (no sync, poll, request log or listener), the table
+  written again by `CREATE TABLE … AS SELECT * … ORDER BY …` in UTC and swapped in by name, checkpointed, and Mason
+  opened again as after a `mason stop` (a copy made again fails the run). The columns, their types, the rows and the
+  absence of a key are checked equal; `_mason`'s bookkeeping names the table, so it is untouched. The fixture records the
+  order (`environment.mason.order`) and the rewrite (`sizes[].reorder`: its time, the row groups and the file's bytes in
+  use before and after). The answers are compared with Postgres's after it.
+- `--mason-only` measures Mason's cells alone (a grid); Postgres still makes the data and the answers are still compared.
+- `--reuse-postgres` adopts the `bench-pg` container a `--keep-postgres` run left, stopped while Mason is measured as in
+  the run that made it, so a second layout's run is isolated as the first was.
+- `--keep-copy` leaves the copy at the end with `statements.json` beside it: each statement's DuckDB SQL as Mason
+  plans it (its `EXPLAIN (FORMAT JSON)`), to time the statements over the file alone.
+
 ## Publishing a result
 
 ```bash
