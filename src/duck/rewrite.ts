@@ -427,6 +427,9 @@ class Rewriter {
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
     const own = isNode(v) ? this.synthetic.get(bodyOf(v)) : undefined;
     if (own !== undefined) this.synthetic.set(bodyOf(out as AstNode), own);
+    // and one typed as another (decidedByKey's any_value): a grouped ORDER BY 1 over a jsonb is keyed over its copy
+    const like = isNode(v) ? this.typedLike.get(bodyOf(v)) : undefined;
+    if (like !== undefined) this.typedLike.set(bodyOf(out as AstNode), like);
     return out as T;
   }
 

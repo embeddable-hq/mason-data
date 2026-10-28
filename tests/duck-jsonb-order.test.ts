@@ -148,6 +148,34 @@ test("every way a statement sorts, groups or compares a jsonb is answered as Pos
       }
       assert.deepEqual(got.map((r) => r[1]).sort(), want.map((r) => r[1]).sort(), sql);
     }
+    // A GROUPED VIEW, AS A BI TOOL SENDS IT: the GROUP BY is the key (keyedGroups), and the ORDER BY over the output
+    // name — or its expression, or its ordinal, or the nulls idiom unfolded — is keyed again and must bind to that
+    // group. The rows in Postgres's order, each group's value one of its texts (jsonb-equal-text): equal as jsonb to
+    // Postgres's, row by row
+    const grouped = [
+      "SELECT j, count(*) FROM jo GROUP BY j ORDER BY j DESC, 2",
+      `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM "public"."jo" AS "e" GROUP BY 1 ORDER BY "e.j" DESC, "count" DESC LIMIT 100 OFFSET 0`,
+      `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM "public"."jo" AS "e" GROUP BY 1 ORDER BY ("e"."j") IS NULL ASC, "e"."j" DESC LIMIT 100 OFFSET 0`,
+      `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM "public"."jo" AS "e" GROUP BY "e"."j" ORDER BY ("e"."j") IS NULL ASC, "e"."j" DESC, "count" DESC LIMIT 100 OFFSET 0`,
+      "SELECT j, count(*) FROM jo GROUP BY j ORDER BY 1", "SELECT j, count(*) FROM jo GROUP BY 1 ORDER BY 1 DESC NULLS LAST",
+      `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM "public"."jo" AS "e" GROUP BY "e.j" HAVING "e"."j" IS NOT NULL AND count(*) >= 1 ORDER BY "e.j" DESC`,
+      "SELECT j AS v, count(*) AS n FROM jo GROUP BY v HAVING j <> '1' ORDER BY v, n",
+    ];
+    for (const sql of grouped) {
+      const got = await s.rows(sql), want = await postgres(sql);
+      assert.equal(got.length, want.length, sql);
+      assert.deepEqual(got.map((r) => r.slice(1)), want.map((r) => r.slice(1)), `${sql}: the counts, in Postgres's order`);
+      const pairs = got.map((r, i) => [r[0], want[i]![0]] as const);
+      const unequal = (await truth.query<{ i: number }>("SELECT i FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS u(a, b, i) WHERE a::jsonb IS DISTINCT FROM b::jsonb",
+        [pairs.map((p) => p[0]), pairs.map((p) => p[1])])).rows;
+      assert.deepEqual(unequal, [], `${sql}: each group's value equal to Postgres's, in its order`);
+    }
+    // an output name in HAVING is no column to Postgres (42703): refused as Postgres refuses it
+    const aliased = "SELECT j AS v, count(*) FROM jo GROUP BY v HAVING v <> '1'";
+    const pgError = await truth.query(aliased).then(() => null, (e: { code: string; message: string }) => e);
+    assert.ok(pgError !== null, aliased);
+    const ours = await s.refusal(aliased);
+    assert.deepEqual([ours.code, ours.message], [pgError.code, pgError.message], aliased);
     // WHAT STAYS REFUSED, by name (gap jsonb-compare), each with its way out
     for (const sql of [
       "SELECT greatest(j, '1') FROM jo", "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY j) FROM jo", "SELECT id FROM jo WHERE j IN (SELECT j FROM jo WHERE id < 3)",
@@ -170,14 +198,24 @@ test("every way a statement sorts, groups or compares a jsonb is answered as Pos
 });
 
 test("under ICU and a libc locale a jsonb's strings sort by the collation's key of each, as the same strings sort as text", async () => {
-  const strings = ["b", "B", "a", "A", "é", "e", "ab", "a b", "zebra", "Zürich", "$x", "@x", "10", "9"];
+  // the empty string (ICU's key of it is empty), and under ICU a string of characters ICU ignores (a zero-width space:
+  // its key holds no primary weight); the hand-made libc order covers no U+200B, held apart below
+  const zwsp = String.fromCodePoint(0x200b);
+  const base = ["b", "B", "a", "A", "é", "e", "ab", "a b", "zebra", "Zürich", "$x", "@x", "10", "9", ""];
   for (const [name, collation, libc] of [
     ["icu", { provider: "i", collate: "en-US", locale: "en-US" }, undefined],
     ["libc", { provider: "c", collate: "en_US.utf8", locale: null }, smallLibcOrder()],
   ] as const) {
+    const strings = name === "icu" ? [...base, zwsp, `a${zwsp}`] : base;
     const s = await served(name, collation, libc);
     try {
       const lits = strings.map((x) => `('${x}')`).join(", ");
+      // an empty key, an empty member, an empty string at the top: answered, never "a Mason bug"
+      const empties = ['{"": 1}', '[""]', '""', '{"": ""}', '["", "a"]'].map((x) => `('${x}')`).join(", ");
+      assert.equal((await s.rows(`SELECT t FROM jo, (VALUES ${empties}) v(t) WHERE jo.id = 1 ORDER BY t::jsonb`)).length, 5, `${name}: empty strings`);
+      // many strings in one document: the list of ICU keys has no size cliff (999 equal members, then the string)
+      const many = (x: string): string => `'[${'"x", '.repeat(999)}"${x}"]'`;
+      const asMany = (await s.rows(`SELECT t FROM jo, (VALUES ${strings.map((x) => `('${x}', ${many(x)})`).join(", ")}) v(t, d) WHERE jo.id = 1 ORDER BY d::jsonb, t`)).map((r) => r[0]);
       // the strings as text in the collation's order, and as jsonb scalars, inside arrays, as an object's keys
       const asText = (await s.rows(`SELECT t FROM jo, (VALUES ${lits}) v(t) WHERE jo.id = 1 ORDER BY t, t COLLATE "C"`)).map((r) => r[0]);
       const asJsonb = (await s.rows(`SELECT t FROM jo, (VALUES ${lits}) v(t) WHERE jo.id = 1 ORDER BY to_jsonb(t), t`)).map((r) => r[0]);
@@ -186,6 +224,7 @@ test("under ICU and a libc locale a jsonb's strings sort by the collation's key 
       assert.deepEqual(asJsonb, asText, `${name}: jsonb strings`);
       assert.deepEqual(inArrays, asText, `${name}: inside an array`);
       assert.deepEqual(asKeys, asText, `${name}: as an object's keys (one each: compared by the collation, in storage order)`);
+      assert.deepEqual(asMany, asText, `${name}: the 1,000th string of a 1,000-string array`);
       // the rest of jsonb's order is none of the collation's business: the types, the sizes, the numbers
       const stringless = "SELECT id FROM jo WHERE j IS NOT NULL AND NOT j::text ~ '\"' ORDER BY j, id";
       assert.deepEqual(await s.rows(stringless), await postgres(stringless), `${name}: values holding no string`);
@@ -194,6 +233,10 @@ test("under ICU and a libc locale a jsonb's strings sort by the collation's key 
         const e = await s.refusal(`SELECT t FROM jo, (VALUES ('"a"'), ('{"k": ["x${String.fromCodePoint(0x0E40)}"]}')) v(t) WHERE jo.id = 1 ORDER BY t::jsonb`);
         assert.equal(e.code, "0A000");
         assert.match(e.message, /U\+0E40.*Mason gap libc-uncovered/);
+        // a character the order does not cover (U+200B here) refuses as a jsonb's string exactly as it does as text
+        const asTextZ = await s.refusal(`SELECT t FROM jo, (VALUES ('a'), ('${zwsp}')) v(t) WHERE jo.id = 1 ORDER BY t`);
+        const asJsonbZ = await s.refusal(`SELECT t FROM jo, (VALUES ('a'), ('${zwsp}')) v(t) WHERE jo.id = 1 ORDER BY to_jsonb(t)`);
+        assert.deepEqual([asJsonbZ.code, asJsonbZ.message], [asTextZ.code, asTextZ.message]);
       }
     } finally { await s.close(); }
   }

@@ -408,17 +408,17 @@ rendered from the code, names each). The copy is read-only.
 
 ### Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 2,808 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 2,817 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 2,808 statements | Mason | DuckDB alone |
+| Of 2,817 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 95% | 30% |
 | answered differently by a decision the registry lists (the known differences below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 4% | — |
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 24% |
 | refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 16% |
-| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 12% |
+| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 11% |
 | wrong rows, or the rows in another order | — | 7% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 5% |
 | another error than Postgres's, or answered where Postgres refuses | — | 5% |

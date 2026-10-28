@@ -1,7 +1,7 @@
 {
-  "statements": 2808,
+  "statements": 2817,
   "mason": {
-    "exact": 2665,
+    "exact": 2674,
     "decided": 28,
     "refused": 115,
     "differs": 0
@@ -9,9 +9,9 @@
   "duckdb": {
     "exact": 854,
     "name": 687,
-    "refused": 457,
+    "refused": 460,
     "value": 323,
-    "rows": 191,
+    "rows": 197,
     "text": 152,
     "other": 144
   },
