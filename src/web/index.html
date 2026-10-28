@@ -26,13 +26,15 @@
   <section id="page-tables" aria-labelledby="tables-h" hidden>
     <h2 id="tables-h">Tables</h2>
     <p class="lead">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p>
-    <p class="search"><label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders"></p>
-    <div id="copies"></div>
-    <h3>The database's tables</h3>
+    <p class="search"><label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders">
+      <label for="tables-show">Show</label> <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="not-added">Not added</option></select></p>
     <div id="tables"></div>
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>
     <h2 id="queries-h">Queries</h2>
+    <h3>Connected now</h3>
+    <p class="lead">The clients with a session open: a row per user and client.</p>
+    <div id="connected-now"></div>
     <h3>Running now</h3>
     <p class="lead">The statements running now, as <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.</p>
     <div id="running-now"></div>
@@ -77,7 +79,6 @@
     <h2 id="logs-h">Logs</h2>
     <h3>The sync's events</h3>
     <div id="logs-events"></div>
-    <h3>The run's log</h3>
     <div id="logs-run"></div>
   </section>
 </main>

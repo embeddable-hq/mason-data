@@ -32,30 +32,40 @@ One page per concern (`.claude/rules/web-ui.md`), each rendered from the endpoin
 plain tables first; how they look comes after. The page stays `mason start`'s (`mason ui`); the managed service renders
 the same endpoints its own way.
 
-Built: the shell, Status and Tables (src/web/app.js, src/web/pages/); Queries, Usage and Logs say they are not built yet,
-and Users is today's form and list.
+Built: the shell and every page (src/web/app.js, src/web/pages/).
 
 - **The shell**: `index.html` with a nav — Status · Tables · Queries · Users · Usage · Logs — and one section per page,
   chosen by the URL's hash (`#status`, the default). Each page is an ES module of its own, a route of `PAGE_ROUTES`.
   ONLY THE PAGE SHOWN polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.
 - **Status** (`#status`): one word, `mason status`'s (Ready / Under way / Failed: `readinessWord` of `readiness`, said
-  by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); a table of the facts — tables synced N
-  of M, rows, last sync, the copy's size, statements in the last day and week, their p50 / p95 — and a table of the
-  recent errors (sync and statements). Reads `/api/state` (2 s), `/api/queries`, `/api/events?failed=1`,
-  `/api/requests?failed=1` (30 s).
-- **Tables** (`#tables`): the database's tables (today's list, Add / Columns… / Remove kept), each added one with its
-  state (Synced / Syncing / Failed / Waiting), rows, last sync and its age, how long it took, its error, the copy's own
-  size, and **Sync** (`POST /api/sync`); a search box over the names. Reads `/api/state` (2 s), `/api/usage`
-  `copySizes` (60 s).
-- **Queries** (`#queries`): the statements running now, each with **Cancel** (asks first; `POST /api/cancel`), and the
-  request log as a table — id, started, ended, duration, status, user, client, rows, bytes, the statement, its error —
-  filtered by status, time, user and client, paged by **Older**. Rows scanned is not a column: decide later, it may add
-  cost to every statement. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, never on an older one).
+  by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); ONE table of
+  facts — the database and how its changes arrive, the warnings, Mason's version, up for, restarts (`engine`), tables
+  synced N of M, rows, last sync, the copy's size, the free disk and what a running copy is projected to add (`disk`),
+  the sessions open (`sessions`); in replication mode a Changes table — the stream (`stream`: running or why not, position,
+  lag, last batch, as `streamLines` says it) and the slot's hold on the WAL (`stream.slot`: held, status, room left;
+  `lost`, `unreserved` or no cap are warnings); the statements of the last day and week (p50 / p95); the copies not
+  finished, a bar each, only while there are any; and a table of the recent errors (sync and statements). A fact the
+  run could not read (`{ error }`) is said as unknown with its reason, never as 0; one it does not say is not shown.
+  The slow and the refused statements are the Queries page's. Reads `/api/state` (2 s), `/api/queries`,
+  `/api/events?failed=1`, `/api/requests?failed=1` (30 s).
+- **Tables** (`#tables`): ONE table of the database's tables. An added one shows its state (Synced / Syncing / Failed /
+  Waiting), rows, last sync and its age, how long it took (`<0.1 s` under a tenth), the copy's own size, in replication
+  mode its stream state, its error, **Sync** (`POST /api/sync`) and Remove; one not added its rows and key and why it
+  cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names and All / Added / Not added.
+  Reads `/api/state` (2 s), `/api/usage` `copySizes` (60 s).
+- **Queries** (`#queries`): who is connected now (`sessions` of `/api/state`: user, client, sessions open, statements
+  running), the statements running now, each with **Cancel** (asks first; `POST /api/cancel`), and the request log as a
+  table — the first 8 characters of the id, started, duration, status, user, client, rows, the statement, its error's
+  first line — with a per-row details (the whole id, ended, bytes sent, the whole statement and error), filtered by
+  status, time, user and client, paged by **Older**. Rows scanned is not a column: decide later, it may add cost to
+  every statement. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, never on an older one),
+  `/api/state` (5 s).
 - **Users** (`#users`): today's add form and Remove, and each user's status (Active / Removed), when it was added, its
   last use, and its URL without the password (**Copy**). Reads `/api/users?lastUsed=1` (on opening, then 30 s).
 - **Usage** (`#usage`): the last day's and week's statements (`/api/queries`), the last 24 h hour by hour
-  (`/api/usage?since=24h&step=3600`), and each copy's own size (60 s).
-- **Logs** (`#logs`): the sync's events (`/api/events`, 10 s) and the run's last log entries (`/api/logs`, 5 s).
+  (`/api/usage?since=24h&step=3600`, the process's memory in a closed details), and each copy's own size (60 s).
+- **Logs** (`#logs`): the sync's events (`/api/events`, 10 s). The run's raw log (`/api/logs`, 5 s) is debugging output
+  with internal tags and paths: it is behind a closed details and read only while that is open.
 
 ## Who reads it
 

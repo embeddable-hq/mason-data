@@ -28,6 +28,7 @@
  *                      promise (the shell writes the page again once it settles)
  *       submit?(form, FormData)  a form submitted: null when not its, else a promise (the shell prevents the default)
  *       input?(target)  an input changed: null when not its
+ *       toggle?(target)  a <details> opened or closed: null when not its, else a value or a promise (as `click`)
  *       model?         its state, for the tests
  *     }
  *     ctx = { ask(path, init) → { body } | { failure }, read(path) → { body, failure } | undefined (body: the last
@@ -49,7 +50,7 @@ export * from "./shared.js";
 export { copyingText, tableLine, sourceRows, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
 export { renderUsers, renderAdded } from "./pages/users.js";
-export { renderRunning, renderRequests } from "./pages/queries.js";
+export { renderRunning, renderRequests, renderSessions } from "./pages/queries.js";
 
 /** The pages, in the nav's order. */
 export const PAGES = [statusPage, tablesPage, queriesPage, usersPage, usagePage, logsPage];
@@ -188,6 +189,14 @@ export function start(doc, win) {
   doc.addEventListener("input", (e) => {
     if ((shownPage().input?.(e.target) ?? null) !== null) paint();
   });
+  // a details opening does not bubble, so it is heard on the way down; the page reads what its opening needs at once
+  doc.addEventListener("toggle", async (e) => {
+    const r = shownPage().toggle?.(e.target) ?? null;
+    if (r === null) return;
+    paint();
+    await r;
+    paint();
+  }, true);
   doc.addEventListener("pointerdown", () => { pressed = true; });
   for (const type of ["pointerup", "pointercancel"]) doc.addEventListener(type, () => { pressed = false; win.setTimeout(paint, 0); });
   win.addEventListener?.("hashchange", () => { app.show(route()); paint(); void poll(); });

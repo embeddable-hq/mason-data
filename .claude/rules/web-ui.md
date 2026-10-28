@@ -11,8 +11,8 @@ paths:
 `mason start`'s run serves one page from its command server (src/cli/run-server.ts): a SHELL (`src/web/app.js`: a nav
 and one section per page, the one shown chosen by the URL's hash, `#status` the default) over a module per page
 (`src/web/pages/<id>.js`): STATUS (what `mason status` says), TABLES (what `mason tables`, `mason add` and `mason
-remove` do), USERS (what `mason user` does), and QUERIES, USAGE and LOGS to come (docs/OBSERVABILITY.md "Pages" is
-their spec). The full UI is built on it, page by page, under these rules.
+remove` do), USERS (what `mason user` does), QUERIES, USAGE and LOGS (docs/OBSERVABILITY.md "Pages" is their spec).
+The full UI is built on it, page by page, under these rules.
 
 - **A page is a module of its own, registered in three places** (the contract is at the top of src/web/app.js): its
   `page = { id, title, create(ctx) }` in `PAGES`, its route `/pages/<id>.js` in `PAGE_ROUTES`, its
@@ -25,7 +25,7 @@ their spec). The full UI is built on it, page by page, under these rules.
   progress, the database's rows, a table's line, what an add or a remove did) it is held EQUAL to the CLI's function by
   a test (`tests/web-page.test.ts`: `copyingText`, `tableLines`, `duration`, `sourceRows`, `tableFacts`, `addedLines`,
   `removedReport`, `readinessWord`, `totalsText`, `fileSize`, `bytesText`, `spanText`, `eventLine`, `requestLine`,
-  `queryLines`, `syncedReport`), so the two cannot drift. A line the page splits into a table's cells is held equal
+  `queryLines`, `syncedReport`, `streamLines`), so the two cannot drift. A line the page splits into a table's cells is held equal
   cell by cell: its cells, read in order, are the CLI's line (spaces aside).
 - **Nothing on the page that `mason status --json` (or the command whose `--json` it renders) cannot also say.** A page
   that needs a fact gets it by adding it to the JSON first, computed ONCE on the server (`readiness` is the run's, in
@@ -34,6 +34,12 @@ their spec). The full UI is built on it, page by page, under these rules.
   carries `failure`, `sendFailure` in src/cli/run-server.ts). A refusal the page meets is worded by the code that
   refuses, the same code `mason …` calls (`addUser`, `removeUser`, `listUsers` in src/cli/user.ts) — never re-worded,
   never validated a second time in the page (no `pattern=` mirroring a server rule: one grammar, the server's).
+- **A page shows what a person reads, and puts the rest behind a closed `<details>`**: a debugging aid (the run's raw
+  log, with internal tags and absolute paths; the process's memory; a request's whole id, bytes and statement) is a
+  details, and what only a details shows is read only while it is open (the raw log: `toggle`, the page's own state).
+  A fact is in ONE place: the Status has one table of facts, the Tables page one list of tables. **A fact the run could
+  not read is `unknown` with its reason, never 0, and one it does not say is not shown** (`{ error }` fields of
+  `/api/state`: `stream.slot`, `engine.restarts`, `disk`, `sessions`).
 - **Tables are added and removed through the commands' own endpoints** (done: the TABLES section): the list is
   `GET /api/state` `tables` (`mason tables --json`'s), Add is `POST /api/pick` `{ table, picked: true, columns?, key? }`
   (`mason add`, the run's `pick`), Remove is `POST /api/remove` `{ tables }` (`mason remove`), and after either the page
@@ -43,7 +49,7 @@ their spec). The full UI is built on it, page by page, under these rules.
   open or a Remove asks, the list is FROZEN at the state it opened over (`held`, src/web/pages/tables.js: no refresh, however
   long), so a poll never rewrites it under the person; it is written from the latest state again at Add, Cancel or confirm.
   Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said under its copy as `mason sync` says it
-  (`syncedReport`, src/cli/sync.ts); the search box filters by name in the page alone (the endpoint returns every table).
+  (`syncedReport`, src/cli/sync.ts); the search box filters by name, and All / Added / Not added by state, in the page alone (the endpoint returns every table).
 - **No framework, no build step, no dependency, no CDN, no fetched font**: plain HTML, CSS and ES modules importing each
   other by relative paths, served as they are (cli/build.ts copies `src/**` that is not TypeScript, subfolders too,
   cli/beside.ts). The CSP (`default-src 'self'`,
@@ -89,7 +95,7 @@ adds pages, not endpoints.
 | Usage over time, each copy's own size | `GET /api/usage?since=&until=&step=` | `mason usage --json` (`samples`, re-bucketed by `step`; `copySizes`) |
 | The run's log | `GET /api/logs?lines=&since=` | `mason logs --json` (`lines`: `{ at, text }`) |
 | Each table's sync, the copies in all | `GET /api/state` `tables[].sync`, `totals` | `mason status --json` |
-| The slow statements | `GET /api/slow` | `mason status --json` `slowQueries` |
-| The refused statements | `GET /api/refused` | `mason status --json` `refusedQueries`, `refusedTotal` |
+| The slow statements (not yet on a page: the Queries page's request log lists them) | `GET /api/slow` | `mason status --json` `slowQueries` |
+| The refused statements (the same) | `GET /api/refused` | `mason status --json` `refusedQueries`, `refusedTotal` |
 | The copy's progress | `GET /api/state` `tables[].copy.progress`, `readiness` | `mason wait --json` (`tableLine`, `copyingText` already render it) |
 | Sync on demand | `POST /api/sync` `{ tables }` | `mason sync --json` |
