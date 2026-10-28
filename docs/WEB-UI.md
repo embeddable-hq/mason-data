@@ -95,7 +95,7 @@ Every colour, space, radius, font and size is a CSS custom property on `:root` i
 `--surface`, `--line`, `--fg`, `--muted`, `--accent`, `--ok`, `--warn`, `--bad`, `--unknown`, `--chart-*`,
 `--font-sans`, `--font-mono`, `--space-1…7`, `--radius*`, `--text-*`), set again for dark mode, so a page is restyled
 by its tokens. The components are helpers of `src/web/shared.js` (`status`, `card`, `cards`, `badge`, `button`,
-`panel`, `pageHead`, `empty`, `skeleton`, `details`, `sortTh`, `moreRows`); the charts, `src/web/charts.js`.
+`panel`, `empty`, `skeleton`, `details`, `sortTh`, `moreRows`); the charts, `src/web/charts.js`.
 
 **Buttons say what they do**: every button has a visible label (no icon alone); a primary action is filled dark, a
 destructive one red-lettered and its confirm filled red; each has hover, focus and disabled states and is at least 28 px

@@ -704,15 +704,14 @@ test("in the browser: the tables are written when they change, never at every po
 // ------------------------------------------------------------------ the shell: a page per hash, each polling its own
 
 test("the shell: four tabs — Overview · Tables · Users · Observability, its three sub-tabs — each page a module with a section and a route; every old hash lands on its view", async () => {
-  const routeOf = fn<[string | undefined], string>("routeOf");
+  const parseHash = fn<[string | undefined], { id: string; params: Record<string, string> }>("parseHash");
   const hashes = ["#overview", "#tables", "#users", "#observability/queries", "#observability/usage", "#observability/logs", "#observability",
     // the hashes of before the Observability tab: bookmarks keep working
     "#status", "#queries", "#usage", "#logs",
     // none, one unknown, one with parameters
     "", undefined, "#", "#nope", "#Tables", "#tables?show=failed", "#observability/usage?range=7d", "#observability/nope"];
-  assert.deepEqual(hashes.map(routeOf), ["status", "tables", "users", "queries", "usage", "logs", "queries", "status", "queries", "usage", "logs",
+  assert.deepEqual(hashes.map((h) => parseHash(h).id), ["status", "tables", "users", "queries", "usage", "logs", "queries", "status", "queries", "usage", "logs",
     "status", "status", "status", "status", "status", "tables", "usage", "status"]);
-  const parseHash = fn<[string], { id: string; params: Record<string, string> }>("parseHash");
   assert.deepEqual(parseHash("#observability/logs?range=1h&failures=1"), { id: "logs", params: { range: "1h", failures: "1" } });
   const hashOf = fn<[string, Record<string, string>?], string>("hashOf");
   assert.deepEqual([hashOf("status"), hashOf("queries"), hashOf("queries", { range: "24h" }), hashOf("usage", { range: "7d" }), hashOf("tables", { show: "failed" })],
@@ -1733,7 +1732,6 @@ test("the components: a state is a dot AND its word, a card its label, value and
     `<button type="button" class="primary" data-sync-table="public.o&quot;rders">Sync</button>`);
   assert.equal(textOf(fn<[string, string?], string>("empty")("No user yet", "<code>mason user add</code> adds one")), "No user yet mason user add adds one");
   assert.match(fn<[number?], string>("skeleton")(2), /^<div class="loading" aria-busy="true"><p class="dim">Asking Mason…<\/p><span class="skeleton"><\/span><span class="skeleton half"><\/span><\/div>$/);
-  assert.equal(fn<[string, string, string], string>("pageHead")("status-h", "Status", "What mason status says"), `<div class="page-head"><h2 id="status-h">Status</h2><p class="desc">What mason status says</p></div>`);
   assert.equal(fn<[string], string>("panel")("<table></table>"), `<div class="panel"><table></table></div>`);
   const details = fn<[string, string, string, boolean?, string?], string>("details");
   assert.equal(details("request:a\"b", "More", "<p>x</p>"), `<details data-open="request:a&quot;b"><summary>More</summary><p>x</p></details>`);
@@ -2024,7 +2022,6 @@ test("Queries, Usage and Logs: the index.html carries the parts the restyled pag
 
 // ------------------------------------------------------------------ Observability: the shared range, sorts, filters, and large data
 
-const queriesPage = await import(path.join(WEB, "pages", "queries.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
 type ObsApp = QueriesApp & { pages: Map<string, { input?(t: unknown): unknown; click?(d: Record<string, string>, b: unknown, env: unknown): unknown; route?(p: Record<string, string>, env: unknown): unknown }>; sortRequests(key: string): void };
 
 test("the shared range: each Observability view reads its span — the request log's since, the samples' window and step, the events' since — and only the view shown reads", async () => {
@@ -2060,7 +2057,7 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   assert.match(html, new RegExp(`<input type="checkbox" id="rq-slow" name="slow"> Slow \\(${SLOW_MS / 1000} s or more\\)</label>`), "the label is SLOW_MS's");
   assert.match(html, /<input id="rq-search" name="search" type="search" maxlength="200"/);
-  const requestsPath = fnOf<[Record<string, unknown>, string | null, string?], string>(queriesPage, "requestsPath");
+  const requestsPath = fnOf<[Record<string, unknown>, string | null, string?], string>(queriesModule, "requestsPath");
   assert.equal(requestsPath({ status: "failed", slow: true, search: "from orders", user: "ana" }, null, "1h"), "/api/requests?outcome=refused%2Cfailed&since=1h&user=ana&slow=1&search=from+orders");
   assert.equal(requestsPath({ since: "2026-10-28" }, "C~1", "1h"), "/api/requests?since=2026-10-28&before=C%7E1", "a since of its own is used instead of the range");
   const run = fakeRun();

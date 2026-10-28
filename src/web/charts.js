@@ -20,7 +20,7 @@
 import { esc } from "./shared.js";
 
 /** uPlot's module, imported relative to this one (a route of PAGE_ROUTES), only in a browser and only once. */
-export const UPLOT = "./vendor/uplot-1.6.32/uPlot.esm.js";
+const UPLOT = "./vendor/uplot-1.6.32/uPlot.esm.js";
 
 const holder = (cls, key, label) => `<div class="chart ${cls}" data-chart="${esc(key)}" role="img" aria-label="${esc(label)}"></div>`;
 /** Where a KPI card's sparkline is drawn: `card(label, value, sub, spark("rows", "Rows, the last 24 hours"))`. */
@@ -38,7 +38,7 @@ export const drawable = (spec) => spec !== undefined && spec !== null && Array.i
   spec.y.filter((v) => v !== null).length >= 2;
 
 /** The colours and the font a chart is drawn in, from the page's tokens (light or dark: the stylesheet chooses). */
-export function themeOf(doc, win) {
+function themeOf(doc, win) {
   const cs = win.getComputedStyle(doc.documentElement);
   const v = (k, d) => cs.getPropertyValue(k).trim() || d;
   return { trend: v("--chart-trend", "#a8a8a8"), mark: v("--chart-mark", "#0070f3"), grid: v("--chart-grid", "#ebebeb"),
@@ -92,7 +92,7 @@ export function compactMs(v) {
 }
 
 /** An axis's labeller by a spec's unit: "bytes", "ms", else a count. */
-export const axisFormat = (unit) => unit === "bytes" ? compactBytes : unit === "ms" ? compactMs : compactCount;
+const axisFormat = (unit) => unit === "bytes" ? compactBytes : unit === "ms" ? compactMs : compactCount;
 
 /** The steps an axis's ticks are chosen from, by unit: whole numbers for a count or ms (never 0.5 of a statement), and
  *  powers of 1024 for bytes, so a tick is 512 MiB or 1 GiB, never 477 MiB. */
@@ -104,7 +104,7 @@ export function axisIncrs(unit) {
 
 /** The steps a time axis's ticks are chosen from, in seconds: whole minutes at the least (a tick between two minutes would
  *  read as the minute twice), then hours, then days. */
-export const TIME_INCRS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10_800, 21_600, 43_200, 86_400, 2 * 86_400, 7 * 86_400];
+const TIME_INCRS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10_800, 21_600, 43_200, 86_400, 2 * 86_400, 7 * 86_400];
 
 /** The y range from a zero baseline, a little over the highest value (1 when all are 0). A spike keeps its height: the
  *  axis is never cut, so the bar that is ten times the others reads as ten times (the table has every value). */

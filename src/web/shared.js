@@ -214,9 +214,6 @@ export const json = (method, body) => ({ method, headers: { "Content-Type": "app
  *  answering is seen ageing. `now` is the page's clock. */
 export const updatedText = (at, now = new Date()) => `Updated ${duration(Math.max(0, (now.getTime() - at.getTime()) / 1000))} ago`;
 
-/** A one-line placeholder for a page not built yet: what it will show, and the command that shows it today. */
-export const placeholder = (what, command) => `<p class="dim">${esc(what)}: not built yet. ${code(command)} shows it in a terminal.</p>`;
-
 // ------------------------------------------------------------------ the components (src/web/app.css styles them; docs/WEB-UI.md "Presentation")
 // Each returns HTML from values it escapes; a part that is already HTML (a chart's holder, a body) is said so by its name.
 
@@ -252,9 +249,6 @@ export function card(label, value, sub = "", chartHtml = "", kind = "", href = "
 /** The cards in a grid (each `card(...)`'s HTML), its class saying how many (`cards n6`), so the stylesheet lays every
  *  count out without a card alone on a row: six in one row or two of three, five as three over two. */
 export const cards = (list) => list.length ? `<div class="cards n${list.length}">${list.join("")}</div>` : "";
-
-/** A section's header: its title and one line of what it shows (`id` the heading's, for aria-labelledby). */
-export const pageHead = (id, title, desc) => `<div class="page-head"><h2 id="${esc(id)}">${esc(title)}</h2>${desc ? `<p class="desc">${esc(desc)}</p>` : ""}</div>`;
 
 /** A table (or any wide HTML) in a hairline card that scrolls sideways on a phone, never the page. */
 export const panel = (html) => `<div class="panel">${html}</div>`;

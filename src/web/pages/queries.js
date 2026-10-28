@@ -20,9 +20,9 @@ const QUERIES_EVERY_MS = 30_000;
 const NEWEST_EVERY_MS = 5000;
 const NO_CLIENT = "(no application_name)";
 /** Who is connected: the clients with the most sessions open, this many; the rest in one row. */
-export const SESSIONS_TOP = 10;
+const SESSIONS_TOP = 10;
 /** The most of a statement (or an error) an expanded row writes, in characters. */
-export const STATEMENT_MAX = 16 * 1024;
+const STATEMENT_MAX = 16 * 1024;
 
 /** A statement on one line, as mason logs says it (src/cli/commands.ts `oneLine`): whitespace collapsed, cut with an ellipsis. */
 export const oneLine = (sql, max = 120) => {
@@ -139,7 +139,7 @@ const REQUEST_COLUMNS = [["Status"], ["Query id"], ["Started", "started"], ["Dur
 /** What each sortable column sorts by. */
 const REQUEST_SORTS = { started: (r) => Date.parse(r.startedAt), duration: (r) => r.durationMs, rows: (r) => r.rows };
 /** The request log's order unless a header is clicked: newest first. */
-export const NEWEST_FIRST = { key: "started", dir: "desc" };
+const NEWEST_FIRST = { key: "started", dir: "desc" };
 
 /**
  * THE REQUEST LOG (`mason logs --requests --json`'s shape: { requests, keptDays, before }), newest first (the command
@@ -191,7 +191,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
 const STATUS_OUTCOMES = { completed: "ok", failed: "refused,failed", cancelled: "cancelled" };
 
 /** The filters as they are before any is set. */
-export const NO_FILTERS = { status: "", since: "", user: "", client: "", slow: false, search: "" };
+const NO_FILTERS = { status: "", since: "", user: "", client: "", slow: false, search: "" };
 
 /** The path of one view of the request log: its filters as the server reads them (it judges since and search), since the
  *  range's (`range`, a key of RANGES) unless the filter names its own, and the cursor of an older page. */

@@ -15,14 +15,14 @@
  */
 
 /** Where each card leads: the views that list what it counts (src/web/app.js hashes). */
-export const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
+const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
   slow: "#observability/queries?slow=1", failedQueries: "#observability/queries?status=failed", failedEvents: "#observability/logs?failures=1" };
 import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   card, cards, details, createOpenSet, skeleton } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`). */
-export const RECENT_ERRORS = 5;
+const RECENT_ERRORS = 5;
 
 const POLL_MS = 2000;
 /** The last 24 hours an hour a point: the cards' sparklines (the Usage page's own read, src/web/pages/usage.js HOURLY). */
@@ -104,7 +104,7 @@ export function renderHealth(s) {
 }
 
 /** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
-export const SPARKS = { rows: ["copyRows", "Rows copied"], "copy-bytes": ["copyBytes", "The copy's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
+const SPARKS = { rows: ["copyRows", "Rows copied"], "copy-bytes": ["copyBytes", "The copy's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
 
 /** The sparklines' specs from the usage answer (`/api/usage`'s body; anything else draws none): what `charts()` returns. */
 export function sparkSpecs(usage) {
@@ -158,7 +158,7 @@ const lagText = (lag) => `${lag.bytes === null || lag.bytes === undefined ? "byt
  * runs and why not, its position, its lag, the last batch applied (`streamRows`, held equal to `mason status`'s
  * `streamLines`), and the WAL the slot holds on the database (`slotText`, one of its rows). Each table's own stream state is the Tables page's.
  */
-export function renderStream(s, now = Date.now()) {
+function renderStream(s, now = Date.now()) {
   const st = s.stream;
   if (!st) return "";
   const { head } = streamRows(st, now);
@@ -191,7 +191,7 @@ export function renderFacts(s, now = Date.now()) {
  * failed, or copied but not kept current — and nothing once every copy is done. With no table added, the commands'
  * sentence and what adds one.
  */
-export function renderProgress(s, isOpen = () => false) {
+function renderProgress(s, isOpen = () => false) {
   const picked = s.tables.filter((t) => t.added);
   if (!picked.length) {
     return `<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>` +

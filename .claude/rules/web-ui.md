@@ -108,8 +108,8 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   never colour alone; the one accent is focus, a link and a chart's mark. No gradient, no shadow beyond a hairline:
   the reader's eye goes to what changed state, not to decoration.
 - **A component is a helper of src/web/shared.js, not markup copied into a page** (`status`, `card`/`cards`, `badge`,
-  `button`, `panel`, `pageHead`, `empty`, `skeleton`, `details`): one place to change how a thing looks, and the tests
-  assert on what the helper wrote.
+  `button`, `panel`, `empty`, `skeleton`, `details`): one place to change how a thing looks, and the tests
+  assert on what the helper wrote. A section's heading is index.html's own (it reads before the script runs).
 - **A number is text first; a chart is an addition** (src/web/charts.js over the vendored uPlot): every value a chart
   draws is also in a card or a table, a holder is hidden until it is drawn, and when uPlot cannot load the page reads
   whole (said once in the console). So a test, a screen reader and a box where the module fails read the same page.

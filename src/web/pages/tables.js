@@ -11,13 +11,13 @@
 import { button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText } from "../shared.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
-export const SIZES_PATH = "/api/usage?since=1m";
+const SIZES_PATH = "/api/usage?since=1m";
 
 /** A table's sync in one word (`/api/state` `tables[].sync.state`, src/cli/readiness.ts `syncStateOf`). */
-export const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", failed: "Failed", waiting: "Waiting" };
+const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", failed: "Failed", waiting: "Waiting" };
 
 /** Whether a table's name has the search box's text (any case; nothing typed: every table). */
-export const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(filter.trim().toLowerCase());
+const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(filter.trim().toLowerCase());
 
 /**
  * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (src/cli/sync.ts `syncedReport`, held equal
@@ -34,7 +34,7 @@ export function syncedReport(b, picked, unsynced) {
 }
 
 /** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current. */
-export function renderSynced(b, table, s) {
+function renderSynced(b, table, s) {
   const r = syncedReport(b, [table], s.tables.filter((t) => t.table === table));
   return `<div class="done" role="status"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissSynced: "" }, "small")}</div>`;
@@ -44,7 +44,7 @@ export function renderSynced(b, table, s) {
 export const SHOWS = { all: "All", added: "Added", failed: "Failed", "not-added": "Not added" };
 
 /** How many of the tables that pass the filters the page writes at once; "Show N more" writes as many again. */
-export const TABLE_ROWS = 100;
+const TABLE_ROWS = 100;
 
 /** Whether an added table's copy or sync failed (the Failed filter, the Overview's failed card). */
 const failedTable = (t) => t.added && (t.sync?.state === "failed" || Boolean(t.error));

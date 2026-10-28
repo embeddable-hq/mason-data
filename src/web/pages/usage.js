@@ -14,12 +14,10 @@ import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 import { statementCards, summaryWindow } from "./queries.js";
 
 const EVERY_MS = 60_000;
-/** The samples of a range, its step a line: `step` is seconds (src/cli/run-server.ts `usage`). The 24 hours' is the
- *  Overview's read too (src/web/pages/status.js HOURLY), so the two pages share it. */
-export const usagePath = (range = DEFAULT_RANGE) => { const r = RANGES[rangeOf(range)]; return `/api/usage?since=${r.since}&step=${r.stepSeconds}`; };
-export const HOURLY = usagePath("24h");
+/** The samples of a range, its step a line: `step` is seconds (src/cli/run-server.ts `usage`). */
+const usagePath = (range = DEFAULT_RANGE) => { const r = RANGES[rangeOf(range)]; return `/api/usage?since=${r.since}&step=${r.stepSeconds}`; };
 /** A step said as the charts' titles say it: `a minute`, `an hour`, `every 6 hours`. */
-export const perStep = (seconds) => seconds === 60 ? "a minute" : seconds === 3600 ? "an hour" : seconds % 3600 === 0 ? `every ${seconds / 3600} hours` : `every ${duration(seconds)}`;
+const perStep = (seconds) => seconds === 60 ? "a minute" : seconds === 3600 ? "an hour" : seconds % 3600 === 0 ? `every ${seconds / 3600} hours` : `every ${duration(seconds)}`;
 const QUERIES = "/api/queries";
 /** How often a copy's own size is measured, in seconds (src/duck/usage.ts SIZE_EVERY_MS, held equal by the tests). */
 export const SIZE_EVERY_SECONDS = 600;
@@ -61,7 +59,7 @@ export function sampleCells(s) {
 
 /** The charts, in order: [holder key, title, sample field, kind, how a hovered value is said (exactly, as the table
  *  says it), the axis's unit]. One series each, from a zero baseline. "Statements" is "Statements an hour" by the step. */
-export const CHARTS = [
+const CHARTS = [
   ["usage-statements", "Statements", "statements", "bars", n, "count"],
   ["usage-p95", "p95 duration", "durationP95Ms", "line", (v) => `${n(Math.round(v))} ms`, "ms"],
   ["usage-copy-bytes", "Size of the copy", "copyBytes", "line", fileSize, "bytes"],
@@ -70,7 +68,7 @@ export const CHARTS = [
 /** A chart's title at a step: the statements are counted per step, the rest are levels. */
 const chartTitle = (key, title, step) => key === "usage-statements" ? `Statements ${perStep(step ?? 3600)}` : title;
 /** The sparklines of the cards, by card: [holder key, title, sample field]. The failed ones are the samples' refused and failed together. */
-export const SPARKS = { statements: ["usage-spark-statements", "Statements", "statements"], failed: ["usage-spark-failed", "Failed statements", "failedCount"],
+const SPARKS = { statements: ["usage-spark-statements", "Statements", "statements"], failed: ["usage-spark-failed", "Failed statements", "failedCount"],
   p95: ["usage-spark-p95", "p95", "durationP95Ms"], rows: ["usage-spark-rows", "Rows sent", "rowsSent"], bytes: ["usage-spark-bytes", "Bytes sent", "bytesSent"] };
 
 const samplesOf = (usage) => usage && Array.isArray(usage.samples) ? usage.samples.map((s) => ({ ...s, failedCount: s.statementsRefused + s.statementsFailed })) : [];

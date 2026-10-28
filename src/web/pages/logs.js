@@ -11,11 +11,11 @@
 import { esc, firstLine, utcText, agoText, renderFailure, badge, empty, panel, n, sortTh, nextSort, moreRows, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
 
 /** How many of the range's events are read (the newest), and how many of those the page writes at once. */
-export const EVENTS_LIMIT = 500;
-export const EVENTS_SHOWN = 100;
+const EVENTS_LIMIT = 500;
+const EVENTS_SHOWN = 100;
 /** The events of a range: the newest EVENTS_LIMIT since its start. */
-export const eventsPath = (range = DEFAULT_RANGE) => `/api/events?limit=${EVENTS_LIMIT}&since=${RANGES[rangeOf(range)].since}`;
-export const LOGS = "/api/logs?lines=200";
+const eventsPath = (range = DEFAULT_RANGE) => `/api/events?limit=${EVENTS_LIMIT}&since=${RANGES[rangeOf(range)].since}`;
+const LOGS = "/api/logs?lines=200";
 
 const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
 
@@ -28,7 +28,7 @@ export function eventCells(e) {
 const kindBadge = (e) => badge(e.failed ? `✗ ${e.kind}` : e.kind, e.failed ? "bad" : /^(copied|recovered)$/.test(e.kind) ? "ok" : "");
 
 /** The events read that pass the page's filters: failures only, a kind, a table ("" any; the sync's own is "(the sync)"). */
-export const eventsShown = (events, { failuresOnly = false, kind = "", table = "" } = {}) =>
+const eventsShown = (events, { failuresOnly = false, kind = "", table = "" } = {}) =>
   events.filter((e) => (!failuresOnly || e.failed) && (!kind || e.kind === kind) && (!table || (e.table ?? "(the sync)") === table));
 
 /**
@@ -59,7 +59,7 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
 
 /** The kind and table filters' controls, their choices the kinds and tables of the events read (and the one chosen,
  *  kept while no event read has it). Written into their part: the choices follow what was read. */
-export function renderEventFilters(b, { kind = "", table = "" } = {}) {
+function renderEventFilters(b, { kind = "", table = "" } = {}) {
   const events = b?.events ?? [];
   const uniq = (list, chosen) => [...new Set([...list, ...(chosen ? [chosen] : [])])].sort();
   const select = (id, label, all, values, chosen) => `<div class="field"><label for="${id}">${esc(label)}</label><select id="${id}">` +
