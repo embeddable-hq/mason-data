@@ -33,7 +33,9 @@ import { copyingText, copyProgress, duration, readiness, type Readiness } from "
 import type { CopyProgressView, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
-import type { LedgerRequest } from "../duck/requests.ts";
+import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery } from "../duck/requests.ts";
+import type { RunningStatement } from "../api/postgres/server.ts";
+import { DEFAULT_REQUEST_LIMIT, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -244,7 +246,8 @@ const STATUS_USAGE = `usage: mason status [--json]
 
   Status: running, not running, or hung — then this project's facts, one a line: its folder, its database and how
   its changes are read, the run and its copy's file, the Postgres API and how it listens. Then each added table as
-  mason wait shows it; the statements the Postgres API answered slowly in the last day; and the ones it refused or
+  mason wait shows it; the Postgres API's statements of the last day and the last week (each outcome, the completed
+  ones' average, p50 and p95 time, the rows and bytes sent); the ones it answered slowly in the last day; and the ones it refused or
   failed, each with the reason (mason logs --requests lists every one). With Mason stopped, the same rows say "not
   running", how the last run ended, and the tables are the ones the sources file names. Hung is a run that is alive and does
   not answer its commands (a statement may be holding its main thread): the same rows, and mason stop ends it (exit 1).
@@ -257,7 +260,10 @@ const STATUS_USAGE = `usage: mason status [--json]
            source's: its sources file's), file (the sources file), url, database, remote, version, standby, changes,
            replication, demo (the demo database this run hosts) }, warnings, folder, project, tables: [{ table, rows,
            bytes, key, added, addedColumns, copy, error, … }], engine: { file, bytes, pollSeconds, restarts (each time its supervisor started the
-           run again: { at, reason, upSeconds }) }, slowQueries, refusedQueries, refusedTotal (how many in all),
+           run again: { at, reason, upSeconds }) }, queries: { keptDays, day, week } (the last day's and the last 7
+           days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
+           failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
+           when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all),
            readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
            { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
@@ -292,7 +298,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   summary: "what Mason is doing: the database, each table's copy, the Postgres API, the slow and refused statements",
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
-  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "engine", "stream", "jsonPaths", "slowQueries", "refusedQueries", "refusedTotal", "readiness", "ui",
+  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "engine", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries", "refusedTotal", "readiness", "ui",
     "lastRun", "lastStop", "hung", "next"],
 };
 
@@ -318,6 +324,10 @@ export async function status(argv: string[]): Promise<number> {
     const refusedReply = await callRun(run, "GET", "/api/refused");
     const refused = refusedReply.status === 200 ? refusedReply.body.refused as RefusedQuery[] : [];
     const refusedTotal = typeof refusedReply.body.total === "number" ? refusedReply.body.total : null;
+    // the last day's and week's statements (src/duck/requests.ts summary): asked here, never with the state
+    const queriesReply = await callRun(run, "GET", "/api/queries");
+    const queries: QuerySummary | { error: string } = queriesReply.status === 200 ? queriesReply.body.queries as QuerySummary
+      : { error: String(queriesReply.body.error ?? `the run answered ${queriesReply.status}`) };
     const picked = s.tables.filter((t) => t.added);
     // what to run next, the same for a person and under --json
     const next: NextStep[] = !picked.length ? addSteps(s.tables)
@@ -328,7 +338,7 @@ export async function status(argv: string[]): Promise<number> {
     const restarts = restartsOf(run.home);
     if (json) {
       out(jsonText(STATUS, { running: true, pid: run.pid, postgres: { ...postgresLink(run.postgresUrl), listener: run.postgresListener },
-        ...s, engine: { ...s.engine, restarts }, slowQueries: slow, refusedQueries: refused, refusedTotal, readiness: r }, next));
+        ...s, engine: { ...s.engine, restarts }, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, readiness: r }, next));
       return 0;
     }
     const rows: Array<[string, string]> = [
@@ -358,6 +368,7 @@ export async function status(argv: string[]): Promise<number> {
     out(st.bold(`Tables (${picked.length} of ${s.tables.length} added):`));
     for (const l of tableLines(s)) out(`  ${paintBar(l, st)}`);
     for (const l of jsonPathLines(s.jsonPaths ?? [], st)) out(l);
+    for (const l of queryLines(queries, st)) out(l);
     for (const l of slowLines(slowReply.status === 200 ? slow : { error: String(slowReply.body.error ?? slowReply.status) }, st)) out(l);
     for (const l of refusedLines(refusedReply.status === 200 ? { refused, total: refusedTotal } : { error: String(refusedReply.body.error ?? refusedReply.status) }, st)) out(l);
     out("");
@@ -407,6 +418,25 @@ export function jsonPathLines(paths: readonly KeptPathStatus[], st: Style): stri
   }
   if (dropped) lines.push(`  ${st.dim(`${dropped} dropped (mason status --json says why)`)}`);
   return lines;
+}
+
+/** Bytes as a person reads them: B, KiB, MiB, GiB. */
+function bytesText(b: number): string { return b < 1024 ? `${n(b)} B` : fileSize(b); }
+
+/**
+ * mason status's queries (src/duck/requests.ts summary): the last day's and the last week's statements, a line each —
+ * how many, each outcome, the completed ones' times, the rows and bytes sent — and, when the request log keeps fewer
+ * days than the week, that the week is only what it keeps.
+ */
+export function queryLines(q: QuerySummary | { error: string }, st: Style): string[] {
+  if ("error" in q) return [`\n${st.bold("Queries")}: could not read them (${firstLine(q.error)}; mason logs has the detail)`];
+  const line = (label: string, w: QueryWindow): string => {
+    const counts = `${n(w.statements)} statement${w.statements === 1 ? "" : "s"}: ${n(w.completed)} completed, ${n(w.refused)} refused, ${n(w.failed)} failed, ${n(w.cancelled)} cancelled`;
+    const times = w.durationMs === null ? "" : ` · ${n(w.durationMs.avg)} / ${n(w.durationMs.p50)} / ${n(w.durationMs.p95)} ms`;
+    const short = w.covered < w.days ? st.dim(` (the request log keeps ${w.covered} day${w.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS)`) : "";
+    return `  ${label.padEnd(10)}  ${counts}${times} · ${n(w.rows)} rows, ${bytesText(w.bytesSent)} sent${short}`;
+  };
+  return [`\n${st.bold("Queries")} ${st.dim("(the completed ones' time: average / p50 / p95; mason logs --requests lists each)")}:`, line("last day", q.day), line("last week", q.week)];
 }
 
 /** mason status's slow statements (src/duck/requests.ts slow), each on one line with its times. */
@@ -1030,39 +1060,60 @@ export async function wait(argv: string[]): Promise<number> {
 
 // ------------------------------------------------------------------ mason logs
 
-const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [--failed]] [--json]
+const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>]] [--running] [--json]
 
   The last lines of Mason's log: every copy, poll and statement it ran, warnings and errors with their reasons —
   running or not. With --requests, the run's request log instead: every statement a tool sent the
-  Postgres API that Mason answered, and every one it refused or failed, a line each, newest last — when, the outcome
-  and SQLSTATE, how long, the rows sent, the client's application_name (and the mason user's name), the statement and
-  the error's first line. It is kept MASON_REQUEST_LOG_DAYS days (default 7) in the run's copy, and read through the
-  running Mason.
+  Postgres API that Mason answered, and every one it refused, failed or cancelled, a line each, newest last — when, the
+  outcome and SQLSTATE, how long, the rows sent, the client's application_name (and the mason user's name), the
+  statement and the error's first line. It is kept MASON_REQUEST_LOG_DAYS days (default 7) in the run's copy, and read
+  through the running Mason; the filters narrow it, and a page that has older rows ends with the line that reads them
+  (--before). With --running, the statements running now instead, one per session (mason cancel <session> stops one).
 
     mason logs
     mason logs -f                 keep printing new lines as Mason works, until Ctrl-C
     mason logs -n 200 --start     what mason start printed: its steps, and the warnings and errors since
-    mason logs --requests --failed -n 20    the last 20 statements refused or failed
+    mason logs --requests --failed -n 20    the last 20 statements refused, failed or cancelled
+    mason logs --requests --since 2h --user metabase --outcome failed,cancelled
+    mason logs --running          the statements running now, and their sessions
 
-  -n, --lines <n>  how many lines, or with --requests how many requests (default 40)
+  -n, --lines <n>  how many lines, or with --requests how many requests (default 40; 1 to 10000)
   -f, --follow     keep printing new lines until Ctrl-C
   --start          mason start's own terminal instead (its steps, then only the warnings and errors)
   --requests       the Postgres API's requests, from the run's request log (Mason must be running)
-  --failed         with --requests: only the refused and failed ones
-  --json           as data: { lines } (the log's), or with --requests { requests: [{ requestId, startedAt, session,
-                   applicationName, tokenName, user (the mason user), method, outcome (ok, refused, failed), sqlstate, message, detail, hint,
-                   rows, durationMs, query, queryTruncated }], keptDays }; next
+  --failed         with --requests: only the ones not answered (refused, failed or cancelled)
+  --outcome <o,…>  with --requests: only these outcomes — ok, refused (the statement's own fault), failed (Mason's or
+                   the machine's), cancelled (a cancel or a statement timeout, SQLSTATE 57014)
+  --since <time>   with --requests: started at or after it — an age (30m, 2h, 7d) or an ISO 8601 date or time with
+                   its zone (2026-10-28, 2026-10-28T09:00:00Z)
+  --until <time>   with --requests: started before it (as --since)
+  --user <name>    with --requests: the mason user's statements
+  --client <name>  with --requests: the statements of the client whose application_name it is
+  --before <pos>   with --requests: the page before: the position a page answered with (its last Next line)
+  --running        the statements running now (Mason must be running)
+  --json           as data: { lines } (the log's); with --requests { requests: [{ requestId, startedAt, endedAt,
+                   session, applicationName, tokenName, user (the mason user), method, outcome (ok, refused, failed,
+                   cancelled), status (completed, failed, cancelled: what a reader shows), sqlstate, message, detail,
+                   hint, rows, bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the
+                   page before, or null: none older) }; with --running { running: [{ session, user, applicationName,
+                   method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;
 
 export const LOGS: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "logs",
-  summary: "Mason's log: every copy, poll and statement (-f to follow it; --requests, every statement the Postgres API met)",
+  summary: "Mason's log (-f to follow it); --requests, every statement the Postgres API met; --running, the ones running now",
   usage: LOGS_USAGE,
   options: { lines: { type: "string", short: "n" }, follow: { type: "boolean", short: "f" }, start: { type: "boolean" },
-    requests: { type: "boolean" }, failed: { type: "boolean" }, json: { type: "boolean" } },
-  json: ["lines", "requests", "keptDays", "next"],
+    requests: { type: "boolean" }, failed: { type: "boolean" }, outcome: { type: "string" }, since: { type: "string" }, until: { type: "string" },
+    user: { type: "string" }, client: { type: "string" }, before: { type: "string" }, running: { type: "boolean" }, json: { type: "boolean" } },
+  json: ["lines", "requests", "keptDays", "before", "running", "next"],
 };
+
+/** the request log's filters as mason logs spells them: -n, --since, … (src/cli/request-filter.ts names each so) */
+const flagOf = (k: FilterKey): string => k === "limit" ? "-n" : `--${k}`;
+/** the filters of --requests (every one but -n) */
+const FILTER_FLAGS = ["failed", "outcome", "since", "until", "user", "client", "before"] as const;
 
 /**
  * One request of the run's ledger on one line (src/duck/requests.ts): when, the outcome and SQLSTATE, how long,
@@ -1073,46 +1124,106 @@ export function requestLine(r: LedgerRequest, st: Style): string {
   const paint = r.outcome === "ok" ? st.green : r.outcome === "failed" ? st.red : st.yellow;
   const rows = r.rows === null ? "" : `${n(r.rows)} row${r.rows === 1 ? "" : "s"}`;
   const who = `${r.applicationName || "(no application_name)"}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`;
-  return `${r.startedAt.slice(0, 19).replace("T", " ")}  ${paint(word.padEnd(13))}  ${`${n(r.durationMs)} ms`.padStart(9)}  ${rows.padStart(11)}  ${who}  ` +
+  return `${r.startedAt.slice(0, 19).replace("T", " ")}  ${paint(word.padEnd(15))}  ${`${n(r.durationMs)} ms`.padStart(9)}  ${rows.padStart(11)}  ${who}  ` +
     `${oneLine(r.query, 120) || "(no statement)"}${r.message ? ` — ${firstLine(r.message)}` : ""}`;
 }
 
+/** One statement running now on one line (src/api/postgres/server.ts RunningStatement): its session, how long, who, what. */
+export function runningLine(r: RunningStatement): string {
+  const who = `${r.applicationName || "(no application_name)"}${r.user ? ` (user ${r.user})` : ""}`;
+  return `session ${String(r.session).padEnd(5)}  ${spanText(r.runningMs / 1000).padStart(8)}  ${`${n(r.rows)} row${r.rows === 1 ? "" : "s"} sent`.padStart(14)}  ${who}  ` +
+    `${oneLine(r.query, 120) || "(no statement)"}`;
+}
+
+/** The mason logs line that reads the same filters again, a page further back (`before`, the page's cursor). */
+function olderPage(q: RequestQuery, before: string): string {
+  const quote = (v: string): string => /^[\w.:,~+-]+$/.test(v) ? v : `'${v.replaceAll("'", "'\\''")}'`;
+  const parts = ["mason logs --requests", ...(q.limit !== DEFAULT_REQUEST_LIMIT ? [`-n ${q.limit}`] : [])];
+  if (q.failed === true) parts.push("--failed");
+  if (q.outcomes !== undefined) parts.push(`--outcome ${q.outcomes.join(",")}`);
+  for (const k of ["since", "until", "user", "client"] as const) { const v = q[k]; if (v !== undefined) parts.push(`--${k} ${quote(v)}`); }
+  parts.push(`--before ${quote(before)}`);
+  return parts.join(" ");
+}
+
 /** mason logs --requests: the run's ledger through its command server (one process holds the copy's file) */
-async function requestLogs(limit: number, failedOnly: boolean, json: boolean): Promise<number> {
+async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
   const r0 = await theRun(process.cwd());
   if ("problem" in r0) return failed("logs", r0, { json });
   return guarded("logs", json, async () => {
-    const reply = await callRun(r0.run, "GET", `/api/requests?limit=${limit}${failedOnly ? "&failed=1" : ""}`);
-    if (reply.status !== 200) {
-      return failed("logs", { message: String(reply.body.error ?? `the run answered ${reply.status}`), code: reply.status === 409 ? "refused" : "failed",
-        next: [["mason status", "the slow and refused queries of the last day"], ["mason logs", "Mason's log"]] }, { json });
-    }
+    const reply = await callRun(r0.run, "GET", `/api/requests?${requestFilterParams(q).toString()}`);
+    if (reply.status !== 200) return failed("logs", runFailure(reply, [["mason status", "the slow and refused queries of the last day"], ["mason logs", "Mason's log"]]), { json });
     const requests = reply.body.requests as LedgerRequest[];
     const keptDays = Number(reply.body.keptDays);
-    const next: NextStep[] = failedOnly ? [["mason logs --requests", "every request, answered or not"], ["mason logs", "Mason's log, where each refusal is a line too"]]
-      : [["mason logs --requests --failed", "only the refused and failed ones"], ["mason status", "the slow and refused ones of the last day, grouped"]];
-    if (json) { out(jsonText(LOGS, { requests, keptDays }, next)); return 0; }
+    const before = typeof reply.body.before === "string" ? reply.body.before : null;
+    const filtered = q.failed === true || q.outcomes !== undefined || q.since !== undefined || q.until !== undefined || q.user !== undefined || q.client !== undefined;
+    const next: NextStep[] = [
+      ...(before !== null ? [[olderPage(q, before), "the page before this one"] as NextStep] : []),
+      ...(filtered ? [["mason logs --requests", "every request, answered or not"] as NextStep] : [["mason logs --requests --failed", "only the ones not answered"] as NextStep]),
+      ["mason status", "the last day's and week's statements, and the slow and refused ones grouped"],
+    ];
+    if (json) { out(jsonText(LOGS, { requests, keptDays, before }, next)); return 0; }
     const st = styleOut();
-    if (!requests.length) out(`No ${failedOnly ? "refused or failed request" : "request"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS).`);
+    if (!requests.length) out(`No ${filtered ? "request that passes the filters" : "request"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS).`);
     for (const r of requests) out(requestLine(r, st));
     out(endText({ next }, st));
     return 0;
   });
 }
 
+/** mason logs --running: the statements the listener runs now, through the run's command server */
+async function runningLogs(json: boolean): Promise<number> {
+  const r0 = await theRun(process.cwd());
+  if ("problem" in r0) return failed("logs", r0, { json });
+  return guarded("logs", json, async () => {
+    const reply = await callRun(r0.run, "GET", "/api/running");
+    if (reply.status !== 200) return failed("logs", runFailure(reply, [["mason logs", "Mason's log"]]), { json });
+    const running = reply.body.running as RunningStatement[];
+    const next: NextStep[] = running.length
+      ? [[`mason cancel ${running[0]!.session}`, "stop a session's statement, as a client's cancel does"], ["mason logs --requests", "the statements answered, refused and cancelled"]]
+      : [["mason logs --requests", "the statements answered, refused and cancelled"]];
+    if (json) { out(jsonText(LOGS, { running }, next)); return 0; }
+    const st = styleOut();
+    out(running.length ? st.bold(`Running now (${running.length}):`) : "No statement is running now.");
+    for (const r of running) out(`  ${runningLine(r)}`);
+    out(endText({ next }, st));
+    return 0;
+  });
+}
+
+/** A refusal the run answered, in the Failure shape it carries (`failure`, src/cli/run-server.ts sendFailure). */
+export function runFailure(reply: { status: number; body: Record<string, unknown> }, next: readonly NextStep[]): Failure {
+  const f = reply.body.failure as { code?: unknown; message?: unknown; why?: unknown; fix?: unknown } | undefined;
+  const code = typeof f?.code === "string" ? f.code : reply.status === 400 ? "usage" : reply.status === 404 ? "not_found" : reply.status === 409 ? "refused" : "failed";
+  return { message: typeof f?.message === "string" ? f.message : String(reply.body.error ?? `the run answered ${reply.status}`), code,
+    ...(typeof f?.why === "string" ? { why: f.why } : {}), ...(typeof f?.fix === "string" ? { fix: f.fix } : {}), next };
+}
+
 export async function logs(argv: string[]): Promise<number> {
   const f = parseCommand(LOGS, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
-  const lines = f.values.lines === undefined ? 40 : Number(f.values.lines);
-  if (!Number.isInteger(lines) || lines < 0) return failed("logs", { message: `-n (--lines) is a number of lines, not ${JSON.stringify(f.values.lines)}`, code: "usage" }, { json });
-  if (f.values.failed && !f.values.requests) return failed("logs", { message: "--failed is a filter of --requests", code: "usage", fix: "mason logs --requests --failed" }, { json });
+  const filter = FILTER_FLAGS.find((k) => f.values[k] !== undefined && f.values[k] !== false);
+  if (filter !== undefined && !f.values.requests) {
+    return failed("logs", { message: `--${filter} is a filter of --requests`, code: "usage", fix: `mason logs --requests --${filter}${filter === "failed" ? "" : " …"}` }, { json });
+  }
+  if (f.values.running && (f.values.requests || f.values.start || f.values.follow)) {
+    const other = f.values.requests ? "--requests" : f.values.start ? "--start" : "-f";
+    return failed("logs", { message: `--running lists the statements running now; ${other} is ${other === "--requests" ? "the request log's" : "the log file's"}`, code: "usage", fix: `mason logs --running, or mason logs ${other}` }, { json });
+  }
   if (f.values.requests && (f.values.start || f.values.follow)) return failed("logs", { message: `--requests lists the request log; ${f.values.start ? "--start" : "-f"} is the log file's`, code: "usage", fix: "mason logs --requests, or mason logs " + (f.values.start ? "--start" : "-f") }, { json });
   if (json && f.values.follow) return failed("logs", { message: "-f prints lines as they come, and --json is one answer", code: "usage", fix: "mason logs --json, or mason logs -f" }, { json });
+  if (f.values.running) return runningLogs(json);
   if (f.values.requests) {
-    if (lines < 1) return failed("logs", { message: "-n with --requests is a number of requests, 1 or more", code: "usage" }, { json });
-    return requestLogs(lines, f.values.failed === true, json);
+    // the filters, read as the run reads its query string (src/cli/request-filter.ts): a mistake is said here, exit 2
+    const text = (v: unknown): string | undefined => typeof v === "string" ? v : undefined;
+    const q = requestFilter({ limit: text(f.values.lines), failed: f.values.failed === true, outcome: text(f.values.outcome), since: text(f.values.since),
+      until: text(f.values.until), user: text(f.values.user), client: text(f.values.client), before: text(f.values.before) }, Date.now(), flagOf);
+    if ("message" in q) return failed("logs", { ...q, usage: LOGS_USAGE }, { json });
+    return requestLogs(q, json);
   }
+  const lines = f.values.lines === undefined ? 40 : Number(f.values.lines);
+  if (!Number.isInteger(lines) || lines < 0) return failed("logs", { message: `-n (--lines) is a number of lines, not ${JSON.stringify(f.values.lines)}`, code: "usage" }, { json });
   // a stopped run's log is still worth reading: the project's, running or not
   const t = theProject(process.cwd());
   if ("problem" in t) return failed("logs", t, { json });

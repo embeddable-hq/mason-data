@@ -26,7 +26,7 @@ import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, SECURITY_HEADERS } from "./security.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
-import { errorJson, nextJson, type Failure } from "./command.ts";
+import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { readiness } from "./readiness.ts";
 import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT } from "./user.ts";
 import { postgresLink } from "./pg-url.ts";
@@ -34,6 +34,8 @@ import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type PolledTable, type StreamStatus } from "../duck/sync.ts";
 import type { RequestLedger } from "../duck/requests.ts";
+import { requestFilter, requestFilterText } from "./request-filter.ts";
+import type { PgApiServer } from "../api/postgres/server.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 
 /** A statement answered in this many milliseconds or more is slow: what mason status lists (src/duck/requests.ts slow). */
@@ -73,6 +75,8 @@ export interface RunContext {
   /** the database's URL the run copies from, as the sources file resolved it at the start */
   runUrl: string;
   log: (m: string) => void;
+  /** the Postgres listener: the statements running now, and a cancel of one (`/api/running`, `POST /api/cancel`) */
+  listener: Pick<PgApiServer, "running" | "cancel">;
   /** the run's copy: each added table's copy as the sync has it, the file it is in, how often it polls */
   duck: { copies: () => CopyState[]; file: string; pollSeconds: number;
     /** a poll of exactly these tables, now (mason sync; src/duck/sync.ts pollNow) */
@@ -80,7 +84,7 @@ export interface RunContext {
     /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode */
     stream: () => Promise<StreamStatus | null>;
     /** the Postgres listener's requests (src/duck/requests.ts, `_mason.requests`): mason status and mason logs --requests */
-    requests: Pick<RequestLedger, "recent" | "slow" | "refused" | "days">;
+    requests: Pick<RequestLedger, "page" | "slow" | "refused" | "summary" | "days">;
     /** the JSON paths stored as columns of the copies, and how far each is (src/duck/kept.ts): mason status */
     jsonPaths?: () => KeptPathStatus[] };
 }
@@ -245,9 +249,24 @@ export function createRunServer(ctx: RunContext): http.Server {
         } else if (req.method === "GET" && url.pathname === "/api/refused") {
           sendJson(res, 200, await ctx.duck.requests.refused());
         } else if (req.method === "GET" && url.pathname === "/api/requests") {
-          const limit = Number(url.searchParams.get("limit") ?? 40);
-          if (!Number.isInteger(limit) || limit < 1 || limit > 10_000) throw new Refusal(400, "limit is a whole number of requests, 1 to 10000");
-          sendJson(res, 200, { requests: await ctx.duck.requests.recent({ limit, failed: url.searchParams.get("failed") === "1" }), keptDays: ctx.duck.requests.days });
+          // the filters, read as mason logs --requests reads its options (src/cli/request-filter.ts)
+          const q = requestFilter(requestFilterText(url.searchParams));
+          if ("message" in q) { sendFailure(res, 400, q); return; }
+          sendJson(res, 200, { ...await ctx.duck.requests.page(q), keptDays: ctx.duck.requests.days });
+        } else if (req.method === "GET" && url.pathname === "/api/queries") {
+          // the last day's and week's statements in one scan of the request log (mason status); asked on its own, never
+          // with /api/state, which the page asks every 2 s
+          sendJson(res, 200, { queries: await ctx.duck.requests.summary() });
+        } else if (req.method === "GET" && url.pathname === "/api/running") {
+          sendJson(res, 200, { running: ctx.listener.running() });
+        } else if (req.method === "POST" && url.pathname === "/api/cancel") {
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { session?: unknown };
+          if (typeof body.session !== "number" || !Number.isInteger(body.session) || body.session < 1) throw new Refusal(400, "send { session }: the session's number, as mason logs --running lists it");
+          const r = ctx.listener.cancel(body.session);
+          if ("cancelled" in r) { sendJson(res, 200, r); return; }
+          const running: NextStep = ["mason logs --running", "the statements running now, with their sessions"];
+          if ("unknown" in r) { sendFailure(res, 404, { message: `no session ${r.unknown} is open`, code: "not_found", why: "it ended, or never was", next: [running] }); return; }
+          sendFailure(res, 409, { message: `session ${r.idle} is running no statement: nothing to cancel`, code: "refused", why: "its statement ended, or it is between two", next: [running] });
         } else if (req.method === "POST" && url.pathname === "/api/pick") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { table?: unknown; picked?: unknown; columns?: unknown; key?: unknown };
           if (typeof body.table !== "string" || typeof body.picked !== "boolean") throw new Refusal(400, "send { table, picked, columns?, key? }");

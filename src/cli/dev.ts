@@ -417,6 +417,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
     log: (m) => say(`  ${m}`),
+    // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
+    listener: api,
     duck: { copies: () => sync.state(), file: duckFile, pollSeconds: pollMs / 1000, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), requests,
       jsonPaths: () => sync.kept.status() },
   });

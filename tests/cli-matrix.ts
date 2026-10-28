@@ -37,6 +37,8 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   ui: ["--no-open"],
   sync: ["no_such_table"],
   logs: [],
+  // a session that is not open: refused by name in every state with a run, and by the state without one
+  cancel: ["99999"],
   stop: [],
   destroy: [],
   serve: [],
