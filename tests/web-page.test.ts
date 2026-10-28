@@ -65,8 +65,10 @@ function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: bo
     facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: o.tables ?? TABLES, systemIdentifier: null }),
     warnings: o.warnings ?? [], slot: o.replication ? "mason_dev_shop" : "", changes: o.replication ? "replication" : "poll",
     ...(o.replication ? { publication: { name: "app_pub", owned: false } } : {}),
-    page: true, folder: () => "/app/mason", root: "/app", sources: () => ({ file: o.sources ?? sourceFile, problem: null }),
-    duck: { file: "/app/.mason/duck.db", pollSeconds: 5 },
+    page: true, folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
+    sources: () => ({ file: o.sources ?? sourceFile, problem: null }),
+    listener: { openSessions: () => ({ open: 0, byClient: [] }) },
+    duck: { file: "/app/.mason/duck.db", pollSeconds: 5, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
   } as unknown as RunContext;
   return JSON.parse(JSON.stringify(runState(ctx, copies, null, o.now))) as RunState;
 }

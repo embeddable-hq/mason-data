@@ -1324,23 +1324,24 @@ test("a paged portal's bytes are its own Executes' frames, never those of a stat
 test("the sessions logged in now, by user and client, and how many of each run a statement; a closed one is gone", async () => {
   const has = (api as unknown as { openSessions?: unknown }).openSessions;
   assert.equal(typeof has, "function", "src/api/postgres/server.ts PgApiServer.openSessions");
-  const before = api.openSessions().open;
+  // other tests' sessions may still be closing: these are told apart by their application_name
   const a = await rawSession(), b = await rawSession(), c = await rawSession();
   try {
-    for (const x of [a, b]) { x.socket.write(wire.query("SET application_name = 'Metabase'")); await x.untilReady(); }
+    for (const [x, name] of [[a, "obs-two"], [b, "obs-two"], [c, "obs-one"]] as const) { x.socket.write(wire.query(`SET application_name = '${name}'`)); await x.untilReady(); }
+    const group = (client: string): unknown => api.openSessions().byClient.find((g) => g.client === client);
     const open = api.openSessions();
-    assert.equal(open.open, before + 3);
-    assert.deepEqual(open.byClient.find((g) => g.client === "Metabase"), { user: "", client: "Metabase", open: 2, running: 0 }, "a token's sessions: no user");
-    assert.ok(open.byClient.some((g) => g.client === "" && g.open >= 1), JSON.stringify(open));
+    assert.ok(open.open >= 3 && open.open === open.byClient.reduce((n, g) => n + g.open, 0), JSON.stringify(open));
+    assert.deepEqual(group("obs-two"), { user: "", client: "obs-two", open: 2, running: 0 }, "a token's sessions: no user");
+    assert.deepEqual(group("obs-one"), { user: "", client: "obs-one", open: 1, running: 0 });
     a.socket.write(wire.query(SLOW));
-    for (const deadline = Date.now() + 10_000; api.openSessions().byClient.find((g) => g.client === "Metabase")?.running !== 1;) {
+    for (const deadline = Date.now() + 10_000; (group("obs-two") as { running: number } | undefined)?.running !== 1;) {
       if (Date.now() > deadline) throw new Error("the statement never showed as running");
       await sleep(20);
     }
     api.cancel(a.pid);
     await a.untilReady();
     c.end();
-    for (const deadline = Date.now() + 5_000; api.openSessions().open !== before + 2;) {
+    for (const deadline = Date.now() + 5_000; group("obs-one") !== undefined;) {
       if (Date.now() > deadline) throw new Error(`a closed session is still counted: ${JSON.stringify(api.openSessions())}`);
       await sleep(20);
     }

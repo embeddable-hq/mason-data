@@ -373,7 +373,7 @@ export class UsageSampler {
 
   /**
    * The samples from `since` until `until`, oldest first; with `stepSeconds`, re-bucketed in ONE query: buckets of that
-   * many seconds from `since`, each count summed and each level at its highest. Committed rows only.
+   * many seconds from `since`, each count summed and each level at its highest (the disk free at its lowest). Committed rows only.
    */
   async samples(o: UsageQuery): Promise<UsageSample[]> {
     const values: DuckDBValue[] = [o.since, o.until];
