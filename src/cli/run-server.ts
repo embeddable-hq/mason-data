@@ -12,9 +12,9 @@
  * request log (src/duck/requests.ts). Added is a fact about the project's files: a table is added when its sources file
  * names it.
  *
- * THE WEB PAGE (src/web/, `mason ui`, docs/WEB-UI.md): under `mason start` it also serves one page and its two files,
- * from an allowlist read when it starts (`pageFiles`), and the users the page manages (`/api/users`, the functions
- * `mason user` calls). The page reads the same JSON the commands read; a refusal carries `failure`, the CLI's Failure
+ * THE WEB PAGE (src/web/, `mason ui`, docs/WEB-UI.md): under `mason start` it also serves one page and its files (the
+ * shell, its pages' modules, the stylesheet), from an allowlist read when it starts (`pageFiles`), and the users the
+ * page manages (`/api/users`, the functions `mason user` calls). The page reads the same JSON the commands read; a refusal carries `failure`, the CLI's Failure
  * shape (message, why, fix, next), so the page says it as the command would. `mason serve`'s run serves no page.
  */
 import * as fs from "node:fs";
@@ -287,6 +287,14 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/": ["index.html", "text/html; charset=utf-8"],
   "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/app.css": ["app.css", "text/css; charset=utf-8"],
+  // the shell's shared helpers and one module per page (src/web/app.js has the page module contract)
+  "/shared.js": ["shared.js", "text/javascript; charset=utf-8"],
+  "/pages/status.js": ["pages/status.js", "text/javascript; charset=utf-8"],
+  "/pages/tables.js": ["pages/tables.js", "text/javascript; charset=utf-8"],
+  "/pages/queries.js": ["pages/queries.js", "text/javascript; charset=utf-8"],
+  "/pages/users.js": ["pages/users.js", "text/javascript; charset=utf-8"],
+  "/pages/usage.js": ["pages/usage.js", "text/javascript; charset=utf-8"],
+  "/pages/logs.js": ["pages/logs.js", "text/javascript; charset=utf-8"],
 };
 
 /**

@@ -15,18 +15,24 @@
   <p id="where" class="where"></p>
   <p id="updated" class="updated" aria-live="polite"></p>
 </header>
+<!-- the pages: one section each, the one shown chosen by the URL's hash (src/web/app.js); the links work before the script runs -->
+<nav id="nav" aria-label="Pages"><ul><li><a href="#status">Status</a></li><li><a href="#tables">Tables</a></li><li><a href="#queries">Queries</a></li><li><a href="#users">Users</a></li><li><a href="#usage">Usage</a></li><li><a href="#logs">Logs</a></li></ul></nav>
 <div id="poll"></div>
 <main>
-  <section aria-labelledby="status-h">
+  <section id="page-status" aria-labelledby="status-h">
     <h2 id="status-h">Status</h2>
     <div id="status"><p class="dim">Asking Mason…</p></div>
   </section>
-  <section aria-labelledby="tables-h">
+  <section id="page-tables" aria-labelledby="tables-h" hidden>
     <h2 id="tables-h">Tables</h2>
     <p class="lead">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p>
     <div id="tables"></div>
   </section>
-  <section aria-labelledby="users-h">
+  <section id="page-queries" aria-labelledby="queries-h" hidden>
+    <h2 id="queries-h">Queries</h2>
+    <div id="queries"></div>
+  </section>
+  <section id="page-users" aria-labelledby="users-h" hidden>
     <h2 id="users-h">Users</h2>
     <p class="lead">A user of the Postgres API: a name and a password that does not expire, for a BI tool or an app. The same users as <code>mason user</code>.</p>
     <div id="added"></div>
@@ -37,6 +43,14 @@
     </form>
     <div id="action"></div>
     <div id="users"></div>
+  </section>
+  <section id="page-usage" aria-labelledby="usage-h" hidden>
+    <h2 id="usage-h">Usage</h2>
+    <div id="usage"></div>
+  </section>
+  <section id="page-logs" aria-labelledby="logs-h" hidden>
+    <h2 id="logs-h">Logs</h2>
+    <div id="logs"></div>
   </section>
 </main>
 <noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code> and <code>mason user list</code> say the same in a terminal.</p></noscript>

@@ -11,7 +11,12 @@ mason ui --json       # { url, port, next }
 
 ## What it shows
 
-- **Status**, refreshed every 2 s while the tab is open: the database (its URL with the password masked, its Postgres
+The page has a nav — Status · Tables · Queries · Users · Usage · Logs — and shows one page at a time, chosen by the
+address's hash (`#tables`; none, or one it does not know, is Status), so a page can be bookmarked and the browser's Back
+goes to the page before. Only the page shown asks Mason anything, each thing at the rate it changes, and nothing while
+the tab is hidden. Queries, Usage and Logs are not built yet: each says so, and names the command that shows it.
+
+- **Status**, refreshed every 2 s while it is shown (the request log's counts every 30 s): the database (its URL with the password masked, its Postgres
   version, how changes arrive — polling or logical replication), the warnings, each added table's copy (its bar, its
   percent, and the line `mason wait` prints: rows, chunks, rows a second, the time left, or why it failed), the
   statements answered slowly and the ones refused in the last day (`mason status` lists them), and whether every added
@@ -49,7 +54,9 @@ to the person at the machine; a page reached from other machines would need TLS 
 
 ## Building it out
 
-The page is plain HTML, CSS and one JavaScript module under `src/web/`, with no framework, build step or dependency,
+The page is plain HTML, CSS and JavaScript modules under `src/web/` — a shell (`app.js`), what the pages share
+(`shared.js`) and one module per page (`pages/<id>.js`, so pages are built independently) — with no framework, build
+step or dependency,
 and every page of the full UI renders a command's `--json` shape from an endpoint the server already has (the
 statements that ran, the slow and refused statements, a sync on demand).
 [`.claude/rules/web-ui.md`](../.claude/rules/web-ui.md) has the rules and the table of what each feature reads.

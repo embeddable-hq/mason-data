@@ -12,7 +12,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-header, main, #poll { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+header, nav, main, #poll { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
 header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; padding-top: 24px; }
 h1 { font-size: 22px; margin: 0; }
 .where { margin: 0; color: var(--dim); }
@@ -74,3 +74,6 @@ label.tick { display: inline-flex; align-items: baseline; gap: 4px; margin: 2px 
 .done { border: 1px solid var(--ok); border-radius: 8px; padding: 8px 12px; margin: 4px 0 8px; }
 .done .headline { font-weight: 600; margin: 0 0 4px; overflow-wrap: anywhere; }
 .done .note, .done .tip { color: var(--dim); margin: 2px 0 6px; }
+nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 12px 0 0; padding: 0; }
+nav a { color: var(--fg); }
+nav a[aria-current="page"] { font-weight: bold; text-decoration: none; }

@@ -31,7 +31,7 @@ const fn = <A extends unknown[], R>(name: string): Fn<A, R> => {
 interface Failure { code: string; message: string; why?: string; fix?: string; next?: Array<{ command: string; what?: string }> }
 interface App {
   model: Record<string, unknown>;
-  poll(): Promise<void>; addUser(name: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
+  show(page: string): void; poll(): Promise<void>; addUser(name: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
   confirmRemove(name: string): Promise<boolean>; dismissAdded(): void; view(): Record<string, string>;
   addTable(table: string, columns?: string[], key?: string[]): Promise<boolean>; choose(table: string): void; cancelChoose(): void;
   askRemoveTable(table: string): void; cancelRemoveTable(): void; confirmRemoveTable(table: string): Promise<boolean>; dismissOutcome(): void;
@@ -337,7 +337,7 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   };
 }
 
-test("the app: a poll writes the status and the users and when; a poll that fails keeps what it knew and says what to do", async () => {
+test("the app: a poll writes the shown page and when, reading only its endpoints; a poll that fails keeps what it knew and says what to do", async () => {
   const run = fakeRun();
   const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(2026, 9, 27, 14, 3, 5));
   assert.match(app.view().status!, /Asking Mason/);
@@ -347,8 +347,15 @@ test("the app: a poll writes the status and the users and when; a poll that fail
   assert.equal(v.updated, "Updated 14:03:05");
   assert.equal(v.poll, "");
   assert.match(textOf(v.status!), /public\.orders 15% copying/);
-  assert.match(textOf(v.users!), /^User Added metabase 2026-10-27 09:10 UTC/);
-  assert.deepEqual(run.asked, ["GET /api/state", "GET /api/slow", "GET /api/refused", "GET /api/users"]);
+  assert.deepEqual(run.asked, ["GET /api/state", "GET /api/slow", "GET /api/refused"], "the Status page's reads, no other page's");
+  assert.equal(v.users, "", "the users are not read while Status is shown");
+  // the Users page shown: its read alone
+  app.show("users");
+  run.asked.length = 0;
+  await app.poll();
+  assert.deepEqual(run.asked, ["GET /api/users"]);
+  assert.match(textOf(app.view().users!), /^User Added metabase 2026-10-27 09:10 UTC/);
+  app.show("status");
   // the run stops
   run.answers.clear();
   await app.poll();
@@ -385,6 +392,7 @@ test("the app: an added user's password is written once, gone once dismissed and
 test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE /api/users/<name> and reads the users again", async () => {
   const run = fakeRun();
   const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("users");
   await app.poll();
   app.askRemove("metabase");
   assert.match(textOf(app.view().users!), /Remove metabase\? It connects no more/);
@@ -404,6 +412,7 @@ test("the app: Add sends POST /api/pick, says what was added under its table, an
   const run = fakeRun();
   run.answers.set("GET /api/state", answer(CATALOG_STATE));
   const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("tables");
   await app.poll();
   run.answers.set("POST /api/pick", () => {
     // the run writes the sources file: from now on its state has the table added
@@ -412,8 +421,8 @@ test("the app: Add sends POST /api/pick, says what was added under its table, an
   });
   run.asked.length = 0;
   assert.equal(await app.addTable("public.accounts"), true);
-  assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET /api/state", "GET /api/slow", "GET /api/refused", "GET /api/users"],
-    "every column, as mason add accounts asks; then the state again");
+  assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET /api/state"],
+    "every column, as mason add accounts asks; then the state again (the page's own read: nothing else)");
   const v = app.view();
   assert.match(textOf(v.tables!), /public\.accounts ~300 rows key id added Remove Added public\.accounts to \/app\/mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
   assert.match(textOf(v.status!), /public\.accounts 0% waiting for its copy to start/, "the Status shows the copy starting");
@@ -478,7 +487,7 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends POST /
   });
   run.asked.length = 0;
   assert.equal(await app.confirmRemoveTable("public.accounts"), true);
-  assert.deepEqual(run.asked, [`POST /api/remove ${JSON.stringify({ tables: ["public.accounts"] })}`, "GET /api/state", "GET /api/slow", "GET /api/refused", "GET /api/users"]);
+  assert.deepEqual(run.asked, [`POST /api/remove ${JSON.stringify({ tables: ["public.accounts"] })}`, "GET /api/state"]);
   assert.match(textOf(app.view().tables!), /public\.accounts ~300 rows key id Add Columns… Removed public\.accounts from \/app\/mason\/sources\/shop\.yml Tip: Mason stops copying it and drops its copy/);
   assert.equal(app.model.removing, null);
   // refused: the server's words
@@ -490,41 +499,60 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends POST /
 
 // ------------------------------------------------------------------ the files: under the CSP, never the token
 
-test("the page's files fetch nothing from elsewhere and never touch the token: the address, the cookie, storage", () => {
+/** Every file under src/web/ (relative to it): the shell, the shared module, each page's module, the stylesheet. */
+const webFiles = (dir = WEB): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+  e.isDirectory() ? webFiles(path.join(dir, e.name)) : [path.relative(WEB, path.join(dir, e.name))]);
+
+test("the page's files fetch nothing from elsewhere and never touch the token: the address but its hash, the cookie, storage", () => {
+  const files = webFiles().sort();
+  assert.ok(files.includes(path.join("pages", "status.js")) && files.includes("shared.js"), "the pages' modules are checked with the rest");
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
-  const js = fs.readFileSync(path.join(WEB, "app.js"), "utf8");
-  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.deepEqual([...html.matchAll(/(?:src|href)="([^"]*)"/g)].map((m) => m[1]), ["data:,", "/app.css", "/app.js"], "every file the page loads is the server's allowlist (or inline)");
-  for (const [f, text] of [["index.html", html], ["app.js", js], ["app.css", css]] as const) {
+  // the nav's links are the page's own hash (#tables): nothing is loaded by them
+  assert.deepEqual([...html.matchAll(/(?:src|href)="([^"]*)"/g)].map((m) => m[1]!).filter((u) => !u.startsWith("#")), ["data:,", "/app.css", "/app.js"],
+    "every file the page loads is the server's allowlist (or inline); the modules are imported by app.js");
+  for (const f of files) {
+    const text = fs.readFileSync(path.join(WEB, f), "utf8");
     assert.ok(!/https?:\/\//.test(text), `${f} names no other site: a CDN or a font would break the CSP`);
     assert.ok(!/@import|url\(/.test(text), `${f} loads no stylesheet or font`);
+    assert.ok(!/duckdb/i.test(text.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")), `${f}: never the engine's name`);
+    if (!f.endsWith(".js")) continue;
+    const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+    // the hash chooses the page shown (#status): it never holds the token, which the first request traded for the cookie
+    // and dropped from the address; every other part of `location` (search, href) is refused, as the cookie and storage are
+    assert.ok(!/\blocation\b(?!\.hash\b)|document\.cookie|localStorage|sessionStorage|indexedDB|[?&]token=|\.token\b/.test(code),
+      `${f}: the cookie carries the token; the page's script never reads it, the address (but its hash) or storage`);
+    // every module it imports is the page's own, a route of PAGE_ROUTES (tests/cli-run-server.test.ts serves each)
+    for (const m of code.matchAll(/\bfrom\s+"([^"]+)"|\bimport\s*\(\s*"([^"]+)"/g)) assert.match(m[1] ?? m[2]!, /^\.\.?\/[\w/.-]+\.js$/, `${f} imports ${m[1] ?? m[2]} by a relative path`);
   }
-  const code = js.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
-  assert.ok(!/\blocation\b|document\.cookie|localStorage|sessionStorage|[?&]token=|\.token\b/.test(code), "the cookie carries the token; the page's script never reads it, the address or storage");
-  assert.ok(!/duckdb/i.test(html + code + css), "never the engine's name");
 });
 
 /** The page in a fake browser: elements whose innerHTML reads back as a browser serialises it (a bare data-x attribute
  *  as data-x="", an apostrophe in text as itself), the listeners `start` adds, the interval it sets, and a FormData
  *  that reads a form's ticked boxes from the fake form. */
-function fakeBrowser(run: ReturnType<typeof fakeRun>) {
+function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
   const els = new Map<string, { writes: number; html: string; innerHTML: string; addEventListener: () => void }>();
   const el = (id: string) => els.get(id) ?? (els.set(id, { writes: 0, html: "", addEventListener: () => undefined,
     get innerHTML() { return this.html.replace(/ (data-[a-z-]+)(?=[ >])/g, ' $1=""').replace(/&#39;/g, "'"); },
     set innerHTML(v: string) { this.html = v; this.writes++; } }), els.get(id)!);
   const on = new Map<string, (e: unknown) => Promise<void> | void>();
   const doc = { visibilityState: "visible", getElementById: el, addEventListener: (type: string, f: (e: unknown) => void) => { on.set(type, f); } };
+  const location = { hash };
+  const onWin = new Map<string, () => void>();
   let tick: (() => void) | null = null;
   class FormData { readonly ticked: Record<string, string[]>; constructor(form: { ticked: Record<string, string[]> }) { this.ticked = form.ticked; } getAll(name: string) { return this.ticked[name] ?? []; } }
-  fn<[unknown, unknown], void>("start")(doc, { fetch: run.fetch, FormData, setInterval: (f: () => void) => { tick = f; return 1; } });
-  return { el, on, doc, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
+  fn<[unknown, unknown], void>("start")(doc, { fetch: run.fetch, FormData, location, addEventListener: (type: string, f: () => void) => { onWin.set(type, f); },
+    setInterval: (f: () => void) => { tick = f; return 1; }, setTimeout: (f: () => void, ms: number) => setTimeout(f, ms) });
+  /** the reader follows a link of the nav: the hash changes, and the browser says so */
+  const go = (to: string) => { location.hash = to; onWin.get("hashchange")!(); };
+  return { el, on, doc, go, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
 }
 
 test("in the browser: each part is written when what it shows changes, never at every poll (a click must find its button)", async () => {
   const run = fakeRun();
-  const { el, on, doc, tick, settle } = fakeBrowser(run);
+  const { el, on, doc, go, tick, settle } = fakeBrowser(run);
   await settle();
   assert.match(textOf(el("status").html), /public\.orders 15% copying/);
+  go("#users"); await settle();
   // Remove clicked: the user's row holds the confirm, whose Cancel is a bare data- attribute
   await on.get("click")!({ target: { closest: () => ({ dataset: { remove: "metabase" } }) } });
   const users = el("users");
@@ -543,7 +571,7 @@ test("in the browser: each part is written when what it shows changes, never at 
 
 test("in the browser: the tables are written when they change, never at every poll — a Remove's confirm and a form's ticks stay", async () => {
   const run = fakeRun();
-  const { el, on, tick, settle } = fakeBrowser(run);
+  const { el, on, tick, settle } = fakeBrowser(run, "#tables");
   await settle();
   const tables = el("tables");
   assert.match(textOf(tables.html), /public\.orders ~2,000,000 rows key id added Remove/);
@@ -586,4 +614,92 @@ test("in the browser: the tables are written when they change, never at every po
   assert.ok(prevented, "the page posts it, not the browser");
   assert.ok(run.asked.includes(`POST /api/pick ${JSON.stringify({ table: "public.audit", picked: true, columns: ["name"] })}`), run.asked.join("\n"));
   assert.match(textOf(tables.html), /Added public\.audit to \/app\/mason\/sources\/shop\.yml: id, name key added: id/);
+});
+
+// ------------------------------------------------------------------ the shell: a page per hash, each polling its own
+
+test("the shell: a page per hash (#status the default, an unknown hash Status), each a module with a section and a route", async () => {
+  const routeOf = fn<[string | undefined], string>("routeOf");
+  assert.deepEqual(["#status", "#tables", "#queries", "#users", "#usage", "#logs", "", undefined, "#", "#nope", "#Tables", "#tables?x=1"].map(routeOf),
+    ["status", "tables", "queries", "users", "usage", "logs", "status", "status", "status", "status", "status", "status"]);
+  const pages = (page as unknown as { PAGES?: Array<{ id: string; title: string; create: unknown }> }).PAGES;
+  assert.ok(Array.isArray(pages), "src/web/app.js exports PAGES");
+  assert.deepEqual(pages!.map((p) => [p.id, p.title]), [["status", "Status"], ["tables", "Tables"], ["queries", "Queries"], ["users", "Users"], ["usage", "Usage"], ["logs", "Logs"]]);
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  const { PAGE_ROUTES } = await import("../src/cli/run-server.ts") as { PAGE_ROUTES: Record<string, readonly [string, string]> };
+  for (const p of pages!) {
+    assert.match(html, new RegExp(`<section id="page-${p.id}" aria-labelledby="${p.id}-h"`), `index.html has ${p.id}'s section`);
+    assert.deepEqual(PAGE_ROUTES[`/pages/${p.id}.js`], [`pages/${p.id}.js`, "text/javascript; charset=utf-8"], `${p.id}'s module is a route`);
+    // what the page module itself exports: its id and title, as the shell registers it
+    const mod = await import(path.join(WEB, "pages", `${p.id}.js`)) as { page: { id: string } };
+    assert.equal(mod.page.id, p.id);
+  }
+  const nav = fn<[string], string>("renderNav")("tables");
+  assert.equal(textOf(nav), "Status Tables Queries Users Usage Logs");
+  assert.deepEqual([...nav.matchAll(/<a href="(#\w+)"( aria-current="page")?>/g)].filter((m) => m[2]).map((m) => m[1]), ["#tables"], "the page shown is the current one");
+  // a page not built yet says so in one line, with the command that shows it today
+  const app = fn<[unknown], App>("createApp")(fakeRun().fetch);
+  assert.equal(textOf(app.view().queries!), "The statements running now and the request log: not built yet. mason logs --requests shows it in a terminal.");
+  assert.match(textOf(app.view().usage!), /not built yet\. mason usage shows it/);
+  assert.match(textOf(app.view().logs!), /not built yet\. mason logs --events shows it/);
+});
+
+test("the shell: only the page shown is asked, each endpoint at its own rate — the state every poll, the slower ones when due", async () => {
+  const run = fakeRun();
+  let t = Date.UTC(2026, 9, 27, 9, 0, 0);
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
+  assert.deepEqual(await asked(), ["GET /api/state", "GET /api/slow", "GET /api/refused"], "Status, first: everything it reads");
+  t += 2000;
+  assert.deepEqual(await asked(), ["GET /api/state"], "2 s on: the state alone; the request log's counts are read every 30 s");
+  t += 28_000;
+  assert.deepEqual(await asked(), ["GET /api/state", "GET /api/slow", "GET /api/refused"], "30 s on: the counts again");
+  app.show("tables");
+  assert.deepEqual(await asked(), ["GET /api/state"], "Tables: its own reads");
+  app.show("users");
+  assert.deepEqual(await asked(), ["GET /api/users"]);
+  app.show("queries");
+  assert.deepEqual(await asked(), [], "a page not built reads nothing");
+  // the page's own read failing is the banner; a slower one failing is said where it is shown, never as the banner
+  app.show("status");
+  run.answers.set("GET /api/slow", answer({ error: "the request log cannot be read", failure: { code: "failed", message: "the request log cannot be read", next: [] } }, 500));
+  t += 30_000;
+  await app.poll();
+  assert.equal(app.view().poll, "");
+  assert.match(textOf(app.view().status!), /Slow queries: could not read them \(the request log cannot be read; mason logs has the detail\)/);
+});
+
+test("in the browser: the hash chooses the section shown and the page asked; a link followed asks the new page at once", async () => {
+  const run = fakeRun();
+  const { el, go, settle, tick } = fakeBrowser(run, "#nope");
+  await settle();
+  const shown = () => ["status", "tables", "queries", "users", "usage", "logs"].filter((id) => (el(`page-${id}`) as unknown as { hidden: boolean }).hidden === false);
+  assert.deepEqual(shown(), ["status"], "an unknown hash shows Status");
+  assert.match(el("nav").html, /<a href="#status" aria-current="page">Status<\/a>/);
+  run.asked.length = 0;
+  go("#users"); await settle();
+  assert.deepEqual(shown(), ["users"]);
+  assert.deepEqual(run.asked, ["GET /api/users"], "the users at once, not at the next tick");
+  assert.match(el("nav").html, /<a href="#users" aria-current="page">Users<\/a>/);
+  run.asked.length = 0;
+  tick(); await settle();
+  assert.deepEqual(run.asked, ["GET /api/users"], "and only they while Users is shown");
+});
+
+test("in the browser: no part is written while a pointer is pressed — a row that moves every poll keeps the button under the press", async () => {
+  const run = fakeRun();
+  const { el, on, settle, tick } = fakeBrowser(run);
+  await settle();
+  const status = el("status");
+  const writes = status.writes;
+  await on.get("pointerdown")!({});
+  run.answers.set("GET /api/state", answer(RUNNING));
+  tick(); await settle();
+  assert.equal(status.writes, writes, "pressed: the new state waits");
+  assert.match(textOf(status.html), /public\.orders 15% copying/);
+  // released: written (the shell writes once the release has been handled)
+  await on.get("pointerup")!({});
+  await settle();
+  assert.ok(status.writes > writes);
+  assert.match(textOf(status.html), /Ready: every added table is copied and served/);
 });

@@ -268,9 +268,11 @@ test("mason remove: the table's entry goes, every other byte of the file as it w
   } finally { fs.writeFileSync(sourceFile, was); }
 });
 
-test("the web page: /, /app.js and /app.css from src/web/, with their types and the security headers; any other path is the 404 it was", async () => {
+test("the web page: /, /app.js, /app.css, /shared.js and each page's module from src/web/, with their types and the security headers; any other path is the 404 it was", async () => {
   const web = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "src", "web");
-  for (const [p, file, type] of [["/", "index.html", "text/html; charset=utf-8"], ["/app.js", "app.js", "text/javascript; charset=utf-8"], ["/app.css", "app.css", "text/css; charset=utf-8"]] as const) {
+  const pages = ["status", "tables", "queries", "users", "usage", "logs"].map((p) => [`/pages/${p}.js`, `pages/${p}.js`, "text/javascript; charset=utf-8"] as const);
+  for (const [p, file, type] of [["/", "index.html", "text/html; charset=utf-8"], ["/app.js", "app.js", "text/javascript; charset=utf-8"], ["/app.css", "app.css", "text/css; charset=utf-8"],
+    ["/shared.js", "shared.js", "text/javascript; charset=utf-8"], ...pages] as const) {
     const r = await call("GET", p);
     assert.equal(r.status, 200, p);
     assert.equal(r.headers["content-type"], type, p);
@@ -281,7 +283,9 @@ test("the web page: /, /app.js and /app.css from src/web/, with their types and 
     assert.equal((await call("GET", p, { cookie: null })).status, 403, `${p} without the cookie`);
   }
   // the allowlist, never a path built from the URL: a file beside them, one above, an encoded one are the 404 they were
-  for (const p of ["/index.html", "/app.d.ts", "/web/app.js", "/../cli/run-server.ts", "/%2e%2e/cli/run-server.ts", "/app.js/", "/api/folders", "/api/preview"]) {
+  for (const p of ["/index.html", "/app.d.ts", "/web/app.js", "/../cli/run-server.ts", "/%2e%2e/cli/run-server.ts", "/app.js/", "/api/folders", "/api/preview",
+    // a page's folder is no route, nor a file beside its modules, nor one named with its slash encoded
+    "/pages", "/pages/", "/pages/nope.js", "/pages/status.ts", "/pages%2fstatus.js", "/pages/../cli/run-server.ts", "/shared.js/"]) {
     const r = await call("GET", p);
     assert.equal(r.status, 404, p);
     assert.match(JSON.parse(r.text).error, /^no GET \/.*: this is mason start's server for the mason command \(mason --help\)$/, p);
