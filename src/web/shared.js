@@ -51,6 +51,63 @@ export function countsText(c) {
 }
 
 /**
+ * THE WAL THE SLOT HOLDS ON THE DATABASE, in a line (src/cli/commands.ts `slotText`, held equal by the tests): how much,
+ * Postgres's status of it, the cap — or that nothing caps it — and a slot Postgres invalidated. `w` is `stream.slotWal`:
+ * { walHeldBytes, walStatus, safeWalSizeBytes, at } or { error }; `since(iso)` is its age in seconds.
+ */
+export function slotText(w, since) {
+  if ("error" in w) return `the WAL it holds could not be read: ${w.error.split("\n")[0]}`;
+  const read = `(read ${spanText(since(w.at))} ago)`;
+  if (w.walStatus === "lost") return `lost: Postgres invalidated it (it held more WAL than max_slot_wal_keep_size), so Mason makes it again and catches the copies up by one poll ${read}`;
+  const cap = w.safeWalSizeBytes === null
+    ? "max_slot_wal_keep_size is unset, so nothing caps it: while nothing reads the slot it holds WAL for ever, until the database's disk fills (set max_slot_wal_keep_size on the database)"
+    : w.safeWalSizeBytes <= 0 ? "past max_slot_wal_keep_size: Postgres invalidates it at its next checkpoint, and Mason makes it again"
+    : `${fileSize(w.safeWalSizeBytes)} more before Postgres invalidates it (max_slot_wal_keep_size)`;
+  return `holds ${fileSize(w.walHeldBytes)} of the database's WAL${w.walStatus === null ? "" : ` (${w.walStatus})`} · ${cap} ${read}`;
+}
+
+/** Whether the slot's line is a warning: the WAL could not be read, Postgres invalidated it, it is past its cap or nothing caps it. */
+export const slotWarns = (w) => "error" in w || w.walStatus === "lost" || w.walStatus === "unreserved" || w.safeWalSizeBytes === null || w.safeWalSizeBytes <= 0;
+
+/** `Mason` in mason status (src/cli/commands.ts `masonRow`): the run's version and how long it has been up. The CLI adds the
+ *  run's pid, which the state does not carry: the tests hold the rest equal. */
+export const masonRow = (e) => ["Mason", `${e.version} · one process${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`];
+
+/** `Sessions` in mason status (src/cli/commands.ts `sessionsRows`). */
+export function sessionsRows(s) {
+  if (s === undefined) return [];
+  if ("error" in s) return [["Sessions", `could not be read: ${s.error.split("\n")[0]}`]];
+  if (s.open === 0) return [["Sessions", "none open"]];
+  const running = s.byClient.reduce((a, c) => a + c.running, 0);
+  const who = s.byClient.slice(0, 3).map((c) => `${c.open} ${c.user === "" ? "by a token" : `as ${c.user}`}${c.client === "" ? "" : ` (${c.client})`}`);
+  const others = s.byClient.length - who.length;
+  return [["Sessions", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
+}
+
+/** `Disk` in mason status (src/cli/commands.ts `diskRows`), but for the path: the page never shows an absolute path, so
+ *  it says "where the copy is" for ` in <path>` (the tests hold the rest equal). */
+export function diskRows(d) {
+  if (d === undefined) return [];
+  const adds = d.projectedBytes === null ? "" : ` · the copies running are projected to add about ${fileSize(d.projectedBytes)} more`;
+  if (d.freeBytes === null) return [["Disk", `${d.error ?? "the free space could not be read"}${adds}`]];
+  return [["Disk", `${fileSize(d.freeBytes)} free where the copy is${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the copy stops before the disk fills" : ""}`]];
+}
+
+/** `Restarts` in mason status (src/cli/commands.ts `restartsRows`; its `ago` is `agoText`): none, no row. */
+export function restartsRows(r, now = Date.now()) {
+  if (r === undefined) return [];
+  if ("error" in r) return [["Restarts", r.error]];
+  if (r.last === null) return [];
+  return [["Restarts", `${r.count}, the last ${agoText(r.last.at, now)}: ${r.last.why}, after ${r.last.upSeconds} s up (mason logs --start has its last lines)`]];
+}
+
+/** A time as `mason status` says how long ago (src/cli/commands.ts `ago`). */
+export function agoText(iso, now = Date.now()) {
+  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
+}
+
+/**
  * WHERE THE STREAM IS, as `mason status` says it (src/cli/commands.ts `streamLines`, held equal by the tests): `head`
  * the stream's own rows (not running and why, its position against the database's, the last change), `tables` a row
  * per added table — streamed, being caught up, not streamed yet or left out, and why. `st` is `/api/state` `stream`.
@@ -66,6 +123,7 @@ export function streamRows(st, now = Date.now()) {
     ? `the database is at ${st.database.lsn}: ${n(st.lag.bytes ?? 0)} bytes behind (read ${spanText(since(st.database.at))} ago)`
     : `the database's position could not be read: ${st.database.error.split("\n")[0]}`;
   head.push(["position", `${st.position} · ${db}`]);
+  head.push(["slot", slotText(st.slotWal, since)]);
   head.push(["last change", st.lastBatch === null ? "none applied this run"
     : `committed ${spanText(since(st.lastBatch.committedAt))} ago, applied ${spanText((Date.parse(st.lastBatch.appliedAt) - Date.parse(st.lastBatch.committedAt)) / 1000)} after its commit`]);
   const total = (t) => t.applied.inserts + t.applied.updates + t.applied.deletes + t.applied.truncates;

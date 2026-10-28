@@ -826,7 +826,7 @@ test("Status: Ready and Under way in mason status's words; nothing added says so
   assert.equal(renderRecentErrors(undefined, undefined), "", "not read yet: nothing");
   const renderFacts = of<[unknown, number], string>(statusPage, "status.js", "renderFacts");
   assert.match(textOf(renderFacts({ ...NONE, totals: { added: 0, copied: 0, failed: 0, rows: 0, syncedAt: null }, engine: { ...NONE.engine, bytes: 2_097_152 } }, NOW)),
-    /Changes polling .* The copy's file 2\.0 MiB$/, "nothing added: no sync to count");
+    /Changes polling .* The copy's file 2\.0 MiB/, "nothing added: no sync to count");
   assert.match(textOf(renderFacts({ ...SYNCED, engine: { ...SYNCED.engine, bytes: 2_097_152 } }, NOW)), /Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 2026-10-27 09:05:00 UTC · 30 s ago The copy's file 2\.0 MiB/);
   assert.match(textOf(of<[unknown], string>(statusPage, "status.js", "renderQueries")({ failure: { code: "failed", message: "no ledger" } })), /^Queries: could not read them \(no ledger; mason logs has the detail\)$/);
   // the app with nothing added: the commands' sentence, no word or facts above it
@@ -1366,7 +1366,8 @@ test("Users: a user's last use is mason user list's words (lastUsedText, src/cli
 
 const zero = { inserts: 0, updates: 0, deletes: 0, truncates: 0 };
 const STREAM = {
-  slot: "mason_dev_shop", publication: "app_pub", running: true, failure: null, position: "0/16B3748", applied: "0/16B3700",
+  slot: "mason_dev_shop", slotWal: { walHeldBytes: 52_428_800, walStatus: "reserved", safeWalSizeBytes: 5 * 2 ** 30, at: "2026-10-27T09:05:29.000Z" },
+  publication: "app_pub", running: true, failure: null, position: "0/16B3748", applied: "0/16B3700",
   database: { lsn: "0/16B4000", at: "2026-10-27T09:05:28.000Z" }, lag: { bytes: 2232, seconds: 1.4 },
   lastBatch: { appliedAt: "2026-10-27T09:05:29.400Z", committedAt: "2026-10-27T09:05:29.000Z" },
   tables: [
@@ -1382,6 +1383,10 @@ const STREAMS: Array<[string, typeof STREAM | Record<string, unknown>]> = [
   ["not running, retrying", { ...STREAM, running: false, failure: { error: "could not connect\nthe database refused", retryAt: "2026-10-27T09:05:40.000Z" } }],
   ["not running yet", { ...STREAM, running: false, failure: null, lastBatch: null }],
   ["the position unreadable", { ...STREAM, database: { error: "connection refused\nmore" }, lag: { bytes: null, seconds: null } }],
+  ["the slot lost", { ...STREAM, slotWal: { walHeldBytes: 0, walStatus: "lost", safeWalSizeBytes: null, at: "2026-10-27T09:05:29.000Z" } }],
+  ["the slot uncapped, unreadable, past its cap", { ...STREAM, slotWal: { walHeldBytes: 9, walStatus: null, safeWalSizeBytes: null, at: "2026-10-27T09:05:29.000Z" } }],
+  ["the slot's WAL unreadable", { ...STREAM, slotWal: { error: "no restart position yet\nmore" } }],
+  ["the slot past its cap", { ...STREAM, slotWal: { walHeldBytes: 9, walStatus: "unreserved", safeWalSizeBytes: 0, at: "2026-10-27T09:05:29.000Z" } }],
   ["catch-up failed", { ...STREAM, tables: [{ ...STREAM.tables[1]!, catchUp: { phase: "queued", from: null, startedAt: null, held: 1, retryAt: "2026-10-27T09:07:00.000Z" }, applied: { inserts: 1, updates: 0, deletes: 0, truncates: 0 } }] }],
 ];
 const REPL = (stream: unknown, extra: Record<string, unknown> = {}) => ({ ...stateOf(THREE_COPIED(), { replication: true, now: NOW }), stream, ...extra }) as RunState;
@@ -1405,7 +1410,7 @@ test("Status: replication mode says the changes — running or not and why, the 
   const renderStatus = fn<[unknown, unknown?], string>("renderStatus");
   const html = renderStatus(REPL(STREAM), { now: NOW });
   const text = textOf(html);
-  assert.match(text, /Changes \(the stream, slot mason_dev_shop\) Stream running Position 0\/16B3748 · the database is at 0\/16B4000: 2,232 bytes behind \(read 2\.0 s ago\) Lag 2\.2 KiB behind the database, the newest change applied was committed 1\.4 s ago Last change committed 1\.0 s ago, applied 0\.4 s after its commit/);
+  assert.match(text, /Changes \(the stream, slot mason_dev_shop\) Stream running Position 0\/16B3748 · the database is at 0\/16B4000: 2,232 bytes behind \(read 2\.0 s ago\) Lag 2\.2 KiB behind the database, the newest change applied was committed 1\.4 s ago Slot holds 50\.0 MiB of the database's WAL \(reserved\) · 5\.0 GiB more before Postgres invalidates it \(max_slot_wal_keep_size\) \(read 1\.0 s ago\) Last change committed 1\.0 s ago, applied 0\.4 s after its commit/);
   assert.ok(!/<tr class="warn"><th scope="row">Stream/.test(html), "running: not a warning");
   assert.match(textOf(renderStatus(REPL(STREAMS[1]![1]), { now: NOW })), /Stream not running: could not connect · it starts again in 10 s/);
   assert.match(renderStatus(REPL(STREAMS[1]![1]), { now: NOW }), /<tr class="warn"><th scope="row">Stream<\/th>/, "a stream that is not running is a warning");
@@ -1415,50 +1420,65 @@ test("Status: replication mode says the changes — running or not and why, the 
   assert.match(text, /Changes logical replication: slot mason_dev_shop, publication app_pub/);
 });
 
-test("Status: the slot's hold on the database's WAL — held, status, room left; lost, unreserved and no cap are warnings; unreadable is unknown, never 0", () => {
+test("Status: the slot's WAL is the CLI's slotText; lost, past its cap, uncapped and unreadable are warnings, a healthy slot is not", () => {
   const renderStatus = fn<[unknown, unknown?], string>("renderStatus");
+  const cliSlot = (commands as unknown as { slotText: (w: unknown, since: (iso: string) => number) => string }).slotText;
+  assert.equal(typeof cliSlot, "function", "src/cli/commands.ts exports slotText");
+  const since = (iso: string) => (NOW - Date.parse(iso)) / 1000;
+  const slotText = fn<[unknown, (iso: string) => number], string>("slotText");
+  for (const [what, st] of STREAMS) assert.equal(slotText((st as typeof STREAM).slotWal, since), cliSlot((st as typeof STREAM).slotWal, since), what);
+  const html = (slotWal: unknown) => renderStatus(REPL({ ...STREAM, slotWal }), { now: NOW });
   const at = "2026-10-27T09:05:29.000Z";
-  const withSlot = (slot: unknown) => renderStatus(REPL({ ...STREAM, slot }), { now: NOW });
-  const ok = withSlot({ walHeldBytes: 52_428_800, walStatus: "reserved", safeWalSizeBytes: 5 * 2 ** 30, at });
-  assert.match(textOf(ok), /WAL the slot holds 50\.0 MiB on the database, kept for the stream \(status reserved\) Room left 5\.0 GiB of WAL before the database drops the slot/);
-  assert.doesNotMatch(ok, /<tr class="warn"><th scope="row">(WAL the slot holds|Room left|Slot)/);
-  const lost = withSlot({ walHeldBytes: 1024, walStatus: "lost", safeWalSizeBytes: 0, at });
-  assert.match(lost, /<tr class="warn"><th scope="row">Slot<\/th><td>the database removed WAL the slot still needed/);
-  assert.match(lost, /<tr class="warn"><th scope="row">Room left<\/th>/);
-  assert.match(withSlot({ walHeldBytes: 1024, walStatus: "unreserved", safeWalSizeBytes: 1 << 20, at }), /<tr class="warn"><th scope="row">Slot<\/th><td>the database may remove WAL the slot still needs/);
-  const nocap = withSlot({ walHeldBytes: 1024, walStatus: "reserved", safeWalSizeBytes: null, at });
-  assert.match(nocap, /<tr class="warn"><th scope="row">Room left<\/th><td>none set: the database has no max_slot_wal_keep_size/);
-  const bad = withSlot({ error: "permission denied for pg_replication_slots\nmore" });
-  assert.match(textOf(bad), /WAL the slot holds what the slot holds could not be read \(permission denied for pg_replication_slots\)/);
-  assert.ok(!/ 0 B/.test(textOf(bad)), "unknown is not zero");
-  assert.doesNotMatch(textOf(renderStatus(REPL({ ...STREAM }), { now: NOW })), /WAL the slot holds/, "a run that does not say it: nothing");
+  const ok = html({ walHeldBytes: 52_428_800, walStatus: "reserved", safeWalSizeBytes: 5 * 2 ** 30, at });
+  assert.match(textOf(ok), /Slot holds 50\.0 MiB of the database's WAL \(reserved\) · 5\.0 GiB more before Postgres invalidates it \(max_slot_wal_keep_size\) \(read 1\.0 s ago\)/);
+  assert.doesNotMatch(ok, /<tr class="warn"><th scope="row">Slot/);
+  for (const w of [{ walHeldBytes: 0, walStatus: "lost", safeWalSizeBytes: null, at }, { walHeldBytes: 1, walStatus: "unreserved", safeWalSizeBytes: 10, at },
+    { walHeldBytes: 1, walStatus: "reserved", safeWalSizeBytes: null, at }, { walHeldBytes: 1, walStatus: "reserved", safeWalSizeBytes: 0, at }, { error: "no restart position yet" }]) {
+    assert.match(html(w), /<tr class="warn"><th scope="row">Slot<\/th>/, JSON.stringify(w));
+  }
+  assert.match(textOf(html({ error: "no restart position yet\nmore" })), /Slot the WAL it holds could not be read: no restart position yet/, "unknown, never 0");
 });
 
-test("Status: Mason's version, how long it has been up, its restarts, the free disk and the sessions open — absent says nothing, an error says unknown", () => {
+test("Status: Mason's version and uptime, the restarts, the disk and the sessions are the CLI's rows (masonRow, restartsRows, diskRows, sessionsRows) — held equal, but for the pid and the path", () => {
+  const cli = commands as unknown as { masonRow: (e: unknown, pid: number) => [string, string]; restartsRows: (r: unknown) => Array<[string, string]>;
+    diskRows: (d: unknown) => Array<[string, string]>; sessionsRows: (s: unknown) => Array<[string, string]> };
+  for (const f of ["masonRow", "restartsRows", "diskRows", "sessionsRows"] as const) assert.equal(typeof cli[f], "function", `src/cli/commands.ts exports ${f}`);
+  const engine = { version: "0.4.2", startedAt: "2026-10-27T08:00:00.000Z", uptimeSeconds: 3930 };
+  // the state carries no pid: the page's row is the CLI's with ", pid N" gone
+  assert.deepEqual(fn<[unknown], string[]>("masonRow")(engine), [cli.masonRow(engine, 4242)[0], cli.masonRow(engine, 4242)[1].replace(", pid 4242", "")]);
+  assert.deepEqual(fn<[unknown], string[]>("masonRow")({ version: "0.4.2" }), ["Mason", cli.masonRow({ version: "0.4.2" }, 1)[1].replace(", pid 1", "")]);
+  const hoursAgo = new Date(Date.now() - 3 * 3600_000).toISOString();
+  const restarts = fn<[unknown, number?], Array<[string, string]>>("restartsRows");
+  for (const r of [undefined, { count: 0, last: null }, { count: 2, last: { at: hoursAgo, why: "the run crashed", upSeconds: 42 } }, { error: "restarts.json is unreadable" }]) assert.deepEqual(restarts(r), cli.restartsRows(r), JSON.stringify(r));
+  const sessions = fn<[unknown], Array<[string, string]>>("sessionsRows");
+  const byClient = [{ user: "metabase", client: "Metabase", open: 2, running: 1 }, { user: "", client: "", open: 1, running: 0 }, { user: "ana", client: "psql", open: 1, running: 0 }, { user: "bob", client: "dbt", open: 1, running: 0 }];
+  for (const x of [undefined, { open: 0, byClient: [] }, { open: 5, byClient }, { open: 1, byClient: byClient.slice(0, 1) }]) assert.deepEqual(sessions(x), cli.sessionsRows(x), JSON.stringify(x));
+  // the disk: the CLI says "free in <path>"; the page never shows an absolute path and says "where the copy is"
+  const disk = fn<[unknown], Array<[string, string]>>("diskRows");
+  const D = "/var/lib/mason/.mason";
+  for (const d of [undefined, { path: D, freeBytes: 20 * 2 ** 30, copyBytes: 5, projectedBytes: null }, { path: D, freeBytes: 20 * 2 ** 30, copyBytes: 5, projectedBytes: 4 * 2 ** 30 },
+    { path: D, freeBytes: 2 ** 30, copyBytes: 5, projectedBytes: 4 * 2 ** 30 }, { path: D, freeBytes: null, copyBytes: null, projectedBytes: null, error: "statfs failed" }]) {
+    const want = cli.diskRows(d).map(([k, v]) => [k, v.replace(` free in ${D}`, " free where the copy is")]);
+    assert.deepEqual(disk(d), want, JSON.stringify(d));
+    assert.ok(!disk(d).some(([, v]) => v.includes(D)), "no path");
+  }
+  // the page: those rows in the one table of facts; warnings only where it matters; absent says nothing
   const renderFacts = of<[unknown, number], string>(statusPage, "status.js", "renderFacts");
-  const base = RUNNING as unknown as Record<string, unknown>;
-  const full = { ...base, engine: { ...RUNNING.engine, bytes: 2_097_152, version: "0.4.2", startedAt: "2026-10-27T08:00:00.000Z", uptimeSeconds: 3930, restarts: { count: 2, last: { at: "2026-10-27T08:00:00.000Z", why: "the run was started again after it stopped\nmore" } } },
-    disk: { path: "/var/lib/mason", freeBytes: 20 * 2 ** 30, copyBytes: 2_097_152, projectedBytes: 0 }, sessions: { open: 3, byClient: [] } };
-  const text = textOf(renderFacts(full, NOW));
-  assert.match(text, /Mason 0\.4\.2 Up for 66 min \(since 2026-10-27 08:00:00 UTC\) Restarts 2, the last 2026-10-27 08:00:00 UTC: the run was started again after it stopped /);
-  assert.match(text, /The copy's file 2\.0 MiB Free disk 20\.0 GiB where the copy is Sessions open 3$/);
-  assert.ok(!text.includes("/var/lib/mason") && !/duckdb/i.test(text), "no path, no engine");
-  assert.match(textOf(renderFacts({ ...full, engine: { ...full.engine, restarts: { count: 0, last: null } } }, NOW)), /Restarts none /);
-  // while a copy runs, what it is projected to add; more than is free is a warning
-  const room = renderFacts({ ...full, disk: { ...(full.disk as object), projectedBytes: 4 * 2 ** 30 } }, NOW);
-  assert.match(textOf(room), /Free disk 20\.0 GiB where the copy is The running copy projected to add 4\.0 GiB Sessions/);
-  assert.doesNotMatch(room, /<tr class="warn"><th scope="row">The running copy/);
-  const over = renderFacts({ ...full, disk: { path: "/x", freeBytes: 2 ** 30, copyBytes: 1, projectedBytes: 4 * 2 ** 30 } }, NOW);
-  assert.match(over, /<tr class="warn"><th scope="row">The running copy<\/th><td>projected to add 4\.0 GiB: more than the 1\.0 GiB free, the disk would fill/);
-  // unreadable: unknown with its reason, never 0
-  const errors = textOf(renderFacts({ ...full, engine: { ...full.engine, restarts: { error: "the events file is locked\nmore" } }, disk: { path: "/x", freeBytes: null, copyBytes: null, projectedBytes: null, error: "statfs failed" }, sessions: { error: "no listener" } }, NOW));
-  assert.match(errors, /Restarts the restarts could not be read \(the events file is locked\)/);
-  assert.match(errors, /Free disk the free disk could not be read \(statfs failed\)/);
-  assert.match(errors, /Sessions open the sessions could not be read \(no listener\)/);
-  assert.ok(!/Free disk 0|Sessions open 0|Restarts 0/.test(errors));
-  // a run that says none of it: the facts the CLI has, and nothing else
-  const plainText = textOf(renderFacts(RUNNING, NOW));
-  assert.ok(!/Up for|Restarts|Free disk|Sessions open|^Mason \d/.test(plainText));
+  const at3h = new Date(NOW - 3 * 3600_000).toISOString();
+  const state = { ...RUNNING, engine: { ...RUNNING.engine, ...engine, restarts: { count: 2, last: { at: at3h, why: "the run crashed", upSeconds: 42 } } },
+    disk: { path: D, freeBytes: 2 ** 30, copyBytes: 5, projectedBytes: 4 * 2 ** 30 }, sessions: { open: 5, byClient } };
+  const html = renderFacts(state, NOW), text = textOf(html);
+  assert.match(text, /Mason 0\.4\.2 · one process · up 1\.1 h|Mason 0\.4\.2 · one process · up 66 min/);
+  assert.match(text, /Restarts 2, the last 3 h ago: the run crashed, after 42 s up/);
+  assert.match(text, /Disk 1\.0 GiB free where the copy is · the copies running are projected to add about 4\.0 GiB more — more than is free/);
+  assert.match(text, /Sessions 5 open, 1 running a statement · 2 as metabase \(Metabase\), 1 by a token, 1 as ana \(psql\), and 1 other client/);
+  assert.match(html, /<tr class="warn"><th scope="row">Disk<\/th>/);
+  assert.ok(!text.includes(D) && !/duckdb/i.test(text));
+  const { disk: _d, sessions: _s, ...older } = RUNNING as unknown as Record<string, unknown> & { engine: Record<string, unknown> };
+  const bare = { ...older, engine: { name: older.engine.name, file: older.engine.file, bytes: older.engine.bytes, pollSeconds: older.engine.pollSeconds } };
+  assert.doesNotMatch(textOf(renderFacts(bare, NOW)), /Mason \d|Restarts|Disk|Sessions/, "a run that says none of it: nothing");
+  assert.match(textOf(renderFacts(RUNNING, NOW)), /Mason \S+ · one process/, "the run's own state says them (runState)");
+  assert.match(textOf(renderFacts({ ...RUNNING, sessions: { error: "no listener\nmore" } } as never, NOW)), /Sessions could not be read: no listener/);
 });
 
 test("Queries: who is connected now — a row per user and client with its open sessions and what it runs; none is said, an error is unknown", async () => {

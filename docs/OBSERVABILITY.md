@@ -64,7 +64,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   facts — the database and how its changes arrive, the warnings, Mason's version, up for, restarts (`engine`), tables
   synced N of M, rows, last sync, the copy's size, the free disk and what a running copy is projected to add (`disk`),
   the sessions open (`sessions`); in replication mode a Changes table — the stream (`stream`: running or why not, position,
-  lag, last batch, as `streamLines` says it) and the slot's hold on the WAL (`stream.slot`: held, status, room left;
+  lag, last batch, as `streamLines` says it) and the slot's hold on the WAL (`stream.slotWal`: held, status, room left;
   `lost`, `unreserved` or no cap are warnings); the statements of the last day and week (p50 / p95); the copies not
   finished, a bar each, only while there are any; and a table of the recent errors (sync and statements). A fact the
   run could not read (`{ error }`) is said as unknown with its reason, never as 0; one it does not say is not shown.

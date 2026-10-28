@@ -6,7 +6,7 @@
  * bar each, only while there are any), and the recent errors (the sync's and the statements'). The slow and the refused
  * statements are the Queries page's. Reads `/api/state` every poll, the request log's every 30 s. Never the engine's name.
  */
-import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, utcText } from "../shared.js";
+import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText } from "../shared.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`). */
 export const RECENT_ERRORS = 5;
@@ -91,34 +91,13 @@ export function renderHealth(s) {
 /** A fact's row; `warn` marks one the reader should act on. */
 const factRow = (k, v, warn = false) => `<tr${warn ? ` class="warn"` : ""}><th scope="row">${esc(k)}</th><td>${esc(v)}</td></tr>`;
 
-/** A fact that could not be read: said as unknown with its reason, never as a zero. */
-const unknown = (what, reason) => `${what} could not be read${reason ? ` (${firstLine(String(reason))})` : ""}`;
-
-/**
- * WHAT THE DATABASE'S WAL IS HELD FOR BY THE SLOT (`stream.slot`: { walHeldBytes, walStatus, safeWalSizeBytes, at } or
- * { error }), as rows `[label, text, warn]`: how much the slot holds on the database, its status, the room left before
- * the database drops it. "lost" and "unreserved", or no cap on the slot, are warnings.
- */
-export function slotRows(slot) {
-  // (`stream.slot` has been the slot's NAME; a run that still says that has nothing of the slot's WAL to show)
-  if (slot === undefined || slot === null || typeof slot !== "object") return [];
-  if ("error" in slot) return [["WAL the slot holds", unknown("what the slot holds", slot.error), true]];
-  const held = typeof slot.walHeldBytes === "number" ? bytesText(slot.walHeldBytes) : null;
-  const rows = [["WAL the slot holds", held === null ? "unknown" : `${held} on the database, kept for the stream (status ${slot.walStatus ?? "unknown"})`, false]];
-  if (slot.walStatus === "lost") rows.push(["Slot", "the database removed WAL the slot still needed: the stream cannot continue from where it was", true]);
-  else if (slot.walStatus === "unreserved") rows.push(["Slot", "the database may remove WAL the slot still needs: the stream may be lost", true]);
-  if (slot.safeWalSizeBytes === null || slot.safeWalSizeBytes === undefined) rows.push(["Room left", "none set: the database has no max_slot_wal_keep_size, so the slot can hold its WAL without limit and fill its disk", true]);
-  else rows.push(["Room left", `${bytesText(slot.safeWalSizeBytes)} of WAL before the database drops the slot`, slot.safeWalSizeBytes <= 0]);
-  return rows;
-}
-
 /** The stream's lag, said once: the bytes behind the database and the age of the newest change applied. */
 const lagText = (lag) => `${lag.bytes === null || lag.bytes === undefined ? "bytes behind unknown" : `${bytesText(lag.bytes)} behind the database`}${lag.seconds === null || lag.seconds === undefined ? "" : `, the newest change applied was committed ${spanText(lag.seconds)} ago`}`;
 
 /**
  * THE CHANGES THE STREAM CARRIES (replication mode: `/api/state` `stream`; "" without one), a table of facts: whether it
  * runs and why not, its position, its lag, the last batch applied (`streamRows`, held equal to `mason status`'s
- * `streamLines`), and what the slot holds on the database (`slotRows`). Each table's own stream state is the Tables page's.
+ * `streamLines`), and the WAL the slot holds on the database (`slotText`, one of its rows). Each table's own stream state is the Tables page's.
  */
 export function renderStream(s, now = Date.now()) {
   const st = s.stream;
@@ -126,9 +105,8 @@ export function renderStream(s, now = Date.now()) {
   const { head } = streamRows(st, now);
   // `head` is the CLI's rows: "stream" (only when it is not running, and why), the position, the last change
   const label = (k) => k[0].toUpperCase() + k.slice(1);
-  const rows = [...(st.running ? [factRow("Stream", "running")] : []), ...head.map(([k, v]) => factRow(label(k), v, k === "stream"))];
+  const rows = [...(st.running ? [factRow("Stream", "running")] : []), ...head.map(([k, v]) => factRow(label(k), v, k === "stream" || (k === "slot" && slotWarns(st.slotWal))))];
   rows.splice(2, 0, factRow("Lag", lagText(st.lag)));
-  rows.push(...slotRows(st.slot).map(([k, v, w]) => factRow(k, v, w)));
   return `<table class="facts-table"><caption>Changes (the stream${s.source.replication ? `, slot ${esc(s.source.replication.slot)}` : ""})</caption><tbody>${rows.join("")}</tbody></table>`;
 }
 
@@ -136,17 +114,13 @@ export function renderStream(s, now = Date.now()) {
  * THE FACTS, ONE table of what `mason status` says: the database and how its changes arrive (`sourceRows`), the
  * warnings, Mason's version, how long it has been up and its restarts (`engine`), the copies in all (`totals`), the
  * copy's file (`engine.bytes`), the free disk and what a running copy is projected to add (`disk`), the sessions open
- * (`sessions`). A fact the run did not say is absent; one it could not read is said as unknown with its reason.
+ * (`sessions`). A fact the run did not say is absent; one it could not read is said as the CLI says it (its reason, never a 0). Mason's, the disk's, the restarts' and the sessions' rows are the CLI's (`masonRow`, `diskRows`, `restartsRows`, `sessionsRows`).
  */
 export function renderFacts(s, now = Date.now()) {
   const rows = [...sourceRows(s).map(([k, v]) => factRow(k, v)), ...s.warnings.map((w) => factRow("Warning", w, true))];
   const e = s.engine;
-  if (typeof e.version === "string") rows.push(factRow("Mason", e.version));
-  else if (e.version && typeof e.version === "object" && "error" in e.version) rows.push(factRow("Mason", unknown("its version", e.version.error)));
-  if (typeof e.uptimeSeconds === "number") rows.push(factRow("Up for", `${duration(e.uptimeSeconds)}${e.startedAt ? ` (since ${utcText(e.startedAt)} UTC)` : ""}`));
-  const r = e.restarts;
-  if (r && "error" in r) rows.push(factRow("Restarts", unknown("the restarts", r.error)));
-  else if (r) rows.push(factRow("Restarts", r.count === 0 ? "none" : `${n(r.count)}${r.last ? `, the last ${utcText(r.last.at)} UTC: ${firstLine(r.last.why)}` : ""}`));
+  if (typeof e.version === "string") rows.push(factRow(...masonRow(e)));
+  rows.push(...restartsRows(e.restarts, now).map(([k, v]) => factRow(k, v, k === "Restarts")));
   const t = s.totals;
   if (t && t.added > 0) rows.push(
     factRow("Tables synced", `${n(t.copied)} of ${n(t.added)} added${t.failed ? `, ${n(t.failed)} failed` : ""}`),
@@ -155,20 +129,8 @@ export function renderFacts(s, now = Date.now()) {
   const d = s.disk;
   const copyBytes = e.bytes ?? (d && typeof d.copyBytes === "number" ? d.copyBytes : null);
   if (t && t.added > 0 || copyBytes !== null) rows.push(factRow("The copy's file", copyBytes === null ? "its size could not be read" : fileSize(copyBytes)));
-  if (d) {
-    if (d.error) rows.push(factRow("Free disk", unknown("the free disk", d.error), true));
-    else {
-      const free = typeof d.freeBytes === "number" ? d.freeBytes : null;
-      rows.push(factRow("Free disk", free === null ? "unknown" : `${fileSize(free)} where the copy is`));
-      if (typeof d.projectedBytes === "number" && d.projectedBytes > 0) {
-        const over = free !== null && d.projectedBytes > free;
-        rows.push(factRow("The running copy", `projected to add ${fileSize(d.projectedBytes)}${over ? `: more than the ${fileSize(free)} free, the disk would fill` : ""}`, over));
-      }
-    }
-  }
-  const x = s.sessions;
-  if (x && "error" in x) rows.push(factRow("Sessions open", unknown("the sessions", x.error)));
-  else if (x) rows.push(factRow("Sessions open", n(x.open)));
+  rows.push(...diskRows(d).map(([k, v]) => factRow(k, v, d.freeBytes === null || (d.projectedBytes !== null && d.projectedBytes > d.freeBytes))));
+  rows.push(...sessionsRows(s.sessions).map(([k, v]) => factRow(k, v)));
   return `<table class="facts-table"><caption>Mason</caption><tbody>${rows.join("")}</tbody></table>`;
 }
 

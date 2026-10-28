@@ -39,7 +39,7 @@ The full UI is built on it, page by page, under these rules.
   details, and what only a details shows is read only while it is open (the raw log: `toggle`, the page's own state).
   A fact is in ONE place: the Status has one table of facts, the Tables page one list of tables. **A fact the run could
   not read is `unknown` with its reason, never 0, and one it does not say is not shown** (`{ error }` fields of
-  `/api/state`: `stream.slot`, `engine.restarts`, `disk`, `sessions`).
+  `/api/state`: `stream.slotWal`, `engine.restarts`, `disk`, `sessions`).
 - **Tables are added and removed through the commands' own endpoints** (done: the TABLES section): the list is
   `GET /api/state` `tables` (`mason tables --json`'s), Add is `POST /api/pick` `{ table, picked: true, columns?, key? }`
   (`mason add`, the run's `pick`), Remove is `POST /api/remove` `{ tables }` (`mason remove`), and after either the page
