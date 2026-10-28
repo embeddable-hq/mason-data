@@ -74,7 +74,7 @@ before(async () => {
     readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined,
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(dir, "duck.db"), pollSeconds: 5, poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }), lastUsed: async (u) => u.map(() => null) } },
+      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }), lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] }, restarts: () => [] },
   };
   control = createRunServer(ctx);
   await new Promise<void>((r) => control.listen(0, "127.0.0.1", () => r()));

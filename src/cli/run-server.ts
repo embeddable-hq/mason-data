@@ -27,7 +27,9 @@ import { guard, SECURITY_HEADERS } from "./security.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure } from "./command.ts";
-import { readiness } from "./readiness.ts";
+import { readiness, syncTotals, tableSync } from "./readiness.ts";
+import type { Restart } from "./supervise.ts";
+import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT, withLastUsed } from "./user.ts";
 import { postgresLink } from "./pg-url.ts";
 import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
@@ -84,6 +86,11 @@ export interface RunContext {
     stream: () => Promise<StreamStatus | null>;
     /** the Postgres listener's requests (src/duck/requests.ts, `_mason.requests`): mason status and mason logs --requests */
     requests: Pick<RequestLedger, "recent" | "slow" | "refused" | "days" | "lastUsed">;
+    /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
+    events: Pick<SyncEvents, "recent" | "days">;
+    /** the run's restarts, as its supervisor records them in `.mason/restarts.json` (src/cli/supervise.ts readRestarts:
+     *  a file that cannot be read throws, said as the request's failure); merged with the events */
+    restarts: () => Restart[];
     /** the JSON paths stored as columns of the copies, and how far each is (src/duck/kept.ts): mason status */
     jsonPaths?: () => KeptPathStatus[] };
 }
@@ -103,16 +110,16 @@ export interface RefusedQuery {
  * added or not, and each added one's copy as the sync has it, so `mason wait` is ready exactly when every added table is
  * copied.
  */
-export function runState(ctx: RunContext, copies: readonly CopyState[], stream: StreamStatus | null): unknown {
+export function runState(ctx: RunContext, copies: readonly CopyState[], stream: StreamStatus | null, now = Date.now()): unknown {
   const folder = ctx.folder();
   const sources = ctx.sources();
   const by = new Map(copies.map((c) => [c.source, c]));
   const project = folder && fs.existsSync(folder) ? projectFingerprint(folder) : null;
   const facts = ctx.facts();
   const tables = facts.tables.map((t) => {
-    const c = by.get(t.source);
+    const c = by.get(t.source), entry = sources.file?.tables.find((e) => e.table === t.source);
     return {
-      ...catalogTable(t, sources.file?.tables.find((e) => e.table === t.source)),
+      ...catalogTable(t, entry),
       // a table the sync has not reached is waiting for its copy (no copy yet), never "copying 0"
       // a copy in a retired layout (src/duck/sync.ts RETIRED_LAYOUT) serves until it is copied again: done, and said
       copy: c && c.phase !== "waiting" ? { phase: (c.phase === "copied" ? "done" : c.phase === "failed" ? "failed" : "copying") as "copying" | "done" | "failed",
@@ -125,6 +132,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // copied and served, but not kept current by the poll (src/duck/sync.ts POLL_ROW_LIMIT): mason status and wait say so
       ...(c?.unsynced ? { unsynced: c.unsynced } : {}),
       ...(c ? { duck: { rows: c.rows, bytes: c.bytes, seconds: c.seconds, copiedAt: c.copiedAt, error: c.error } } : {}),
+      // an added table's sync: synced, syncing, failed or waiting (src/cli/readiness.ts syncStateOf), when it was last
+      // brought current, how long that took and by what, and how old that is now
+      ...(c !== undefined || entry !== undefined ? { sync: tableSync(c, now) } : {}),
     };
   });
   return {
@@ -139,6 +149,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
     warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason copies the tables it read before; mason start reads the file again)`] : [])],
     folder, project, tables,
+    // the copies in all: tables added, copied, failed, their rows, the latest sync (the file's size is engine.bytes)
+    totals: syncTotals(tables.filter((t) => t.added).length, copies),
     engine: { name: "duckdb", file: ctx.duck.file, bytes: fileBytes(ctx.duck.file), pollSeconds: ctx.duck.pollSeconds },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
     // replication mode: where the stream is, its lag and what it applied (mason status and wait render it, streamLines)
@@ -153,6 +165,22 @@ function fileBytes(file: string): number | null {
 
 async function state(ctx: RunContext): Promise<unknown> {
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream());
+}
+
+/**
+ * `GET /api/events?limit=&since=&failed=1`: the newest `limit` (1 to 10000, default 40) of the sync's events merged with
+ * the run's restarts, newest last, from `since` (a time, ISO 8601) on, the failures only with `failed=1`; and the days
+ * they are kept. `mason logs --events --json` is this; `mason status --json` `recentErrors` its latest failures.
+ */
+export async function events(ctx: RunContext, q: URLSearchParams): Promise<{ events: ReturnType<typeof withRestarts>; keptDays: number }> {
+  const limit = Number(q.get("limit") ?? 40);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 10_000) throw new Refusal(400, "limit is a whole number of events, 1 to 10000");
+  const sinceText = q.get("since");
+  const since = sinceText === null ? undefined : Date.parse(sinceText);
+  if (since !== undefined && Number.isNaN(since)) throw new Refusal(400, `since is a time, as ISO 8601 (2026-10-28T09:00:00Z), not ${JSON.stringify(sinceText)}`);
+  const o = { limit, failed: q.get("failed") === "1", ...(since === undefined ? {} : { since: new Date(since).toISOString() }) };
+  const found = await ctx.duck.events.recent(o);
+  return { events: withRestarts(found, ctx.duck.restarts(), { ...o, days: ctx.duck.events.days }), keptDays: ctx.duck.events.days };
 }
 
 /** The sources file as it is on disk now (src/cli/source-edit.ts sourceToEdit) — and the database it names NOW must be
@@ -258,6 +286,9 @@ export function createRunServer(ctx: RunContext): http.Server {
           const since = url.searchParams.get("since") ?? undefined;
           if (since !== undefined && !/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(since)) throw new Refusal(400, "since is a UTC time as an entry's `at` has it, like 2026-10-24T10:04:00.000Z");
           sendJson(res, 200, { lines: ctx.logs.recent({ lines, ...(since !== undefined ? { since } : {}) }), kept: ctx.logs.capacity });
+        } else if (req.method === "GET" && url.pathname === "/api/events") {
+          // the sync's events and the run's restarts, newest last (src/duck/events.ts): mason logs --events, mason status
+          sendJson(res, 200, await events(ctx, url.searchParams));
         } else if (req.method === "POST" && url.pathname === "/api/pick") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { table?: unknown; picked?: unknown; columns?: unknown; key?: unknown };
           if (typeof body.table !== "string" || typeof body.picked !== "boolean") throw new Refusal(400, "send { table, picked, columns?, key? }");

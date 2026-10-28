@@ -67,6 +67,8 @@ adds pages, not endpoints.
 | Feature | Endpoint (src/cli/run-server.ts) | Renders the shape of |
 |---|---|---|
 | The statements that ran | `GET /api/requests?limit=&failed=1` | `mason logs --requests --json` |
+| The sync's failures and events | `GET /api/events?limit=&since=&failed=1` | `mason logs --events --json`; the latest failures, `mason status --json` `recentErrors` |
+| Each table's sync, the copies in all | `GET /api/state` `tables[].sync`, `totals` | `mason status --json` |
 | The slow statements | `GET /api/slow` | `mason status --json` `slowQueries` |
 | The refused statements | `GET /api/refused` | `mason status --json` `refusedQueries`, `refusedTotal` |
 | The copy's progress | `GET /api/state` `tables[].copy.progress`, `readiness` | `mason wait --json` (`tableLine`, `copyingText` already render it) |

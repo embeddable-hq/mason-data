@@ -284,6 +284,34 @@ test("mason logs --requests: a request a line, newest last — when, the outcome
     "2026-10-26 14:02:14  ok                  5 ms        1 row  Metabase (user metabase)  SELECT 1 FROM orders");
 });
 
+test("the sync's events: a line each in mason logs --events and mason status's Sync errors; the copies in all on one row; every key declared", () => {
+  // read from the module's namespace: at a commit without them the file loads, and the test fails by name
+  const { eventLine, syncErrorLines, totalsText, LOGS } = commands as unknown as {
+    eventLine: (e: unknown, st: typeof PLAIN) => string; syncErrorLines: (r: unknown, st: typeof PLAIN) => string[];
+    totalsText: (t: unknown, now?: number) => string; LOGS: typeof STATUS };
+  const failedCopy = { at: "2026-10-28T09:00:00.000Z", kind: "copy_failed", failed: true, table: "public.orders", message: "the source closed the connection\nmore detail" };
+  const restart = { at: "2026-10-28T09:05:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again" };
+  assert.equal(eventLine(failedCopy, PLAIN), "2026-10-28 09:00:00  copy_failed         public.orders  the source closed the connection");
+  assert.equal(eventLine(restart, PLAIN), "2026-10-28 09:05:00  restart             (the sync)  the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again");
+  assert.deepEqual(syncErrorLines({ sync: [failedCopy, restart], error: null }, PLAIN), [
+    "\nSync errors (the latest, newest last; mason logs --events lists every event):",
+    `  ${eventLine(failedCopy, PLAIN)}`, `  ${eventLine(restart, PLAIN)}`]);
+  assert.deepEqual(syncErrorLines({ sync: [], error: null }, PLAIN), [], "none: no section");
+  assert.deepEqual(syncErrorLines({ sync: [], error: "the run answered 500\nstack" }, PLAIN), ["\nSync errors: could not read them (the run answered 500; mason logs has the detail)"]);
+  const now = Date.parse("2026-10-28T09:10:00.000Z");
+  assert.equal(totalsText({ added: 4, copied: 3, failed: 1, rows: 1_234, syncedAt: "2026-10-28T09:09:55.000Z" }, now), "3 of 4 added copied, 1,234 rows, 1 failed, the last synced 5 s ago");
+  assert.equal(totalsText({ added: 1, copied: 0, failed: 0, rows: 0, syncedAt: null }, now), "0 of 1 added copied, 0 rows");
+  // --json: each key declared, and named in the usage
+  for (const [spec, keys] of [[STATUS, ["totals", "recentErrors"]], [LOGS, ["events"]]] as const) {
+    for (const k of keys) {
+      assert.ok(spec.json?.includes(k), `mason ${spec.name} --json declares ${k}`);
+      assert.match(spec.usage, new RegExp(`\\b${k}\\b`), `mason ${spec.name}'s usage names ${k}`);
+    }
+  }
+  assert.match(LOGS.usage, /--events/);
+  assert.deepEqual(JSON.parse(jsonText(LOGS, { events: [failedCopy], keptDays: 7 }, [["mason status", "x"]])).events, [failedCopy]);
+});
+
 // ------------------------------------------------------------------ mason add and mason remove before mason start
 
 /**
@@ -372,7 +400,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     readSource: () => { runEdits++; return read(); }, runUrl: s.url,
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }), lastUsed: async (u) => u.map(() => null) } },
+      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }), lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] }, restarts: () => [] },
   };
   const server = createRunServer(ctx);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));

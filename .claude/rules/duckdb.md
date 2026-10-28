@@ -381,6 +381,21 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   file. **Its order is `started_at`, then `seq`** (the row's number in arrival order, continuing across restarts):
   `request_id` is a random uuid and the clock a millisecond, so a refused login and the statement before it read back
   in either order until a number broke the tie. ("The request log")
+- **Every sync failure is a row of `_mason.sync_events`, kept as the request log is** (src/duck/events.ts: a failure
+  was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
+  says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy
+  finished, a table current again — the last detected in `record`, the one place an error is cleared), `SyncEvents`
+  writes them in batches on a connection of its own, never the writer's turn, a failed write said once and never
+  failing the sync; a failure repeated word for word within an hour is one event unless its table recovered between.
+  The supervisor's restarts stay in `.mason/restarts.json` (a process of its own cannot open the file) and are merged
+  when read (`withRestarts`). `mason logs --events` and `mason status` (`recentErrors`) read them through the command
+  server's `/api/events`.
+- **A copy's `rows` is its count after every write that changes it** (`CopyState.rows`): the copy's own count at the
+  swap, the poll's reconciled count at its commit, and after every stream batch the rows its writes inserted less the
+  rows they deleted (`rowsChanged`, `writeByKey`) — never a `count(*)` per batch (a write by key's deletes make it a scan:
+  12 ms on 20 M rows) — written to `copy_state` IN the batch's transaction. When it was last brought current, and how,
+  is `CopyState.synced` (`Synced`: the swap, a poll's commit, the stream's last batch); `/api/state` derives each
+  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked.
 
 ## Users (`mason user`, src/duck/users.ts)
 
