@@ -299,7 +299,14 @@ DuckDB's names (`Table Scan`, not `Seq Scan`, which sends a reader looking for a
 
 **Why.** EXPLAIN was the review's critical finding, so it is built over plans. DuckDB's operator time is THREAD time
 summed over threads: a parallel scan's exceeds the Execution Time, which a reader of `actual time` takes for elapsed.
-**Where.** `src/api/postgres/explain.ts`, `src/duck/explain.ts`; `tests/duck-explain-options.test.ts`.
+The profile is the statement's because it is checked to be (2026-10-28): DuckDB's profiler writes one file, the last
+profiled statement's on the connection, and Mason turned it on before the settle's probe of the schemas. A count(*) of a
+whole table writes no profile (DuckDB answers it from the table's row count while planning, a lone `COLUMN_DATA_SCAN`),
+so on a real deployment `EXPLAIN (ANALYZE) SELECT count(*)` of a 197 M-row copy answered the probe's plan, "reading none
+of its copies", while a GROUP BY over the same copy answered its own. Now the profiler is on for the statement alone, the
+profile must name it (`query.sql`), and a statement with none is said so, its plan DuckDB's EXPLAIN with the rows it
+answered and no times.
+**Where.** `src/api/postgres/explain.ts`, `src/duck/explain.ts`; `tests/duck-explain-options.test.ts`, `tests/duck-wire.test.ts`.
 
 ### A query cannot take the run down
 

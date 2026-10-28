@@ -1012,6 +1012,43 @@ test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's
   } finally { await c.end(); }
 });
 
+test("EXPLAIN ANALYZE reports the statement's own profile, never another statement's: one DuckDB answers while planning has its plan and no times", async () => {
+  // DuckDB's profiler writes ONE file, the last profiled statement's on the connection: the settle's probe of the
+  // schemas ran under it, and a count(*) of a whole table — which DuckDB answers from the table's row count while
+  // planning, writing no profile — was reported as that probe's plan (a scan of duckdb_schemas), "reading none of its
+  // copies" (a real deployment's count(*) of a 197 M-row copy)
+  const c = await client();
+  const lines = async (sql: string): Promise<string[]> => (await c.query({ text: sql, rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
+  try {
+    for (const table of ["orders", "big"]) {
+      const l = await lines(`EXPLAIN (ANALYZE) SELECT count(*) FROM ${table}`);
+      const plan = l.filter((x) => !/^ |^(Mason|Planning Time|Execution Time):/.test(x));
+      assert.ok(!l.some((x) => /schemas/i.test(x)), l.join("\n"));
+      // DuckDB's plan of the count (its EXPLAIN: a scan of the one row it computed), the rows it answered, no times
+      assert.deepEqual(plan, ["Column Data Scan  (rows=1) (actual rows=1)"], l.join("\n"));
+      assert.ok(l.includes("  Note: DuckDB's profiler recorded no operator of this statement: DuckDB answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered"), l.join("\n"));
+      assert.ok(!l.some((x) => /thread time/.test(x)), l.join("\n"));
+      assert.match(l.at(-1)!, /^Execution Time: \d+\.\d{3} ms /);
+    }
+    // FORMAT JSON says the same
+    const [doc] = JSON.parse(String((await c.query({ text: "EXPLAIN (ANALYZE, FORMAT JSON) SELECT count(*) FROM big", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown> }>;
+    assert.deepEqual([doc!.Plan["Node Type"], doc!.Plan["Actual Rows"], doc!.Plan["DuckDB Thread Time"]], ["Column Data Scan", 1, undefined]);
+    assert.match(String(doc!.Mason.Note), /^DuckDB's profiler recorded no operator of this statement/);
+    // a statement the profiler does time is its own, after one it did not and after one of another table's; one that
+    // scans a copy says its scan's rows and time
+    for (const [sql, scans] of [["SELECT count(*) FROM big WHERE id > 7", "big"], ["SELECT count(*) FROM orders WHERE qty > 1", "orders"], ["SELECT 1", null], ["SELECT id FROM orders WHERE false", null]] as const) {
+      const l = await lines(`EXPLAIN ANALYZE ${sql}`);
+      assert.ok(!l.some((x) => /schemas|^ {2}Note: DuckDB's profiler/i.test(x)), `${sql}\n${l.join("\n")}`);
+      if (scans !== null) assert.ok(l.some((x) => x.includes(`Table Scan on public.${scans}  (rows=`) && /\(actual rows=\d+, thread time=\d+\.\d{3} ms\)$/.test(x)), `${sql}\n${l.join("\n")}`);
+    }
+    // the profile names the statement as DuckDB was given it: one with a parameter bound, one calling Mason's functions
+    for (const [sql, values] of [["SELECT id FROM orders WHERE status = $1", ["paid"]], ["SELECT sum(amount::text::numeric) FROM orders\nWHERE qty > 0", []]] as const) {
+      const l = (await c.query({ text: `EXPLAIN ANALYZE ${sql}`, values: [...values], rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
+      assert.ok(l.some((x) => /Table Scan on public\.orders {2}\(rows=\d+\) \(actual rows=\d+, thread time=/.test(x)), `${sql}\n${l.join("\n")}`);
+    }
+  } finally { await c.end(); }
+});
+
 test("EXPLAIN (FORMAT JSON) is Postgres's plan document, DuckDB's operators in it and Mason's sections beside: what pgAdmin, DBeaver and DataGrip draw", async () => {
   const c = await client();
   try {

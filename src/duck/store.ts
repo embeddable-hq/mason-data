@@ -34,7 +34,7 @@ import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } fro
 import type { ExactColumn } from "./rewrite.ts";
 import { gapMark } from "./gaps.ts";
 import { cellsOf, evaluateText, NumericError } from "../lib/pg-numeric.ts";
-import { explainJson, explainText, planNodes, scannedTables, type Copy, type Explained, type PlanNode } from "./explain.ts";
+import { explainJson, explainText, planNodes, profiled, scannedTables, type Copy, type Explained, type PlanNode } from "./explain.ts";
 import type { ExplainOptions } from "../api/postgres/explain.ts";
 import type { PlannedSql } from "./plan.ts";
 import * as fs from "node:fs";
@@ -412,9 +412,11 @@ export class SessionRunner implements DuckRunner {
   }
 
   /** `run`, and where its time goes as it is read: DuckDB's (its prepare, which plans; each chunk it computes) and
-   *  Mason's (the exact numerics, the encoding), ms — what an EXPLAIN ANALYZE says */
+   *  Mason's (the exact numerics, the encoding), ms — what an EXPLAIN ANALYZE says. `profile`: the file DuckDB's
+   *  profiler writes this statement's profile to (EXPLAIN ANALYZE), turned on here, after the settle */
   private async streamed(planned: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
-    fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact: readonly ExactColumn[]): Promise<{ answer: DuckAnswer; timing: { prepareMs: number; duckdbMs: number; masonMs: number } }> {
+    fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact: readonly ExactColumn[],
+    profile: string | null = null): Promise<{ answer: DuckAnswer; timing: { prepareMs: number; duckdbMs: number; masonMs: number } }> {
     const sql = planned.text;
     const seq = this.next;
     await Promise.all([...this.releasing]);
@@ -423,6 +425,14 @@ export class SessionRunner implements DuckRunner {
     beginStatement(this.cancels, this.slot, seq);
     try { await this.settle(session); }
     catch (e) { throw pgErrorOf(e, sql); }
+    // THE PROFILER IS ON FOR THE STATEMENT ALONE: DuckDB writes the profile of the LAST statement it profiled on the
+    // connection, so it is turned on after every other statement Mason runs here (the settle's probe of the schemas,
+    // turned on before it, was reported as the plan of a count(*) that wrote no profile of its own), and the caller turns
+    // it off before it runs another (`explained`, which also holds the profile to the statement's text)
+    if (profile !== null) {
+      try { await this.conn.run("SET enable_profiling = 'json'"); await this.conn.run(`SET profiling_output = ${quoteLiteral(profile)}`); }
+      catch (e) { throw pgErrorOf(e, sql); }
+    }
     const timing = { prepareMs: 0, duckdbMs: 0, masonMs: 0 };
     const t0 = performance.now();
     const p = await this.prepare(sql);
@@ -602,43 +612,55 @@ export class SessionRunner implements DuckRunner {
     const o = how.options;
     let plan: PlanNode[];
     let analyzed: Explained["analyzed"];
-    if (!o.analyze) {
-      try { await this.settle(session); }
-      catch (e) { throw pgErrorOf(e, sql.text); }
-      const p = await this.prepare(`EXPLAIN (FORMAT JSON) ${sql.text}`);
-      const interrupt = (): void => this.conn.interrupt();
-      signal.addEventListener("abort", interrupt);
-      try {
-        if (signal.aborted) throw failureOf(signal, null, sql.text);
-        params.forEach((v, i) => { if (v === null) p.bindNull(i + 1); else p.bindVarchar(i + 1, v); });
-        let r;
-        try { r = await p.runAndReadAll(); }
-        catch (e) { throw failureOf(signal, e, sql.text); }
-        plan = planNodes(JSON.parse(String(r.getRowsJS()[0]?.[1] ?? "[]")));
-      } finally { signal.removeEventListener("abort", interrupt); p.destroySync(); }
-    } else {
+    if (!o.analyze) plan = await this.plainPlan(sql, params, session, signal);
+    else {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-explain-"));
       const file = path.join(dir, "profile.json");
       try {
         let rows = 0;
         let timing;
-        await this.conn.run("SET enable_profiling = 'json'");
         try {
-          await this.conn.run(`SET profiling_output = ${quoteLiteral(file)}`);
-          const s = await this.streamed(sql, params, session, signal, how.fields, how.exact);
+          const s = await this.streamed(sql, params, session, signal, how.fields, how.exact, file);
           timing = s.timing;
           try { for (let chunk = await s.answer.fetch([], { timeZone: session.timeZone }); chunk !== null; chunk = await s.answer.fetch([], { timeZone: session.timeZone })) rows += chunk.length; }
           finally { s.answer.close(); }
         } finally { await this.conn.run("PRAGMA disable_profiling"); }
-        // the profile is the statement's: written when its result was read to its end, after every other statement here
-        plan = planNodes((JSON.parse(fs.readFileSync(file, "utf8")) as { operator?: unknown[] }).operator ?? []);
-        analyzed = { rows, planning: { ...how.planning, duckdbMs: timing.prepareMs }, execution: { duckdbMs: timing.duckdbMs, masonMs: timing.masonMs } };
+        // THE PROFILE IS HELD TO THE STATEMENT, never assumed its: DuckDB writes one when the result is read to its end,
+        // naming the statement it timed. None: DuckDB ran no operator (it answered while planning — a count(*) of a
+        // whole table is the table's row count), and its plan is its EXPLAIN, the rows the ones it answered
+        const profile = fs.existsSync(file) ? profiled(JSON.parse(fs.readFileSync(file, "utf8"))) : null;
+        if (profile !== null && profile.sql !== sql.text) {
+          throw new StatementError({ code: "XX000", message: `DuckDB's profile of an EXPLAIN ANALYZE is of another statement (${oneLine(profile.sql ?? "none named")}): report it (Mason's EXPLAIN)` }, sql.text);
+        }
+        if (profile !== null) plan = profile.plan;
+        else {
+          plan = await this.plainPlan(sql, params, session, signal);
+          if (plan[0] !== undefined) plan[0].actualRows = rows;
+        }
+        analyzed = { rows, profiled: profile !== null, planning: { ...how.planning, duckdbMs: timing.prepareMs }, execution: { duckdbMs: timing.duckdbMs, masonMs: timing.masonMs } };
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }
     // what it calls is the plan's (src/duck/plan.ts PlannedSql), the list that decides how it is cancelled
     const explained: Explained = { copies: await this.copies(scannedTables(plan)), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
       functions: [...sql.functions], plan, ...(analyzed === undefined ? {} : { analyzed }) };
     return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
+  }
+
+  /** DuckDB's `EXPLAIN (FORMAT JSON)` of the planned SQL, its parameters bound: its plan, estimates only */
+  private async plainPlan(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal): Promise<PlanNode[]> {
+    try { await this.settle(session); }
+    catch (e) { throw pgErrorOf(e, sql.text); }
+    const p = await this.prepare(`EXPLAIN (FORMAT JSON) ${sql.text}`);
+    const interrupt = (): void => this.conn.interrupt();
+    signal.addEventListener("abort", interrupt);
+    try {
+      if (signal.aborted) throw failureOf(signal, null, sql.text);
+      params.forEach((v, i) => { if (v === null) p.bindNull(i + 1); else p.bindVarchar(i + 1, v); });
+      let r;
+      try { r = await p.runAndReadAll(); }
+      catch (e) { throw failureOf(signal, e, sql.text); }
+      return planNodes(JSON.parse(String(r.getRowsJS()[0]?.[1] ?? "[]")));
+    } finally { signal.removeEventListener("abort", interrupt); p.destroySync(); }
   }
 
   /** each copy's rows and last poll (none recorded: a copy made whole, not polled yet) */

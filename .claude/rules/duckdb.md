@@ -24,6 +24,12 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 - **DuckDB runs only a `PlannedSql`, made in `src/duck/plan.ts` alone, after the read-back** (`tests/conventions.test.ts`):
   a statement's own text never reaches DuckDB, because an `EXPLAIN ANALYZE <write>` that did ran the write
   (docs/DESIGN.md "The review").
+- **EXPLAIN ANALYZE's profile is held to its statement, never assumed its** (src/duck/store.ts `explained`): DuckDB's
+  profiler writes the LAST profiled statement's profile on the connection, so it is on for the statement alone (turned
+  on in `streamed` after the settle, off before anything else runs), and the profile must name the planned SQL
+  (`query.sql`; another's is XX000 "report it"). None written — DuckDB answered while planning, a count(*) of a whole
+  table — is said, with DuckDB's EXPLAIN as the plan: the settle's probe of the schemas was once reported as the plan of
+  such a count (`tests/duck-wire.test.ts` "own profile"; docs/DESIGN.md "EXPLAIN").
 - **A node is placed ONCE in the rewritten tree**: the walker runs a node's rule at its first place only, so a rule that
   uses a node twice clones it per use (`this.cp`, a helper's `copy`), or the second place is Postgres's text (a json
   read's column qualified in one arm of its CASE: DuckDB's 42804, a review finding). The walker records a node
