@@ -49,6 +49,9 @@ test("the file's parser gives the buffer's entries: one shape for mason logs and
   b.push(first); b.push(second);
   assert.deepEqual(need("logEntries")(first + second), b.recent({ lines: 10 }));
   assert.deepEqual(need("logEntries")("Starting\n  step one\n", { perLine: true }), [{ at: null, text: "Starting" }, { at: null, text: "  step one" }]);
+  // a terminal's text (dev.log) keeps its blank lines; the log (mason.log) has no blank entry
+  assert.deepEqual(need("logEntries")("Starting\n\n  step one\n\n", { perLine: true }), [{ at: null, text: "Starting" }, { at: null, text: "" }, { at: null, text: "  step one" }, { at: null, text: "" }]);
+  assert.deepEqual(need("logEntries")(`${first}\n${second}\n\n`), b.recent({ lines: 10 }), "no blank entry in the log");
   assert.equal(need("logLineText")({ at: at(1), text: "[a] x" }), `${at(1)} [a] x`);
 });
 
@@ -61,5 +64,16 @@ test("mason logs --json prints the file's entries as { at, text }, a multi-line 
     assert.equal(r.status, 0, r.stderr);
     const j = JSON.parse(r.stdout) as { lines: unknown };
     assert.deepEqual(j.lines, [{ at: at(2), text: "[b] two\n    more" }]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("mason logs --start prints dev.log as written, its blank lines too", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-logs-"));
+  try {
+    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason", false));
+    fs.writeFileSync(path.join(dir, ".mason", "dev.log"), "Starting\n\n  step one\n\nReady\n");
+    const r = spawnSync(process.execPath, [path.resolve("src/cli/main.ts"), "logs", "--start"], { cwd: dir, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, "Starting\n\n  step one\n\nReady\n");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

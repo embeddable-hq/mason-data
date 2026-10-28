@@ -397,9 +397,10 @@ test("usage over time: /api/usage passes since, until and step to the samples, a
   assert.deepEqual(usageAsks[1], { since: plain.body.since, until: plain.body.until });
   const span = Date.parse(String(plain.body.until)) - Date.parse(String(plain.body.since));
   assert.ok(span === 3_600_000 && Date.parse(String(plain.body.until)) >= t0 - 1000, `the last hour by default: ${plain.body.since} … ${plain.body.until}`);
-  const refusals = await Promise.all(["/api/usage?since=yesterday", "/api/usage?since=2026-10-28T10:00:00Z&until=2026-10-28T09:00:00Z", "/api/usage?step=30", "/api/usage?step=5m"].map(get));
+  const refusals = await Promise.all(["/api/usage?since=yesterday", "/api/usage?since=2026-10-28T09:00:00", "/api/usage?since=2026-10-28T10:00:00Z&until=2026-10-28T09:00:00Z", "/api/usage?step=30", "/api/usage?step=5m"].map(get));
   assert.deepEqual(refusals.map((r) => [r.status, r.body.error]), [
-    [400, 'since is a time, as ISO 8601 (2026-10-28T09:00:00Z), not "yesterday"'],
+    [400, 'since "yesterday" is not a time'],
+    [400, 'since "2026-10-28T09:00:00" is not a time'],
     [400, "since (2026-10-28T10:00:00.000Z) must be before until (2026-10-28T09:00:00.000Z)"],
     [400, 'step is a whole number of seconds, 60 (a sample\'s interval) to 604800 (the 7 days kept), not "30"'],
     [400, 'step is a whole number of seconds, 60 (a sample\'s interval) to 604800 (the 7 days kept), not "5m"'],
@@ -455,7 +456,12 @@ test("the sync's events: /api/events passes its filters to the record, merges th
     const bad = await get("/api/events?limit=0");
     assert.deepEqual([bad.status, bad.body.error], [400, "limit is a whole number of events, 1 to 10000"]);
     const when = await get("/api/events?since=yesterday");
-    assert.deepEqual([when.status, when.body.error], [400, 'since is a time, as ISO 8601 (2026-10-28T09:00:00Z), not "yesterday"']);
+    assert.deepEqual([when.status, when.body.error], [400, 'since "yesterday" is not a time']);
+    // the one time grammar: no zone refused, a bare number refused, an age taken
+    for (const bad of ["2026-10-28T09:00:00", "1"]) assert.equal((await get(`/api/events?since=${bad}`)).status, 400, bad);
+    eventAsks.length = 0;
+    assert.equal((await get("/api/events?since=2h")).status, 200);
+    assert.ok(Math.abs(Date.parse((eventAsks[0] as { since: string }).since) - (Date.now() - 7_200_000)) < 60_000, "an age is that long ago");
   } finally { restarts = []; }
 });
 
@@ -485,7 +491,7 @@ test("a table of any size on a database elsewhere can be added, and mason tables
 
 test("the users: /api/users lists, adds and removes through mason user's own functions and file — its shapes, its sentences", async () => {
   fs.rmSync(usersFile, { force: true });
-  const list = async () => JSON.parse((await call("GET", "/api/users")).text) as { users: Array<Record<string, unknown>>; lastUsedNote: string | null; urlNote: string | null; requestLogDays: number | null };
+  const list = async (query = "?lastUsed=1") => JSON.parse((await call("GET", `/api/users${query}`)).text) as { users: Array<Record<string, unknown>>; lastUsedNote: string | null; urlNote: string | null; requestLogDays: number | null };
   assert.deepEqual((await list()).users, []);
   const added = await call("POST", "/api/users", { body: { name: "metabase" } });
   assert.equal(added.status, 200, added.text);
@@ -506,6 +512,12 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, live: true, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app" }]);
   assert.deepEqual([listed.lastUsedNote, listed.urlNote, listed.requestLogDays], [null, null, 7]);
   assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: null }, "asked for the window the user was a user in");
+  // the web page asks every 2 s and shows no last use: without ?lastUsed=1 the request log is never scanned
+  const scans = lastUsedAsks.length;
+  const plain = await list("");
+  assert.equal(lastUsedAsks.length, scans, "no scan of the request log");
+  assert.deepEqual(plain.users.map((u) => u.lastUsedAt), [null]);
+  assert.equal(plain.lastUsedNote, "not asked: GET /api/users?lastUsed=1 reads it from the request log");
   assert.ok(logged.includes("user metabase added"), "the run's log says it, without the password");
   assert.ok(!logged.some((l) => l.includes(a.password as string)));
 
@@ -579,7 +591,10 @@ test("GET /api/logs: the run's last entries from memory, { at, text } oldest fir
   assert.deepEqual((await get("?since=2026-10-24T10:00:02.000Z")).body.lines!.map((l) => l.at), ["2026-10-24T10:00:03.000Z"]);
   const bad = await get("?lines=4");
   assert.deepEqual([bad.status, bad.body.error], [400, "lines is a whole number of log entries, 1 to 3 (all the run keeps)"]);
-  assert.equal((await get("?since=yesterday")).status, 400);
+  // the one time grammar (src/cli/request-filter.ts timeOf), as every other entrance: an age, or a time with its zone
+  for (const bad of ["yesterday", "1", "2026-10-24T10:00:02"]) assert.equal((await get(`?since=${bad}`)).status, 400, bad);
+  assert.deepEqual((await get("?since=2026-10-24T10:00:02Z")).body.lines!.map((l) => l.at), ["2026-10-24T10:00:03.000Z"]);
+  assert.deepEqual((await get("?since=1h")).body.lines, [], "an hour ago is after every entry of 2026-10-24");
 });
 
 test("the request log's filters and pages: each reaches the ledger as read by the one parser, a malformed one is refused in the Failure shape", async () => {

@@ -37,7 +37,7 @@ import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type 
 import { PollRefused, type CopyState, type PolledTable, type StreamStatus } from "../duck/sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { RequestLedger } from "../duck/requests.ts";
-import { requestFilter, requestFilterText } from "./request-filter.ts";
+import { eventLimit, requestFilter, requestFilterText, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
@@ -188,10 +188,20 @@ export async function usageFacts(ctx: RunContext, now = Date.now()): Promise<Usa
     copied: copies.filter((c) => c.phase === "copied").map((c) => c.source) };
 }
 
+/** A `since` / `until` of a query string, read by the one time grammar (src/cli/request-filter.ts timeOf), as an ISO time. */
+function timeParam(key: string, text: string, now: number): string {
+  const t = timeOf(key, text, now);
+  if (typeof t !== "string") throw new Refusal(400, t.message, t);
+  return t;
+}
+
+/** why `lastUsedAt` is null in a `GET /api/users` that did not ask for it */
+const LAST_USED_NOT_ASKED = "not asked: GET /api/users?lastUsed=1 reads it from the request log";
+
 const DAY_S = 86_400;
 
 /**
- * `GET /api/usage?since=&until=&step=`: the samples from `since` (ISO 8601; default an hour ago) until `until` (default
+ * `GET /api/usage?since=&until=&step=`: the samples from `since` (default an hour ago) until `until` (default
  * now), oldest first; with `step` (seconds, at least a sample's interval) re-bucketed in one query, each count summed and
  * each level at its highest. And each copy's own bytes as last measured, how often a sample is taken, and the days
  * kept. `mason usage --json` is this.
@@ -201,9 +211,7 @@ export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now(
   const time = (k: "since" | "until", fallback: number): string => {
     const text = q.get(k);
     if (text === null) return new Date(fallback).toISOString();
-    const t = Date.parse(text);
-    if (Number.isNaN(t)) throw new Refusal(400, `${k} is a time, as ISO 8601 (2026-10-28T09:00:00Z), not ${JSON.stringify(text)}`);
-    return new Date(t).toISOString();
+    return timeParam(k, text, now);
   };
   const since = time("since", now - 3_600_000), until = time("until", now);
   if (since >= until) throw new Refusal(400, `since (${since}) must be before until (${until})`);
@@ -219,16 +227,15 @@ export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now(
 
 /**
  * `GET /api/events?limit=&since=&failed=1`: the newest `limit` (1 to 10000, default 40) of the sync's events merged with
- * the run's restarts, newest last, from `since` (a time, ISO 8601) on, the failures only with `failed=1`; and the days
+ * the run's restarts, newest last, from `since` on (`since` and `until` are read everywhere by one grammar, src/cli/request-filter.ts `timeOf`: an age, or an ISO 8601 time with its zone), the failures only with `failed=1`; and the days
  * they are kept. `mason logs --events --json` is this; `mason status --json` `recentErrors` its latest failures.
  */
 export async function events(ctx: RunContext, q: URLSearchParams): Promise<{ events: ReturnType<typeof withRestarts>; keptDays: number }> {
-  const limit = Number(q.get("limit") ?? 40);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 10_000) throw new Refusal(400, "limit is a whole number of events, 1 to 10000");
+  const limit = eventLimit(q.get("limit") ?? undefined, "limit");
+  if (typeof limit !== "number") throw new Refusal(400, limit.message, limit);
   const sinceText = q.get("since");
-  const since = sinceText === null ? undefined : Date.parse(sinceText);
-  if (since !== undefined && Number.isNaN(since)) throw new Refusal(400, `since is a time, as ISO 8601 (2026-10-28T09:00:00Z), not ${JSON.stringify(sinceText)}`);
-  const o = { limit, failed: q.get("failed") === "1", ...(since === undefined ? {} : { since: new Date(since).toISOString() }) };
+  const since = sinceText === null ? undefined : timeParam("since", sinceText, Date.now());
+  const o = { limit, failed: q.get("failed") === "1", ...(since === undefined ? {} : { since }) };
   const found = await ctx.duck.events.recent(o);
   return { events: withRestarts(found, ctx.duck.restarts(), { ...o, days: ctx.duck.events.days }), keptDays: ctx.duck.events.days };
 }
@@ -348,8 +355,8 @@ export function createRunServer(ctx: RunContext): http.Server {
           // the run's last log entries from memory (mason serve has no file to read): { at, text } each, oldest first
           const lines = Number(url.searchParams.get("lines") ?? Math.min(40, ctx.logs.capacity));
           if (!Number.isInteger(lines) || lines < 1 || lines > ctx.logs.capacity) throw new Refusal(400, `lines is a whole number of log entries, 1 to ${ctx.logs.capacity} (all the run keeps)`);
-          const since = url.searchParams.get("since") ?? undefined;
-          if (since !== undefined && !/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(since)) throw new Refusal(400, "since is a UTC time as an entry's `at` has it, like 2026-10-24T10:04:00.000Z");
+          const sinceText = url.searchParams.get("since");
+          const since = sinceText === null ? undefined : timeParam("since", sinceText, Date.now());
           sendJson(res, 200, { lines: ctx.logs.recent({ lines, ...(since !== undefined ? { since } : {}) }), kept: ctx.logs.capacity });
         } else if (req.method === "GET" && url.pathname === "/api/events") {
           // the sync's events and the run's restarts, newest last (src/duck/events.ts): mason logs --events, mason status
@@ -374,10 +381,13 @@ export function createRunServer(ctx: RunContext): http.Server {
             sendJson(res, 200, { ...r, state: await state(ctx) });
           }
         } else if (req.method === "GET" && url.pathname === "/api/users") {
-          // mason user list --json's shape: the users, and whether each connects
+          // mason user list --json's shape: the users, and whether each connects (and with ?lastUsed=1 when each was last used)
           const r = listUsers(ctx.users.file, ctx.users.apiKey, postgresLink(ctx.users.postgresUrl));
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
-          const used = await withLastUsed(r.users, ctx.duck.requests, ctx.log);
+          // the last use is a scan of the request log: only when asked (?lastUsed=1, mason user list), never for the web page's
+          // poll every 2 s, which does not show it
+          const used = url.searchParams.get("lastUsed") === "1" ? await withLastUsed(r.users, ctx.duck.requests, ctx.log)
+            : { users: r.users, lastUsedNote: LAST_USED_NOT_ASKED, requestLogDays: ctx.duck.requests.days };
           sendJson(res, 200, { ...used, urlNote: null, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
         } else if (req.method === "POST" && url.pathname === "/api/users") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown };

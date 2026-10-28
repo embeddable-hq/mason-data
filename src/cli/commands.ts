@@ -37,7 +37,7 @@ import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery } from "../duck/requests.ts";
 import type { RunningStatement } from "../api/postgres/server.ts";
-import { DEFAULT_REQUEST_LIMIT, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
+import { DEFAULT_REQUEST_LIMIT, eventLimit, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -208,7 +208,7 @@ export function tableLines(s: RunState): string[] {
 }
 
 /** A span of seconds as the stream's lines say it: `0.3 s` under ten seconds, then as a wait reads (`duration`). */
-const spanText = (seconds: number): string => seconds < 10 ? `${Math.max(0, seconds).toFixed(1)} s` : duration(seconds);
+export const spanText = (seconds: number): string => seconds < 10 ? `${Math.max(0, seconds).toFixed(1)} s` : duration(seconds);
 
 /**
  * WHERE THE STREAM IS, a thing a line (the first replication run on a server showed nothing of it in 35
@@ -253,7 +253,7 @@ const STATUS_USAGE = `usage: mason status [--json]
   Status: running, not running, or hung — then this project's facts, one a line: its folder, its database and how
   its changes are read, the run and its copy's file and the copies in all (copied, rows, the last sync), the Postgres API
   and how it listens. Then each added table as mason wait shows it; the sync's latest failures (mason logs --events
-  lists every event); the Postgres API's statements of the last day and the last week (each outcome, the completed
+  lists every event) and the latest statements refused, failed or cancelled (mason logs --requests --failed); the Postgres API's statements of the last day and the last week (each outcome, the completed
   ones' average, p50 and p95 time, the rows and bytes sent); the ones it answered slowly in the last day; and the ones it refused or
   failed, each with the reason (mason logs --requests lists every one). With Mason stopped, the same rows say "not
   running", how the last run ended, and the tables are the ones the sources file names. Hung is a run that is alive and does
@@ -275,7 +275,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
            when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all),
            recentErrors: { sync: [{ at, kind, failed, table, message }] (the latest failures of the sync and restarts,
-           newest last: mason logs --events), error (why they could not be read, or null) },
+           newest last: mason logs --events), error (why they could not be read, or null), queries: [{ requestId,
+           startedAt, outcome, sqlstate, message, query, … }] (the latest statements refused, failed or cancelled, newest
+           last, as mason logs --requests --json shows each: mason logs --requests --failed), queriesError (or null) },
            readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
            { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
@@ -339,8 +341,14 @@ export async function status(argv: string[]): Promise<number> {
     const refusedTotal = typeof refusedReply.body.total === "number" ? refusedReply.body.total : null;
     // the sync's latest failures (src/duck/events.ts), and the run's restarts among them
     const eventsReply = await callRun(run, "GET", `/api/events?failed=1&limit=${RECENT_ERRORS}`);
-    const recentErrors: RecentErrors = eventsReply.status === 200 ? { sync: eventsReply.body.events as SyncEvent[], error: null }
-      : { sync: [], error: String(eventsReply.body.error ?? `the run answered ${eventsReply.status}`) };
+    // and the latest statements refused, failed or cancelled: the request log's own page, the shape mason logs --requests --json prints
+    const failedReply = await callRun(run, "GET", `/api/requests?failed=1&limit=${RECENT_ERRORS}`);
+    const recentErrors: RecentErrors = {
+      sync: eventsReply.status === 200 ? eventsReply.body.events as SyncEvent[] : [],
+      error: eventsReply.status === 200 ? null : String(eventsReply.body.error ?? `the run answered ${eventsReply.status}`),
+      queries: failedReply.status === 200 ? failedReply.body.requests as LedgerRequest[] : [],
+      queriesError: failedReply.status === 200 ? null : String(failedReply.body.error ?? `the run answered ${failedReply.status}`),
+    };
     // the last day's and week's statements (src/duck/requests.ts summary): asked here, never with the state
     const queriesReply = await callRun(run, "GET", "/api/queries");
     const queries: QuerySummary | { error: string } = queriesReply.status === 200 ? queriesReply.body.queries as QuerySummary
@@ -387,6 +395,7 @@ export async function status(argv: string[]): Promise<number> {
     out(st.bold(`Tables (${picked.length} of ${s.tables.length} added):`));
     for (const l of tableLines(s)) out(`  ${paintBar(l, st)}`);
     for (const l of syncErrorLines(recentErrors, st)) out(l);
+    for (const l of queryErrorLines(recentErrors, st)) out(l);
     for (const l of jsonPathLines(s.jsonPaths ?? [], st)) out(l);
     for (const l of queryLines(queries, st)) out(l);
     for (const l of slowLines(slowReply.status === 200 ? slow : { error: String(slowReply.body.error ?? slowReply.status) }, st)) out(l);
@@ -446,14 +455,16 @@ export function totalsText(t: SyncTotals, now = Date.now()): string {
   return `${n(t.copied)} of ${n(t.added)} added copied, ${n(t.rows)} row${t.rows === 1 ? "" : "s"}${t.failed ? `, ${n(t.failed)} failed` : ""}${last}`;
 }
 
-/** How many of the latest sync failures mason status shows (`recentErrors.sync`); mason logs --events lists each. */
+/** How many of the latest sync failures and failed statements mason status shows (`recentErrors`); mason logs --events and --requests --failed list each. */
 export const RECENT_ERRORS = 5;
 
 /**
- * mason status's RECENT ERRORS: the latest failures of the sync (src/duck/events.ts, through `/api/events?failed=1`),
- * and why they could not be read when they could not. `queries` (the request log's failures) joins them here.
+ * mason status's RECENT ERRORS: the latest failures of the sync (`sync`, src/duck/events.ts, through `/api/events?failed=1`)
+ * and the latest statements the Postgres API refused, failed or cancelled (`queries`, the request log's page through
+ * `/api/requests?failed=1`, as `mason logs --requests --failed --json` prints them), each with why it could not be read
+ * (`error`, `queriesError`) when it could not.
  */
-export interface RecentErrors { sync: SyncEvent[]; error: string | null }
+export interface RecentErrors { sync: SyncEvent[]; error: string | null; queries: LedgerRequest[]; queriesError: string | null }
 
 /** One event of the sync on one line (src/duck/events.ts): when, what (a failure in red), its table, its reason's first line. */
 export function eventLine(e: SyncEvent, st: Style): string {
@@ -465,6 +476,13 @@ export function syncErrorLines(r: RecentErrors, st: Style): string[] {
   if (r.error !== null) return [`\n${st.bold("Sync errors")}: could not read them (${firstLine(r.error)}; mason logs has the detail)`];
   if (!r.sync.length) return [];
   return [`\n${st.bold("Sync errors")} ${st.dim("(the latest, newest last; mason logs --events lists every event)")}:`, ...r.sync.map((e) => `  ${eventLine(e, st)}`)];
+}
+
+/** mason status's statement errors: the latest few refused, failed or cancelled, a line each (`requestLine`), newest last; none, no section. */
+export function queryErrorLines(r: Pick<RecentErrors, "queries" | "queriesError">, st: Style): string[] {
+  if (r.queriesError !== null) return [`\n${st.bold("Query errors")}: could not read them (${firstLine(r.queriesError)}; mason logs has the detail)`];
+  if (!r.queries.length) return [];
+  return [`\n${st.bold("Query errors")} ${st.dim("(the latest refused, failed or cancelled, newest last; mason logs --requests --failed lists each)")}:`, ...r.queries.map((q) => `  ${requestLine(q, st)}`)];
 }
 
 /** Bytes as a person reads them: B, KiB, MiB, GiB. */
@@ -1128,7 +1146,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     mason logs --events --failed  the sync's latest failures
     mason logs --running          the statements running now, and their sessions
 
-  -n, --lines <n>  how many lines, or with --requests or --events how many of them (default 40; requests 1 to 10000)
+  -n, --lines <n>  how many lines, or with --requests or --events how many of them (default 40; 1 to 10000 for each)
   -f, --follow     keep printing new lines until Ctrl-C
   --start          mason start's own terminal instead (its steps, then only the warnings and errors)
   --requests       the Postgres API's requests, from the run's request log (Mason must be running)
@@ -1234,8 +1252,7 @@ async function eventLogs(limit: number, failedOnly: boolean, json: boolean): Pro
   return guarded("logs", json, async () => {
     const reply = await callRun(r0.run, "GET", `/api/events?limit=${limit}${failedOnly ? "&failed=1" : ""}`);
     if (reply.status !== 200) {
-      return failed("logs", { message: String(reply.body.error ?? `the run answered ${reply.status}`), code: reply.status === 409 ? "refused" : "failed",
-        next: [["mason status", "each table's copy and its error now"], ["mason logs", "Mason's log, where each event is a line too"]] }, { json });
+      return failed("logs", runFailure(reply, [["mason status", "each table's copy and its error now"], ["mason logs", "Mason's log, where each event is a line too"]]), { json });
     }
     const events = reply.body.events as SyncEvent[];
     const keptDays = Number(reply.body.keptDays);
@@ -1294,6 +1311,9 @@ export async function logs(argv: string[]): Promise<number> {
     const whose = other === "--requests" ? "the request log's" : other === "--events" ? "the sync's events'" : "the log file's";
     return failed("logs", { message: `--running lists the statements running now; ${other} is ${whose}`, code: "usage", fix: `mason logs --running, or mason logs ${other}` }, { json });
   }
+  if (f.values.running && f.values.lines !== undefined) {
+    return failed("logs", { message: "--running lists every statement running now: -n (--lines) does not apply to it", code: "usage", fix: "mason logs --running" }, { json });
+  }
   if (f.values.requests && (f.values.start || f.values.follow)) return failed("logs", { message: `--requests lists the request log; ${f.values.start ? "--start" : "-f"} is the log file's`, code: "usage", fix: "mason logs --requests, or mason logs " + (f.values.start ? "--start" : "-f") }, { json });
   if (f.values.events && (f.values.start || f.values.follow)) return failed("logs", { message: `--events lists the sync's events; ${f.values.start ? "--start" : "-f"} is the log file's`, code: "usage", fix: "mason logs --events, or mason logs " + (f.values.start ? "--start" : "-f") }, { json });
   if (json && f.values.follow) return failed("logs", { message: "-f prints lines as they come, and --json is one answer", code: "usage", fix: "mason logs --json, or mason logs -f" }, { json });
@@ -1309,8 +1329,9 @@ export async function logs(argv: string[]): Promise<number> {
   const lines = f.values.lines === undefined ? 40 : Number(f.values.lines);
   if (!Number.isInteger(lines) || lines < 0) return failed("logs", { message: `-n (--lines) is a number of lines, not ${JSON.stringify(f.values.lines)}`, code: "usage" }, { json });
   if (f.values.events) {
-    if (lines < 1) return failed("logs", { message: "-n with --events is a number of events, 1 or more", code: "usage" }, { json });
-    return eventLogs(lines, f.values.failed === true, json);
+    const limit = eventLimit(typeof f.values.lines === "string" ? f.values.lines : undefined, "-n");
+    if (typeof limit !== "number") return failed("logs", { ...limit, usage: LOGS_USAGE }, { json });
+    return eventLogs(limit, f.values.failed === true, json);
   }
   // a stopped run's log is still worth reading: the project's, running or not
   const t = theProject(process.cwd());

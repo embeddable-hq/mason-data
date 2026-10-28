@@ -1,8 +1,30 @@
-# Observability: the plan
+# Observability
 
 What a team running Mason sees about it: whether it is healthy, how fresh each copy is, what was asked of it, who
-asked, and what it costs. This is a PLAN: the data and the endpoints first, the presentation after. Nothing here is
-built yet unless it says ✅.
+asked, and what it costs. The data and the endpoints came first and are built (steps 1–6 below, ✅); the presentation
+(the web page's sections, the managed service) is built on them after. What is not built says so (⏸, "Access").
+
+## Built
+
+Every field below is a field of a command's `--json`, and the run's command server (src/cli/run-server.ts) answers the
+same JSON; the web page and the managed service read those endpoints, never a second computation.
+
+| Endpoint | Command | What |
+|---|---|---|
+| `GET /api/state` | `mason status`, `mason tables`, `mason wait` | each copy's rows, state and last sync (`tables[].sync`), the totals, the readiness |
+| `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent |
+| `GET /api/slow`, `GET /api/refused` | `mason status` | the slow statements; the refused and failed ones, each distinct one once |
+| `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&before=` | `mason logs --requests` | the request log, filtered and paged |
+| `GET /api/events?limit=&since=&failed=` | `mason logs --events`; `mason status` `recentErrors.sync` | the sync's failures and events, and the run's restarts |
+| `GET /api/running`, `POST /api/cancel { session }` | `mason logs --running`, `mason cancel <session>` | the statements running now; stop one as a client's cancel does |
+| `GET /api/usage?since=&until=&step=` | `mason usage` | a sample a minute, re-bucketed by `step`, and each copy's own size |
+| `GET /api/users[?lastUsed=1]` | `mason user list` | the users, removed ones kept; the last use only when asked (a scan of the request log) |
+| `GET /api/logs?lines=&since=` | `mason logs --json` | the run's last log entries from memory (`mason serve` has no file) |
+| `POST /api/sync { tables }` | `mason sync` | sync now, per table |
+
+`mason status --json` `recentErrors` holds the latest sync failures (`sync`) and the latest statements refused, failed or
+cancelled (`queries`, the request log's own shape). `since` and `until` are read everywhere by one grammar: an age (30m,
+2h, 7d) or an ISO 8601 time with its zone.
 
 ## Who reads it
 
@@ -19,7 +41,7 @@ built yet unless it says ✅.
 - **Kept like the request log**: anything with history lives in the run's own file, written on a connection of its own
   (never the sync's writer turn), kept `MASON_REQUEST_LOG_DAYS` days.
 
-Key: ✅ exists · 🟡 derivable from what Mason already records · 🔨 needs building · ⏸ deferred
+Key: ✅ built · ⏸ deferred
 
 ## 1. Status
 
@@ -27,39 +49,39 @@ Key: ✅ exists · 🟡 derivable from what Mason already records · 🔨 needs 
 |---|---|---|
 | Healthy / Syncing / Error | ✅ | `readiness` (src/cli/readiness.ts) |
 | Tables synced, N of M | ✅ | `/api/state` `tables` |
-| Total rows | 🔨 | a copy's `rows` is counted when it is copied and never refreshed by a poll (src/duck/sync.ts `record` at the swap): count after each poll |
-| Last successful sync | 🟡 | `_mason.poll_state.polled_at`; in replication mode the stream's last batch |
+| Total rows | ✅ | `totals.rows`; a copy's rows are counted after every batch |
+| Last successful sync | ✅ | `totals.syncedAt` and `tables[].sync` (`syncedAt`, `syncedBy`); in replication mode the stream's last batch |
 | Storage used | ✅ | `engine.bytes`, the copy's file |
-| Queries, last 24 h / 7 d | 🟡 | the request log (`_mason.requests`); 7 days is its default retention |
-| Query duration | 🟡 | the request log: average, and p50 / p95 (an average alone hides the slow ones) |
-| Recent errors | 🔨 | query failures are in the request log; a sync failure is kept only as a table's CURRENT error, earlier ones only in the log file: needs the sync events record (step 2) |
+| Queries, last 24 h / 7 d | ✅ | `queries` (`/api/queries`), from the request log (`_mason.requests`); 7 days is its default retention |
+| Query duration | ✅ | `queries`: average, and p50 / p95 (an average alone hides the slow ones) |
+| Recent errors | ✅ | `recentErrors`: `sync` (the sync events record, step 2) and `queries` (the request log's failures) |
 
 ## 2. Tables
 
 | Field | | Where it comes from / what to build |
 |---|---|---|
-| Row count | 🔨 | as Total rows above |
-| Last sync time, and how old the copy is | 🟡 | per table: `poll_state.polled_at`, or the stream's per-table state |
+| Row count | ✅ | as Total rows above |
+| Last sync time, and how old the copy is | ✅ | per table: `sync.syncedAt`, `sync.ageSeconds` |
 | Sync now, per table | ✅ | `POST /api/sync { tables }` (`mason sync`) |
 | Synced / Syncing / Failed / Pending | ✅ | the copy's phase: done / copying / failed / waiting |
-| Sync duration | 🟡 / 🔨 | a copy's `seconds` exists; a table's poll is not timed (only the whole pass, `lastPassMs`) |
-| Sync error | ✅ / 🔨 | the current one exists; its history needs step 2 |
+| Sync duration | ✅ | `sync.syncSeconds`: how long the sync that brought the copy current took |
+| Sync error | ✅ | the current one on the table; its history is the sync events (`mason logs --events`) |
 | Size of the copy | ✅ | `bytes` is the SOURCE table's size; the copy's own size per table is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request |
-| Search / filter | 🟡 | over the list the endpoint returns; no server change for hundreds of tables |
+| Search / filter | ✅ | over the list the endpoint returns; no server change for hundreds of tables |
 
 ## 3. Queries
 
 | Field | | Where it comes from / what to build |
 |---|---|---|
 | SQL, started, duration, rows returned, error | ✅ | a request log row (`LedgerRequest`) |
-| Ended | 🟡 | started + duration |
-| Completed / Failed / Cancelled | 🟡 | `outcome`, and SQLSTATE 57014 for a cancel |
-| Running | 🔨 | the listener knows each session's statement in flight (`Session`, src/api/postgres/server.ts); nothing exposes it |
-| Cancel | 🔨 | the listener cancels a session's statement for the Postgres protocol already; needs an endpoint and a command |
+| Ended | ✅ | `endedAt` |
+| Completed / Failed / Cancelled | ✅ | `outcome` and `status`; a cancel is SQLSTATE 57014 |
+| Running | ✅ | `GET /api/running`, `mason logs --running` |
+| Cancel | ✅ | `POST /api/cancel`, `mason cancel <session>`, through the listener's one path |
 | User | ✅ | `user`; and the client's `applicationName` |
 | Query ID | ✅ | `requestId` |
 | Rows scanned | ⏸ | **Decide later: may add cost to every query.** DuckDB reports it only with its profiler on per statement, whose cost is not measured. Measure (about half a day) before promising it. |
-| Filters: status, date, user | 🔨 | `/api/requests` takes `limit` and `failed` only: add outcome, since / until, user, client, and paging |
+| Filters: status, date, user | ✅ | `/api/requests`: outcome, `failed`, since / until, user, client, and paging (`before`) |
 
 ## 4. Users
 
@@ -67,25 +89,25 @@ Key: ✅ exists · 🟡 derivable from what Mason already records · 🔨 needs 
 |---|---|---|
 | List, add (password shown once), remove | ✅ | `mason user`, `/api/users` |
 | Added at | ✅ | `addedAt` |
-| Last used | 🟡 | the request log's latest row for the user; older than the retention is said as such |
-| Active / Removed | 🔨 | a removal deletes the entry: keep it with `removedAt` |
+| Last used | ✅ | `lastUsedAt`, the request log's latest row for the user (`?lastUsed=1`); older than the retention is said as such |
+| Active / Removed | ✅ | a removed user is kept with `removedAt` |
 | Connection string | ✅ | with the password ONCE, when the user is added (kept nowhere); afterwards the URL without it |
 
 ## 5. Usage
 
 | Field | | Where it comes from / what to build |
 |---|---|---|
-| Storage, queries executed | ✅ / 🟡 | as Status |
-| Rows returned | 🟡 | the request log |
+| Storage, queries executed | ✅ | as Status |
+| Rows returned | ✅ | the request log |
 | Rows processed | ⏸ | as Rows scanned |
-| Data transferred | 🔨 | not recorded: the listener counts the bytes it sends a statement, a column of the request log |
+| Data transferred | ✅ | `bytesSent`, the bytes the listener sends a statement, a column of the request log |
 | Usage over time | ✅ | a sample a minute in `_mason.usage` (step 6): `/api/usage`, `mason usage` |
 | Billing period | — | dropped for now |
 
 ## 6. Logs
 
-- `mason start`: the run's log, `.mason/mason.log`. 🔨 an endpoint.
-- `mason serve`: the log is stdout, so there is no file. 🔨 the last N lines kept in memory, for both.
+- `mason start`: the run's log, `.mason/mason.log`. ✅ `mason logs`.
+- `mason serve`: the log is stdout, so there is no file. ✅ the last 2000 entries are kept in memory, for both: `GET /api/logs`.
 
 ## Also worth showing (not asked for)
 
@@ -99,20 +121,20 @@ Key: ✅ exists · 🟡 derivable from what Mason already records · 🔨 needs 
 
 Each adds fields to a command's `--json` and the endpoint with the same JSON, with its tests.
 
-1. **Status and Tables (~2 days)**: row counts after each poll; per table the last sync, its duration and the copy's
+1. ✅ **Status and Tables (~2 days)**: row counts after each poll; per table the last sync, its duration and the copy's
    age; totals; query counts and durations over 24 h and 7 d.
-2. **Sync events (~1.5 days)**: copy and poll failures and restarts as rows, kept as the request log is.
-3. **Queries (~2 days)**: filters and paging, ended, Cancelled; the running statements and cancel; bytes sent.
-4. **Users (~1 day)**: last used, removed entries kept, the URL without the password.
-5. **Logs (~1 day)**: the last N lines in memory, an endpoint, `mason logs --json`.
+2. ✅ **Sync events (~1.5 days)**: copy and poll failures and restarts as rows, kept as the request log is.
+3. ✅ **Queries (~2 days)**: filters and paging, ended, Cancelled; the running statements and cancel; bytes sent.
+4. ✅ **Users (~1 day)**: last used, removed entries kept, the URL without the password.
+5. ✅ **Logs (~1 day)**: the last N lines in memory, an endpoint, `mason logs --json`.
 6. ✅ **Samples (~2–3 days)**: every N seconds — storage, rows, queries, bytes sent, lag, memory — and each copy's size
    less often.
 
 ## Access (open)
 
-The managed service reads these from `mason serve`, which today answers `/healthz` alone. It needs the endpoints
-served there behind a service token, and TLS off loopback. Not designed yet; it decides whether steps 1–6 land on
-`mason serve` at once or `mason start` first.
+The managed service reads these from `mason serve`, which today answers `/healthz` alone: the endpoints above are
+`mason start`'s command server (loopback, the run's token). It needs them served from `mason serve` behind a service
+token, and TLS off loopback. Not designed yet.
 
 ## Decided
 

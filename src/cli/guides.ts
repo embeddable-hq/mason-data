@@ -41,7 +41,8 @@ async function agentGuide(): Promise<string> {
   return `DRIVING MASON FROM A CODING AGENT — the same commands a person runs, answered as data
 
   Every command prints for a person, or with --json one JSON object for a program. One prints text alone: mason help
-  (this reference); mason logs --json is the log's entries ({ at, text }), or with --requests the request log. Nothing a command prints
+  (this reference); mason logs --json is the log's entries ({ at, text }), or with --requests the request log, --events the sync's
+  events, --running the statements running now. Nothing a command prints
   refers to a file this package does not ship.
 
   THE COMMANDS, in the order a project takes them (mason --help lists the same):
@@ -90,6 +91,14 @@ ${codes}
     mason start --json && mason wait --json   Mason in the background; until every added table is copied
     mason user add my-tool --json             the URL and password a tool connects with
     mason status --json                       each table's copy, and the last day's slow and refused statements
+  WATCHING IT, once it runs (every one with --json; --since and --until take an age, 30m or 2h or 7d, or an ISO 8601 time WITH
+  its zone):
+    mason status --json                       recentErrors: the sync's latest failures and the statements latest refused, failed or cancelled
+    mason logs --requests --failed --json     every statement a tool sent that was not answered, with its SQLSTATE and message
+    mason logs --events --failed --json       the sync's failures: a copy, a poll, the stream, the database out of reach, a restart
+    mason logs --running --json               the statements running now, one per session
+    mason cancel <session> --json             stops that session's statement, as a client's cancel does (the client is told 57014)
+    mason usage --since 7d --step 1h --json  the statements, the copy's size and age, the memory over time, a sample a minute
   With no database to hand, in a new folder: mason init demo --json && mason start --json — a demo database Mason
   hosts itself (${DEMO_TABLES.join(", ")}), changed every few seconds, read by polling only. Init adds
   ${DEMO_ADDED_TABLES.join(", ")}; ${DEMO_TABLE_TO_ADD} is left to add: mason add ${DEMO_TABLE_TO_ADD} --json && mason wait --json, after mason start.
