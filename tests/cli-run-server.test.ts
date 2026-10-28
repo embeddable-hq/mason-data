@@ -491,7 +491,7 @@ test("a table of any size on a database elsewhere can be added, and mason tables
 
 test("the users: /api/users lists, adds and removes through mason user's own functions and file — its shapes, its sentences", async () => {
   fs.rmSync(usersFile, { force: true });
-  const list = async () => JSON.parse((await call("GET", "/api/users")).text) as { users: Array<Record<string, unknown>>; lastUsedNote: string | null; urlNote: string | null; requestLogDays: number | null };
+  const list = async (query = "?lastUsed=1") => JSON.parse((await call("GET", `/api/users${query}`)).text) as { users: Array<Record<string, unknown>>; lastUsedNote: string | null; urlNote: string | null; requestLogDays: number | null };
   assert.deepEqual((await list()).users, []);
   const added = await call("POST", "/api/users", { body: { name: "metabase" } });
   assert.equal(added.status, 200, added.text);
@@ -512,6 +512,12 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, live: true, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app" }]);
   assert.deepEqual([listed.lastUsedNote, listed.urlNote, listed.requestLogDays], [null, null, 7]);
   assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: null }, "asked for the window the user was a user in");
+  // the web page asks every 2 s and shows no last use: without ?lastUsed=1 the request log is never scanned
+  const scans = lastUsedAsks.length;
+  const plain = await list("");
+  assert.equal(lastUsedAsks.length, scans, "no scan of the request log");
+  assert.deepEqual(plain.users.map((u) => u.lastUsedAt), [null]);
+  assert.equal(plain.lastUsedNote, "not asked: GET /api/users?lastUsed=1 reads it from the request log");
   assert.ok(logged.includes("user metabase added"), "the run's log says it, without the password");
   assert.ok(!logged.some((l) => l.includes(a.password as string)));
 

@@ -195,6 +195,9 @@ function timeParam(key: string, text: string, now: number): string {
   return t;
 }
 
+/** why `lastUsedAt` is null in a `GET /api/users` that did not ask for it */
+const LAST_USED_NOT_ASKED = "not asked: GET /api/users?lastUsed=1 reads it from the request log";
+
 const DAY_S = 86_400;
 
 /**
@@ -378,10 +381,13 @@ export function createRunServer(ctx: RunContext): http.Server {
             sendJson(res, 200, { ...r, state: await state(ctx) });
           }
         } else if (req.method === "GET" && url.pathname === "/api/users") {
-          // mason user list --json's shape: the users, and whether each connects
+          // mason user list --json's shape: the users, and whether each connects (and with ?lastUsed=1 when each was last used)
           const r = listUsers(ctx.users.file, ctx.users.apiKey, postgresLink(ctx.users.postgresUrl));
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
-          const used = await withLastUsed(r.users, ctx.duck.requests, ctx.log);
+          // the last use is a scan of the request log: only when asked (?lastUsed=1, mason user list), never for the web page's
+          // poll every 2 s, which does not show it
+          const used = url.searchParams.get("lastUsed") === "1" ? await withLastUsed(r.users, ctx.duck.requests, ctx.log)
+            : { users: r.users, lastUsedNote: LAST_USED_NOT_ASKED, requestLogDays: ctx.duck.requests.days };
           sendJson(res, 200, { ...used, urlNote: null, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
         } else if (req.method === "POST" && url.pathname === "/api/users") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown };

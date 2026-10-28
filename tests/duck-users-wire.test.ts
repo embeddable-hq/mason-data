@@ -67,7 +67,7 @@ before(async () => {
   control = http.createServer((req, res) => {
     if (req.url === "/api/ping" && req.headers.authorization === `Bearer ${RUN_TOKEN}`) { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ pid: process.pid, service: true })); return; }
     // GET /api/users as the run answers it (src/cli/run-server.ts): the same functions, over this test's ledger
-    if (req.url === "/api/users" && req.headers.authorization === `Bearer ${RUN_TOKEN}`) {
+    if (req.url === "/api/users?lastUsed=1" && req.headers.authorization === `Bearer ${RUN_TOKEN}`) {
       void (async () => {
         const m = await import("../src/cli/user.ts");
         const { postgresLink } = await import("../src/cli/pg-url.ts");

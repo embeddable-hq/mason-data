@@ -220,7 +220,7 @@ export async function user(argv: string[]): Promise<number> {
     let requestLogDays: number | null = null;
     if (up !== null) {
       try {
-        const asked = await callRun(up, "GET", "/api/users");
+        const asked = await callRun(up, "GET", "/api/users?lastUsed=1");
         if (asked.status === 200 && Array.isArray(asked.body.users)) {
           const used = new Map((asked.body.users as UserRow[]).map((u) => [u.id, u.lastUsedAt]));
           users = users.map((u) => ({ ...u, lastUsedAt: used.get(u.id) ?? null }));
