@@ -35,7 +35,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   progress, the database's rows, a table's line, what an add or a remove did) it is held EQUAL to the CLI's function by
   a test (`tests/web-page.test.ts`: `copyingText`, `tableLines`, `duration`, `sourceRows`, `tableFacts`, `addedLines`,
   `removedReport`, `readinessWord`, `totalsText`, `fileSize`, `bytesText`, `spanText`, `eventLine`, `requestLine`,
-  `queryLines`, `syncedReport`, `streamLines`), so the two cannot drift. A line the page splits into a table's cells is held equal
+  `queryLines`, `syncedReport`, `streamLines`, `unsupportedLines`, `ago`), so the two cannot drift. A line the page splits into a table's cells is held equal
   cell by cell: its cells, read in order, are the CLI's line (spaces aside).
 - **Nothing on the page that `mason status --json` (or the command whose `--json` it renders) cannot also say.** A page
   that needs a fact gets it by adding it to the JSON first, computed ONCE on the server (`readiness` is the run's, in
@@ -156,5 +156,6 @@ adds pages, not endpoints.
 | Each table's sync, the copies in all | `GET /api/state` `tables[].sync`, `totals` | `mason status --json` |
 | The slow statements | `GET /api/requests?slow=1` (Queries' Slow filter; `GET /api/slow` groups them for `mason status`) | `mason logs --requests --slow --json`; `mason status --json` `slowQueries` |
 | The refused statements (the same) | `GET /api/refused` | `mason status --json` `refusedQueries`, `refusedTotal` |
+| The unsupported SQL (Queries' panel, over the range; the Overview's line, the last day) | `GET /api/unsupported?since=&limit=` | `mason status --json` `unsupported` (`unsupportedLines`) |
 | The copy's progress | `GET /api/state` `tables[].copy.progress`, `readiness` | `mason wait --json` (`tableLine`, `copyingText` already render it) |
 | Sync on demand | `POST /api/sync` `{ tables }` | `mason sync --json` |

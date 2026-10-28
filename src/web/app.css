@@ -400,3 +400,13 @@ table.sessions tr.others td { color: var(--muted); font-style: italic; }
 form#request-filters input[type="checkbox"] { min-width: 0; }
 #page-queries table.requests .clip { max-width: 12em; }
 #page-queries tr.detail pre { max-height: 320px; overflow: auto; }
+
+/* ---------------------------------------------------------------- the unsupported SQL (Queries; a line on the Overview) */
+ul.unsupported { list-style: none; margin: 0; padding: 0; }
+ul.unsupported li { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line); }
+ul.unsupported li:first-child { border-top: 0; }
+ul.unsupported p { margin: 0; overflow-wrap: anywhere; }
+ul.unsupported .headline { font-weight: 500; }
+ul.unsupported .clip { max-width: min(40em, 100%); }
+.unsupported-line { margin: var(--space-4) 0 0; overflow-wrap: anywhere; }
+.unsupported-line a.see { margin-left: var(--space-2); font-size: var(--text-sm); }

@@ -130,10 +130,10 @@ const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.0
   copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
 
 /** What the Status page reads, in order: the state every poll, the request log's every 30 s. */
-const STATUS_READS = ["GET /api/state", "GET /api/queries", "GET /api/events?failed=1&limit=5", "GET /api/requests?failed=1&limit=5"];
-/** Status's first poll: those, and the last 24 hours of usage its cards' sparklines draw (read once a minute). */
+const STATUS_READS = ["GET /api/state", "GET /api/queries", "GET /api/events?failed=1&limit=5", "GET /api/requests?failed=1&limit=5", "GET /api/unsupported?limit=100"];
+/** The Overview's first poll: those, and the last 24 hours of usage its cards' sparklines draw (read once a minute). */
 const STATUS_FIRST = [...STATUS_READS, "GET /api/usage?since=24h&step=3600"];
-/** The run's word at the top of the Status page, as it is written: a big dot, then the word. */
+/** The run's word at the top of the Overview, as it is written: a big dot, then the word. */
 const HEALTH = (kind: string, word: string) => new RegExp(`^<div class="health ${kind}" role="status"><span class="dot" aria-hidden="true"></span><span class="word">${word}</span></div>`);
 
 // ------------------------------------------------------------------ the DOM-free helpers, held to the commands'
@@ -395,6 +395,7 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   answers.set("GET /api/usage?since=1m", json(USAGE));
   answers.set("GET /api/running", json({ running: [] }));
   answers.set("GET /api/requests?since=24h", json({ requests: [], keptDays: 7, before: null }));
+  for (const p of ["limit=100", "since=1h", "since=24h", "since=7d"]) answers.set(`GET /api/unsupported?${p}`, json({ since: "2026-10-26T09:05:00.000Z", unsupported: [], keptDays: 7 }));
   answers.set("GET /api/users?lastUsed=1", json({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true }] }));
   return {
     asked, answers,
@@ -773,7 +774,8 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
   app.show("users");
   assert.deepEqual(await asked(), ["GET /api/users?lastUsed=1"]);
   app.show("queries");
-  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests?since=24h"], "Queries: the statements running, the newest requests of the range (the state, who is connected, was just read by Tables)");
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests?since=24h", "GET /api/unsupported?since=24h"],
+    "Queries: the statements running, the newest requests and the unsupported SQL of the range (the state, who is connected, was just read by Tables)");
   // the page's own read failing is the banner; a slower one failing is said where it is shown, never as the banner
   app.show("status");
   run.answers.set("GET /api/queries", answer({ error: "the request log cannot be read", failure: { code: "failed", message: "the request log cannot be read", next: [] } }, 500));
@@ -1190,7 +1192,8 @@ test("the app: the newest page is read every 5 s; Older reads the page before wi
   const app = fn<[unknown, () => Date], QueriesApp>("createApp")(run.fetch, () => new Date(t));
   app.show("queries");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests?since=24h", "GET /api/state", "GET /api/queries"], "who is connected is the state's `sessions`; the cards' last day is /api/queries");
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests?since=24h", "GET /api/state", "GET /api/queries", "GET /api/unsupported?since=24h"],
+    "who is connected is the state's `sessions`; the cards' last day is /api/queries; the range's unsupported SQL");
   t += 2000;
   assert.deepEqual(await asked(), ["GET /api/running"], "the statements every 2 s");
   t += 3000;
@@ -1201,7 +1204,7 @@ test("the app: the newest page is read every 5 s; Older reads the page before wi
   assert.deepEqual(run.asked, ["GET /api/requests?since=24h&before=CURSOR.1"], "Older asks with the cursor the page answered with");
   assert.match(textOf(app.view()["request-log"]!), /r-old .* Newest$/);
   t += 60_000;
-  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/state", "GET /api/queries"], "an older page is never read again while paging");
+  assert.deepEqual(await asked(), ["GET /api/running", "GET /api/state", "GET /api/queries", "GET /api/unsupported?since=24h"], "an older page is never read again while paging");
   await app.newestRequests();
   assert.match(textOf(app.view()["request-log"]!), /r-new .* Older$/);
   t += 5000;
@@ -2310,4 +2313,65 @@ test("the buttons: every one has a visible label; a primary, a destructive one a
   assert.match(css, /button:disabled \{ opacity: 0\.5; cursor: not-allowed; \}/);
   assert.match(css, /td\.act \{ text-align: right; white-space: nowrap; \}/);
   assert.match(css, /\.cards > :last-child:nth-child\(odd\) \{ grid-column: 1 \/ -1; \}/, "no orphan card on a phone");
+});
+
+// ------------------------------------------------------------------ the unsupported SQL: Queries' panel, the Overview's line
+
+const UNSUPPORTED = { since: "2026-10-27T09:05:00.000Z", keptDays: 7, unsupported: [
+  { gap: "frame-groups", title: "a window frame in GROUPS mode", runs: 12, users: ["ana", "metabase"], clients: ["Metabase"], last: "2026-10-28T08:59:30.000Z",
+    example: `SELECT sum(amount) OVER (ORDER BY day GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM orders WHERE ${"x = 1 AND ".repeat(40)}true` },
+  { gap: "gone-entry", title: null, runs: 1, users: [], clients: [], last: "2026-10-28T07:00:00.000Z", example: "SELECT 1" },
+] };
+
+test("Queries: the unsupported SQL of the range is mason status's lines (unsupportedLines), each entry named by docs/SQL-SUPPORT.md, read once a minute", async () => {
+  const entry = fn<[unknown], { headline: string; last: string; example: string }>("unsupportedEntry");
+  for (const g of UNSUPPORTED.unsupported) {
+    const [, head, last] = commands.unsupportedLines([g], PLAIN);
+    const e = entry(g);
+    assert.equal(e.headline, head!.trim(), "the first line is mason status's");
+    assert.equal(`${e.last} — ${e.example}`, last!.trim(), "the second too: when, who, the latest on a line");
+  }
+  const render = fnOf<[unknown, string?], string>(queriesModule, "renderUnsupported");
+  const html = render(UNSUPPORTED, "the last 7 days");
+  assert.match(textOf(html), /^The statements refused in the last 7 days by the SQL they used that Mason does not support, the most first; docs\/SQL-SUPPORT\.md has each one's way out\. 12 statements used a window frame in GROUPS mode — docs\/SQL-SUPPORT\.md frame-groups last 2026-10-28 08:59 as ana, metabase from Metabase — SELECT sum/);
+  assert.match(textOf(html), /1 statement used what this Mason no longer lists — docs\/SQL-SUPPORT\.md gone-entry last 2026-10-28 07:00 — SELECT 1$/);
+  assert.ok(html.includes(`title="${UNSUPPORTED.unsupported[0]!.example}"`), "the whole statement is its title");
+  assert.ok(!textOf(html).includes(UNSUPPORTED.unsupported[0]!.example), "the line has it cut, as mason status cuts it");
+  assert.equal(textOf(render({ ...UNSUPPORTED, unsupported: [] }, "the last hour")), "No statement refused for unsupported SQL in the last hour (the request log keeps 7 days: MASON_REQUEST_LOG_DAYS).");
+  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<h3>Unsupported SQL<\/h3>\s*<div id="unsupported"><\/div>/);
+  // the app: the shared range's since, once a minute, and its failure said where it shows
+  const run = fakeRun();
+  run.answers.set("GET /api/unsupported?since=7d", answer(UNSUPPORTED));
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
+  app.show("#observability/queries?range=7d");
+  await app.poll();
+  assert.ok(run.asked.includes("GET /api/unsupported?since=7d"), "the range's since");
+  assert.match(textOf(app.view().unsupported!), /^The statements refused in the last 7 days .* 12 statements used a window frame in GROUPS mode/);
+  run.asked.length = 0; t += 2000; await app.poll();
+  assert.ok(!run.asked.some((a) => a.startsWith("GET /api/unsupported")), "not every poll: once a minute");
+  t += 60_000; await app.poll();
+  assert.ok(run.asked.includes("GET /api/unsupported?since=7d"), "a minute on, again");
+  run.answers.set("GET /api/unsupported?since=1h", answer({ error: "the request log cannot be read" }, 500));
+  app.show("#observability/queries?range=1h"); await app.poll();
+  assert.match(textOf(app.view().unsupported!), /^✗ the request log cannot be read/, "a failure is said in its part, as the Failure");
+});
+
+test("the Overview: the last day's unsupported SQL is one line of the recent errors, with See all, and nothing when there is none", async () => {
+  const runServer = await import("../src/cli/run-server.ts") as { MAX_UNSUPPORTED_LIMIT?: number };
+  assert.equal(statusPage.UNSUPPORTED_LIMIT as unknown, runServer.MAX_UNSUPPORTED_LIMIT, "it reads every entry the endpoint answers, to count them");
+  const line = of<[unknown], string>(statusPage, "status.js", "renderUnsupportedLine");
+  const html = line(UNSUPPORTED);
+  assert.equal(textOf(html), "Unsupported SQL, the last day: 12 statements used a window frame in GROUPS mode — docs/SQL-SUPPORT.md frame-groups (and 1 other) See all");
+  assert.match(html, /<a class="see" href="#observability\/queries">See all<\/a>/);
+  assert.equal(line({ ...UNSUPPORTED, unsupported: [] }), "", "none: no line");
+  assert.equal(line(undefined), "", "not read yet: nothing");
+  assert.equal(textOf(line({ failure: { code: "failed", message: "no ledger\nmore" } })), "Unsupported SQL: could not read it (no ledger; mason logs has the detail)", "as mason status says it");
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(RUNNING));
+  run.answers.set("GET /api/unsupported?limit=100", answer(UNSUPPORTED));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  await app.poll();
+  assert.ok(run.asked.includes("GET /api/unsupported?limit=100"), "the Overview reads the last day's, the endpoint's default");
+  assert.match(textOf(app.view().status!), /Query errors .* Unsupported SQL, the last day: 12 statements used a window frame in GROUPS mode — docs\/SQL-SUPPORT\.md frame-groups \(and 1 other\) See all$/);
 });

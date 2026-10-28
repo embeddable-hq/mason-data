@@ -44,13 +44,15 @@
     <div id="tables"></div>
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>
-    <div class="page-head"><h2 id="queries-h">Queries</h2><p class="desc">The statements the Postgres API answers: who is connected, what runs now, and every statement that ran, as <code>mason logs</code> lists them.</p></div>
+    <div class="page-head"><h2 id="queries-h">Queries</h2><p class="desc">The statements the Postgres API answers: who is connected, what runs now, the SQL it refused as unsupported, and every statement that ran, as <code>mason status</code> and <code>mason logs</code> list them.</p></div>
     <div id="queries-kpis"></div>
     <h3>Connected now</h3>
     <div id="connected-now"></div>
     <h3>Running now</h3>
     <p class="lead">As <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.</p>
     <div id="running-now"></div>
+    <h3>Unsupported SQL</h3>
+    <div id="unsupported"></div>
     <h3>Request log</h3>
     <p class="lead">The statements answered, refused or cancelled, as <code>mason logs --requests</code> lists them, newest first, over the time range above. Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone.</p>
     <form id="request-filters" class="toolbar" autocomplete="off">

@@ -74,8 +74,9 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   slot's hold on the WAL (`stream.slotWal`: held, status, room left; `lost`, `unreserved` or no cap are warnings); the
   statements of the last day and week (p50 / p95); the copies not finished, a bar each, only while there are any; and a
   table of the recent errors (sync and statements), each with See all. A fact the run could not read (`{ error }`) is
-  said as unknown with its reason, never as 0; one it does not say is not shown. Reads `/api/state` (2 s),
-  `/api/queries`, `/api/events?failed=1`, `/api/requests?failed=1` (30 s).
+  said as unknown with its reason, never as 0; one it does not say is not shown; the last day's unsupported SQL, one line
+  with See all when there is any. Reads `/api/state` (2 s), `/api/queries`, `/api/events?failed=1`,
+  `/api/requests?failed=1`, `/api/unsupported` (30 s).
 - **Tables** (`#tables`, `#tables?show=failed`): ONE table of the database's tables. An added one shows its state
   (Synced / Syncing / Failed / Waiting), rows, last sync and its age, how long it took (`<0.1 s` under a tenth), the
   copy's own size, in replication mode its stream state, its error, **Sync** (`POST /api/sync`) and Remove; one not added
@@ -91,7 +92,9 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   details (the whole id, ended, bytes sent, the statement and error, the first 16 KiB of each), filtered by status, slow
   (1 s or more), the statement's text, time (the range unless Since says), user and client, paged by **Older**, its page
   sorted by Started, Duration or Rows. Rows scanned is not a column: decide later, it may add cost to every statement.
-  Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, never on an older one), `/api/state` (5 s).
+  The unsupported SQL of the range, grouped by its entry of docs/SQL-SUPPORT.md (`/api/unsupported?since=`, 60 s), in
+  `mason status`'s lines. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, never on an older one),
+  `/api/state` (5 s).
 - **Observability › Usage** (`#observability/usage`): the statements of the range's window of `/api/queries` (the week
   for 7 days, else the day), the range's samples (`/api/usage?since=<range>&step=<60|3600|21600>`, newest first, the
   process's memory in a closed details), four charts of them, and each copy's own size (60 s).
