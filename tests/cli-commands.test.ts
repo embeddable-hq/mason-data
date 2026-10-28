@@ -371,7 +371,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     folder: () => s.folder, root: app, sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url,
     duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
+      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }), lastUsed: async (u) => u.map(() => null) } },
   };
   const server = createRunServer(ctx);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));

@@ -265,4 +265,21 @@ export class RequestLedger {
     this.writer.closeSync();
     this.reader.closeSync();
   }
+
+  /**
+   * When each `mason user` last ran a statement, within the log's retention: for each of `users` (a name and the window
+   * it was a user in: `since` its addedAt, `until` its removedAt or null), the time of its newest request in that
+   * window, ISO 8601, or null when the log has none. The window tells a user from an earlier one of the same name. A
+   * refused login (28P01, 57P03) or an ended session (28000) is no use, so it does not count. Committed rows only.
+   */
+  async lastUsed(users: ReadonlyArray<{ name: string; since: string; until: string | null }>): Promise<Array<string | null>> {
+    const out: Array<string | null> = [];
+    for (const u of users) {
+      const row = (await this.reader.runAndReadAll(`SELECT max(started_at) AS last FROM ${REQUESTS_TABLE} WHERE user_name = $1 ` +
+        `AND (sqlstate IS NULL OR sqlstate NOT IN ('28P01', '57P03', '28000')) AND started_at >= CAST($2 AS TIMESTAMPTZ) AND ($3 IS NULL OR started_at <= CAST($3 AS TIMESTAMPTZ))`,
+        [u.name, u.since, u.until])).getRowObjectsJson()[0];
+      out.push(row === undefined || row.last === null || row.last === undefined ? null : new Date(String(row.last)).toISOString());
+    }
+    return out;
+  }
 }

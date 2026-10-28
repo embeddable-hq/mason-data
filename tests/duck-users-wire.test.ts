@@ -66,6 +66,18 @@ before(async () => {
   // the run's command server, as far as `mason user` asks it: is the run up (src/cli/runs.ts answers)
   control = http.createServer((req, res) => {
     if (req.url === "/api/ping" && req.headers.authorization === `Bearer ${RUN_TOKEN}`) { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ pid: process.pid, service: true })); return; }
+    // GET /api/users as the run answers it (src/cli/run-server.ts): the same functions, over this test's ledger
+    if (req.url === "/api/users" && req.headers.authorization === `Bearer ${RUN_TOKEN}`) {
+      void (async () => {
+        const m = await import("../src/cli/user.ts");
+        const { postgresLink } = await import("../src/cli/pg-url.ts");
+        const r = m.listUsers(path.join(home, "users.json"), API_KEY, postgresLink(`postgresql://127.0.0.1:${api.port}/shop`));
+        if ("message" in r) { res.writeHead(500).end("{}"); return; }
+        const used = await m.withLastUsed(r.users, ledger, () => undefined);
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ...used, urlNote: null }));
+      })();
+      return;
+    }
     res.writeHead(404).end("{}");
   });
   await new Promise<void>((resolve) => control.listen(0, "127.0.0.1", resolve));
@@ -151,7 +163,8 @@ test("mason user remove, beside the listener: the next connection is refused at 
   held.on("error", (e) => { ended.push(e); });
   assert.equal((await held.query("SELECT 1 AS one")).rows[0].one, 1, "a catalog statement too is the session's");
   const removed = await masonUser("remove", "superset");
-  assert.deepEqual(removed.removed, { name: "superset", id: added.id, addedAt: added.addedAt });
+  assert.deepEqual(removed.removed, { name: "superset", id: added.id, addedAt: added.addedAt, removedAt: (removed.removed as { removedAt: string }).removedAt });
+  assert.match((removed.removed as { removedAt: string }).removedAt, /^\d{4}-\d\d-\d\dT[\d:.]+Z$/);
   // the held session: its next statement — any statement — ends it, FATAL, with the reason
   const e = await held.query("SELECT 1").then(() => assert.fail("it answered"), (x: pg.DatabaseError) => x);
   assert.equal(e.code, "28000");
@@ -163,8 +176,25 @@ test("mason user remove, beside the listener: the next connection is refused at 
   const again = await refusedWith({ url: added.url as string });
   assert.equal(again.code, "28P01");
   assert.match(again.message, /the user "superset" was removed \(mason user list shows the users; mason user add superset makes it again, with a new password\)/);
-  // and the list no longer has it
-  assert.deepEqual(((await masonUser("list")).users as Array<{ name: string }>).map((u) => u.name), ["metabase", "grafana"]);
+  // and the list keeps it, marked removed: it does not connect, and has no URL to paste
+  await ledger.flush();
+  const listAll = await masonUser("list");
+  assert.deepEqual([listAll.lastUsedNote, listAll.urlNote, listAll.requestLogDays], [null, null, 7]);
+  const listed = listAll.users as Array<{ name: string; removedAt: string | null; live: boolean; url: string | null; lastUsedAt: string | null }>;
+  // last used: the newest statement of the run's request log (metabase ran one above); the URL: without the password
+  assert.match(listed.find((u) => u.name === "metabase")!.lastUsedAt ?? "", /^\d{4}-\d\d-\d\dT/);
+  assert.equal(listed.find((u) => u.name === "grafana")!.lastUsedAt, null, "grafana never ran a statement");
+  assert.equal(listed.find((u) => u.name === "metabase")!.url, `postgres://metabase@127.0.0.1:${api.port}/shop`);
+  assert.deepEqual(listed.filter((u) => u.removedAt === null).map((u) => u.name), ["metabase", "grafana"]);
+  const gone = listed.find((u) => u.name === "superset")!;
+  assert.deepEqual([gone.removedAt, gone.live, gone.url], [(removed.removed as { removedAt: string }).removedAt, false, null]);
+  // the name added again is a new user, with a new password that connects; the removed entry stays
+  const back = await masonUser("add", "superset");
+  assert.notEqual(back.id, added.id);
+  const c = await connect({ url: back.url as string, app: "Superset" });
+  try { assert.equal((await c.query("SELECT 1 AS one")).rows[0].one, 1); } finally { await c.end(); }
+  const again2 = await refusedWith({ url: added.url as string });
+  assert.match(again2.message, /the user "superset" was removed/, "the old password is still refused");
 });
 
 test("FAIL CLOSED: a users file that cannot be read refuses a user's connection (57P03) and its session's statements, never lets it in; a token is untouched", async () => {
@@ -199,11 +229,32 @@ test("every statement of a user's session is that user's row of the request log;
   // the refused login as "mason" with metabase's password is the user it asked for: "mason"
   assert.ok(rows.some((r) => r.method === "CONNECT" && r.user === "mason" && r.sqlstate === "28P01" && /not a password of this project's users/.test(r.message ?? "")));
   // superset: its statement, then the one its session was ended at, then the refused connection after the removal
-  assert.deepEqual(of("superset"), [["QUERY", "refused", "28000"], ["CONNECT", "refused", "28P01"]],
-    "the SELECT 1 is the catalog's, no request; the statement the session ended at; the connection refused after");
+  assert.deepEqual(of("superset"), [["QUERY", "refused", "28000"], ["CONNECT", "refused", "28P01"], ["CONNECT", "refused", "28P01"]],
+    "the SELECT 1 is the catalog's, no request; the statement the session ended at; the connection refused after; the name added again connects (a catalog statement, no request); the old password refused again");
   assert.equal(rows.find((r) => r.user === "superset" && r.sqlstate === "28000")?.query, "SELECT 1");
   assert.deepEqual(of("looker"), [["CONNECT", "failed", "57P03"], ["QUERY", "failed", "57P03"], ["QUERY", "ok", null]]);
   // a token's session is no user's
   assert.ok(rows.filter((r) => r.applicationName === "psql").every((r) => r.user === ""));
   assert.ok(rows.every((r) => !r.query.includes("mason_")), "never a password");
+});
+
+test("mason user list with Mason NOT running still lists, removed ones too: last used and the URL are null, each with its reason — never a guess", async () => {
+  const file = path.join(home, "config.json");
+  const was = fs.readFileSync(file, "utf8");
+  const stopped = JSON.parse(was) as Record<string, unknown>;
+  delete stopped.running;
+  fs.writeFileSync(file, JSON.stringify(stopped), { mode: 0o600 });
+  try {
+    const l = await masonUser("list");
+    const rows = l.users as Array<{ name: string; removedAt: string | null; lastUsedAt: string | null; url: string | null }>;
+    assert.ok(rows.some((u) => u.removedAt !== null), "removed users are listed");
+    assert.ok(rows.every((u) => u.lastUsedAt === null && u.url === null));
+    assert.match(String(l.lastUsedNote), /^unknown: Mason is not running/);
+    assert.match(String(l.urlNote), /^unknown: Mason is not running/);
+    assert.equal(l.requestLogDays, null);
+    const human = await runMason(root, ["user", "list"], env);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /removed 20\d\d-\d\d-\d\d \d\d:\d\d UTC/);
+    assert.match(human.stdout, /last used unknown: Mason is not running/);
+  } finally { fs.writeFileSync(file, was, { mode: 0o600 }); }
 });

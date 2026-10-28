@@ -259,8 +259,10 @@ export function renderWhere(s) {
  * connects — with a Remove button; the one being removed asks first (`confirming`, its name).
  */
 export function renderUsers(list, confirming = null) {
-  if (!list.users.length) return `<p class="dim">No users yet.</p>`;
-  return `<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Added</th><th scope="col"></th></tr></thead><tbody>${list.users.map((u) =>
+  // a removed user stays in the list (removedAt): the page shows the live ones until its presentation is built
+  const users = list.users.filter((u) => u.removedAt == null);
+  if (!users.length) return `<p class="dim">No users yet.</p>`;
+  return `<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Added</th><th scope="col"></th></tr></thead><tbody>${users.map((u) =>
     `<tr><th scope="row">${code(u.name)}${u.live ? "" : ` <span class="warn">does not connect: the API key was rotated since it was added</span>`}</th>` +
     `<td class="dim">${esc(u.addedAt.slice(0, 16).replace("T", " "))} UTC · id ${esc(u.id)}</td>` +
     `<td class="act">${confirming === u.name
@@ -341,7 +343,7 @@ export function createApp(fetchFn, now = () => new Date()) {
     const u = await ask("/api/users");
     if ("failure" in u) { m.usersFailure = u.failure; return; }
     m.users = u.body; m.usersFailure = null;
-    if (m.confirming !== null && !m.users.users.some((x) => x.name === m.confirming)) m.confirming = null;
+    if (m.confirming !== null && !m.users.users.some((x) => x.name === m.confirming && x.removedAt == null)) m.confirming = null;
   };
   const json = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const poll = async () => {

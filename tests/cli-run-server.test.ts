@@ -65,8 +65,10 @@ const pollNow = (sources: string[]): Promise<{ at: string; tables: PolledTable[]
 const asks: Array<{ limit: number; failed?: boolean }> = [];
 const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", session: 3, applicationName: "Metabase", tokenName: "", user: "", method: "QUERY",
   outcome: "refused", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, durationMs: 2, query: "SELECT * FROM nope", queryTruncated: false };
+const lastUsedAsks: Array<{ name: string; since: string; until: string | null }> = [];
 const requests = {
   days: 7,
+  lastUsed: async (u: Array<{ name: string; since: string; until: string | null }>) => { lastUsedAsks.push(...u); return u.map((x) => x.name === "metabase" ? "2026-10-24T10:04:00.000Z" : null); },
   recent: async (o: { limit: number; failed?: boolean }) => { asks.push(o); return [request]; },
   slow: async () => [{ route: "postgres" as const, payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-24T10:03:00.000Z" }],
   refused: async () => ({ total: 3, refused: [{ route: "postgres" as const, payload: "SELECT * FROM nope", runs: 3, last: "2026-10-24T10:04:00.000Z", code: "42P01", message: 'relation "nope" does not exist' }] }),
@@ -356,7 +358,7 @@ test("a table of any size on a database elsewhere can be added, and mason tables
 
 test("the users: /api/users lists, adds and removes through mason user's own functions and file — its shapes, its sentences", async () => {
   fs.rmSync(usersFile, { force: true });
-  const list = async () => JSON.parse((await call("GET", "/api/users")).text) as { users: Array<{ name: string; id: string; addedAt: string; live: boolean }> };
+  const list = async () => JSON.parse((await call("GET", "/api/users")).text) as { users: Array<Record<string, unknown>>; lastUsedNote: string | null; urlNote: string | null; requestLogDays: number | null };
   assert.deepEqual((await list()).users, []);
   const added = await call("POST", "/api/users", { body: { name: "metabase" } });
   assert.equal(added.status, 200, added.text);
@@ -372,7 +374,11 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.ok("users" in file);
   assert.deepEqual(file.users.map((u) => [u.name, u.id]), [["metabase", a.id]]);
   assert.ok(!fs.readFileSync(usersFile, "utf8").includes(a.password as string), "users.json holds no password");
-  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, live: true }]);
+  // the list: removedAt null, last used from the request log, the URL to paste WITHOUT the password (the add's own builder)
+  const listed = await list();
+  assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, live: true, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app" }]);
+  assert.deepEqual([listed.lastUsedNote, listed.urlNote, listed.requestLogDays], [null, null, 7]);
+  assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: null }, "asked for the window the user was a user in");
   assert.ok(logged.includes("user metabase added"), "the run's log says it, without the password");
   assert.ok(!logged.some((l) => l.includes(a.password as string)));
 
@@ -405,9 +411,17 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
     next: [{ command: "mason user list", what: "the users" }] });
   const removed = await call("DELETE", "/api/users/metabase");
   assert.equal(removed.status, 200, removed.text);
-  assert.deepEqual(JSON.parse(removed.text), { removed: { name: "metabase", id: a.id, addedAt: a.addedAt },
-    next: [{ command: "mason user list", what: "the users left" }, { command: "mason user add <name>", what: "a new user, with a new password" }] });
-  assert.deepEqual((await list()).users, []);
+  const gone = JSON.parse(removed.text) as { removed: { removedAt: string } };
+  assert.deepEqual(gone, { removed: { name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt },
+    next: [{ command: "mason user list", what: "the users, removed ones included" }, { command: "mason user add <name>", what: "a new user, with a new password" }] });
+  // kept, marked removed: no URL, does not connect, last used asked within [addedAt, removedAt]
+  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt, live: false, lastUsedAt: "2026-10-24T10:04:00.000Z", url: null }]);
+  assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: gone.removed.removedAt });
+  // removing it again is not found; the name can be added again, as a new id, and the removed entry stays
+  assert.equal((await call("DELETE", "/api/users/metabase")).status, 404);
+  const second = JSON.parse((await call("POST", "/api/users", { body: { name: "metabase" } })).text) as { id: string };
+  assert.notEqual(second.id, a.id);
+  assert.deepEqual((await list()).users.map((u) => [u.id, u.removedAt === null]), [[a.id, false], [second.id, true]]);
   assert.ok(!fs.existsSync(`${usersFile}.lock`), "the lock is let go");
 });
 
