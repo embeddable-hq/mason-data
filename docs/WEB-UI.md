@@ -23,7 +23,8 @@ mason ui --json       # { url, port, next }
   with no primary key has **Name its key…**, the same form with its key to tick (`--key`). An added table has
   **Remove**, which asks first, then takes it out of the sources file and drops its copy (`mason remove`). What was
   added or removed is said under the table in the commands' words, and the Status above then shows the copy starting.
-  The sources file is edited by the run exactly as the commands edit it, and refused in the same words. While a
+  The sources file is edited by the run exactly as the commands edit it — one check-and-write, src/cli/source-edit.ts,
+  which `mason add` and `mason remove` also call themselves while Mason is stopped — and refused in the same words. While a
   Columns… form is open or a Remove asks, the list is frozen as it was when it opened (no refresh, however long it
   stays open, so nothing moves under the person's ticks or click); it is written from the latest state again once
   they Add, Cancel or confirm.

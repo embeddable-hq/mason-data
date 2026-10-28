@@ -1,9 +1,9 @@
 /**
  * THE RUN'S COMMAND SERVER (`mason start`; a server for the `mason` command alone, the CLI's UI part dropped
- * completely). `mason tables`, `mason add`, `mason status`, `mason wait`, `mason sync` and
- * `mason logs --requests` ask it (src/cli/control.ts): it reads the database's catalog, writes the tables added and
- * removed into the project's sources file (src/cli/sources.ts) — the sync, told of the change, starts copying a table at
- * once — and says where everything is.
+ * completely). `mason status`, `mason wait`, `mason sync`, `mason logs --requests`, and `mason add` and `mason remove`
+ * while it is up, ask it (src/cli/control.ts): it reads the database's catalog, writes the tables added and removed into
+ * the project's sources file (src/cli/source-edit.ts, the check-and-write the commands call themselves while Mason is
+ * down) — the sync, told of the change, starts copying a table at once — and says where everything is.
  *
  * Every request passes the run's guard (src/cli/security.ts): loopback, the Host header, and the run's token, which
  * the commands send as `Authorization: Bearer` from the run's settings file.

@@ -78,13 +78,15 @@ ${codes}
         exclude: [raw_body]       every column but these
       sessions:
         key: [tenant_id, id]      only for a table with no primary key: the unique columns to copy it by (polling only)
-  mason add and mason remove edit one entry of it, keep the rest as it was, and take effect at once; an edit by hand is
-  read at the next mason start (or the next add or remove). Column types are read from the database at every start.
+  mason add and mason remove edit one entry of it and keep the rest as it was, Mason running or not: with it running
+  they take effect at once, else at mason start. An edit by hand is read at the next mason start (or the next add or
+  remove). Column types are read from the database at every start.
 
   A FIRST SESSION, as a shell runs it:
-    mason doctor --json && mason init --json && mason start --json
+    mason doctor --json && mason init --json
     mason tables --json                       choose the tables (rows, key, whether one can be added)
-    mason add orders customers --json && mason wait --json
+    mason add orders customers --json         added to the sources file, checked against the database
+    mason start --json && mason wait --json   Mason in the background; until every added table is copied
     mason user add my-tool --json             the URL and password a tool connects with
     mason status --json                       each table's copy, and the last day's slow and refused statements
   With no database to hand, in a new folder: mason init demo --json && mason start --json — a demo database Mason
