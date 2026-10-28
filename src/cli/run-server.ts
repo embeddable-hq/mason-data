@@ -37,13 +37,14 @@ import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type 
 import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamStatus } from "../duck/sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { RequestLedger } from "../duck/requests.ts";
-import { eventLimit, requestFilter, requestFilterText, timeOf } from "./request-filter.ts";
+import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
 
-/** A statement answered in this many milliseconds or more is slow: what mason status lists (src/duck/requests.ts slow). */
-export const SLOW_MS = 1000;
+/** A statement answered in this many milliseconds or more is slow (one constant: src/cli/request-filter.ts SLOW_MS, the
+ *  request log's `slow` filter's too): what mason status lists (src/duck/requests.ts slow). */
+export { SLOW_MS };
 
 export interface RunContext {
   source: Source;

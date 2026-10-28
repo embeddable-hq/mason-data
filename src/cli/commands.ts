@@ -23,7 +23,7 @@ import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, 
 import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
-import { SLOW_MS, type RefusedQuery, type SlowQuery } from "./run-server.ts";
+import type { RefusedQuery, SlowQuery } from "./run-server.ts";
 import { logEntries, logLineText } from "../lib/log-buffer.ts";
 import { catalogTable, entryName, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
@@ -37,7 +37,7 @@ import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery } from "../duck/requests.ts";
 import type { RunningStatement, SessionsOpen } from "../api/postgres/server.ts";
-import { DEFAULT_REQUEST_LIMIT, eventLimit, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
+import { DEFAULT_REQUEST_LIMIT, eventLimit, MAX_SEARCH, SLOW_MS, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -1200,6 +1200,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     mason logs -n 200 --start     what mason start printed: its steps, and the warnings and errors since
     mason logs --requests --failed -n 20    the last 20 statements refused, failed or cancelled
     mason logs --requests --since 2h --user metabase --outcome failed,cancelled
+    mason logs --requests --slow --search orders   the statements over orders that took a second or more
     mason logs --events --failed  the sync's latest failures
     mason logs --running          the statements running now, and their sessions
 
@@ -1217,6 +1218,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --until <time>   with --requests: started before it (as --since)
   --user <name>    with --requests: the mason user's statements
   --client <name>  with --requests: the statements of the client whose application_name it is
+  --slow           with --requests: only the ones that took ${(SLOW_MS / 1000).toLocaleString("en-US")} s or more (the slow ones mason status lists)
+  --search <text>  with --requests: only the statements whose text has it, in any case (at most ${MAX_SEARCH} characters)
   --before <pos>   with --requests: the page before: the position a page answered with (its last Next line)
   --running        the statements running now (Mason must be running)
   --json           as data: { lines: [{ at, text }] } (the log's entries, oldest first; at is null for a line with no
@@ -1237,14 +1240,14 @@ export const LOGS: CommandSpec & { needs: "project" } = {
   usage: LOGS_USAGE,
   options: { lines: { type: "string", short: "n" }, follow: { type: "boolean", short: "f" }, start: { type: "boolean" },
     requests: { type: "boolean" }, events: { type: "boolean" }, failed: { type: "boolean" }, outcome: { type: "string" }, since: { type: "string" },
-    until: { type: "string" }, user: { type: "string" }, client: { type: "string" }, before: { type: "string" }, running: { type: "boolean" }, json: { type: "boolean" } },
+    until: { type: "string" }, user: { type: "string" }, client: { type: "string" }, slow: { type: "boolean" }, search: { type: "string" }, before: { type: "string" }, running: { type: "boolean" }, json: { type: "boolean" } },
   json: ["lines", "requests", "events", "keptDays", "before", "running", "next"],
 };
 
 /** the request log's filters as mason logs spells them: -n, --since, … (src/cli/request-filter.ts names each so) */
 const flagOf = (k: FilterKey): string => k === "limit" ? "-n" : `--${k}`;
 /** the filters of --requests (every one but -n) */
-const FILTER_FLAGS = ["failed", "outcome", "since", "until", "user", "client", "before"] as const;
+const FILTER_FLAGS = ["failed", "outcome", "since", "until", "user", "client", "slow", "search", "before"] as const;
 
 /**
  * One request of the run's ledger on one line (src/duck/requests.ts): when, the outcome and SQLSTATE, how long,
@@ -1273,6 +1276,8 @@ function olderPage(q: RequestQuery, before: string): string {
   if (q.failed === true) parts.push("--failed");
   if (q.outcomes !== undefined) parts.push(`--outcome ${q.outcomes.join(",")}`);
   for (const k of ["since", "until", "user", "client"] as const) { const v = q[k]; if (v !== undefined) parts.push(`--${k} ${quote(v)}`); }
+  if (q.minMs !== undefined) parts.push("--slow");
+  if (q.search !== undefined) parts.push(`--search ${quote(q.search)}`);
   parts.push(`--before ${quote(before)}`);
   return parts.join(" ");
 }
@@ -1287,7 +1292,8 @@ async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
     const requests = reply.body.requests as LedgerRequest[];
     const keptDays = Number(reply.body.keptDays);
     const before = typeof reply.body.before === "string" ? reply.body.before : null;
-    const filtered = q.failed === true || q.outcomes !== undefined || q.since !== undefined || q.until !== undefined || q.user !== undefined || q.client !== undefined;
+    const filtered = q.failed === true || q.outcomes !== undefined || q.since !== undefined || q.until !== undefined || q.user !== undefined || q.client !== undefined ||
+      q.minMs !== undefined || q.search !== undefined;
     const next: NextStep[] = [
       ...(before !== null ? [[olderPage(q, before), "the page before this one"] as NextStep] : []),
       ...(filtered ? [["mason logs --requests", "every request, answered or not"] as NextStep] : [["mason logs --requests --failed", "only the ones not answered"] as NextStep]),
@@ -1379,7 +1385,8 @@ export async function logs(argv: string[]): Promise<number> {
     // the filters, read as the run reads its query string (src/cli/request-filter.ts): a mistake is said here, exit 2
     const text = (v: unknown): string | undefined => typeof v === "string" ? v : undefined;
     const q = requestFilter({ limit: text(f.values.lines), failed: f.values.failed === true, outcome: text(f.values.outcome), since: text(f.values.since),
-      until: text(f.values.until), user: text(f.values.user), client: text(f.values.client), before: text(f.values.before) }, Date.now(), flagOf);
+      until: text(f.values.until), user: text(f.values.user), client: text(f.values.client),
+      slow: f.values.slow === true, search: text(f.values.search), before: text(f.values.before) }, Date.now(), flagOf);
     if ("message" in q) return failed("logs", { ...q, usage: LOGS_USAGE }, { json });
     return requestLogs(q, json);
   }

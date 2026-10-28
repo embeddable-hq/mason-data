@@ -592,6 +592,11 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     const body = JSON.parse(page.stdout) as { requests: unknown[]; keptDays: number; before: string; next: Array<{ command: string }> };
     assert.deepEqual([body.requests, body.keptDays, body.before], [[], 7, "2026-10-24T10:00:00.000Z~7"]);
     assert.equal(body.next[0]!.command, `mason logs --requests -n 5 --outcome cancelled --since ${q.since} --user metabase --before 2026-10-24T10:00:00.000Z~7`);
+    // --slow and --search: the run is asked for SLOW_MS or more and the text, and the page before keeps them
+    const slow = await run(["logs", "--requests", "--slow", "--search", "from orders", "--json"]);
+    assert.equal(slow.code, 0, slow.stdout + slow.stderr);
+    assert.deepEqual(asked.at(-1), { limit: 40, minMs: 1000, search: "from orders" });
+    assert.equal((JSON.parse(slow.stdout) as { next: Array<{ command: string }> }).next[0]!.command, "mason logs --requests --slow --search 'from orders' --before 2026-10-24T10:00:00.000Z~7");
     // a mistake: exit 2, in the flag's name, before the run is asked
     const before = asked.length;
     for (const [argv, words] of [
@@ -600,6 +605,8 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
       [["logs", "--requests", "-n", "0"], /mason logs: -n is a whole number of requests, 1 to 10000/],
       [["logs", "--requests", "--failed", "--outcome", "ok"], /mason logs: --failed is every outcome but ok: name it or --outcome, never both/],
       [["logs", "--since", "2h"], /mason logs: --since is a filter of --requests/],
+      [["logs", "--slow"], /mason logs: --slow is a filter of --requests/],
+      [["logs", "--requests", "--search", ""], /mason logs: --search is a piece of a statement's text: it is empty/],
       [["logs", "--running", "--requests"], /mason logs: --running lists the statements running now; --requests is the request log's/],
       [["usage", "--since", "2026-10-28T09:00:00"], /mason usage: --since "2026-10-28T09:00:00" is not a time/],
       [["logs", "--events", "-n", "20000"], /mason logs: -n is a whole number of events, 1 to 10000/],

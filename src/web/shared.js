@@ -7,6 +7,20 @@
 /** A value as HTML text: every character that means something in HTML escaped. */
 export const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+/**
+ * THE TIME RANGES the Observability pages share (`?range=` of their hash; 24 hours unless it says): each its label, the
+ * age every endpoint's `since` takes (src/cli/request-filter.ts `timeOf`), and the usage samples' step — a minute a
+ * point for the hour, an hour for the day, six for the week (60, 24 and 28 points: a chart readable at each).
+ */
+export const RANGES = {
+  "1h": { label: "Last hour", span: "the last hour", since: "1h", stepSeconds: 60 },
+  "24h": { label: "24 hours", span: "the last 24 hours", since: "24h", stepSeconds: 3600 },
+  "7d": { label: "7 days", span: "the last 7 days", since: "7d", stepSeconds: 21_600 },
+};
+export const DEFAULT_RANGE = "24h";
+/** A range's key as the hash gave it: one of RANGES, else the default. */
+export const rangeOf = (text) => Object.hasOwn(RANGES, String(text ?? "")) ? String(text) : DEFAULT_RANGE;
+
 /** A count as the commands print it: `1,234`. */
 export const n = (x) => x.toLocaleString("en-US");
 /** A text's first line, trimmed: a reason's headline (its further lines are its detail). */
@@ -226,13 +240,18 @@ export const status = (kind, word) => `<span class="indicator ${kindOf(kind ?? s
 export const badge = (text, kind = "") => `<span class="badge${kind ? ` ${esc(kind)}` : ""}">${esc(text)}</span>`;
 
 /** A KPI card: its label small and muted, its value large, a sub-line, and a chart's holder (`spark(...)` of
- *  src/web/charts.js: HTML) under it; `kind` warn or bad colours the value of one to act on. */
-export function card(label, value, sub = "", chartHtml = "", kind = "") {
-  return `<div class="card${kind === "warn" || kind === "bad" ? ` ${kind}` : ""}"><p class="card-label">${esc(label)}</p><p class="card-value">${esc(value)}</p>` +
-    `${sub === "" ? "" : `<p class="card-sub">${esc(sub)}</p>`}${chartHtml}</div>`;
+ *  src/web/charts.js: HTML) under it; `kind` warn or bad colours the value of one to act on. With `href` (a hash of the
+ *  page: `#observability/queries`) the whole card is a link into the view that lists what it counts (its arrow is the
+ *  stylesheet's, so a reader of the text reads the card the same). */
+export function card(label, value, sub = "", chartHtml = "", kind = "", href = "") {
+  const tag = href ? "a" : "div";
+  return `<${tag} class="card${kind === "warn" || kind === "bad" ? ` ${kind}` : ""}${href ? " link" : ""}"${href ? ` href="${esc(href)}"` : ""}>` +
+    `<p class="card-label">${esc(label)}</p><p class="card-value">${esc(value)}</p>` +
+    `${sub === "" ? "" : `<p class="card-sub">${esc(sub)}</p>`}${chartHtml}</${tag}>`;
 }
-/** The cards in a grid (each `card(...)`'s HTML). */
-export const cards = (list) => list.length ? `<div class="cards">${list.join("")}</div>` : "";
+/** The cards in a grid (each `card(...)`'s HTML), its class saying how many (`cards n6`), so the stylesheet lays every
+ *  count out without a card alone on a row: six in one row or two of three, five as three over two. */
+export const cards = (list) => list.length ? `<div class="cards n${list.length}">${list.join("")}</div>` : "";
 
 /** A section's header: its title and one line of what it shows (`id` the heading's, for aria-labelledby). */
 export const pageHead = (id, title, desc) => `<div class="page-head"><h2 id="${esc(id)}">${esc(title)}</h2>${desc ? `<p class="desc">${esc(desc)}</p>` : ""}</div>`;
@@ -281,4 +300,52 @@ export function createOpenSet() {
       return true;
     },
   };
+}
+
+// ------------------------------------------------------------------ large data: what the page writes is bounded
+
+/** A text cut to `max` characters with an ellipsis (a title, a cell): the page never writes a 64 KiB statement into an
+ *  attribute or a row; the whole of it is behind its details, itself capped (`capped`). */
+export const clip = (s, max) => { const t = String(s ?? ""); return t.length <= max ? t : `${t.slice(0, Math.max(0, max - 1))}…`; };
+
+/** The most of a text a title attribute carries (a statement's, an error's). */
+export const TITLE_MAX = 1000;
+
+/** A text as a details shows it, at most `max` characters: `{ text, cut }`, `cut` what is said after it when it was cut
+ *  ("the first 16.0 KiB of 64.0 KiB: … has it whole"; `whole` names where). */
+export function capped(s, max, whole) {
+  const t = String(s ?? "");
+  if (t.length <= max) return { text: t, cut: "" };
+  return { text: t.slice(0, max), cut: `the first ${fileSize(max)} of ${fileSize(t.length)}: ${whole} has it whole` };
+}
+
+/** "Showing 100 of 800" and the buttons that write more (`data-show-more`, `data-show-all` = `key`): under a list the page
+ *  writes at most `shown` rows of. "" when every row is shown. */
+export function moreRows(key, shown, total, step) {
+  if (shown >= total) return "";
+  return `<div class="more"><p class="dim">Showing ${n(shown)} of ${n(total)}.</p>` +
+    `${button(`Show ${n(Math.min(step, total - shown))} more`, { showMore: key }, "small")} ${button(`Show all ${n(total)}`, { showAll: key }, "small")}</div>`;
+}
+
+// ------------------------------------------------------------------ sorting a table by a column
+
+/** A sort: `{ key, dir }`, dir "asc" or "desc". The column clicked again turns it round; another starts at `first`. */
+export const nextSort = (sort, key, first = "desc") => sort.key === key ? { key, dir: sort.dir === "asc" ? "desc" : "asc" } : { key, dir: first };
+
+/** A sortable column's header: a button (`data-sort-table`, `data-sort-key`) whose arrow and `aria-sort` say the order. */
+export function sortTh(table, key, label, sort, cls = "") {
+  const on = sort.key === key;
+  const aria = on ? (sort.dir === "asc" ? "ascending" : "descending") : "none";
+  return `<th scope="col" aria-sort="${aria}"${cls ? ` class="${esc(cls)}"` : ""}><button type="button" class="sort${on ? " on" : ""}" data-sort-table="${esc(table)}" data-sort-key="${esc(key)}">` +
+    `${esc(label)}<span class="arrow" aria-hidden="true">${on ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}</span></button></th>`;
+}
+
+/** A list sorted by `value(item)` (a number or a string; null last whatever the order), stably, without changing it. */
+export function sortedBy(list, value, dir) {
+  const sign = dir === "asc" ? 1 : -1;
+  return list.map((x, i) => ({ x, i, v: value(x) })).sort((a, b) => {
+    if (a.v === null || a.v === undefined) return b.v === null || b.v === undefined ? a.i - b.i : 1;
+    if (b.v === null || b.v === undefined) return -1;
+    return (a.v < b.v ? -1 : a.v > b.v ? 1 : 0) * sign || a.i - b.i;
+  }).map((e) => e.x);
 }

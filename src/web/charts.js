@@ -8,7 +8,9 @@
  *   1. its renderer writes a holder where the chart goes — `spark(key, label)` or `seriesChart(key, label)` — an empty
  *      div that takes no room until it is drawn;
  *   2. its `charts()` (the page module contract, src/web/app.js) returns `{ [key]: spec }`, a spec being
- *      `{ kind: "spark" | "bars" | "line", x: seconds[], y: (number | null)[], label, format?(v) → text }`
+ *      `{ kind: "spark" | "bars" | "line", x: seconds[], y: (number | null)[], label, format?(v) → text, unit? }`
+ *      (`format` says a hovered value exactly, as the tables do; `unit` — "bytes", "ms", else a count — the axis's
+ *      compact labels and steps: `axisFormat`, `axisIncrs`; the time axis's labels follow the span, `timeTick`)
  *      (`seriesOf(samples, field)` makes x and y from /api/usage's samples);
  *   3. the shell, after it writes the page, calls `mount(specs)` of ONE `createCharts`: a chart is made once per key,
  *      moved into the holder a rewrite made, given its new data when the data changed, and destroyed when its key or
@@ -46,8 +48,67 @@ export function themeOf(doc, win) {
 /** The index of a series' last value: where a sparkline's one marker goes (the latest period, in the accent). */
 const lastIndex = (y) => { for (let i = y.length - 1; i >= 0; i--) if (y[i] !== null) return i; return -1; };
 
-/** An hour's label in UTC, as the tables say it: `09:00`. */
-const hourText = (sec) => new Date(sec * 1000).toISOString().slice(11, 16);
+// ------------------------------------------------------------------ the axes' words (pure: the tests hold each)
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * A TIME TICK'S LABEL for a chart spanning `span` seconds, in UTC as the tables say it: minutes and hours (`09:05`,
+ * `14:00`) up to two days; past that a day (`Oct 27`) at midnight and the hour between (`12:00`), so a week reads by
+ * its days. Short enough that ticks 72 px apart never touch.
+ */
+export function timeTick(sec, span) {
+  const d = new Date(sec * 1000);
+  const hm = d.toISOString().slice(11, 16);
+  if (span <= 2 * 86_400) return hm;
+  return hm === "00:00" ? `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}` : hm;
+}
+
+/** The hovered time, read out under the chart: the minute alone within three hours, else its date too (`2026-10-27 09:00 UTC`). */
+export function readoutTime(sec, span) {
+  const iso = new Date(sec * 1000).toISOString();
+  return `${span <= 3 * 3600 ? iso.slice(11, 16) : `${iso.slice(0, 10)} ${iso.slice(11, 16)}`} UTC`;
+}
+
+const trim1 = (x) => (x >= 100 ? String(Math.round(x)) : x.toFixed(1).replace(/\.0$/, ""));
+
+/** A count on an axis: `0`, `950`, `1.2K`, `3.4M` (the read-out and the table have it whole). */
+export const compactCount = (v) => new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(v);
+
+/** Bytes on an axis, in the units the commands use (KiB, MiB, GiB) and on to TiB and PiB: `512 B`, `3.4 MiB`, `1.5 TiB`. */
+export function compactBytes(v) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let i = 0, x = Math.abs(v);
+  while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
+  return `${v < 0 ? "-" : ""}${i === 0 ? Math.round(x) : trim1(x)} ${units[i]}`;
+}
+
+/** A duration in ms on an axis: `512 ms`, `1.2 s`, `2.5 min`, `1.1 h`. */
+export function compactMs(v) {
+  if (v < 1000) return `${Math.round(v)} ms`;
+  if (v < 60_000) return `${trim1(v / 1000)} s`;
+  if (v < 3_600_000) return `${trim1(v / 60_000)} min`;
+  return `${trim1(v / 3_600_000)} h`;
+}
+
+/** An axis's labeller by a spec's unit: "bytes", "ms", else a count. */
+export const axisFormat = (unit) => unit === "bytes" ? compactBytes : unit === "ms" ? compactMs : compactCount;
+
+/** The steps an axis's ticks are chosen from, by unit: whole numbers for a count or ms (never 0.5 of a statement), and
+ *  powers of 1024 for bytes, so a tick is 512 MiB or 1 GiB, never 477 MiB. */
+export function axisIncrs(unit) {
+  const bases = unit === "bytes" ? [1, 1024, 1024 ** 2, 1024 ** 3, 1024 ** 4, 1024 ** 5] : [1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12];
+  const mults = unit === "bytes" ? [1, 2, 4, 8, 16, 32, 64, 128, 256, 512] : [1, 2, 5];
+  return [...new Set(bases.flatMap((b) => mults.map((m) => m * b)))].sort((a, b) => a - b);
+}
+
+/** The steps a time axis's ticks are chosen from, in seconds: whole minutes at the least (a tick between two minutes would
+ *  read as the minute twice), then hours, then days. */
+export const TIME_INCRS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10_800, 21_600, 43_200, 86_400, 2 * 86_400, 7 * 86_400];
+
+/** The y range from a zero baseline, a little over the highest value (1 when all are 0). A spike keeps its height: the
+ *  axis is never cut, so the bar that is ten times the others reads as ten times (the table has every value). */
+export const zeroRange = (max) => [0, max > 0 ? max * 1.08 : 1];
 
 /**
  * UPLOT'S OPTIONS FOR A SPEC (pure): a sparkline is the trend alone — no axis, legend or cursor, a 2px line in the
@@ -57,7 +118,7 @@ const hourText = (sec) => new Date(sec * 1000).toISOString().slice(11, 16);
  */
 export function chartOptions(spec, theme, width, height, uPlot) {
   const fmt = spec.format ?? ((v) => String(v));
-  const zero = (_u, _min, max) => [0, max > 0 ? max * 1.08 : 1];
+  const zero = (_u, _min, max) => zeroRange(max);
   if (spec.kind === "spark") {
     return {
       width, height, padding: [6, 6, 6, 6], legend: { show: false }, cursor: { show: false }, select: { show: false },
@@ -68,17 +129,20 @@ export function chartOptions(spec, theme, width, height, uPlot) {
   }
   const bars = spec.kind === "bars" && typeof uPlot?.paths?.bars === "function";
   const axisFont = `11px ${theme.font}`;
+  const span = spec.x.length ? spec.x[spec.x.length - 1] - spec.x[0] : 0;
+  const axis = axisFormat(spec.unit);
   return {
     width, height, padding: [10, 24, 0, 0], legend: { show: true, live: true }, select: { show: false },
     cursor: { drag: { x: false, y: false }, points: { size: 8, fill: theme.mark } },
     ...(typeof uPlot?.tzDate === "function" ? { tzDate: (ts) => uPlot.tzDate(new Date(ts * 1000), "Etc/UTC") } : {}),
     scales: { x: { time: true }, y: { range: zero } },
     axes: [
-      { stroke: theme.text, font: axisFont, grid: { show: false }, ticks: { stroke: theme.grid, width: 1, size: 4 }, values: (_u, vals) => vals.map(hourText) },
-      { stroke: theme.text, font: axisFont, size: 64, grid: { stroke: theme.grid, width: 1 }, ticks: { show: false }, values: (_u, vals) => vals.map(fmt) },
+      { stroke: theme.text, font: axisFont, space: 72, incrs: TIME_INCRS, grid: { show: false }, ticks: { stroke: theme.grid, width: 1, size: 4 }, values: (_u, vals) => vals.map((v) => timeTick(v, span)) },
+      { stroke: theme.text, font: axisFont, size: 64, space: 28, incrs: axisIncrs(spec.unit), grid: { stroke: theme.grid, width: 1 }, ticks: { show: false }, values: (_u, vals) => vals.map(axis) },
     ],
     series: [
-      { label: "UTC", value: (_u, v) => v === null ? "–" : hourText(v) },
+      // the read-out under the chart: the hovered time and its EXACT value (the axis is compact; the read-out is the table's)
+      { label: "At", value: (_u, v) => v === null ? "–" : readoutTime(v, span) },
       { label: spec.label, stroke: theme.mark, width: bars ? 0 : 2, ...(bars ? { fill: theme.mark, paths: uPlot.paths.bars({ size: [0.7, 48], gap: 2 }) } : {}),
         points: { show: false }, value: (_u, v) => v === null ? "–" : fmt(v) },
     ],

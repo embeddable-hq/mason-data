@@ -1,5 +1,5 @@
 /**
- * THE STATUS PAGE (#status): what `mason status` prints — the run in one word (`readiness`), ONE table of facts (the
+ * THE OVERVIEW (#overview; `#status`, its old address, lands here; the module and its section keep the id `status`): what `mason status` prints — the run in one word (`readiness`), ONE table of facts (the
  * database and how its changes arrive, Mason's version, uptime and restarts, the copies in all, the copy's file, the
  * disk, the sessions open, the warnings), the changes the stream carries (replication mode: its position, lag, last
  * batch and the slot's hold on the database's WAL), the statements of the last day and week, the copies not finished (a
@@ -10,8 +10,13 @@
  * Laid out as a dashboard (docs/WEB-UI.md "Presentation"): the word with a big dot, then KPI cards (the copies in all,
  * their rows, the last sync, the copy's file, the last day's statements and their p95 — each its own fact, said once,
  * with a sparkline of the last 24 hours where one helps), the copies not finished, the ONE table of the other facts,
- * the stream, the statements, the recent errors.
+ * the stream, the statements, the recent errors. Each card links into the view that lists what it counts (the tables,
+ * filtered to the failed ones when a copy failed; Observability's Queries — the slow ones for the p95 — and Usage).
  */
+
+/** Where each card leads: the views that list what it counts (src/web/app.js hashes). */
+export const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
+  slow: "#observability/queries?slow=1", failedQueries: "#observability/queries?status=failed", failedEvents: "#observability/logs?failures=1" };
 import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   card, cards, details, createOpenSet, skeleton } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
@@ -122,21 +127,21 @@ export function renderKpis(s, o = {}) {
   // as renderStatus judges it: a table added (the totals count what the sources file names)
   const added = Boolean(t) && s.tables.some((x) => x.added);
   if (added) list.push(
-    card("Tables synced", `${n(t.copied)} of ${n(t.added)}`, `added${t.failed ? `, ${n(t.failed)} failed` : ""}`, "", t.failed ? "bad" : ""),
-    card("Rows", n(t.rows), "", line("rows")),
-    t.syncedAt === null ? card("Last sync", "none yet") : card("Last sync", `${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`, `${utcText(t.syncedAt)} UTC`));
+    card("Tables synced", `${n(t.copied)} of ${n(t.added)}`, `added${t.failed ? `, ${n(t.failed)} failed` : ""}`, "", t.failed ? "bad" : "", t.failed ? LINKS.failedTables : LINKS.tables),
+    card("Rows", n(t.rows), "", line("rows"), "", LINKS.tables),
+    t.syncedAt === null ? card("Last sync", "none yet", "", "", "", LINKS.tables) : card("Last sync", `${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`, `${utcText(t.syncedAt)} UTC`, "", "", LINKS.tables));
   const d = s.disk;
   const copyBytes = s.engine.bytes ?? (d && typeof d.copyBytes === "number" ? d.copyBytes : null);
-  if (added || copyBytes !== null) list.push(copyBytes === null ? card("The copy's file", "unknown", "its size could not be read") : card("The copy's file", fileSize(copyBytes), "", line("copy-bytes")));
+  if (added || copyBytes !== null) list.push(copyBytes === null ? card("The copy's file", "unknown", "its size could not be read", "", "", LINKS.usage) : card("The copy's file", fileSize(copyBytes), "", line("copy-bytes"), "", LINKS.usage));
   const q = o.queries;
   if (added && q !== undefined) {
-    if ("failure" in q) list.push(card("Statements, last day", "unknown", `could not read them: ${firstLine(q.failure.message)}`));
+    if ("failure" in q) list.push(card("Statements, last day", "unknown", `could not read them: ${firstLine(q.failure.message)}`, "", "", LINKS.queries));
     else {
       const day = q.queries.day;
       const bad = day.refused + day.failed + day.cancelled;
-      list.push(card("Statements, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : ""),
+      list.push(card("Statements, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : "", LINKS.queries),
         card("p95, last day", day.durationMs === null ? "–" : `${n(day.durationMs.p95)} ms`,
-          day.durationMs === null ? "no statement completed" : `average ${n(day.durationMs.avg)} ms · p50 ${n(day.durationMs.p50)} ms`, line("p95")));
+          day.durationMs === null ? "no statement completed" : `average ${n(day.durationMs.avg)} ms · p50 ${n(day.durationMs.p50)} ms`, line("p95"), "", LINKS.slow));
     }
   }
   return cards(list);
@@ -222,7 +227,7 @@ export function renderQueries(q) {
     ["Statements", "Completed", "Refused", "Failed", "Cancelled", "Average", "p50", "p95", "Rows sent", "Sent"].map((h) => `<th scope="col">${h}</th>`).join("") +
     `</tr></thead><tbody>${row("Last day", w.day)}${row("Last week", w.week)}</tbody></table>` +
     (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS.</p>` : "") +
-    `<p class="dim">The slow and the refused statements, and every other, are on the <a href="#queries">Queries</a> page (${code("mason logs --requests")}).</p>`;
+    `<p class="dim">The slow and the refused statements, and every other, are on <a href="${LINKS.queries}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
 }
 
 /** A sync event's cells, as mason status's `Sync errors` line says them (src/cli/commands.ts `eventLine`): when, what, its table, its reason's first line. */
@@ -246,13 +251,13 @@ const cellsRow = (cells) => `<tr><th scope="row">${esc(cells[0])}</th>${cells.sl
  * says so, one that could not be read says why. Each argument is the body, or `{ failure }`.
  */
 export function renderRecentErrors(events, requests) {
-  const part = (title, r, list, head, cells, more) => r === undefined ? ""
+  const part = (title, r, list, head, cells, more, href) => r === undefined ? ""
     : "failure" in r ? `<h3>${title}</h3><p class="count">Could not read them (${esc(firstLine(r.failure.message))}; ${code("mason logs")} has the detail)</p>`
     : !list(r).length ? `<h3>${title}</h3><p class="dim">None.</p>`
-    : `<table class="errors"><caption>${title} (the latest, newest last; ${code(more)} lists each)</caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
+    : `<table class="errors"><caption>${title} (the latest, newest last; ${code(more)} lists each) <a class="see" href="${href}">See all</a></caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${list(r).map((x) => cellsRow(cells(x))).join("")}</tbody></table>`;
-  return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], eventCells, "mason logs --events") +
-    part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed");
+  return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], eventCells, "mason logs --events", LINKS.failedEvents) +
+    part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed", LINKS.failedQueries);
 }
 
 /**
@@ -275,7 +280,8 @@ const asRequest = (r) => r === undefined ? undefined : r.failure ? { failure: r.
 
 export const page = {
   id: "status",
-  title: "Status",
+  hash: "overview",
+  title: "Overview",
   create(ctx) {
     // the details open (a copy's whole error), by key: a poll rewrites the section, and they stay open
     const opened = createOpenSet();

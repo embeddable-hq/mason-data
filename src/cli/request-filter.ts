@@ -14,6 +14,13 @@ import { didYouMean } from "../lib/did-you-mean.ts";
 export const DEFAULT_REQUEST_LIMIT = 40;
 export const MAX_REQUEST_LIMIT = 10_000;
 
+/** A statement answered in this many milliseconds or more is slow: what mason status lists, and what the `slow` filter
+ *  keeps (`--slow`, `slow=1`). One constant, here, where the filter is read; src/cli/run-server.ts re-exports it. */
+export const SLOW_MS = 1000;
+
+/** The longest text `search` takes: a fragment of a statement, never a statement pasted whole. */
+export const MAX_SEARCH = 200;
+
 /** How many sync events a read returns unless it says, and the most it may. */
 export const DEFAULT_EVENT_LIMIT = 40;
 export const MAX_EVENT_LIMIT = MAX_REQUEST_LIMIT;
@@ -28,6 +35,10 @@ export interface RequestFilterText {
   until?: string | undefined;
   user?: string | undefined;
   client?: string | undefined;
+  /** only the ones that took SLOW_MS or more */
+  slow?: boolean | undefined;
+  /** only the statements whose text has it, any case */
+  search?: string | undefined;
   before?: string | undefined;
 }
 
@@ -66,7 +77,8 @@ export function eventLimit(text: string | undefined, key: string): number | Fail
 
 /**
  * The filters read, or the first thing wrong with them, its key spelled as the entrance spells it (`name`). `failed`
- * is every outcome but ok, so it is never named beside `outcome`; `since` must come before `until`; `before` is a
+ * is every outcome but ok, so it is never named beside `outcome`; `slow` keeps the ones that took SLOW_MS or more, and
+ * `search` the statements whose text has it (any case, at most MAX_SEARCH characters); `since` must come before `until`; `before` is a
  * cursor a page handed on, passed back as it came.
  */
 export function requestFilter(f: RequestFilterText, now: number = Date.now(), name: (k: FilterKey) => string = QUERY_NAMES): RequestQuery | Failure {
@@ -101,6 +113,12 @@ export function requestFilter(f: RequestFilterText, now: number = Date.now(), na
     if (text === "") return usage(`${name(k)} names ${k === "user" ? "a mason user" : "a client's application_name"}: it is empty`);
     q[k] = text;
   }
+  if (f.slow === true) q.minMs = SLOW_MS;
+  if (f.search !== undefined) {
+    if (f.search.trim() === "") return usage(`${name("search")} is a piece of a statement's text: it is empty`);
+    if (f.search.length > MAX_SEARCH) return usage(`${name("search")} is a piece of a statement's text, at most ${MAX_SEARCH} characters: it has ${f.search.length}`);
+    q.search = f.search;
+  }
   if (f.before !== undefined) {
     const c = parseRequestCursor(f.before);
     if (c === null) return usage(`${name("before")} ${JSON.stringify(f.before)} is not a position in the request log`, `pass back the before a page answered with, as it came`);
@@ -118,6 +136,8 @@ export function requestFilterParams(q: RequestQuery): URLSearchParams {
   if (q.until !== undefined) p.set("until", q.until);
   if (q.user !== undefined) p.set("user", q.user);
   if (q.client !== undefined) p.set("client", q.client);
+  if (q.minMs !== undefined) p.set("slow", "1");
+  if (q.search !== undefined) p.set("search", q.search);
   if (q.before !== undefined) p.set("before", requestCursor(q.before.at, q.before.seq));
   return p;
 }
@@ -126,5 +146,5 @@ export function requestFilterParams(q: RequestQuery): URLSearchParams {
 export function requestFilterText(p: URLSearchParams): RequestFilterText {
   const get = (k: string): string | undefined => p.get(k) ?? undefined;
   return { limit: get("limit"), outcome: get("outcome"), failed: p.get("failed") === "1", since: get("since"), until: get("until"),
-    user: get("user"), client: get("client"), before: get("before") };
+    user: get("user"), client: get("client"), slow: p.get("slow") === "1", search: get("search"), before: get("before") };
 }

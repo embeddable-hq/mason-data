@@ -1,7 +1,8 @@
 # The web page (`mason ui`)
 
-`mason start` serves a web page beside the commands, in a browser tab: six pages (Status, Tables, Queries, Users,
-Usage and Logs) over the state `mason status`, `mason tables`, `mason user`, `mason usage` and `mason logs` read.
+`mason start` serves a web page beside the commands, in a browser tab: four tabs (Overview, Tables, Users and
+Observability, the last with three views: Queries, Usage and Logs) over the state `mason status`, `mason tables`,
+`mason user`, `mason usage` and `mason logs` read.
 
 ```bash
 mason ui              # opens the page in your browser
@@ -11,44 +12,71 @@ mason ui --json       # { url, port, next }
 
 ## What it shows
 
-The page has a nav (Status · Tables · Queries · Users · Usage · Logs) and shows one page at a time, chosen by the
-address's hash (`#tables`; none, or one it does not know, is Status), so a page can be bookmarked and Back goes to the
-page before. Only the page shown asks Mason anything, each read at the rate its data changes, and nothing while the tab
-is hidden. How long ago Mason last answered is in the top bar.
+The page has a nav of four tabs — **Overview · Tables · Users · Observability** — and shows one view at a time, chosen by
+the address's hash, so a view can be bookmarked and Back goes to the one before:
 
-- **Status** (`#status`, read only): the run's word (Ready, Under way or Failed) beside a big dot, then cards for the
+| Hash | View |
+|---|---|
+| `#overview` (none, or one it does not know) | the Overview |
+| `#tables`, `#tables?show=failed` | Tables (filtered to the failed copies) |
+| `#users` | Users |
+| `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=failed` set those filters |
+| `#observability/usage` | Observability › Usage |
+| `#observability/logs` | Observability › Logs; `?failures=1` ticks Failures only |
+
+The hashes of before the Observability tab still land on their view: `#status` is the Overview, `#queries`, `#usage` and
+`#logs` the Observability views. Observability's three views sit under a secondary underline nav, beside **the time range
+they share**: a segmented control — Last hour · 24 hours · 7 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`)
+— kept in the hash, so a link carries it. Queries reads the request log since then, Usage the samples of that span (a
+minute a point for the hour, an hour for the day, six hours for the week), Logs the sync's events since then; each
+view's own filters compose with it. Only the view shown asks Mason anything, each read at the rate its data changes,
+and nothing while the tab is hidden. How long ago Mason last answered is in the top bar.
+
+- **Overview** (`#overview`, read only): the run's word (Ready, Under way or Failed) beside a big dot, then cards for the
   tables synced, the rows, the last sync, the copy's file, and the last day's statements with their p95. Each card has a
-  24-hour sparkline once there are two hours to draw.
-- **Status**, the copies not finished: a bar each with the line `mason wait` prints, and nothing once every copy is done.
-- **Status**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime and
-  restarts, free disk, and sessions open. In replication mode, a Changes table shows the stream and the WAL its slot holds.
-- **Status**, the statements and errors: the last day and week in one table, then the latest sync errors and the refused
-  or failed statements.
+  24-hour sparkline once there are two hours to draw, and **each is a link** into the view that lists what it counts:
+  the tables (the failed ones when a copy failed), Usage for the copy's file, Queries for the statements, the slow ones
+  for the p95.
+- **Overview**, the copies not finished: a bar each with the line `mason wait` prints, and nothing once every copy is done.
+- **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime
+  and restarts, free disk, and sessions open. In replication mode, a Changes table shows the stream and the WAL its slot holds.
+- **Overview**, the statements and errors: the last day and week in one table, then the latest sync errors and the
+  refused or failed statements, each with **See all** (Logs, failures only; Queries, the failed ones).
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /
-  Added / Not added filter.
+  Added / Failed / Not added filter. With hundreds of tables the first 100 that pass are written, then **Show 100 more**
+  and **Show all**; the search is over every table, at once. A long name is cut with an ellipsis, its whole the tooltip.
 - **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting), rows, last sync, how long the sync took, the
   copy's size and any error. **Sync** runs `mason sync` for it; **Remove** asks first, then runs `mason remove`.
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** copies every column, as
   `mason add <table>` does; **Columns…** opens a form to tick the columns to copy; **Name its key…** does the same for a
   table with no primary key.
-- **Queries** (`#queries`): cards for sessions open, statements running, the last day's statements, failed and p95, then
-  who is connected now, a row per user and client.
-- **Queries**, running now: each statement with **Cancel**, which asks first and stops that one statement, as
-  `mason cancel` does.
-- **Queries**, the request log: newest first, with a status dot per row. Filter by status, since (`2h`, `7d`, or a date),
-  user and client; **Older** pages back and **Newest** returns. A row opens in place to its whole id, times, bytes sent,
-  statement and error.
 - **Users** (`#users`): a form that adds a user by name. Its password and URL are shown once, in a card with Copy buttons;
   Mason keeps no copy, so they are never shown again.
 - **Users**, the list: each user's status (Active or Removed), when added, when last used, and its URL with **Copy**. A
   user that no longer connects is flagged with why. **Remove** asks first; a removed user stays listed, muted.
-- **Usage** (`#usage`): cards for the last 24 hours (statements, failed, p95, rows sent, bytes sent), each with a sparkline.
-- **Usage**, charts and tables: four charts by the hour (statements, p95, the copy's size, rows in the copy), the last day
-  and week side by side, and each copy's own size, measured every 10 minutes. The hourly numbers sit behind a closed
-  details, and the process's memory behind another.
-- **Logs** (`#logs`): the sync's events, newest last, with when, kind, table and reason. **Failures only** narrows the list.
-- **Logs**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths). Mason is asked for
-  it only while the details is open.
+- **Observability › Queries** (`#observability/queries`): cards for sessions open, statements running, and the
+  statements, failed and p95 of the range (the request log's summary has a day and a week: the hour's cards say the
+  day, by name), then who is connected now — a row per user and client, the 10 with the most sessions and one row for
+  the others.
+- **Queries**, running now: each statement with **Cancel**, which asks first and stops that one statement, as
+  `mason cancel` does.
+- **Queries**, the request log: newest first, with a status dot per row. Filter by status, **Slow (1 s or more)**, a
+  piece of the statement's text (**Statement has**), since (`2h`, `7d`, or a date: used instead of the range), user and
+  client; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
+  shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
+  opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.
+- **Observability › Usage** (`#observability/usage`): cards for the range (statements, failed, p95, rows sent, bytes
+  sent), each with a sparkline.
+- **Usage**, charts and tables: four charts over the range (statements, p95, the copy's size, rows in the copy), their
+  time axis in minutes, hours or days by the range, their values compact (`1.2K`, `3.4 MiB`, `512 ms`) and exact on
+  hover; a series with one sample says its value instead. Then the last day and week side by side, and each copy's own
+  size, measured every 10 minutes. The samples, newest first (**Time** sorts them), sit behind a closed details, and
+  the process's memory behind another.
+- **Observability › Logs** (`#observability/logs`): the sync's events of the range, newest first (**When** turns it
+  round), with when, kind, table and reason. **Failures only**, a **Kind** and a **Table** narrow the list; 100 are
+  written at once, then **Show more**.
+- **Logs**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
+  is asked for it only while the details is open.
 
 When something is refused, or Mason stops answering, the page says it as the commands do: what is wrong, why, the way
 out, and the commands to run next.
@@ -58,7 +86,8 @@ out, and the commands to run next.
 The page looks like Vercel's dashboard: Geist Sans for text and Geist Mono for numbers and code, a near-monochrome gray
 scale with hairline borders and generous space, a top bar (Mason, the database's name, a **demo** badge when it is the
 demo database, and how long ago Mason last answered — `Updated 3 s ago`, which keeps counting when it stops answering),
-underlined tabs, and on Status the run's word beside a big dot, a grid of KPI cards, then dense tables. Colour says a
+underlined tabs (and under Observability a secondary underline nav with the time range as a segmented control), and on
+the Overview the run's word beside a big dot, a grid of KPI cards, then dense tables. Colour says a
 state and nothing else — a green, amber, red or gray dot always beside its word — besides the one blue accent for focus,
 links and a chart's mark. It follows the system's light or dark theme.
 
@@ -66,7 +95,16 @@ Every colour, space, radius, font and size is a CSS custom property on `:root` i
 `--surface`, `--line`, `--fg`, `--muted`, `--accent`, `--ok`, `--warn`, `--bad`, `--unknown`, `--chart-*`,
 `--font-sans`, `--font-mono`, `--space-1…7`, `--radius*`, `--text-*`), set again for dark mode, so a page is restyled
 by its tokens. The components are helpers of `src/web/shared.js` (`status`, `card`, `cards`, `badge`, `button`,
-`panel`, `pageHead`, `empty`, `skeleton`, `details`); the charts, `src/web/charts.js`.
+`panel`, `pageHead`, `empty`, `skeleton`, `details`, `sortTh`, `moreRows`); the charts, `src/web/charts.js`.
+
+**Buttons say what they do**: every button has a visible label (no icon alone); a primary action is filled dark, a
+destructive one red-lettered and its confirm filled red; each has hover, focus and disabled states and is at least 28 px
+tall; a row's actions sit at its right. **Large data stays bounded**: a list of hundreds writes 100 rows and offers
+more, a by-client list shows its top 10 and one row for the rest, a long name is cut with its whole the tooltip, a
+statement is two lines at most outside its expanded row and 16 KiB in it. **Charts read at every range**: time ticks in
+minutes, hours or days by the span, at least 72 px apart; y labels compact in the commands' units, ticks on whole
+numbers (powers of 1024 for bytes); the axis starts at zero and is never cut, so a spike keeps its height and the table
+under the chart has every value.
 
 **The vendored files, and why.** People run Mason on machines without internet, so the page fetches nothing from
 elsewhere — the policy it is served under (`default-src 'self'`) would refuse it anyway. What it uses that Mason did not

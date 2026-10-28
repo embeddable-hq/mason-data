@@ -157,6 +157,10 @@ export interface RequestQuery {
   user?: string | undefined;
   /** the client's application_name, exactly */
   client?: string | undefined;
+  /** took this many ms or more (the `slow` filter: src/cli/request-filter.ts SLOW_MS) */
+  minMs?: number | undefined;
+  /** the statement's text has it, any case */
+  search?: string | undefined;
   /** strictly older than this position (a page's `before`, parseRequestCursor) */
   before?: { at: string; seq: number } | undefined;
 }
@@ -325,6 +329,9 @@ export class RequestLedger {
     if (q.until !== undefined) where.push(`started_at < ${arg(q.until, "::TIMESTAMPTZ")}`);
     if (q.user !== undefined) where.push(`user_name = ${arg(q.user)}`);
     if (q.client !== undefined) where.push(`application_name = ${arg(q.client)}`);
+    if (q.minMs !== undefined) where.push(`duration_ms >= ${arg(q.minMs)}`);
+    // a substring, any case: contains() takes the text as it is (no LIKE pattern to escape); a scan of the kept days, as every filter is
+    if (q.search !== undefined) where.push(`contains(lower(coalesce(query, '')), lower(${arg(q.search)}))`);
     if (q.before !== undefined) {
       const at = arg(q.before.at, "::TIMESTAMPTZ");
       where.push(`(started_at < ${at} OR (started_at = ${at} AND coalesce(seq, -1) < ${arg(q.before.seq)}))`);
