@@ -71,10 +71,11 @@ export function tableLine(t) {
   return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}` };
 }
 
-/** `mason status`'s rows for the database (src/cli/commands.ts `sourceRows`): its sources file, its URL as the run masked it, how its changes arrive. */
+/** `mason status`'s rows for the database (src/cli/commands.ts `sourceRows`): its sources file (from the project's root:
+ *  the page never shows an absolute path), its URL as the run masked it, how its changes arrive. */
 export function sourceRows(s) {
   return [
-    ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`]] : []),
+    ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +

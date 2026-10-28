@@ -84,16 +84,22 @@ export function removedReport(removed, file) {
  */
 export const pickBody = (table, columns = [], key = []) => ({ table, picked: true, ...(columns.length ? { columns } : {}), ...(key.length ? { key } : {}) });
 
-/** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): the line and notes `mason add` prints. */
-export function renderTableAdded(b) {
-  const l = addedLines(b, b.file);
+/** The sources file as the commands name it, from the project's root (`/api/state` `source.shownFile`), when it is the
+ *  one the state names: the page never shows an absolute path. */
+const shownFileOf = (s, file) => s?.source?.file === file && typeof s.source.shownFile === "string" ? s.source.shownFile : file;
+
+/** A table just added (`/api/pick`'s answer, `mason add --json`'s `added` entry): the line and notes `mason add` prints,
+ *  the sources file named as `file` (as `mason add` names it: from the project's root). */
+export function renderTableAdded(b, file = b.file) {
+  const l = addedLines(b, file);
   return `<div class="done" role="status"><p class="headline">${esc(l.line)}</p>${l.notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "" }, "small")}</div>`;
 }
 
-/** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): what `mason remove` prints. */
-export function renderTablesRemoved(b) {
-  const r = removedReport(b.removed, b.file);
+/** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): what `mason remove` prints, the file named
+ *  as `file`. */
+export function renderTablesRemoved(b, file = b.file) {
+  const r = removedReport(b.removed, file);
   return `<div class="done" role="status"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
     `${button("Dismiss", { dismissOutcome: "" }, "small")}</div>`;
 }
@@ -167,7 +173,7 @@ export function renderTables(s, ui = {}) {
     const note = t.added
       ? t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : ""
       : `<span class="dim">${esc(f.state ?? "")}</span>`;
-    const said = (outcome?.table !== t.table ? "" : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added) : renderTablesRemoved(outcome.removed))) +
+    const said = (outcome?.table !== t.table ? "" : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added, shownFileOf(s, outcome.added.file)) : renderTablesRemoved(outcome.removed, shownFileOf(s, outcome.removed.file)))) +
       (synced?.table !== t.table ? "" : under("failure" in synced ? renderFailure(synced.failure) : renderSynced(synced.synced, t.table, s)));
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td>${state}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +

@@ -72,6 +72,9 @@ export interface RunState {
     name: string | null;
     /** the sources file the run copies from, absolute */
     file: string | null;
+    /** the same, relative to the project's root (src/cli/sources.ts shownPath): what mason status and the web page show,
+     *  which never shows an absolute path; absent from a run before it was said */
+    shownFile?: string | null;
     /** replication mode: its slot and publication (`owned`: Mason's own; else named, only read) */
     replication?: { slot: string; publication: string; owned: boolean } };
   warnings: string[];
@@ -291,7 +294,7 @@ const STATUS_USAGE = `usage: mason status [--json]
 
   --json   as data: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), listener:
            { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
-           source's: its sources file's), file (the sources file), url, database, remote, version, standby, changes,
+           source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
            replication, demo (the demo database this run hosts) }, warnings, folder, project, tables: [{ table, rows,
            bytes, key, added, addedColumns, copy, error, sync: { state (synced, syncing, failed, waiting), syncedAt (when
            the copy was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
@@ -458,7 +461,7 @@ export async function status(argv: string[]): Promise<number> {
  */
 export function sourceRows(s: Pick<RunState, "source" | "engine">): Array<[string, string]> {
   return [
-    ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`] as [string, string]] : []),
+    ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`] as [string, string]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +

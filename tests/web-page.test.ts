@@ -307,7 +307,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.ok(!/pattern=|required/.test(keyForm + columnsForm), "the server judges what is sent, never the page");
   // what an add or a remove answered is said under its table; a refusal for a table the list lacks, above the list
   const said = renderTables(CATALOG_STATE, { outcome: { table: "public.accounts", added: PICKED.secret } });
-  assert.match(textOf(said), /public\.accounts Not added ~300 rows key id Add Columns… Added public\.accounts to \/app\/mason\/sources\/shop\.yml: every column but password_hash .* public\.event_log /);
+  assert.match(textOf(said), /public\.accounts Not added ~300 rows key id Add Columns… Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash .* public\.event_log /);
   const gone = renderTables(CATALOG_STATE, { outcome: { table: "public.gone", failure: { code: "not_found", message: "public.gone is not a table of shop that this user can read" } } });
   assert.match(textOf(gone), /^✗ public\.gone is not a table of shop that this user can read Table State /);
   assert.equal(textOf(renderTables({ ...NONE, tables: [] })), "shop has no table this user can read.");
@@ -501,7 +501,7 @@ test("the app: Add sends POST /api/pick, says what was added under its table, an
   assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET /api/state"],
     "every column, as mason add accounts asks; then the state again (the page's own read: nothing else)");
   const v = app.view();
-  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id Sync Remove Added public\.accounts to \/app\/mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
+  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id Sync Remove Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
   assert.match(textOf(v.status!), /public\.accounts 0% waiting for its copy to start/, "the Status shows the copy starting");
   app.dismissOutcome();
   assert.ok(!/Added public\.accounts/.test(app.view().tables!));
@@ -565,7 +565,7 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends POST /
   run.asked.length = 0;
   assert.equal(await app.confirmRemoveTable("public.accounts"), true);
   assert.deepEqual(run.asked, [`POST /api/remove ${JSON.stringify({ tables: ["public.accounts"] })}`, "GET /api/state"]);
-  assert.match(textOf(app.view().tables!), /public\.accounts Not added ~300 rows key id Add Columns… Removed public\.accounts from \/app\/mason\/sources\/shop\.yml Tip: Mason stops copying it and drops its copy/);
+  assert.match(textOf(app.view().tables!), /public\.accounts Not added ~300 rows key id Add Columns… Removed public\.accounts from mason\/sources\/shop\.yml Tip: Mason stops copying it and drops its copy/);
   assert.equal(app.model.removing, null);
   // refused: the server's words
   const message = "shop.yml names no table orders — did you mean `orders`? (it names customers)";
@@ -703,7 +703,8 @@ test("in the browser: the tables are written when they change, never at every po
   await on.get("submit")!({ target: { dataset: { pickForm: "public.audit" }, ticked: { columns: ["name"] } }, preventDefault: () => { prevented = true; } });
   assert.ok(prevented, "the page posts it, not the browser");
   assert.ok(run.asked.includes(`POST /api/pick ${JSON.stringify({ table: "public.audit", picked: true, columns: ["name"] })}`), run.asked.join("\n"));
-  assert.match(textOf(tables.html), /Added public\.audit to \/app\/mason\/sources\/shop\.yml: id, name key added: id/);
+  assert.match(textOf(tables.html), /Added public\.audit to mason\/sources\/shop\.yml: id, name key added: id/, "the sources file from the project's root, as mason add names it");
+  assert.doesNotMatch(tables.html, /\/app\//, "never an absolute path");
 });
 
 // ------------------------------------------------------------------ the shell: a page per hash, each polling its own
@@ -886,6 +887,8 @@ test("Status: the word, the facts (tables synced N of M, rows, the last sync and
     assert.match(text, /^Failed Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 30 s ago 2026-10-27 09:05:00 UTC The copy's file unknown its size could not be read Statements, last day 1,234 1,200 completed, 34 refused, failed or cancelled p95, last day 380 ms average 42 ms · p50 12 ms /);
     assert.match(html, /<a class="card bad link" href="#tables\?show=failed"><p class="card-label">Tables synced<\/p><p class="card-value">2 of 3<\/p><p class="card-sub">added, 1 failed<\/p><\/a>/, "a card: its label, its value, its sub-line — and a link to the failed tables");
     assert.match(text, / Mason Source .* Database postgres:.* Changes polling /);
+    assert.match(text, / Source mason\/sources\/shop\.yml \(the tables it names are added\) Database /, "the sources file from the project's root, as mason status names it");
+    assert.doesNotMatch(html, /\/app\//, "never an absolute path");
     assert.match(html, /<caption>Mason<\/caption><tbody><tr><th scope="row">Source<\/th>/, "ONE table of the other facts, each a row headed by its name");
     assert.doesNotMatch(html.slice(html.indexOf("<caption>Mason</caption>")), /<th scope="row">(Tables synced|Rows|Last sync|The copy's file)<\/th>/, "a fact in ONE place: the cards' are not rows too");
     // the statements: a row per window, each count as mason status says it
@@ -1652,7 +1655,9 @@ test("Tables and Users: the sections are a page head, the cards' part and a tool
   const tables = section("tables"), users = section("users");
   assert.match(tables, /<div class="page-head"><h2 id="tables-h">Tables<\/h2><p class="desc">/);
   assert.ok(tables.indexOf('id="tables-cards"') < tables.indexOf('class="toolbar"') && tables.indexOf('class="toolbar"') < tables.indexOf('id="tables"'), "cards, then the toolbar, then the list");
-  assert.match(tables, /<input type="search" id="tables-filter"[^>]*>\s*<label for="tables-show">Show<\/label> <select id="tables-show">/);
+  // each label in a field with its control (on a phone a field is a row of its own: "Show" never wraps away from its select)
+  assert.match(tables, /<div class="field grow"><label for="tables-filter">Search the tables<\/label>\s*<input type="search" id="tables-filter"[^>]*><\/div>/);
+  assert.match(tables, /<div class="field"><label for="tables-show">Show<\/label>\s*<select id="tables-show">[\s\S]*?<\/select><\/div>/);
   assert.match(users, /<div class="page-head"><h2 id="users-h">Users<\/h2>/);
   assert.match(users, /<form id="add-user" class="formcard"[^>]*>[\s\S]*<button type="submit" class="primary">Add a user<\/button>/);
   assert.ok(users.indexOf('id="add-user"') < users.indexOf('id="added"') && users.indexOf('id="added"') < users.indexOf('id="users"'), "the form, the password just shown, the users");
