@@ -129,7 +129,7 @@ const FAILED_REQUESTS = { requests: [REQUEST, { ...REQUEST, requestId: "0b9e5c1e
 const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.000Z", stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [],
   copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
 
-/** What the Status page reads, in order: the state every poll, the request log's every 30 s. */
+/** What the Overview reads, in order: the state every poll, the request log's every 30 s. */
 const STATUS_READS = ["GET /api/state", "GET /api/queries", "GET /api/events?failed=1&limit=5", "GET /api/requests?failed=1&limit=5", "GET /api/unsupported?limit=100"];
 /** The Overview's first poll: those, and the last 24 hours of usage its cards' sparklines draw (read once a minute). */
 const STATUS_FIRST = [...STATUS_READS, "GET /api/usage?since=24h&step=3600"];
@@ -424,8 +424,8 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   assert.equal(app.view().updated, "Updated 4 s ago", "how long ago it last heard, ageing as the page is written");
   assert.equal(v.poll, "");
   assert.match(textOf(v.status!), /public\.orders 15% copying/);
-  assert.deepEqual(run.asked, STATUS_FIRST, "the Status page's reads, no other page's");
-  assert.equal(v.users, "", "the users are not read while Status is shown");
+  assert.deepEqual(run.asked, STATUS_FIRST, "the Overview's reads, no other page's");
+  assert.equal(v.users, "", "the users are not read while the Overview is shown");
   // the Users page shown: its read alone
   app.show("users");
   run.asked.length = 0;
@@ -503,7 +503,7 @@ test("the app: Add sends POST /api/pick, says what was added under its table, an
     "every column, as mason add accounts asks; then the state again (the page's own read: nothing else)");
   const v = app.view();
   assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id Sync Remove Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
-  assert.match(textOf(v.status!), /public\.accounts 0% waiting for its copy to start/, "the Status shows the copy starting");
+  assert.match(textOf(v.status!), /public\.accounts 0% waiting for its copy to start/, "the Overview shows the copy starting");
   app.dismissOutcome();
   assert.ok(!/Added public\.accounts/.test(app.view().tables!));
 });
@@ -762,7 +762,7 @@ test("the shell: only the page shown is asked, each endpoint at its own rate —
   let t = Date.UTC(2026, 9, 27, 9, 0, 0);
   const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), STATUS_FIRST, "Status, first: everything it reads");
+  assert.deepEqual(await asked(), STATUS_FIRST, "the Overview, first: everything it reads");
   t += 2000;
   assert.deepEqual(await asked(), ["GET /api/state"], "2 s on: the state alone; the request log's are read every 30 s");
   t += 28_000;
@@ -841,7 +841,7 @@ test("in the browser: no part is written while a pointer is pressed — a row th
   assert.match(status.html, HEALTH("ok", "Ready"));
 });
 
-// ------------------------------------------------------------------ the Status page: the word, the facts, the recent errors
+// ------------------------------------------------------------------ the Overview: the word, the facts, the recent errors
 
 // the pages' own modules, imported when the tests run (at a commit without them each test fails by name)
 const statusPage = await import(path.join(WEB, "pages", "status.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
@@ -852,7 +852,7 @@ const of = <A extends unknown[], R>(mod: Record<string, unknown>, file: string, 
 };
 const plain = (line: string) => line.replace(/\s+/g, " ").trim();
 
-test("the Status page's words are mason status's: the readiness word, the copies' line, a size, a span, an event's and a statement's line", () => {
+test("the Overview's words are mason status's: the readiness word, the copies' line, a size, a span, an event's and a statement's line", () => {
   const readinessWord = (commands as unknown as { readinessWord?: (r: unknown) => string }).readinessWord;
   assert.equal(typeof readinessWord, "function", "src/cli/commands.ts exports readinessWord");
   const word = of<[unknown], string>(statusPage, "status.js", "readinessWord");
@@ -877,7 +877,7 @@ test("the Status page's words are mason status's: the readiness word, the copies
   }
 });
 
-test("Status: the word, the facts (tables synced N of M, rows, the last sync and its age, the copy's file), the statements, the recent errors", () => {
+test("the Overview: the word, the facts (tables synced N of M, rows, the last sync and its age, the copy's file), the statements, the recent errors", () => {
   const run = fakeRun();
   run.answers.set("GET /api/state", answer(SYNCED));
   const a = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(NOW));
@@ -911,7 +911,7 @@ test("Status: the word, the facts (tables synced N of M, rows, the last sync and
   });
 });
 
-test("Status: Ready and Under way in mason status's words; nothing added says so once; an error list that could not be read, or is empty, says so", async () => {
+test("the Overview: Ready and Under way in mason status's words; nothing added says so once; an error list that could not be read, or is empty, says so", async () => {
   const renderHealth = of<[unknown], string>(statusPage, "status.js", "renderHealth");
   assert.equal(textOf(renderHealth(RUNNING)), "Ready");
   assert.equal(textOf(renderHealth(COPYING)), "Under way");
@@ -1545,7 +1545,7 @@ test("the stream: the page's rows are mason status's streamLines, row for row, i
 });
 const commandsStream = await import("../src/duck/stream.ts");
 
-test("Status: replication mode says the changes — running or not and why, the position, the lag, the last batch — and none without a stream", () => {
+test("the Overview: replication mode says the changes — running or not and why, the position, the lag, the last batch — and none without a stream", () => {
   const renderStatus = fn<[unknown, unknown?], string>("renderStatus");
   const html = renderStatus(REPL(STREAM), { now: NOW });
   const text = textOf(html);
@@ -1559,7 +1559,7 @@ test("Status: replication mode says the changes — running or not and why, the 
   assert.match(text, /Changes logical replication: slot mason_dev_shop, publication app_pub/);
 });
 
-test("Status: the slot's WAL is the CLI's slotText; lost, past its cap, uncapped and unreadable are warnings, a healthy slot is not", () => {
+test("the Overview: the slot's WAL is the CLI's slotText; lost, past its cap, uncapped and unreadable are warnings, a healthy slot is not", () => {
   const renderStatus = fn<[unknown, unknown?], string>("renderStatus");
   const cliSlot = (commands as unknown as { slotText: (w: unknown, since: (iso: string) => number) => string }).slotText;
   assert.equal(typeof cliSlot, "function", "src/cli/commands.ts exports slotText");
@@ -1578,7 +1578,7 @@ test("Status: the slot's WAL is the CLI's slotText; lost, past its cap, uncapped
   assert.match(textOf(html({ error: "no restart position yet\nmore" })), /Slot the WAL it holds could not be read: no restart position yet/, "unknown, never 0");
 });
 
-test("Status: Mason's version and uptime, the restarts, the disk and the sessions are the CLI's rows (masonRow, restartsRows, diskRows, sessionsRows) — held equal, but for the pid and the path", () => {
+test("the Overview: Mason's version and uptime, the restarts, the disk and the sessions are the CLI's rows (masonRow, restartsRows, diskRows, sessionsRows) — held equal, but for the pid and the path", () => {
   const cli = commands as unknown as { masonRow: (e: unknown, pid: number) => [string, string]; restartsRows: (r: unknown) => Array<[string, string]>;
     diskRows: (d: unknown) => Array<[string, string]>; sessionsRows: (s: unknown) => Array<[string, string]> };
   for (const f of ["masonRow", "restartsRows", "diskRows", "sessionsRows"] as const) assert.equal(typeof cli[f], "function", `src/cli/commands.ts exports ${f}`);
@@ -1752,7 +1752,7 @@ test("the components: a state is a dot AND its word, a card its label, value and
   assert.equal(details("k", "More", "", true, "memory"), `<details class="memory" data-open="k" open><summary>More</summary></details>`);
 });
 
-test("the shell: the top bar's project and a demo badge, the tab nav's current page, the Status page's header", async () => {
+test("the shell: the top bar's project and a demo badge, the tab nav's current page, the Overview's header", async () => {
   const run = fakeRun();
   run.answers.set("GET /api/state", answer(stateOf([], { demo: true })));
   const app = fn<[unknown], App>("createApp")(run.fetch);
