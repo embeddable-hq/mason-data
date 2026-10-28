@@ -1,19 +1,14 @@
 /**
- * THE TABLES PAGE (#tables): each added table's copy — its sync's state, rows, last sync and its age, how long it took,
- * its error, the copy's own size — with Sync (POST /api/sync, `mason sync`); and the database's tables, as `mason
- * tables` lists them, with what `mason add` and `mason remove` do to them — Add, Columns… and Name its key…
- * (POST /api/pick), Remove (POST /api/remove). A search box filters both by name. Reads `/api/state` every poll and
- * `/api/usage`'s `copySizes` every minute (they are measured every 10 min).
- */
-/**
  * THE TABLES PAGE (#tables): the database's tables in ONE table, as `mason tables` lists them. An added table shows its
  * copy's sync — state, rows, last sync and its age, how long it took, the copy's own size, and in replication mode its
  * stream state — and its error, with Sync (POST /api/sync, `mason sync`) and Remove (POST /api/remove, `mason remove`);
  * one not added shows its rows and key and why it cannot be added as it is, with Add, Columns… and Name its key…
- * (POST /api/pick, `mason add`). A search box filters by name, and All / Added / Not added by state. Reads `/api/state`
- * every poll and `/api/usage`'s `copySizes` every minute (they are measured every 10 min).
+ * (POST /api/pick, `mason add`). A search box filters by name, and All / Added / Failed / Not added by state
+ * (`#tables?show=failed`, where the Overview's card leads). With hundreds of tables the page writes the first
+ * TABLE_ROWS that pass and "Show N more" / "Show all" (the search is over all of them, at once); a long name is cut with
+ * an ellipsis, its whole the title. Reads `/api/state` every poll and `/api/usage`'s `copySizes` every minute.
  */
-import { button, card, cards, code, createOpenSet, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText } from "../shared.js";
+import { button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText } from "../shared.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
 export const SIZES_PATH = "/api/usage?since=1m";
@@ -46,7 +41,13 @@ export function renderSynced(b, table, s) {
 }
 
 /** The filter beside the search box: which of the database's tables are listed. */
-export const SHOWS = { all: "All", added: "Added", "not-added": "Not added" };
+export const SHOWS = { all: "All", added: "Added", failed: "Failed", "not-added": "Not added" };
+
+/** How many of the tables that pass the filters the page writes at once; "Show N more" writes as many again. */
+export const TABLE_ROWS = 100;
+
+/** Whether an added table's copy or sync failed (the Failed filter, the Overview's failed card). */
+const failedTable = (t) => t.added && (t.sync?.state === "failed" || Boolean(t.error));
 
 /** How long a sync took, as the commands say it (`spanText`) but for one under a tenth of a second, which is not worth a digit: `<0.1 s (poll)`. */
 export const tookText = (y) => `${y.syncSeconds < 0.1 ? "<0.1 s" : spanText(y.syncSeconds)} (${y.syncedBy})`;
@@ -141,7 +142,7 @@ export function renderTablesCards(s) {
  * search box's text and `ui.show` the state filter (a key of SHOWS).
  */
 export function renderTables(s, ui = {}) {
-  const { removing = null, choosing = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], synced = null, open = () => false } = ui;
+  const { removing = null, choosing = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], synced = null, open = () => false, limit = TABLE_ROWS } = ui;
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
   const stream = s.stream ? new Map(streamRows(s.stream, ui.now ?? Date.now()).tables) : null;
   const head = [["Table", ""], ["State", ""], ["Rows", "num"], ["Key", ""], ["Last sync", "num"], ["Took", "num"], ["Size of the copy", "num"], ...(stream ? [["Stream", ""]] : []), ["Note", ""], ["", ""]];
@@ -170,7 +171,7 @@ export function renderTables(s, ui = {}) {
       : `<span class="dim">${esc(f.state ?? "")}</span>`;
     const said = (outcome?.table !== t.table ? "" : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added) : renderTablesRemoved(outcome.removed))) +
       (synced?.table !== t.table ? "" : under("failure" in synced ? renderFailure(synced.failure) : renderSynced(synced.synced, t.table, s)));
-    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}"><th scope="row">${code(t.table)}</th>` +
+    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td>${state}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +
       `${cell(t.added && y?.syncSeconds != null ? tookText(y) : "", "num")}${cell(t.added && sizeOf.has(t.table) ? fileSize(sizeOf.get(t.table)) : "", "num")}` +
       `${stream ? cell(t.added ? stream.get(t.table) ?? "" : "", "stream") : ""}<td class="what">${note}</td><td class="act">${act}</td></tr>` +
@@ -180,14 +181,16 @@ export function renderTables(s, ui = {}) {
   // a refusal for a table the list does not have (dropped since the run read the catalog): said above the list
   const stray = outcome !== null && "failure" in outcome && !s.tables.some((t) => t.table === outcome.table) ? renderFailure(outcome.failure) : "";
   // the search box's text and the state filter: the tables that pass both (the one a form or a confirm is open on stays, whatever they say)
-  const passes = (t) => (show === "added" ? t.added : show === "not-added" ? !t.added : true) && nameMatches(t.table, filter);
+  const passes = (t) => (show === "added" ? t.added : show === "failed" ? failedTable(t) : show === "not-added" ? !t.added : true) && nameMatches(t.table, filter);
   const shown = s.tables.filter((t) => passes(t) || t.table === choosing || t.table === removing);
+  // at most `limit` rows written (the one a form or a confirm is open on always): a database of 800 tables costs 100 rows
+  const written = shown.filter((t, i) => i < limit || t.table === choosing || t.table === removing);
   const matching = filter.trim() ? `<p class="count dim">${n(shown.length)} with “${esc(filter.trim())}” in the name</p>` : "";
   const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The copies' own sizes: could not read them (${esc(firstLine(sizes.failure.message))}; ${code("mason usage")} has them)</p>` : "";
   return stray + (added ? "" : empty("No table added yet", `Add one from the list, as ${code("mason add <table>")} does.`)) + matching +
     panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +
-      `<tbody>${shown.map(line).join("")}</tbody></table>`) +
-    (!shown.length ? `<p class="dim">No ${show === "added" ? "added " : show === "not-added" ? "table that is not added, " : ""}table's name has “${esc(filter.trim())}”.</p>` : "") + sizesFailed +
+      `<tbody>${written.map(line).join("")}</tbody></table>`) + moreRows("tables", Math.min(limit, shown.length), shown.length, TABLE_ROWS) +
+    (!shown.length ? `<p class="dim">No ${show === "added" ? "added " : show === "failed" ? "failed " : show === "not-added" ? "table that is not added, " : ""}table${filter.trim() ? `'s name has “${esc(filter.trim())}”` : ""}.</p>` : "") + sizesFailed +
     (added ? `<p class="dim">A copy's own size is measured every 10 minutes (${code("mason usage")}).</p>` : "");
 }
 
@@ -195,7 +198,7 @@ export const page = {
   id: "tables",
   title: "Tables",
   create(ctx) {
-    const m = { removing: null, choosing: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], synced: null };
+    const m = { removing: null, choosing: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], synced: null, limit: TABLE_ROWS };
     const state = () => ctx.read("/api/state")?.body ?? null;
     // the details open (a copy's whole error), by key: a poll rewrites the part, and they stay open
     const opened = createOpenSet();
@@ -247,9 +250,12 @@ export const page = {
       },
       dismissSynced() { m.synced = null; },
       /** The search box's text: kept here, so every poll writes the lists filtered by it. */
-      filterTables(text) { m.filter = text; },
+      filterTables(text) { m.filter = text; m.limit = TABLE_ROWS; },
       /** The state filter beside it (a key of SHOWS; anything else is All). */
-      showTables(which) { m.show = which in SHOWS ? which : "all"; },
+      showTables(which) { m.show = Object.hasOwn(SHOWS, which) ? which : "all"; m.limit = TABLE_ROWS; },
+      /** Write TABLE_ROWS more of the tables that pass, or all of them. */
+      showMoreTables() { m.limit += TABLE_ROWS; },
+      showAllTables() { m.limit = Infinity; },
     };
     return {
       model: m,
@@ -272,7 +278,7 @@ export const page = {
         return {
           "tables-cards": latest ? renderTablesCards(latest) : "",
           tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, outcome: m.outcome, ticked: m.ticked, now: ctx.now().getTime(),
-            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, synced: m.synced, open: opened.has,
+            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, synced: m.synced, open: opened.has, limit: m.limit,
             sizes: sizes === undefined ? undefined : sizes.failure ? { failure: sizes.failure } : sizes.body }) : "",
         };
       },
@@ -283,7 +289,16 @@ export const page = {
         const ticked = new FormData(form);
         return actions.addTable(form.dataset.pickForm, ticked.getAll("columns"), ticked.getAll("key"));
       },
+      /** `#tables?show=failed`: the state filter as the hash says (the select beside the search box shows it too). */
+      route(params, { doc } = {}) {
+        if (params.show === undefined) return;
+        actions.showTables(params.show);
+        const select = doc?.getElementById?.("tables-show");
+        if (select) select.value = m.show;
+      },
       click(d) {
+        if (d.showMore === "tables") return actions.showMoreTables() ?? true;
+        if (d.showAll === "tables") return actions.showAllTables() ?? true;
         if (d.addTable !== undefined) return actions.addTable(d.addTable);
         if (d.choose !== undefined) return actions.choose(d.choose) ?? true;
         if (d.cancelChoose !== undefined) return actions.cancelChoose() ?? true;

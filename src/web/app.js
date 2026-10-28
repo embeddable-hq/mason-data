@@ -1,7 +1,8 @@
 /**
  * THE WEB PAGE OF `mason start` (`mason ui`; docs/WEB-UI.md, and .claude/rules/web-ui.md for whoever builds it out):
- * the SHELL — a nav and one section per page, the one shown chosen by the URL's hash (`#status`, the default; an
- * unknown hash is Status) — over the pages, each an ES module of src/web/pages/ rendered from the run's command
+ * the SHELL — a nav of four tabs (Overview · Tables · Users · Observability, the last with three sub-tabs: Queries ·
+ * Usage · Logs) and one section per page, the one shown chosen by the URL's hash (`#overview`, the default; an unknown
+ * hash is the Overview; `#observability/queries?range=24h`, the shared time range of the three) — over the pages, each an ES module of src/web/pages/ rendered from the run's command
  * server's JSON (src/cli/run-server.ts) in the words the commands print.
  *
  * Plain JavaScript, ES modules, no framework and no build step: the server serves each file as it is (PAGE_ROUTES),
@@ -12,9 +13,11 @@
  *
  * THE PAGE MODULE CONTRACT (src/web/pages/<id>.js), so a page is built without touching the others:
  *
- *   export const page = { id, title, create(ctx) }
- *     id      its hash (#id), its section (<section id="page-<id>"> in index.html) and its route (/pages/<id>.js)
- *     title   its link in the nav
+ *   export const page = { id, title, hash?, parent?, create(ctx) }
+ *     id      its section (<section id="page-<id>"> in index.html) and its route (/pages/<id>.js); its hash too, unless
+ *     hash    says another (`overview`, `observability/queries`): the address it is shown at
+ *     title   its link in the nav (a tab; a sub-tab under its `parent`'s tab, `observability`, whose pages share the
+ *             time range: ctx.range())
  *     create(ctx) → {
  *       reads()        [{ path, everyMs }]: what it reads WHILE SHOWN, each at its own rate (everyMs ≤ POLL_MS: every
  *                      poll); a path is the store's key, so a path built from the page's own state (a filter, a page
@@ -33,15 +36,18 @@
  *                      `createOpenSet()` in the page's state, whose `toggle` this is
  *       charts?()      { <holder key>: spec }: the charts drawn in its holders after each write (src/web/charts.js; a
  *                      progressive addition: every number a chart draws is also text)
+ *       route?(params, { doc })  the hash showed it with these parameters (`#tables?show=failed`: { show: "failed" }):
+ *                      it takes the ones it knows into its state (and a control outside its parts, through `doc`)
  *       model?         its state, for the tests
  *     }
  *     ctx = { ask(path, init) → { body } | { failure }, read(path) → { body, failure } | undefined (body: the last
- *             one read; failure: this read's, else null), refresh(paths) → Promise (read them now), now() → Date }
+ *             one read; failure: this read's, else null), refresh(paths) → Promise (read them now), now() → Date,
+ *             range() → a key of RANGES: the time range the Observability pages share (from the hash) }
  *
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, createAsk, renderFailure, updatedText } from "./shared.js";
+import { esc, badge, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -58,21 +64,77 @@ export { tableFacts, addedLines, removedReport, pickBody, renderTableAdded, rend
 export { renderUsers, renderAdded } from "./pages/users.js";
 export { renderRunning, renderRequests, renderSessions } from "./pages/queries.js";
 
-/** The pages, in the nav's order. */
-export const PAGES = [statusPage, tablesPage, queriesPage, usersPage, usagePage, logsPage];
+/** The pages, in the nav's order: a page with a `parent` is a sub-tab of its parent's tab. */
+export const PAGES = [statusPage, tablesPage, usersPage, queriesPage, usagePage, logsPage];
 
 /** How often the shown page is asked while the tab is seen: its fastest reads every poll, the slower ones when due. */
 export const POLL_MS = 2000;
 
-/** The page a hash shows: `#tables` → tables; none or one unknown → status. */
-export const routeOf = (hash) => {
-  const id = String(hash ?? "").replace(/^#/, "");
-  return PAGES.some((p) => p.id === id) ? id : "status";
-};
+/** The tabs a parent stands for: its title, and the first of its pages is where its tab goes. */
+export const GROUPS = { observability: { title: "Observability" } };
 
-/** The nav: a link per page, the one shown marked as the current page. */
-export const renderNav = (shown) => `<ul>${PAGES.map((p) =>
-  `<li><a href="#${p.id}"${p.id === shown ? ` aria-current="page"` : ""}>${esc(p.title)}</a></li>`).join("")}</ul>`;
+/** The hashes of before the Observability tab, and the tab's own: each lands on the view it was (`#status` the Overview). */
+const ALIASES = { status: "status", queries: "queries", usage: "usage", logs: "logs", observability: "queries" };
+
+const hashOfPage = (p) => p.hash ?? p.id;
+
+/**
+ * WHAT A HASH SHOWS: the page (`#tables`, `#observability/usage`, an old one — `#status`, `#queries` — the view it was;
+ * none, or one it does not know, the Overview) and the parameters after its `?` (`range=7d`, `show=failed`).
+ */
+export function parseHash(hash) {
+  const raw = String(hash ?? "").replace(/^#/, "");
+  const at = raw.indexOf("?");
+  const where = at < 0 ? raw : raw.slice(0, at);
+  const params = Object.fromEntries(new URLSearchParams(at < 0 ? "" : raw.slice(at + 1)));
+  const page = PAGES.find((p) => hashOfPage(p) === where)?.id ?? ALIASES[where] ?? "status";
+  return { id: page, params };
+}
+
+/** The page a hash shows: `#tables` → tables; `#observability/logs` → logs; none or one unknown → status (the Overview). */
+export const routeOf = (hash) => parseHash(hash).id;
+
+/** A page's address with its parameters (`hashOf("queries", { range: "7d" })` → `#observability/queries?range=7d`); the
+ *  default range is left out, so the plain address is the 24 hours. */
+export function hashOf(id, params = {}) {
+  const p = PAGES.find((x) => x.id === id) ?? PAGES[0];
+  const q = new URLSearchParams(Object.entries(params).filter(([k, v]) => v !== undefined && v !== "" && !(k === "range" && v === DEFAULT_RANGE)));
+  const qs = q.toString();
+  return `#${hashOfPage(p)}${qs ? `?${qs}` : ""}`;
+}
+
+/** The tabs, in order: a page of its own, or a group standing for its pages (`pages`), at the place of its first. */
+export function tabs() {
+  const list = [];
+  for (const p of PAGES) {
+    if (!p.parent) { list.push({ id: p.id, title: p.title, pages: [p.id] }); continue; }
+    const tab = list.find((t) => t.id === p.parent);
+    if (tab) tab.pages.push(p.id); else list.push({ id: p.parent, title: GROUPS[p.parent]?.title ?? p.parent, pages: [p.id] });
+  }
+  return list;
+}
+
+/** The nav: a link per tab, the one holding the page shown marked as the current page; a group's link keeps the range. */
+export const renderNav = (shown, range = DEFAULT_RANGE) => `<ul>${tabs().map((t) => {
+  const to = t.id !== t.pages[0] ? hashOf(t.pages[0], { range }) : hashOf(t.id);
+  return `<li><a href="${esc(to)}"${t.pages.includes(shown) ? ` aria-current="page"` : ""}>${esc(t.title)}</a></li>`;
+}).join("")}</ul>`;
+
+/**
+ * THE SUB-NAV of a group's page (the Observability tab's): its pages as a secondary underline nav, then the time range
+ * they share as a segmented control — each a link to the same view at that range, so the hash is the state and Back
+ * goes to the range before. "" for a page of its own.
+ */
+export function renderSubnav(shown, range = DEFAULT_RANGE) {
+  const p = PAGES.find((x) => x.id === shown);
+  if (!p?.parent) return "";
+  const siblings = PAGES.filter((x) => x.parent === p.parent);
+  const r = rangeOf(range);
+  return `<nav class="subtabs" aria-label="${esc(GROUPS[p.parent]?.title ?? p.parent)}"><ul>${siblings.map((x) =>
+    `<li><a href="${esc(hashOf(x.id, { range: r }))}"${x.id === shown ? ` aria-current="page"` : ""}>${esc(x.title)}</a></li>`).join("")}</ul></nav>` +
+    `<div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) =>
+      `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}>${esc(v.label)}</a>`).join("")}</div>`;
+}
 
 /** The heading's line: the database the run copies, and its sources file's name when that is another. */
 export function renderWhere(s) {
@@ -88,7 +150,8 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
   const ask = createAsk(fetchFn);
   // what was read, by path: the last body, this read's failure (null when it answered), when it was asked
   const store = new Map();
-  const m = { shown: routeOf(shown), pollFailure: null, updatedAt: null };
+  const first = parseHash(shown);
+  const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null };
   const put = (path, at, r) => {
     const was = store.get(path);
     store.set(path, { at, body: "body" in r ? r.body : was?.body, failure: "failure" in r ? r.failure : null });
@@ -102,12 +165,19 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     paths.forEach((p, i) => put(p, at, rs[i]));
     afterRead();
   };
-  const ctx = { ask, now, refresh, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure }; } };
+  const ctx = { ask, now, refresh, range: () => m.range, read: (path) => { const e = store.get(path); return e === undefined ? undefined : { body: e.body, failure: e.failure }; } };
   for (const p of PAGES) pages.set(p.id, p.create(ctx));
   const app = {
     model: m,
     pages,
-    show(id) { m.shown = routeOf(id); },
+    /** Show what a hash (or a page's id) says: the page, the range when it is a group's page, and its parameters
+     *  handed to the page (`route`); `env.doc` the document, for a control outside the parts. */
+    show(hash, env = {}) {
+      const r = parseHash(hash);
+      m.shown = r.id;
+      if (PAGES.find((p) => p.id === r.id)?.parent) m.range = rangeOf(r.params.range);
+      pages.get(r.id).route?.(r.params, env);
+    },
     /** Read the shown page's reads that are due: those at the poll's rate every time, the slower ones once their time is up. */
     async poll() {
       const page = pages.get(m.shown);
@@ -123,7 +193,8 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     view() {
       const st = store.get("/api/state")?.body;
       return {
-        nav: renderNav(m.shown),
+        nav: renderNav(m.shown, m.range),
+        subnav: renderSubnav(m.shown, m.range),
         where: st ? renderWhere(st) : "",
         // the demo database is said beside its name, so a person never takes it for their own
         badge: st?.source?.demo ? badge("demo", "accent") : "",
@@ -151,8 +222,8 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
 /** Wire the app to the page: each part written from `view()`, the shown section from the hash, the buttons, forms and
  *  inputs to the shown page, and the poll while the tab is seen. */
 export function start(doc, win) {
-  const route = () => routeOf(win.location.hash);
-  const app = createApp((path, init) => win.fetch(path, init), () => new Date(), route());
+  const app = createApp((path, init) => win.fetch(path, init), () => new Date(), "status");
+  app.show(win.location.hash, { doc });
   // what each part was last written, compared as written: the browser's innerHTML serialises attributes its own way
   // (data-x becomes data-x=""), and a part rewritten at every poll replaces the button under a click
   const written = new Map();
@@ -210,7 +281,7 @@ export function start(doc, win) {
   }, true);
   doc.addEventListener("pointerdown", () => { pressed = true; });
   for (const type of ["pointerup", "pointercancel"]) doc.addEventListener(type, () => { pressed = false; win.setTimeout(paint, 0); });
-  win.addEventListener?.("hashchange", () => { app.show(route()); paint(); void poll(); });
+  win.addEventListener?.("hashchange", () => { app.show(win.location.hash, { doc }); paint(); void poll(); });
   if (charts !== null) {
     win.addEventListener?.("resize", () => charts.resize());
     win.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", () => charts.retheme());

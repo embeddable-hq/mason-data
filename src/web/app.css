@@ -125,7 +125,13 @@ button.primary:hover { opacity: 0.88; background: var(--fg); }
 button.danger { color: var(--bad); }
 button.danger:hover { background: var(--bad-soft); border-color: var(--bad); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-button.small { height: 26px; padding: 0 var(--space-2); font-size: var(--text-xs); }
+button.small { height: 28px; padding: 0 var(--space-3); font-size: var(--text-xs); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary:disabled, button:disabled:hover { opacity: 0.5; background: var(--surface); }
+button.primary:disabled { background: var(--fg); }
+/* the confirm of a destructive action (Remove orders, Cancel statement 3): filled red, the one button that does it */
+.confirm ~ button.danger { background: var(--bad); color: var(--surface); border-color: var(--bad); }
+.confirm ~ button.danger:hover { opacity: 0.88; background: var(--bad); }
 
 /* ---------------------------------------------------------------- form controls */
 form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-3) 0; }
@@ -146,6 +152,14 @@ label.tick { display: inline-flex; align-items: baseline; gap: var(--space-1); m
 
 /* ---------------------------------------------------------------- KPI cards */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--space-3); margin: 0 0 var(--space-5); }
+/* by count, so no card is left alone on a row: one row on a wide screen; on a narrower one six as two rows of three,
+   five as three over two (a six-column grid, the last two spanning half each), four as two by two */
+@media (min-width: 1100px) { .cards.n4 { grid-template-columns: repeat(4, 1fr); } .cards.n5 { grid-template-columns: repeat(5, 1fr); } .cards.n6 { grid-template-columns: repeat(6, 1fr); } }
+@media (min-width: 641px) and (max-width: 1099px) {
+  .cards.n4 { grid-template-columns: repeat(4, 1fr); }
+  .cards.n6 { grid-template-columns: repeat(3, 1fr); }
+  .cards.n5 { grid-template-columns: repeat(6, 1fr); } .cards.n5 > * { grid-column: span 2; } .cards.n5 > :nth-child(n+4) { grid-column: span 3; }
+}
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: var(--space-4); min-width: 0;
   display: flex; flex-direction: column; gap: var(--space-1); }
 .card-label { margin: 0; font-size: var(--text-sm); color: var(--muted); }
@@ -275,7 +289,7 @@ details.memory, details#logs-raw { margin: var(--space-4) 0; }
 #page-tables td.stream { color: var(--muted); }
 .err { color: var(--bad); overflow-wrap: anywhere; }
 #page-tables td.act .confirm, #page-users td.act .confirm { display: inline-block; text-align: left; max-width: 28em; margin-right: var(--space-2); color: var(--muted); }
-#page-tables td.act { white-space: normal; } #page-tables td.act > * { vertical-align: middle; }
+#page-tables td.act { white-space: nowrap; } #page-tables td.act > * { vertical-align: middle; }
 #page-tables .done button { margin-top: var(--space-1); }
 tr.removed > * { color: var(--muted); }
 form.formcard { margin: 0 0 var(--space-4); padding: var(--space-3) var(--space-4); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
@@ -333,3 +347,66 @@ details.hours > summary { margin-bottom: var(--space-2); }
 
 /* A chart's live legend reads the hovered hour: hidden at rest, where it would only say "-" (its space kept, so nothing moves). */
 .uplot:not(:hover) .u-legend { visibility: hidden; }
+
+/* ---------------------------------------------------------------- the Observability sub-nav and its time range */
+.subnav:empty { display: none; }
+.subnav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); margin: 0 0 var(--space-5);
+  border-bottom: 1px solid var(--line); }
+.subtabs ul { list-style: none; display: flex; gap: var(--space-4); margin: 0; padding: 0; overflow-x: auto; scrollbar-width: none; }
+.subtabs a { display: block; padding: var(--space-2) 0 calc(var(--space-2) - 1px); color: var(--muted); font-size: var(--text-sm); font-weight: 500;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; text-decoration: none; }
+.subtabs a:hover { color: var(--fg); text-decoration: none; }
+.subtabs a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--fg); }
+.range { display: inline-flex; padding: 2px; margin: 0 0 var(--space-2); background: var(--sunken); border: 1px solid var(--line); border-radius: var(--radius); }
+.range a { display: inline-flex; align-items: center; min-height: 28px; padding: 0 var(--space-3); border-radius: var(--radius-sm); color: var(--muted);
+  font-size: var(--text-sm); font-weight: 500; white-space: nowrap; text-decoration: none; }
+.range a:hover { color: var(--fg); text-decoration: none; }
+.range a[aria-current="true"] { background: var(--surface); color: var(--fg); box-shadow: 0 0 0 1px var(--line); }
+
+/* ---------------------------------------------------------------- a card that links into the view that lists it */
+a.card { color: inherit; text-decoration: none; transition: border-color 0.12s; }
+a.card:hover { border-color: var(--line-strong); text-decoration: none; background: var(--surface); }
+a.card .card-label { display: flex; justify-content: space-between; gap: var(--space-2); }
+a.card .card-label::after { content: "→" / ""; color: var(--subtle); transition: transform 0.12s, color 0.12s; }
+a.card:hover .card-label::after { color: var(--fg); transform: translateX(2px); }
+caption a.see { font-weight: 400; font-size: var(--text-sm); margin-left: var(--space-2); }
+
+/* ---------------------------------------------------------------- sortable headers, long values, large lists */
+th[aria-sort] { padding-top: 3px; padding-bottom: 3px; }
+button.sort { all: unset; display: inline-flex; align-items: center; gap: 4px; min-height: 28px; cursor: pointer; color: inherit; font: inherit; white-space: nowrap; }
+button.sort:hover, button.sort.on { color: var(--fg); }
+button.sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+button.sort .arrow { font-size: 10px; color: var(--subtle); }
+button.sort.on .arrow { color: var(--fg); }
+th.num button.sort { flex-direction: row-reverse; }
+code.name { display: inline-block; max-width: 36ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.clip { display: inline-block; max-width: 28em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* a statement in its cell: one or two lines, never the whole of it (its expanded row has it, capped) */
+code.stmt, #page-queries table.requests code.stmt, #page-queries table.running code.stmt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  line-clamp: 2; white-space: normal; overflow: hidden; overflow-wrap: anywhere; max-width: 40em; }
+#page-queries table.running code.stmt { max-width: 24em; }
+.more { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); margin: calc(-1 * var(--space-2)) 0 var(--space-4); }
+.more p { margin: 0 auto 0 0; }
+.sort-note, .cut { margin: var(--space-2) 0; font-size: var(--text-sm); }
+table.sessions tr.others td { color: var(--muted); font-style: italic; }
+.toolbar .fields { display: contents; }
+.toolbar .field.grow input { min-width: 14em; }
+.toolbar select { min-width: 10em; max-width: 22em; }
+.chart-card .card-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-card.note { display: block; }
+.chart-card.note p.dim { margin: var(--space-4) 0; }
+@media (max-width: 640px) {
+  /* an odd card last spans the row: no orphan beside an empty cell */
+  .cards > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .subnav { flex-direction: column; align-items: stretch; }
+  .range { align-self: flex-start; }
+  .toolbar .field, .toolbar .field.grow { flex: 1 1 100%; }
+  /* a field's control is its width, never its height (the phone's input { flex } is a row's, and a field is a column) */
+  .toolbar .field input, .toolbar .field select { flex: none; width: 100%; min-width: 0; max-width: none; }
+  .toolbar .actions { margin-left: 0; }
+  code.name { max-width: 22ch; }
+}
+form#request-filters input[type="checkbox"] { min-width: 0; }
+.toolbar label.check { min-height: 32px; }
+#page-queries table.requests .clip { max-width: 12em; }
+#page-queries tr.detail pre { max-height: 320px; overflow: auto; }

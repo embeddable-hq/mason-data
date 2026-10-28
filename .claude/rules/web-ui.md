@@ -9,13 +9,23 @@ paths:
 # The web page (`src/web/`, `mason ui`, docs/WEB-UI.md)
 
 `mason start`'s run serves one web page, with six pages in it, from its command server (src/cli/run-server.ts): a SHELL (`src/web/app.js`: a nav
-and one section per page, the one shown chosen by the URL's hash, `#status` the default) over a module per page
-(`src/web/pages/<id>.js`): STATUS (what `mason status` says), TABLES (what `mason tables`, `mason add` and `mason
-remove` do), USERS (what `mason user` does), QUERIES, USAGE and LOGS (docs/OBSERVABILITY.md "Pages" is their spec).
-All six pages are built on it, under these rules.
+of four tabs and one section per page, the one shown chosen by the URL's hash, `#overview` the default) over a module
+per page (`src/web/pages/<id>.js`): the OVERVIEW (`status.js`: what `mason status` says), TABLES (what `mason tables`,
+`mason add` and `mason remove` do), USERS (what `mason user` does), and OBSERVABILITY's three views, QUERIES, USAGE and
+LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on it, under these rules.
+
+- **The hash is the state of the navigation, and an old one never breaks**: a page's `hash` (`overview`,
+  `observability/queries`; its id when it says none) and its `?` parameters (`range`, `show`, `slow`, `status`,
+  `failures`) are read by ONE function (`parseHash`), written by one (`hashOf`), and a page takes the parameters it knows
+  in its `route(params, { doc })`. The hashes of before (`#status`, `#queries`, `#usage`, `#logs`, `#observability`) are
+  `ALIASES` of the view they were: a bookmark lands where it did (`tests/web-page.test.ts` holds each).
+- **A page with a `parent` is a sub-tab** (`observability`, `GROUPS`): its tab is the parent's, and its views share
+  `ctx.range()` — `RANGES` in src/web/shared.js (Last hour · 24 hours · 7 days, 24 hours by default), each its `since`
+  for every endpoint and its usage step — kept in the hash (`?range=`), never in storage. A view builds its paths from
+  it, so a change of range is a new read of the view shown alone.
 
 - **A page is a module of its own, registered in three places** (the contract is at the top of src/web/app.js): its
-  `page = { id, title, create(ctx) }` in `PAGES`, its route `/pages/<id>.js` in `PAGE_ROUTES`, its
+  `page = { id, title, hash?, parent?, create(ctx) }` in `PAGES`, its route `/pages/<id>.js` in `PAGE_ROUTES`, its
   `<section id="page-<id>">` in index.html; what every page uses lives in `src/web/shared.js`. So pages are built in
   parallel without touching each other, and the tests hold the three equal (a module that is no route would not load).
 
@@ -37,7 +47,7 @@ All six pages are built on it, under these rules.
 - **A page shows what a person reads, and puts the rest behind a closed `<details>`**: a debugging aid (the run's raw
   log, with internal tags and absolute paths; the process's memory; a request's whole id, bytes and statement) is a
   details, and what only a details shows is read only while it is open (the raw log: `toggle`, the page's own state).
-  A fact is in ONE place: the Status has one table of facts, the Tables page one list of tables. **A fact the run could
+  A fact is in ONE place: the Overview has one table of facts, the Tables page one list of tables. **A fact the run could
   not read is `unknown` with its reason, never 0, and one it does not say is not shown** (`{ error }` fields of
   `/api/state`: `stream.slotWal`, `engine.restarts`, `disk`, `sessions`).
 - **Tables are added and removed through the commands' own endpoints** (the Tables page): the list is
@@ -108,11 +118,29 @@ All six pages are built on it, under these rules.
 - **A `<details>` a poll rewrites stays open**: whether it is open is the page's state (`createOpenSet`), keyed by a
   stable id (a request's id, a table's name), written into the HTML by `details(key, …)` — never the element's own,
   which a rewrite replaces. (The raw log's details is the Logs page's own state, as before.)
-- **A fact is in ONE place on Status**: the cards carry the copies in all, their rows, the last sync and the copy's file,
+- **A fact is in ONE place on the Overview**: the cards carry the copies in all, their rows, the last sync and the copy's file,
   and the facts table no longer does; the last day's statements and p95 cards are the request log's summary at a
   glance, its table the day and the week in full.
 - **Numbers are mono and right-aligned in a column; a table scrolls inside its card on a phone, never the page**: the
   reader compares down a column, and a page that scrolls sideways hides the nav.
+- **Newest first wherever a list is time** (the request log, the sync's events, the raw log, Usage's samples); a chart
+  alone reads oldest to newest, left to right. **A column sorts when sorting means something**, by a `sortTh` button
+  with `aria-sort`: server-side only where the server pages by that order — the request log's pages follow its cursor
+  (start, seq), so Started, Duration and Rows sort THE PAGE SHOWN and the page says so (a sort of the whole log would
+  need a cursor per order) — and in the page for a list read whole (the events, the samples).
+- **What the page writes is bounded, whatever the data**: a list of hundreds writes a page of rows and `moreRows`
+  (Tables 100, the events 100), a by-client list its top 10 and one row for the rest, a long name or value is cut by the
+  stylesheet with its whole the `title`, a title is at most `TITLE_MAX` characters (`clip`), a statement is one or two
+  lines in its cell and the first `STATEMENT_MAX` in its expanded row (`capped`, which says it was cut and where the
+  whole is). The tests render these with large fixtures (800 tables of 60-character names, 200 clients, a 64 KiB
+  statement, 10,000 requests paged, 500 events, a week of samples with a spike) and hold the caps.
+- **A chart's axes read at every range** (src/web/charts.js, pure helpers the tests hold): time ticks by the span
+  (`timeTick`: minutes and hours up to two days, then days), at least 72 px apart; y labels compact in the commands'
+  units (`compactCount`, `compactBytes` to TiB, `compactMs`) on whole-number or power-of-1024 steps (`axisIncrs`); the
+  read-out on hover is exact (the spec's `format`, as the table says it). The y axis starts at zero and is never cut: a
+  spike keeps its height, and the table under the chart has every value.
+- **No card alone on a row**: `cards()` writes its count (`cards n5`), and the stylesheet lays each count out (one row
+  wide; six as three by two, five as three over two; on a phone the odd last card spans the row).
 
 ## What the full UI adds
 
@@ -121,12 +149,12 @@ adds pages, not endpoints.
 
 | Feature | Endpoint (src/cli/run-server.ts) | Renders the shape of |
 |---|---|---|
-| The statements that ran | `GET /api/requests?limit=&failed=1` | `mason logs --requests --json` |
+| The statements that ran | `GET /api/requests?since=&outcome=&user=&client=&slow=1&search=&before=` | `mason logs --requests --json` |
 | The sync's failures and events | `GET /api/events?limit=&since=&failed=1` | `mason logs --events --json`; the latest failures, `mason status --json` `recentErrors` |
 | Usage over time, each copy's own size | `GET /api/usage?since=&until=&step=` | `mason usage --json` (`samples`, re-bucketed by `step`; `copySizes`) |
 | The run's log | `GET /api/logs?lines=&since=` | `mason logs --json` (`lines`: `{ at, text }`) |
 | Each table's sync, the copies in all | `GET /api/state` `tables[].sync`, `totals` | `mason status --json` |
-| The slow statements (not yet on a page: the Queries page's request log lists them) | `GET /api/slow` | `mason status --json` `slowQueries` |
+| The slow statements | `GET /api/requests?slow=1` (Queries' Slow filter; `GET /api/slow` groups them for `mason status`) | `mason logs --requests --slow --json`; `mason status --json` `slowQueries` |
 | The refused statements (the same) | `GET /api/refused` | `mason status --json` `refusedQueries`, `refusedTotal` |
 | The copy's progress | `GET /api/state` `tables[].copy.progress`, `readiness` | `mason wait --json` (`tableLine`, `copyingText` already render it) |
 | Sync on demand | `POST /api/sync` `{ tables }` | `mason sync --json` |

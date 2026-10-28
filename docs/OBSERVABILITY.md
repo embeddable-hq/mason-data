@@ -14,7 +14,7 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | `GET /api/state` | `mason status`, `mason tables`, `mason wait` | each copy's rows, state and last sync (`tables[].sync`), the totals, the readiness |
 | `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent |
 | `GET /api/slow`, `GET /api/refused` | `mason status` | the slow statements; the refused and failed ones, each distinct one once |
-| `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&before=` | `mason logs --requests` | the request log, filtered and paged |
+| `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&slow=&search=&before=` | `mason logs --requests` | the request log, filtered and paged; `slow=1` (`--slow`) the ones that took `SLOW_MS` (1 s) or more, `search` (`--search`) a piece of the statement's text, any case |
 | `GET /api/events?limit=&since=&failed=` | `mason logs --events`; `mason status` `recentErrors.sync` | the sync's failures and events, and the run's restarts |
 | `GET /api/running`, `POST /api/cancel { session }` | `mason logs --running`, `mason cancel <session>` | the statements running now; stop one as a client's cancel does |
 | `GET /api/usage?since=&until=&step=` | `mason usage` | a sample a minute, re-bucketed by `step`, and each copy's own size |
@@ -56,38 +56,47 @@ the same endpoints its own way.
 
 Built: the shell and every page (src/web/app.js, src/web/pages/).
 
-- **The shell**: `index.html` with a nav — Status · Tables · Queries · Users · Usage · Logs — and one section per page,
-  chosen by the URL's hash (`#status`, the default). Each page is an ES module of its own, a route of `PAGE_ROUTES`.
-  ONLY THE PAGE SHOWN polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.
-- **Status** (`#status`): one word, `mason status`'s (Ready / Under way / Failed: `readinessWord` of `readiness`, said
-  by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); ONE table of
-  facts — the database and how its changes arrive, the warnings, Mason's version, up for, restarts (`engine`), tables
-  synced N of M, rows, last sync, the copy's size, the free disk and what a running copy is projected to add (`disk`),
-  the sessions open (`sessions`); in replication mode a Changes table — the stream (`stream`: running or why not, position,
-  lag, last batch, as `streamLines` says it) and the slot's hold on the WAL (`stream.slotWal`: held, status, room left;
-  `lost`, `unreserved` or no cap are warnings); the statements of the last day and week (p50 / p95); the copies not
-  finished, a bar each, only while there are any; and a table of the recent errors (sync and statements). A fact the
-  run could not read (`{ error }`) is said as unknown with its reason, never as 0; one it does not say is not shown.
-  The slow and the refused statements are the Queries page's. Reads `/api/state` (2 s), `/api/queries`,
-  `/api/events?failed=1`, `/api/requests?failed=1` (30 s).
-- **Tables** (`#tables`): ONE table of the database's tables. An added one shows its state (Synced / Syncing / Failed /
-  Waiting), rows, last sync and its age, how long it took (`<0.1 s` under a tenth), the copy's own size, in replication
-  mode its stream state, its error, **Sync** (`POST /api/sync`) and Remove; one not added its rows and key and why it
-  cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names and All / Added / Not added.
-  Reads `/api/state` (2 s), `/api/usage` `copySizes` (60 s).
-- **Queries** (`#queries`): who is connected now (`sessions` of `/api/state`: user, client, sessions open, statements
-  running), the statements running now, each with **Cancel** (asks first; `POST /api/cancel`), and the request log as a
-  table — the first 8 characters of the id, started, duration, status, user, client, rows, the statement, its error's
-  first line — with a per-row details (the whole id, ended, bytes sent, the whole statement and error), filtered by
-  status, time, user and client, paged by **Older**. Rows scanned is not a column: decide later, it may add cost to
-  every statement. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, never on an older one),
-  `/api/state` (5 s).
+- **The shell**: `index.html` with a nav of four tabs — Overview · Tables · Users · Observability, the last with three
+  sub-tabs, Queries · Usage · Logs (modelled on Vercel's, Neon's and PlanetScale's) — and one section per page, chosen
+  by the URL's hash (`#overview`, the default; `#observability/queries`; the old `#status`, `#queries`, `#usage` and
+  `#logs` land on their view). Each page is an ES module of its own, a route of `PAGE_ROUTES`. ONLY THE PAGE SHOWN
+  polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.
+- **Observability's time range**: Last hour · 24 hours · 7 days (24 hours unless `?range=` says), shared by its three
+  views and kept in the hash: Queries' request log `since`, Usage's samples (`since`, and a step of 60 s, 1 h or 6 h),
+  Logs' events `since`. Each view's filters compose with it.
+- **Overview** (`#overview`): one word, `mason status`'s (Ready / Under way / Failed: `readinessWord` of `readiness`, said
+  by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); cards that each link
+  into the view that lists what they count (the failed tables, Queries — the slow ones from the p95 —, Usage); ONE table
+  of facts — the database and how its changes arrive, the warnings, Mason's version, up for, restarts (`engine`), the
+  free disk and what a running copy is projected to add (`disk`), the sessions open (`sessions`); in replication mode a
+  Changes table — the stream (`stream`: running or why not, position, lag, last batch, as `streamLines` says it) and the
+  slot's hold on the WAL (`stream.slotWal`: held, status, room left; `lost`, `unreserved` or no cap are warnings); the
+  statements of the last day and week (p50 / p95); the copies not finished, a bar each, only while there are any; and a
+  table of the recent errors (sync and statements), each with See all. A fact the run could not read (`{ error }`) is
+  said as unknown with its reason, never as 0; one it does not say is not shown. Reads `/api/state` (2 s),
+  `/api/queries`, `/api/events?failed=1`, `/api/requests?failed=1` (30 s).
+- **Tables** (`#tables`, `#tables?show=failed`): ONE table of the database's tables. An added one shows its state
+  (Synced / Syncing / Failed / Waiting), rows, last sync and its age, how long it took (`<0.1 s` under a tenth), the
+  copy's own size, in replication mode its stream state, its error, **Sync** (`POST /api/sync`) and Remove; one not added
+  its rows and key and why it cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names
+  and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
+  (2 s), `/api/usage` `copySizes` (60 s).
 - **Users** (`#users`): today's add form and Remove, and each user's status (Active / Removed), when it was added, its
   last use, and its URL without the password (**Copy**). Reads `/api/users?lastUsed=1` (on opening, then 30 s).
-- **Usage** (`#usage`): the last day's and week's statements (`/api/queries`), the last 24 h hour by hour
-  (`/api/usage?since=24h&step=3600`, the process's memory in a closed details), and each copy's own size (60 s).
-- **Logs** (`#logs`): the sync's events (`/api/events`, 10 s). The run's raw log (`/api/logs`, 5 s) is debugging output
-  with internal tags and paths: it is behind a closed details and read only while that is open.
+- **Observability › Queries** (`#observability/queries`): who is connected now (`sessions` of `/api/state`: the 10
+  clients with the most sessions, then one row for the others), the statements running now, each with **Cancel** (asks
+  first; `POST /api/cancel`), and the request log as a table, newest first — the first 8 characters of the id, started,
+  duration, status, user, client, rows, the statement (two lines at most), its error's first line — with a per-row
+  details (the whole id, ended, bytes sent, the statement and error, the first 16 KiB of each), filtered by status, slow
+  (1 s or more), the statement's text, time (the range unless Since says), user and client, paged by **Older**, its page
+  sorted by Started, Duration or Rows. Rows scanned is not a column: decide later, it may add cost to every statement.
+  Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, never on an older one), `/api/state` (5 s).
+- **Observability › Usage** (`#observability/usage`): the statements of the range's window of `/api/queries` (the week
+  for 7 days, else the day), the range's samples (`/api/usage?since=<range>&step=<60|3600|21600>`, newest first, the
+  process's memory in a closed details), four charts of them, and each copy's own size (60 s).
+- **Observability › Logs** (`#observability/logs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s),
+  newest first, narrowed by Failures only, a kind and a table. The run's raw log (`/api/logs`, 5 s) is debugging output
+  with internal tags and paths: it is behind a closed details, newest first, and read only while that is open.
 
 ## Who reads it
 
@@ -144,7 +153,7 @@ Key: ✅ built · ⏸ deferred
 | User | ✅ | `user`; and the client's `applicationName` |
 | Query ID | ✅ | `requestId` |
 | Rows scanned | ⏸ | **Decide later: may add cost to every query.** DuckDB reports it only with its profiler on per statement, whose cost is not measured. Measure (about half a day) before promising it. |
-| Filters: status, date, user | ✅ | `/api/requests`: outcome, `failed`, since / until, user, client, and paging (`before`) |
+| Filters: status, date, user | ✅ | `/api/requests`: outcome, `failed`, since / until, user, client, `slow`, `search`, and paging (`before`) |
 
 ## 4. Users
 
@@ -201,9 +210,9 @@ token, and TLS off loopback. Not designed yet.
 
 ## To come back to
 
-- **The slow statements have no page.** The Status clean-up dropped the "Slow queries: N in the last day" line and
-  pointed to the Queries page, which has no slow filter; `/api/slow` and `mason status` still say them. The way back:
-  a "Slow (1 s or more)" option in the Queries page's status filter, or a "slowest" sort of the request log (~30 min).
+- ✅ **The slow statements have a page**: Observability › Queries' **Slow (1 s or more)** filter — the request log's
+  `slow` (`--slow`, `slow=1`, src/cli/request-filter.ts `SLOW_MS`, the constant `mason status` lists them by) — and the
+  Overview's p95 card links to it; Duration sorts the page shown.
 - **The oracle's measurement fixture** (`tests/fixtures/oracle-duckdb-alone.json`) fails on `main` as on this branch
   against a local Postgres 18.3 (913 exact where it has 850): recorded elsewhere, to regenerate where CI runs.
 - **Access** for the managed service (above): not designed.

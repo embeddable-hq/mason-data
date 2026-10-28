@@ -21,12 +21,14 @@
     <p id="updated" class="updated" aria-live="polite"></p>
   </div>
   <!-- the pages: one section each, the one shown chosen by the URL's hash (src/web/app.js); the links work before the script runs -->
-  <nav id="nav" class="tabs" aria-label="Pages"><ul><li><a href="#status">Status</a></li><li><a href="#tables">Tables</a></li><li><a href="#queries">Queries</a></li><li><a href="#users">Users</a></li><li><a href="#usage">Usage</a></li><li><a href="#logs">Logs</a></li></ul></nav>
+  <nav id="nav" class="tabs" aria-label="Pages"><ul><li><a href="#overview">Overview</a></li><li><a href="#tables">Tables</a></li><li><a href="#users">Users</a></li><li><a href="#observability/queries">Observability</a></li></ul></nav>
 </header>
 <div id="poll"></div>
 <main>
+  <!-- Observability's sub-tabs and the time range its three views share (src/web/app.js renderSubnav): empty elsewhere -->
+  <div id="subnav" class="subnav"></div>
   <section id="page-status" aria-labelledby="status-h">
-    <div class="page-head"><h2 id="status-h">Status</h2><p class="desc">What <code>mason status</code> says: whether the copy is ready, the database, the sync and the statements.</p></div>
+    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">What <code>mason status</code> says: whether the copy is ready, the database, the sync and the statements.</p></div>
     <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
   <section id="page-tables" aria-labelledby="tables-h" hidden>
@@ -34,7 +36,7 @@
     <div id="tables-cards"></div>
     <div class="toolbar">
       <label for="tables-filter">Search the tables</label> <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders">
-      <label for="tables-show">Show</label> <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="not-added">Not added</option></select>
+      <label for="tables-show">Show</label> <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="failed">Failed</option><option value="not-added">Not added</option></select>
     </div>
     <div id="tables"></div>
   </section>
@@ -47,7 +49,7 @@
     <p class="lead">As <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.</p>
     <div id="running-now"></div>
     <h3>Request log</h3>
-    <p class="lead">The statements answered, refused or cancelled, as <code>mason logs --requests</code> lists them. Since is an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone.</p>
+    <p class="lead">The statements answered, refused or cancelled, as <code>mason logs --requests</code> lists them, newest first, over the time range above. Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone.</p>
     <form id="request-filters" class="toolbar" autocomplete="off">
       <div class="field"><label for="rq-status">Status</label>
         <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
@@ -57,6 +59,9 @@
         <input id="rq-user" name="user" spellcheck="false"></div>
       <div class="field"><label for="rq-client">Client</label>
         <input id="rq-client" name="client" spellcheck="false"></div>
+      <div class="field grow"><label for="rq-search">Statement has</label>
+        <input id="rq-search" name="search" type="search" maxlength="200" spellcheck="false" placeholder="orders"></div>
+      <label class="check" for="rq-slow"><input type="checkbox" id="rq-slow" name="slow"> Slow (1 s or more)</label>
       <div class="actions"><button type="submit" class="primary">Filter</button>
         <button type="button" data-clear-filters>Clear</button></div>
     </form>
@@ -74,19 +79,19 @@
     <div id="users"></div>
   </section>
   <section id="page-usage" aria-labelledby="usage-h" hidden>
-    <div class="page-head"><h2 id="usage-h">Usage</h2><p class="desc">What the Postgres API answered over the last 24 hours and each copy's size, as <code>mason usage</code> prints them.</p></div>
+    <div class="page-head"><h2 id="usage-h">Usage</h2><p class="desc">What the Postgres API answered over the time range and each copy's size, as <code>mason usage</code> prints them.</p></div>
     <div id="usage-kpis"></div>
     <div id="usage-charts"></div>
     <h3>The last day and the last week</h3>
     <div id="usage-queries"></div>
-    <h3>The last 24 hours, an hour a line</h3>
+    <h3>Over time</h3>
     <div id="usage-hourly"></div>
     <h3>Each copy's own size</h3>
     <div id="usage-sizes"></div>
   </section>
   <section id="page-logs" aria-labelledby="logs-h" hidden>
     <div class="page-head"><h2 id="logs-h">Logs</h2><p class="desc">The sync's events, as <code>mason logs --events</code> lists them, and the run's own log behind a details.</p></div>
-    <div class="toolbar"><label class="check" for="logs-failures-only"><input type="checkbox" id="logs-failures-only"> Failures only</label></div>
+    <div class="toolbar"><div id="logs-filters" class="fields"></div><label class="check" for="logs-failures-only"><input type="checkbox" id="logs-failures-only"> Failures only</label></div>
     <div id="logs-events"></div>
     <div id="logs-run"></div>
   </section>
