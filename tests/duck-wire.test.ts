@@ -1277,11 +1277,13 @@ test("the request log's bytes are the bytes the client read for the statement: a
       assert.ok(row !== undefined, `a row for ${sql}`);
       return { read: s.bytes - READY, row };
     };
-    for (const sql of ["SELECT count(*) FROM big", "SELECT v || repeat('z', 200) AS bytes_wide FROM big", "SELECT * FROM nope"]) {
+    for (const sql of ["SELECT count(*) FROM big", "SELECT * FROM nope"]) {
       const { read, row } = await asked(sql);
       assert.equal(row.bytesSent, read, sql);
     }
-    assert.ok((await asked("SELECT v || repeat('z', 200) AS bytes_wide FROM big")).read > 30_000_000, "the stream's 30 MB, counted whole");
+    const wide = await asked("SELECT v || repeat('z', 200) AS bytes_wide FROM big");
+    assert.equal(wide.row.bytesSent, wide.read);
+    assert.ok(wide.read > 30_000_000, "the stream's 30 MB, counted whole");
   } finally { s.end(); }
 });
 
