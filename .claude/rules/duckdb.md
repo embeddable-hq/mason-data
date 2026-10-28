@@ -395,8 +395,12 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   writes them in batches on a connection of its own, never the writer's turn, a failed write said once and never
   failing the sync; a failure repeated word for word within an hour is one event unless it was over between — a
   table's when it is current again (`recovered`) or copied anew (`copied`), the whole sync's (`table: null`) when the
-  sync says so (`recovered` of no table: the stream applied a batch, the publication and slot were made ready, the
-  database attached — `wholeFailure`); never a failure whose end nothing says.
+  sync says so (`recovered` of no table: the stream applied a batch WITH A POSITION, the publication and slot were made
+  ready, the database attached — `wholeFailure`); never a failure whose end nothing says. **A copy's replication error
+  is over only when the stream applies a batch with a position** (`applyChanges`: every table it keeps current is current
+  as of it), never at a pass's publication check (`settlePrepared`, which runs while the stream waits out its back-off)
+  nor at a piece of a large transaction; the check clears only what it owns — a named publication's gap once the table is
+  carried again, and its own failure on a table never copied.
   The supervisor's restarts stay in `.mason/restarts.json` (a process of its own cannot open the file) and are merged
   when read (`withRestarts`). `mason logs --events` and `mason status` (`recentErrors`) read them through the command
   server's `/api/events`.

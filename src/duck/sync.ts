@@ -757,6 +757,9 @@ export class Sync {
   private readonly streamed = new Map<string, StreamedTable>();
   /** a NAMED publication's gaps: each added table it does not carry, with the refusal (neither copied nor streamed) */
   private readonly unpublished = new Map<string, string>();
+  /** the error each table a named publication did not carry was given (`settlePrepared`): cleared by the pass that finds
+   *  it carried again, and by nothing else that pass */
+  private readonly gapErrors = new Map<string, string>();
   /** a named publication that does not publish TRUNCATE has been said (once a run) */
   private truncateSaid = false;
   /** the last pass failed: in replication mode it is tried again after the interval, the stream started by it */
@@ -1303,25 +1306,39 @@ export class Sync {
         });
       }
     } finally { pg.close(); }
-    // what the last stream's failure said is the past once the publication and slot are as they should be; a table a
-    // named publication does not carry is refused on its own line (a copy it never had is failed), the others go on
-    await this.onWriter(async () => {
-      for (const t of tables) {
-        const st = this.states.get(t.source)!;
-        const gap = this.unpublished.get(t.source);
-        if (gap !== undefined) {
-          const error = `replication: ${gap}`;
-          if (st.error !== error) { this.log(`${t.source} is not copied or streamed: ${error}`); this.event({ kind: "stream_failed", table: t.source, message: `not copied or streamed: ${error}` }); }
-          await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error });
-        } else if (st.error?.startsWith("replication: ")) await this.record({ ...st, error: null });
+    await this.onWriter(() => this.settlePrepared(tables));
+  }
+
+  /**
+   * WHAT A PASS'S PUBLICATION CHECK SETTLES, ON THE WRITER'S TURN (`prepareReplication`, once the publication and slot are
+   * as they should be): a table a named publication does not carry is refused on its own line (a copy it never had is
+   * failed), the others go on; a table it carries AGAIN has that gap's error cleared, and a table never copied the last
+   * pass's failure to prepare. NOTHING ELSE: a copy whose stream failed, or that the failed preparation left behind, is
+   * current again only once the stream applies a batch with a position (`applyChanges`) — the publication being right
+   * says nothing of whether its changes are in the copy, and a pass runs while the stream waits out its back-off.
+   */
+  private async settlePrepared(tables: readonly AddedTable[]): Promise<void> {
+    for (const t of tables) {
+      const st = this.states.get(t.source)!;
+      const gap = this.unpublished.get(t.source);
+      if (gap !== undefined) {
+        const error = `replication: ${gap}`;
+        if (st.error !== error) { this.log(`${t.source} is not copied or streamed: ${error}`); this.event({ kind: "stream_failed", table: t.source, message: `not copied or streamed: ${error}` }); }
+        this.gapErrors.set(t.source, error);
+        await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error });
+        continue;
       }
-      // a table the publication does not carry was never streamed: its last sync is its copy's or its poll's, never
-      // the stream's time a start credited it with (`readSynced` at `open`, before the publication was read)
-      const credited = tables.filter((t) => this.unpublished.has(t.source) && this.synced.get(t.source)?.by === "stream").map((t) => t.source);
-      if (credited.length) await this.readSynced(new Set(credited));
-      // a table the publication stopped carrying leaves the stream; one it carries now may join
-      this.refreshStreamed();
-    });
+      const gapClosed = this.gapErrors.get(t.source);
+      this.gapErrors.delete(t.source);
+      if (st.error === null) continue;
+      if (st.error === gapClosed || (st.phase !== "copied" && st.error === this.wholeFailure.prepare)) await this.record({ ...st, error: null });
+    }
+    // a table the publication does not carry was never streamed: its last sync is its copy's or its poll's, never
+    // the stream's time a start credited it with (`readSynced` at `open`, before the publication was read)
+    const credited = tables.filter((t) => this.unpublished.has(t.source) && this.synced.get(t.source)?.by === "stream").map((t) => t.source);
+    if (credited.length) await this.readSynced(new Set(credited));
+    // a table the publication stopped carrying leaves the stream; one it carries now may join
+    this.refreshStreamed();
   }
 
   /**
@@ -1718,7 +1735,10 @@ export class Sync {
       throw e;
     } finally { source?.close(); }
     if (lsn !== null) this.appliedLsn = lsn;
-    if (from !== "held") { this.streamFailures = 0; this.recovered("stream", "the stream applies changes again"); }
+    if (from !== "held") this.streamFailures = 0;
+    // THE STREAM'S FAILURE IS OVER when it applies a batch WITH A POSITION: every table it keeps current is current as of
+    // it. A piece of a large transaction (no position) is not that yet, nor the changes a catch-up held
+    if (lsn !== null) this.recovered("stream", "the stream applies changes again");
     let moved = false;
     for (const [name, changes] of batch) {
       if (!this.tables.has(name)) continue;
@@ -1730,12 +1750,20 @@ export class Sync {
       moved = true;
     }
     if (moved && committedAt !== null && committedAt.getTime() > 0) this.lastBatch = { appliedAt: Date.now(), committedAt: committedAt.getTime() };
-    // the rows, as the ledger has them now; a table the batch wrote is current again (its error, if any, cleared)
+    // the rows, as the ledger has them now; with a position, a table the batch wrote is current again (its error, if
+    // any, cleared), and so is every table the stream keeps current whose error was the replication's (the stream's
+    // failure, the preparation's): the position covers each of them, changed in the batch or not
     for (const [name, rows] of rowsAfter) {
       const st = this.states.get(name);
       if (st === undefined) continue;
-      if (st.error !== null) await this.record({ ...st, rows, error: null });
+      if (st.error !== null && lsn !== null) await this.record({ ...st, rows, error: null });
       else this.states.set(name, { ...st, rows });
+    }
+    if (lsn !== null) {
+      for (const source of this.joinedNow) {
+        const st = this.states.get(source);
+        if (st !== undefined && st.phase === "copied" && st.error?.startsWith("replication: ")) await this.record({ ...st, error: null });
+      }
     }
     // every table the stream keeps current is current as of this batch's position (`Synced`); a piece of a large
     // transaction (no position) and the changes a catch-up held are not a position

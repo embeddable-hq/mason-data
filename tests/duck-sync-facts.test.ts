@@ -232,3 +232,57 @@ test("the disk under the copy: free where its file is, by the sync's own measure
     s.copyLive.clear();
   });
 });
+
+test("a stream's failure is over when the stream next applies a batch WITH A POSITION — never at a pass's publication check, nor at a piece of a large transaction", async () => {
+  await aRun(async ({ sync, events, st }) => {
+    const s = sync as unknown as { settlePrepared?: (t: readonly AddedTable[]) => Promise<void>; wholeFailure: { stream: string | null };
+      applyStreamed: (b: Map<string, TableChanges>, lsn: bigint | null, at: Date) => Promise<void> };
+    assert.equal(typeof s.settlePrepared, "function", "src/duck/sync.ts Sync.settlePrepared: what a pass's publication check settles");
+    // the stream failed (its error on the table it kept current, as startStream's failure records it)
+    s.wholeFailure.stream = "replication: the slot is in use";
+    const said = (): string[] => events.map((e) => `${e.kind} ${e.table ?? "-"}: ${e.message}`);
+    // a pass: the publication and slot are as they should be — that says nothing of the copy
+    await s.settlePrepared!([T]);
+    assert.equal(st().error, "replication: the slot is in use", "the publication check does not clear the stream's failure");
+    assert.deepEqual(said(), [], "and says no recovery");
+    // a piece of a large transaction: written, but no position yet
+    await s.applyStreamed(batch({ 11: "piece" }), null, new Date());
+    assert.equal(st().error, "replication: the slot is in use", "a piece without a position does not");
+    assert.deepEqual(said(), []);
+    // a batch with a position, of another table only (the database committed): every streamed table is current as of it
+    const other: Map<string, TableChanges> = new Map([["public.other", batch({ 1: "x" }).get("public.t")!]]);
+    await s.applyStreamed(other, 0x40n, new Date());
+    assert.equal(st().error, null, "current as of the batch's position");
+    assert.deepEqual(said(), [
+      "recovered -: the stream applies changes again (it had failed: replication: the slot is in use)",
+      "recovered public.t: current again (it had failed: replication: the slot is in use)",
+    ]);
+  });
+});
+
+test("a named publication's gap is its own error and its own recovery: set by the pass that finds it, cleared by the pass that finds the table carried again", async () => {
+  await aRun(async ({ sync, events, st }) => {
+    const s = sync as unknown as { settlePrepared: (t: readonly AddedTable[]) => Promise<void>; unpublished: Map<string, string>; wholeFailure: { prepare: string | null };
+      states: Map<string, Record<string, unknown>> };
+    // the table's last error was the stream's (from the run before): not the pass's to clear
+    await s.settlePrepared([T]);
+    assert.equal(st().error, "replication: the slot is in use");
+    s.unpublished.set("public.t", "publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t");
+    await s.settlePrepared([T]);
+    assert.equal(st().error, "replication: publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t");
+    assert.deepEqual(events.map((e) => e.kind), ["stream_failed"]);
+    s.unpublished.clear();
+    await s.settlePrepared([T]);
+    assert.equal(st().error, null, "carried again: its gap's error cleared by the pass that found it");
+    assert.deepEqual(events.map((e) => `${e.kind} ${e.table}`), ["stream_failed public.t", "recovered public.t"]);
+    // a failure to prepare: a table never copied has it cleared by the pass that prepares (its copy is next); a copied
+    // one keeps it until the stream applies a batch with a position
+    s.wholeFailure.prepare = "replication: the slot could not be read: connection refused";
+    s.states.set("public.t", { ...s.states.get("public.t")!, phase: "failed", error: s.wholeFailure.prepare });
+    await s.settlePrepared([T]);
+    assert.equal(st().error, null, "never copied: cleared");
+    s.states.set("public.t", { ...s.states.get("public.t")!, phase: "copied", error: s.wholeFailure.prepare });
+    await s.settlePrepared([T]);
+    assert.equal(st().error, s.wholeFailure.prepare, "copied: current only once the stream says so");
+  });
+});
