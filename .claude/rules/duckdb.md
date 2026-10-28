@@ -305,7 +305,9 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   attempt read 1 % of the heap, what the pages left would add (from what its pages added to the file and its log) is
   held to what is free where the file is; past it the copy FAILS with the way out (free disk, `mason remove`, `mason add
   --columns`), its chunks kept, and is tried again as a failed copy is — at the retry, or at once at the next start.
-  Nothing warns before 1 %; a table whose late pages are wider than its early ones is under-projected.
+  Nothing warns before 1 %; a table whose late pages are wider than its early ones is under-projected. What the check
+  last projected is kept on the copy's live state and said, never computed a second way (`diskStatus`: `/api/state`
+  `disk`, `mason status`'s Disk line, beside the bytes free by the same `diskFree`).
 
 ## Keeping a copy current
 

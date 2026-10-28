@@ -96,6 +96,8 @@ const eventAsks: Array<{ limit: number; since?: string; failed?: boolean }> = []
 const syncEvent = { at: new Date(Date.now() - 120_000).toISOString(), kind: "poll_failed" as const, failed: true, table: "public.customers", message: "the poll failed, and is tried again at the next one" };
 const events = { days: 7, recent: async (o: { limit: number; since?: string; failed?: boolean }) => { eventAsks.push(o); return [syncEvent]; } };
 let restarts: Array<{ at: string; reason: string; upSeconds: number }> = [];
+// the disk under the copy, as the sync measures it (src/duck/sync.ts diskStatus)
+let disk: { path: string; freeBytes: number | null; projectedBytes: number | null; error?: string } = { path: "/data", freeBytes: 75 * 2 ** 30, projectedBytes: null };
 // usage over time (src/duck/usage.ts), as UsageSampler answers it
 const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
 const copySize = { table: "public.orders", bytes: 4_194_304, at: "2026-10-28T09:10:00.000Z" };
@@ -111,7 +113,7 @@ const ctx: RunContext = {
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app", listener,
   logs: runLog,
-  duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, requests, events, usage, restarts: () => restarts },
+  duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, disk: () => disk, requests, events, usage, restarts: () => restarts },
 };
 const server = createRunServer(ctx);
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -349,6 +351,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.match(String(refused.body.error), /public\.logs is not copied yet/);
     assert.equal((await post("/api/sync", { tables: [] })).status, 400);
     assert.deepEqual(asked, [["public.customers"], ["public.logs"]]);
+    assert.deepEqual(s.body.disk, { path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 10, projectedBytes: null }, "the disk under the copy: its file is engine.bytes, one fact");
     const { uptimeSeconds, ...engine } = s.body.engine as { uptimeSeconds: number };
     assert.deepEqual(engine, { name: "duckdb", file: duckFile, bytes: 10, pollSeconds: 5, version: "9.9.9", startedAt: "2026-10-28T08:00:00.000Z", restarts: { count: 0, last: null } });
     assert.ok(Math.abs(uptimeSeconds - (Date.now() - Date.parse("2026-10-28T08:00:00.000Z")) / 1000) < 5, `up since the run started: ${uptimeSeconds}`);
@@ -438,7 +441,7 @@ test("a usage sample reads /api/state's own facts: the copy file's bytes, the to
   const facts = await runServer.usageFacts!(c, now);
   const state = runServer.runState(c, states, stream, now) as { totals: unknown; engine: { bytes: number } };
   assert.deepEqual(facts, { copyBytes: state.engine.bytes, totals: { added: 3, copied: 3, failed: 0, rows: 1_023, syncedAt: at }, oldestSyncSeconds: 3690.5, streamLag: lag,
-    copied: ["public.customers", "public.orders", "public.logs"], slotWalHeldBytes: 65_536 });
+    copied: ["public.customers", "public.orders", "public.logs"], slotWalHeldBytes: 65_536, diskFreeBytes: 75 * 2 ** 30 });
   assert.equal(state.engine.bytes, 10, "the copy file's size, as engine.bytes says it");
   const polled = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => null } }, now) as { streamLag: unknown; slotWalHeldBytes: unknown };
   assert.equal(polled.streamLag, null, "no stream when polling");

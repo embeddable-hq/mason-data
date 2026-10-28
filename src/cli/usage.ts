@@ -37,7 +37,8 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
                    tablesFailed, oldestSyncSeconds, statements, statementsRefused, statementsFailed, statementsCancelled,
                    rowsSent, bytesSent, durationP50Ms, durationP95Ms, streamLagBytes, streamLagSeconds, rssBytes,
                    heapUsedBytes, copyMemoryBytes, copyMemoryLimitBytes, slotWalHeldBytes (replication: the WAL the
-                   slot holds on the database) }], copySizes: [{ table, bytes, at }], next }
+                   slot holds on the database), diskFreeBytes (free where the copy is; with a step, the lowest) }],
+                   copySizes: [{ table, bytes, at }], next }
 `;
 
 export const USAGE: CommandSpec & { needs: "run" } = {

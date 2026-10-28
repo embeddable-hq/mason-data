@@ -421,7 +421,18 @@ export interface CopyLive {
   rate: ChunkRate | null;
   /** rows per heap page: the committed chunks', else the catalog's estimate, else unknown */
   rowsPerPage: number | null;
+  /** what its pages left are projected to add on disk, bytes (`copyDiskProjection`, at each chunk's check); null until
+   *  it can be said */
+  diskNeeded: number | null;
 }
+
+/**
+ * WHERE THE COPY'S FILE IS, AND THE DISK UNDER IT (`Sync.diskStatus`, `/api/state` `disk`): the bytes free there — the
+ * sync's own `diskFree`, the one a copy is held to — and, while copies run, what their pages left are projected to add
+ * (`copyDiskProjection`, as each chunk's check last computed it: summed over the copies, null while none can say). A
+ * free space that cannot be read is its error.
+ */
+export interface DiskStatus { path: string; freeBytes: number | null; projectedBytes: number | null; error?: string }
 
 /** A COPY'S PROGRESS AT A MOMENT (`CopyState.progress`), for `mason wait` and `mason status` to render */
 export interface CopyProgressView {
@@ -2500,6 +2511,15 @@ export class Sync {
     }
   }
 
+  /** Where the copy's file is, the bytes free there, and what the copies running are projected to add (`DiskStatus`). */
+  diskStatus(): DiskStatus {
+    const dir = path.dirname(this.store.file);
+    const needed = [...this.copyLive.values()].map((l) => l.diskNeeded).filter((n): n is number => n !== null);
+    const projectedBytes = needed.length ? Math.round(needed.reduce((a, b) => a + b, 0)) : null;
+    try { return { path: dir, freeBytes: this.diskFree(dir), projectedBytes }; }
+    catch (e) { return { path: dir, freeBytes: null, projectedBytes, error: `the free space where the copy is could not be read: ${e instanceof Error ? e.message : String(e)}` }; }
+  }
+
   /** The DuckDB file's bytes with its write-ahead log's (what a copy adds lands in the log until a checkpoint). */
   private fileBytes(): number {
     let n = 0;
@@ -2510,10 +2530,12 @@ export class Sync {
     return n;
   }
 
-  /** Why the copy of `t` must stop now — what its pages left would add is more than the disk has free — or null. */
-  private diskShort(t: AddedTable, p: CopyProgress, disk: { bytesAtStart: number; doneAtStart: readonly PageRange[] }): string | null {
+  /** Why the copy of `t` must stop now — what its pages left would add is more than the disk has free — or null. What
+   *  it projects is kept on the copy's `live` (`diskStatus` says it). */
+  private diskShort(t: AddedTable, p: CopyProgress, disk: { bytesAtStart: number; doneAtStart: readonly PageRange[] }, live: CopyLive): string | null {
     const bytesNow = this.fileBytes();
     const projected = copyDiskProjection({ pages: p.pages, done: p.done, doneAtStart: disk.doneAtStart, bytesAtStart: disk.bytesAtStart, bytesNow });
+    live.diskNeeded = projected?.needed ?? null;
     if (projected === null) return null;
     const free = this.diskFree(path.dirname(this.store.file));
     if (projected.needed <= free) return null;
@@ -2592,7 +2614,7 @@ export class Sync {
       const pagesDone = pagesRead(p.done, p.pages);
       const live: CopyLive = { pages: p.pages, chunksDone: p.done.length, pagesDone, rowsDone: p.rows, untaken: gapPages(gaps, p.pages),
         chunkPages: nextChunkPages(ceiling, null, this.copyChunkSeconds), readers, reading: [], rate: null,
-        rowsPerPage: pagesDone > 0 ? p.rows / pagesDone : t.rows !== null && t.rows > 0 && p.pages > 0 ? t.rows / p.pages : null };
+        rowsPerPage: pagesDone > 0 ? p.rows / pagesDone : t.rows !== null && t.rows > 0 && p.pages > 0 ? t.rows / p.pages : null, diskNeeded: null };
       this.copyLive.set(t.source, live);
       for (let i = 1; i < readers; i++) {
         const lane: Lane = { conn: await this.store.instance.connect(), inFlight: false };
@@ -2676,7 +2698,7 @@ export class Sync {
           }
           // STOPPED BEFORE THE DISK FILLS: the chunks committed are kept, the copy fails with the way out and is tried
           // again as a failed copy is (freed disk is used at the retry, or at once at the next start)
-          const short = recopy ? null : this.diskShort(t, p, disk);
+          const short = recopy ? null : this.diskShort(t, p, disk, live);
           if (short !== null) { fail(new Error(short)); return; }
           const at = readThrough(p.done);
           if (Date.now() - lineAt >= 60_000 && at !== null) {

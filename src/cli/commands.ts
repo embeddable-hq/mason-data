@@ -89,6 +89,9 @@ export interface RunState {
     restarts?: RestartsFact };
   /** replication mode: where the stream is, its lag, what it applied (src/duck/sync.ts streamStatus) */
   stream?: StreamStatus;
+  /** the disk under the copy (src/duck/sync.ts diskStatus): free where its file is, the file, what the copies running
+   *  are projected to add; a run from before it has none */
+  disk?: { path: string; freeBytes: number | null; copyBytes: number | null; projectedBytes: number | null; error?: string };
   /** the JSON paths stored as columns of the copies (src/duck/kept.ts): a run from before them has none */
   jsonPaths?: KeptPathStatus[];
   /** what mason wait waits on (src/cli/readiness.ts), said by the run: a run from before it has none */
@@ -292,7 +295,8 @@ const STATUS_USAGE = `usage: mason status [--json]
            ageSeconds (how old the copy is now) }, … }], totals: { added, copied, failed, rows (the copies' rows),
            syncedAt (the latest sync of any) }, engine: { file, bytes, pollSeconds, version (the run's), startedAt,
            uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
-           or null }, or { error }) }, queries: { keptDays, day, week } (the last day's and the last 7
+           or null }, or { error }) }, disk: { path (where the copy's file is), freeBytes, copyBytes (the file),
+           projectedBytes (what the copies running are projected to add; null: none, or too early to say), error }, queries: { keptDays, day, week } (the last day's and the last 7
            days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
            failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
            when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all),
@@ -336,7 +340,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   summary: "what Mason is doing: the database, each table's copy, the Postgres API, the slow and refused statements",
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
-  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
+  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
     "refusedTotal", "recentErrors", "readiness", "ui",
     "lastRun", "lastStop", "hung", "next"],
 };
@@ -394,6 +398,7 @@ export async function status(argv: string[]): Promise<number> {
       // the run's own version and how long it has been up (a CLI of another version says the run's)
       ["Mason", `${s.engine.version ?? version()}, pid ${run.pid} · one process${s.engine.startedAt ? ` · up ${spanText(s.engine.uptimeSeconds ?? 0)}, since ${s.engine.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`],
       ["Copy", `${s.engine.file}${s.engine.bytes === null ? "" : ` · ${fileSize(s.engine.bytes)}`}`],
+      ...diskRows(s.disk),
       // the copies in all (src/cli/readiness.ts syncTotals): a run from before them has none
       ...(s.totals ? [["Copies", totalsText(s.totals)] as [string, string]] : []),
       // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
@@ -560,6 +565,15 @@ export function refusedLines(r: { refused: readonly RefusedQuery[]; total: numbe
 /** A file's size, as a person reads one (mason status's copy, mason usage's) */
 export function fileSize(b: number): string {
   return b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GiB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`;
+}
+
+/** `Disk` in mason status: the bytes free where the copy is, and what the copies running are projected to add (none: no
+ *  row, for a run from before it) */
+export function diskRows(d: RunState["disk"]): Array<[string, string]> {
+  if (d === undefined) return [];
+  const adds = d.projectedBytes === null ? "" : ` · the copies running are projected to add about ${fileSize(d.projectedBytes)} more`;
+  if (d.freeBytes === null) return [["Disk", `${d.error ?? "the free space could not be read"}${adds}`]];
+  return [["Disk", `${fileSize(d.freeBytes)} free in ${d.path}${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the copy stops before the disk fills" : ""}`]];
 }
 
 /** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) —

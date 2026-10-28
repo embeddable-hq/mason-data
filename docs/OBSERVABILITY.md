@@ -33,6 +33,10 @@ sampled once a minute where it moves):
   `engine.restarts` — `{ count, last: { at, why, upSeconds } | null }` or `{ error }` — its supervisor's record
   (`.mason/restarts.json`, the last 20), read by ONE function (src/cli/supervise.ts `restartsFact`) that `mason status`
   reads with Mason stopped too.
+- `disk` — `{ path, freeBytes, copyBytes, projectedBytes, error? }`: free where the copy's file is (the sync's own
+  `diskFree`, the measure a copy is held to), the file (`engine.bytes`), and while copies run what their pages left are
+  projected to add (`copyDiskProjection`, as each chunk's check last computed it; null while none can say). A `statfs`, no
+  query. Sampled as `diskFreeBytes` (re-bucketed, the lowest).
 
 `mason status --json` `recentErrors` holds the latest sync failures (`sync`) and the latest statements refused, failed or
 cancelled (`queries`, the request log's own shape). `since` and `until` are read everywhere by one grammar: an age (30m,
@@ -158,7 +162,7 @@ Key: ✅ built · ⏸ deferred
 2. ✅ **Stream lag, and the WAL the replication slot holds on the source**: a slot nobody reads fills the source's disk.
 3. **Refused statements grouped by the unsupported SQL they used** (`src/duck/gaps.ts`), so users know what to rewrite.
 4. **Sessions open now, restarts, memory against the limit** (`store.memoryLimitBytes`).
-5. **Free disk against the copy's projected size** (`copyDiskProjection` computes it already).
+5. ✅ **Free disk against the copy's projected size** (`disk`, from `copyDiskProjection`).
 
 ## Steps (data and endpoints; presentation later)
 

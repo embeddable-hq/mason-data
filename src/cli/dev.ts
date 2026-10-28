@@ -442,7 +442,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     logs,
     // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
     listener: api,
-    duck: { copies: () => sync.state(), file: duckFile, pollSeconds: pollMs / 1000, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), requests, events, usage,
+    duck: { copies: () => sync.state(), file: duckFile, pollSeconds: pollMs / 1000, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), disk: () => sync.diskStatus(), requests, events, usage,
       restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status() },
   };
   const server = createRunServer(runCtx);

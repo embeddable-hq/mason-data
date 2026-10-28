@@ -206,3 +206,29 @@ test("the slot's WAL is read with the database's position, at most every 30 s, a
     assert.match(String((await status() as { error: string }).error), /^the database could not be reached: /, "past it, read again");
   });
 });
+
+test("the disk under the copy: free where its file is, by the sync's own measure, and what the copies running are projected to add, as their chunks' check computed it", async () => {
+  await aRun(async ({ store, sync }) => {
+    const s = sync as unknown as { diskStatus?: () => unknown; diskFree: (dir: string) => number; copyLive: Map<string, Record<string, unknown>>;
+      diskShort: (t: AddedTable, p: unknown, disk: unknown, live: Record<string, unknown>) => string | null };
+    assert.equal(typeof s.diskStatus, "function", "src/duck/sync.ts Sync.diskStatus");
+    const dir = path.dirname(store.file);
+    s.diskFree = () => 80 * 2 ** 30;
+    assert.deepEqual(s.diskStatus!(), { path: dir, freeBytes: 80 * 2 ** 30, projectedBytes: null }, "no copy running: nothing projected");
+    // a copy whose chunks' check projected what its pages left add (copyDiskProjection): kept on its live state, said
+    const live: Record<string, unknown> = { diskNeeded: null };
+    s.copyLive.set("public.t", live);
+    const short = s.diskShort(T, { pages: 100, done: [{ first: 0, end: 50 }] }, { bytesAtStart: 0, doneAtStart: [] }, live);
+    assert.equal(short, null, "80 GiB free: the copy goes on");
+    assert.ok(typeof live.diskNeeded === "number" && live.diskNeeded > 0, `what its 50 pages left would add: ${live.diskNeeded}`);
+    s.copyLive.set("public.u", { diskNeeded: 1_000 });
+    s.copyLive.set("public.v", { diskNeeded: null });
+    assert.equal((s.diskStatus!() as { projectedBytes: number }).projectedBytes, Math.round((live.diskNeeded as number) + 1_000), "summed over the copies that can say");
+    // a free space that cannot be read is its error, never a 0
+    s.diskFree = () => { throw new Error("ENOENT: no such file or directory"); };
+    const failed = s.diskStatus!() as { freeBytes: unknown; error?: string };
+    assert.equal(failed.freeBytes, null);
+    assert.match(String(failed.error), /^the free space where the copy is could not be read: ENOENT/);
+    s.copyLive.clear();
+  });
+});
