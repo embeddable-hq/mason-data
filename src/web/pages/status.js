@@ -1,11 +1,12 @@
 /**
- * THE STATUS PAGE (#status): what `mason status` prints — the run in one word (`readiness`), the facts (the copies in
- * all, the copy file's size, the last day's and week's statements), the database, each added table's copy (its bar,
- * its percent and the line `mason wait` shows), the warnings, the slow and refused counts, readiness, and the recent
- * errors (the sync's and the statements'). Reads `/api/state` every poll, the request log's every 30 s. Never the
- * engine's name.
+ * THE STATUS PAGE (#status): what `mason status` prints — the run in one word (`readiness`), ONE table of facts (the
+ * database and how its changes arrive, Mason's version, uptime and restarts, the copies in all, the copy's file, the
+ * disk, the sessions open, the warnings), the changes the stream carries (replication mode: its position, lag, last
+ * batch and the slot's hold on the database's WAL), the statements of the last day and week, the copies not finished (a
+ * bar each, only while there are any), and the recent errors (the sync's and the statements'). The slow and the refused
+ * statements are the Queries page's. Reads `/api/state` every poll, the request log's every 30 s. Never the engine's name.
  */
-import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, duration, entryName, rowsHtml, utcText } from "../shared.js";
+import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, utcText } from "../shared.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`). */
 export const RECENT_ERRORS = 5;
@@ -68,45 +69,6 @@ export function sourceRows(s) {
   ];
 }
 
-/** How many of `xs` were in the last day, or why they could not be read. */
-const countLine = (label, r, count, tail) => "failure" in r
-  ? `<p class="count">${esc(label)}: could not read them (${esc(firstLine(r.failure.message))}; ${code("mason logs")} has the detail)</p>`
-  : `<p class="count">${esc(label)}: <strong>${n(count(r))}</strong> in the last day${tail(r)}</p>`;
-
-/**
- * THE STATUS SECTION from `/api/state` (and the counts of `/api/slow`, `/api/refused`; each `{ failure }` when it could
- * not be read): what `mason status` prints — the database, each added table's copy (its bar, percent and the line
- * `mason wait` shows), the warnings, the slow and refused counts, and readiness. Never the engine's name.
- */
-export function renderStatus(s, requests = {}) {
-  const parts = [rowsHtml([...sourceRows(s), ...s.warnings.map((w) => ["Warning", w])])];
-  const picked = s.tables.filter((t) => t.added);
-  if (!picked.length) {
-    parts.push(`<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>`,
-      `<p class="dim">${code("mason tables")} lists them; ${code("mason add <table>")} copies one.</p>`);
-    return parts.join("");
-  }
-  // as tableLines orders them: the finished first, in the order they finished, then the failed, the copying, the waiting
-  const rank = { done: 0, unsynced: 0, failed: 1, copying: 2, waiting: 3 };
-  const lines = picked.map((t) => ({ t, l: tableLine(t) }))
-    .sort((a, b) => rank[a.l.state] - rank[b.l.state] || (a.t.copy?.updatedAt ?? "").localeCompare(b.t.copy?.updatedAt ?? "") || a.t.table.localeCompare(b.t.table));
-  parts.push(`<h3>Tables (${picked.length} of ${s.tables.length} added)</h3>`,
-    `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Copy</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
-      `<tr class="t-${l.state}"><th scope="row">${code(t.table)}</th>` +
-      `<td class="bar"><progress max="100" value="${Math.floor(Math.max(0, Math.min(1, l.fraction)) * 100)}"></progress> <span class="pct">${percent(l.fraction)}</span></td>` +
-      `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? `<details><summary>the whole error</summary><pre>${esc(t.error)}</pre></details>` : ""}</td></tr>`).join("")}</tbody></table>`);
-  if (requests.slow) parts.push(countLine("Slow queries", requests.slow, (r) => r.slow.length, (r) => ` (${n(r.slowMs / 1000)} s or more)`));
-  if (requests.refused) parts.push(countLine("Refused queries", requests.refused, (r) => r.total ?? r.refused.length, () => ""));
-  if (requests.slow || requests.refused) parts.push(`<p class="dim">${code("mason status")} lists them; ${code("mason logs --requests")} every one.</p>`);
-  const r = s.readiness;
-  if (r) {
-    if (r.ready) parts.push(`<p class="readiness ok">Ready: every added table is copied and served.</p>`);
-    else if (r.failed.length) parts.push(`<p class="readiness bad">Failed:</p><ul class="bullets">${r.failed.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`);
-    else parts.push(`<p class="readiness">Under way:</p><ul class="bullets">${r.waiting.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`);
-  }
-  return parts.join("");
-}
-
 /** THE RUN IN ONE WORD, as `mason status` heads its last line (src/cli/readiness.ts `readinessWord`): Ready, Failed or
  *  Under way. */
 export function readinessWord(r) {
@@ -126,21 +88,111 @@ export function renderHealth(s) {
   return `<p class="health ${word === "Ready" ? "ok" : word === "Failed" ? "bad" : ""}">${esc(word)}</p>`;
 }
 
-const factRow = (k, v) => `<tr><th scope="row">${esc(k)}</th><td>${esc(v)}</td></tr>`;
+/** A fact's row; `warn` marks one the reader should act on. */
+const factRow = (k, v, warn = false) => `<tr${warn ? ` class="warn"` : ""}><th scope="row">${esc(k)}</th><td>${esc(v)}</td></tr>`;
+
+/** A fact that could not be read: said as unknown with its reason, never as a zero. */
+const unknown = (what, reason) => `${what} could not be read${reason ? ` (${firstLine(String(reason))})` : ""}`;
 
 /**
- * THE FACTS, a table of what `mason status` says of the copies (`totals`, `engine.bytes`): the tables synced of those
- * added, their rows, the last sync and how long ago (`totalsText`'s parts), and the copy file's size (`fileSize`).
+ * WHAT THE DATABASE'S WAL IS HELD FOR BY THE SLOT (`stream.slot`: { walHeldBytes, walStatus, safeWalSizeBytes, at } or
+ * { error }), as rows `[label, text, warn]`: how much the slot holds on the database, its status, the room left before
+ * the database drops it. "lost" and "unreserved", or no cap on the slot, are warnings.
+ */
+export function slotRows(slot) {
+  // (`stream.slot` has been the slot's NAME; a run that still says that has nothing of the slot's WAL to show)
+  if (slot === undefined || slot === null || typeof slot !== "object") return [];
+  if ("error" in slot) return [["WAL the slot holds", unknown("what the slot holds", slot.error), true]];
+  const held = typeof slot.walHeldBytes === "number" ? bytesText(slot.walHeldBytes) : null;
+  const rows = [["WAL the slot holds", held === null ? "unknown" : `${held} on the database, kept for the stream (status ${slot.walStatus ?? "unknown"})`, false]];
+  if (slot.walStatus === "lost") rows.push(["Slot", "the database removed WAL the slot still needed: the stream cannot continue from where it was", true]);
+  else if (slot.walStatus === "unreserved") rows.push(["Slot", "the database may remove WAL the slot still needs: the stream may be lost", true]);
+  if (slot.safeWalSizeBytes === null || slot.safeWalSizeBytes === undefined) rows.push(["Room left", "none set: the database has no max_slot_wal_keep_size, so the slot can hold its WAL without limit and fill its disk", true]);
+  else rows.push(["Room left", `${bytesText(slot.safeWalSizeBytes)} of WAL before the database drops the slot`, slot.safeWalSizeBytes <= 0]);
+  return rows;
+}
+
+/** The stream's lag, said once: the bytes behind the database and the age of the newest change applied. */
+const lagText = (lag) => `${lag.bytes === null || lag.bytes === undefined ? "bytes behind unknown" : `${bytesText(lag.bytes)} behind the database`}${lag.seconds === null || lag.seconds === undefined ? "" : `, the newest change applied was committed ${spanText(lag.seconds)} ago`}`;
+
+/**
+ * THE CHANGES THE STREAM CARRIES (replication mode: `/api/state` `stream`; "" without one), a table of facts: whether it
+ * runs and why not, its position, its lag, the last batch applied (`streamRows`, held equal to `mason status`'s
+ * `streamLines`), and what the slot holds on the database (`slotRows`). Each table's own stream state is the Tables page's.
+ */
+export function renderStream(s, now = Date.now()) {
+  const st = s.stream;
+  if (!st) return "";
+  const { head } = streamRows(st, now);
+  // `head` is the CLI's rows: "stream" (only when it is not running, and why), the position, the last change
+  const label = (k) => k[0].toUpperCase() + k.slice(1);
+  const rows = [...(st.running ? [factRow("Stream", "running")] : []), ...head.map(([k, v]) => factRow(label(k), v, k === "stream"))];
+  rows.splice(2, 0, factRow("Lag", lagText(st.lag)));
+  rows.push(...slotRows(st.slot).map(([k, v, w]) => factRow(k, v, w)));
+  return `<table class="facts-table"><caption>Changes (the stream${s.source.replication ? `, slot ${esc(s.source.replication.slot)}` : ""})</caption><tbody>${rows.join("")}</tbody></table>`;
+}
+
+/**
+ * THE FACTS, ONE table of what `mason status` says: the database and how its changes arrive (`sourceRows`), the
+ * warnings, Mason's version, how long it has been up and its restarts (`engine`), the copies in all (`totals`), the
+ * copy's file (`engine.bytes`), the free disk and what a running copy is projected to add (`disk`), the sessions open
+ * (`sessions`). A fact the run did not say is absent; one it could not read is said as unknown with its reason.
  */
 export function renderFacts(s, now = Date.now()) {
+  const rows = [...sourceRows(s).map(([k, v]) => factRow(k, v)), ...s.warnings.map((w) => factRow("Warning", w, true))];
+  const e = s.engine;
+  if (typeof e.version === "string") rows.push(factRow("Mason", e.version));
+  else if (e.version && typeof e.version === "object" && "error" in e.version) rows.push(factRow("Mason", unknown("its version", e.version.error)));
+  if (typeof e.uptimeSeconds === "number") rows.push(factRow("Up for", `${duration(e.uptimeSeconds)}${e.startedAt ? ` (since ${utcText(e.startedAt)} UTC)` : ""}`));
+  const r = e.restarts;
+  if (r && "error" in r) rows.push(factRow("Restarts", unknown("the restarts", r.error)));
+  else if (r) rows.push(factRow("Restarts", r.count === 0 ? "none" : `${n(r.count)}${r.last ? `, the last ${utcText(r.last.at)} UTC: ${firstLine(r.last.why)}` : ""}`));
   const t = s.totals;
-  const rows = t ? [
+  if (t && t.added > 0) rows.push(
     factRow("Tables synced", `${n(t.copied)} of ${n(t.added)} added${t.failed ? `, ${n(t.failed)} failed` : ""}`),
     factRow("Rows", n(t.rows)),
-    factRow("Last sync", t.syncedAt === null ? "none yet" : `${utcText(t.syncedAt)} UTC · ${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`),
-  ] : [];
-  rows.push(factRow("The copy's file", s.engine.bytes === null ? "its size could not be read" : fileSize(s.engine.bytes)));
-  return `<table class="facts-table"><caption>The copies</caption><tbody>${rows.join("")}</tbody></table>`;
+    factRow("Last sync", t.syncedAt === null ? "none yet" : `${utcText(t.syncedAt)} UTC · ${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`));
+  const d = s.disk;
+  const copyBytes = e.bytes ?? (d && typeof d.copyBytes === "number" ? d.copyBytes : null);
+  if (t && t.added > 0 || copyBytes !== null) rows.push(factRow("The copy's file", copyBytes === null ? "its size could not be read" : fileSize(copyBytes)));
+  if (d) {
+    if (d.error) rows.push(factRow("Free disk", unknown("the free disk", d.error), true));
+    else {
+      const free = typeof d.freeBytes === "number" ? d.freeBytes : null;
+      rows.push(factRow("Free disk", free === null ? "unknown" : `${fileSize(free)} where the copy is`));
+      if (typeof d.projectedBytes === "number" && d.projectedBytes > 0) {
+        const over = free !== null && d.projectedBytes > free;
+        rows.push(factRow("The running copy", `projected to add ${fileSize(d.projectedBytes)}${over ? `: more than the ${fileSize(free)} free, the disk would fill` : ""}`, over));
+      }
+    }
+  }
+  const x = s.sessions;
+  if (x && "error" in x) rows.push(factRow("Sessions open", unknown("the sessions", x.error)));
+  else if (x) rows.push(factRow("Sessions open", n(x.open)));
+  return `<table class="facts-table"><caption>Mason</caption><tbody>${rows.join("")}</tbody></table>`;
+}
+
+/**
+ * THE COPIES NOT FINISHED, a bar each as `mason status` and `mason wait` print them (`tableLine`): copying, waiting,
+ * failed, or copied but not kept current — and nothing once every copy is done. With no table added, the commands'
+ * sentence and what adds one.
+ */
+export function renderProgress(s) {
+  const picked = s.tables.filter((t) => t.added);
+  if (!picked.length) {
+    return `<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>` +
+      `<p class="dim">${code("mason tables")} lists them; ${code("mason add <table>")} copies one.</p>`;
+  }
+  // as tableLines orders them: the finished first, in the order they finished, then the failed, the copying, the waiting
+  const rank = { done: 0, unsynced: 0, failed: 1, copying: 2, waiting: 3 };
+  const lines = picked.map((t) => ({ t, l: tableLine(t) })).filter(({ l }) => l.state !== "done")
+    .sort((a, b) => rank[a.l.state] - rank[b.l.state] || (a.t.copy?.updatedAt ?? "").localeCompare(b.t.copy?.updatedAt ?? "") || a.t.table.localeCompare(b.t.table));
+  if (!lines.length) return "";
+  return `<h3>Copies not finished (${lines.length} of ${picked.length} added)</h3>` +
+    `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Copy</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
+      `<tr class="t-${l.state}"><th scope="row">${code(t.table)}</th>` +
+      `<td class="bar"><progress max="100" value="${Math.floor(Math.max(0, Math.min(1, l.fraction)) * 100)}"></progress> <span class="pct">${percent(l.fraction)}</span></td>` +
+      `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? `<details><summary>the whole error</summary><pre>${esc(t.error)}</pre></details>` : ""}</td></tr>`).join("")}</tbody></table>`;
 }
 
 /**
@@ -160,7 +212,8 @@ export function renderQueries(q) {
   return `<table class="queries"><caption>Statements (the completed ones' time; ${code("mason logs --requests")} lists each)</caption><thead><tr><th scope="col"></th>` +
     ["Statements", "Completed", "Refused", "Failed", "Cancelled", "Average", "p50", "p95", "Rows sent", "Sent"].map((h) => `<th scope="col">${h}</th>`).join("") +
     `</tr></thead><tbody>${row("Last day", w.day)}${row("Last week", w.week)}</tbody></table>` +
-    (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS.</p>` : "");
+    (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS.</p>` : "") +
+    `<p class="dim">The slow and the refused statements, and every other, are on the <a href="#queries">Queries</a> page (${code("mason logs --requests")}).</p>`;
 }
 
 /** A sync event's cells, as mason status's `Sync errors` line says them (src/cli/commands.ts `eventLine`): when, what, its table, its reason's first line. */
@@ -193,8 +246,20 @@ export function renderRecentErrors(events, requests) {
     part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed");
 }
 
-/** What the page reads every 30 s beside the state: the request log's counts and summary, and the recent errors. */
-const SLOWER = ["/api/slow", "/api/refused", "/api/queries", `/api/events?failed=1&limit=${RECENT_ERRORS}`, `/api/requests?failed=1&limit=${RECENT_ERRORS}`];
+/**
+ * THE STATUS SECTION from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`: each the body,
+ * or `{ failure }`; `o.now` the clock): the word, the facts, the stream, the statements, the copies not finished, the
+ * recent errors. Never the engine's name.
+ */
+export function renderStatus(s, o = {}) {
+  const now = o.now ?? Date.now();
+  const added = s.tables.some((t) => t.added);
+  return renderHealth(s) + renderFacts(s, now) + renderStream(s, now) + (added ? renderQueries(o.queries) : "") + renderProgress(s) +
+    (added ? renderRecentErrors(o.events, o.requests) : "");
+}
+
+/** What the page reads every 30 s beside the state: the request log's summary and the recent errors. */
+const SLOWER = ["/api/queries", `/api/events?failed=1&limit=${RECENT_ERRORS}`, `/api/requests?failed=1&limit=${RECENT_ERRORS}`];
 
 /** A read as `renderStatus` takes it: the body, or `{ failure }` when it could not be read; undefined before any read. */
 const asRequest = (r) => r === undefined ? undefined : r.failure ? { failure: r.failure } : r.body;
@@ -209,11 +274,8 @@ export const page = {
       view() {
         const st = ctx.read("/api/state");
         if (!st?.body) return { status: st?.failure ? "" : `<p class="dim">Asking Mason…</p>` };
-        const s = st.body;
-        const [slow, refused, queries, events, requests] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        const added = s.tables.some((t) => t.added);
-        return { status: renderHealth(s) + (added ? renderFacts(s, ctx.now().getTime()) + renderQueries(queries) : "") +
-          renderStatus(s, { slow, refused }) + (added ? renderRecentErrors(events, requests) : "") };
+        const [queries, events, requests] = SLOWER.map((p) => asRequest(ctx.read(p)));
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests }) };
       },
     };
   },

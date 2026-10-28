@@ -1,12 +1,13 @@
 /**
- * THE QUERIES PAGE (#queries): the statements running now (`mason logs --running`, GET /api/running) with a Cancel that
+ * THE QUERIES PAGE (#queries): who is connected now (`/api/state` `sessions`), the statements running now (`mason logs --running`, GET /api/running) with a Cancel that
  * asks first (`mason cancel`, POST /api/cancel), and the request log (`mason logs --requests`, GET /api/requests) as a
  * table, filtered by status, time, user and client, and paged back by Older. The words are the commands': a running
  * statement's "N rows sent" and its client, a request's duration in ms, its error, the empty log's sentence.
  */
-import { bytesText, esc, firstLine, json, n, renderFailure, spanText, utcText } from "../shared.js";
+import { bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText } from "../shared.js";
 
 const RUNNING = "/api/running";
+const STATE = "/api/state";
 const NEWEST_EVERY_MS = 5000;
 const NO_CLIENT = "(no application_name)";
 
@@ -28,6 +29,19 @@ export const clientText = (applicationName) => applicationName || NO_CLIENT;
 function outcomeHtml(o) {
   if (o.failure) return renderFailure(o.failure);
   return `<p class="done" role="status"><span class="headline">Cancelled session ${o.cancelled.session}'s statement: it ends now, and its client is told so (57014).</span></p>`;
+}
+
+/**
+ * WHO IS CONNECTED NOW (`/api/state` `sessions`: { open, byClient: [{ user, client, open, running }] } or { error }): a row
+ * per user and client — the sessions it has open and the statements it is running. "" when the run did not say.
+ */
+export function renderSessions(sessions) {
+  if (!sessions) return "";
+  if ("error" in sessions) return `<p class="count">Who is connected could not be read (${esc(firstLine(String(sessions.error)))})</p>`;
+  if (!sessions.byClient.length) return `<p class="dim">No client is connected now.</p>`;
+  return `<table class="sessions"><thead><tr><th scope="col">User</th><th scope="col">Client</th><th scope="col">Open</th><th scope="col">Running</th></tr></thead><tbody>` +
+    sessions.byClient.map((c) => `<tr><td>${esc(c.user || "(no user)")}</td><td>${esc(clientText(c.client))}</td><td class="num">${esc(n(c.open))}</td><td class="num">${esc(n(c.running))}</td></tr>`).join("") +
+    `</tbody></table><p class="dim">${esc(n(sessions.open))} session${sessions.open === 1 ? "" : "s"} open.</p>`;
 }
 
 /**
@@ -64,8 +78,9 @@ const STATUS = { completed: "Completed", failed: "Failed", cancelled: "Cancelled
 
 /**
  * THE REQUEST LOG (`mason logs --requests --json`'s shape: { requests, keptDays, before }), newest first (the command
- * prints the oldest of the page first; a table reads the other way): id, started, ended, duration, status, user, client,
- * rows, bytes, the statement and its error. **Older** when the page has an older one (`before`), **Newest** when the
+ * prints the oldest of the page first; a table reads the other way): the id's first 8 characters, started, duration,
+ * status, user, client, rows, the statement and its error's first line; each row's details hold the whole id, when it
+ * ended, the bytes sent, the whole statement and the whole error. **Older** when the page has an older one (`before`), **Newest** when the
  * page shown is not the newest. `filtered`: the empty sentence names the filters, as the command's does.
  */
 export function renderRequests(page, { paged = false, filtered = false } = {}) {
@@ -76,14 +91,17 @@ export function renderRequests(page, { paged = false, filtered = false } = {}) {
   }
   const rows = [...page.requests].reverse().map((r) => {
     const error = r.sqlstate === null && !r.message ? "" : `<code>${esc(r.sqlstate ?? "")}</code> <span title="${esc(r.message ?? "")}">${esc(firstLine(r.message ?? ""))}</span>`;
-    return `<tr class="s-${esc(r.status)}"><td><code>${esc(r.requestId)}</code></td><td>${esc(utcText(r.startedAt))}</td><td>${esc(utcText(r.endedAt))}</td>` +
+    // the rest of a request is in its row's details: the whole id, when it ended, the bytes sent, the whole statement and error
+    const more = `<details><summary>More</summary>${rowsHtml([["Query id", r.requestId], ["Ended (UTC)", utcText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
+      `<pre class="stmt">${esc(r.query || "(no statement)")}</pre>${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(r.message)}</pre>` : ""}</details>`;
+    return `<tr class="s-${esc(r.status)}"><td><code title="${esc(r.requestId)}">${esc(r.requestId.slice(0, 8))}</code></td><td>${esc(utcText(r.startedAt))}</td>` +
       `<td class="num">${esc(n(r.durationMs))} ms</td><td class="status">${esc(STATUS[r.status] ?? r.status)}</td>` +
       `<td>${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</td><td>${esc(clientText(r.applicationName))}</td>` +
-      `<td class="num">${r.rows === null ? "" : esc(plural(r.rows, "row"))}</td><td class="num">${r.bytesSent === null ? "" : esc(bytesText(r.bytesSent))}</td>` +
-      `<td>${statementCell(r.query)}</td><td>${error}</td></tr>`;
+      `<td class="num">${r.rows === null ? "" : esc(plural(r.rows, "row"))}</td>` +
+      `<td>${statementCell(r.query)}</td><td>${error}</td><td>${more}</td></tr>`;
   }).join("");
-  return `<div class="scroll"><table class="requests"><thead><tr><th scope="col">Query id</th><th scope="col">Started (UTC)</th><th scope="col">Ended (UTC)</th><th scope="col">Duration</th>` +
-    `<th scope="col">Status</th><th scope="col">User</th><th scope="col">Client</th><th scope="col">Rows</th><th scope="col">Bytes</th><th scope="col">Statement</th><th scope="col">Error</th></tr></thead>` +
+  return `<div class="scroll"><table class="requests"><thead><tr><th scope="col">Query id</th><th scope="col">Started (UTC)</th><th scope="col">Duration</th>` +
+    `<th scope="col">Status</th><th scope="col">User</th><th scope="col">Client</th><th scope="col">Rows</th><th scope="col">Statement</th><th scope="col">Error</th><th scope="col"></th></tr></thead>` +
     `<tbody>${rows}</tbody></table></div>${nav}`;
 }
 
@@ -140,7 +158,8 @@ export const page = {
     return {
       model: m,
       // the running statements every poll; the newest page of the log every 5 s, an older one only when first asked
-      reads: () => [{ path: RUNNING, everyMs: 2000 }, { path: path(), everyMs: m.before === null ? NEWEST_EVERY_MS : Infinity }],
+      // (and who is connected, from the state, every 5 s)
+      reads: () => [{ path: RUNNING, everyMs: 2000 }, { path: path(), everyMs: m.before === null ? NEWEST_EVERY_MS : Infinity }, { path: STATE, everyMs: NEWEST_EVERY_MS }],
       afterRead() {
         // a statement that ended since it was asked about has nothing left to cancel
         const r = ctx.read(RUNNING)?.body?.running;
@@ -151,6 +170,7 @@ export const page = {
         const running = ctx.read(RUNNING)?.body;
         const log = ctx.read(path());
         return {
+          "connected-now": renderSessions(ctx.read(STATE)?.body?.sessions),
           "running-now": running ? renderRunning(running.running, m.asking, m.outcome) : "",
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered() }) : ""),
         };

@@ -57,11 +57,14 @@ export function renderUsage(b) {
   if (!b.samples.length) samples = `<p>No sample in this time: Mason takes the first a minute after it starts.</p>`;
   else {
     const withLag = b.samples.some((s) => s.streamLagBytes !== null || s.streamLagSeconds !== null);
-    const cols = ["Time (UTC)", "Statements", "Errors", "Rows sent", "Bytes sent", "p95", "Copy", "Rows", "Failing", "Oldest", ...(withLag ? ["Lag"] : []), "Memory"];
+    const cols = ["Time (UTC)", "Statements", "Errors", "Rows sent", "Bytes sent", "p95", "Copy", "Rows", "Failing", "Oldest", ...(withLag ? ["Lag"] : [])];
     samples = `<table class="samples">${th(cols)}<tbody>` + b.samples.map((s) => {
       const c = sampleCells(s);
-      return `<tr><th scope="row">${esc(c.time)}</th>${[c.statements, c.errors, c.rowsSent, c.bytesSent, c.p95, c.copy, c.rows, c.failing, c.oldest, ...(withLag ? [c.lag] : [])].map(num).join("")}<td>${esc(c.memory)}</td></tr>`;
-    }).join("") + "</tbody></table>";
+      return `<tr><th scope="row">${esc(c.time)}</th>${[c.statements, c.errors, c.rowsSent, c.bytesSent, c.p95, c.copy, c.rows, c.failing, c.oldest, ...(withLag ? [c.lag] : [])].map(num).join("")}</tr>`;
+    }).join("") + "</tbody></table>" +
+      // the process's memory, an hour a line: a debugging aid, behind a closed details
+      `<details class="memory"><summary>Memory</summary><table class="samples">${th(["Time (UTC)", "Memory"])}<tbody>` +
+      b.samples.map((s) => { const c = sampleCells(s); return `<tr><th scope="row">${esc(c.time)}</th><td>${esc(c.memory)}</td></tr>`; }).join("") + "</tbody></table></details>";
   }
   return head + samples;
 }

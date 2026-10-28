@@ -42,6 +42,47 @@ export const percent = (share) => `${Math.floor(Math.max(0, Math.min(1, share)) 
 /** The time a copy has left, as the commands print it: `~12 min left`; "" when nothing is measured yet. */
 export const leftText = (secondsLeft) => secondsLeft === null || secondsLeft === undefined ? "" : `~${duration(secondsLeft)} left`;
 
+/** `1,204 changes (1,000 inserts, 200 updates, 4 deletes)`: a table's counts as the stream's lines say them (src/duck/stream.ts `countsText`). */
+export function countsText(c) {
+  const total = c.inserts + c.updates + c.deletes + c.truncates;
+  const parts = [[c.inserts, "insert"], [c.updates, "update"], [c.deletes, "delete"], [c.truncates, "truncate"]]
+    .filter(([k]) => k > 0).map(([k, w]) => `${n(k)} ${w}${k === 1 ? "" : "s"}`);
+  return `${n(total)} change${total === 1 ? "" : "s"}${parts.length ? ` (${parts.join(", ")})` : ""}`;
+}
+
+/**
+ * WHERE THE STREAM IS, as `mason status` says it (src/cli/commands.ts `streamLines`, held equal by the tests): `head`
+ * the stream's own rows (not running and why, its position against the database's, the last change), `tables` a row
+ * per added table — streamed, being caught up, not streamed yet or left out, and why. `st` is `/api/state` `stream`.
+ */
+export function streamRows(st, now = Date.now()) {
+  const head = [], tables = [];
+  const since = (iso) => (now - Date.parse(iso)) / 1000;
+  if (!st.running) {
+    head.push(["stream", st.failure === null ? "not running yet: it starts once the slot is made"
+      : `not running: ${st.failure.error.split("\n")[0]} · it starts again in ${spanText(Math.max(0, -since(st.failure.retryAt)))}`]);
+  }
+  const db = "lsn" in st.database
+    ? `the database is at ${st.database.lsn}: ${n(st.lag.bytes ?? 0)} bytes behind (read ${spanText(since(st.database.at))} ago)`
+    : `the database's position could not be read: ${st.database.error.split("\n")[0]}`;
+  head.push(["position", `${st.position} · ${db}`]);
+  head.push(["last change", st.lastBatch === null ? "none applied this run"
+    : `committed ${spanText(since(st.lastBatch.committedAt))} ago, applied ${spanText((Date.parse(st.lastBatch.appliedAt) - Date.parse(st.lastBatch.committedAt)) / 1000)} after its commit`]);
+  const total = (t) => t.applied.inserts + t.applied.updates + t.applied.deletes + t.applied.truncates;
+  for (const t of st.tables) {
+    const counts = ` · ${countsText(t.applied)} this run`;
+    const c = t.catchUp;
+    tables.push([t.table, t.state === "streamed" ? `streamed${counts}`
+      : t.state === "catching-up" && c !== undefined
+        ? `catching up by one poll ${c.from ? `from ${c.from.slice(0, 16).replace("T", " ")} UTC` : t.why?.replace(/^caught up by one poll /, "") ?? ""}: ` +
+          `${c.phase === "queued" ? (c.retryAt ? `its last catch-up failed, tried again after ${c.retryAt.slice(11, 16)} UTC (mason logs says why)` : "waiting its turn") : c.phase === "polling" ? "polling" : "applying what the stream held meanwhile"}` +
+          `${c.startedAt ? `, for ${spanText(since(c.startedAt))}` : ""} · the stream holds ${n(c.held)} change${c.held === 1 ? "" : "s"} of it meanwhile${total(t) ? counts : ""}`
+      : t.state === "left-out" ? `left out: ${t.why ?? ""}`
+      : `not streamed yet: ${t.why ?? ""}${total(t) ? counts : ""}`]);
+  }
+  return { head, tables };
+}
+
 /** A table as the commands name it: `orders` in public, else `schema.table` (src/cli/sources.ts `entryName`). */
 export const entryName = (table) => table.startsWith("public.") ? table.slice("public.".length) : table;
 

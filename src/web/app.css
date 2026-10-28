@@ -102,3 +102,9 @@ table.samples th[scope="row"], table.events th[scope="row"], table.log th[scope=
 table.log pre { margin: 0; color: var(--fg); }
 table.events td pre { margin: 2px 0 0; }
 tr.t-failed .mark { color: var(--bad); }
+
+/* a fact to act on (a warning, a slot near its limit), and the details that hold what is not a default column */
+tr.warn th, tr.warn td { color: var(--warn); }
+details > summary { cursor: pointer; color: var(--dim); }
+details pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; margin: 4px 0; }
+table.sessions td, table.catalog td { font-size: 13px; }
