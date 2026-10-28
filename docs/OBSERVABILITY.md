@@ -229,12 +229,17 @@ required**, then **C** for teams that already run Prometheus.
 
 ## To come back to
 
+- **NEXT: a table just added shows its copy's progress at once.** Today, Add on the Tables page writes the sources
+  file and the copy starts, but nothing on the row moves, so it looks as if nothing happened. The row should show a
+  progress bar and the % copied (`tables[].copy.progress.share`, the rows, the time left — what `mason wait` prints,
+  `copyingText`), above all on a table's first copy, from the click until the copy is served; then its sync state.
+
 - ✅ **The slow statements have a page**: Observability › Queries' **Slow (1 s or more)** filter — the request log's
   `slow` (`--slow`, `slow=1`, src/cli/request-filter.ts `SLOW_MS`, the constant `mason status` lists them by) — and the
   Overview's p95 card links to it; Duration sorts the page shown.
 - **The oracle's measurement fixture** (`tests/fixtures/oracle-duckdb-alone.json`) fails on `main` as on this branch
   against a local Postgres 18.3 (913 exact where it has 850): recorded elsewhere, to regenerate where CI runs.
-- **Access** for the managed service (above): not designed.
+- **Access** for the managed service (above): three options written, awaiting the owner's choice.
 - **Rows scanned**: deferred (it may add cost to every statement).
 
 ## Decided
