@@ -8,11 +8,11 @@ paths:
 
 # The web page (`src/web/`, `mason ui`, docs/WEB-UI.md)
 
-`mason start`'s run serves one page from its command server (src/cli/run-server.ts): a SHELL (`src/web/app.js`: a nav
+`mason start`'s run serves one web page, with six pages in it, from its command server (src/cli/run-server.ts): a SHELL (`src/web/app.js`: a nav
 and one section per page, the one shown chosen by the URL's hash, `#status` the default) over a module per page
 (`src/web/pages/<id>.js`): STATUS (what `mason status` says), TABLES (what `mason tables`, `mason add` and `mason
 remove` do), USERS (what `mason user` does), QUERIES, USAGE and LOGS (docs/OBSERVABILITY.md "Pages" is their spec).
-The full UI is built on it, page by page, under these rules.
+All six pages are built on it, under these rules.
 
 - **A page is a module of its own, registered in three places** (the contract is at the top of src/web/app.js): its
   `page = { id, title, create(ctx) }` in `PAGES`, its route `/pages/<id>.js` in `PAGE_ROUTES`, its
@@ -40,7 +40,7 @@ The full UI is built on it, page by page, under these rules.
   A fact is in ONE place: the Status has one table of facts, the Tables page one list of tables. **A fact the run could
   not read is `unknown` with its reason, never 0, and one it does not say is not shown** (`{ error }` fields of
   `/api/state`: `stream.slotWal`, `engine.restarts`, `disk`, `sessions`).
-- **Tables are added and removed through the commands' own endpoints** (done: the TABLES section): the list is
+- **Tables are added and removed through the commands' own endpoints** (the Tables page): the list is
   `GET /api/state` `tables` (`mason tables --json`'s), Add is `POST /api/pick` `{ table, picked: true, columns?, key? }`
   (`mason add`, the run's `pick`), Remove is `POST /api/remove` `{ tables }` (`mason remove`), and after either the page
   reads the state again. The columns and the key are TICKED from the table's own columns, never typed: the page sends
