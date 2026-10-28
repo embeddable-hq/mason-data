@@ -501,14 +501,14 @@ class Rewriter {
       case "CaseExpr": {
         if (!isNode(b.arg) || (this.typeOf(b.arg) !== JSONB && this.typeOf(b.arg) !== JSONB_ARRAY)) return null;
         b.arg = this.equated(b.arg, "CASE … WHEN of");
-        for (const w of (b.args ?? []) as AstNode[]) if (isNode(bodyOf(w).expr)) bodyOf(w).expr = this.jsonbKey(bodyOf(w).expr as AstNode);
+        for (const w of (b.args ?? []) as AstNode[]) if (isNode(bodyOf(w).expr)) bodyOf(w).expr = this.equalKey(bodyOf(w).expr as AstNode);
         return null;
       }
       // x IN (SELECT …), x = ANY / ALL (SELECT …): the subquery's values compared with x by jsonb's equality
       case "SubLink": {
         if (!isNode(b.testexpr) || !["ANY_SUBLINK", "ALL_SUBLINK", "ROWCOMPARE_SUBLINK"].includes(String(b.subLinkType))) return null;
         const type = this.typeOf(b.testexpr);
-        if (type === JSONB || type === JSONB_ARRAY) throw new Unrewritable("a jsonb compared with a subquery's values (IN (SELECT …), = ANY (SELECT …)) is not supported by Mason (Postgres equates jsonb by its own rules)", "join the subquery instead: … JOIN (SELECT …) s ON s.v = t.j", "jsonb-compare");
+        if (type === JSONB || type === JSONB_ARRAY || this.rowHoldsJsonb(b.testexpr)) throw new Unrewritable("a jsonb compared with a subquery's values (IN (SELECT …), = ANY (SELECT …)) is not supported by Mason (Postgres equates jsonb by its own rules)", "join the subquery instead: … JOIN (SELECT …) s ON s.v = t.j", "jsonb-compare");
         return null;
       }
       // a row as a value anywhere but the SELECT list, a cast to text and the json functions (rowValues) is a struct
@@ -732,6 +732,12 @@ class Rewriter {
       b.sortClause = (b.sortClause as AstNode[]).flatMap((s) => {
         const sb = bodyOf(s);
         this.done.add(sb);
+        // an ordinal that names a jsonb a `*` lists: DuckDB would sort that column's text
+        const n = constInt(sb.node as AstNode);
+        const starred = n === null ? null : this.starColumnType(targets, n);
+        if (starred === JSONB || starred === JSONB_ARRAY) {
+          throw new Unrewritable("ORDER BY the number of a jsonb column a * lists is not supported by Mason (Postgres orders jsonb by its own rules)", "ORDER BY the column's name", "jsonb-compare");
+        }
         return this.sortBy(sb, targets, b) ?? [s];
       });
     }
@@ -771,7 +777,9 @@ class Rewriter {
       const target = bodyOf(targets[n - 1]!);
       const value = target.val as AstNode;
       const c = this.textCollation(value);
-      if (c === null || c.kind === "bytes") continue;
+      // (a jsonb is sorted by its key whatever the collation: the SortBy rule keys the output column)
+      const keyed = this.typeOf(value) === JSONB || this.typeOf(value) === JSONB_ARRAY;
+      if (!keyed && (c === null || c.kind === "bytes")) continue;
       if (target.name === undefined) target.name = `__mason_sort_${n}`;
       const ref: AstNode = { ColumnRef: { fields: [S(String(target.name))] } };
       this.typedLike.set(bodyOf(ref), value);
@@ -1557,6 +1565,7 @@ class Rewriter {
     if (this.isCitext(type)) throw new Unrewritable(`${where} a citext value is not supported by Mason (Postgres groups and sorts it without regard to case)`, "GROUP BY lower(x), or x::text where case matters", "citext-forms");
     if (type === JSONB) throw new Unrewritable(`${where} a jsonb value is not supported by Mason (Postgres orders and equates jsonb by its own rules)`, JSONB_WAY_OUT, "jsonb-compare");
     if (type === JSONB_ARRAY) throw new Unrewritable(`${where} a jsonb array is not supported by Mason (Postgres compares its elements by jsonb's rules)`, "compare an element (a[1]), or a::text", "jsonb-compare");
+    if (this.rowHoldsJsonb(n)) throw new Unrewritable(`${where} a row holding a jsonb is not supported by Mason (Postgres compares the jsonb by its own rules)`, "list its members one by one: GROUP BY a, j", "jsonb-compare");
     if ((type === 1009 || type === 1015) && this.collation.kind !== "bytes") throw new Unrewritable(`${where} a text array is not supported by Mason under the database's collation`, "sort by an element (a[1]) or by array_to_string(a, ',')", "text-array-order");
   }
 
@@ -1576,13 +1585,47 @@ class Rewriter {
     return fn(c.kind === "icu" ? "__mason_jsonb_key_icu" : "__mason_jsonb_key_libc", [e, keys]);
   }
 
+  /**
+   * A JSONB AS ITS EQUALITY KEY: the key under C, whatever the database's collation. Postgres's default collation is
+   * deterministic, so two jsonb strings are equal only when their bytes are (varstr_cmp breaks a collation's tie by
+   * strcmp), and the C key's equality is exactly jsonb's — where the collation's key would refuse a value its order
+   * does not cover (a libc collation's `libc-uncovered`: an emoji's variation selector, an NFD accent) that equality
+   * never needed to order. Every context that only equates (=, <>, IN, = ANY, IS DISTINCT FROM, NULLIF, CASE x WHEN,
+   * GROUP BY, DISTINCT [ON], count(DISTINCT), PARTITION BY) reads this one; ORDER BY, <, >, BETWEEN read `jsonbKey`.
+   */
+  private equalKey(e: AstNode): AstNode {
+    return fn("__mason_jsonb_key", [e]);
+  }
+
   /** a value compared for EQUALITY only (PARTITION BY, IS DISTINCT FROM, NULLIF, CASE x WHEN, = ANY, DISTINCT ON): a
-   *  jsonb as its key, a jsonb array refused; any other value as it is (its equality is DuckDB's) */
+   *  jsonb as its equality key, a jsonb array refused; any other value as it is (its equality is DuckDB's) */
   private equated(n: AstNode, where: string): AstNode {
     const type = this.typeOf(n);
-    if (type === JSONB) return this.jsonbKey(n);
+    if (type === JSONB) return this.equalKey(n);
     if (type === JSONB_ARRAY) this.comparable(n, where);
     return n;
+  }
+
+  /** a row value (`(a, j)`, `ROW(…)`, a list of IN's left) one of whose members, at any depth, is a jsonb or a jsonb array */
+  private rowHoldsJsonb(n: AstNode): boolean {
+    if (kindOf(n) !== "RowExpr") return false;
+    return ((bodyOf(n).args ?? []) as AstNode[]).some((a) => isNode(a) && (this.typeOf(a) === JSONB || this.typeOf(a) === JSONB_ARRAY || this.rowHoldsJsonb(a)));
+  }
+
+  /** the type of the `n`th output column where a `*` (or `t.*`) lists it, as Postgres expanded the stars (each column's
+   *  VAR at its star's offset, in order); null where the column is a target of its own, or not known */
+  private starColumnType(targets: readonly AstNode[], n: number): number | null {
+    let at = 0;
+    for (const t of targets) {
+      const v = bodyOf(t).val as AstNode | undefined;
+      if (v === undefined || !hasStar(v) || kindOf(v) !== "ColumnRef") { at++; if (at === n) return null; continue; }
+      const loc = bodyOf(v).location;
+      const cols = typeof loc === "number" ? (this.types.get(loc - this.base) ?? []).filter((x) => x.node === "VAR") : [];
+      if (cols.length === 0) return null;
+      if (n <= at + cols.length) return cols[n - at - 1]!.type;
+      at += cols.length;
+    }
+    return null;
   }
 
   /** a `*` (or `t.*`) whose columns hold a jsonb or a jsonb array, as Postgres expanded it (each column's VAR at the
@@ -1613,7 +1656,7 @@ class Rewriter {
       if (kindOf(g) === "GroupingSet") { refuseIn(bodyOf(g).content); return g; }
       const e = this.groupedExpression(g, b);
       if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return g; }
-      return this.jsonbKey(e === g ? g : this.clone(e));
+      return this.equalKey(e === g ? g : this.clone(e));
     });
   }
 
@@ -1635,7 +1678,7 @@ class Rewriter {
         const ordinal = n !== null && n >= 1 && n <= targets.length;
         const e = ordinal ? bodyOf(targets[n - 1]!).val as AstNode : d;
         if (this.typeOf(e) !== JSONB) { this.comparable(e, "SELECT DISTINCT ON"); return d; }
-        return this.jsonbKey(ordinal ? this.clone(e) : d);
+        return this.equalKey(ordinal ? this.clone(e) : d);
       });
       return;
     }
@@ -1697,10 +1740,35 @@ class Rewriter {
     // (an operand of a jsonb operator is a jsonb, a literal included: each is keyed, whatever its own analysis says)
     const lType = l === undefined ? null : this.typeOf(l);
     const comparing = ["=", "<>", "!=", "<", "<=", ">", ">="].includes(name);
-    if (l !== undefined && r !== undefined && (a0 === JSONB || a0 === JSONB_ARRAY || lType === JSONB || lType === JSONB_ARRAY) && (b.kind !== "AEXPR_OP" || comparing)) {
+    // rows compared member by member (`(id, j) = (1, '…')`: Postgres's per-member operators; a struct to DuckDB,
+    // compared by its text)
+    if ((l !== undefined && this.rowHoldsJsonb(l)) || (r !== undefined && this.rowHoldsJsonb(r))) {
+      throw new Unrewritable("a row holding a jsonb compared with another is not supported by Mason (Postgres compares the jsonb by its own rules)", "compare the members one by one: a = x AND j = y", "jsonb-compare");
+    }
+    // a jsonb array's containment and overlap compare its elements by jsonb's equality, DuckDB's list operators by text
+    if (b.kind === "AEXPR_OP" && ["@>", "<@", "&&"].includes(name) && (a0 === JSONB_ARRAY || a1 === JSONB_ARRAY)) {
+      throw new Unrewritable(`a jsonb array's ${name} is not supported by Mason (Postgres compares its elements by jsonb's equality)`, "compare an element: a[1] = '…'::jsonb, or a::text", "jsonb-compare");
+    }
+    // a jsonb's containment with ANY / ALL of an array written out: each element's containment, OR'd (ALL: AND'd), as
+    // SQL's three values are ANY's and ALL's (DuckDB has no `@> ANY`)
+    if ((b.kind === "AEXPR_OP_ANY" || b.kind === "AEXPR_OP_ALL") && (name === "@>" || name === "<@") && (a0 === JSONB || lType === JSONB) && l !== undefined && r !== undefined) {
+      if (kindOf(r) !== "A_ArrayExpr" || ((bodyOf(r).elements ?? []) as AstNode[]).length === 0) {
+        throw new Unrewritable(`a jsonb's ${name} with ${b.kind === "AEXPR_OP_ANY" ? "ANY" : "ALL"} of an array that is not written out is not supported by Mason`, `write the values out: j ${name} '…' OR j ${name} '…'`, "jsonb-compare");
+      }
+      const each = ((bodyOf(r).elements ?? []) as AstNode[]).map((e, i) => {
+        const x: AstNode = i === 0 ? l! : this.clone(l!);
+        return name === "@>" ? fn("__mason_jsonb_contains", [jsonArg(x), jsonArg(e)]) : fn("__mason_jsonb_contains", [jsonArg(e), jsonArg(x)]);
+      });
+      return b.kind === "AEXPR_OP_ANY" ? or(each) : and(each);
+    }
+    // an operator's ANY / ALL compares only for a comparison (`j @> ANY (…)` is containment, above)
+    const compares = b.kind === "AEXPR_OP" || b.kind === "AEXPR_OP_ANY" || b.kind === "AEXPR_OP_ALL" ? comparing : true;
+    if (l !== undefined && r !== undefined && (a0 === JSONB || a0 === JSONB_ARRAY || lType === JSONB || lType === JSONB_ARRAY) && compares) {
       const what = `comparing (${b.kind === "AEXPR_OP" ? name : b.kind.replace("AEXPR_", "").replace(/_/g, " ").toLowerCase()})`;
       if (a0 === JSONB_ARRAY || lType === JSONB_ARRAY) this.comparable(l, what);
-      const key = (x: AstNode): AstNode => this.jsonbKey(x);
+      // equality by the equality key (no collation: equalKey), an order by the collation's
+      const equating = ["=", "<>", "!="].includes(name) || ["AEXPR_DISTINCT", "AEXPR_NOT_DISTINCT", "AEXPR_NULLIF"].includes(String(b.kind));
+      const key = (x: AstNode): AstNode => equating ? this.equalKey(x) : this.jsonbKey(x);
       switch (b.kind) {
         case "AEXPR_OP": return op(name, key(l), key(r));
         case "AEXPR_DISTINCT": case "AEXPR_NOT_DISTINCT": return { A_Expr: { ...b, lexpr: key(l), rexpr: key(r) } };
@@ -2001,8 +2069,12 @@ class Rewriter {
     if (name === "sum" && this.typeOf(args[0] ?? { A_Const: {} }) === FLOAT4 && argType(0) === FLOAT4) throw new Unrewritable("sum() of a real is not supported by Mason (Postgres adds in single precision)", "sum(x::double precision)", "sum-real");
     // count(DISTINCT j) counts jsonb's equal values once: their keys, counted (another aggregate's DISTINCT would hand
     // the key itself to the aggregate)
-    if (b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 && this.typeOf(args[0]) === JSONB) args[0] = this.jsonbKey(args[0]);
+    if (b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 && this.typeOf(args[0]) === JSONB) args[0] = this.equalKey(args[0]);
     else if (b.agg_distinct === true && args[0] !== undefined) this.comparable(args[0], `${name}(DISTINCT …) of`);
+    // a jsonb array searched for an element: jsonb's equality, where DuckDB's list functions compare the text
+    if (["array_position", "array_positions", "array_remove", "array_replace"].includes(name) && args[0] !== undefined && this.typeOf(args[0]) === JSONB_ARRAY) {
+      throw new Unrewritable(`${name}() of a jsonb array is not supported by Mason (Postgres compares its elements by jsonb's equality)`, "compare an element: a[1] = '…'::jsonb", "jsonb-compare");
+    }
     // a function-style cast (`date(x)`, `text(x)`, `numeric(x)`) is the cast
     if (t !== null && (t.node === "COERCEVIAIO" || t.node === "RELABELTYPE" || (t.node === "FUNCEXPR" && t.format !== null && t.format !== 0 && t.format !== 3)) && args.length === 1) {
       if (t.type === TEXT || t.type === VARCHAR) { const text = this.pgText(args[0]!, this.typeOf(args[0]!), true); if (text !== null) return text; }

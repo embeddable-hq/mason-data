@@ -365,6 +365,18 @@ function* matrix(): Generator<{ name: string; sql: string }> {
   // ordinal or output name sorts a copy of that under the database's collation (it sorted by bytes before)
   yield q("text decided by the key, ORDER BY its ordinal and its name", "SELECT t AS name, id FROM typed GROUP BY id ORDER BY 1, 2 LIMIT 40");
   yield q("jsonb: grouped view of the copy, counted", `SELECT count(*) AS "count", min("e"."id") FROM "public"."jorder" AS "e" GROUP BY "e"."j" ORDER BY ("e"."j") IS NULL ASC, "e"."j" DESC LIMIT 100`);
+  // the review's: a jsonb the GROUP BY's key decides, sorted by its ordinal; a set operation sorted by a jsonb; a * sorted
+  // by another column's number; containment with ANY, and a raw scalar's containment of an array
+  yield q("jsonb: decided by the key, ORDER BY its ordinal", "SELECT id, j FROM jorder GROUP BY id ORDER BY 2, 1");
+  yield q("jsonb: decided by the key, DISTINCT", "SELECT count(*) FROM (SELECT DISTINCT j FROM jorder GROUP BY id) s");
+  yield q("jsonb: UNION ALL sorted by its ordinal", "SELECT id, j FROM jorder WHERE id < 40 UNION ALL SELECT id, j FROM jorder WHERE id >= 40 ORDER BY 2, 1");
+  yield q("jsonb: UNION ALL sorted by its name", "SELECT id, j FROM jorder WHERE id < 40 UNION ALL SELECT id, j FROM jorder WHERE id >= 40 ORDER BY j DESC, id");
+  yield q("jsonb: a * sorted by another column's number", "SELECT * FROM (SELECT id, j FROM jorder) s ORDER BY 1");
+  yield q("jsonb: contained, with ANY", `SELECT id FROM jorder WHERE j @> ANY (ARRAY['{"a": 1}'::jsonb, '[1]', '"a"']) OR j <@ ALL (ARRAY['[1, 2, "b"]'::jsonb, '[1, "b"]']) ORDER BY id`);
+  yield q("jsonb: a raw scalar's containment", `SELECT id, j @> '[1]', '[1, "a"]' @> j FROM jorder ORDER BY id`);
+  yield q("jsonb: equality beside a value only a sort refuses", `SELECT count(*), min(n) FROM (SELECT j, id AS n FROM jorder UNION ALL SELECT '{"t": "❤️"}', 0 FROM public.one) s WHERE j = '{"a": 1.00}' OR j = '{"t": "❤️"}' GROUP BY j ORDER BY 2`);
+  yield q("jsonb[]: contained, searched (refused)", "SELECT id FROM typed_arrays WHERE jba @> ARRAY['{\"a\": 1.0}'::jsonb] OR array_position(jba, '1'::jsonb) IS NOT NULL ORDER BY id");
+  yield q("jsonb: a row holding one, compared (refused)", "SELECT id FROM jorder WHERE (id, j) = (2, '\"a\"') ORDER BY id");
   yield q("jsonb: an empty string, as a key, a member and the value", `SELECT id FROM jorder, (VALUES ('{"": 1}'::jsonb), ('[""]'), ('""'), ('{"": ""}')) v(x) WHERE id < 3 ORDER BY x, id`);
   yield q("jsonb: a 1,000-string array's last string", `SELECT id FROM jorder WHERE j::text LIKE '"%' ORDER BY ('[' || repeat('"x", ', 999) || (j::text) || ']')::jsonb, id`);
   // json has no ordering and no equality: Postgres refuses each (42883), and so does Mason, in Postgres's words

@@ -134,6 +134,13 @@ test("every way a statement sorts, groups or compares a jsonb is answered as Pos
       "SELECT count(*), min(id) FROM jo GROUP BY j ORDER BY 2", "SELECT count(*), min(id) FROM jo GROUP BY j -> 'a' ORDER BY 2", "SELECT count(DISTINCT j), count(DISTINCT j -> 'a') FROM jo",
       "SELECT count(*) FROM (SELECT DISTINCT j FROM jo) s", "SELECT count(*) FROM (SELECT DISTINCT ON (j) id FROM jo ORDER BY j, id) s", "SELECT DISTINCT ON (j) id FROM jo ORDER BY j, id",
       "SELECT id, count(*) OVER (PARTITION BY j) FROM jo ORDER BY id", "SELECT min(id) FROM jo GROUP BY j HAVING j = '1' OR count(*) > 2 ORDER BY 1",
+      // a set operation sorted by a jsonb column, by its ordinal and by its name
+      "SELECT id, j FROM jo WHERE id < 10 UNION ALL SELECT id, j FROM jo WHERE id >= 10 ORDER BY 2, 1",
+      "SELECT id, j FROM jo WHERE id < 10 UNION ALL SELECT id, j FROM jo WHERE id >= 10 ORDER BY j DESC, id",
+      // a * sorted by the number of a column that is no jsonb; a jsonb's containment with ANY (its own operator)
+      "SELECT * FROM (SELECT id, j FROM jo) s ORDER BY 1", "SELECT id FROM jo WHERE j @> ANY (ARRAY['{\"a\": 1}'::jsonb, '[1]']) ORDER BY id",
+      // a raw scalar contains no array, an array may contain a raw scalar (JsonbDeepContains)
+      "SELECT id FROM jo WHERE j @> '[1]' ORDER BY id", "SELECT id FROM jo WHERE '[1, 2, \"a\"]' @> j ORDER BY id",
       // json has no order and no equality: Postgres's own refusal
     ];
     for (const sql of alike) assert.deepEqual(await s.rows(sql), await postgres(sql), sql);
@@ -159,7 +166,9 @@ test("every way a statement sorts, groups or compares a jsonb is answered as Pos
       `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM "public"."jo" AS "e" GROUP BY "e"."j" ORDER BY ("e"."j") IS NULL ASC, "e"."j" DESC, "count" DESC LIMIT 100 OFFSET 0`,
       "SELECT j, count(*) FROM jo GROUP BY j ORDER BY 1", "SELECT j, count(*) FROM jo GROUP BY 1 ORDER BY 1 DESC NULLS LAST",
       `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM "public"."jo" AS "e" GROUP BY "e.j" HAVING "e"."j" IS NOT NULL AND count(*) >= 1 ORDER BY "e.j" DESC`,
-      "SELECT j AS v, count(*) AS n FROM jo GROUP BY v HAVING j <> '1' ORDER BY v, n",
+      "SELECT j AS v, count(*) AS n FROM jo GROUP BY v HAVING j <> '1' ORDER BY v, n", "SELECT j AS v, count(*) FROM jo GROUP BY v ORDER BY v",
+      // a jsonb the GROUP BY's key decides (id is jo's primary key): through any_value, sorted by its ordinal
+      "SELECT j, id FROM jo GROUP BY id ORDER BY 1, 2", "SELECT j, id FROM jo GROUP BY id ORDER BY j DESC, id", "SELECT DISTINCT j FROM jo GROUP BY id ORDER BY 1",
     ];
     for (const sql of grouped) {
       const got = await s.rows(sql), want = await postgres(sql);
@@ -169,6 +178,12 @@ test("every way a statement sorts, groups or compares a jsonb is answered as Pos
       const unequal = (await truth.query<{ i: number }>("SELECT i FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS u(a, b, i) WHERE a::jsonb IS DISTINCT FROM b::jsonb",
         [pairs.map((p) => p[0]), pairs.map((p) => p[1])])).rows;
       assert.deepEqual(unequal, [], `${sql}: each group's value equal to Postgres's, in its order`);
+    }
+    // a row holding a jsonb sorted or grouped: refused by name (a row value's own gap, or jsonb's)
+    for (const sql of ["SELECT id FROM jo ORDER BY (j, id)", "SELECT count(*) FROM jo GROUP BY (j, j -> 'a')"]) {
+      const e = await s.refusal(sql);
+      assert.equal(e.code, "0A000", sql);
+      assert.match(`${e.message} ${e.detail ?? ""}`, /Mason gap (row-value|jsonb-compare)/, sql);
     }
     // an output name in HAVING is no column to Postgres (42703): refused as Postgres refuses it
     const aliased = "SELECT j AS v, count(*) FROM jo GROUP BY v HAVING v <> '1'";
@@ -182,6 +197,11 @@ test("every way a statement sorts, groups or compares a jsonb is answered as Pos
       "SELECT a.id FROM jo a JOIN jo b USING (j)", "SELECT j FROM jo UNION SELECT j FROM jo", "SELECT j FROM jo INTERSECT ALL SELECT j FROM jo", "SELECT DISTINCT * FROM (SELECT id, j FROM jo) s", "SELECT DISTINCT s.* FROM (SELECT j FROM jo) s",
       "SELECT j, count(*) FROM jo GROUP BY ROLLUP (j)", "SELECT array_agg(DISTINCT j) FROM jo", "SELECT id FROM jo ORDER BY ja", "SELECT id FROM jo WHERE ja = ARRAY['1'::jsonb]",
       "SELECT id FROM jo WHERE j = ANY (ja)", "SELECT id FROM jo WHERE j BETWEEN SYMMETRIC '10' AND '1'",
+      // a * sorted by a jsonb's column number; rows holding a jsonb compared; a jsonb array contained or searched
+      "SELECT * FROM (SELECT id, j FROM jo) s ORDER BY 2", "SELECT s.* FROM (SELECT id, j FROM jo) s ORDER BY 2 DESC",
+      "SELECT id FROM jo WHERE (id, j) = (2, '{\"a\": 1}')", "SELECT id FROM jo WHERE (j, id) IN (SELECT j, id FROM jo)", "SELECT id FROM jo WHERE (id, j) < (2, '1')",
+      "SELECT id FROM jo WHERE ja @> ARRAY['{\"a\": 1.0}'::jsonb]", "SELECT id FROM jo WHERE ja <@ ARRAY['{\"a\": 1.0}'::jsonb]", "SELECT id FROM jo WHERE ja && ARRAY['1.0'::jsonb]",
+      "SELECT array_position(ja, '1.0'::jsonb) FROM jo", "SELECT array_remove(ja, '1.0'::jsonb) FROM jo",
     ]) {
       const e = await s.refusal(sql);
       assert.equal(e.code, "0A000", sql);
@@ -233,6 +253,24 @@ test("under ICU and a libc locale a jsonb's strings sort by the collation's key 
         const e = await s.refusal(`SELECT t FROM jo, (VALUES ('"a"'), ('{"k": ["x${String.fromCodePoint(0x0E40)}"]}')) v(t) WHERE jo.id = 1 ORDER BY t::jsonb`);
         assert.equal(e.code, "0A000");
         assert.match(e.message, /U\+0E40.*Mason gap libc-uncovered/);
+        // EQUALITY NEEDS NO COLLATION (a deterministic one's equal strings are equal bytes): a row holding a string the
+        // order does not cover — an emoji's variation selector, U+FE0F — is equated, grouped and made DISTINCT, and only
+        // a sort refuses it, by name
+        const heart = `${String.fromCodePoint(0x2764)}${String.fromCodePoint(0xfe0f)}`;
+        // (beside a row of the copy: a statement of no table is the catalog Postgres's, never the rewrite's)
+        const rowsAs = (alias: string): string => `(SELECT x, n FROM jo, (VALUES ('{"t": "${heart}"}'::jsonb, 1), ('{"a": 1}', 2), ('{"a": 1.0}', 3), ('{"t": "${heart}"}', 4)) v(x, n) WHERE jo.id = 1) ${alias}`;
+        const rows = rowsAs("w");
+        for (const [sql, want] of [
+          [`SELECT n FROM ${rows} WHERE x = '{"a": 1.00}' ORDER BY n`, [["2"], ["3"]]],
+          [`SELECT n FROM ${rows} WHERE x IN ('{"t": "${heart}"}', '[]') AND x <> '{"a": 1}' AND x IS DISTINCT FROM '1' ORDER BY n`, [["1"], ["4"]]],
+          [`SELECT count(*), min(n) FROM ${rows} GROUP BY x ORDER BY 2`, [["2", "1"], ["2", "2"]]],
+          [`SELECT count(DISTINCT x), count(*) FROM (SELECT DISTINCT x FROM ${rows}) s`, [["2", "2"]]],
+          [`SELECT a.n, b.n FROM ${rowsAs("a")} JOIN ${rowsAs("b")} ON a.x = b.x AND a.n < b.n ORDER BY 1`, [["1", "4"], ["2", "3"]]],
+          [`SELECT n, count(*) OVER (PARTITION BY x), CASE x WHEN '{"a": 1}' THEN 'a' ELSE 'other' END, nullif(x, '{"a": 1}') IS NULL FROM ${rows} ORDER BY n`,
+            [["1", "2", "other", "f"], ["2", "2", "a", "t"], ["3", "2", "a", "t"], ["4", "2", "other", "f"]]],
+        ] as const) assert.deepEqual(await s.rows(sql), want, sql);
+        const sorted = await s.refusal(`SELECT n FROM ${rows} ORDER BY x`);
+        assert.match(sorted.message, /U\+2764.*Mason gap libc-uncovered/);
         // a character the order does not cover (U+200B here) refuses as a jsonb's string exactly as it does as text
         const asTextZ = await s.refusal(`SELECT t FROM jo, (VALUES ('a'), ('${zwsp}')) v(t) WHERE jo.id = 1 ORDER BY t`);
         const asJsonbZ = await s.refusal(`SELECT t FROM jo, (VALUES ('a'), ('${zwsp}')) v(t) WHERE jo.id = 1 ORDER BY to_jsonb(t)`);
