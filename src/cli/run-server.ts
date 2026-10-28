@@ -37,7 +37,7 @@ import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type 
 import { PollRefused, type CopyState, type PolledTable, type StreamStatus } from "../duck/sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { RequestLedger } from "../duck/requests.ts";
-import { requestFilter, requestFilterText } from "./request-filter.ts";
+import { eventLimit, requestFilter, requestFilterText } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
@@ -223,8 +223,8 @@ export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now(
  * they are kept. `mason logs --events --json` is this; `mason status --json` `recentErrors` its latest failures.
  */
 export async function events(ctx: RunContext, q: URLSearchParams): Promise<{ events: ReturnType<typeof withRestarts>; keptDays: number }> {
-  const limit = Number(q.get("limit") ?? 40);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 10_000) throw new Refusal(400, "limit is a whole number of events, 1 to 10000");
+  const limit = eventLimit(q.get("limit") ?? undefined, "limit");
+  if (typeof limit !== "number") throw new Refusal(400, limit.message, limit);
   const sinceText = q.get("since");
   const since = sinceText === null ? undefined : Date.parse(sinceText);
   if (since !== undefined && Number.isNaN(since)) throw new Refusal(400, `since is a time, as ISO 8601 (2026-10-28T09:00:00Z), not ${JSON.stringify(sinceText)}`);

@@ -569,6 +569,9 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
       [["logs", "--requests", "--failed", "--outcome", "ok"], /mason logs: --failed is every outcome but ok: name it or --outcome, never both/],
       [["logs", "--since", "2h"], /mason logs: --since is a filter of --requests/],
       [["logs", "--running", "--requests"], /mason logs: --running lists the statements running now; --requests is the request log's/],
+      [["logs", "--events", "-n", "20000"], /mason logs: -n is a whole number of events, 1 to 10000/],
+      [["logs", "--events", "-n", "0"], /mason logs: -n is a whole number of events, 1 to 10000/],
+      [["logs", "--running", "-n", "5"], /mason logs: --running lists every statement running now: -n \(--lines\) does not apply to it/],
     ] as Array<[string[], RegExp]>) {
       const a = await run(argv);
       assert.equal(a.code, 2, `${argv.join(" ")}: ${a.stdout}${a.stderr}`);

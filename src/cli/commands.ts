@@ -37,7 +37,7 @@ import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery } from "../duck/requests.ts";
 import type { RunningStatement } from "../api/postgres/server.ts";
-import { DEFAULT_REQUEST_LIMIT, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
+import { DEFAULT_REQUEST_LIMIT, eventLimit, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -1128,7 +1128,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
     mason logs --events --failed  the sync's latest failures
     mason logs --running          the statements running now, and their sessions
 
-  -n, --lines <n>  how many lines, or with --requests or --events how many of them (default 40; requests 1 to 10000)
+  -n, --lines <n>  how many lines, or with --requests or --events how many of them (default 40; 1 to 10000 for each)
   -f, --follow     keep printing new lines until Ctrl-C
   --start          mason start's own terminal instead (its steps, then only the warnings and errors)
   --requests       the Postgres API's requests, from the run's request log (Mason must be running)
@@ -1234,8 +1234,7 @@ async function eventLogs(limit: number, failedOnly: boolean, json: boolean): Pro
   return guarded("logs", json, async () => {
     const reply = await callRun(r0.run, "GET", `/api/events?limit=${limit}${failedOnly ? "&failed=1" : ""}`);
     if (reply.status !== 200) {
-      return failed("logs", { message: String(reply.body.error ?? `the run answered ${reply.status}`), code: reply.status === 409 ? "refused" : "failed",
-        next: [["mason status", "each table's copy and its error now"], ["mason logs", "Mason's log, where each event is a line too"]] }, { json });
+      return failed("logs", runFailure(reply, [["mason status", "each table's copy and its error now"], ["mason logs", "Mason's log, where each event is a line too"]]), { json });
     }
     const events = reply.body.events as SyncEvent[];
     const keptDays = Number(reply.body.keptDays);
@@ -1294,6 +1293,9 @@ export async function logs(argv: string[]): Promise<number> {
     const whose = other === "--requests" ? "the request log's" : other === "--events" ? "the sync's events'" : "the log file's";
     return failed("logs", { message: `--running lists the statements running now; ${other} is ${whose}`, code: "usage", fix: `mason logs --running, or mason logs ${other}` }, { json });
   }
+  if (f.values.running && f.values.lines !== undefined) {
+    return failed("logs", { message: "--running lists every statement running now: -n (--lines) does not apply to it", code: "usage", fix: "mason logs --running" }, { json });
+  }
   if (f.values.requests && (f.values.start || f.values.follow)) return failed("logs", { message: `--requests lists the request log; ${f.values.start ? "--start" : "-f"} is the log file's`, code: "usage", fix: "mason logs --requests, or mason logs " + (f.values.start ? "--start" : "-f") }, { json });
   if (f.values.events && (f.values.start || f.values.follow)) return failed("logs", { message: `--events lists the sync's events; ${f.values.start ? "--start" : "-f"} is the log file's`, code: "usage", fix: "mason logs --events, or mason logs " + (f.values.start ? "--start" : "-f") }, { json });
   if (json && f.values.follow) return failed("logs", { message: "-f prints lines as they come, and --json is one answer", code: "usage", fix: "mason logs --json, or mason logs -f" }, { json });
@@ -1309,8 +1311,9 @@ export async function logs(argv: string[]): Promise<number> {
   const lines = f.values.lines === undefined ? 40 : Number(f.values.lines);
   if (!Number.isInteger(lines) || lines < 0) return failed("logs", { message: `-n (--lines) is a number of lines, not ${JSON.stringify(f.values.lines)}`, code: "usage" }, { json });
   if (f.values.events) {
-    if (lines < 1) return failed("logs", { message: "-n with --events is a number of events, 1 or more", code: "usage" }, { json });
-    return eventLogs(lines, f.values.failed === true, json);
+    const limit = eventLimit(typeof f.values.lines === "string" ? f.values.lines : undefined, "-n");
+    if (typeof limit !== "number") return failed("logs", { ...limit, usage: LOGS_USAGE }, { json });
+    return eventLogs(limit, f.values.failed === true, json);
   }
   // a stopped run's log is still worth reading: the project's, running or not
   const t = theProject(process.cwd());

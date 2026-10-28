@@ -14,6 +14,10 @@ import { didYouMean } from "../lib/did-you-mean.ts";
 export const DEFAULT_REQUEST_LIMIT = 40;
 export const MAX_REQUEST_LIMIT = 10_000;
 
+/** How many sync events a read returns unless it says, and the most it may. */
+export const DEFAULT_EVENT_LIMIT = 40;
+export const MAX_EVENT_LIMIT = MAX_REQUEST_LIMIT;
+
 /** The filters as text, as a command line or a query string carries them (absent: not asked). */
 export interface RequestFilterText {
   limit?: string | undefined;
@@ -47,6 +51,13 @@ function timeOf(name: string, text: string, now: number): string | Failure {
     return usage(`${name} ${JSON.stringify(text)} is not a time`, "an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone (2026-10-28, 2026-10-28T09:00:00Z)");
   }
   return new Date(t).toISOString();
+}
+
+/** `-n` / `limit` of the sync's events: a whole number, 1 to the cap, said in the entrance's own spelling of the key. */
+export function eventLimit(text: string | undefined, key: string): number | Failure {
+  const limit = text === undefined ? DEFAULT_EVENT_LIMIT : Number(text);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_EVENT_LIMIT) return usage(`${key} is a whole number of events, 1 to ${MAX_EVENT_LIMIT}`);
+  return limit;
 }
 
 /**
