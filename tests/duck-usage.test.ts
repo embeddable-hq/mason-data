@@ -21,7 +21,8 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-usage-"));
 const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined, { memoryLimit: "512MiB" });
 after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
-const facts = { copyBytes: 12_345, totals: { added: 3, copied: 2, failed: 1, rows: 1_000 }, oldestSyncSeconds: 42.5, streamLag: { bytes: 2_048, seconds: 1.5 }, copied: [] as string[] };
+const facts = { copyBytes: 12_345, totals: { added: 3, copied: 2, failed: 1, rows: 1_000 }, oldestSyncSeconds: 42.5, streamLag: { bytes: 2_048, seconds: 1.5 }, copied: [] as string[],
+  slotWalHeldBytes: 4_096, diskFreeBytes: 80 * 2 ** 30, sessionsOpen: 3 };
 const row = (durationMs: number, o: Partial<ApiLogRow> = {}): ApiLogRow => ({ requestId: "r", at: new Date(), method: "QUERY", status: 200, durationMs, ...o });
 const NEVER = 3_600_000;
 
@@ -50,6 +51,7 @@ test("a sample is the run's facts, the interval's statements by the request log 
     statements: 23, statementsRefused: 1, statementsFailed: 1, statementsCancelled: 1, rowsSent: 100, bytesSent: 2_150,
     // the 20 completed: 10 … 200 ms, interpolated as quantile_cont — 105 and 190.5, rounded as the summary rounds
     durationP50Ms: 105, durationP95Ms: 191, streamLagBytes: 2_048, streamLagSeconds: 1.5, rssBytes: 900, heapUsedBytes: 300, copyMemoryLimitBytes: 512 * 2 ** 20,
+    slotWalHeldBytes: 4_096, diskFreeBytes: 80 * 2 ** 30, sessionsOpen: 3,
   });
   assert.ok(typeof copyMemoryBytes === "number" && copyMemoryBytes >= 0, `the copy's memory in use is read: ${copyMemoryBytes}`);
   assert.deepEqual([b!.at, b!.statements, b!.statementsFailed, b!.rowsSent, b!.bytesSent, b!.durationP50Ms, b!.durationP95Ms], ["2026-10-28T09:02:00.000Z", 1, 0, 1, 0, 3, 3], "the next interval counts afresh");
@@ -68,7 +70,7 @@ test("re-bucketed in one query: buckets of the step from since, each count summe
   let clock = Date.parse("2026-10-28T10:00:00.000Z");
   let level = 0;
   const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: NEVER });
-  u.start(async () => ({ ...facts, copyBytes: 1_000 + level, totals: { ...facts.totals, rows: 10 * level } }));
+  u.start(async () => ({ ...facts, copyBytes: 1_000 + level, totals: { ...facts.totals, rows: 10 * level }, diskFreeBytes: 10_000 - level }));
   for (let m = 1; m <= 6; m++) {
     level = m === 2 ? 50 : m;
     if (m !== 4) u.count(row(m * 100, { rows: m }));
@@ -84,6 +86,8 @@ test("re-bucketed in one query: buckets of the step from since, each count summe
     ["2026-10-28T10:03:00.000Z", 180, 2, 8, 1_005, 50, 500],
     ["2026-10-28T10:06:00.000Z", 60, 1, 6, 1_006, 60, 600],
   ]);
+  // the disk free is the one level a bucket says at its LOWEST: its worst moment
+  assert.deepEqual(buckets.map((s) => s.diskFreeBytes), [9_950, 9_995, 9_994]);
   assert.deepEqual(await u.samples({ since: "2026-10-28T10:02:00Z", until: "2026-10-28T10:04:00Z" }).then((r) => r.map((s) => s.at)),
     ["2026-10-28T10:02:00.000Z", "2026-10-28T10:03:00.000Z"], "since included, until not");
   await u.close();
@@ -215,4 +219,36 @@ test("samples are taken every interval once started, one after the other, and ne
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(taken, at, "nothing after close");
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
+});
+
+test("a samples table a run before a column made gains it, and a sample is written and read back with it (the slot's WAL, the disk free, the sessions open)", async () => {
+  const { UsageSampler, USAGE_TABLE } = await usage();
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "mason-usage-old-"));
+  const old = await DuckStore.open(path.join(d, "duck.db"), () => undefined, { memoryLimit: "256MiB" });
+  try {
+    // the samples' table as the first samples made it, without the columns added since
+    await old.writer.run("CREATE SCHEMA IF NOT EXISTS _mason");
+    await old.writer.run(`CREATE TABLE ${USAGE_TABLE} (sampled_at TIMESTAMPTZ, seconds DOUBLE, copy_bytes BIGINT, copy_rows BIGINT, tables_added INTEGER, tables_copied INTEGER, ` +
+      `tables_failed INTEGER, oldest_sync_seconds DOUBLE, statements BIGINT, statements_refused BIGINT, statements_failed BIGINT, statements_cancelled BIGINT, rows_sent BIGINT, ` +
+      `bytes_sent BIGINT, duration_p50_ms INTEGER, duration_p95_ms INTEGER, stream_lag_bytes BIGINT, stream_lag_seconds DOUBLE, rss_bytes BIGINT, heap_used_bytes BIGINT, ` +
+      `copy_memory_bytes BIGINT, copy_memory_limit_bytes BIGINT)`);
+    const said: string[] = [];
+    let clock = Date.parse("2026-10-28T13:00:00.000Z");
+    const u = await UsageSampler.open(old, (l) => said.push(l), { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: NEVER });
+    u.start(async () => facts);
+    clock += 60_000;
+    await u.sample();
+    u.start(async () => ({ ...facts, slotWalHeldBytes: null, diskFreeBytes: null, sessionsOpen: 0 }));
+    clock += 60_000;
+    await u.sample();
+    assert.deepEqual(said.filter((l) => /failed/.test(l)), [], "every sample written");
+    const got = await u.samples({ since: "2026-10-28T00:00:00Z", until: "2026-10-29T00:00:00Z" });
+    assert.deepEqual(got.map((x) => x.slotWalHeldBytes), [4_096, null], "the WAL the slot holds; null when polling, never a 0");
+    assert.deepEqual(got.map((x) => x.diskFreeBytes), [80 * 2 ** 30, null], "the disk free; null when it could not be read, never a 0");
+    assert.deepEqual(got.map((x) => x.sessionsOpen), [3, 0], "the sessions open");
+    await u.close();
+  } finally {
+    old.close();
+    fs.rmSync(d, { recursive: true, force: true });
+  }
 });

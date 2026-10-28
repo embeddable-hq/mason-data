@@ -60,6 +60,9 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   TLS start** (`directTls`): a connection's first byte 0x16 is a ClientHello (`sslnegotiation=direct`, a
   TLS terminator in front) and is TLS at once, ALPN `postgresql`, the bytes read unshifted onto the socket whole —
   never a second read path; a plain listener closes it saying so in the log.
+- **The sessions open are the listener's own, counted in memory** (`openSessions`: logged-in sessions by user and
+  application_name, and how many run a statement): `/api/state` `sessions`, `mason status`, the usage samples — never a
+  query of the request log.
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
   `application_name`, a token's NAME (never the token) or the user's name. A refused statement is recorded in

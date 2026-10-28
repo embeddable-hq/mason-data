@@ -177,3 +177,112 @@ test("a table the named publication does not carry is never credited with the st
     assert.ok(Math.abs(Date.parse(synced.at) - (Date.now() - 60 * 60_000)) < 60_000, synced.at);
   });
 });
+
+test("the slot's WAL is read with the database's position, at most every 30 s, and a read that failed is its error, never a 0", async () => {
+  // imported when the test runs: at a commit without them this file still loads, and the test fails by name
+  const m = await import("../src/duck/sync.ts") as unknown as { slotWalOf?: (s: unknown, name: string, at: number) => unknown; SLOT_READ_MS?: number };
+  assert.equal(typeof m.slotWalOf, "function", "src/duck/sync.ts slotWalOf");
+  const at = Date.parse("2026-10-28T09:00:00.000Z");
+  const row = { exists: true, active: true, activePid: "7", plugin: "pgoutput", database: "x", confirmedFlush: "0/10", walStatus: "reserved", retainedBytes: 123_456n, safeBytes: 4_096n };
+  assert.deepEqual(m.slotWalOf!(row, "mason_x", at), { walHeldBytes: 123_456, walStatus: "reserved", safeWalSizeBytes: 4_096, at: "2026-10-28T09:00:00.000Z" });
+  assert.deepEqual(m.slotWalOf!({ ...row, safeBytes: null }, "mason_x", at), { walHeldBytes: 123_456, walStatus: "reserved", safeWalSizeBytes: null, at: "2026-10-28T09:00:00.000Z" },
+    "no cap: max_slot_wal_keep_size unset");
+  assert.deepEqual(m.slotWalOf!({ ...row, walStatus: "lost", retainedBytes: null, safeBytes: null }, "mason_x", at), { walHeldBytes: 0, walStatus: "lost", safeWalSizeBytes: null, at: "2026-10-28T09:00:00.000Z" },
+    "a lost slot's WAL was freed: it holds none");
+  assert.match(String((m.slotWalOf!({ ...row, retainedBytes: null }, "mason_x", at) as { error?: string }).error), /no restart position yet/, "unknown is said, never a 0");
+  assert.match(String((m.slotWalOf!({ ...row, exists: false }, "mason_x", at) as { error?: string }).error), /^replication slot mason_x does not exist on the database/);
+  await aRun(async ({ sync }) => {
+    const s = sync as unknown as { slotWal: { wal: unknown; at: number } | null };
+    const status = async (): Promise<unknown> => (await sync.streamStatus())!.slotWal;
+    // the source is not there: the position and the slot are each said as their error
+    assert.match(String((await status() as { error: string }).error), /^the database could not be reached: /);
+    // read 10 s ago: not again (the position is read again, at most every 5 s; the slot is not due)
+    const recent = { wal: { walHeldBytes: 1, walStatus: "reserved", safeWalSizeBytes: null, at: new Date(Date.now() - 10_000).toISOString() }, at: Date.now() - 10_000 };
+    s.slotWal = recent;
+    (sync as unknown as { dbPosition: unknown }).dbPosition = null;
+    assert.deepEqual(await status(), recent.wal, "within SLOT_READ_MS the slot is not read again");
+    s.slotWal = { ...recent, at: Date.now() - m.SLOT_READ_MS! - 1 };
+    (sync as unknown as { dbPosition: unknown }).dbPosition = null;
+    assert.match(String((await status() as { error: string }).error), /^the database could not be reached: /, "past it, read again");
+  });
+});
+
+test("the disk under the copy: free where its file is, by the sync's own measure, and what the copies running are projected to add, as their chunks' check computed it", async () => {
+  await aRun(async ({ store, sync }) => {
+    const s = sync as unknown as { diskStatus?: () => unknown; diskFree: (dir: string) => number; copyLive: Map<string, Record<string, unknown>>;
+      diskShort: (t: AddedTable, p: unknown, disk: unknown, live: Record<string, unknown>) => string | null };
+    assert.equal(typeof s.diskStatus, "function", "src/duck/sync.ts Sync.diskStatus");
+    const dir = path.dirname(store.file);
+    s.diskFree = () => 80 * 2 ** 30;
+    assert.deepEqual(s.diskStatus!(), { path: dir, freeBytes: 80 * 2 ** 30, projectedBytes: null }, "no copy running: nothing projected");
+    // a copy whose chunks' check projected what its pages left add (copyDiskProjection): kept on its live state, said
+    const live: Record<string, unknown> = { diskNeeded: null };
+    s.copyLive.set("public.t", live);
+    const short = s.diskShort(T, { pages: 100, done: [{ first: 0, end: 50 }] }, { bytesAtStart: 0, doneAtStart: [] }, live);
+    assert.equal(short, null, "80 GiB free: the copy goes on");
+    assert.ok(typeof live.diskNeeded === "number" && live.diskNeeded > 0, `what its 50 pages left would add: ${live.diskNeeded}`);
+    s.copyLive.set("public.u", { diskNeeded: 1_000 });
+    s.copyLive.set("public.v", { diskNeeded: null });
+    assert.equal((s.diskStatus!() as { projectedBytes: number }).projectedBytes, Math.round((live.diskNeeded as number) + 1_000), "summed over the copies that can say");
+    // a free space that cannot be read is its error, never a 0
+    s.diskFree = () => { throw new Error("ENOENT: no such file or directory"); };
+    const failed = s.diskStatus!() as { freeBytes: unknown; error?: string };
+    assert.equal(failed.freeBytes, null);
+    assert.match(String(failed.error), /^the free space where the copy is could not be read: ENOENT/);
+    s.copyLive.clear();
+  });
+});
+
+test("a stream's failure is over when the stream next applies a batch WITH A POSITION — never at a pass's publication check, nor at a piece of a large transaction", async () => {
+  await aRun(async ({ sync, events, st }) => {
+    const s = sync as unknown as { settlePrepared?: (t: readonly AddedTable[]) => Promise<void>; wholeFailure: { stream: string | null };
+      applyStreamed: (b: Map<string, TableChanges>, lsn: bigint | null, at: Date) => Promise<void> };
+    assert.equal(typeof s.settlePrepared, "function", "src/duck/sync.ts Sync.settlePrepared: what a pass's publication check settles");
+    // the stream failed (its error on the table it kept current, as startStream's failure records it)
+    s.wholeFailure.stream = "replication: the slot is in use";
+    const said = (): string[] => events.map((e) => `${e.kind} ${e.table ?? "-"}: ${e.message}`);
+    // a pass: the publication and slot are as they should be — that says nothing of the copy
+    await s.settlePrepared!([T]);
+    assert.equal(st().error, "replication: the slot is in use", "the publication check does not clear the stream's failure");
+    assert.deepEqual(said(), [], "and says no recovery");
+    // a piece of a large transaction: written, but no position yet
+    await s.applyStreamed(batch({ 11: "piece" }), null, new Date());
+    assert.equal(st().error, "replication: the slot is in use", "a piece without a position does not");
+    assert.deepEqual(said(), []);
+    // a batch with a position, of another table only (the database committed): every streamed table is current as of it
+    const other: Map<string, TableChanges> = new Map([["public.other", batch({ 1: "x" }).get("public.t")!]]);
+    await s.applyStreamed(other, 0x40n, new Date());
+    assert.equal(st().error, null, "current as of the batch's position");
+    assert.deepEqual(said(), [
+      "recovered -: the stream applies changes again (it had failed: replication: the slot is in use)",
+      "recovered public.t: current again (it had failed: replication: the slot is in use)",
+    ]);
+  });
+});
+
+test("a named publication's gap is its own error and its own recovery: set by the pass that finds it, cleared by the pass that finds the table carried again", async () => {
+  await aRun(async ({ sync, events, st }) => {
+    const s = sync as unknown as { settlePrepared: (t: readonly AddedTable[]) => Promise<void>; unpublished: Map<string, string>; wholeFailure: { prepare: string | null };
+      states: Map<string, Record<string, unknown>> };
+    // the table's last error was the stream's (from the run before): not the pass's to clear
+    await s.settlePrepared([T]);
+    assert.equal(st().error, "replication: the slot is in use");
+    s.unpublished.set("public.t", "publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t");
+    await s.settlePrepared([T]);
+    assert.equal(st().error, "replication: publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t");
+    assert.deepEqual(events.map((e) => e.kind), ["stream_failed"]);
+    s.unpublished.clear();
+    await s.settlePrepared([T]);
+    assert.equal(st().error, null, "carried again: its gap's error cleared by the pass that found it");
+    assert.deepEqual(events.map((e) => `${e.kind} ${e.table}`), ["stream_failed public.t", "recovered public.t"]);
+    // a failure to prepare: a table never copied has it cleared by the pass that prepares (its copy is next); a copied
+    // one keeps it until the stream applies a batch with a position
+    s.wholeFailure.prepare = "replication: the slot could not be read: connection refused";
+    s.states.set("public.t", { ...s.states.get("public.t")!, phase: "failed", error: s.wholeFailure.prepare });
+    await s.settlePrepared([T]);
+    assert.equal(st().error, null, "never copied: cleared");
+    s.states.set("public.t", { ...s.states.get("public.t")!, phase: "copied", error: s.wholeFailure.prepare });
+    await s.settlePrepared([T]);
+    assert.equal(st().error, s.wholeFailure.prepare, "copied: current only once the stream says so");
+  });
+});

@@ -22,6 +22,28 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | `GET /api/logs?lines=&since=` | `mason logs --json` | the run's last log entries from memory (`mason serve` has no file) |
 | `POST /api/sync { tables }` | `mason sync` | sync now, per table |
 
+`/api/state` also says the run's health beyond the copies (each `mason status` says on a line of its own, and each
+sampled once a minute where it moves):
+
+- `stream.slotWal` (replication): the WAL the slot holds on the database — `{ walHeldBytes, walStatus, safeWalSizeBytes, at }`
+  or `{ error }`; `safeWalSizeBytes` null is `max_slot_wal_keep_size` unset, nothing capping it. One row of
+  `pg_replication_slots`, read on the connection the database's position is read on, at most every 30 s. Sampled as
+  `slotWalHeldBytes`. (`stream.slot` is the slot's name.)
+- `engine.version`, `engine.startedAt`, `engine.uptimeSeconds`: the run's own (a supervisor's restart is a new run), and
+  `engine.restarts` — `{ count, last: { at, why, upSeconds } | null }` or `{ error }` — its supervisor's record
+  (`.mason/restarts.json`, the last 20), read by ONE function (src/cli/supervise.ts `restartsFact`) that `mason status`
+  reads with Mason stopped too.
+- `disk` — `{ path, freeBytes, copyBytes, projectedBytes, error? }`: free where the copy's file is (the sync's own
+  `diskFree`, the measure a copy is held to), the file (`engine.bytes`), and while copies run what their pages left are
+  projected to add (`copyDiskProjection`, as each chunk's check last computed it; null while none can say). A `statfs`, no
+  query. Sampled as `diskFreeBytes` (re-bucketed, the lowest).
+- `sessions` — `{ open, byClient: [{ user, client, open, running }] }`: the Postgres API's sessions logged in now, by
+  `mason user` ('' a token's) and application_name, and how many of each run a statement; the listener's own, in memory
+  (`openSessions`). Sampled as `sessionsOpen`.
+
+The lines `mason status` prints for them are exported renderers (src/cli/commands.ts `slotText`, `masonRow`,
+`restartsRows`, `diskRows`, `sessionsRows`), so the web page is held equal to them.
+
 `mason status --json` `recentErrors` holds the latest sync failures (`sync`) and the latest statements refused, failed or
 cancelled (`queries`, the request log's own shape). `since` and `until` are read everywhere by one grammar: an age (30m,
 2h, 7d) or an ISO 8601 time with its zone.
@@ -143,10 +165,10 @@ Key: ✅ built · ⏸ deferred
 ## Also worth showing (not asked for)
 
 1. **How old each copy is**, in seconds: "can I trust this number?"
-2. **Stream lag, and the WAL the replication slot holds on the source**: a slot nobody reads fills the source's disk.
+2. ✅ **Stream lag, and the WAL the replication slot holds on the source**: a slot nobody reads fills the source's disk.
 3. **Refused statements grouped by the unsupported SQL they used** (`src/duck/gaps.ts`), so users know what to rewrite.
-4. **Sessions open now, restarts, memory against the limit** (`store.memoryLimitBytes`).
-5. **Free disk against the copy's projected size** (`copyDiskProjection` computes it already).
+4. ✅ **Sessions open now, restarts** (`sessions`, `engine.restarts`); memory against the limit is a usage sample (`copyMemoryBytes`).
+5. ✅ **Free disk against the copy's projected size** (`disk`, from `copyDiskProjection`).
 
 ## Steps (data and endpoints; presentation later)
 

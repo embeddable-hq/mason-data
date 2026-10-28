@@ -59,7 +59,7 @@ import { pgIdent } from "../cdc/pg-wire.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
-import { createSlot, currentLsn, dropSlot, readSlot } from "../cdc/source.ts";
+import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
 import { addCounts, countsText, duckValue, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { namedPublicationVerdict, readNamedPublication } from "./publication.ts";
@@ -163,7 +163,10 @@ export interface Synced { at: string; seconds: number | null; by: "copy" | "poll
  * on the database was the only way to tell it worked). Positions are Postgres's `X/Y`, times ISO.
  */
 export interface StreamStatus {
+  /** the replication slot's name (the one object Mason makes on the database) */
   slot: string;
+  /** the WAL the slot holds on the database (`SlotWal`), read at most every SLOT_READ_MS on the position's connection */
+  slotWal: SlotWal;
   publication: string;
   /** a stream is running now; when not, `failure` says why and when it starts again (null: it has not started yet) */
   running: boolean;
@@ -182,6 +185,28 @@ export interface StreamStatus {
   lastBatch: { appliedAt: string; committedAt: string } | null;
   tables: StreamTableStatus[];
 }
+/**
+ * THE WAL THE REPLICATION SLOT HOLDS ON THE DATABASE (pg_replication_slots, src/cdc/source.ts `readSlot`): from its
+ * restart_lsn to the database's position now, in bytes; Postgres's `wal_status`; and `safe_wal_size`, how many more bytes
+ * of WAL may be written before Postgres invalidates the slot — null when `max_slot_wal_keep_size` is unset (-1: the slot
+ * holds WAL for ever while nothing reads it, CLAUDE.md "Hard-won gotchas") or the slot is lost. `at` is when it was read.
+ * A read that failed is its error, never a 0.
+ */
+export type SlotWal = { walHeldBytes: number; walStatus: "reserved" | "extended" | "unreserved" | "lost" | null; safeWalSizeBytes: number | null; at: string } | { error: string };
+
+/** How often the slot's WAL is read at most (`streamStatus`): a catalog view's row, on the connection the database's
+ *  position is read on, so never a connection of its own — and never per poll or per batch. */
+export const SLOT_READ_MS = 30_000;
+
+/** The slot as `readSlot` read it, as `SlotWal` says it. */
+export function slotWalOf(s: SlotState, name: string, at: number): SlotWal {
+  if (!s.exists) return { error: `replication slot ${name} does not exist on the database (the next pass makes it again)` };
+  const status = s.walStatus === "reserved" || s.walStatus === "extended" || s.walStatus === "unreserved" || s.walStatus === "lost" ? s.walStatus : null;
+  // a lost slot's WAL was freed by Postgres (its restart_lsn is null): it holds none; any other null is not known
+  if (s.retainedBytes === null && status !== "lost") return { error: `replication slot ${name} has no restart position yet: the WAL it holds is not known` };
+  return { walHeldBytes: s.retainedBytes === null ? 0 : Number(s.retainedBytes), walStatus: status, safeWalSizeBytes: s.safeBytes === null ? null : Number(s.safeBytes), at: new Date(at).toISOString() };
+}
+
 export interface StreamTableStatus {
   /** `schema.table` */
   table: string;
@@ -396,7 +421,18 @@ export interface CopyLive {
   rate: ChunkRate | null;
   /** rows per heap page: the committed chunks', else the catalog's estimate, else unknown */
   rowsPerPage: number | null;
+  /** what its pages left are projected to add on disk, bytes (`copyDiskProjection`, at each chunk's check); null until
+   *  it can be said */
+  diskNeeded: number | null;
 }
+
+/**
+ * WHERE THE COPY'S FILE IS, AND THE DISK UNDER IT (`Sync.diskStatus`, `/api/state` `disk`): the bytes free there — the
+ * sync's own `diskFree`, the one a copy is held to — and, while copies run, what their pages left are projected to add
+ * (`copyDiskProjection`, as each chunk's check last computed it: summed over the copies, null while none can say). A
+ * free space that cannot be read is its error.
+ */
+export interface DiskStatus { path: string; freeBytes: number | null; projectedBytes: number | null; error?: string }
 
 /** A COPY'S PROGRESS AT A MOMENT (`CopyState.progress`), for `mason wait` and `mason status` to render */
 export interface CopyProgressView {
@@ -721,6 +757,9 @@ export class Sync {
   private readonly streamed = new Map<string, StreamedTable>();
   /** a NAMED publication's gaps: each added table it does not carry, with the refusal (neither copied nor streamed) */
   private readonly unpublished = new Map<string, string>();
+  /** the error each table a named publication did not carry was given (`settlePrepared`): cleared by the pass that finds
+   *  it carried again, and by nothing else that pass */
+  private readonly gapErrors = new Map<string, string>();
   /** a named publication that does not publish TRUNCATE has been said (once a run) */
   private truncateSaid = false;
   /** the last pass failed: in replication mode it is tried again after the interval, the stream started by it */
@@ -797,6 +836,8 @@ export class Sync {
   private readonly wholeFailure: { stream: string | null; prepare: string | null; attach: string | null } = { stream: null, prepare: null, attach: null };
   /** the database's position as last read (`databasePosition`), and the read in flight */
   private dbPosition: { lsn: bigint; at: number } | { error: string; at: number } | null = null;
+  /** the slot's WAL as last read (`databasePosition`, at most every SLOT_READ_MS), and when */
+  private slotWal: { wal: SlotWal; at: number } | null = null;
   private dbPositionRead: Promise<void> | null = null;
   /** THE STORED JSON PATHS (src/duck/kept.ts): every write below computes them; the plans read them */
   readonly kept: KeptJsonPaths;
@@ -1265,25 +1306,39 @@ export class Sync {
         });
       }
     } finally { pg.close(); }
-    // what the last stream's failure said is the past once the publication and slot are as they should be; a table a
-    // named publication does not carry is refused on its own line (a copy it never had is failed), the others go on
-    await this.onWriter(async () => {
-      for (const t of tables) {
-        const st = this.states.get(t.source)!;
-        const gap = this.unpublished.get(t.source);
-        if (gap !== undefined) {
-          const error = `replication: ${gap}`;
-          if (st.error !== error) { this.log(`${t.source} is not copied or streamed: ${error}`); this.event({ kind: "stream_failed", table: t.source, message: `not copied or streamed: ${error}` }); }
-          await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error });
-        } else if (st.error?.startsWith("replication: ")) await this.record({ ...st, error: null });
+    await this.onWriter(() => this.settlePrepared(tables));
+  }
+
+  /**
+   * WHAT A PASS'S PUBLICATION CHECK SETTLES, ON THE WRITER'S TURN (`prepareReplication`, once the publication and slot are
+   * as they should be): a table a named publication does not carry is refused on its own line (a copy it never had is
+   * failed), the others go on; a table it carries AGAIN has that gap's error cleared, and a table never copied the last
+   * pass's failure to prepare. NOTHING ELSE: a copy whose stream failed, or that the failed preparation left behind, is
+   * current again only once the stream applies a batch with a position (`applyChanges`) — the publication being right
+   * says nothing of whether its changes are in the copy, and a pass runs while the stream waits out its back-off.
+   */
+  private async settlePrepared(tables: readonly AddedTable[]): Promise<void> {
+    for (const t of tables) {
+      const st = this.states.get(t.source)!;
+      const gap = this.unpublished.get(t.source);
+      if (gap !== undefined) {
+        const error = `replication: ${gap}`;
+        if (st.error !== error) { this.log(`${t.source} is not copied or streamed: ${error}`); this.event({ kind: "stream_failed", table: t.source, message: `not copied or streamed: ${error}` }); }
+        this.gapErrors.set(t.source, error);
+        await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error });
+        continue;
       }
-      // a table the publication does not carry was never streamed: its last sync is its copy's or its poll's, never
-      // the stream's time a start credited it with (`readSynced` at `open`, before the publication was read)
-      const credited = tables.filter((t) => this.unpublished.has(t.source) && this.synced.get(t.source)?.by === "stream").map((t) => t.source);
-      if (credited.length) await this.readSynced(new Set(credited));
-      // a table the publication stopped carrying leaves the stream; one it carries now may join
-      this.refreshStreamed();
-    });
+      const gapClosed = this.gapErrors.get(t.source);
+      this.gapErrors.delete(t.source);
+      if (st.error === null) continue;
+      if (st.error === gapClosed || (st.phase !== "copied" && st.error === this.wholeFailure.prepare)) await this.record({ ...st, error: null });
+    }
+    // a table the publication does not carry was never streamed: its last sync is its copy's or its poll's, never
+    // the stream's time a start credited it with (`readSynced` at `open`, before the publication was read)
+    const credited = tables.filter((t) => this.unpublished.has(t.source) && this.synced.get(t.source)?.by === "stream").map((t) => t.source);
+    if (credited.length) await this.readSynced(new Set(credited));
+    // a table the publication stopped carrying leaves the stream; one it carries now may join
+    this.refreshStreamed();
   }
 
   /**
@@ -1514,7 +1569,7 @@ export class Sync {
       return { table: t.source, state: "waiting", why: this.notStreamedWhy(t.source), applied };
     });
     return {
-      slot: r.slot, publication: r.publication, running: s !== null,
+      slot: r.slot, slotWal: this.slotWal?.wal ?? { error: "not read yet: the database did not answer within 3 s" }, publication: r.publication, running: s !== null,
       failure: s === null && this.streamFailure !== null ? { error: this.streamFailure.error, retryAt: iso(this.streamFailure.retryAt) } : null,
       position: formatLsn(position), applied: formatLsn(this.appliedLsn),
       database: "lsn" in db ? { lsn: formatLsn(db.lsn), at: iso(db.at) } : { error: db.error },
@@ -1530,17 +1585,30 @@ export class Sync {
    * wait` asks every second), waited for at most 3 s (the last read is answered meanwhile, with its time). Not the
    * stream's keepalive: that carries the walsender's own read position, not the database's, so it cannot say how far
    * behind the stream is when that matters — while it decodes a backlog. A read that fails is answered as its error.
+   * THE SLOT'S WAL (`SlotWal`) is read on the same connection, at most every SLOT_READ_MS (one row of
+   * pg_replication_slots): what the slot holds on the database's disk, said by `mason status` and sampled by usage.
    */
   private async databasePosition(): Promise<{ lsn: bigint; at: number } | { error: string; at: number }> {
     const fresh = this.dbPosition !== null && Date.now() - this.dbPosition.at < 5_000;
     if (!fresh && this.dbPositionRead === null) {
+      const slotDue = this.slotWal === null || Date.now() - this.slotWal.at >= SLOT_READ_MS;
+      const slot = this.replication!.slot;
       this.dbPositionRead = (async () => {
         try {
           const pg = await PgConnection.connect(this.pgOptions());
-          try { this.dbPosition = { lsn: await currentLsn(pg), at: Date.now() }; } finally { pg.close(); }
+          try {
+            this.dbPosition = { lsn: await currentLsn(pg), at: Date.now() };
+            if (slotDue) {
+              // its own failure is the slot's line alone: the position read above stands
+              try { this.slotWal = { wal: slotWalOf(await readSlot(pg, slot), slot, Date.now()), at: Date.now() }; }
+              catch (e) { this.slotWal = { wal: { error: `the slot could not be read: ${e instanceof Error ? e.message : String(e)}` }, at: Date.now() }; }
+            }
+          } finally { pg.close(); }
         } catch (e) {
           // answered as the status's (and the log line's) own words: the position could not be read, and why
-          this.dbPosition = { error: e instanceof Error ? e.message : String(e), at: Date.now() };
+          const m = e instanceof Error ? e.message : String(e);
+          this.dbPosition = { error: m, at: Date.now() };
+          if (slotDue) this.slotWal = { wal: { error: `the database could not be reached: ${m}` }, at: Date.now() };
         } finally { this.dbPositionRead = null; }
       })();
     }
@@ -1667,7 +1735,10 @@ export class Sync {
       throw e;
     } finally { source?.close(); }
     if (lsn !== null) this.appliedLsn = lsn;
-    if (from !== "held") { this.streamFailures = 0; this.recovered("stream", "the stream applies changes again"); }
+    if (from !== "held") this.streamFailures = 0;
+    // THE STREAM'S FAILURE IS OVER when it applies a batch WITH A POSITION: every table it keeps current is current as of
+    // it. A piece of a large transaction (no position) is not that yet, nor the changes a catch-up held
+    if (lsn !== null) this.recovered("stream", "the stream applies changes again");
     let moved = false;
     for (const [name, changes] of batch) {
       if (!this.tables.has(name)) continue;
@@ -1679,12 +1750,20 @@ export class Sync {
       moved = true;
     }
     if (moved && committedAt !== null && committedAt.getTime() > 0) this.lastBatch = { appliedAt: Date.now(), committedAt: committedAt.getTime() };
-    // the rows, as the ledger has them now; a table the batch wrote is current again (its error, if any, cleared)
+    // the rows, as the ledger has them now; with a position, a table the batch wrote is current again (its error, if
+    // any, cleared), and so is every table the stream keeps current whose error was the replication's (the stream's
+    // failure, the preparation's): the position covers each of them, changed in the batch or not
     for (const [name, rows] of rowsAfter) {
       const st = this.states.get(name);
       if (st === undefined) continue;
-      if (st.error !== null) await this.record({ ...st, rows, error: null });
+      if (st.error !== null && lsn !== null) await this.record({ ...st, rows, error: null });
       else this.states.set(name, { ...st, rows });
+    }
+    if (lsn !== null) {
+      for (const source of this.joinedNow) {
+        const st = this.states.get(source);
+        if (st !== undefined && st.phase === "copied" && st.error?.startsWith("replication: ")) await this.record({ ...st, error: null });
+      }
     }
     // every table the stream keeps current is current as of this batch's position (`Synced`); a piece of a large
     // transaction (no position) and the changes a catch-up held are not a position
@@ -2460,6 +2539,15 @@ export class Sync {
     }
   }
 
+  /** Where the copy's file is, the bytes free there, and what the copies running are projected to add (`DiskStatus`). */
+  diskStatus(): DiskStatus {
+    const dir = path.dirname(this.store.file);
+    const needed = [...this.copyLive.values()].map((l) => l.diskNeeded).filter((n): n is number => n !== null);
+    const projectedBytes = needed.length ? Math.round(needed.reduce((a, b) => a + b, 0)) : null;
+    try { return { path: dir, freeBytes: this.diskFree(dir), projectedBytes }; }
+    catch (e) { return { path: dir, freeBytes: null, projectedBytes, error: `the free space where the copy is could not be read: ${e instanceof Error ? e.message : String(e)}` }; }
+  }
+
   /** The DuckDB file's bytes with its write-ahead log's (what a copy adds lands in the log until a checkpoint). */
   private fileBytes(): number {
     let n = 0;
@@ -2470,10 +2558,12 @@ export class Sync {
     return n;
   }
 
-  /** Why the copy of `t` must stop now — what its pages left would add is more than the disk has free — or null. */
-  private diskShort(t: AddedTable, p: CopyProgress, disk: { bytesAtStart: number; doneAtStart: readonly PageRange[] }): string | null {
+  /** Why the copy of `t` must stop now — what its pages left would add is more than the disk has free — or null. What
+   *  it projects is kept on the copy's `live` (`diskStatus` says it). */
+  private diskShort(t: AddedTable, p: CopyProgress, disk: { bytesAtStart: number; doneAtStart: readonly PageRange[] }, live: CopyLive): string | null {
     const bytesNow = this.fileBytes();
     const projected = copyDiskProjection({ pages: p.pages, done: p.done, doneAtStart: disk.doneAtStart, bytesAtStart: disk.bytesAtStart, bytesNow });
+    live.diskNeeded = projected?.needed ?? null;
     if (projected === null) return null;
     const free = this.diskFree(path.dirname(this.store.file));
     if (projected.needed <= free) return null;
@@ -2552,7 +2642,7 @@ export class Sync {
       const pagesDone = pagesRead(p.done, p.pages);
       const live: CopyLive = { pages: p.pages, chunksDone: p.done.length, pagesDone, rowsDone: p.rows, untaken: gapPages(gaps, p.pages),
         chunkPages: nextChunkPages(ceiling, null, this.copyChunkSeconds), readers, reading: [], rate: null,
-        rowsPerPage: pagesDone > 0 ? p.rows / pagesDone : t.rows !== null && t.rows > 0 && p.pages > 0 ? t.rows / p.pages : null };
+        rowsPerPage: pagesDone > 0 ? p.rows / pagesDone : t.rows !== null && t.rows > 0 && p.pages > 0 ? t.rows / p.pages : null, diskNeeded: null };
       this.copyLive.set(t.source, live);
       for (let i = 1; i < readers; i++) {
         const lane: Lane = { conn: await this.store.instance.connect(), inFlight: false };
@@ -2636,7 +2726,7 @@ export class Sync {
           }
           // STOPPED BEFORE THE DISK FILLS: the chunks committed are kept, the copy fails with the way out and is tried
           // again as a failed copy is (freed disk is used at the retry, or at once at the next start)
-          const short = recopy ? null : this.diskShort(t, p, disk);
+          const short = recopy ? null : this.diskShort(t, p, disk, live);
           if (short !== null) { fail(new Error(short)); return; }
           const at = readThrough(p.done);
           if (Date.now() - lineAt >= 60_000 && at !== null) {

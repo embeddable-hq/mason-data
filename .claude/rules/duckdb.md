@@ -305,7 +305,9 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   attempt read 1 % of the heap, what the pages left would add (from what its pages added to the file and its log) is
   held to what is free where the file is; past it the copy FAILS with the way out (free disk, `mason remove`, `mason add
   --columns`), its chunks kept, and is tried again as a failed copy is — at the retry, or at once at the next start.
-  Nothing warns before 1 %; a table whose late pages are wider than its early ones is under-projected.
+  Nothing warns before 1 %; a table whose late pages are wider than its early ones is under-projected. What the check
+  last projected is kept on the copy's live state and said, never computed a second way (`diskStatus`: `/api/state`
+  `disk`, `mason status`'s Disk line, beside the bytes free by the same `diskFree`).
 
 ## Keeping a copy current
 
@@ -355,8 +357,10 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   line each with the position, found in ONE place (`refreshStreamed`), never a line per batch; a periodic line at most
   once a minute when something moved (`reportStream`); `mason status` / `wait` / `--json` show the position, the
   database's (a connection at most every 5 s, never the keepalive's: that is the walsender's read position), the lag in
-  bytes and as the newest change's age, and each table's state and changes applied (`streamStatus`). A new state of a
-  table is a state there too. ("Logical replication")
+  bytes and as the newest change's age, the WAL the slot holds on the database (`stream.slotWal`: one row of
+  `pg_replication_slots` on that same connection, at most every 30 s, `SLOT_READ_MS` — its status, and the cap left, or
+  that `max_slot_wal_keep_size` is unset and nothing caps it), and each table's state and changes applied
+  (`streamStatus`). A new state of a table is a state there too. ("Logical replication")
 - **The slot outlives `mason stop` and holds the source's WAL** (said at the stop); `--poll` and `mason destroy` drop
   the slot, and Mason's own publication, verified gone. A `REPLICA IDENTITY NOTHING` table is refused by name: publishing
   its updates would fail the app's own UPDATEs.
@@ -391,8 +395,12 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   writes them in batches on a connection of its own, never the writer's turn, a failed write said once and never
   failing the sync; a failure repeated word for word within an hour is one event unless it was over between — a
   table's when it is current again (`recovered`) or copied anew (`copied`), the whole sync's (`table: null`) when the
-  sync says so (`recovered` of no table: the stream applied a batch, the publication and slot were made ready, the
-  database attached — `wholeFailure`); never a failure whose end nothing says.
+  sync says so (`recovered` of no table: the stream applied a batch WITH A POSITION, the publication and slot were made
+  ready, the database attached — `wholeFailure`); never a failure whose end nothing says. **A copy's replication error
+  is over only when the stream applies a batch with a position** (`applyChanges`: every table it keeps current is current
+  as of it), never at a pass's publication check (`settlePrepared`, which runs while the stream waits out its back-off)
+  nor at a piece of a large transaction; the check clears only what it owns — a named publication's gap once the table is
+  carried again, and its own failure on a table never copied.
   The supervisor's restarts stay in `.mason/restarts.json` (a process of its own cannot open the file) and are merged
   when read (`withRestarts`). `mason logs --events` and `mason status` (`recentErrors`) read them through the command
   server's `/api/events`.

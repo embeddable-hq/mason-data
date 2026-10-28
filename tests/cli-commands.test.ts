@@ -196,7 +196,8 @@ test("mason status and wait in replication mode say where the stream is: its pos
   // the first replication run on a server: one stream line in 35 minutes, and status showed no position, lag or count
   const now = Date.parse("2026-10-26T12:00:10.000Z");
   const stream: StreamStatus = {
-    slot: "mason_shop", publication: "mason_shop", running: true, failure: null,
+    slot: "mason_shop", slotWal: { walHeldBytes: 3 * 2 ** 30, walStatus: "extended", safeWalSizeBytes: 2 ** 30, at: "2026-10-26T12:00:08.000Z" },
+    publication: "mason_shop", running: true, failure: null,
     position: "0/1A2B3C8", applied: "0/1A2B300",
     database: { lsn: "0/1A2B4F0", at: "2026-10-26T12:00:08.000Z" },
     lag: { bytes: 296, seconds: 5 },
@@ -213,6 +214,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
   const { streamLines } = commands;
   assert.deepEqual(streamLines(stream, now), [
     "position       0/1A2B3C8 · the database is at 0/1A2B4F0: 296 bytes behind (read 2.0 s ago)",
+    "slot           holds 3.0 GiB of the database's WAL (extended) · 1.0 GiB more before Postgres invalidates it (max_slot_wal_keep_size) (read 2.0 s ago)",
     "last change    committed 5.0 s ago, applied 0.3 s after its commit",
     "public.orders  streamed · 1,204 changes (1,000 inserts, 200 updates, 4 deletes) this run",
     "shop.lines     catching up by one poll from 2026-10-26 11:58 UTC: polling, for 3.0 s · the stream holds 12 changes of it meanwhile",
@@ -221,11 +223,19 @@ test("mason status and wait in replication mode say where the stream is: its pos
   ]);
   // a stream that failed says why and when it starts again; a database that could not be asked says so, never a lag of 0
   assert.deepEqual(streamLines({ ...stream, running: false, failure: { error: "replication: the slot is in use\nmore", retryAt: "2026-10-26T12:00:40.000Z" },
-    database: { error: "connect ECONNREFUSED" }, lag: { bytes: null, seconds: null }, lastBatch: null, tables: [] }, now), [
+    database: { error: "connect ECONNREFUSED" }, slotWal: { error: "the database could not be reached: connect ECONNREFUSED" }, lag: { bytes: null, seconds: null }, lastBatch: null, tables: [] }, now), [
     "stream       not running: replication: the slot is in use · it starts again in 30 s",
     "position     0/1A2B3C8 · the database's position could not be read: connect ECONNREFUSED",
+    "slot         the WAL it holds could not be read: the database could not be reached: connect ECONNREFUSED",
     "last change  none applied this run",
   ]);
+  // THE SLOT'S WAL, with no cap: said plainly, since a slot nothing reads then holds WAL until the database's disk fills
+  const slotLine = (slotWal: StreamStatus["slotWal"]): string => streamLines({ ...stream, slotWal, tables: [] }, now)[1]!;
+  assert.equal(slotLine({ walHeldBytes: 512 * 2 ** 20, walStatus: "reserved", safeWalSizeBytes: null, at: "2026-10-26T12:00:00.000Z" }),
+    "slot         holds 512.0 MiB of the database's WAL (reserved) · max_slot_wal_keep_size is unset, so nothing caps it: while nothing reads the slot it holds WAL for ever, " +
+    "until the database's disk fills (set max_slot_wal_keep_size on the database) (read 10 s ago)");
+  assert.match(slotLine({ walHeldBytes: 0, walStatus: "lost", safeWalSizeBytes: null, at: "2026-10-26T12:00:00.000Z" }), /^slot +lost: Postgres invalidated it .*Mason makes it again/);
+  assert.match(slotLine({ walHeldBytes: 2 ** 30, walStatus: "unreserved", safeWalSizeBytes: -4096, at: "2026-10-26T12:00:00.000Z" }), /\(unreserved\) · past max_slot_wal_keep_size: Postgres invalidates it at its next checkpoint/);
   // --json: the stream under its declared key, as the run's state has it (jsonText refuses a key its spec does not declare)
   const s: RunState = state({ stream });
   for (const spec of [STATUS, WAIT]) {
@@ -332,7 +342,7 @@ const usageCli = await import("../src/cli/usage.ts" as string).catch(() => ({}))
 const sampleLine = (s: unknown, lag: boolean): string => usageCli.sampleLine?.(s as never, lag) ?? "(no src/cli/usage.ts)";
 const sample = { at: "2026-10-28T09:05:00.000Z", seconds: 300, copyBytes: 5 * 2 ** 30, copyRows: 12_345_678, tablesAdded: 4, tablesCopied: 4, tablesFailed: 1, oldestSyncSeconds: 75,
   statements: 1_204, statementsRefused: 2, statementsFailed: 1, statementsCancelled: 0, rowsSent: 98_765, bytesSent: 4_567_890, durationP50Ms: 12, durationP95Ms: 1_830, streamLagBytes: null, streamLagSeconds: null,
-  rssBytes: 900 * 2 ** 20, heapUsedBytes: 80 * 2 ** 20, copyMemoryBytes: 300 * 2 ** 20, copyMemoryLimitBytes: 8 * 2 ** 30 };
+  rssBytes: 900 * 2 ** 20, heapUsedBytes: 80 * 2 ** 20, copyMemoryBytes: 300 * 2 ** 20, copyMemoryLimitBytes: 8 * 2 ** 30, slotWalHeldBytes: null, diskFreeBytes: null, sessionsOpen: 2 };
 
 test("mason usage: a span a line under its heading — the statements, their errors, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
   const { sampleHeading, spanSeconds, USAGE } = usageCli as UsageCli;
@@ -438,10 +448,10 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => facts, warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
-    folder: () => s.folder, root: app, sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
-    readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }) },
+    folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
+    readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
+    duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); },
         lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
       usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }] },
@@ -554,12 +564,12 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0,
-    token: "t0ken-of-the-run", folder: () => path.join(app, "mason"), root: app, sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
+    token: "t0ken-of-the-run", folder: () => path.join(app, "mason"), root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
     readSource: () => ({ message: "not read here", code: "bad_source" }), runUrl: "postgres://me@localhost:5432/shop",
-    listener: { running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);
+    listener: { openSessions: () => ({ open: 1, byClient: [{ user: "metabase", client: "Metabase", open: 1, running: 1 }] }), running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);
       return session === 4 && statement !== undefined && statement !== 9 ? { other: running, asked: statement } : session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session }; } },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => [], file: path.join(root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
+    duck: { copies: () => [], file: path.join(root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, page: async (q) => { asked.push(q); return { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
         refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, lastUsed: async (u) => u.map(() => null) },
       events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
@@ -646,4 +656,26 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     server.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("mason status's Disk line: free where the copy is, and what the copies running add — said as more than is free when it is; an unread free space is its error", async () => {
+  const { diskRows } = await import("../src/cli/commands.ts") as unknown as { diskRows?: (d: unknown) => Array<[string, string]> };
+  assert.equal(typeof diskRows, "function", "src/cli/commands.ts diskRows");
+  assert.deepEqual(diskRows!({ path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 49 * 2 ** 30, projectedBytes: null }), [["Disk", "75.0 GiB free in /data"]]);
+  assert.deepEqual(diskRows!({ path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 49 * 2 ** 30, projectedBytes: 80 * 2 ** 30 }),
+    [["Disk", "75.0 GiB free in /data · the copies running are projected to add about 80.0 GiB more — more than is free: the copy stops before the disk fills"]]);
+  assert.deepEqual(diskRows!({ path: "/data", freeBytes: null, copyBytes: null, projectedBytes: null, error: "the free space where the copy is could not be read: EACCES" }),
+    [["Disk", "the free space where the copy is could not be read: EACCES"]]);
+  assert.deepEqual(diskRows!(undefined), [], "a run from before it: no line");
+});
+
+test("mason status's Sessions line: how many are open and running a statement, and by whom — the three with the most, then how many others", async () => {
+  const { sessionsRows } = await import("../src/cli/commands.ts") as unknown as { sessionsRows?: (s: unknown) => Array<[string, string]> };
+  assert.equal(typeof sessionsRows, "function", "src/cli/commands.ts sessionsRows");
+  assert.deepEqual(sessionsRows!({ open: 0, byClient: [] }), [["Sessions", "none open"]]);
+  assert.deepEqual(sessionsRows!({ open: 7, byClient: [
+    { user: "metabase", client: "Metabase", open: 3, running: 1 }, { user: "", client: "", open: 2, running: 0 },
+    { user: "agent", client: "psql", open: 1, running: 1 }, { user: "grafana", client: "Grafana", open: 1, running: 0 }] }),
+    [["Sessions", "7 open, 2 running a statement · 3 as metabase (Metabase), 2 by a token, 1 as agent (psql), and 1 other client (mason logs --running lists the statements)"]]);
+  assert.deepEqual(sessionsRows!(undefined), [], "a run from before it: no line");
 });

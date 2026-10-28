@@ -77,7 +77,9 @@ const summary: QuerySummary = { keptDays: 7, day: window(1), week: window(7) };
 const runningNow: RunningStatement = { session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-24T10:04:30.000Z", runningMs: 1500,
   rows: 0, query: "SELECT count(*) FROM orders", queryTruncated: false };
 const cancels: Array<number | [number, number]> = [];
-const listener = { running: () => [runningNow], cancel: (session: number, statement?: number): CancelAnswer => {
+// the sessions logged in, as the listener counts them (src/api/postgres/server.ts openSessions)
+const sessionsNow = { open: 3, byClient: [{ user: "metabase", client: "Metabase", open: 2, running: 1 }, { user: "", client: "", open: 1, running: 0 }] };
+const listener = { openSessions: () => sessionsNow, running: () => [runningNow], cancel: (session: number, statement?: number): CancelAnswer => {
   cancels.push(statement === undefined ? session : [session, statement]);
   if (session === 4 && statement !== undefined && statement !== runningNow.statement) return { other: runningNow, asked: statement };
   return session === 4 ? { cancelled: runningNow } : session === 5 ? { idle: 5 } : { unknown: session };
@@ -96,6 +98,8 @@ const eventAsks: Array<{ limit: number; since?: string; failed?: boolean }> = []
 const syncEvent = { at: new Date(Date.now() - 120_000).toISOString(), kind: "poll_failed" as const, failed: true, table: "public.customers", message: "the poll failed, and is tried again at the next one" };
 const events = { days: 7, recent: async (o: { limit: number; since?: string; failed?: boolean }) => { eventAsks.push(o); return [syncEvent]; } };
 let restarts: Array<{ at: string; reason: string; upSeconds: number }> = [];
+// the disk under the copy, as the sync measures it (src/duck/sync.ts diskStatus)
+let disk: { path: string; freeBytes: number | null; projectedBytes: number | null; error?: string } = { path: "/data", freeBytes: 75 * 2 ** 30, projectedBytes: null };
 // usage over time (src/duck/usage.ts), as UsageSampler answers it
 const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
 const copySize = { table: "public.orders", bytes: 4_194_304, at: "2026-10-28T09:10:00.000Z" };
@@ -106,12 +110,12 @@ const ctx: RunContext = {
   page: true, users: { file: usersFile, apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" },
   source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [],
   slot: "", changes: "poll", port: 0, token: "t0ken-of-this-run",
-  folder: () => chosen, root: path.join(root, "app"), sources: () => ({ file: null, problem: null }), sourcesChanged: () => { changed++; }, log: (m) => logged.push(m),
+  folder: () => chosen, root: path.join(root, "app"), home: path.join(root, "app", ".mason"), version: "9.9.9", startedAt: Date.parse("2026-10-28T08:00:00.000Z"), sources: () => ({ file: null, problem: null }), sourcesChanged: () => { changed++; }, log: (m) => logged.push(m),
   // the file as the run reads it: its URL resolved from no environment (the test's file writes it whole)
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app", listener,
   logs: runLog,
-  duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, requests, events, usage, restarts: () => restarts },
+  duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, disk: () => disk, requests, events, usage, restarts: () => restarts },
 };
 const server = createRunServer(ctx);
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -349,7 +353,11 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.match(String(refused.body.error), /public\.logs is not copied yet/);
     assert.equal((await post("/api/sync", { tables: [] })).status, 400);
     assert.deepEqual(asked, [["public.customers"], ["public.logs"]]);
-    assert.deepEqual(s.body.engine, { name: "duckdb", file: duckFile, bytes: 10, pollSeconds: 5 });
+    assert.deepEqual(s.body.sessions, sessionsNow, "the listener's own count, by user and client");
+    assert.deepEqual(s.body.disk, { path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 10, projectedBytes: null }, "the disk under the copy: its file is engine.bytes, one fact");
+    const { uptimeSeconds, ...engine } = s.body.engine as { uptimeSeconds: number };
+    assert.deepEqual(engine, { name: "duckdb", file: duckFile, bytes: 10, pollSeconds: 5, version: "9.9.9", startedAt: "2026-10-28T08:00:00.000Z", restarts: { count: 0, last: null } });
+    assert.ok(Math.abs(uptimeSeconds - (Date.now() - Date.parse("2026-10-28T08:00:00.000Z")) / 1000) < 5, `up since the run started: ${uptimeSeconds}`);
     // the slow and refused statements are the request log's, in the shapes mason status renders
     assert.deepEqual((await get("/api/slow")).body, { slow: await requests.slow(), slowMs: 1000 });
     assert.deepEqual((await get("/api/refused")).body, await requests.refused());
@@ -429,16 +437,42 @@ test("a usage sample reads /api/state's own facts: the copy file's bytes, the to
     { source: "public.Shouty", phase: "copying", ...base, rows: null, seconds: null, copiedAt: null },
   ] as unknown as CopyState[];
   const lag = { bytes: 4096, seconds: 2.5 };
-  const stream = { slot: "s", publication: "p", running: true, failure: null, position: "0/1", applied: "0/1", database: { lsn: "0/2", at }, lag, lastBatch: null, tables: [] };
+  const slot = { walHeldBytes: 65_536, walStatus: "reserved" as const, safeWalSizeBytes: null, at };
+  const stream = { slot: "s", slotWal: slot, publication: "p", running: true, failure: null, position: "0/1", applied: "0/1", database: { lsn: "0/2", at }, lag, lastBatch: null, tables: [] };
   const added = { file: { name: "app", file: sourceFile, tables: ["customers", "orders", "Shouty"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null } as unknown as ReturnType<RunContext["sources"]>;
   const c: RunContext = { ...ctx, sources: () => added, duck: { ...ctx.duck, copies: () => states, stream: async () => stream } };
   const facts = await runServer.usageFacts!(c, now);
   const state = runServer.runState(c, states, stream, now) as { totals: unknown; engine: { bytes: number } };
   assert.deepEqual(facts, { copyBytes: state.engine.bytes, totals: { added: 3, copied: 3, failed: 0, rows: 1_023, syncedAt: at }, oldestSyncSeconds: 3690.5, streamLag: lag,
-    copied: ["public.customers", "public.orders", "public.logs"] });
+    copied: ["public.customers", "public.orders", "public.logs"], slotWalHeldBytes: 65_536, diskFreeBytes: 75 * 2 ** 30, sessionsOpen: 3 });
   assert.equal(state.engine.bytes, 10, "the copy file's size, as engine.bytes says it");
-  const polled = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => null } }, now) as { streamLag: unknown };
+  const polled = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => null } }, now) as { streamLag: unknown; slotWalHeldBytes: unknown };
   assert.equal(polled.streamLag, null, "no stream when polling");
+  assert.equal(polled.slotWalHeldBytes, null, "no slot when polling");
+  const unread = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => ({ ...stream, slotWal: { error: "the database could not be reached: connect ECONNREFUSED" } }) } }, now) as { slotWalHeldBytes: unknown };
+  assert.equal(unread.slotWalHeldBytes, null, "a slot that could not be read is unknown, never a 0");
+});
+
+test("the run itself in /api/state: its version, since when it is up, and its supervisor's restarts — how many and the last — or why they could not be read", async () => {
+  const runServer = await import("../src/cli/run-server.ts");
+  const now = Date.parse("2026-10-28T09:30:00.400Z");
+  type Engine = { version: string; startedAt: string; uptimeSeconds: number; restarts: unknown };
+  const engine = (c: RunContext): Engine => (runServer.runState(c, [], null, now) as { engine: Engine }).engine;
+  const none = engine(ctx);
+  assert.deepEqual([none.version, none.startedAt, none.uptimeSeconds, none.restarts], ["9.9.9", "2026-10-28T08:00:00.000Z", 5400, { count: 0, last: null }]);
+  const two = [{ at: "2026-10-28T08:59:00.000Z", reason: "it was killed (SIGKILL: often the system out of memory)", upSeconds: 40 },
+    { at: "2026-10-28T09:00:00.000Z", reason: "it ran out of JavaScript heap (V8: heap out of memory)", upSeconds: 120 }];
+  assert.deepEqual(engine({ ...ctx, duck: { ...ctx.duck, restarts: () => two } }).restarts,
+    { count: 2, last: { at: "2026-10-28T09:00:00.000Z", why: "it ran out of JavaScript heap (V8: heap out of memory)", upSeconds: 120 } });
+  const unreadable = engine({ ...ctx, duck: { ...ctx.duck, restarts: () => { throw new Error("Unexpected end of JSON input"); } } }).restarts as { error: string };
+  assert.equal(unreadable.error, `${path.join(root, "app", ".mason", "restarts.json")} could not be read: Unexpected end of JSON input`, "said, never taken as none");
+  // mason status's line is the same fact, rendered (src/cli/commands.ts restartsRows)
+  const { restartsRows } = await import("../src/cli/commands.ts") as unknown as { restartsRows: (r: unknown) => Array<[string, string]> };
+  assert.match(restartsRows(engine({ ...ctx, duck: { ...ctx.duck, restarts: () => two } }).restarts)[0]![1], /^2, the last .* ago: it ran out of JavaScript heap \(V8: heap out of memory\), after 120 s up/);
+  assert.deepEqual(restartsRows(none.restarts), [], "none: no line");
+  assert.deepEqual(restartsRows(unreadable), [["Restarts", unreadable.error]]);
+  const { masonRow } = await import("../src/cli/commands.ts") as unknown as { masonRow: (e: unknown, pid: number) => [string, string] };
+  assert.deepEqual(masonRow(none, 4242), ["Mason", "9.9.9, pid 4242 · one process · up 1 h 30 min, since 2026-10-28 08:00:00 UTC"]);
 });
 
 test("the sync's events: /api/events passes its filters to the record, merges the run's restarts newest last, and refuses a bad limit or time by name", async () => {

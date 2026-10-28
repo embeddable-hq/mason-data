@@ -28,13 +28,13 @@ import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { readiness, syncTotals, tableSync, type SyncTotals, type TableSync } from "./readiness.ts";
-import type { Restart } from "./supervise.ts";
+import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT, withLastUsed } from "./user.ts";
 import { postgresLink } from "./pg-url.ts";
 import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
-import { PollRefused, type CopyState, type PolledTable, type StreamStatus } from "../duck/sync.ts";
+import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamStatus } from "../duck/sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { RequestLedger } from "../duck/requests.ts";
 import { eventLimit, requestFilter, requestFilterText, timeOf } from "./request-filter.ts";
@@ -70,6 +70,11 @@ export interface RunContext {
   folder: () => string | null;
   /** the project's root (where .mason/ is): what messages name files from */
   root: string;
+  /** the run's own folder (.mason/): where its supervisor records its restarts */
+  home: string;
+  /** the run's version (src/cli/version.ts) and when this process started, ms: `engine.version`, `startedAt`, uptime */
+  version: string;
+  startedAt: number;
   /** the sources file the run copies from as it last read it, and what is wrong with it now (null: nothing) */
   sources: () => { file: SourceFile | null; problem: string | null };
   /** the sources file changed (a table added or removed): the run reads it again */
@@ -82,13 +87,15 @@ export interface RunContext {
   /** the run's last log entries (src/lib/log-buffer.ts), fed by the one writer of its log: `/api/logs` */
   logs: Pick<LogBuffer, "recent" | "capacity">;
   /** the Postgres listener: the statements running now, and a cancel of one (`/api/running`, `POST /api/cancel`) */
-  listener: Pick<PgApiServer, "running" | "cancel">;
+  listener: Pick<PgApiServer, "running" | "cancel" | "openSessions">;
   /** the run's copy: each added table's copy as the sync has it, the file it is in, how often it polls */
   duck: { copies: () => CopyState[]; file: string; pollSeconds: number;
     /** a poll of exactly these tables, now (mason sync; src/duck/sync.ts pollNow) */
     poll: (sources: string[]) => Promise<{ at: string; tables: PolledTable[] }>;
     /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode */
     stream: () => Promise<StreamStatus | null>;
+    /** the disk the copy's file is on: free, and what the copies running are projected to add (src/duck/sync.ts diskStatus) */
+    disk: () => DiskStatus;
     /** the Postgres listener's requests (src/duck/requests.ts, `_mason.requests`): mason status and mason logs --requests */
     requests: Pick<RequestLedger, "page" | "slow" | "refused" | "summary" | "days" | "lastUsed">;
     /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
@@ -123,6 +130,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   const by = new Map(copies.map((c) => [c.source, c]));
   const project = folder && fs.existsSync(folder) ? projectFingerprint(folder) : null;
   const facts = ctx.facts();
+  const bytes = fileBytes(ctx.duck.file);
+  const disk = ctx.duck.disk();
   const tables = facts.tables.map((t) => {
     const c = by.get(t.source), entry = sources.file?.tables.find((e) => e.table === t.source);
     return {
@@ -158,7 +167,16 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     folder, project, tables,
     // the copies in all: tables added, copied, failed, their rows, the latest sync (the file's size is engine.bytes)
     totals: syncTotals(tables.filter((t) => t.added).length, copies),
-    engine: { name: "duckdb", file: ctx.duck.file, bytes: fileBytes(ctx.duck.file), pollSeconds: ctx.duck.pollSeconds },
+    // the run itself: its version, since when it is up, and its supervisor's restarts (ONE reader, restartsFact, which
+    // mason status reads with Mason stopped too)
+    engine: { name: "duckdb", file: ctx.duck.file, bytes, pollSeconds: ctx.duck.pollSeconds,
+      version: ctx.version, startedAt: new Date(ctx.startedAt).toISOString(), uptimeSeconds: Math.max(0, Math.round((now - ctx.startedAt) / 1000)),
+      restarts: restartsFact(ctx.home, ctx.duck.restarts) },
+    // the disk under the copy: free where its file is (the sync's own measure, the one a copy is held to), the file
+    // (engine.bytes), and what the copies running are projected to add (copyDiskProjection) — mason status says it
+    // the sessions logged in now, by user and client (the listener's own, in memory): mason status says how many
+    sessions: ctx.listener.openSessions(),
+    disk: { path: disk.path, freeBytes: disk.freeBytes, copyBytes: bytes, projectedBytes: disk.projectedBytes, ...(disk.error !== undefined ? { error: disk.error } : {}) },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
     // replication mode: where the stream is, its lag and what it applied (mason status and wait render it, streamLines)
     ...(stream !== null ? { stream } : {}),
@@ -177,15 +195,17 @@ async function state(ctx: RunContext): Promise<unknown> {
 /**
  * WHAT A USAGE SAMPLE READS OF THE RUN (src/duck/usage.ts): `/api/state` at that moment, never a second computation of
  * any of it — the copy file's bytes (`engine.bytes`), `totals`, the stalest added table's `sync.ageSeconds`, the
- * stream's `lag`, and the copies served.
+ * stream's `lag` and its slot's `walHeldBytes`, the bytes free under the copy (`disk.freeBytes`), the sessions open (`sessions.open`), and the copies served.
  */
 export async function usageFacts(ctx: RunContext, now = Date.now()): Promise<UsageFacts> {
   const copies = ctx.duck.copies();
-  const s = runState(ctx, copies, await ctx.duck.stream(), now) as { totals: SyncTotals; engine: { bytes: number | null };
+  const s = runState(ctx, copies, await ctx.duck.stream(), now) as { totals: SyncTotals; engine: { bytes: number | null }; disk: { freeBytes: number | null }; sessions: { open: number };
     tables: Array<{ added: boolean; sync?: TableSync }>; stream?: StreamStatus };
   const ages = s.tables.flatMap((t) => (t.added && t.sync?.ageSeconds != null ? [t.sync.ageSeconds] : []));
+  const slot = s.stream?.slotWal;
   return { copyBytes: s.engine.bytes, totals: s.totals, oldestSyncSeconds: ages.length ? Math.max(...ages) : null, streamLag: s.stream?.lag ?? null,
-    copied: copies.filter((c) => c.phase === "copied").map((c) => c.source) };
+    copied: copies.filter((c) => c.phase === "copied").map((c) => c.source), slotWalHeldBytes: slot !== undefined && "walHeldBytes" in slot ? slot.walHeldBytes : null,
+    diskFreeBytes: s.disk.freeBytes, sessionsOpen: s.sessions.open };
 }
 
 /** A `since` / `until` of a query string, read by the one time grammar (src/cli/request-filter.ts timeOf), as an ISO time. */

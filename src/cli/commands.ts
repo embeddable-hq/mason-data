@@ -18,7 +18,7 @@ import { asFailure, endText, errorJson, failed, jsonText, nextBlock, parseComman
 import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from "./style.ts";
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
-import { readRestarts, signalSupervisor, stopSupervisor, supervisorGone, type Restart } from "./supervise.ts";
+import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
 import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresLink } from "./pg-url.ts";
@@ -36,7 +36,7 @@ import type { CopyProgressView, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery } from "../duck/requests.ts";
-import type { RunningStatement } from "../api/postgres/server.ts";
+import type { RunningStatement, SessionsOpen } from "../api/postgres/server.ts";
 import { DEFAULT_REQUEST_LIMIT, eventLimit, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 
@@ -82,9 +82,19 @@ export interface RunState {
   /** the copies in all (src/cli/readiness.ts syncTotals); a run from before it has none */
   totals?: SyncTotals;
   /** the run's copy: its file and how often it polls */
-  engine: { name: "duckdb"; file: string; bytes: number | null; pollSeconds: number };
+  engine: { name: "duckdb"; file: string; bytes: number | null; pollSeconds: number;
+    /** the run's version, when it started (ISO), and how long it has been up; a run from before them has none */
+    version?: string; startedAt?: string; uptimeSeconds?: number;
+    /** its supervisor's restarts (src/cli/supervise.ts restartsFact): how many, and the last one */
+    restarts?: RestartsFact };
   /** replication mode: where the stream is, its lag, what it applied (src/duck/sync.ts streamStatus) */
   stream?: StreamStatus;
+  /** the disk under the copy (src/duck/sync.ts diskStatus): free where its file is, the file, what the copies running
+   *  are projected to add; a run from before it has none */
+  disk?: { path: string; freeBytes: number | null; copyBytes: number | null; projectedBytes: number | null; error?: string };
+  /** the Postgres API's sessions logged in now, by user and client (src/api/postgres/server.ts openSessions); a run from
+   *  before it has none */
+  sessions?: SessionsOpen;
   /** the JSON paths stored as columns of the copies (src/duck/kept.ts): a run from before them has none */
   jsonPaths?: KeptPathStatus[];
   /** what mason wait waits on (src/cli/readiness.ts), said by the run: a run from before it has none */
@@ -228,6 +238,7 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
     ? `the database is at ${st.database.lsn}: ${n(st.lag.bytes ?? 0)} bytes behind (read ${spanText(since(st.database.at))} ago)`
     : `the database's position could not be read: ${st.database.error.split("\n")[0]}`;
   rows.push(["position", `${st.position} · ${db}`]);
+  rows.push(["slot", slotText(st.slotWal, since)]);
   rows.push(["last change", st.lastBatch === null ? "none applied this run"
     : `committed ${spanText(since(st.lastBatch.committedAt))} ago, applied ${spanText((Date.parse(st.lastBatch.appliedAt) - Date.parse(st.lastBatch.committedAt)) / 1000)} after its commit`]);
   const total = (t: StreamStatus["tables"][number]): number => t.applied.inserts + t.applied.updates + t.applied.deletes + t.applied.truncates;
@@ -244,6 +255,22 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
   }
   const w = Math.max(...rows.map(([k]) => k.length));
   return rows.map(([k, v]) => `${k.padEnd(w)}  ${v}`);
+}
+
+/**
+ * THE WAL THE SLOT HOLDS ON THE DATABASE, in a line (`StreamStatus.slotWal`): how much, Postgres's status of it, and the cap —
+ * or, with `max_slot_wal_keep_size` unset, that nothing caps it: while nothing reads the slot it holds WAL for ever, until
+ * the database's disk fills (CLAUDE.md "Hard-won gotchas"). A read that failed is said, never a 0.
+ */
+export function slotText(w: StreamStatus["slotWal"], since: (iso: string) => number): string {
+  if ("error" in w) return `the WAL it holds could not be read: ${w.error.split("\n")[0]}`;
+  const read = `(read ${spanText(since(w.at))} ago)`;
+  if (w.walStatus === "lost") return `lost: Postgres invalidated it (it held more WAL than max_slot_wal_keep_size), so Mason makes it again and catches the copies up by one poll ${read}`;
+  const cap = w.safeWalSizeBytes === null
+    ? "max_slot_wal_keep_size is unset, so nothing caps it: while nothing reads the slot it holds WAL for ever, until the database's disk fills (set max_slot_wal_keep_size on the database)"
+    : w.safeWalSizeBytes <= 0 ? "past max_slot_wal_keep_size: Postgres invalidates it at its next checkpoint, and Mason makes it again"
+    : `${fileSize(w.safeWalSizeBytes)} more before Postgres invalidates it (max_slot_wal_keep_size)`;
+  return `holds ${fileSize(w.walHeldBytes)} of the database's WAL${w.walStatus === null ? "" : ` (${w.walStatus})`} · ${cap} ${read}`;
 }
 
 // ------------------------------------------------------------------ mason status
@@ -269,8 +296,12 @@ const STATUS_USAGE = `usage: mason status [--json]
            bytes, key, added, addedColumns, copy, error, sync: { state (synced, syncing, failed, waiting), syncedAt (when
            the copy was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
            ageSeconds (how old the copy is now) }, … }], totals: { added, copied, failed, rows (the copies' rows),
-           syncedAt (the latest sync of any) }, engine: { file, bytes, pollSeconds, restarts (each time its supervisor started the
-           run again: { at, reason, upSeconds }) }, queries: { keptDays, day, week } (the last day's and the last 7
+           syncedAt (the latest sync of any) }, engine: { file, bytes, pollSeconds, version (the run's), startedAt,
+           uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
+           or null }, or { error }) }, disk: { path (where the copy's file is), freeBytes, copyBytes (the file),
+           projectedBytes (what the copies running are projected to add; null: none, or too early to say), error },
+           sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
+           application_name), open, running }] }, queries: { keptDays, day, week } (the last day's and the last 7
            days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
            failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
            when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all),
@@ -281,7 +312,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
            { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
-           exit 1. In replication mode stream: { slot, publication, running, failure, position,
+           exit 1. In replication mode stream: { slot, slotWal: { walHeldBytes (the WAL the slot holds on the
+           database), walStatus (reserved, extended, unreserved, lost), safeWalSizeBytes (the WAL left before Postgres
+           invalidates it; null: max_slot_wal_keep_size unset, nothing caps it), at } or { error }, publication, running, failure, position,
            applied, database: { lsn, at } or { error }, lag: { bytes, seconds }, lastBatch: { appliedAt, committedAt },
            tables: [{ table, state (streamed, catching-up, waiting, left-out), why, catchUp: { phase (queued, polling,
            applying), from, startedAt, held, retryAt }, applied: { inserts, updates, deletes, truncates } }] }.
@@ -312,7 +345,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   summary: "what Mason is doing: the database, each table's copy, the Postgres API, the slow and refused statements",
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
-  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
+  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
     "refusedTotal", "recentErrors", "readiness", "ui",
     "lastRun", "lastStop", "hung", "next"],
 };
@@ -359,22 +392,23 @@ export async function status(argv: string[]): Promise<number> {
       : r.ready ? [...READY_STEPS]
       : r.failed.length ? [["mason logs", "the detail of each failure"], ["mason wait", "each failure, with the way out"]]
       : [["mason wait", "until it is done"]];
-    // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
-    const restarts = restartsOf(run.home);
     if (json) {
       out(jsonText(STATUS, { running: true, pid: run.pid, postgres: { ...postgresLink(run.postgresUrl), listener: run.postgresListener },
-        ...s, engine: { ...s.engine, restarts }, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, recentErrors, readiness: r }, next));
+        ...s, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, recentErrors, readiness: r }, next));
       return 0;
     }
     const rows: Array<[string, string]> = [
       ["Project", `${run.name}, files in ${s.folder ?? "(none chosen)"}`],
       ...sourceRows(s),
-      ["Mason", `${version()}, pid ${run.pid} · one process`],
+      masonRow(s.engine, run.pid),
       ["Copy", `${s.engine.file}${s.engine.bytes === null ? "" : ` · ${fileSize(s.engine.bytes)}`}`],
+      ...diskRows(s.disk),
       // the copies in all (src/cli/readiness.ts syncTotals): a run from before them has none
       ...(s.totals ? [["Copies", totalsText(s.totals)] as [string, string]] : []),
-      ...restartsRows(restarts),
+      // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
+      ...restartsRows(s.engine.restarts),
       ["Postgres API", `${withPlaceholders(run.postgresUrl)}  (mason user add <name> makes a user)`],
+      ...sessionsRows(s.sessions),
       // what it serves: its address, TLS or plain (src/cli/pg-tls.ts)
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
@@ -538,18 +572,39 @@ export function fileSize(b: number): string {
   return b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GiB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`;
 }
 
-/** The restarts recorded for a run, or why they could not be read (a file nobody can read is said, never taken as none). */
-function restartsOf(home: string): Restart[] | { error: string } {
-  try { return readRestarts(home); }
-  catch (e) { return { error: `${path.join(home, "restarts.json")} could not be read: ${(e as Error).message}` }; }
+/** `Mason` in mason status: the run's own version (a CLI of another version says the run's), its pid, and how long it
+ *  has been up (a run from before it: the CLI's version, no uptime) */
+export function masonRow(e: Pick<RunState["engine"], "version" | "startedAt" | "uptimeSeconds">, pid: number): [string, string] {
+  return ["Mason", `${e.version ?? version()}, pid ${pid} · one process${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`];
 }
 
-/** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) */
-function restartsRows(r: Restart[] | { error: string }): Array<[string, string]> {
-  if (!Array.isArray(r)) return [["Restarts", r.error]];
-  const last = r[r.length - 1];
-  if (last === undefined) return [];
-  return [["Restarts", `${r.length}, the last ${ago(last.at)}: ${last.reason}, after ${last.upSeconds} s up (mason logs --start has its last lines)`]];
+/** `Sessions` in mason status: how many are logged in to the Postgres API, how many run a statement, and by whom (the
+ *  three with the most, then how many others) */
+export function sessionsRows(s: SessionsOpen | undefined): Array<[string, string]> {
+  if (s === undefined) return [];
+  if (s.open === 0) return [["Sessions", "none open"]];
+  const running = s.byClient.reduce((n, c) => n + c.running, 0);
+  const who = s.byClient.slice(0, 3).map((c) => `${c.open} ${c.user === "" ? "by a token" : `as ${c.user}`}${c.client === "" ? "" : ` (${c.client})`}`);
+  const others = s.byClient.length - who.length;
+  return [["Sessions", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
+}
+
+/** `Disk` in mason status: the bytes free where the copy is, and what the copies running are projected to add (none: no
+ *  row, for a run from before it) */
+export function diskRows(d: RunState["disk"]): Array<[string, string]> {
+  if (d === undefined) return [];
+  const adds = d.projectedBytes === null ? "" : ` · the copies running are projected to add about ${fileSize(d.projectedBytes)} more`;
+  if (d.freeBytes === null) return [["Disk", `${d.error ?? "the free space could not be read"}${adds}`]];
+  return [["Disk", `${fileSize(d.freeBytes)} free in ${d.path}${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the copy stops before the disk fills" : ""}`]];
+}
+
+/** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) —
+ *  the run's own `engine.restarts` while it is up, the same fact read from the file while it is not (`restartsFact`) */
+export function restartsRows(r: RestartsFact | undefined): Array<[string, string]> {
+  if (r === undefined) return [];
+  if ("error" in r) return [["Restarts", r.error]];
+  if (r.last === null) return [];
+  return [["Restarts", `${r.count}, the last ${ago(r.last.at)}: ${r.last.why}, after ${r.last.upSeconds} s up (mason logs --start has its last lines)`]];
 }
 
 /**
@@ -567,7 +622,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const duckFile = path.join(project.dir, DUCK_FILE);
   // the copy's file, when a run has made one: its size says what the next mason start resumes with
   const bytes = fs.existsSync(duckFile) ? fs.statSync(duckFile).size : null;
-  const restarts = restartsOf(project.dir);
+  const restarts = restartsFact(project.dir);
   const lastStop = project.config.lastStop ?? null;
   const next: readonly NextStep[] = hung === null ? ("message" in src && src.next?.length ? src.next : [["mason start", "start Mason for this project: what it copied is kept, and polled again"]])
     : hung.problem.next ?? [["mason stop", "end it"], ["mason logs", "what it was doing"]];
