@@ -317,9 +317,13 @@ below a day it keeps the instant's own offset. So: milliseconds and seconds floo
 seconds); minutes and hours floored in UTC, elsewhere the instant less the wall clock's remainder (one zone conversion);
 day and week (Monday's) floored in UTC, month and up the naive calendar of the UTC wall clock (`make_timestamp`); a day
 and up in another zone stays DuckDB's own `date_trunc` in the session's zone (the three-argument form's wall clock
-there, read back), whose zone lookup no form here makes cheaper. ±infinity is itself, NULL NULL.
+there, read back), whose zone lookup no form here makes cheaper. ±infinity is itself, NULL NULL. The session's zone is
+the one the statement EXECUTES in, read by `current_setting('TimeZone')` under a CASE on UTC's names (`UTC_NAMES`,
+`src/lib/timezone.ts`), never the zone it was planned in: a prepared statement is planned at its Parse and run after any
+later `SET TimeZone`, so a plan that baked in the Parse's zone truncated by UTC's days in Berlin. DuckDB folds the
+CASE to one branch when it plans what it runs (the histogram's times below are unchanged by it).
 
-**Why.** On the test server a BI tool's monthly histogram (`DATE_TRUNC('month', t.created_at) … GROUP BY 1 ORDER BY 1
+**Why.** On the test server a BI tool's monthly histogram (`DATE_TRUNC('month', t.ts) … GROUP BY 1 ORDER BY 1
 DESC LIMIT 100`) over 197 M rows took 7.9 s, every core busy and the disk idle: the Projection holding `date_trunc` took
 41.8 s of thread time against the scan's 13.1 (~150 ns a row a thread), and 799 statements of its request log carried a
 DATE_TRUNC (median 2.5 s). DuckDB's `date_trunc` of a TIMESTAMPTZ is the ICU extension's calendar for every row, in UTC
@@ -423,11 +427,11 @@ of three, ms; DuckDB's EXPLAIN ANALYZE of the statement sent:
 | ORDER BY … LIMIT | main (the idiom as written) | now (one key) | row groups the key's scan read, main → now |
 |---|---|---|---|
 | `(w.ts) IS NULL ASC, w.ts DESC` LIMIT 100 | 61 | 5 | 326 → 8 of 326 |
-| `(w.ext_id) IS NULL ASC, w.ext_id DESC` LIMIT 100 | 169 | 48 | 326 → 100 of 326 |
+| `(w.tid) IS NULL ASC, w.tid DESC` LIMIT 100 | 169 | 48 | 326 → 100 of 326 |
 | the timestamp, LIMIT 1000 | 67 | 16 | 326 → 10 |
 | the text id, LIMIT 1000 | 310 | 349 (noise: the folded key read every row group too) | 326 → 326 |
 
-Without the LIMIT the plan is the same but for its sort key (`#7 ASC, ext_id DESC` against `ext_id DESC`). On a plain
+Without the LIMIT the plan is the same but for its sort key (`#7 ASC, tid DESC` against `tid DESC`). On a plain
 DuckDB connection (late materialisation at its default 50) the text id's LIMIT 1000 took 2.8–3.0 s in either form: the
 top N over every column. The test server's 91 s is that table read from its disk at ~125 MB/s: one key column (the late
 fetch) and the row groups its threshold cannot skip are what remain, so a random text id gains what its zone maps

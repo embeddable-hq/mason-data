@@ -929,6 +929,7 @@ test("date_trunc of a timestamptz is Postgres's in every zone and part, by the i
   const c = await client();
   const units = ["microseconds", "milliseconds", "second", "minute", "hour", "day", "week", "month", "quarter", "year", "decade", "century", "millennium"];
   const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  const planned = new Map<string, string>();
   try {
     for (const zone of ["UTC", "Europe/Berlin", "America/New_York", "Australia/Lord_Howe", "Asia/Kathmandu"]) {
       await c.query(`SET TimeZone = '${zone}'`);
@@ -938,11 +939,15 @@ test("date_trunc of a timestamptz is Postgres's in every zone and part, by the i
         const from = logged.length;
         assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
         const duck = sent(from);
-        // in UTC every part is the instant's arithmetic; elsewhere up to the hour (the offset kept), and from the day on
-        // DuckDB's own truncation in the session's zone
-        const arithmetic = zone === "UTC" ? unit !== "microseconds" : ["milliseconds", "second", "minute", "hour"].includes(unit);
-        if (arithmetic) assert.match(duck, /make_timestamptz\(/, `${unit} in ${zone}: ${duck}`);
-        if (arithmetic) assert.doesNotMatch(duck, /date_trunc\('\w+', (?!make_timestamp\()/, `${unit} in ${zone}: ${duck}`);
+        // every part but the microsecond is the instant's arithmetic: a second or less in every zone; a minute and up
+        // under a CASE on the zone the statement EXECUTES in (in UTC the arithmetic; elsewhere a minute or an hour
+        // with the offset kept, a day and up DuckDB's own truncation), never the zone it was planned in
+        if (unit !== "microseconds") assert.match(duck, /make_timestamptz\(/, `${unit} in ${zone}: ${duck}`);
+        if (unit === "milliseconds" || unit === "second") assert.doesNotMatch(duck, /date_trunc\(|current_setting\(/, `${unit} in ${zone}: ${duck}`);
+        if (!["microseconds", "milliseconds", "second"].includes(unit)) assert.match(duck, /CASE WHEN current_setting\('TimeZone'\) = 'UTC' OR /, `${unit} in ${zone}: ${duck}`);
+        // so what is sent names no session zone: one text in every zone
+        const first = planned.get(unit);
+        if (first === undefined) planned.set(unit, duck); else assert.equal(duck, first, `${unit} in ${zone}`);
       }
       // the three-argument form, in a zone of its own, whatever the session's
       for (const [unit, z] of [["hour", "Europe/Berlin"], ["minute", "Asia/Kathmandu"], ["day", "America/New_York"], ["month", "UTC"], ["century", "Europe/Berlin"], ["week", "utc"]]) {
@@ -955,6 +960,28 @@ test("date_trunc of a timestamptz is Postgres's in every zone and part, by the i
     await truth.exec("SET TimeZone = 'UTC'");
     const histogram = "SELECT DATE_TRUNC('month', i.at) AS m, count(*) FROM instants i GROUP BY 1 ORDER BY 1 DESC LIMIT 100";
     assert.deepEqual(await answer(c, histogram), await postgres(histogram));
+  } finally {
+    await truth.exec("SET TimeZone = 'UTC'");
+    await c.end();
+  }
+});
+
+// A prepared statement is planned at its Parse and executed after any later SET TimeZone: the truncation's zone is the
+// one each execution runs in (the arithmetic once read the zone of the Parse, so a statement prepared in UTC truncated
+// by UTC's days in Berlin).
+test("date_trunc of a timestamptz in a prepared statement truncates in the zone it executes in", async () => {
+  const c = await client();
+  try {
+    for (const unit of ["hour", "day", "month", "week"]) {
+      const text = `SELECT id, date_trunc('${unit}', at) AS t FROM instants WHERE id > $1 ORDER BY id`;
+      const name = `trunc_${unit}`;
+      for (const zone of ["UTC", "Europe/Berlin", "America/New_York", "UTC"]) {
+        await c.query(`SET TimeZone = '${zone}'`);
+        await truth.exec(`SET TimeZone = '${zone}'`);
+        const r = await c.query({ name, text, values: [0], rowMode: "array", types: raw } as pg.QueryConfig);
+        assert.deepEqual({ fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows }, await postgres(text, [0]), `${name} executed in ${zone}`);
+      }
+    }
   } finally {
     await truth.exec("SET TimeZone = 'UTC'");
     await c.end();

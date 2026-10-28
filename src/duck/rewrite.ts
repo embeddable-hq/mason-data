@@ -32,7 +32,7 @@ import { pathIndex, SESSION_VARIABLE, type CaseMode, type JsonKind, type PgKind 
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, type Typed } from "./pgtree.ts";
 import { canonicalRead, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
-import { atTimeZoneOf, isUtc } from "../lib/timezone.ts";
+import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -1924,13 +1924,24 @@ class Rewriter {
           if (own === TIME) throw new Unrewritable("date_trunc() of a time is not supported by Mason", "date_trunc a timestamp, or extract the parts", "time-date-trunc");
           if (argType(1) === INTERVAL && unit === "week") throw new Unrewritable(`unit "week" not supported for type interval`, "", { postgres: "0A000" });
           const x = argType(1) === TIMESTAMPTZ && own === DATE ? cast(args[1]!, ["timestamptz"]) : args[1]!;
-          // a timestamptz in the session's zone: the instant's own arithmetic where that is Postgres's answer
+          const wall = (v: AstNode): AstNode | null => (unit === "century" || unit === "millennium" || unit === "decade") && argType(1) !== INTERVAL
+            ? this.truncWall(args[0]!, v, argType(1) === TIMESTAMPTZ ? TIMESTAMPTZ : TIMESTAMP)
+            : v === args[1] ? null : fn("date_trunc", [args[0]!, v]);
+          // a timestamptz in the session's zone: the instant's own arithmetic where that is Postgres's answer. The
+          // zone is the one the statement EXECUTES in, never the one it was planned in (a prepared statement is
+          // planned at its Parse and run after any later SET TimeZone): `current_setting('TimeZone')`, which DuckDB
+          // folds to a constant when it plans the statement it runs, so the CASE costs no row anything
           if (argType(1) === TIMESTAMPTZ) {
-            const fast = this.truncInstant(unit, x, strConst(this.timeZone), this.timeZone);
-            if (fast !== null) return fast;
+            const session = (): AstNode => fn("current_setting", [strConst("TimeZone")]);
+            const utc = this.truncInstant(unit, this.clone(x), session(), "UTC");
+            if (utc !== null && ["microseconds", "milliseconds", "second"].includes(unit)) return utc;
+            if (utc !== null) {
+              const inUtc = or(UTC_NAMES.map((z) => op("=", session(), strConst(z))));
+              const elsewhere = this.truncInstant(unit, x, session(), null) ?? wall(x) ?? fn("date_trunc", [args[0]!, x]);
+              return caseWhen([[inUtc, utc]], elsewhere);
+            }
           }
-          if ((unit === "century" || unit === "millennium" || unit === "decade") && argType(1) !== INTERVAL) return this.truncWall(args[0]!, x, argType(1) === TIMESTAMPTZ ? TIMESTAMPTZ : TIMESTAMP);
-          return x === args[1] ? null : fn("date_trunc", [args[0]!, x]);
+          return wall(x);
         }
       case "make_interval": return makeInterval(args);
       // isfinite of a time or an interval: DuckDB has none, and neither is ever infinite here

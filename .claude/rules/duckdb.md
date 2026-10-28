@@ -40,7 +40,9 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     never ICU's calendar where the arithmetic is Postgres's: every part in UTC, a second or less in any zone, a minute or
     an hour elsewhere with the instant's offset kept (ICU re-read the wall clock: 02:30 CEST truncated to 02:00 +01). A
     day or more in another zone stays DuckDB's `date_trunc` in the session's zone. ICU is ~45 ns a row even in UTC, the
-    arithmetic ~8; a TIMESTAMP ↔ TIMESTAMPTZ cast is ICU's too, so never "cast, truncate, cast back";
+    arithmetic ~8; a TIMESTAMP ↔ TIMESTAMPTZ cast is ICU's too, so never "cast, truncate, cast back". The session's
+    zone is read where the statement executes (`current_setting('TimeZone')`), never the rewriter's: a prepared
+    statement's plan is made at its Parse and run after a later `SET TimeZone`;
   - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty** (`leftLateral`, the functions'
     `orNull`): DuckDB's LEFT lateral is a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a
     100-row preview) and whose order kept other rows than Postgres's; the INNER one is its streaming UNNEST;
