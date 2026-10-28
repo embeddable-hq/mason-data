@@ -393,6 +393,10 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   DuckDB's file lock): no secret in it; changed under a lock file and renamed into place; the listener stats it at every
   connection and before EVERY statement of a user's session (`recheckMs: 0`), so a removal takes effect without a
   restart. Fail closed: a file that cannot be read refuses every user (57P03), never "live"; no file is no users.
+- **A removed user is KEPT in the file with `removedAt`** (the list shows Active / Removed): only entries without one are live,
+  and the listener (`LiveUsers`) reads only those, so a removal refuses as before; a removed name can be added again (a new
+  id); `mason user list` gives each user `lastUsedAt` (`RequestLedger.lastUsed`, within the user's own window) and its URL
+  without the password (`connectionUrl`, the one builder).
 
 ## Testing
 

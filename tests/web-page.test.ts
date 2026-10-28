@@ -286,6 +286,7 @@ test("the users: a line each with when it was added, one rotated away said so; R
   assert.match(asking, /data-confirm-remove="metabase"/);
   assert.ok(!/data-confirm-remove="grafana"/.test(asking), "only the one asked");
   assert.equal(textOf(renderUsers({ users: [] }, null)), "No users yet.");
+  assert.equal(textOf(renderUsers({ users: [{ name: "old", id: "0123456789abcdef", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false }] }, null)), "No users yet.", "a removed user is not listed as one");
 });
 
 test("a user just added: the password and the URL to paste, each with a copy button, and that it will not be shown again", () => {

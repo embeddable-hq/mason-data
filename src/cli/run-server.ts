@@ -28,7 +28,7 @@ import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure } from "./command.ts";
 import { readiness } from "./readiness.ts";
-import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT } from "./user.ts";
+import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT, withLastUsed } from "./user.ts";
 import { postgresLink } from "./pg-url.ts";
 import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
@@ -83,7 +83,7 @@ export interface RunContext {
     /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode */
     stream: () => Promise<StreamStatus | null>;
     /** the Postgres listener's requests (src/duck/requests.ts, `_mason.requests`): mason status and mason logs --requests */
-    requests: Pick<RequestLedger, "recent" | "slow" | "refused" | "days">;
+    requests: Pick<RequestLedger, "recent" | "slow" | "refused" | "days" | "lastUsed">;
     /** the JSON paths stored as columns of the copies, and how far each is (src/duck/kept.ts): mason status */
     jsonPaths?: () => KeptPathStatus[] };
 }
@@ -276,9 +276,10 @@ export function createRunServer(ctx: RunContext): http.Server {
           }
         } else if (req.method === "GET" && url.pathname === "/api/users") {
           // mason user list --json's shape: the users, and whether each connects
-          const r = listUsers(ctx.users.file, ctx.users.apiKey);
+          const r = listUsers(ctx.users.file, ctx.users.apiKey, postgresLink(ctx.users.postgresUrl));
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
-          sendJson(res, 200, { ...r, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
+          const used = await withLastUsed(r.users, ctx.duck.requests, ctx.log);
+          sendJson(res, 200, { ...used, urlNote: null, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
         } else if (req.method === "POST" && url.pathname === "/api/users") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown };
           if (typeof body.name !== "string") throw new Refusal(400, "send { name }: the user's name");

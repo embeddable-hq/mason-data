@@ -81,6 +81,31 @@ test("two requests recorded in one millisecond read back in the order the listen
   await store.writer.run(`DELETE FROM ${REQUESTS_TABLE}`);
 });
 
+test("lastUsed: each user's newest statement within the window it was a user in; a refused login or an ended session is no use; none is null", async () => {
+  const ledger = await RequestLedger.open(store, () => undefined, { days: 7 });
+  const t0 = Date.now() - 3_600_000;
+  const at = (ms: number): Date => new Date(t0 + ms);
+  ledger.record(row({ requestId: "u1", at: at(0), user: "metabase" }));
+  ledger.record(row({ requestId: "u2", at: at(1000), user: "metabase" }));
+  ledger.record(row({ requestId: "u3", at: at(2000), user: "metabase", method: "CONNECT", status: 401, sqlstate: "28P01", error: "password authentication failed" }));
+  ledger.record(row({ requestId: "u4", at: at(3000), user: "metabase", status: 401, sqlstate: "28000", error: "the user was removed" }));
+  ledger.record(row({ requestId: "u5", at: at(4000), user: "metabase", status: 400, sqlstate: "42P01", error: "no table" }));   // the statement's own error is a use
+  ledger.record(row({ requestId: "u6", at: at(10_000), user: "metabase" }));   // a later user of the same name
+  ledger.record(row({ requestId: "u7", at: at(500), user: "grafana", sqlstate: "28P01", status: 401, error: "wrong" }));
+  ledger.record(row({ requestId: "u8", at: at(600) }));   // a token's session: no user
+  await ledger.flush();
+  const iso = (ms: number): string => at(ms).toISOString();
+  const used = await ledger.lastUsed([
+    { name: "metabase", since: iso(-1000), until: iso(5000) },   // the first user of the name, removed at 5 s
+    { name: "metabase", since: iso(6000), until: null },         // its successor
+    { name: "grafana", since: iso(-1000), until: null },         // only a refused login
+    { name: "nobody", since: iso(-1000), until: null },
+  ]);
+  assert.deepEqual(used, [iso(4000), iso(10_000), null, null]);
+  await ledger.close();
+  await store.writer.run(`DELETE FROM ${REQUESTS_TABLE}`);
+});
+
 test("the requests older than MASON_REQUEST_LOG_DAYS are deleted at open and said with their count; the rest are kept", async () => {
   const day = 86_400_000;
   const said: string[] = [];

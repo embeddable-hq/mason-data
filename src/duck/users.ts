@@ -11,10 +11,11 @@
  * statement of its session is attributed to that user, and rotating the API key removes every user at once (no MAC
  * verifies under the new key). It never collides with a token: a token's MAC is 43 base64url characters.
  *
- * THE LIST OF LIVE USERS is a FILE in the state folder (`.mason/users.json`), never a DuckDB table: `mason user …` runs
+ * THE LIST OF USERS is a FILE in the state folder (`.mason/users.json`), never a DuckDB table: `mason user …` runs
  * as a second process beside the run, which holds DuckDB's file lock. It holds each user's name, id, when it was added
  * and the API key's fingerprint at the time (`key`, a MAC of a constant: no secret, it says which key a user was added
- * under) — never a password. A change is made under a lock file (`users.json.lock`, O_EXCL) and written beside and
+ * under) — never a password. A removed user STAYS in it with `removedAt` (so a list can show who was removed, and when):
+ * only the entries without one are live, and the listener reads only those. A change is made under a lock file (`users.json.lock`, O_EXCL) and written beside and
  * renamed, so a reader sees the old list or the new one, never half of either, and two `mason user add` at once cannot
  * both win a name. The listener RE-READS it (`LiveUsers`: a stat at every connection and before every statement of a
  * user's session, the file read again when its inode, size or mtime moved), so a removal refuses the next connection
@@ -35,7 +36,7 @@ export const USERS_FILE = "users.json";
 export const USER_NAME_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 export const USER_NAME_RULE = "1 to 63 lower case letters, digits, \"_\", \".\" or \"-\", starting with a letter or digit (e.g. metabase)";
 
-/** One live user, as the file keeps it: no secret. */
+/** One user, as the file keeps it: no secret. */
 export interface MasonUser {
   name: string;
   /** 16 hex digits, the password's middle part */
@@ -44,7 +45,12 @@ export interface MasonUser {
   addedAt: string;
   /** the API key's fingerprint when it was added (`keyFingerprint`): another one means the key was rotated since */
   key: string;
+  /** ISO 8601 UTC; set by `mason user remove`, which keeps the entry: absent for a user that is not removed */
+  removedAt?: string;
 }
+
+/** Whether a user has not been removed (it may still not connect: see `underKey`). */
+export const isActive = (u: MasonUser): boolean => u.removedAt === undefined;
 
 const PASSWORD_RE = /^mason_([0-9a-f]{16})_([0-9a-f]{32})$/;
 
@@ -91,9 +97,12 @@ function parseUsers(file: string, text: string): UsersRead {
     const o = u as Record<string, unknown> | null;
     if (typeof o !== "object" || o === null || typeof o.name !== "string" || !USER_NAME_RE.test(o.name) || typeof o.id !== "string" || !/^[0-9a-f]{16}$/.test(o.id) ||
       typeof o.addedAt !== "string" || typeof o.key !== "string") {
-      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key } as mason user add writes it` };
+      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key[, removedAt] } as mason user add writes it` };
     }
-    users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key });
+    if (o.removedAt !== undefined && typeof o.removedAt !== "string") {
+      return { problem: `${file}: users[${i}].removedAt is not a timestamp as mason user remove writes it` };
+    }
+    users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key, ...(o.removedAt !== undefined ? { removedAt: o.removedAt } : {}) });
   }
   return { users };
 }
@@ -159,7 +168,7 @@ export class LiveUsers {
 
   constructor(file: string, apiKey: string) { this.file = file; this.apiKey = apiKey; }
 
-  /** the users now; why not, when the file cannot be read */
+  /** the live (not removed) users now; why not, when the file cannot be read */
   now(): UsersRead {
     let stamp: string;
     try { const s = fs.statSync(this.file); stamp = `${s.ino}:${s.size}:${s.mtimeMs}`; }
@@ -167,7 +176,12 @@ export class LiveUsers {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") return { problem: `${this.file} cannot be read: ${(e as Error).message}` };
       stamp = "none";
     }
-    if (stamp !== this.seen || "problem" in this.read) { this.read = readUsers(this.file); this.seen = stamp; }
+    if (stamp !== this.seen || "problem" in this.read) {
+      const r = readUsers(this.file);
+      // a removed user is kept in the file for the list: it is no user to the listener
+      this.read = "problem" in r ? r : { users: r.users.filter(isActive) };
+      this.seen = stamp;
+    }
     return this.read;
   }
 
