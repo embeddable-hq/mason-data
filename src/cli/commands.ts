@@ -1,7 +1,8 @@
 /**
  * THE COMMANDS BESIDE `mason start` (an interface as good for people as for coding agents).
- * Each one finds the run it means (src/cli/runs.ts), asks its command server (src/cli/control.ts) — or, for what needs
- * only the project's files and its database (tables, add, remove), reads them itself — and prints it for a person — or, with `--json`, as data a program reads. Exit codes are part of each command's contract:
+ * Each one finds the run it means (src/cli/runs.ts) and asks its command server (src/cli/control.ts) — or, for what
+ * needs only the project's files and its database (tables; add and remove while Mason is down), reads them itself — and
+ * prints it for a person or, with `--json`, as data a program reads. Exit codes are part of each command's contract:
  *
  *   mason status [--json]                 what the run is doing: its database, its tables and their copies, the Postgres API
  *   mason tables [<table>…] [--json]      the database's tables, their columns, keys and foreign keys
