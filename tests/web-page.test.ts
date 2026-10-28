@@ -1266,3 +1266,12 @@ test("Usage and Logs: the index.html has the parts the pages write, the placehol
   for (const id of ["usage-queries", "usage-hourly", "usage-sizes", "logs-events", "logs-run"]) assert.match(html, new RegExp(`<div id="${id}"></div>`), id);
   assert.doesNotMatch(html, /<div id="usage"><\/div>|<div id="logs"><\/div>/);
 });
+
+test("Users: a user's last use is mason user list's words (lastUsedText, src/cli/user.ts), a time, unknown, or not used within the log's days", async () => {
+  const cli = await import("../src/cli/user.ts") as unknown as { lastUsedText?: (at: string | null, note: string | null, days: number | null) => string };
+  assert.equal(typeof cli.lastUsedText, "function", "src/cli/user.ts exports lastUsedText");
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as { lastUsedText: (u: { lastUsedAt: string | null }, note: string | null, days: number | null) => string };
+  for (const [at, note, days] of [["2026-10-27T09:10:11.000Z", null, 7], [null, "unknown: Mason is not running", null], [null, null, 7], [null, null, null]] as const) {
+    assert.equal(usersPage.lastUsedText({ lastUsedAt: at }, note, days), cli.lastUsedText!(at, note, days), `${at} ${note} ${days}`);
+  }
+});

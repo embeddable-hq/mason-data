@@ -54,7 +54,7 @@ and Users is today's form and list.
 - **Users** (`#users`): today's add form and Remove, and each user's status (Active / Removed), when it was added, its
   last use, and its URL without the password (**Copy**). Reads `/api/users?lastUsed=1` (on opening, then 30 s).
 - **Usage** (`#usage`): the last day's and week's statements (`/api/queries`), the last 24 h hour by hour
-  (`/api/usage?since=24h&step=1h`), and each copy's own size (60 s).
+  (`/api/usage?since=24h&step=3600`), and each copy's own size (60 s).
 - **Logs** (`#logs`): the sync's events (`/api/events`, 10 s) and the run's last log entries (`/api/logs`, 5 s).
 
 ## Who reads it
