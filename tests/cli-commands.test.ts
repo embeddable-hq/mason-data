@@ -278,6 +278,29 @@ test("mason status's slow and refused statements: each on one line with its time
   assert.deepEqual(refusedLines({ error: "the run answered 500" }, PLAIN), ["\nRefused queries: could not read them (the run answered 500; mason logs has the detail)"]);
 });
 
+test("mason status's unsupported SQL: an entry a line — how many, what they used, its entry of docs/SQL-SUPPORT.md — then when last, who, the latest; none, no section; declared", () => {
+  const { unsupportedLines } = commands as unknown as { unsupportedLines: (u: unknown, st: typeof PLAIN) => string[] };
+  assert.equal(typeof unsupportedLines, "function", "src/cli/commands.ts unsupportedLines");
+  const long = `SELECT ${Array.from({ length: 40 }, (_, i) => `c${i}`).join(", ")} FROM public.orders`;
+  assert.deepEqual(unsupportedLines([
+    { gap: "json-agg-distinct", title: "json_agg / jsonb_agg (DISTINCT …)", runs: 1200, users: ["alice", "bob"], clients: ["Metabase"], last: "2026-10-26T10:01:00.000Z", example: long },
+    { gap: "quote-ident", title: "quote_ident()", runs: 1, users: [], clients: [], last: "2026-10-26T09:00:00.000Z", example: "SELECT quote_ident(\n name) FROM t" },
+    { gap: "a-renamed-entry", title: null, runs: 2, users: [], clients: ["psql"], last: "2026-10-26T08:00:00.000Z", example: "SELECT 1" },
+  ], PLAIN), [
+    "\nUnsupported SQL (the last day's refused statements by what they used, the most first; docs/SQL-SUPPORT.md has each one's way out):",
+    "  1,200 statements used json_agg / jsonb_agg (DISTINCT …) — docs/SQL-SUPPORT.md json-agg-distinct",
+    `    last 2026-10-26 10:01 as alice, bob from Metabase — ${long.slice(0, 99)}…`,
+    "  1 statement used quote_ident() — docs/SQL-SUPPORT.md quote-ident",
+    "    last 2026-10-26 09:00 — SELECT quote_ident( name) FROM t",
+    "  2 statements used what this Mason no longer lists — docs/SQL-SUPPORT.md a-renamed-entry",
+    "    last 2026-10-26 08:00 from psql — SELECT 1",
+  ]);
+  assert.deepEqual(unsupportedLines([], PLAIN), [], "nothing refused by an entry: no section");
+  assert.deepEqual(unsupportedLines({ error: "the run answered 500\nstack" }, PLAIN), ["\nUnsupported SQL: could not read it (the run answered 500; mason logs has the detail)"]);
+  assert.ok(STATUS.json?.includes("unsupported"), "mason status --json declares unsupported");
+  assert.match(STATUS.usage, /refusedTotal \(how many in all\), unsupported: \[\{ gap[^]*title[^]*runs[^]*users, clients[^]*last, example/, "and its usage names its fields");
+});
+
 test("mason status's query errors: the latest refused, failed or cancelled statements, a line each (requestLine); none, no section; declared and named in the usage", () => {
   const { queryErrorLines, requestLine } = commands as unknown as { queryErrorLines: (r: unknown, st: typeof PLAIN) => string[]; requestLine: (r: unknown, st: typeof PLAIN) => string };
   const refused = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 0,
@@ -452,7 +475,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
-      requests: { days: 7, page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); },
+      requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); },
         lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
       usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }] },
       restarts: () => [] },
@@ -561,6 +584,9 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
   const failedQueries = [{ requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", endedAt: "2026-10-24T10:04:00.003Z", session: 4, applicationName: "psql", tokenName: "", user: "",
     method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, bytesSent: 0, durationMs: 3,
     query: "SELECT * FROM nope", queryTruncated: false }];
+  const unsupportedAsks: Array<{ since: string; limit: number }> = [];
+  const unsupportedSql = { gap: "json-agg-distinct", title: "json_agg / jsonb_agg (DISTINCT …)", runs: 12, users: ["metabase"], clients: ["Metabase"],
+    last: "2026-10-24T10:04:00.000Z", example: "SELECT json_agg(DISTINCT status) FROM orders" };
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0,
@@ -570,7 +596,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
       return session === 4 && statement !== undefined && statement !== 9 ? { other: running, asked: statement } : session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session }; } },
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
-      requests: { days: 7, page: async (q) => { asked.push(q); return { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
+      requests: { days: 7, unsupported: async (q) => { unsupportedAsks.push(q); return [unsupportedSql]; }, page: async (q) => { asked.push(q); return { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
         refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, lastUsed: async (u) => u.map(() => null) },
       events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
   };
@@ -619,6 +645,10 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     assert.equal(st.code, 0, st.stdout + st.stderr);
     const recent = (JSON.parse(st.stdout) as { recentErrors: Record<string, unknown> }).recentErrors;
     assert.deepEqual(recent, { sync: [], error: null, queries: failedQueries, queriesError: null });
+    // and the refused statements grouped by the unsupported SQL they used, beside refusedQueries: the run's /api/unsupported, a day of it
+    assert.deepEqual((JSON.parse(st.stdout) as { unsupported: unknown }).unsupported, [unsupportedSql]);
+    assert.ok(Math.abs(Date.parse(unsupportedAsks[0]!.since) - (Date.now() - 86_400_000)) < 60_000, `the last day: ${unsupportedAsks[0]!.since}`);
+    assert.equal(unsupportedAsks[0]!.limit, 5, "the top few");
     assert.deepEqual(asked.slice(asks).map((q) => { const { limit, failed } = q as { limit: number; failed?: boolean }; return { limit, failed }; }), [{ limit: 5, failed: true }]);
     // the statements running now
     const now = await run(["logs", "--running", "--json"]);

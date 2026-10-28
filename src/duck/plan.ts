@@ -7,11 +7,10 @@
  */
 import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
-import { StatementError, type DuckPlan } from "../api/postgres/server.ts";
+import { gapRefusal, StatementError, type DuckPlan } from "../api/postgres/server.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
 import { describeKeys, nameUserKeys, resolvedKeys } from "./resolved.ts";
-import { gapMark } from "./gaps.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
 import { pgTyplen } from "./types.ts";
@@ -159,7 +158,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
     catch (e) {
       if (!(e instanceof StatementError)) throw e;
       const { position: _p, ...fields } = e.fields;
-      throw new StatementError(fields, text);
+      throw new StatementError(fields, text, e.gap);
     }
   }
   // the catalog's own OIDs for the types an extension made (citext): the rewrite knows a few by name, and the wire sends
@@ -215,9 +214,8 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   catch (e) {
     // a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its SQLSTATE, and no gap
     if (e instanceof Unrewritable) {
-      throw new StatementError(typeof e.gap === "string"
-        ? { code: "0A000", message: e.message, hint: e.hint, detail: `${gapMark(e.gap)} (docs/SQL-SUPPORT.md)` }
-        : { code: e.gap.postgres, message: e.message, hint: e.hint }, text);
+      throw typeof e.gap === "string" ? gapRefusal(e.gap, e.message, e.hint, text)
+        : new StatementError({ code: e.gap.postgres, message: e.message, hint: e.hint }, text);
     }
     throw e;
   }
@@ -233,10 +231,10 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   if (unverified.length > 0) {
     const names = await describeKeys((sql) => catalogRows(catalog, sql), unverified);
     const listed = unverified.map((k) => names.get(k) ?? k);
-    throw new StatementError({ code: "0A000",
-      message: `Mason cannot yet answer this statement on DuckDB exactly as Postgres would: it uses ${listed.slice(0, 5).join("; ")}${listed.length > 5 ? ` and ${listed.length - 5} more` : ""}, which Mason has not verified`,
-      hint: "write the statement without it (docs/SQL-SUPPORT.md lists what is verified), or report it: a statement Mason has not verified is refused rather than answered differently",
-      detail: `${gapMark("unverified")}: ${unverified.join(", ")}` }, text);
+    throw gapRefusal("unverified",
+      `Mason cannot yet answer this statement on DuckDB exactly as Postgres would: it uses ${listed.slice(0, 5).join("; ")}${listed.length > 5 ? ` and ${listed.length - 5} more` : ""}, which Mason has not verified`,
+      "write the statement without it (docs/SQL-SUPPORT.md lists what is verified), or report it: a statement Mason has not verified is refused rather than answered differently",
+      text, `: ${unverified.join(", ")}`);
   }
   // DuckDB's COLUMNS(t.*) (decidedByKey's star) is an expression only unquoted; the deparser quotes the keyword. No
   // statement Postgres accepted calls a function "columns" (Postgres has none), and the read-back below checks the text

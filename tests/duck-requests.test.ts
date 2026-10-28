@@ -270,3 +270,35 @@ test("a ledger made before the bytes were counted gains the column; its old rows
     await ledger.close();
   } finally { await old.close(); fs.rmSync(d2, { recursive: true, force: true }); }
 });
+
+test("unsupported: the refused statements grouped by the registry entry that refused them — how many, who, when last, the latest — the most first; other refusals are not in it", async () => {
+  const ledger = await RequestLedger.open(store, () => undefined, { days: 7 });
+  const now = Date.now();
+  const refused = (requestId: string, gap: string | undefined, o: Partial<ApiLogRow> = {}): ApiLogRow =>
+    row({ requestId, status: 400, sqlstate: "0A000", error: "is not supported by Mason", ...(gap === undefined ? {} : { gap }), ...o });
+  ledger.record(refused("j1", "json-agg-distinct", { at: new Date(now - 30_000), user: "alice", client: "postgres:Metabase", payload: "SELECT json_agg(DISTINCT a) FROM t" }));
+  ledger.record(refused("j2", "json-agg-distinct", { at: new Date(now - 20_000), user: "bob", client: "postgres:unnamed", payload: "SELECT jsonb_agg(DISTINCT b) FROM t" }));
+  ledger.record(refused("j3", "json-agg-distinct", { at: new Date(now - 10_000), user: "alice", client: "postgres:psql", payload: `SELECT json_agg(DISTINCT c) FROM t WHERE ${"x".repeat(2000)}` }));
+  ledger.record(refused("q1", "quote-ident", { at: new Date(now - 5_000), client: "postgres:unnamed", payload: "SELECT quote_ident(name) FROM t" }));
+  ledger.record(refused("gone", "an-entry-renamed-since", { at: new Date(now - 6_000), payload: "SELECT 1" }));
+  // refused for another reason, answered, and refused before the window: none of them
+  ledger.record(row({ requestId: "missing", at: new Date(now - 1_000), status: 400, sqlstate: "42P01", error: 'relation "nope" does not exist', payload: "SELECT * FROM nope" }));
+  ledger.record(row({ requestId: "syntax", at: new Date(now - 1_000), status: 400, sqlstate: "42601", error: "syntax error", payload: "SELEC 1" }));
+  ledger.record(row({ requestId: "ok", at: new Date(now - 1_000) }));
+  ledger.record(refused("old", "quote-ident", { at: new Date(now - 3 * 86_400_000), payload: "SELECT quote_ident(x) FROM t" }));
+  await ledger.flush();
+  const since = new Date(now - 86_400_000).toISOString();
+  const u = await ledger.unsupported({ since, limit: 10 });
+  assert.deepEqual(u.map((g) => [g.gap, g.runs]), [["json-agg-distinct", 3], ["quote-ident", 1], ["an-entry-renamed-since", 1]],
+    "the most refused first, then the latest; a missing table, a syntax error and an answer have no entry; what is before since is not counted");
+  assert.deepEqual(u[0], { gap: "json-agg-distinct", title: "json_agg / jsonb_agg (DISTINCT …)", runs: 3, users: ["alice", "bob"], clients: ["Metabase", "psql"],
+    last: new Date(now - 10_000).toISOString(), example: `SELECT json_agg(DISTINCT c) FROM t WHERE ${"x".repeat(2000)}`.slice(0, 1000) + "…" },
+    "its title from the registry; each user and client once, sorted, '' left out; the latest statement, cut");
+  assert.deepEqual([u[1]!.users, u[1]!.clients, u[1]!.example], [[], [], "SELECT quote_ident(name) FROM t"], "no user, no application_name: empty lists");
+  assert.equal(u[2]!.title, null, "an id the registry no longer has: no title, never a guess");
+  assert.deepEqual((await ledger.unsupported({ since, limit: 1 })).map((g) => g.gap), ["json-agg-distinct"], "limit: the first entries");
+  assert.deepEqual((await ledger.unsupported({ since: new Date(now - 7 * 86_400_000).toISOString(), limit: 10 })).map((g) => [g.gap, g.runs]),
+    [["json-agg-distinct", 3], ["quote-ident", 2], ["an-entry-renamed-since", 1]], "since: the window asked");
+  await ledger.close();
+  await store.writer.run(`DELETE FROM ${REQUESTS_TABLE}`);
+});

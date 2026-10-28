@@ -387,7 +387,12 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   in either order until a number broke the tie; a page's cursor is that order's position (`requestCursor`). **An
   outcome is ONE rule** (`outcomeOf`, src/api/request-log.ts: ok, refused, failed, cancelled = 57014), read as SQL by
   the ledger's filters and summary through `outcomeSql`, held equal code for code by tests/duck-requests.test.ts. Every
-  row carries the bytes the listener sent for the statement (`bytes_sent`). ("The request log")
+  row carries the bytes the listener sent for the statement (`bytes_sent`), and a refusal by a registry entry its id
+  (`gap`): taken from the error as the refusal was built (`gapRefusal`, src/api/postgres/server.ts; an `EncodeError`'s,
+  `NumericError`'s or `Unsupported`'s own `gap`), read from the text (`gapIn`) only where a refusal crossed DuckDB as
+  its message (src/duck/store.ts `pgErrorOf`), and carried across the executor's worker (`WireError`); a re-wrap of an
+  error keeps it (tests/duck-wire.test.ts holds every path). `unsupported` groups by it (`/api/unsupported`, `mason
+  status`). ("The request log")
 - **Every sync failure is a row of `_mason.sync_events`, kept as the request log is** (src/duck/events.ts: a failure
   was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
   says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy

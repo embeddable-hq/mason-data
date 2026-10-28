@@ -74,7 +74,7 @@ before(async () => {
     readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined, listener: api,
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(dir, "duck.db"), pollSeconds: 5, poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null, disk: () => ({ path: dir, freeBytes: null, projectedBytes: null }),
-      requests: { days: 7, page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); },
+      requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); },
         lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
       usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
   };

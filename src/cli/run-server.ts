@@ -36,7 +36,7 @@ import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamStatus } from "../duck/sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
-import type { RequestLedger } from "../duck/requests.ts";
+import type { RequestLedger, UnsupportedSql } from "../duck/requests.ts";
 import { eventLimit, requestFilter, requestFilterText, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -97,7 +97,7 @@ export interface RunContext {
     /** the disk the copy's file is on: free, and what the copies running are projected to add (src/duck/sync.ts diskStatus) */
     disk: () => DiskStatus;
     /** the Postgres listener's requests (src/duck/requests.ts, `_mason.requests`): mason status and mason logs --requests */
-    requests: Pick<RequestLedger, "page" | "slow" | "refused" | "summary" | "days" | "lastUsed">;
+    requests: Pick<RequestLedger, "page" | "slow" | "refused" | "unsupported" | "summary" | "days" | "lastUsed">;
     /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
     events: Pick<SyncEvents, "recent" | "days">;
     /** usage over time (src/duck/usage.ts, `_mason.usage`): mason usage */
@@ -245,6 +245,27 @@ export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now(
   return { since, until, stepSeconds: step, sampleSeconds: u.sampleSeconds, keptDays: u.days, samples, copySizes: await u.copySizes() };
 }
 
+/** how many registry entries `/api/unsupported` answers unless `limit` says, and at most */
+export const DEFAULT_UNSUPPORTED_LIMIT = 10;
+export const MAX_UNSUPPORTED_LIMIT = 100;
+
+/**
+ * `GET /api/unsupported?since=&limit=`: the statements refused from `since` on (default a day ago; read by the one time
+ * grammar, src/cli/request-filter.ts `timeOf`) grouped by the registry entry that refused them (src/duck/requests.ts
+ * `unsupported`), the most refused first, `limit` (1 to 100, default 10) of them; and the days the request log keeps.
+ * `mason status --json` `unsupported` is this.
+ */
+export async function unsupported(ctx: RunContext, q: URLSearchParams, now = Date.now()): Promise<{ since: string; unsupported: UnsupportedSql[]; keptDays: number }> {
+  const sinceText = q.get("since");
+  const since = sinceText === null ? new Date(now - DAY_S * 1000).toISOString() : timeParam("since", sinceText, now);
+  const limitText = q.get("limit");
+  const limit = limitText === null ? DEFAULT_UNSUPPORTED_LIMIT : Number(limitText);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_UNSUPPORTED_LIMIT) {
+    throw new Refusal(400, `limit is a whole number of entries of docs/SQL-SUPPORT.md, 1 to ${MAX_UNSUPPORTED_LIMIT}, not ${JSON.stringify(limitText)}`);
+  }
+  return { since, unsupported: await ctx.duck.requests.unsupported({ since, limit }), keptDays: ctx.duck.requests.days };
+}
+
 /**
  * `GET /api/events?limit=&since=&failed=1`: the newest `limit` (1 to 10000, default 40) of the sync's events merged with
  * the run's restarts, newest last, from `since` on (`since` and `until` are read everywhere by one grammar, src/cli/request-filter.ts `timeOf`: an age, or an ISO 8601 time with its zone), the failures only with `failed=1`; and the days
@@ -370,6 +391,9 @@ export function createRunServer(ctx: RunContext): http.Server {
           sendJson(res, 200, { slow: await ctx.duck.requests.slow(SLOW_MS), slowMs: SLOW_MS });
         } else if (req.method === "GET" && url.pathname === "/api/refused") {
           sendJson(res, 200, await ctx.duck.requests.refused());
+        } else if (req.method === "GET" && url.pathname === "/api/unsupported") {
+          // the refused statements grouped by the unsupported SQL they used (src/duck/gaps.ts): mason status
+          sendJson(res, 200, await unsupported(ctx, url.searchParams));
         } else if (req.method === "GET" && url.pathname === "/api/requests") {
           // the filters, read as mason logs --requests reads its options (src/cli/request-filter.ts)
           const q = requestFilter(requestFilterText(url.searchParams));
