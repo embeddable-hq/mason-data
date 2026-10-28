@@ -145,8 +145,8 @@ export class DuckStore {
   }
 
   /** `silentMs` and `closeGraceMs`: the executor's bounds (src/duck/executor.ts SILENT_MS, CLOSE_GRACE_MS), shorter only
-   *  in a test */
-  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; silentMs?: number; closeGraceMs?: number } = {}): Promise<DuckStore> {
+   *  in a test; `workerFile`, the executor worker's module, another only in a test */
+  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; silentMs?: number; closeGraceMs?: number; workerFile?: string } = {}): Promise<DuckStore> {
     const memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
     if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(`MASON_DUCKDB_MEMORY=${JSON.stringify(memoryLimit)} is not an amount of memory: write it as 8GB or 512MiB (unset, half the machine's RAM: ${DEFAULT_MEMORY_LIMIT})`);
     const where = path.resolve(file);
@@ -161,7 +161,7 @@ export class DuckStore {
       if (before !== undefined) await before.closed;
       // every connection's, the sync's and each session's
       executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, memory_limit: memoryLimit, temp_directory: `${file}.tmp` }, log,
-        ...(options.silentMs !== undefined ? { silentMs: options.silentMs } : {}) });
+        ...(options.silentMs !== undefined ? { silentMs: options.silentMs } : {}), ...(options.workerFile !== undefined ? { workerFile: options.workerFile } : {}) });
     } catch (e) { if (opened.get(where) === mine) opened.delete(where); throw e; }
     const store = new DuckStore(file, executor, memoryLimitBytes(memoryLimit), options.closeGraceMs);
     // closed: the file may be opened again — unless its thread was given up on (`abandoned`), which keeps it here
@@ -669,8 +669,14 @@ export class SessionRunner implements DuckRunner {
    *  closed under a drain's pending fetch aborted the process). */
   async close(): Promise<void> {
     this.openAnswer?.();
-    for (let waiting = [...this.busy, ...this.releasing]; waiting.length > 0; waiting = [...this.busy, ...this.releasing]) await Promise.allSettled(waiting);
+    await this.idle();
     this.conn.closeSync();
+  }
+
+  /** Settles once nothing runs on the connection: every answer released and every call of DuckDB settled (an answer
+   *  closed early is answered then: src/duck/executor-worker.ts `answer.close`). */
+  async idle(): Promise<void> {
+    for (let waiting = [...this.busy, ...this.releasing]; waiting.length > 0; waiting = [...this.busy, ...this.releasing]) await Promise.allSettled(waiting);
   }
 }
 

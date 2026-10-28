@@ -113,6 +113,16 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.doesNotMatch(sources, /order_items/, "order_items is the person's to add");
     assert.equal(config().demo, true);
     assert.ok(!fs.existsSync(demoDir), "nothing is hosted before mason start");
+    // THE DEMO ON A PORT THE OS HANDS OUT, never the 5434 init prefers (src/cli/demo.ts DEMO_PORT): init takes 5434
+    // whenever it is free at that moment, and another run of this file (a second worktree's check), another test's demo
+    // or the developer's own demo in another folder may hold it by the time this one starts or is asked "not
+    // running". The port lives in .env's URL alone by design (demoPort), so the URL is the place to move it
+    let own = await freePort();
+    while (own === pgPort) own = await freePort();
+    fs.writeFileSync(path.join(root, ".env"), fs.readFileSync(path.join(root, ".env"), "utf8").replace(demoUrl, `postgres://demo@127.0.0.1:${own}/demo`));
+    demoUrl = envUrl();
+    demoPort = own;
+    assert.equal(demoUrl, `postgres://demo@127.0.0.1:${own}/demo`, "the demo's URL moved to the OS's port");
   });
 
   test("mason tables before any start: the failure shape, the demo database runs inside mason start", async () => {
@@ -256,11 +266,11 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
   test("DATABASE_URL in .env edited to another URL: mason start refuses, saying what the demo's is", async () => {
     const file = path.join(root, ".env");
     const was = fs.readFileSync(file, "utf8");
-    fs.writeFileSync(file, was.replace(demoUrl, "postgres://demo@localhost:5434/demo"));
+    fs.writeFileSync(file, was.replace(demoUrl, `postgres://demo@localhost:${demoPort}/demo`));
     try {
       const s = await mason(["start"]);
       assert.notEqual(s.code, 0, said(s));
-      assert.match(s.stdout + s.stderr, /DATABASE_URL in \.env was changed: the demo database is postgres:\/\/demo@127\.0\.0\.1:5434\/demo; mason destroy and mason init demo again/);
+      assert.match(s.stdout + s.stderr, new RegExp(`DATABASE_URL in \\.env was changed: the demo database is postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo; mason destroy and mason init demo again`));
       // an agent reads the reason in the failure's why
       const j = await mason(["start", "--json"]);
       assert.equal(j.code, 1, said(j));
