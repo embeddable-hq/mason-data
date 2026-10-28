@@ -30,8 +30,8 @@ import { errorJson, nextJson, type Failure } from "./command.ts";
 import { readiness } from "./readiness.ts";
 import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT } from "./user.ts";
 import { postgresLink } from "./pg-url.ts";
-import { addedTables, catalogTable, chooseColumns, entryName, entryProblems, findEntry, parseSourceText, shownPath, sourceFailure, sourceFileNames, sourcesDir, unaddableReason,
-  withoutTable, withTable, type ProjectSource, type SourceFile } from "./sources.ts";
+import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
+import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type PolledTable, type StreamStatus } from "../duck/sync.ts";
 import type { RequestLedger } from "../duck/requests.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -152,119 +152,34 @@ async function state(ctx: RunContext): Promise<unknown> {
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream());
 }
 
-/** The sources file as it is on disk now, its text and what it says — or why the command server cannot edit it. */
-function sourceOnDisk(ctx: RunContext): { file: string; text: string; parsed: SourceFile } {
-  const folder = ctx.folder();
-  if (!folder) throw new Refusal(409, "choose the project's folder first");
-  const names = sourceFileNames(folder);
-  if (names.length !== 1) throw new Refusal(409, `${path.relative(ctx.root, sourcesDir(folder)) || sourcesDir(folder)}/ has ${names.length ? `${names.length} source files` : "no source file"}: one source per project for now`);
-  const file = path.join(sourcesDir(folder), names[0]!);
-  const text = fs.readFileSync(file, "utf8");
-  const parsed = parseSourceText(text, names[0]!.replace(/\.ya?ml$/, ""), file);
-  if ("problems" in parsed) {
-    const f = sourceFailure(file, ctx.root, parsed.problems);
-    throw new Refusal(409, `${f.message}${f.why ? `\n${f.why}` : ""} — fix it first`);
-  }
-  // the database the file names NOW must be the one this run copies: its catalog is what an edit is checked against
-  const read = ctx.readSource();
-  if ("message" in read) throw new Refusal(409, `${read.message}${read.why ? `\n${read.why}` : ""} — fix it first`);
-  if (read.resolved !== ctx.runUrl) {
-    throw new Refusal(409, `${shownPath(ctx.root, file)}: url: now names ${maskedUrl(read.resolved)} (${read.from}), and this run copies ${maskedUrl(ctx.runUrl)}: ` +
+/** The sources file as it is on disk now (src/cli/source-edit.ts sourceToEdit) — and the database it names NOW must be
+ *  the one this run copies: its catalog is what an edit is checked against. */
+function sourceOnDisk(ctx: RunContext): EditTarget {
+  const at = sourceToEdit(ctx.folder(), ctx.root, ctx.readSource);
+  if (at.read.resolved !== ctx.runUrl) {
+    throw new Refusal(409, `${shownPath(ctx.root, at.file)}: url: now names ${maskedUrl(at.read.resolved)} (${at.read.from}), and this run copies ${maskedUrl(ctx.runUrl)}: ` +
       "mason stop && mason start copies from the new one, then add or remove the table");
   }
-  return { file, text, parsed };
+  return at;
 }
 
-/** The file's other entries against the database: an edit is never written over a file the run would not take. */
-function othersHold(ctx: RunContext, parsed: SourceFile, without: readonly string[], then: string): void {
-  const others = { ...parsed, tables: parsed.tables.filter((e) => !without.includes(e.table)) };
-  const held = addedTables(others, ctx.facts().tables, ctx.source.database, ctx.root, { replication: ctx.changes === "replication" });
-  if (!Array.isArray(held)) throw new Refusal(409, `${held.message}${held.why ? `\n${held.why}` : ""} — fix it first, then ${then}`);
-}
-
-/** What `mason add` did to one table: its entry in the sources file, and what the columns asked for left out. */
-export interface PickResult {
-  table: string;
-  /** the sources file, absolute */
-  file: string;
-  /** the entry's key (`orders`, `billing.invoices`), and what it copies */
-  entry: string; columns: string[] | null; exclude: string[]; key: string[] | null;
-  /** the key's columns added to a --columns list (a copy always has its key) */
-  addedKey: string[];
-  /** secret-looking columns every-column left out (sources.ts looksSecret) */
-  skippedSecrets: string[];
-  /** the file named it so already: nothing was written */
-  already: boolean;
-}
+/** The database this run copies, as an edit is checked against it: the catalog it last read, and how it reads changes. */
+const catalogOf = (ctx: RunContext): EditCatalog => ({ tables: ctx.facts().tables, database: ctx.source.database, replication: ctx.changes === "replication" });
 
 /**
- * ADD A TABLE: its entry in the sources file, written — after the last one, or in place of the table's own (`withTable`):
- * every other byte of the file as it was. `columns` are the ones asked (`["*"]`: every one); `key` the columns a table
- * with no primary key is copied by. The file's other entries must hold against the database first: an edit is never
- * written over a file the next start would refuse.
+ * ADD A TABLE: the check-and-write every entrance shares (src/cli/source-edit.ts addEntry), against the file on disk and
+ * this run's catalog; the caller tells the run the file changed, and the sync starts the copy.
  */
-export async function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null): Promise<PickResult> {
-  const { file, text, parsed } = sourceOnDisk(ctx);
-  const facts = ctx.facts();
-  const t = facts.tables.find((x) => x.source === table);
-  if (!t) throw new Refusal(404, `${table} is not a table of ${ctx.source.database} that this user can read`);
-  if (key !== null && t.key.length) throw new Refusal(400, `${table} has a primary key (${t.key.join(", ")}), which Mason copies it by: leave --key out`);
-  if (key === null && !t.key.length) throw new Refusal(409, `${table} cannot be added: ${unaddableReason(t)}`);
-  if (key !== null && ctx.changes === "replication") throw new Refusal(409, `${table} has no primary key, and logical replication cannot apply its changes by --key: copy it by polling (mason start --poll), then add it`);
-  const chosen = chooseColumns(t, columns, key);
-  if ("problem" in chosen) throw new Refusal(400, chosen.problem);
-  othersHold(ctx, parsed, [table], `add ${entryName(table)}`);
-  const was = parsed.tables.find((e) => e.table === table);
-  const entry = { name: was?.name ?? entryName(table), table, columns: chosen.columns, exclude: chosen.exclude, key: key === null ? null : [...key] };
-  // the entry itself, as the run will read it: a --key that does not tell the rows apart is refused here, not at the copy
-  const own = entryProblems(t, entry, facts.tables, ctx.source.database, { replication: ctx.changes === "replication" });
-  if (own.length) throw new Refusal(400, own.join("; "));
-  const same = was !== undefined && JSON.stringify([was.columns, was.exclude, was.key]) === JSON.stringify([entry.columns, entry.exclude, entry.key]);
-  if (!same) {
-    const r = withTable(text, entry);
-    if ("problem" in r) throw new Refusal(409, `${path.relative(ctx.root, file)} cannot be edited: ${r.problem}`);
-    fs.writeFileSync(file, r.text);
-  }
-  return { table, file, entry: entry.name, columns: entry.columns, exclude: entry.exclude, key: entry.key, addedKey: chosen.addedKey, skippedSecrets: chosen.skipped, already: same };
+export function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null): PickResult {
+  return addEntry(sourceOnDisk(ctx), catalogOf(ctx), table, columns, key);
 }
 
-export interface RemoveResult { removed: string[]; file: string }
-
-/**
- * REMOVE TABLES from the sources file: each one's entry cut (`withoutTable`), every other byte of the file as it was; the
- * run then drops its copy. A name the file does not have is refused with the closest one it has.
- */
-export async function removeTables(ctx: RunContext, names: readonly string[]): Promise<RemoveResult> {
-  const { file, text, parsed } = sourceOnDisk(ctx);
-  const entries = names.map((n) => {
-    const e = findEntry(parsed, n);
-    if ("problem" in e) throw new Refusal(e.usage ? 400 : 404, e.problem);
-    return e;
-  });
-  // what stays must hold: else the run's re-read refuses the file, keeps the removed table and goes on copying it
-  othersHold(ctx, parsed, entries.map((e) => e.table), `remove ${names.join(" ")}`);
-  let out = text;
-  for (const e of entries) {
-    const r = withoutTable(out, e.table);
-    if (r === null) continue;
-    if ("problem" in r) throw new Refusal(409, `${path.relative(ctx.root, file)} cannot be edited: ${r.problem}`);
-    out = r.text;
-  }
-  fs.writeFileSync(file, out);
-  return { removed: [...new Set(entries.map((e) => e.table))], file };
+/** REMOVE TABLES: the check-and-write every entrance shares (src/cli/source-edit.ts removeEntries); the run then drops their copies. */
+export function removeTables(ctx: RunContext, names: readonly string[]): RemoveResult {
+  return removeEntries(sourceOnDisk(ctx), catalogOf(ctx), names);
 }
 
-/** A refusal the command shows as it is; `failure` is how the web page says it (the CLI's Failure: why, fix, next), by
- *  default the message alone under the status's code. */
-export class Refusal extends Error {
-  readonly status: number;
-  readonly failure: Failure;
-  constructor(status: number, message: string, failure?: Failure) { super(message); this.status = status; this.failure = failure ?? { message, code: codeOf(status) }; }
-}
-
-/** The FAILURE_CODES code (src/cli/command.ts) of a refusal by its HTTP status. */
-const codeOf = (status: number): string => status === 400 ? "usage" : status === 404 ? "not_found" : status >= 500 ? "failed" : "refused";
-/** The HTTP status of a Failure by its code: the other way round. */
+/** The HTTP status of a Failure by its code: src/cli/source-edit.ts codeOf the other way round. */
 const statusOf = (f: Failure): number => f.code === "usage" ? 400 : f.code === "not_found" ? 404 : f.code === "failed" ? 500 : 409;
 
 /**
@@ -339,12 +254,12 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (body.columns !== undefined && !(Array.isArray(body.columns) && body.columns.every((c) => typeof c === "string"))) throw new Refusal(400, "columns is a list of column names, or [\"*\"]");
           if (body.key !== undefined && !(Array.isArray(body.key) && body.key.length > 0 && body.key.every((c) => typeof c === "string"))) throw new Refusal(400, "key is a list of column names");
           if (body.picked) {
-            const r = await pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null);
+            const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null);
             if (!r.already) ctx.log(`added ${r.table} to ${r.file}`);
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });
           } else {
-            const r = await removeTables(ctx, [body.table]);
+            const r = removeTables(ctx, [body.table]);
             for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });
@@ -379,7 +294,7 @@ export function createRunServer(ctx: RunContext): http.Server {
         } else if (req.method === "POST" && url.pathname === "/api/remove") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { tables?: unknown };
           if (!Array.isArray(body.tables) || !body.tables.length || !body.tables.every((m) => typeof m === "string")) throw new Refusal(400, "send { tables: [name, …] }");
-          const r = await removeTables(ctx, body.tables as string[]);
+          const r = removeTables(ctx, body.tables as string[]);
           // the sync stops copying a removed table, and drops its copy
           ctx.sourcesChanged();
           for (const t of r.removed) ctx.log(`removed ${t} from ${r.file}`);
