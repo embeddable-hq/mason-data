@@ -393,6 +393,16 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   The supervisor's restarts stay in `.mason/restarts.json` (a process of its own cannot open the file) and are merged
   when read (`withRestarts`). `mason logs --events` and `mason status` (`recentErrors`) read them through the command
   server's `/api/events`.
+- **Usage over time is a row of `_mason.usage` a minute, and each copy's own bytes a row of `_mason.copy_sizes` every 10
+  minutes, kept as the request log is** (src/duck/usage.ts `UsageSampler`; the run had only the moment): on connections
+  of their own, never the writer's turn, a failed take or write said once and never failing anything (a sample not
+  taken keeps its counts for the next). A sample computes NOTHING a second time: the copies' facts are `/api/state`'s
+  at that moment (`usageFacts`, src/cli/run-server.ts), the statements are counted as the listener records them (the one
+  `record`, by the summary's rules: no CONNECT, `outcomeOf`, the completed ones' `quantile_cont`, held equal to DuckDB's
+  by tests/duck-usage.test.ts) — so a statement is in the interval it ENDED in, which a query by `started_at` would miss.
+  The copy's memory is `duckdb_memory()` (under 1 ms); a copy's bytes are its distinct blocks from
+  `pragma_storage_info` (61–72 ms cold on 30 M rows × 14 columns, metadata only; it grows with rows × columns, so never
+  per request). `mason usage` and `GET /api/usage` read them.
 - **A copy's `rows` is its count after every write that changes it** (`CopyState.rows`): the copy's own count at the
   swap, the poll's reconciled count at its commit, and after every stream batch the rows its writes inserted less the
   rows they deleted (`rowsChanged`, `writeByKey`) — never a `count(*)` per batch (a write by key's deletes make it a scan:

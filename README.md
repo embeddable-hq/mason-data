@@ -252,6 +252,7 @@ answered in the last day and week, the ones it answered slowly and the ones it r
 mason status
 mason logs --requests --failed       # every statement the Postgres API refused, failed or cancelled, with why
 mason logs --running                 # the statements running now; mason cancel <session> stops one
+mason usage --since 7d --step 1h     # the week, an hour a line: statements, the copy, memory
 mason stop                           # the copy stays; the next `mason start` resumes in seconds
 mason destroy                        # removes this project's copy and state, never its files or users
 ```

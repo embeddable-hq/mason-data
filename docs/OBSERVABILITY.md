@@ -44,7 +44,7 @@ Key: ✅ exists · 🟡 derivable from what Mason already records · 🔨 needs 
 | Synced / Syncing / Failed / Pending | ✅ | the copy's phase: done / copying / failed / waiting |
 | Sync duration | 🟡 / 🔨 | a copy's `seconds` exists; a table's poll is not timed (only the whole pass, `lastPassMs`) |
 | Sync error | ✅ / 🔨 | the current one exists; its history needs step 2 |
-| Size of the copy | 🔨 | `bytes` today is the SOURCE table's size; the copy's own size per table needs DuckDB's storage info, costly on a large table, so sampled every few minutes (step 6), never per request |
+| Size of the copy | ✅ | `bytes` is the SOURCE table's size; the copy's own size per table is measured every 10 min from its blocks (`/api/usage` `copySizes`, `mason usage`), never per request |
 | Search / filter | 🟡 | over the list the endpoint returns; no server change for hundreds of tables |
 
 ## 3. Queries
@@ -79,7 +79,7 @@ Key: ✅ exists · 🟡 derivable from what Mason already records · 🔨 needs 
 | Rows returned | 🟡 | the request log |
 | Rows processed | ⏸ | as Rows scanned |
 | Data transferred | 🔨 | not recorded: the listener counts the bytes it sends a statement, a column of the request log |
-| Usage over time | 🔨 | samples (step 6) |
+| Usage over time | ✅ | a sample a minute in `_mason.usage` (step 6): `/api/usage`, `mason usage` |
 | Billing period | — | dropped for now |
 
 ## 6. Logs
@@ -105,7 +105,7 @@ Each adds fields to a command's `--json` and the endpoint with the same JSON, wi
 3. **Queries (~2 days)**: filters and paging, ended, Cancelled; the running statements and cancel; bytes sent.
 4. **Users (~1 day)**: last used, removed entries kept, the URL without the password.
 5. **Logs (~1 day)**: the last N lines in memory, an endpoint, `mason logs --json`.
-6. **Samples (~2–3 days)**: every N seconds — storage, rows, queries, bytes sent, lag, memory — and each copy's size
+6. ✅ **Samples (~2–3 days)**: every N seconds — storage, rows, queries, bytes sent, lag, memory — and each copy's size
    less often.
 
 ## Access (open)

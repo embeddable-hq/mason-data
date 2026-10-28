@@ -29,7 +29,7 @@ import * as path from "node:path";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
-import { createRunServer } from "./run-server.ts";
+import { createRunServer, usageFacts, type RunContext } from "./run-server.ts";
 import { addedTables, rereadSources, type RunSources } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
@@ -40,6 +40,7 @@ import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, r
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
 import { RequestLedger, REQUESTS_TABLE, requestLogDays } from "../duck/requests.ts";
 import { EVENTS_TABLE, SyncEvents } from "../duck/events.ts";
+import { USAGE_TABLE, UsageSampler } from "../duck/usage.ts";
 import { withPlaceholders } from "./pg-url.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
@@ -394,9 +395,14 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let requests: RequestLedger;
   try { requests = await RequestLedger.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Starting the Postgres listener"); say(`  the request log (${REQUESTS_TABLE}) could not be opened: ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }
+  // USAGE OVER TIME (src/duck/usage.ts): a sample a minute, kept as the request log is; it counts the listener's requests
+  // as they are recorded, and samples the run's state once the command server's context exists (below)
+  let usage: UsageSampler;
+  try { usage = await UsageSampler.open(store, logLine, { days: keptDays }); }
+  catch (e) { fail("Starting the Postgres listener"); say(`  the usage samples (${USAGE_TABLE}) could not be opened: ${(e as Error).message}`); await requests.close(); await sync.stop(); await events.close(); await store.close(); return 1; }
   let duckListener;
   try { duckListener = await store.listener(facts.collation, undefined, libc, () => sync.state(), sync.kept.enabled ? sync.kept : undefined); }
-  catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await events.close(); await store.close(); return 1; }
+  catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
   logLine(`[duckdb] text sorts as the source's collation does: ${JSON.stringify(duckListener.collation)}`);
   // THE USERS (src/duck/users.ts): `mason user` edits the file beside this process; the listener re-reads it at every
   // connection and before every statement of a user's session, so a removal takes effect without a restart
@@ -407,18 +413,19 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       port: pgAddress.port, host: pgAddress.host, tls: pgTls.tls, database: cfg.name, masonVersion: o.version, product: "mason-data", statementTimeoutMs,
       ...listenerLogins(users, cfg.apiKey),
       schema: () => sync.schema(),
-      record: (row) => requests.record(row),
+      // the one place a request is recorded: the request log's row, and the usage sample's count of it
+      record: (row) => { requests.record(row); usage.count(row); },
       log: logLine,
       trace: process.env.MASON_PG_TRACE === "1",
       duck: duckListener,
     });
-  } catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await events.close(); await store.close(); return 1; }
+  } catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
   done(`Postgres listener on ${listenerText(pgTls.listener, api.port)}; ${statementTimeoutMs === 0 ? "statements without a time limit" : `each statement at most ${timeoutSetting.trim()}`} (MASON_STATEMENT_TIMEOUT); ` +
     `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS; mason logs --requests)`);
 
   const setupPort = await freePort(o.port, chosen);
   const token = newToken();
-  const server = createRunServer({
+  const runCtx: RunContext = {
     source, facts: () => facts, warnings,
     slot: changes === "replication" ? repl.slot : "", changes, port: setupPort, token, folder: () => folder, root: project.root,
     // the web page (mason ui) is mason start's alone: mason serve's run serves none (src/cli/run-server.ts RunContext.page)
@@ -432,9 +439,12 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     logs,
     // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
     listener: api,
-    duck: { copies: () => sync.state(), file: duckFile, pollSeconds: pollMs / 1000, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), requests, events, restarts: () => readRestarts(home),
-      jsonPaths: () => sync.kept.status() },
-  });
+    duck: { copies: () => sync.state(), file: duckFile, pollSeconds: pollMs / 1000, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), requests, events, usage,
+      restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status() },
+  };
+  const server = createRunServer(runCtx);
+  // a sample is /api/state's facts at its moment (src/cli/run-server.ts usageFacts): one computation of each
+  usage.start(() => usageFacts(runCtx));
   await new Promise<void>((resolve) => server.listen(setupPort, "127.0.0.1", resolve));
   const refreshFacts = setInterval(() => {
     void (async () => {
@@ -489,6 +499,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         try { await requests.close(); } catch (e) { say(`  closing the request log: ${(e as Error).message}`); }
         let syncStop: Error | null = null;
         try { await sync.stop(); } catch (e) { syncStop = e as Error; }
+        // after the sync: a sample in flight ends before the file closes (it reads the sync's state)
+        try { await usage.close(); } catch (e) { say(`  closing the usage samples: ${(e as Error).message}`); }
         // after the sync: its last events are written before the file closes
         try { await events.close(); } catch (e) { say(`  closing the sync's events: ${(e as Error).message}`); }
         // the demo database after the sync (nothing reads it any more) and before the copy closes

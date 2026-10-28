@@ -39,6 +39,7 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   logs: [],
   // a session that is not open: refused by name in every state with a run, and by the state without one
   cancel: ["99999"],
+  usage: [],
   stop: [],
   destroy: [],
   serve: [],
