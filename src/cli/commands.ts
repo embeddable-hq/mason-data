@@ -228,6 +228,7 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
     ? `the database is at ${st.database.lsn}: ${n(st.lag.bytes ?? 0)} bytes behind (read ${spanText(since(st.database.at))} ago)`
     : `the database's position could not be read: ${st.database.error.split("\n")[0]}`;
   rows.push(["position", `${st.position} · ${db}`]);
+  rows.push(["slot", slotText(st.slot, since)]);
   rows.push(["last change", st.lastBatch === null ? "none applied this run"
     : `committed ${spanText(since(st.lastBatch.committedAt))} ago, applied ${spanText((Date.parse(st.lastBatch.appliedAt) - Date.parse(st.lastBatch.committedAt)) / 1000)} after its commit`]);
   const total = (t: StreamStatus["tables"][number]): number => t.applied.inserts + t.applied.updates + t.applied.deletes + t.applied.truncates;
@@ -244,6 +245,22 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
   }
   const w = Math.max(...rows.map(([k]) => k.length));
   return rows.map(([k, v]) => `${k.padEnd(w)}  ${v}`);
+}
+
+/**
+ * THE WAL THE SLOT HOLDS ON THE DATABASE, in a line (`StreamStatus.slot`): how much, Postgres's status of it, and the cap —
+ * or, with `max_slot_wal_keep_size` unset, that nothing caps it: while nothing reads the slot it holds WAL for ever, until
+ * the database's disk fills (CLAUDE.md "Hard-won gotchas"). A read that failed is said, never a 0.
+ */
+export function slotText(w: StreamStatus["slot"], since: (iso: string) => number): string {
+  if ("error" in w) return `the WAL it holds could not be read: ${w.error.split("\n")[0]}`;
+  const read = `(read ${spanText(since(w.at))} ago)`;
+  if (w.walStatus === "lost") return `lost: Postgres invalidated it (it held more WAL than max_slot_wal_keep_size), so Mason makes it again and catches the copies up by one poll ${read}`;
+  const cap = w.safeWalSizeBytes === null
+    ? "max_slot_wal_keep_size is unset, so nothing caps it: while nothing reads the slot it holds WAL for ever, until the database's disk fills (set max_slot_wal_keep_size on the database)"
+    : w.safeWalSizeBytes <= 0 ? "past max_slot_wal_keep_size: Postgres invalidates it at its next checkpoint, and Mason makes it again"
+    : `${fileSize(w.safeWalSizeBytes)} more before Postgres invalidates it (max_slot_wal_keep_size)`;
+  return `holds ${fileSize(w.walHeldBytes)} of the database's WAL${w.walStatus === null ? "" : ` (${w.walStatus})`} · ${cap} ${read}`;
 }
 
 // ------------------------------------------------------------------ mason status
@@ -281,7 +298,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
            { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
-           exit 1. In replication mode stream: { slot, publication, running, failure, position,
+           exit 1. In replication mode stream: { slotName, slot: { walHeldBytes (the WAL the slot holds on the
+           database), walStatus (reserved, extended, unreserved, lost), safeWalSizeBytes (the WAL left before Postgres
+           invalidates it; null: max_slot_wal_keep_size unset, nothing caps it), at } or { error }, publication, running, failure, position,
            applied, database: { lsn, at } or { error }, lag: { bytes, seconds }, lastBatch: { appliedAt, committedAt },
            tables: [{ table, state (streamed, catching-up, waiting, left-out), why, catchUp: { phase (queued, polling,
            applying), from, startedAt, held, retryAt }, applied: { inserts, updates, deletes, truncates } }] }.
@@ -388,7 +407,7 @@ export async function status(argv: string[]): Promise<number> {
       return 0;
     }
     if (s.stream) {
-      out(st.bold(`Stream (slot ${s.stream.slot}):`));
+      out(st.bold(`Stream (slot ${s.stream.slotName}):`));
       for (const l of streamLines(s.stream)) out(`  ${l}`);
       out("");
     }

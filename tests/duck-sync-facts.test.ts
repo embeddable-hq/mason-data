@@ -177,3 +177,32 @@ test("a table the named publication does not carry is never credited with the st
     assert.ok(Math.abs(Date.parse(synced.at) - (Date.now() - 60 * 60_000)) < 60_000, synced.at);
   });
 });
+
+test("the slot's WAL is read with the database's position, at most every 30 s, and a read that failed is its error, never a 0", async () => {
+  // imported when the test runs: at a commit without them this file still loads, and the test fails by name
+  const m = await import("../src/duck/sync.ts") as unknown as { slotWalOf?: (s: unknown, name: string, at: number) => unknown; SLOT_READ_MS?: number };
+  assert.equal(typeof m.slotWalOf, "function", "src/duck/sync.ts slotWalOf");
+  const at = Date.parse("2026-10-28T09:00:00.000Z");
+  const row = { exists: true, active: true, activePid: "7", plugin: "pgoutput", database: "x", confirmedFlush: "0/10", walStatus: "reserved", retainedBytes: 123_456n, safeBytes: 4_096n };
+  assert.deepEqual(m.slotWalOf!(row, "mason_x", at), { walHeldBytes: 123_456, walStatus: "reserved", safeWalSizeBytes: 4_096, at: "2026-10-28T09:00:00.000Z" });
+  assert.deepEqual(m.slotWalOf!({ ...row, safeBytes: null }, "mason_x", at), { walHeldBytes: 123_456, walStatus: "reserved", safeWalSizeBytes: null, at: "2026-10-28T09:00:00.000Z" },
+    "no cap: max_slot_wal_keep_size unset");
+  assert.deepEqual(m.slotWalOf!({ ...row, walStatus: "lost", retainedBytes: null, safeBytes: null }, "mason_x", at), { walHeldBytes: 0, walStatus: "lost", safeWalSizeBytes: null, at: "2026-10-28T09:00:00.000Z" },
+    "a lost slot's WAL was freed: it holds none");
+  assert.match(String((m.slotWalOf!({ ...row, retainedBytes: null }, "mason_x", at) as { error?: string }).error), /no restart position yet/, "unknown is said, never a 0");
+  assert.match(String((m.slotWalOf!({ ...row, exists: false }, "mason_x", at) as { error?: string }).error), /^replication slot mason_x does not exist on the database/);
+  await aRun(async ({ sync }) => {
+    const s = sync as unknown as { slotWal: { wal: unknown; at: number } | null };
+    const status = async (): Promise<unknown> => (await sync.streamStatus())!.slot;
+    // the source is not there: the position and the slot are each said as their error
+    assert.match(String((await status() as { error: string }).error), /^the database could not be reached: /);
+    // read 10 s ago: not again (the position is read again, at most every 5 s; the slot is not due)
+    const recent = { wal: { walHeldBytes: 1, walStatus: "reserved", safeWalSizeBytes: null, at: new Date(Date.now() - 10_000).toISOString() }, at: Date.now() - 10_000 };
+    s.slotWal = recent;
+    (sync as unknown as { dbPosition: unknown }).dbPosition = null;
+    assert.deepEqual(await status(), recent.wal, "within SLOT_READ_MS the slot is not read again");
+    s.slotWal = { ...recent, at: Date.now() - m.SLOT_READ_MS! - 1 };
+    (sync as unknown as { dbPosition: unknown }).dbPosition = null;
+    assert.match(String((await status() as { error: string }).error), /^the database could not be reached: /, "past it, read again");
+  });
+});

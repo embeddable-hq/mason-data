@@ -177,15 +177,16 @@ async function state(ctx: RunContext): Promise<unknown> {
 /**
  * WHAT A USAGE SAMPLE READS OF THE RUN (src/duck/usage.ts): `/api/state` at that moment, never a second computation of
  * any of it — the copy file's bytes (`engine.bytes`), `totals`, the stalest added table's `sync.ageSeconds`, the
- * stream's `lag`, and the copies served.
+ * stream's `lag` and its slot's `walHeldBytes`, and the copies served.
  */
 export async function usageFacts(ctx: RunContext, now = Date.now()): Promise<UsageFacts> {
   const copies = ctx.duck.copies();
   const s = runState(ctx, copies, await ctx.duck.stream(), now) as { totals: SyncTotals; engine: { bytes: number | null };
     tables: Array<{ added: boolean; sync?: TableSync }>; stream?: StreamStatus };
   const ages = s.tables.flatMap((t) => (t.added && t.sync?.ageSeconds != null ? [t.sync.ageSeconds] : []));
+  const slot = s.stream?.slot;
   return { copyBytes: s.engine.bytes, totals: s.totals, oldestSyncSeconds: ages.length ? Math.max(...ages) : null, streamLag: s.stream?.lag ?? null,
-    copied: copies.filter((c) => c.phase === "copied").map((c) => c.source) };
+    copied: copies.filter((c) => c.phase === "copied").map((c) => c.source), slotWalHeldBytes: slot !== undefined && "walHeldBytes" in slot ? slot.walHeldBytes : null };
 }
 
 /** A `since` / `until` of a query string, read by the one time grammar (src/cli/request-filter.ts timeOf), as an ISO time. */

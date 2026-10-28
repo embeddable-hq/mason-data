@@ -2,7 +2,7 @@
  * USAGE OVER TIME (`_mason.usage`, `_mason.copy_sizes`): every SAMPLE_SECONDS the run writes one row of what it is and
  * what it did — the copy's size and rows, the copies added, copied and failed, how old the oldest copy is, the statements
  * of the interval (how many, refused, failed, cancelled, the rows and bytes sent, the completed ones' p50 / p95), the
- * stream's lag, and the memory of
+ * stream's lag and the WAL its slot holds, and the memory of
  * the process and of the copy — and every SIZE_EVERY_MS each copy's own bytes. `mason status` says the moment; this is
  * what it said over the last days (`mason usage`, `GET /api/usage`).
  *
@@ -54,13 +54,15 @@ const TRIM_EVERY_MS = 60 * 60 * 1000;
 
 const COLUMNS = ["sampled_at", "seconds", "copy_bytes", "copy_rows", "tables_added", "tables_copied", "tables_failed", "oldest_sync_seconds",
   "statements", "statements_refused", "statements_failed", "statements_cancelled", "rows_sent", "bytes_sent", "duration_p50_ms", "duration_p95_ms",
-  "stream_lag_bytes", "stream_lag_seconds", "rss_bytes", "heap_used_bytes", "copy_memory_bytes", "copy_memory_limit_bytes"] as const;
+  "stream_lag_bytes", "stream_lag_seconds", "rss_bytes", "heap_used_bytes", "copy_memory_bytes", "copy_memory_limit_bytes", "slot_wal_held_bytes"] as const;
 
 /** the samples' DDL: one row a sample; a level is as of `sampled_at`, a count is of the `seconds` before it */
 export const USAGE_DDL = `CREATE TABLE IF NOT EXISTS ${USAGE_TABLE} (sampled_at TIMESTAMPTZ, seconds DOUBLE, copy_bytes BIGINT, copy_rows BIGINT, ` +
   `tables_added INTEGER, tables_copied INTEGER, tables_failed INTEGER, oldest_sync_seconds DOUBLE, statements BIGINT, statements_refused BIGINT, ` +
   `statements_failed BIGINT, statements_cancelled BIGINT, rows_sent BIGINT, bytes_sent BIGINT, duration_p50_ms INTEGER, duration_p95_ms INTEGER, stream_lag_bytes BIGINT, ` +
   `stream_lag_seconds DOUBLE, rss_bytes BIGINT, heap_used_bytes BIGINT, copy_memory_bytes BIGINT, copy_memory_limit_bytes BIGINT)`;
+/** the columns added since the first samples (a file a run before them made): each added where it is missing */
+export const USAGE_ADDED = ["slot_wal_held_bytes BIGINT"] as const;
 /** each copy's own bytes, every SIZE_EVERY_MS */
 export const SIZES_DDL = `CREATE TABLE IF NOT EXISTS ${SIZES_TABLE} (sampled_at TIMESTAMPTZ, table_name VARCHAR, bytes BIGINT)`;
 
@@ -76,6 +78,8 @@ export interface UsageFacts {
   streamLag: { bytes: number | null; seconds: number | null } | null;
   /** the copies served (`schema.table`): those whose own bytes are measured */
   copied: string[];
+  /** replication mode: the WAL the slot holds on the database (`stream.slot.walHeldBytes`); null when polling or not read */
+  slotWalHeldBytes: number | null;
 }
 
 /**
@@ -122,6 +126,9 @@ export interface UsageSample {
   /** the copy's memory in use, and its limit (MASON_DUCKDB_MEMORY; half the machine's by default) */
   copyMemoryBytes: number | null;
   copyMemoryLimitBytes: number;
+  /** replication mode: the WAL the slot holds on the database, bytes (`mason status`'s stream line); null when polling,
+   *  or when it could not be read */
+  slotWalHeldBytes: number | null;
 }
 
 /** One copy's own bytes, as last measured. */
@@ -205,6 +212,7 @@ export class UsageSampler {
     const writer = await store.instance.connect();
     await writer.run(`CREATE SCHEMA IF NOT EXISTS ${MASON_SCHEMA}`);
     await writer.run(USAGE_DDL);
+    for (const c of USAGE_ADDED) await writer.run(`ALTER TABLE ${USAGE_TABLE} ADD COLUMN IF NOT EXISTS ${c}`);
     await writer.run(SIZES_DDL);
     const reader = await store.instance.connect();
     const u = new UsageSampler(writer, reader, log, store.memoryLimitBytes, options);
@@ -286,7 +294,7 @@ export class UsageSampler {
     const mem = this.options.memory?.() ?? process.memoryUsage();
     const values: DuckDBValue[] = [new Date(now).toISOString(), seconds, facts.copyBytes, facts.totals.rows, facts.totals.added, facts.totals.copied, facts.totals.failed,
       facts.oldestSyncSeconds, i.statements, i.outcomes.refused, i.outcomes.failed, i.outcomes.cancelled, i.rowsSent, i.bytesSent, quantileCont(sorted, 0.5), quantileCont(sorted, 0.95),
-      facts.streamLag?.bytes ?? null, facts.streamLag?.seconds ?? null, mem.rss, mem.heapUsed, copyMemory, this.memoryLimitBytes];
+      facts.streamLag?.bytes ?? null, facts.streamLag?.seconds ?? null, mem.rss, mem.heapUsed, copyMemory, this.memoryLimitBytes, facts.slotWalHeldBytes];
     const sql = `INSERT INTO ${USAGE_TABLE} (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map((c, j) => `$${j + 1}${c === "sampled_at" ? "::TIMESTAMPTZ" : ""}`).join(", ")})`;
     try {
       if (this.options.insert !== undefined) await this.options.insert(sql, values);
@@ -404,5 +412,6 @@ function sampleOf(r: Record<string, unknown>): UsageSample {
     statementsCancelled: Number(r.statements_cancelled ?? 0), rowsSent: Number(r.rows_sent ?? 0), bytesSent: Number(r.bytes_sent ?? 0), durationP50Ms: num(r.duration_p50_ms), durationP95Ms: num(r.duration_p95_ms),
     streamLagBytes: num(r.stream_lag_bytes), streamLagSeconds: num(r.stream_lag_seconds),
     rssBytes: Number(r.rss_bytes), heapUsedBytes: Number(r.heap_used_bytes), copyMemoryBytes: num(r.copy_memory_bytes), copyMemoryLimitBytes: Number(r.copy_memory_limit_bytes),
+    slotWalHeldBytes: num(r.slot_wal_held_bytes),
   };
 }

@@ -22,6 +22,14 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | `GET /api/logs?lines=&since=` | `mason logs --json` | the run's last log entries from memory (`mason serve` has no file) |
 | `POST /api/sync { tables }` | `mason sync` | sync now, per table |
 
+`/api/state` also says the run's health beyond the copies (each `mason status` says on a line of its own, and each
+sampled once a minute where it moves):
+
+- `stream.slot` (replication): the WAL the slot holds on the database — `{ walHeldBytes, walStatus, safeWalSizeBytes, at }`
+  or `{ error }`; `safeWalSizeBytes` null is `max_slot_wal_keep_size` unset, nothing capping it. One row of
+  `pg_replication_slots`, read on the connection the database's position is read on, at most every 30 s. Sampled as
+  `slotWalHeldBytes`. (`stream.slotName` is the slot's name.)
+
 `mason status --json` `recentErrors` holds the latest sync failures (`sync`) and the latest statements refused, failed or
 cancelled (`queries`, the request log's own shape). `since` and `until` are read everywhere by one grammar: an age (30m,
 2h, 7d) or an ISO 8601 time with its zone.
@@ -143,7 +151,7 @@ Key: ✅ built · ⏸ deferred
 ## Also worth showing (not asked for)
 
 1. **How old each copy is**, in seconds: "can I trust this number?"
-2. **Stream lag, and the WAL the replication slot holds on the source**: a slot nobody reads fills the source's disk.
+2. ✅ **Stream lag, and the WAL the replication slot holds on the source**: a slot nobody reads fills the source's disk.
 3. **Refused statements grouped by the unsupported SQL they used** (`src/duck/gaps.ts`), so users know what to rewrite.
 4. **Sessions open now, restarts, memory against the limit** (`store.memoryLimitBytes`).
 5. **Free disk against the copy's projected size** (`copyDiskProjection` computes it already).

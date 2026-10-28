@@ -355,8 +355,10 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   line each with the position, found in ONE place (`refreshStreamed`), never a line per batch; a periodic line at most
   once a minute when something moved (`reportStream`); `mason status` / `wait` / `--json` show the position, the
   database's (a connection at most every 5 s, never the keepalive's: that is the walsender's read position), the lag in
-  bytes and as the newest change's age, and each table's state and changes applied (`streamStatus`). A new state of a
-  table is a state there too. ("Logical replication")
+  bytes and as the newest change's age, the WAL the slot holds on the database (`stream.slot`: one row of
+  `pg_replication_slots` on that same connection, at most every 30 s, `SLOT_READ_MS` — its status, and the cap left, or
+  that `max_slot_wal_keep_size` is unset and nothing caps it), and each table's state and changes applied
+  (`streamStatus`). A new state of a table is a state there too. ("Logical replication")
 - **The slot outlives `mason stop` and holds the source's WAL** (said at the stop); `--poll` and `mason destroy` drop
   the slot, and Mason's own publication, verified gone. A `REPLICA IDENTITY NOTHING` table is refused by name: publishing
   its updates would fail the app's own UPDATEs.

@@ -506,6 +506,8 @@ test("the stream says where it is: a table joins and leaves on a line with its p
     assert.equal(s0.running, true);
     assert.deepEqual([table(s0, "public.a").state, table(s0, "public.a").applied], ["streamed", { inserts: 0, updates: 0, deletes: 0, truncates: 0 }]);
     assert.ok("lsn" in s0.database, `the database's position is read: ${JSON.stringify(s0.database)}`);
+    // the WAL the slot holds, read on the same connection: a number and Postgres's status, never a 0 for unknown
+    assert.ok("walHeldBytes" in s0.slot && s0.slot.walHeldBytes >= 0 && s0.slot.walStatus !== null && s0.slotName === `${tag}_v`, `the slot's WAL is read: ${JSON.stringify(s0.slot)}`);
 
     // THE CHANGES MADE are what the state counts, the position moves, and the lag right after them is their age
     psql(url, "INSERT INTO a VALUES (11, 'x'), (12, 'y'), (13, 'z'); UPDATE a SET v = 'changed' WHERE id IN (1, 2); DELETE FROM a WHERE id = 3");

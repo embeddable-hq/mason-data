@@ -59,7 +59,7 @@ import { pgIdent } from "../cdc/pg-wire.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
-import { createSlot, currentLsn, dropSlot, readSlot } from "../cdc/source.ts";
+import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
 import { addCounts, countsText, duckValue, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { namedPublicationVerdict, readNamedPublication } from "./publication.ts";
@@ -163,7 +163,10 @@ export interface Synced { at: string; seconds: number | null; by: "copy" | "poll
  * on the database was the only way to tell it worked). Positions are Postgres's `X/Y`, times ISO.
  */
 export interface StreamStatus {
-  slot: string;
+  /** the replication slot's name (the one object Mason makes on the database) */
+  slotName: string;
+  /** the WAL the slot holds on the database (`SlotWal`), read at most every SLOT_READ_MS on the position's connection */
+  slot: SlotWal;
   publication: string;
   /** a stream is running now; when not, `failure` says why and when it starts again (null: it has not started yet) */
   running: boolean;
@@ -182,6 +185,28 @@ export interface StreamStatus {
   lastBatch: { appliedAt: string; committedAt: string } | null;
   tables: StreamTableStatus[];
 }
+/**
+ * THE WAL THE REPLICATION SLOT HOLDS ON THE DATABASE (pg_replication_slots, src/cdc/source.ts `readSlot`): from its
+ * restart_lsn to the database's position now, in bytes; Postgres's `wal_status`; and `safe_wal_size`, how many more bytes
+ * of WAL may be written before Postgres invalidates the slot — null when `max_slot_wal_keep_size` is unset (-1: the slot
+ * holds WAL for ever while nothing reads it, CLAUDE.md "Hard-won gotchas") or the slot is lost. `at` is when it was read.
+ * A read that failed is its error, never a 0.
+ */
+export type SlotWal = { walHeldBytes: number; walStatus: "reserved" | "extended" | "unreserved" | "lost" | null; safeWalSizeBytes: number | null; at: string } | { error: string };
+
+/** How often the slot's WAL is read at most (`streamStatus`): a catalog view's row, on the connection the database's
+ *  position is read on, so never a connection of its own — and never per poll or per batch. */
+export const SLOT_READ_MS = 30_000;
+
+/** The slot as `readSlot` read it, as `SlotWal` says it. */
+export function slotWalOf(s: SlotState, name: string, at: number): SlotWal {
+  if (!s.exists) return { error: `replication slot ${name} does not exist on the database (the next pass makes it again)` };
+  const status = s.walStatus === "reserved" || s.walStatus === "extended" || s.walStatus === "unreserved" || s.walStatus === "lost" ? s.walStatus : null;
+  // a lost slot's WAL was freed by Postgres (its restart_lsn is null): it holds none; any other null is not known
+  if (s.retainedBytes === null && status !== "lost") return { error: `replication slot ${name} has no restart position yet: the WAL it holds is not known` };
+  return { walHeldBytes: s.retainedBytes === null ? 0 : Number(s.retainedBytes), walStatus: status, safeWalSizeBytes: s.safeBytes === null ? null : Number(s.safeBytes), at: new Date(at).toISOString() };
+}
+
 export interface StreamTableStatus {
   /** `schema.table` */
   table: string;
@@ -797,6 +822,8 @@ export class Sync {
   private readonly wholeFailure: { stream: string | null; prepare: string | null; attach: string | null } = { stream: null, prepare: null, attach: null };
   /** the database's position as last read (`databasePosition`), and the read in flight */
   private dbPosition: { lsn: bigint; at: number } | { error: string; at: number } | null = null;
+  /** the slot's WAL as last read (`databasePosition`, at most every SLOT_READ_MS), and when */
+  private slotWal: { wal: SlotWal; at: number } | null = null;
   private dbPositionRead: Promise<void> | null = null;
   /** THE STORED JSON PATHS (src/duck/kept.ts): every write below computes them; the plans read them */
   readonly kept: KeptJsonPaths;
@@ -1514,7 +1541,7 @@ export class Sync {
       return { table: t.source, state: "waiting", why: this.notStreamedWhy(t.source), applied };
     });
     return {
-      slot: r.slot, publication: r.publication, running: s !== null,
+      slotName: r.slot, slot: this.slotWal?.wal ?? { error: "not read yet: the database did not answer within 3 s" }, publication: r.publication, running: s !== null,
       failure: s === null && this.streamFailure !== null ? { error: this.streamFailure.error, retryAt: iso(this.streamFailure.retryAt) } : null,
       position: formatLsn(position), applied: formatLsn(this.appliedLsn),
       database: "lsn" in db ? { lsn: formatLsn(db.lsn), at: iso(db.at) } : { error: db.error },
@@ -1530,17 +1557,30 @@ export class Sync {
    * wait` asks every second), waited for at most 3 s (the last read is answered meanwhile, with its time). Not the
    * stream's keepalive: that carries the walsender's own read position, not the database's, so it cannot say how far
    * behind the stream is when that matters — while it decodes a backlog. A read that fails is answered as its error.
+   * THE SLOT'S WAL (`SlotWal`) is read on the same connection, at most every SLOT_READ_MS (one row of
+   * pg_replication_slots): what the slot holds on the database's disk, said by `mason status` and sampled by usage.
    */
   private async databasePosition(): Promise<{ lsn: bigint; at: number } | { error: string; at: number }> {
     const fresh = this.dbPosition !== null && Date.now() - this.dbPosition.at < 5_000;
     if (!fresh && this.dbPositionRead === null) {
+      const slotDue = this.slotWal === null || Date.now() - this.slotWal.at >= SLOT_READ_MS;
+      const slot = this.replication!.slot;
       this.dbPositionRead = (async () => {
         try {
           const pg = await PgConnection.connect(this.pgOptions());
-          try { this.dbPosition = { lsn: await currentLsn(pg), at: Date.now() }; } finally { pg.close(); }
+          try {
+            this.dbPosition = { lsn: await currentLsn(pg), at: Date.now() };
+            if (slotDue) {
+              // its own failure is the slot's line alone: the position read above stands
+              try { this.slotWal = { wal: slotWalOf(await readSlot(pg, slot), slot, Date.now()), at: Date.now() }; }
+              catch (e) { this.slotWal = { wal: { error: `the slot could not be read: ${e instanceof Error ? e.message : String(e)}` }, at: Date.now() }; }
+            }
+          } finally { pg.close(); }
         } catch (e) {
           // answered as the status's (and the log line's) own words: the position could not be read, and why
-          this.dbPosition = { error: e instanceof Error ? e.message : String(e), at: Date.now() };
+          const m = e instanceof Error ? e.message : String(e);
+          this.dbPosition = { error: m, at: Date.now() };
+          if (slotDue) this.slotWal = { wal: { error: `the database could not be reached: ${m}` }, at: Date.now() };
         } finally { this.dbPositionRead = null; }
       })();
     }
