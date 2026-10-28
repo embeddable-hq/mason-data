@@ -617,11 +617,19 @@ export function registerFunctions(conn: DuckDBConnection): void {
   // the same, as a stored JSON path keeps it (keptJsonValue, src/duck/kept.ts): what the copy's writes compute
   scalar(conn, "__mason_json_kept", [VARCHAR, VARCHAR, BOOLEAN, BOOLEAN, BOOLEAN], VARCHAR,
     ([j, s, either, canonical, asText]) => keptJsonValue(String(j), steps(String(s), either === true), canonical === true, asText === true));
-  scalar(conn, "__mason_json_elements", [VARCHAR, BOOLEAN, BOOLEAN], LIST(VARCHAR),
-    ([j, canonical, asText]) => listValue(jsonElements(String(j), canonical === true, asText === true)));
-  scalar(conn, "__mason_json_keys", [VARCHAR, BOOLEAN], LIST(VARCHAR), ([j, canonical]) => listValue(jsonMembers(String(j), canonical === true, false).map(([k]) => k)));
-  scalar(conn, "__mason_json_values", [VARCHAR, BOOLEAN, BOOLEAN], LIST(VARCHAR),
-    ([j, canonical, asText]) => listValue(jsonMembers(String(j), canonical === true, asText === true).map(([, v]) => v)));
+  // a document's rows as a list each (elements, keys, values); `orNull` (the last argument): never empty, a NULL or
+  // empty document's list one NULL — a LEFT JOIN LATERAL … ON TRUE's one row of NULLs, as an INNER lateral DuckDB runs
+  // in its rows' order and stops at a LIMIT (src/duck/rewrite.ts `leftLateral`)
+  const rows = (j: DuckDBValue | undefined, orNull: DuckDBValue | undefined, list: (text: string) => Array<string | null>): DuckDBValue => {
+    const items = j === null || j === undefined ? null : list(String(j));
+    return orNull === true && (items === null || items.length === 0) ? listValue([null]) : items === null ? null : listValue(items);
+  };
+  scalar(conn, "__mason_json_elements", [VARCHAR, BOOLEAN, BOOLEAN, BOOLEAN], LIST(VARCHAR),
+    ([j, canonical, asText, orNull]) => rows(j, orNull, (t) => jsonElements(t, canonical === true, asText === true)), { nulls: "pass" });
+  scalar(conn, "__mason_json_keys", [VARCHAR, BOOLEAN, BOOLEAN], LIST(VARCHAR),
+    ([j, canonical, orNull]) => rows(j, orNull, (t) => jsonMembers(t, canonical === true, false).map(([k]) => k)), { nulls: "pass" });
+  scalar(conn, "__mason_json_values", [VARCHAR, BOOLEAN, BOOLEAN, BOOLEAN], LIST(VARCHAR),
+    ([j, canonical, asText, orNull]) => rows(j, orNull, (t) => jsonMembers(t, canonical === true, asText === true).map(([, v]) => v)), { nulls: "pass" });
   scalar(conn, "__mason_jsonb_text", [VARCHAR], VARCHAR, ([j]) => jsonbText(String(j)));
   // jsonb's @>, ?, ?| and ?& (DuckDB's json_contains and json_exists answer otherwise on arrays), json(b)_array_length
   scalar(conn, "__mason_jsonb_contains", [VARCHAR, VARCHAR], BOOLEAN, ([a, b]) => jsonbContains(String(a), String(b)));

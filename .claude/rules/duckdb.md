@@ -40,6 +40,23 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 - **No DuckDB macro**: with the `postgres` extension loaded, a macro with a lambda or calling a macro
   fails; every helper is a JavaScript scalar function (`src/duck/functions.ts`) or SQL written inline.
   ("How a statement is answered")
+- **What DuckDB is sent is the form it computes natively, where that is Postgres's answer** (each was a BI tool's slow
+  path on the test server, and two were not Postgres's answer either; "What DuckDB is sent"):
+  - **a truncation of a timestamptz is the instant's arithmetic** (`truncInstant`: `epoch_us` floored, `make_timestamptz`),
+    never ICU's calendar where the arithmetic is Postgres's: every part in UTC, a second or less in any zone, a minute or
+    an hour elsewhere with the instant's offset kept (ICU re-read the wall clock: 02:30 CEST truncated to 02:00 +01). A
+    day or more in another zone stays DuckDB's `date_trunc` in the session's zone. ICU is ~45 ns a row even in UTC, the
+    arithmetic ~8; a TIMESTAMP ↔ TIMESTAMPTZ cast is ICU's too, so never "cast, truncate, cast back". The session's
+    zone is read where the statement executes (`current_setting('TimeZone')`), never the rewriter's: a prepared
+    statement's plan is made at its Parse and run after a later `SET TimeZone`;
+  - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty** (`leftLateral`, the functions'
+    `orNull`): DuckDB's LEFT lateral is a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a
+    100-row preview) and whose order kept other rows than Postgres's; the INNER one is its streaming UNNEST;
+  - **equivalent order keys are canonicalised: `x IS [NOT] NULL, x` is one key on `x` with its NULLS placed**
+    (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
+    Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's
+    (findTargetlistEntrySQL92), the same tree inside an expression the input's (`bareKeyIsInput`);
+  A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`.
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
 - **DuckDB lives on the executor worker; the main thread never runs a Mason function and never waits for the
@@ -405,7 +422,10 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 - **The oracle is the arbiter** (`tests/integration/duck-oracle.itest.ts`, `IT_ORACLE_ONLY=<regex>` for a subset): every
   statement asked of a real Postgres and of the endpoint, after the copy and after two rounds of changes, and again in
   six shapes (`oracle/shapes.ts`); names, OIDs, text, order and SQLSTATEs must be equal. A fix for a class adds a
-  statement to it (`postgres-cases.ts`, `oracle/bi-shapes.ts`, `oracle/type-matrix.ts`, `oracle/gap-cases.ts`).
+  statement to it (`postgres-cases.ts`, `oracle/bi-shapes.ts`, `oracle/type-matrix.ts`, `oracle/gap-cases.ts`). The
+  sessions are in UTC; a type-matrix statement with a `zone` is asked with both sessions' TimeZone set to it (a time
+  computed in the session's zone must be held in a zone with daylight saving, not UTC alone). Run it against a Linux
+  Postgres (CI's `postgres:18` image): a macOS cluster's libc collation is not glibc's, and its `coll` statements differ.
 - **It needs a disposable Postgres, `IT_POSTGRES_URL`** (a database of its own is created and dropped; `duck-stream` needs
   `wal_level=logical`, the oracle and `duck-poll` any; `tests/integration/README.md`), never a shared deployment's source.
 - **The recorded corpus is answered whole offline** (`tests/duck-corpus.test.ts`: every statement psql, pgjdbc,

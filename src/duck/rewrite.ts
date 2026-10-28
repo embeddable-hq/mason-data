@@ -32,7 +32,7 @@ import { pathIndex, SESSION_VARIABLE, type CaseMode, type JsonKind, type PgKind 
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, type Typed } from "./pgtree.ts";
 import { canonicalRead, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
-import { atTimeZoneOf } from "../lib/timezone.ts";
+import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -244,6 +244,8 @@ class Rewriter {
   private readonly answering = new Set<Body>();
   /** the function calls a FROM reads (a set-returning function there is a table, not unnest's) */
   private readonly inFrom = new WeakSet<Body>();
+  /** the set-returning functions in FROM a LEFT JOIN … ON TRUE reads, written as a list never empty (leftLateral) */
+  private readonly nonEmpty = new WeakSet<Body>();
   /** how the database changes a letter's case */
   private readonly caseMode: CaseMode;
 
@@ -488,6 +490,7 @@ class Rewriter {
       case "ParamRef": return this.param(b);
       case "SortBy": return this.sortBy(b, null, null);
       case "RangeFunction": return this.rangeFunction(b);
+      case "JoinExpr": return this.leftLateral(b);
       case "CollateClause": return this.collateClause(b);
       case "MinMaxExpr": return this.minMax(b);
       case "SQLValueFunction": return this.sqlValueFunction(b);
@@ -503,6 +506,10 @@ class Rewriter {
         // and a column its subquery has twice in two cases (`"T"`, `t`) is that subquery's renamed one (caseTwins)
         const fields = (b.fields ?? []) as AstNode[];
         const last = fields.at(-1);
+        // a function's whole row by its FROM name alone, where the function is one column and no row (`e` of
+        // `jsonb_array_elements(x) e`, whose column is `value`): that column, which DuckDB would read as a struct
+        const whole = k === "ColumnRef" && t?.node === "VAR" && fields.length === 1 && last !== undefined && kindOf(last) === "String" ? t.functionColumn : undefined;
+        if (whole !== undefined && String(bodyOf(last!).sval) !== whole.column) return { ColumnRef: { ...b, fields: [S(whole.alias), S(t!.renamed ?? whole.column)] } };
         if (k === "ColumnRef" && t?.node === "VAR" && last !== undefined && kindOf(last) === "String" && (t.renamed !== null || (t.qualifier !== null && fields.length === 1))) {
           const prefix = fields.length === 1 && t.qualifier !== null ? [S(t.qualifier)] : fields.slice(0, -1);
           return { ColumnRef: { ...b, fields: [...prefix, t.renamed !== null ? S(t.renamed) : last] } };
@@ -695,6 +702,11 @@ class Rewriter {
       for (const t of (first.targetList ?? []) as AstNode[]) if (isNode(bodyOf(t).val)) this.comparable(bodyOf(t).val as AstNode, `${String(b.op).replace("SETOP_", "")} (without ALL) of`);
     }
     this.decidedByKey(b);
+    // `x IS NULL, x DESC` as `x DESC NULLS LAST` (nullsKeyFolded): the folded key is the statement's own, its rules to run
+    if (Array.isArray(b.sortClause)) {
+      b.sortClause = nullsKeyFolded(b.sortClause as AstNode[], b);
+      for (const s of b.sortClause as AstNode[]) this.original.add(bodyOf(s));
+    }
     // the statement's own ORDER BY: an ordinal or an output name sorts by that target's expression, so its key is
     // built over the expression (DuckDB's `ORDER BY 1 COLLATE …` would sort by the constant)
     if (Array.isArray(b.sortClause) && Array.isArray(b.targetList) && (b.op === undefined || b.op === "SETOP_NONE")) {
@@ -1900,10 +1912,17 @@ class Rewriter {
         return null;
       case "date_trunc":
         if (args.length === 3) {
-          // in a zone: the wall clock there truncated, read back as an instant in that zone
+          // in a zone: the instant's own arithmetic where that is Postgres's answer (truncInstant), else the wall clock
+          // there truncated, read back as an instant in that zone
           const [unit, ts] = args as [AstNode, AstNode, AstNode];
           const zone = this.zoneArg(args[2]!);
-          return fn("timezone", [zone, fn("date_trunc", [unit, fn("timezone", [this.clone(zone), this.asInstant(ts, argType(1))])])]);
+          const instant = this.asInstant(ts, argType(1));
+          const fast = this.truncInstant((constString(unit) ?? "").toLowerCase(), instant, zone, constString(zone));
+          // date_trunc is strict and reads its zone first: a zone not a constant name (a row's, a NULL) is read here
+          // (`__mason_zone`, which refuses a name Postgres would) and a NULL one is NULL, whatever the part — a second
+          // or less never names the zone, and a minute's or an hour's ±infinity is the instant's own
+          if (fast !== null) return constString(zone) !== null ? fast : caseWhen([[isNull(zone), nullConst()]], fast);
+          return fn("timezone", [zone, this.truncWall(unit, fn("timezone", [this.clone(zone), instant]), TIMESTAMP)]);
         }
         if (args.length !== 2) return null;
         {
@@ -1912,22 +1931,24 @@ class Rewriter {
           if (own === TIME) throw new Unrewritable("date_trunc() of a time is not supported by Mason", "date_trunc a timestamp, or extract the parts", "time-date-trunc");
           if (argType(1) === INTERVAL && unit === "week") throw new Unrewritable(`unit "week" not supported for type interval`, "", { postgres: "0A000" });
           const x = argType(1) === TIMESTAMPTZ && own === DATE ? cast(args[1]!, ["timestamptz"]) : args[1]!;
-          // Postgres's centuries and millennia begin in a year 1 (2001-01-01), DuckDB's in a year 0 (DT_CENTURY)
-          // (and a decade before year 1 is counted back as Postgres counts it: timestamp_trunc's DTK_DECADE)
-          if ((unit === "century" || unit === "millennium" || unit === "decade") && argType(1) !== INTERVAL) {
-            const y = fn("year", [this.clone(x)]);
-            const first = unit === "decade"
-              ? caseWhen([[op(">", y, intConst(0)), op("*", op("//", this.clone(y), intConst(10)), intConst(10))]],
-                op("*", op("-", intConst(0), op("//", op("-", intConst(8), op("-", this.clone(y), intConst(1))), intConst(10))), intConst(10)))
-              : (() => {
-                const n = unit === "century" ? 100 : 1000;
-                return caseWhen([[op(">", y, intConst(0)), op("-", op("*", op("//", op("+", this.clone(y), intConst(n - 1)), intConst(n)), intConst(n)), intConst(n - 1))]],
-                  op("+", op("*", op("-", intConst(0), op("//", op("-", intConst(n - 1), op("-", this.clone(y), intConst(1))), intConst(n))), intConst(n)), intConst(1)));
-              })();
-            const truncated = op("+", fn("date_trunc", [strConst("year"), this.clone(x)]), fn("to_years", [cast(op("-", first, this.clone(y)), ["integer"])]));
-            return caseWhen([[fn("isfinite", [this.clone(x)]), truncated]], argType(1) === TIMESTAMPTZ ? cast(x, ["timestamptz"]) : cast(x, ["timestamp"]));
+          const wall = (v: AstNode): AstNode | null => (unit === "century" || unit === "millennium" || unit === "decade") && argType(1) !== INTERVAL
+            ? this.truncWall(args[0]!, v, argType(1) === TIMESTAMPTZ ? TIMESTAMPTZ : TIMESTAMP)
+            : v === args[1] ? null : fn("date_trunc", [args[0]!, v]);
+          // a timestamptz in the session's zone: the instant's own arithmetic where that is Postgres's answer. The
+          // zone is the one the statement EXECUTES in, never the one it was planned in (a prepared statement is
+          // planned at its Parse and run after any later SET TimeZone): `current_setting('TimeZone')`, which DuckDB
+          // folds to a constant when it plans the statement it runs, so the CASE costs no row anything
+          if (argType(1) === TIMESTAMPTZ) {
+            const session = (): AstNode => fn("current_setting", [strConst("TimeZone")]);
+            const utc = this.truncInstant(unit, this.clone(x), session(), "UTC");
+            if (utc !== null && ["microseconds", "milliseconds", "second"].includes(unit)) return utc;
+            if (utc !== null) {
+              const inUtc = or(UTC_NAMES.map((z) => op("=", session(), strConst(z))));
+              const elsewhere = this.truncInstant(unit, x, session(), null) ?? wall(x) ?? fn("date_trunc", [args[0]!, x]);
+              return caseWhen([[inUtc, utc]], elsewhere);
+            }
           }
-          return x === args[1] ? null : fn("date_trunc", [args[0]!, x]);
+          return wall(x);
         }
       case "make_interval": return makeInterval(args);
       // isfinite of a time or an interval: DuckDB has none, and neither is ever infinite here
@@ -2026,7 +2047,7 @@ class Rewriter {
       }
       case "jsonb_object_keys": case "json_object_keys":
         if (this.inFrom.has(b)) return null;
-        return fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(name.startsWith("jsonb"))])]);
+        return fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(name.startsWith("jsonb")), boolConst(false)])]);
       case "jsonb_array_elements": case "json_array_elements": case "jsonb_array_elements_text": case "json_array_elements_text":
       case "jsonb_each": case "json_each": case "jsonb_each_text": case "json_each_text":
         throw new Unrewritable(`${name}() in a SELECT list is not supported by Mason`, `read it in FROM: SELECT … FROM ${name}(…) AS e`, "json-rows-in-select");
@@ -2121,6 +2142,68 @@ class Rewriter {
   private asInstant(n: AstNode, wanted: number | null): AstNode {
     const own = this.typeOf(n);
     return wanted === TIMESTAMPTZ && own !== null && own !== TIMESTAMPTZ && own !== UNKNOWN ? cast(n, ["timestamptz"]) : n;
+  }
+
+  /**
+   * A TIMESTAMPTZ TRUNCATED AS THE INSTANT'S OWN ARITHMETIC (docs/DESIGN.md "date_trunc of a timestamptz"), where
+   * that is exactly Postgres's `timestamptz_trunc_internal` and cheaper than DuckDB's: DuckDB's `date_trunc(part,
+   * TIMESTAMPTZ)` is ICU's calendar, ~45 ns a row a thread even in UTC (and its sub-day parts in another zone re-read the
+   * wall clock, so an instant in a repeated hour lands on the other side of the transition, where Postgres keeps its
+   * offset), while the instant's microseconds (`epoch_us`, `make_timestamptz`) are ~7. Postgres truncates the wall clock
+   * in `zone` and, for a day or longer, reads the truncated wall clock back in that zone (`redotz`), else keeps the
+   * instant's own offset. So, the instant's microseconds `u`, floored by integer arithmetic (`%` is truncating, hence
+   * `((u % k) + k) % k`):
+   *  - microseconds: the instant itself;
+   *  - milliseconds, second: `u` floored, in every zone (an offset is whole seconds);
+   *  - minute, hour: in UTC `u` floored; elsewhere `u` less the wall clock's remainder (one zone conversion, the
+   *    offset kept);
+   *  - day, week (Monday's, ISO: 1970-01-01 was a Thursday), month and up: in UTC only — `u` floored by a day or a
+   *    week, or the naive calendar (`make_timestamp(u)`, no zone) truncated as a timestamp is (`truncWall`); in
+   *    another zone the wall clock read back is a zone lookup DuckDB's own call makes as cheaply, so null (the caller's
+   *    path).
+   * `zoneName` is the zone as a constant (UTC and its aliases: `isUtc`), null for a zone a row holds. ±infinity is
+   * itself (Postgres 14+) and NULL is NULL: the CASE's ELSE. null where the unit is not a constant this handles.
+   */
+  private truncInstant(unit: string, value: AstNode, zone: AstNode, zoneName: string | null): AstNode | null {
+    // a literal Postgres read as a timestamptz is one to DuckDB too (in the session's zone, as Postgres reads it)
+    const x = this.typeOf(value) === UNKNOWN ? cast(value, ["timestamptz"]) : value;
+    const utc = zoneName !== null && isUtc(zoneName);
+    const DAY = 86_400_000_000n;
+    const k = ({ milliseconds: 1000n, second: 1_000_000n, minute: 60_000_000n, hour: 3_600_000_000n, day: DAY } as Record<string, bigint>)[unit];
+    const big = (n: bigint): AstNode => n <= 2_147_483_647n ? intConst(Number(n)) : numConst(String(n));
+    const u = (): AstNode => fn("epoch_us", [this.clone(x)]);
+    const floorMod = (v: () => AstNode, by: bigint, plus = 0n): AstNode => op("%", op("+", op("%", v(), big(by)), big(by + plus)), big(by));
+    let micros: AstNode;
+    if (unit === "microseconds") return x;
+    if (k !== undefined && (utc || unit === "milliseconds" || unit === "second")) micros = op("-", u(), floorMod(u, k));
+    else if (k !== undefined && unit !== "day") micros = op("-", u(), floorMod(() => fn("epoch_us", [fn("timezone", [this.clone(zone), this.clone(x)])]), k));
+    else if (!utc) return null;
+    // Monday's: u - ((u + 3 days) mod 7 days), as ((u % 7d) + 10d) % 7d, which no instant overflows
+    else if (unit === "week") micros = op("-", u(), floorMod(u, 7n * DAY, 3n * DAY));
+    else if (["month", "quarter", "year", "decade", "century", "millennium"].includes(unit)) micros = fn("epoch_us", [this.truncWall(strConst(unit), fn("make_timestamp", [u()]), TIMESTAMP)]);
+    else return null;
+    return caseWhen([[fn("isfinite", [this.clone(x)]), fn("make_timestamptz", [micros])]], x);
+  }
+
+  /**
+   * `date_trunc(unit, x)` of a wall clock (a timestamp, or a timestamptz read in the session's zone: `type`), DuckDB's
+   * except where Postgres counts otherwise: its centuries and millennia begin in a year 1 (2001-01-01), DuckDB's in a
+   * year 0 (DT_CENTURY), and a decade before year 1 is counted back as timestamp_trunc's DTK_DECADE counts it.
+   */
+  private truncWall(unitNode: AstNode, x: AstNode, type: number): AstNode {
+    const unit = (constString(unitNode) ?? "").toLowerCase();
+    if (unit !== "century" && unit !== "millennium" && unit !== "decade") return fn("date_trunc", [unitNode, x]);
+    const y = fn("year", [this.clone(x)]);
+    const first = unit === "decade"
+      ? caseWhen([[op(">", y, intConst(0)), op("*", op("//", this.clone(y), intConst(10)), intConst(10))]],
+        op("*", op("-", intConst(0), op("//", op("-", intConst(8), op("-", this.clone(y), intConst(1))), intConst(10))), intConst(10)))
+      : (() => {
+        const n = unit === "century" ? 100 : 1000;
+        return caseWhen([[op(">", y, intConst(0)), op("-", op("*", op("//", op("+", this.clone(y), intConst(n - 1)), intConst(n)), intConst(n)), intConst(n - 1))]],
+          op("+", op("*", op("-", intConst(0), op("//", op("-", intConst(n - 1), op("-", this.clone(y), intConst(1))), intConst(n))), intConst(n)), intConst(1)));
+      })();
+    const truncated = op("+", fn("date_trunc", [strConst("year"), this.clone(x)]), fn("to_years", [cast(op("-", first, this.clone(y)), ["integer"])]));
+    return caseWhen([[fn("isfinite", [this.clone(x)]), truncated]], type === TIMESTAMPTZ ? cast(x, ["timestamptz"]) : cast(x, ["timestamp"]));
   }
 
   private textMinMax(name: string, b: Body, args: AstNode[]): AstNode | null {
@@ -2499,6 +2582,40 @@ class Rewriter {
 
   // --------------------------------------------------------------------------------------------- FROM
 
+  /**
+   * A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE (docs/DESIGN.md "A LEFT lateral of a list"): `FROM base LEFT JOIN
+   * json_each(base.doc) d ON TRUE` is every base row with each of its members, or once with NULLs where it has none.
+   * DuckDB plans a LEFT lateral as a delimiter join — the whole base grouped, the function called for every distinct
+   * argument, a hash join back — so a LIMIT over it reads every row (a BI tool's "expand the JSON" preview: 37.9 s over
+   * 22 M rows), and the join hands its rows back in an order of its own, so the LIMIT kept OTHER rows than Postgres's
+   * (Postgres walks the base and each row's members in order). Written as an INNER lateral over a list that is never
+   * empty — the members, or one NULL (`orNull`) — it is the same rows, and DuckDB runs it as a streaming UNNEST: in the
+   * base's order, the members in theirs, stopping at the LIMIT. That holds whatever stands above the join (a WHERE, an
+   * ORDER BY, an aggregate), so the condition is the join's alone: LEFT, ON a literal TRUE, its right side one function
+   * of a list Mason writes (the json rows, an array column's unnest), without ORDINALITY. A RIGHT or FULL join, another
+   * condition, or another function keeps DuckDB's own plan.
+   */
+  private leftLateral(b: Body): AstNode | null {
+    const quals = b.quals as AstNode | undefined;
+    if (b.jointype !== "JOIN_LEFT" || b.isNatural === true || b.usingClause !== undefined || quals === undefined || kindOf(quals) !== "A_Const" || bodyOf(quals).boolval?.boolval !== true) return null;
+    const rarg = b.rarg as AstNode | undefined;
+    if (rarg === undefined || kindOf(rarg) !== "RangeFunction") return null;
+    const r = bodyOf(rarg);
+    const items = (r.functions ?? []) as AstNode[];
+    const calls = items.length === 1 ? (bodyOf(items[0]!).items ?? []) as AstNode[] : [];
+    const call = calls[0];
+    if (r.ordinality === true || r.is_rowsfrom === true || r.coldeflist !== undefined || call === undefined || kindOf(call) !== "FuncCall") return null;
+    const c = bodyOf(call);
+    const args = (c.args ?? []) as AstNode[];
+    const name = lastName(c.funcname);
+    if (args.length !== 1 || c.agg_star === true || c.func_variadic === true || kindOf(args[0]!) === "NamedArgExpr") return null;
+    // an array's unnest is the list itself, named twice in its CASE (never empty): a column's alone, which costs nothing twice
+    if (!LIST_ROWS.has(name) && !(name === "unnest" && kindOf(args[0]!) === "ColumnRef")) return null;
+    this.nonEmpty.add(r);
+    const { quals: _true, ...rest } = b;
+    return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
+  }
+
   private rangeFunction(b: Body): AstNode | null {
     const items = (b.functions ?? []) as AstNode[];
     const first = items[0] !== undefined ? (bodyOf(items[0]).items as AstNode[] | undefined)?.[0] : undefined;
@@ -2511,6 +2628,8 @@ class Rewriter {
     const colnames = names(alias?.colnames);
     for (const item of items) for (const f of (bodyOf(item).items ?? []) as AstNode[]) if (isNode(f) && kindOf(f) === "FuncCall") this.inFrom.add(bodyOf(f));
     const canonical = name.startsWith("jsonb");
+    // the right side of a LEFT JOIN … ON TRUE whose rows are a list: written never empty (leftLateral)
+    const orNull = this.nonEmpty.has(b);
     switch (name) {
       // jsonpath's rows, as Postgres finds them (src/duck/pg-eval.ts), unnested
       case "jsonb_path_query": {
@@ -2524,11 +2643,13 @@ class Rewriter {
       case "jsonb_array_elements": case "json_array_elements": case "jsonb_array_elements_text": case "json_array_elements_text": {
         if (b.ordinality === true) throw new Unrewritable(`${name}() WITH ORDINALITY is not supported by Mason`, "number the elements with row_number() OVER () instead", "with-ordinality");
         const text = name.endsWith("_text");
-        const elements = fn("__mason_json_elements", [jsonArg(args[0]!), boolConst(canonical), boolConst(text)]);
+        const elements = fn("__mason_json_elements", [jsonArg(args[0]!), boolConst(canonical), boolConst(text), boolConst(orNull)]);
         const list = text ? elements : arrayCast(elements, "json");
-        // a scalar function's column is named by its alias (or `value`), and so is DuckDB's unnest column here
-        const column = colnames[0] ?? aliasName ?? "value";
+        // its column is its OUT parameter's, `value`, under a FROM name too (`e.value`), unless the alias names it;
+        // the FROM name alone is the element (the ColumnRef rule: Typed.functionColumn)
+        const column = colnames[0] ?? "value";
         const unnest: AstNode = fn("unnest", [list]);
+        if (orNull) return listLateral([{ name: column, list }], aliasName ?? name, this.done);
         const item = bodyOf(items[0]!);
         return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [unnest, ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
       }
@@ -2566,21 +2687,24 @@ class Rewriter {
         if (b.ordinality === true) throw new Unrewritable(`${name}() WITH ORDINALITY is not supported by Mason`, "number the members with row_number() OVER () instead", "with-ordinality");
         const text = name.endsWith("_text");
         // each member's key and value, two lists of one length that unnest side by side
-        const sub: Body = {
-          targetList: [
-            { ResTarget: { name: colnames[0] ?? "key", val: fn("unnest", [fn("__mason_json_keys", [jsonArg(args[0]!), boolConst(canonical)])]) } },
-            { ResTarget: { name: colnames[1] ?? "value", val: fn("unnest", [fn("__mason_json_values", [this.clone(args[0]!), boolConst(canonical), boolConst(text)])]) } },
-          ],
-          op: "SETOP_NONE",
-        };
-        this.done.add(sub);
-        return { RangeSubselect: { lateral: true, subquery: { SelectStmt: sub }, alias: { aliasname: aliasName ?? name } } };
+        return listLateral([
+          { name: colnames[0] ?? "key", list: fn("__mason_json_keys", [jsonArg(args[0]!), boolConst(canonical), boolConst(orNull)]) },
+          { name: colnames[1] ?? "value", list: fn("__mason_json_values", [this.clone(args[0]!), boolConst(canonical), boolConst(text), boolConst(orNull)]) },
+        ], aliasName ?? name, this.done);
       }
       case "jsonb_object_keys": case "json_object_keys": {
         const column = colnames[0] ?? aliasName ?? name;
-        const unnest = fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(canonical)])]);
+        const keys = fn("__mason_json_keys", [args[0]!, boolConst(canonical), boolConst(orNull)]);
+        if (orNull) return listLateral([{ name: column, list: keys }], aliasName ?? name, this.done);
         const item = bodyOf(items[0]!);
-        return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [unnest, ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
+        return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [fn("unnest", [keys]), ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
+      }
+      // an array column's elements, never empty: its list where it has one, else one NULL (leftLateral)
+      case "unnest": {
+        if (!orNull) return null;
+        const list = args[0]!;
+        const column = colnames[0] ?? aliasName ?? name;
+        return listLateral([{ name: column, list: caseWhen([[op(">", fn("len", [this.clone(list)]), intConst(0)), list]], arrayOf([nullConst()])) }], aliasName ?? name, this.done);
       }
       default: return null;
     }
@@ -2591,6 +2715,82 @@ class Rewriter {
 
 /** a deep copy that stays the statement's own: each helper below that uses a node twice is handed its rewriter's */
 type Copy = <T>(n: T) => T;
+
+/**
+ * THE NULLS-PLACEMENT IDIOM AS ONE KEY (docs/DESIGN.md "Nulls placed by a key of their own"): `ORDER BY x IS NULL,
+ * x DESC` — nulls last, written without NULLS LAST, as SQL that must also run where NULLS LAST is not grammar — orders
+ * exactly as `ORDER BY x DESC NULLS LAST`. DuckDB's top N cannot push its threshold into the scan of an expression key,
+ * so it read every row of a 197 M-row copy for a 100-row page (6.4 s by a timestamp; 91 s by a text id, cut off by
+ * the tool); one plain key with its NULLS placement is pruned by the zone maps. So a pair of CONSECUTIVE keys, the
+ * first `<e> IS [NOT] NULL` (either direction, no USING) and the second the same `<e>` (the same tree, parentheses
+ * being no node of it), is one key on `<e>` with the second's direction and the nulls where the first put them: `IS
+ * NULL ASC` and `IS NOT NULL DESC` last, `IS NULL DESC` and `IS NOT NULL ASC` first. Every other key stays in place.
+ * Not under a DISTINCT ON, whose expressions must lead the ORDER BY as written, and never a window's ORDER BY.
+ */
+function nullsKeyFolded(keys: AstNode[], select: Body): AstNode[] {
+  const distinctOn = Array.isArray(select.distinctClause) && (select.distinctClause as unknown[]).some((d) => isNode(d));
+  if (distinctOn || keys.length < 2) return keys;
+  const out: AstNode[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const first = keys[i]!, second = keys[i + 1];
+    const a = kindOf(first) === "SortBy" ? bodyOf(first) : null, b = second !== undefined && kindOf(second) === "SortBy" ? bodyOf(second) : null;
+    const test = a !== null && isNode(a.node) && kindOf(a.node) === "NullTest" ? bodyOf(a.node) : null;
+    if (a === null || b === null || test === null || a.useOp !== undefined || b.useOp !== undefined || !isNode(test.arg) || !alikeTree(test.arg, b.node)
+      || !bareKeyIsInput(test.arg, b.node as AstNode, select)) { out.push(first); continue; }
+    const last = (test.nulltesttype === "IS_NULL") === (a.sortby_dir !== "SORTBY_DESC");
+    out.push({ SortBy: { ...b, sortby_nulls: last ? "SORTBY_NULLS_LAST" : "SORTBY_NULLS_FIRST" } });
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Whether an ORDER BY key read BARE is the same value as the same tree read inside an expression (the `x` of `x IS
+ * NULL`), where Postgres reads them by two rules (findTargetlistEntrySQL92, parse_clause.c): inside an expression a name
+ * is always an input column, while a bare key that is an integer constant is an output column by its position (`ORDER
+ * BY 2`), and a bare one-part name that is an output column's name is that output column (`SELECT coalesce(x, 0) AS x
+ * … ORDER BY x`). Every other node is read alike either way. So a constant is never, and a one-part name is only
+ * where no output column may bear its name or every one that may is the same tree as the input's (`SELECT x … ORDER BY
+ * x`). An output column's name is its alias, else Postgres's FigureColname (a CASE's may be its ELSE's).
+ */
+function bareKeyIsInput(inner: AstNode, bare: AstNode, select: Body): boolean {
+  if (kindOf(bare) === "A_Const") return false;
+  if (kindOf(bare) !== "ColumnRef") return true;
+  const fields = (bodyOf(bare).fields ?? []) as AstNode[];
+  if (fields.length !== 1 || kindOf(fields[0]!) !== "String") return true;
+  const name = String(bodyOf(fields[0]!).sval);
+  return ((select.targetList ?? []) as AstNode[]).every((t) => {
+    const r = bodyOf(t), val = r.val as AstNode | undefined;
+    if (val === undefined) return true;
+    // `*` and `t.*` are the input columns themselves
+    const last = kindOf(val) === "ColumnRef" ? ((bodyOf(val).fields ?? []) as AstNode[]).at(-1) : undefined;
+    if (last !== undefined && kindOf(last) === "A_Star") return true;
+    // every target is named by now: its alias, else Postgres's name for it (nameTargets, figureColname)
+    return (typeof r.name === "string" && r.name !== name) || alikeTree(val, inner);
+  });
+}
+
+/** two trees alike but for where their text stood (`location`): `(x)` and `x` are one tree, parentheses no node */
+function alikeTree(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((x, i) => alikeTree(x, b[i]));
+  if (a === null || typeof a !== "object") return a === b;
+  if (b === null || typeof b !== "object" || Array.isArray(b)) return false;
+  const ka = Object.keys(a).filter((k) => k !== "location"), kb = Object.keys(b).filter((k) => k !== "location");
+  return ka.length === kb.length && ka.every((k) => alikeTree((a as Body)[k], (b as Body)[k]));
+}
+
+/** the json functions whose rows Mason writes as lists in FROM (src/duck/rewrite.ts rangeFunction), each with an
+ *  `orNull` form (src/duck/functions.ts) */
+const LIST_ROWS = new Set(["jsonb_each", "json_each", "jsonb_each_text", "json_each_text", "jsonb_array_elements", "json_array_elements",
+  "jsonb_array_elements_text", "json_array_elements_text", "jsonb_object_keys", "json_object_keys"]);
+
+/** `LATERAL (SELECT unnest(<list>) AS <name>, …) AS <alias>`: lists of one length unnested side by side, a subquery
+ *  DuckDB runs as its UNNEST operator when the join is INNER (leftLateral) */
+function listLateral(columns: Array<{ name: string; list: AstNode }>, alias: string, done: WeakSet<Body>): AstNode {
+  const sub: Body = { targetList: columns.map((c) => ({ ResTarget: { name: c.name, val: fn("unnest", [c.list]) } })), op: "SETOP_NONE" };
+  done.add(sub);
+  return { RangeSubselect: { lateral: true, subquery: { SelectStmt: sub }, alias: { aliasname: alias } } };
+}
 
 type Built = { p: NumericProgram; kind: "int" | "numeric" };
 /** a cell an exact program cannot take (in a grouped SELECT, a column not grouped): the column stays DuckDB's */
@@ -3166,17 +3366,35 @@ function strptimeFormat(fmt: AstNode): string {
  * …) s`). Every unnamed target is given this name (`nameTargets`).
  */
 export function figureColname(n: AstNode): string {
+  const [name, strength] = colnameOf(n);
+  return strength === 0 ? "?column?" : name;
+}
+
+/** FigureColnameInternal: the name and its strength — 2 a name of the expression's own (a column's, a function's), 1 a
+ *  kind's (`case`, a cast's type), 0 none. A CASE is named by its ELSE where that name is strong (`CASE … ELSE n END`
+ *  is `n`), and a cast by its argument where that one's is, else by its type */
+function colnameOf(n: AstNode): [string, number] {
+  const k = kindOf(n), b = bodyOf(n);
+  switch (k) {
+    case "TypeCast": { const inner = isNode(b.arg) ? colnameOf(b.arg) : ["?column?", 0] as [string, number]; return inner[1] > 1 ? inner : [lastName(b.typeName?.names), 1]; }
+    case "CollateClause": return isNode(b.arg) ? colnameOf(b.arg) : ["?column?", 0];
+    case "CaseExpr": { const d = isNode(b.defresult) ? colnameOf(b.defresult) : ["?column?", 0] as [string, number]; return d[1] > 1 ? d : ["case", 1]; }
+    case "A_Expr": return b.kind === "AEXPR_NULLIF" ? ["nullif", 2] : ["?column?", 0];
+    case "A_Indirection": {
+      const ind = ((b.indirection ?? []) as AstNode[]);
+      for (let i = ind.length - 1; i >= 0; i--) { if (kindOf(ind[i]!) === "String") return [String(bodyOf(ind[i]!).sval), 2]; if (kindOf(ind[i]!) === "A_Star") break; }
+      return isNode(b.arg) ? colnameOf(b.arg) : ["?column?", 0];
+    }
+    default: { const name = strongColname(n); return name === "?column?" ? [name, 0] : [name, 2]; }
+  }
+}
+
+/** the kinds whose name is their own (strength 2), or none */
+function strongColname(n: AstNode): string {
   const k = kindOf(n), b = bodyOf(n);
   switch (k) {
     case "ColumnRef": { const f = (b.fields ?? []) as AstNode[]; const last = f[f.length - 1]; return last !== undefined && kindOf(last) === "String" ? String(bodyOf(last).sval) : "?column?"; }
-    case "A_Indirection": {
-      const ind = ((b.indirection ?? []) as AstNode[]);
-      for (let i = ind.length - 1; i >= 0; i--) { if (kindOf(ind[i]!) === "String") return String(bodyOf(ind[i]!).sval); if (kindOf(ind[i]!) === "A_Star") break; }
-      return isNode(b.arg) ? figureColname(b.arg) : "?column?";
-    }
     case "FuncCall": return lastName(b.funcname);
-    case "TypeCast": { const inner = isNode(b.arg) ? figureColname(b.arg) : "?column?"; return inner !== "?column?" ? inner : lastName(b.typeName?.names); }
-    case "CollateClause": return isNode(b.arg) ? figureColname(b.arg) : "?column?";
     case "GroupingFunc": return "grouping";
     case "SubLink": {
       if (b.subLinkType === "EXISTS_SUBLINK") return "exists";
@@ -3185,7 +3403,6 @@ export function figureColname(n: AstNode): string {
       const first = ((bodyOf(b.subselect).targetList ?? []) as AstNode[])[0];
       return first !== undefined ? (bodyOf(first).name ?? (isNode(bodyOf(first).val) ? figureColname(bodyOf(first).val as AstNode) : "?column?")) : "?column?";
     }
-    case "CaseExpr": return "case";
     case "A_ArrayExpr": return "array";
     case "RowExpr": return "row";
     case "CoalesceExpr": return "coalesce";
