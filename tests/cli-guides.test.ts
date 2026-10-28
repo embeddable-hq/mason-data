@@ -51,3 +51,10 @@ test("the agent's guide lists every command with --json where it takes it, and e
   for (const c of COMMANDS) assert.ok(text.includes(`mason ${c.name}${Object.hasOwn(c.options, "json") ? " --json" : ""}`), `${c.name}${Object.hasOwn(c.options, "json") ? " with --json" : ""}`);
   for (const code of Object.keys(FAILURE_CODES)) assert.match(text, new RegExp(`^ {4}${code} `, "m"), code);
 });
+
+test("the agent's guide says what mason init demo adds and the table it leaves for the first mason add, from the seed's lists", async () => {
+  const { DEMO_ADDED_TABLES, DEMO_TABLE_TO_ADD } = await import("../src/demo/seed.ts");
+  assert.deepEqual([DEMO_ADDED_TABLES, DEMO_TABLE_TO_ADD], [["customers", "products", "orders"], "order_items"]);
+  const text = (await guideText("agent")).replace(/\s+/g, " ");
+  assert.ok(text.includes("Init adds customers, products, orders; order_items is left to add: mason add order_items --json && mason wait --json, after mason start."), text.slice(-600));
+});

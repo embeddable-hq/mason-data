@@ -12,6 +12,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { COMMANDS, STEPS, topUsage } from "../src/cli/registry.ts";
 import { GUIDES } from "../src/cli/guides.ts";
+import { PLAIN } from "../src/cli/style.ts";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const mason = (...args: string[]) => spawnSync(process.execPath, [MAIN, ...args], { encoding: "utf8", env: { ...process.env, HOME: "/nonexistent-home" } });
@@ -154,6 +155,15 @@ test("the --json shapes of the commands that change what is copied name the sour
   }
 });
 
+test("mason add and mason remove need the project, not the run: their help says what each does before mason start", () => {
+  // the sources file is the list: mason init && mason add orders && mason start is a natural order
+  const c = (name: string) => COMMANDS.find((x) => x.name === name)!;
+  assert.deepEqual(["tables", "add", "remove"].map((n) => c(n).needs), ["project", "project", "project"]);
+  assert.match(c("add").usage, /Before\s+mason start \(mason init && mason add orders && mason start\) the entry is written, checked against the database as\s+the run checks it, and the copy begins at mason start/);
+  assert.match(c("remove").usage, /with Mason\s+stopped, a copy an earlier run made is dropped at the next mason start/);
+  assert.match(topUsage(PLAIN), /a project \(mason init\), add tables \(mason add, before or after the start\), start Mason \(mason start\), connect a tool/);
+});
+
 test("a failure is one shape for a person and for a program: what, why, fix, next; JSON under --json; the exit code says it", async () => {
   const { failureText, failureJson, failed, FAILURE_CODES } = await import("../src/cli/command.ts");
   const { PLAIN } = await import("../src/cli/style.ts");
@@ -198,4 +208,10 @@ test("a failure to stderr is styled as stderr is, with a red ✘ and a bold mess
   const plain: string[] = [];
   assert.equal(failed("x", f, { json: false, io: { out: () => undefined, err: (m) => { plain.push(m); } } }), 1);
   assert.match(plain.join(""), /^✗ mason x: it broke\n/);
+});
+
+test("mason init --help says the demo adds three of its tables and leaves order_items for the first mason add", () => {
+  const r = mason("init", "--help");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /\n {2}orders, order_items\): mason start makes it in \.mason\/demo\/ and changes it every few seconds\. Three of its tables are\n {2}added; the fourth is yours to add after mason start \(mason add order_items\), to watch its copy begin\.\n/);
 });

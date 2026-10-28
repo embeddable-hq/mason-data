@@ -13,8 +13,9 @@
  * — but for a project with no source file (one an older Mason made), whose source file it writes, nothing else changed.
  *
  * `mason init demo` (src/cli/demo.ts) writes the same files for a database Mason hosts itself: the demo's URL, on a port
- * free now, in `.env` (the one place the port is kept), the demo's four tables already added, and `demo: true` in the
- * config; there is nothing to connect to yet — `mason start` makes the database in `.mason/demo/`.
+ * free now, in `.env` (the one place the port is kept), three of the demo's four tables already added (the fourth,
+ * `DEMO_TABLE_TO_ADD`, left for the person's first `mason add`), and `demo: true` in the config; there is nothing to
+ * connect to yet — `mason start` makes the database in `.mason/demo/`.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -27,7 +28,7 @@ import { version } from "./version.ts";
 import { parseVersion, PIN_FILE } from "../lib/project-version.ts";
 import { appDatabaseUrl, appEnvValue, appendEnvLine, ENV_FILE } from "../lib/dotenv.ts";
 import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateDir, nameFromFolder, newConfig, writeConfig } from "./project.ts";
-import { DEMO_ARG, DEMO_PORT, DEMO_TABLES, demoUrl } from "./demo.ts";
+import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_PORT, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
 import { freePort } from "./ports.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 
@@ -43,7 +44,8 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   only in the shell), never in a committed file. .mason/ and that .env go into .gitignore. Every other mason command
   then works anywhere in this folder. In a project with no source file (an older Mason's), it writes that file alone.
   mason init demo, in a new folder, makes a project on a demo database Mason hosts itself (a shop: customers, products,
-  orders, order_items, its four tables added): mason start makes it in .mason/demo/ and changes it every few seconds.
+  orders, order_items): mason start makes it in .mason/demo/ and changes it every few seconds. Three of its tables are
+  added; the fourth is yours to add after mason start (mason add ${DEMO_TABLE_TO_ADD}), to watch its copy begin.
 
     mason init                                          DATABASE_URL from .env.local, .env or the shell
     mason init postgres://me:secret@localhost:5432/shop
@@ -277,8 +279,8 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     } else {
       await steps.step(`Writing ${rel(sourceFile)}`, () => {
         fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
-        fs.writeFileSync(sourceFile, newSourceText(`\${${where.variable}}`, demo ? DEMO_TABLES : []));
-      }, () => `Wrote ${rel(sourceFile)}: the database (url: \${${where.variable}}) and the tables to copy, ${demo ? `the demo's ${DEMO_TABLES.length} added` : "none yet (mason add)"} — commit it`);
+        fs.writeFileSync(sourceFile, newSourceText(`\${${where.variable}}`, demo ? DEMO_ADDED_TABLES : []));
+      }, () => `Wrote ${rel(sourceFile)}: the database (url: \${${where.variable}}) and the tables to copy, ${demo ? `the demo's ${DEMO_ADDED_TABLES.length} added — mason add ${DEMO_TABLE_TO_ADD} adds the fourth` : "none yet (mason add)"} — commit it`);
     }
     if (where.line !== null) {
       const envLine = where.line;
@@ -315,6 +317,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   }
   const next: NextStep[] = demo ? [
     ["mason start", "the demo database and Mason, in the background: its tables copied, then kept current"],
+    [`mason add ${DEMO_TABLE_TO_ADD}`, "the demo's fourth table, once Mason is up: watch its copy begin"],
     ["mason status", "the copy keeping up with the demo's changes"],
     ["mason user add <name>", "a user for psql or a BI tool: its password and URL, printed once"],
   ] : [
@@ -330,7 +333,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     return 0;
   }
   for (const n of notes) say(`  ! ${n}`);
-  say(endText({ tips: [demo ? "The demo database runs inside mason start, read by polling: a new order every few seconds; mason destroy removes it with the copy"
+  say(endText({ tips: [demo ? `The demo database runs inside mason start, read by polling: a new order every few seconds; ${DEMO_TABLE_TO_ADD} is left for you to add; mason destroy removes it with the copy`
     : "Mason only reads your database: no setting, slot or publication is needed or made"], next }, st));
   return 0;
 }

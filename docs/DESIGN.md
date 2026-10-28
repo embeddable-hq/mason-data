@@ -485,8 +485,11 @@ millisecond clock, a refused login and the statement before it read back in eith
 **Decision.** `mason init demo` makes an ordinary project whose database Mason hosts itself: PGlite (Postgres 18 in
 WebAssembly, already a dependency for the catalog) persisted in `.mason/demo/`, seeded with a small shop schema at its
 first open, served by the `mason start` process on a loopback port over the Postgres wire protocol, and changed every
-`MASON_DEMO_CHANGE_MS` (5 s) by a writer in the run. The project's files are the usual ones — `url: ${DATABASE_URL}`, the
-four tables added, the demo's URL in `.env` — with `demo: true` in its config. The port is chosen free at init and kept
+`MASON_DEMO_CHANGE_MS` (5 s) by a writer in the run. The project's files are the usual ones — `url: ${DATABASE_URL}`,
+three of the four tables added, the demo's URL in `.env` — with `demo: true` in its config. The fourth, `order_items`,
+is left out of the sources file (2026-10-28, `DEMO_TABLE_TO_ADD` in `src/demo/seed.ts`): the first thing a person does
+after `mason start` is a real `mason add` (or the web page's Add), and they see a copy begin; its foreign keys' targets
+are among the three, so it joins cleanly when it lands, and the writer keeps inserting into it in the database meanwhile. The port is chosen free at init and kept
 in that URL alone; the run reads it back from the resolved URL (`src/cli/demo.ts` `demoPort`). It is read by polling
 only: `--replication` on a demo project is refused before anything starts.
 

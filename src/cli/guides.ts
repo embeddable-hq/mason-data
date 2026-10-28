@@ -7,6 +7,7 @@
  *
  * A guide's name is never a command's (tests/cli-help.test.ts): one word never means two pages.
  */
+import { DEMO_ADDED_TABLES, DEMO_TABLES, DEMO_TABLE_TO_ADD } from "../demo/seed.ts";
 
 /** The guides, by the name `mason help <guide>` takes. */
 export const GUIDES = {
@@ -78,17 +79,20 @@ ${codes}
         exclude: [raw_body]       every column but these
       sessions:
         key: [tenant_id, id]      only for a table with no primary key: the unique columns to copy it by (polling only)
-  mason add and mason remove edit one entry of it, keep the rest as it was, and take effect at once; an edit by hand is
-  read at the next mason start (or the next add or remove). Column types are read from the database at every start.
+  mason add and mason remove edit one entry of it and keep the rest as it was, Mason running or not: with it running
+  they take effect at once, else at mason start. An edit by hand is read at the next mason start (or the next add or
+  remove). Column types are read from the database at every start.
 
   A FIRST SESSION, as a shell runs it:
-    mason doctor --json && mason init --json && mason start --json
+    mason doctor --json && mason init --json
     mason tables --json                       choose the tables (rows, key, whether one can be added)
-    mason add orders customers --json && mason wait --json
+    mason add orders customers --json         added to the sources file, checked against the database
+    mason start --json && mason wait --json   Mason in the background; until every added table is copied
     mason user add my-tool --json             the URL and password a tool connects with
     mason status --json                       each table's copy, and the last day's slow and refused statements
   With no database to hand, in a new folder: mason init demo --json && mason start --json — a demo database Mason
-  hosts itself (customers, products, orders, order_items, all added), changed every few seconds, read by polling only.
+  hosts itself (${DEMO_TABLES.join(", ")}), changed every few seconds, read by polling only. Init adds
+  ${DEMO_ADDED_TABLES.join(", ")}; ${DEMO_TABLE_TO_ADD} is left to add: mason add ${DEMO_TABLE_TO_ADD} --json && mason wait --json, after mason start.
 `;
 }
 

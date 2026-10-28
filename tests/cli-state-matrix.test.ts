@@ -33,13 +33,19 @@ after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true 
 /**
  * A STOPPED DEMO PROJECT, written by `mason init demo` itself (its sources file, its `.env` naming a port free now,
  * `demo: true`), once, and copied for each command: its database runs inside mason start, so nothing answers there.
+ * Its port is then moved to 1, where nothing listens (as SOURCE's): the port init picks is the demo's preferred one,
+ * which tests/cli-demo-start.test.ts's run, beside this file under `node --test`, picks too and hosts its demo database
+ * on — and a `mason tables`, `add` or `remove` here would read that one.
  */
 const demoTemplate = fs.mkdtempSync(path.join(os.tmpdir(), "mason-matrix-demo-template-"));
 made.push(demoTemplate);
 const demoInit = await runMason(demoTemplate, ["init", "demo", "--json"], matrixEnv());
 if (demoInit.code !== 0) throw new Error(`mason init demo, for the matrix's demo project: exit ${demoInit.code}\n${demoInit.stdout}${demoInit.stderr}`);
-const demoAt = /^DATABASE_URL=postgres:\/\/demo@(127\.0\.0\.1:\d+)\/demo$/m.exec(fs.readFileSync(path.join(demoTemplate, ".env"), "utf8"))?.[1];
-if (demoAt === undefined) throw new Error("mason init demo wrote no demo URL in .env");
+const demoEnv = path.join(demoTemplate, ".env");
+const initAt = /^DATABASE_URL=postgres:\/\/demo@(127\.0\.0\.1:\d+)\/demo$/m.exec(fs.readFileSync(demoEnv, "utf8"))?.[1];
+if (initAt === undefined) throw new Error("mason init demo wrote no demo URL in .env");
+const demoAt = "127.0.0.1:1";
+fs.writeFileSync(demoEnv, fs.readFileSync(demoEnv, "utf8").replace(`@${initAt}/`, `@${demoAt}/`));
 /** The commands' lines in a state: a demo project's start asks for replication, refused before anything starts (a
  *  plain start there would host the demo database and run, which the matrix must not leave behind). */
 const argsIn = (state: string, cmd: string): readonly string[] => state === "demo" && cmd === "start" ? ["--replication"] : MATRIX_ARGS[cmd]!;
@@ -168,6 +174,28 @@ test("a demo project, stopped: mason tables says its database runs inside mason 
     if (json) assert.equal((JSON.parse(start.stdout) as { error: { code: string } }).error.code, "refused");
     assert.match(json ? start.stdout : start.stderr, /the demo database is read by polling only: --replication does not apply to it/);
     assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, "refused before a run was spawned");
+  }
+});
+
+test("mason add and mason remove need only the project: Mason stopped, they read the database themselves — the demo's runs inside mason start", async () => {
+  // the sources file is the list, so a table is added before mason start: with Mason stopped the command checks the
+  // edit against the database itself, and a database that does not answer is ITS refusal, as mason tables says it —
+  // never "Mason is not running"; the demo database's way out is mason start, which hosts it
+  for (const cmd of ["add", "remove"]) {
+    const stopped = await runMason(folderIn("stopped"), [cmd, "orders", "--json"], matrixEnv());
+    assert.equal(stopped.code, 1, stopped.stdout + stopped.stderr);
+    const s = JSON.parse(stopped.stdout) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string }> };
+    assert.deepEqual([s.error.code, s.error.message, s.error.fix, s.next.map((n) => n.command)], ["unreachable",
+      "could not connect to postgres://mason:****@127.0.0.1:1/shop: nothing is listening on 127.0.0.1:1",
+      "change the URL where it is (mason/sources/shop.yml) when the database's password or host changed", ["mason doctor"]], `mason ${cmd}, stopped`);
+    const root = folderIn("demo");
+    const was = fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8");
+    const demo = await runMason(root, [cmd, "orders", "--json"], matrixEnv());
+    assert.equal(demo.code, 1, demo.stdout + demo.stderr);
+    const d = JSON.parse(demo.stdout) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string }> };
+    assert.deepEqual([d.error.code, d.error.message, d.error.fix, d.next.map((n) => n.command)], ["unreachable",
+      `could not connect to postgres://demo@${demoAt}/demo: the demo database is not running on ${demoAt}`, "the demo database runs inside mason start: start it first", ["mason start"]], `mason ${cmd}, a demo project stopped`);
+    assert.equal(fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8"), was, "nothing written");
   }
 });
 

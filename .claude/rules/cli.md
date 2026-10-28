@@ -81,8 +81,9 @@ CLI lacks).
   `doctor` word their own answer for a state they handle and keep the state's code where they fail.
   tests/cli-state-matrix.test.ts runs every command, as a person and with `--json`, in every state without a run (a
   stale pid, a reused one, a broken config included). **A command needs only what it reads**: `mason tables` reads the
-  database's catalog and the project's sources file itself (`databaseTables`, src/cli/commands.ts), so it needs the
-  project, not a run; `mason user` edits `.mason/users.json` beside the run. Both read `MATRIX_ARGS` (tests/cli-matrix.ts),
+  database's catalog and the project's sources file itself (`readCatalog`, src/cli/commands.ts), so it needs the
+  project, not a run; so do `mason add` and `mason remove`, which edit that file (below); `mason user` edits
+  `.mason/users.json` beside the run. Both read `MATRIX_ARGS` (tests/cli-matrix.ts),
   which must name every command: a new one is in the matrix by construction. They run with `MASON_DEBUG=1`, so a crash
   prints its stack and is caught whatever the state accepts.
 - **A project is a folder**, as with docker's or supabase's CLI: `mason init` writes `<root>/.mason/config.json` (0600,
@@ -92,13 +93,15 @@ CLI lacks).
   src/cli/project.ts, as git finds `.git`). Nothing is kept in the home folder. Never a guess at "the only run on the
   machine".
 - **`mason init demo` is an ordinary project on a database Mason hosts** (src/cli/demo.ts; the database is
-  src/demo/source.ts): the files init always writes — `url: ${DATABASE_URL}`, here with the demo's four tables added,
-  its URL in `.env` — and `demo: true` in the config; `mason start` hosts it in `.mason/demo/` before it connects, reads
-  it over the wire as any Postgres, and changes it every `MASON_DEMO_CHANGE_MS`; `mason destroy` removes it with the copy.
+  src/demo/source.ts): the files init always writes — `url: ${DATABASE_URL}`, here with three of the demo's four tables
+  added (`DEMO_ADDED_TABLES`; `order_items` is left for the person's first `mason add`, so they see a copy begin — one
+  list, src/demo/seed.ts), its URL in `.env` — and `demo: true` in the config; `mason start` hosts it in `.mason/demo/`
+  before it connects, reads it over the wire as any Postgres, and changes it every `MASON_DEMO_CHANGE_MS`; `mason
+  destroy` removes it with the copy.
   Why: a first try must need nothing installed, and must run the read path production runs. **Its port is in the URL
   alone** (chosen free at init, read back by `demoPort`): a second record would disagree with an edited `.env`, which the
   run refuses with the way out. **Poll only**: the demo database has no change log, so `--replication` is refused before
-  anything starts (`demoChangesRefusal`). A command that connects while the run is down (`tables`, `doctor`) says the
+  anything starts (`demoChangesRefusal`). A command that connects while the run is down (`tables`, `add`, `remove`, `doctor`) says the
   demo database runs inside mason start — told by the config's `demo`, never by sniffing the URL.
 - **Up means it answers** (what a reboot does to a run): a run is up only when its command server answers
   `/api/ping` with the run's token and its own pid (`answers`, src/cli/runs.ts); a pid in the config that is alive is
@@ -125,20 +128,30 @@ CLI lacks).
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every
   mistake of a file on ONE report (`sourceFailure`, code `bad_source`), each with its key, a `did you mean` and the
   way out. A file that cannot be read mid-run keeps the tables read before: a typo never drops a copy.
+- **`mason add` and `mason remove` work before `mason start` as after it** (`needs: "project"`): the sources file is
+  the list, and `mason init demo` already writes entries before any run, so `mason init && mason add orders && mason
+  start` is a natural order. With Mason up they ask the run (`/api/pick`, `/api/remove`: the copy starts or is dropped
+  now, and the run's own re-read never races the file's write); with it down they read the catalog themselves
+  (`readCatalog`, as `mason tables`), write the file, and their `Next:` is `mason start`. Both entrances call ONE
+  check-and-write (src/cli/source-edit.ts `sourceToEdit`, `addEntry`, `removeEntries`), so a refusal is worded once
+  (tests/cli-commands.test.ts holds the run's and the commands' answers equal, as a person and with `--json`). A hung
+  run is refused (`unreachable`, mason stop); a demo project stopped answers `mason tables`' unreachable, naming
+  mason start.
 - **`mason add` and `mason remove` edit one entry and keep every other byte** (`withTable` / `withoutTable`, spliced at
   the `yaml` document's node ranges, never re-serialised: a person's comments survive). `mason add` writes what
   `chooseColumns` decides — `columns:` when a subset was named, the key columns written first; every column as `{}`,
   or `exclude:` naming the secret-looking ones it left out, which `--include` names (`--columns`
   instead of a DSL); `--key` for a table with no primary key — and refuses while another entry of the file fails
   against the database ("fix it first"). Never add boilerplate a coding agent would have to delete. `mason remove`
-  cuts the entry (the last one leaves `tables: {}`) and the run drops the copy. No `--json` answer names a model
+  cuts the entry (the last one leaves `tables: {}`) and the run drops the copy (at once, or at the next start). No `--json` answer names a model
   (`tests/conventions.test.ts`, `tests/cli-help.test.ts`, the state matrix).
 - **A project an older Mason made is refused, and nothing is migrated** (no backwards compatibility before v1.0): a
   folder with `models/` and no sources file stops `mason start` (and `serve`, `tables`, `doctor`) in the failure shape,
   the way out `mason init`, which in a project with no sources file writes that file alone (its config, key and copy
   kept); the person adds the tables again and removes `models/`. `OLD_TABLES_DIR` (src/cli/sources.ts) is the one name of
   that folder (`tests/conventions.test.ts`).
-- **An edit is checked before it is written, against the database the run copies**: `mason add` checks its own entry
+- **An edit is checked before it is written, against the database the run copies** (the run's catalog, or with Mason
+  down the one the command reads): `mason add` checks its own entry
   (a `--key` must be NOT NULL columns over a unique index: `keyProblems`) and the file's other entries; `mason remove` the
   entries that stay — else the run's re-read would refuse the file, keep the removed table and go on copying it while
   the command said "Removed". A `url:` that now resolves to another database (a `.env` edited) refuses both, and the
