@@ -37,6 +37,7 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   ui: ["--no-open"],
   sync: ["no_such_table"],
   logs: [],
+  usage: [],
   stop: [],
   destroy: [],
   serve: [],

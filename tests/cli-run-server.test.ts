@@ -82,6 +82,10 @@ const eventAsks: Array<{ limit: number; since?: string; failed?: boolean }> = []
 const syncEvent = { at: new Date(Date.now() - 120_000).toISOString(), kind: "poll_failed" as const, failed: true, table: "public.customers", message: "the poll failed, and is tried again at the next one" };
 const events = { days: 7, recent: async (o: { limit: number; since?: string; failed?: boolean }) => { eventAsks.push(o); return [syncEvent]; } };
 let restarts: Array<{ at: string; reason: string; upSeconds: number }> = [];
+// usage over time (src/duck/usage.ts), as UsageSampler answers it
+const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
+const copySize = { table: "public.orders", bytes: 4_194_304, at: "2026-10-28T09:10:00.000Z" };
+const usage = { days: 7, sampleSeconds: 60, samples: async (o: { since: string; until: string; stepSeconds?: number }) => { usageAsks.push(o); return []; }, copySizes: async () => [copySize] };
 const usersFile = path.join(root, "app", ".mason", "users.json");
 const API_KEY = "k".repeat(48);
 const ctx: RunContext = {
@@ -93,7 +97,7 @@ const ctx: RunContext = {
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app",
   logs: runLog,
-  duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, requests, events, restarts: () => restarts },
+  duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, requests, events, usage, restarts: () => restarts },
 };
 const server = createRunServer(ctx);
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -365,6 +369,57 @@ test("each table's sync: its state in one word, when it was last brought current
   const { syncStateOf } = await import("../src/cli/readiness.ts") as unknown as { syncStateOf: (c: unknown) => string };
   assert.deepEqual([{ phase: "copying", error: null }, { phase: "failed", error: "x" }, { phase: "copied", error: null, rebuilding: "copy" }, { phase: "copied", error: null }].map(syncStateOf),
     ["syncing", "failed", "syncing", "synced"], "copying, a failed copy, a copy made again (the old one serves), served and kept current");
+});
+
+test("usage over time: /api/usage passes since, until and step to the samples, an hour by default, with the copies' sizes; a bad time or step refused by name", async () => {
+  const get = async (p: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}${p}`, { headers: { Authorization: "Bearer t0ken-of-this-run" } });
+    return { status: r.status, body: await r.json() as Record<string, unknown> };
+  };
+  usageAsks.length = 0;
+  const one = await get("/api/usage?since=2026-10-28T09:00:00Z&until=2026-10-28T10:00:00Z&step=300");
+  assert.equal(one.status, 200);
+  assert.deepEqual(one.body, { since: "2026-10-28T09:00:00.000Z", until: "2026-10-28T10:00:00.000Z", stepSeconds: 300, sampleSeconds: 60, keptDays: 7, samples: [], copySizes: [copySize] });
+  assert.deepEqual(usageAsks, [{ since: "2026-10-28T09:00:00.000Z", until: "2026-10-28T10:00:00.000Z", stepSeconds: 300 }]);
+  const t0 = Date.now();
+  const plain = await get("/api/usage");
+  assert.equal(plain.body.stepSeconds, null, "every sample, without a step");
+  assert.deepEqual(usageAsks[1], { since: plain.body.since, until: plain.body.until });
+  const span = Date.parse(String(plain.body.until)) - Date.parse(String(plain.body.since));
+  assert.ok(span === 3_600_000 && Date.parse(String(plain.body.until)) >= t0 - 1000, `the last hour by default: ${plain.body.since} … ${plain.body.until}`);
+  const refusals = await Promise.all(["/api/usage?since=yesterday", "/api/usage?since=2026-10-28T10:00:00Z&until=2026-10-28T09:00:00Z", "/api/usage?step=30", "/api/usage?step=5m"].map(get));
+  assert.deepEqual(refusals.map((r) => [r.status, r.body.error]), [
+    [400, 'since is a time, as ISO 8601 (2026-10-28T09:00:00Z), not "yesterday"'],
+    [400, "since (2026-10-28T10:00:00.000Z) must be before until (2026-10-28T09:00:00.000Z)"],
+    [400, 'step is a whole number of seconds, 60 (a sample\'s interval) to 604800 (the 7 days kept), not "30"'],
+    [400, 'step is a whole number of seconds, 60 (a sample\'s interval) to 604800 (the 7 days kept), not "5m"'],
+  ]);
+  assert.ok(refusals.every((r) => (r.body.failure as { code?: string } | undefined)?.code === "usage"), "each in the Failure shape");
+});
+
+test("a usage sample reads /api/state's own facts: the copy file's bytes, the totals, the stalest ADDED table's age, the stream's lag, the copies served", async () => {
+  const runServer = await import("../src/cli/run-server.ts") as unknown as { usageFacts?: (c: RunContext, now?: number) => Promise<unknown>; runState: typeof import("../src/cli/run-server.ts").runState };
+  assert.equal(typeof runServer.usageFacts, "function", "src/cli/run-server.ts usageFacts");
+  const at = "2026-10-24T10:00:00.000Z", now = Date.parse(at) + 90_500;
+  const base = { rows: 3, bytes: 8192, seconds: 1, copiedAt: at, error: null };
+  const states = [
+    { source: "public.customers", phase: "copied", ...base, rows: 1_000, synced: { at, seconds: 0.04, by: "poll" } },
+    { source: "public.orders", phase: "copied", ...base, rows: 20, synced: { at: "2026-10-24T09:00:00.000Z", seconds: 12.5, by: "copy" } },
+    // not added (its entry removed), its copy still in the sync's list: not the stalest
+    { source: "public.logs", phase: "copied", ...base, synced: { at: "2026-10-23T09:30:00.000Z", seconds: null, by: "poll" } },
+    { source: "public.Shouty", phase: "copying", ...base, rows: null, seconds: null, copiedAt: null },
+  ] as unknown as CopyState[];
+  const lag = { bytes: 4096, seconds: 2.5 };
+  const stream = { slot: "s", publication: "p", running: true, failure: null, position: "0/1", applied: "0/1", database: { lsn: "0/2", at }, lag, lastBatch: null, tables: [] };
+  const added = { file: { name: "app", file: sourceFile, tables: ["customers", "orders", "Shouty"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null } as unknown as ReturnType<RunContext["sources"]>;
+  const c: RunContext = { ...ctx, sources: () => added, duck: { ...ctx.duck, copies: () => states, stream: async () => stream } };
+  const facts = await runServer.usageFacts!(c, now);
+  const state = runServer.runState(c, states, stream, now) as { totals: unknown; engine: { bytes: number } };
+  assert.deepEqual(facts, { copyBytes: state.engine.bytes, totals: { added: 3, copied: 3, failed: 0, rows: 1_023, syncedAt: at }, oldestSyncSeconds: 3690.5, streamLag: lag,
+    copied: ["public.customers", "public.orders", "public.logs"] });
+  assert.equal(state.engine.bytes, 10, "the copy file's size, as engine.bytes says it");
+  const polled = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => null } }, now) as { streamLag: unknown };
+  assert.equal(polled.streamLag, null, "no stream when polling");
 });
 
 test("the sync's events: /api/events passes its filters to the record, merges the run's restarts newest last, and refuses a bad limit or time by name", async () => {

@@ -27,7 +27,7 @@ import { guard, SECURITY_HEADERS } from "./security.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure } from "./command.ts";
-import { readiness, syncTotals, tableSync } from "./readiness.ts";
+import { readiness, syncTotals, tableSync, type SyncTotals, type TableSync } from "./readiness.ts";
 import type { Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT, withLastUsed } from "./user.ts";
@@ -38,6 +38,7 @@ import { PollRefused, type CopyState, type PolledTable, type StreamStatus } from
 import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { RequestLedger } from "../duck/requests.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
+import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
 
 /** A statement answered in this many milliseconds or more is slow: what mason status lists (src/duck/requests.ts slow). */
 export const SLOW_MS = 1000;
@@ -88,6 +89,8 @@ export interface RunContext {
     requests: Pick<RequestLedger, "recent" | "slow" | "refused" | "days" | "lastUsed">;
     /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
     events: Pick<SyncEvents, "recent" | "days">;
+    /** usage over time (src/duck/usage.ts, `_mason.usage`): mason usage */
+    usage: Pick<UsageSampler, "samples" | "copySizes" | "days" | "sampleSeconds">;
     /** the run's restarts, as its supervisor records them in `.mason/restarts.json` (src/cli/supervise.ts readRestarts:
      *  a file that cannot be read throws, said as the request's failure); merged with the events */
     restarts: () => Restart[];
@@ -165,6 +168,49 @@ function fileBytes(file: string): number | null {
 
 async function state(ctx: RunContext): Promise<unknown> {
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream());
+}
+
+/**
+ * WHAT A USAGE SAMPLE READS OF THE RUN (src/duck/usage.ts): `/api/state` at that moment, never a second computation of
+ * any of it — the copy file's bytes (`engine.bytes`), `totals`, the stalest added table's `sync.ageSeconds`, the
+ * stream's `lag`, and the copies served.
+ */
+export async function usageFacts(ctx: RunContext, now = Date.now()): Promise<UsageFacts> {
+  const copies = ctx.duck.copies();
+  const s = runState(ctx, copies, await ctx.duck.stream(), now) as { totals: SyncTotals; engine: { bytes: number | null };
+    tables: Array<{ added: boolean; sync?: TableSync }>; stream?: StreamStatus };
+  const ages = s.tables.flatMap((t) => (t.added && t.sync?.ageSeconds != null ? [t.sync.ageSeconds] : []));
+  return { copyBytes: s.engine.bytes, totals: s.totals, oldestSyncSeconds: ages.length ? Math.max(...ages) : null, streamLag: s.stream?.lag ?? null,
+    copied: copies.filter((c) => c.phase === "copied").map((c) => c.source) };
+}
+
+const DAY_S = 86_400;
+
+/**
+ * `GET /api/usage?since=&until=&step=`: the samples from `since` (ISO 8601; default an hour ago) until `until` (default
+ * now), oldest first; with `step` (seconds, at least a sample's interval) re-bucketed in one query, each count summed and
+ * each level at its highest. And each copy's own bytes as last measured, how often a sample is taken, and the days
+ * kept. `mason usage --json` is this.
+ */
+export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now()): Promise<{ since: string; until: string; stepSeconds: number | null; sampleSeconds: number;
+  keptDays: number; samples: UsageSample[]; copySizes: CopySize[] }> {
+  const time = (k: "since" | "until", fallback: number): string => {
+    const text = q.get(k);
+    if (text === null) return new Date(fallback).toISOString();
+    const t = Date.parse(text);
+    if (Number.isNaN(t)) throw new Refusal(400, `${k} is a time, as ISO 8601 (2026-10-28T09:00:00Z), not ${JSON.stringify(text)}`);
+    return new Date(t).toISOString();
+  };
+  const since = time("since", now - 3_600_000), until = time("until", now);
+  if (since >= until) throw new Refusal(400, `since (${since}) must be before until (${until})`);
+  const u = ctx.duck.usage;
+  const stepText = q.get("step");
+  const step = stepText === null ? null : Number(stepText);
+  if (step !== null && (!Number.isInteger(step) || step < u.sampleSeconds || step > u.days * DAY_S)) {
+    throw new Refusal(400, `step is a whole number of seconds, ${u.sampleSeconds} (a sample's interval) to ${u.days * DAY_S} (the ${u.days} days kept), not ${JSON.stringify(stepText)}`);
+  }
+  const samples = await u.samples({ since, until, ...(step === null ? {} : { stepSeconds: step }) });
+  return { since, until, stepSeconds: step, sampleSeconds: u.sampleSeconds, keptDays: u.days, samples, copySizes: await u.copySizes() };
 }
 
 /**
@@ -289,6 +335,9 @@ export function createRunServer(ctx: RunContext): http.Server {
         } else if (req.method === "GET" && url.pathname === "/api/events") {
           // the sync's events and the run's restarts, newest last (src/duck/events.ts): mason logs --events, mason status
           sendJson(res, 200, await events(ctx, url.searchParams));
+        } else if (req.method === "GET" && url.pathname === "/api/usage") {
+          // usage over time, a sample a minute (src/duck/usage.ts): mason usage
+          sendJson(res, 200, await usage(ctx, url.searchParams));
         } else if (req.method === "POST" && url.pathname === "/api/pick") {
           const body = JSON.parse(await readBody(req, 64 * 1024)) as { table?: unknown; picked?: unknown; columns?: unknown; key?: unknown };
           if (typeof body.table !== "string" || typeof body.picked !== "boolean") throw new Refusal(400, "send { table, picked, columns?, key? }");

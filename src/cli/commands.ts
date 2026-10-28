@@ -483,8 +483,8 @@ export function refusedLines(r: { refused: readonly RefusedQuery[]; total: numbe
   return lines;
 }
 
-/** A file's size, as a person reads one */
-function fileSize(b: number): string {
+/** A file's size, as a person reads one (mason status's copy, mason usage's) */
+export function fileSize(b: number): string {
   return b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GiB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`;
 }
 

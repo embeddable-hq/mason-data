@@ -312,6 +312,29 @@ test("the sync's events: a line each in mason logs --events and mason status's S
   assert.deepEqual(JSON.parse(jsonText(LOGS, { events: [failedCopy], keptDays: 7 }, [["mason status", "x"]])).events, [failedCopy]);
 });
 
+// usage over time (src/cli/usage.ts): read from the module when the tests run, so the file loads at a commit without it
+type UsageCli = typeof import("../src/cli/usage.ts");
+const usageCli = await import("../src/cli/usage.ts" as string).catch(() => ({})) as Partial<UsageCli>;
+const sampleLine = (s: unknown, lag: boolean): string => usageCli.sampleLine?.(s as never, lag) ?? "(no src/cli/usage.ts)";
+const sample = { at: "2026-10-28T09:05:00.000Z", seconds: 300, copyBytes: 5 * 2 ** 30, copyRows: 12_345_678, tablesAdded: 4, tablesCopied: 4, tablesFailed: 1, oldestSyncSeconds: 75,
+  requests: 1_204, requestsFailed: 1, requestsRefused: 2, rowsSent: 98_765, bytesSent: null, durationP50Ms: 12, durationP95Ms: 1_830, streamLagBytes: null, streamLagSeconds: null,
+  rssBytes: 900 * 2 ** 20, heapUsedBytes: 80 * 2 ** 20, copyMemoryBytes: 300 * 2 ** 20, copyMemoryLimitBytes: 8 * 2 ** 30 };
+
+test("mason usage: a span a line under its heading — the requests, failed and refused, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
+  const { sampleHeading, spanSeconds, whenOf, USAGE } = usageCli as UsageCli;
+  assert.equal(sampleHeading(false), "time (UTC)         requests   failed         p95    rows sent        copy           rows  failed      oldest  memory");
+  assert.equal(sampleLine(sample, false), "2026-10-28 09:05      1,204        3    1,830 ms       98,765     5.0 GiB     12,345,678       1        75 s  900.0 MiB (copy 300.0 MiB of 8.0 GiB)");
+  assert.equal(sampleLine({ ...sample, requests: 0, requestsFailed: 0, requestsRefused: 0, durationP95Ms: null, tablesFailed: 0, oldestSyncSeconds: null, copyMemoryBytes: null, streamLagSeconds: 3, streamLagBytes: 10 }, true),
+    "2026-10-28 09:05          0                    –       98,765     5.0 GiB     12,345,678                   –        3 s  900.0 MiB", "nothing to say is blank or a dash; the lag with replication");
+  assert.equal(sampleHeading(true).endsWith("oldest        lag  memory"), true);
+  assert.deepEqual(["90s", "30m", "6h", "7d", "0", "5", "1w", "-1h"].map(spanSeconds), [90, 1800, 21_600, 604_800, 0, null, null, null]);
+  const now = Date.parse("2026-10-28T10:00:00.000Z");
+  assert.deepEqual(["1h", "2026-10-28T09:00:00Z", "2026-10-28", "yesterday", "12"].map((t) => whenOf(t, now)),
+    ["2026-10-28T09:00:00.000Z", "2026-10-28T09:00:00.000Z", "2026-10-28T00:00:00.000Z", null, null]);
+  for (const k of USAGE.json ?? []) if (k !== "next") assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names ${k}`);
+  for (const k of Object.keys(sample)) assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names a sample's ${k}`);
+});
+
 // ------------------------------------------------------------------ mason add and mason remove before mason start
 
 /**
@@ -393,6 +416,8 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
   // the run's edits read the file through readSource (src/cli/run-server.ts sourceOnDisk): counted, so an answer "up" is
   // known to be the run's
   let runEdits = 0;
+  // usage over time, as the run's samples answer it (src/duck/usage.ts): mason usage asks it
+  const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => facts, warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
@@ -400,7 +425,9 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     readSource: () => { runEdits++; return read(); }, runUrl: s.url,
     logs: { capacity: 2000, recent: () => [] },
     duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }), lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] }, restarts: () => [] },
+      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }), lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
+      usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }] },
+      restarts: () => [] },
   };
   const server = createRunServer(ctx);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -438,6 +465,34 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then remove customers/);
     // a name the file does not have, with the closest it has
     await same(["remove", "customer"], /shop\.yml names no table customer — did you mean `customers`\?/);
+    // MASON USAGE asks the run's /api/usage and prints its answer: as it is under --json, a line a span for a person
+    writeRunning(s.root, { port: ctx.port, token: ctx.token });
+    try {
+      const t0 = Date.now();
+      const person = await runMason(app, ["usage", "--since", "2h", "--step", "10m"], matrixEnv());
+      assert.equal(person.code, 0, person.stderr);
+      assert.deepEqual([usageAsks[0]!.stepSeconds, Math.round((Date.parse(usageAsks[0]!.until) - Date.parse(usageAsks[0]!.since)) / 1000)], [600, 7200]);
+      assert.ok(Date.parse(usageAsks[0]!.until) >= t0 - 1000, "until now");
+      assert.match(person.stdout, /^Usage from \d{4}-\d\d-\d\d \d\d:\d\d to .* UTC, 10 min a line \(a sample every 60 s, kept 7 days\):\n/);
+      assert.ok(person.stdout.includes(`\n${sampleLine(sample, false)}\n`), person.stdout);
+      assert.match(person.stdout, /Each copy's own size \(measured every 10 min\):\n {2}public\.orders {2}\s+3\.0 MiB {2}at 09:10 UTC\n/);
+      assert.match(person.stdout, /\nNext:/);
+      const json = await runMason(app, ["usage", "--step", "0", "--json"], matrixEnv());
+      assert.equal(json.code, 0, json.stderr);
+      const answer = JSON.parse(json.stdout) as Record<string, unknown>;
+      assert.equal(usageAsks[1]!.stepSeconds, undefined, "--step 0: every sample");
+      assert.deepEqual({ ...answer, since: null, until: null, next: null }, { since: null, until: null, stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [sample],
+        copySizes: [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }], next: null });
+      // the run's refusal, in its words and the usage code; and one the command refuses itself, before asking
+      const short = await runMason(app, ["usage", "--step", "30s", "--json"], matrixEnv());
+      assert.deepEqual([short.code, (JSON.parse(short.stdout) as { error: { code: string; message: string } }).error.message],
+        [2, "step is a whole number of seconds, 60 (a sample's interval) to 604800 (the 7 days kept), not \"30\""]);
+      const asked = usageAsks.length;
+      const bad = await runMason(app, ["usage", "--since", "yesterday"], matrixEnv());
+      assert.equal(bad.code, 2);
+      assert.match(bad.stderr, /mason usage: --since is a span ago \(90s, 30m, 6h, 7d\) or a time \(2026-10-28T09:00:00Z\), not "yesterday"/);
+      assert.equal(usageAsks.length, asked, "refused before the run is asked");
+    } finally { writeRunning(s.root, null); }
   } finally {
     server.close();
     fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables: {}\n`);
