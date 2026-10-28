@@ -358,6 +358,13 @@ production run must set and the ones worth deciding; `mason serve --help` has ev
 npm install && npm run check      # typecheck + tests, offline, a few minutes
 ```
 
+To run the checkout's `mason` from any folder, with no build or install, define an alias once. A project folder
+elsewhere (`mkdir`, then `mason-local init demo`) is the quickest way to try a change by hand.
+
+```bash
+alias mason-local="node $PWD/src/cli/main.ts"   # from the checkout's root; then mason-local works in any project folder
+```
+
 The integration tests run the real copy, stream, listener and `mason serve` against a Postgres
 of yours (`tests/integration/README.md`): a throwaway one, since each test makes and drops a
 database there.
