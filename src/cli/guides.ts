@@ -41,7 +41,7 @@ async function agentGuide(): Promise<string> {
   return `DRIVING MASON FROM A CODING AGENT — the same commands a person runs, answered as data
 
   Every command prints for a person, or with --json one JSON object for a program. One prints text alone: mason help
-  (this reference); mason logs --json is the log's lines, or with --requests the request log. Nothing a command prints
+  (this reference); mason logs --json is the log's entries ({ at, text }), or with --requests the request log. Nothing a command prints
   refers to a file this package does not ship.
 
   THE COMMANDS, in the order a project takes them (mason --help lists the same):

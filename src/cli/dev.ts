@@ -51,6 +51,7 @@ import { listenerLogins, LiveUsers, USERS_FILE } from "../duck/users.ts";
 import { READY_LINE } from "./supervise.ts";
 import { changesOf, dropOwnReplication, dropStatements, madeReplication, namedPublication, projectReplication, replicationReadiness } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
+import { LogBuffer } from "../lib/log-buffer.ts";
 
 export interface DevOptions {
   /** the port the commands reach the run on (src/cli/run-server.ts), or the next free one */
@@ -187,9 +188,13 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const log = fs.createWriteStream(logFile, { flags: "a" });
   // one entry a line: a multi-line message's further lines indented under it (src/lib/log.ts `textEntry`);
   // mason serve gets the same entry, for the container's stdout (src/cli/serve.ts)
+  // the last entries are kept in memory too (src/lib/log-buffer.ts), for the command server's /api/logs: the one writer
+  // feeds the file, stdout and the buffer, so a mode with no file (mason serve) has the log as well
+  const logs = new LogBuffer();
   const logLine = (l: string): void => {
     const entry = textEntry(`${new Date().toISOString()} `, l);
     log.write(entry);
+    logs.push(entry);
     o.serve?.log(entry.trimEnd());
   };
   // THE DEMO DATABASE (src/cli/demo.ts), hosted here: opened before it is connected to, as any database is
@@ -417,6 +422,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
     log: (m) => say(`  ${m}`),
+    logs,
     duck: { copies: () => sync.state(), file: duckFile, pollSeconds: pollMs / 1000, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), requests,
       jsonPaths: () => sync.kept.status() },
   });
