@@ -168,13 +168,16 @@ cd your-app
 `mason init demo`, in a new folder, makes a project whose database Mason hosts itself: a small
 shop (`customers`, `products`, `orders`, `order_items`) in a Postgres that `mason start` runs in
 its own process, kept in `.mason/demo/` and served on a port of this machine. Nothing to install,
-no Docker. The four tables are added already, and a new order lands every few seconds, so
-`mason status` shows the copy keeping up. Mason reads it as it reads yours, over the Postgres
-protocol, by polling (the demo database has no change log, so `--replication` does not apply).
+no Docker. Three of the four tables are added already; the fourth, `order_items`, is yours to
+add once Mason is up, so the first thing you do is a real `mason add` and you watch its copy
+begin. A new order lands every few seconds, so `mason status` shows the copy keeping up. Mason
+reads it as it reads yours, over the Postgres protocol, by polling (the demo database has no
+change log, so `--replication` does not apply).
 
 ```bash
 mkdir mason-demo && cd mason-demo
 mason init demo && mason start
+mason add order_items                # the fourth table: its copy begins (or Add, on mason ui)
 mason user add me                    # prints the URL with its password, once
 psql "postgres://me:<password>@127.0.0.1:5433/mason-demo" -c "select status, count(*) from orders group by 1"
 mason destroy                        # the copy and the demo database go; the next mason start seeds it again
@@ -189,14 +192,15 @@ your data and Mason's state (gitignored). The URL itself stays in `.env`: the fi
 
 ```bash
 mason init
-mason start                          # Mason in the background, for this folder; returns once it is up
 ```
 
-**2. Add the tables your dashboards read.** `mason add` copies a table and adds it to the sources file:
+**2. Add the tables your dashboards read, and start Mason.** `mason add` adds a table to the sources
+file — checked against the database first — and `mason start` copies what the file names:
 
 ```bash
 mason tables                         # what this database has: rows, keys, what is added
-mason add orders customers           # copy them (--columns id,status,total: those only, one table at a time)
+mason add orders customers           # add them (--columns id,status,total: those only, one table at a time)
+mason start                          # Mason in the background, for this folder: the copy begins; returns once it is up
 mason wait                           # until every added table is copied and served
 mason remove customers               # (later) take one out of the file again; its copy is dropped
 ```
@@ -219,7 +223,8 @@ tables:
 
 A column that looks like a secret (`password`, `token`, `api_key`, …) is left out unless you
 name it, written as `exclude:`. Column types are not in the file: they are read from the
-database at every start. The copy starts at once and the table is served the moment it lands;
+database at every start. With Mason running, `mason add` starts the copy at once and the table
+is served the moment it lands (before `mason start`, the copy begins at the start);
 `mason add` and `mason remove` keep the rest of the file as it was, comments included. An entry
 you edit by hand is applied at the next `mason start`, and a mistake in it is refused with the
 key and the way out.

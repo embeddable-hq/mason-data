@@ -1,7 +1,8 @@
 /**
  * THE COMMANDS BESIDE `mason start` (an interface as good for people as for coding agents).
- * Each one finds the run it means (src/cli/runs.ts), asks its command server (src/cli/control.ts), and prints
- * it for a person — or, with `--json`, as data a program reads. Exit codes are part of each command's contract:
+ * Each one finds the run it means (src/cli/runs.ts) and asks its command server (src/cli/control.ts) — or, for what
+ * needs only the project's files and its database (tables; add and remove while Mason is down), reads them itself — and
+ * prints it for a person or, with `--json`, as data a program reads. Exit codes are part of each command's contract:
  *
  *   mason status [--json]                 what the run is doing: its database, its tables and their copies, the Postgres API
  *   mason tables [<table>…] [--json]      the database's tables, their columns, keys and foreign keys
@@ -13,9 +14,9 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { endText, errorJson, failed, jsonText, nextBlock, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
+import { asFailure, endText, errorJson, failed, jsonText, nextBlock, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
 import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from "./style.ts";
-import { alive, endRun, END_GRACE_MS, theRun, type DevRun } from "./runs.ts";
+import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
 import { readRestarts, signalSupervisor, stopSupervisor, supervisorGone, type Restart } from "./supervise.ts";
 import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
@@ -23,8 +24,10 @@ import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
 import { SLOW_MS, type RefusedQuery, type SlowQuery } from "./run-server.ts";
-import { catalogTable, entryName, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable } from "./sources.ts";
-import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts } from "./preflight.ts";
+import { catalogTable, entryName, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
+import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
+import { changesOf } from "./replication-mode.ts";
+import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import { reach } from "./state.ts";
 import { copyingText, copyProgress, duration, readiness, type Readiness } from "./readiness.ts";
 import type { CopyProgressView, StreamStatus } from "../duck/sync.ts";
@@ -609,12 +612,13 @@ export function tableFacts(t: CatalogTable): { size: string; key: string; state:
 }
 
 /**
- * THE PROJECT'S DATABASE'S TABLES, READ BY THE COMMAND ITSELF (the hands-on review of #451, item 15: `mason tables`
- * answered "Mason is not running", though it reads only Postgres): the database's catalog (preflight.ts
- * readSourceFacts, what mason start reads), each table as the run's state says it against the sources file
- * (sources.ts catalogTable). A file that cannot be read, or a database that does not answer, is said with why and the way out.
+ * THE PROJECT'S DATABASE'S CATALOG, READ BY THE COMMAND ITSELF (the hands-on review of #451, item 15: `mason tables`
+ * answered "Mason is not running", though it reads only Postgres): the sources file as the run reads it, and the
+ * database's catalog (preflight.ts readSourceFacts, what mason start reads) — what `mason tables` lists, and what `mason
+ * add` and `mason remove` check an edit against while Mason is down. A file that cannot be read, or a database that does
+ * not answer, is said with why and the way out.
  */
-async function databaseTables(p: Project): Promise<{ database: string; name: string; file: string; tables: CatalogTable[] } | Failure> {
+async function readCatalog(p: Project): Promise<{ src: ProjectSource; database: string; facts: SourceTable[] } | Failure> {
   const src = projectSource(p);
   if ("message" in src) return src;
   const demo = p.config.demo === true;
@@ -640,7 +644,55 @@ async function databaseTables(p: Project): Promise<{ database: string; name: str
       next: [["mason doctor", "checks the machine and the project's database"]] };
   }
   finally { connected.pg.close(); }
-  return { database: parsed.source.database, name: src.name, file: src.file, tables: facts.tables.map((t) => catalogTable(t, src.tables.find((e) => e.table === t.source))) };
+  return { src, database: parsed.source.database, facts: facts.tables };
+}
+
+/** `mason tables` without the run: the database's tables, each as the run's state says it against the sources file
+ *  (sources.ts catalogTable). */
+async function databaseTables(p: Project): Promise<{ database: string; name: string; file: string; tables: CatalogTable[] } | Failure> {
+  const c = await readCatalog(p);
+  if ("message" in c) return c;
+  return { database: c.database, name: c.src.name, file: c.src.file, tables: c.facts.map((t) => catalogTable(t, c.src.tables.find((e) => e.table === t.source))) };
+}
+
+/**
+ * MASON DOWN, `mason add` AND `mason remove` EDIT THE FILE THEMSELVES (the file is the list: `mason init && mason add
+ * orders && mason start` is a natural order, and `mason init demo` already writes entries before any run) — through
+ * the same check-and-write the run's command server calls (src/cli/source-edit.ts), against the catalog the command
+ * reads itself (`readCatalog`), so a refusal is worded alike from both. A run alive and silent (hung) still holds the
+ * file: refused, with mason stop as the way out, as is a run that came up since the command looked. Null once the
+ * failure is said.
+ */
+async function withoutRun(cmd: string, p: Project, json: boolean): Promise<{ db: EditCatalog; tables: CatalogTable[]; file: string; edit: () => EditTarget } | null> {
+  const st = await runState(p);
+  // a hung run is Mason running and not answering: FAILURE_CODES' unreachable
+  if (st.kind === "hung") { failed(cmd, { ...asFailure(notAnswering(p, st.run)), code: "unreachable" }, { json }); return null; }
+  if (st.kind === "up") {
+    failed(cmd, { message: `Mason started for ${p.config.name} while mason ${cmd} ran`, code: "refused", fix: `run mason ${cmd} again: it asks the run, which copies at once` }, { json });
+    return null;
+  }
+  const c = await readCatalog(p);
+  if ("message" in c) { failed(cmd, c, { json }); return null; }
+  return { db: { tables: c.facts, database: c.database, replication: changesOf(null, p.config.changes) === "replication" },
+    tables: c.facts.map((t) => catalogTable(t, c.src.tables.find((e) => e.table === t.source))), file: c.src.file,
+    edit: () => sourceToEdit(p.folder, p.root, () => projectSource(p)) };
+}
+
+/** What an edit answered, as the run's command server answers it: the result, or the refusal's HTTP status and sentence. */
+type Edited<T> = { ok: T } | { status: number; error: string };
+function edited<T>(f: () => T): Edited<T> {
+  try { return { ok: f() }; }
+  catch (e) {
+    // a refusal is the edit's answer, said as the run's is; anything else is a bug, and goes on up
+    if (e instanceof Refusal) return { status: e.status, error: e.message };
+    throw e;
+  }
+}
+
+/** The run's command server's answer, as an edit's (`Edited`): what `/api/pick` or `/api/remove` answered. */
+async function viaRun<T>(run: DevRun, route: "/api/pick" | "/api/remove", body: unknown): Promise<Edited<T>> {
+  const r = await callRun(run, "POST", route, body);
+  return r.status === 200 ? { ok: r.body as unknown as T } : { status: r.status, error: String(r.body.error) };
 }
 
 // ------------------------------------------------------------------ mason add
@@ -660,8 +712,10 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   it is written as exclude: [password_hash], since anyone with a user's password can read every copied column. Name
   one with --columns or --include to have it.
 
-  The copy starts at once; mason wait returns when it is done and the table is served. Adding a table again with
-  other columns changes its entry, and the table is copied again with them.
+  With Mason running the copy starts at once; mason wait returns when it is done and the table is served. Before
+  mason start (mason init && mason add orders && mason start) the entry is written, checked against the database as
+  the run checks it, and the copy begins at mason start. Adding a table again with other columns changes its entry,
+  and the table is copied again with them.
 
   --columns <a,b,…>   only these columns (one table at a time: the list is that table's)
   --include <a,b,…>   these columns as well as every other one — a column that looks like a secret, named on purpose
@@ -673,8 +727,9 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
                       exit 1 when a table could not be added
 `;
 
-export const ADD: CommandSpec & { needs: "run" } = {
-  needs: "run",
+export const ADD: CommandSpec & { needs: "project" } = {
+  // the project, not the run: the sources file is the list, so a table is added before mason start as well as after
+  needs: "project",
   name: "add",
   summary: "copy tables into Mason, adding them to the sources file: mason add orders (--columns id,status: those only)",
   usage: ADD_USAGE,
@@ -710,70 +765,92 @@ export async function add(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   const specs = addSpecs(f.positionals, f.values.columns as string | undefined, f.values.include as string | undefined, f.values.key as string | undefined);
   if (typeof specs === "string") return failed("add", { message: specs, code: "usage", usage: ADD_USAGE }, { json });
-  const run = await runOr(ADD, json);
-  if (!run) return 1;
-  return guarded("add", json, async () => {
-    const s = await readState(run);
-    const results: unknown[] = [];
-    const added: string[] = [];
-    let file: string | null = s.source.file ?? null;
-    // the tables that could not be added, each with its reason and code: the command's failure, in the failure shape
-    const refused: Array<{ table: string; message: string; code: string }> = [];
-    // A CHECKLIST, a line per table (it reads best as a list of completed actions): a spinner
-    // while it is added, ✔ with what was written, its notes under it; ✘ with the reason when it could not be
-    const st = styleOut();
-    const steps = stepRenderer({ line: out, live: !json && process.stdout.isTTY ? { write: (t) => { process.stdout.write(t); } } : null, style: st });
-    const note = (text: string): void => { if (!json) steps.print(st.dim(`    ${wrap(text, st.width, 4)}`)); };
-    const shown = (p: string): string => { const rel = path.relative(process.cwd(), p); return rel.startsWith("..") ? p : rel; };
-    for (const spec of specs) {
-      const t = findTable(s.tables, spec.table);
-      // a table the database lacks is a failed line of the checklist, its reason under it, like a table Mason refused
-      if (!("table" in t)) { refused.push({ table: spec.table, message: t.message, code: t.code }); results.push({ table: spec.table, error: t.message }); if (!json) { steps.begin(`Adding ${spec.table}`); steps.fail(`Adding ${spec.table}`); note(`${t.message}${t.fix ? `: ${t.fix}` : ""}${t.next?.length ? ` (${t.next[0]![0]})` : ""}`); } continue; }
-      if (!json) steps.begin(`Adding ${t.table}`);
-      const r = await callRun(run, "POST", "/api/pick", { table: t.table, picked: true, columns: spec.columns, ...(spec.key ? { key: spec.key } : {}) });
-      if (r.status !== 200) {
-        refused.push({ table: t.table, message: String(r.body.error), code: r.status === 404 ? "not_found" : "refused" });
-        results.push({ table: t.table, error: String(r.body.error) });
-        if (!json) { steps.fail(`Adding ${t.table}`); note(String(r.body.error)); }
-        continue;
-      }
-      const b = r.body as unknown as PickAnswer;
-      file = b.file;
-      results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already });
-      added.push(b.table);
-      if (json) continue;
-      const l = addedLines(b, shown(b.file));
-      steps.done(l.line);
-      for (const x of l.notes) note(x);
-    }
-    const next: NextStep[] = added.length ? [
-      ["mason wait", `until ${added.length === 1 ? "its copy finishes" : "their copies finish"} (the copy has started)`],
-      READY_STEPS[0]!,
-    ] : [];
-    if (refused.length) {
-      // A TABLE NOT ADDED IS THE COMMAND'S FAILURE, in the shape every failure has (found by the CLI session test of the private repo:
-      // exit 1 with no error, and nothing on stderr): what is wrong, each table's reason, and next — the added ones' too
-      const f: Failure = {
-        message: specs.length === 1 ? `${refused[0]!.table} was not added` : `${refused.length} of ${specs.length} tables were not added: ${refused.map((x) => x.table).join(", ")}`,
-        code: refused.every((x) => x.code === "not_found") ? "not_found" : refused.every((x) => x.code === "usage") ? "usage" : "refused",
-        why: refused.map((x) => specs.length === 1 ? x.message : `${x.table}: ${x.message}`).join("; "),
-        next: [...next, ["mason tables", "the database's tables, as this user reads them"]],
-      };
-      if (json) { out(jsonText(ADD, { added: results, file, error: errorJson(f) }, f.next!)); return 1; }
-      return failed("add", f, { json: false });
-    }
-    if (json) out(jsonText(ADD, { added: results, file }, next));
-    else out(endText({ next }, st));
-    return 0;
-  });
+  const where = await reach(ADD, json);
+  // (a state with no project never meets the need: reach said it)
+  if (where === null || where.project === null) return 1;
+  if (where.state === "up") {
+    // Mason up: the run adds it (the copy starts now, and the run's own re-read never races the file's write)
+    const run = where.run;
+    return guarded("add", json, async () => {
+      const s = await readState(run);
+      return addTables({ tables: s.tables, file: s.source.file ?? null,
+        pick: (table, columns, key) => viaRun<PickResult>(run, "/api/pick", { table, picked: true, columns, ...(key ? { key } : {}) }),
+        next: (n) => [["mason wait", `until ${n === 1 ? "its copy finishes" : "their copies finish"} (the copy has started)`], READY_STEPS[0]!] }, specs, json);
+    });
+  }
+  // Mason down: the command writes the entry itself, checked as the run checks it; the copy begins at mason start
+  const down = await withoutRun("add", where.project, json);
+  if (down === null) return 1;
+  return addTables({ tables: down.tables, file: down.file,
+    pick: async (table, columns, key) => edited(() => addEntry(down.edit(), down.db, table, columns, key)),
+    next: () => [["mason start", "Mason in the background, for this project: the copy of every added table begins"],
+      ["mason wait", "then, until every added table is copied and served"]] }, specs, json);
 }
 
-/** What the run's command server answers a table added with (src/cli/run-server.ts PickResult). */
-export interface PickAnswer { table: string; file: string; entry: string; columns: string[] | null; exclude: string[]; key: string[] | null; addedKey: string[]; skippedSecrets: string[]; already: boolean }
+/** Where `mason add` adds a table: the database's tables as it names them, the sources file, the one edit, and what to
+ *  run once `n` tables are added — the run (Mason up) or the file itself (Mason down). */
+interface AddWay {
+  tables: readonly CatalogTable[];
+  file: string | null;
+  pick: (table: string, columns: string[], key: string[] | null) => Promise<Edited<PickResult>>;
+  next: (n: number) => NextStep[];
+}
+
+/** `mason add`'s checklist and answer, the same whichever way the tables are added (`AddWay`). */
+async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; columns: string[]; key: string[] | null }>, json: boolean): Promise<number> {
+  const results: unknown[] = [];
+  const added: string[] = [];
+  let file: string | null = way.file;
+  // the tables that could not be added, each with its reason and code: the command's failure, in the failure shape
+  const refused: Array<{ table: string; message: string; code: string }> = [];
+  // A CHECKLIST, a line per table (it reads best as a list of completed actions): a spinner
+  // while it is added, ✔ with what was written, its notes under it; ✘ with the reason when it could not be
+  const st = styleOut();
+  const steps = stepRenderer({ line: out, live: !json && process.stdout.isTTY ? { write: (t) => { process.stdout.write(t); } } : null, style: st });
+  const note = (text: string): void => { if (!json) steps.print(st.dim(`    ${wrap(text, st.width, 4)}`)); };
+  const shown = (p: string): string => { const rel = path.relative(process.cwd(), p); return rel.startsWith("..") ? p : rel; };
+  for (const spec of specs) {
+    const t = findTable(way.tables, spec.table);
+    // a table the database lacks is a failed line of the checklist, its reason under it, like a table Mason refused
+    if (!("table" in t)) { refused.push({ table: spec.table, message: t.message, code: t.code }); results.push({ table: spec.table, error: t.message }); if (!json) { steps.begin(`Adding ${spec.table}`); steps.fail(`Adding ${spec.table}`); note(`${t.message}${t.fix ? `: ${t.fix}` : ""}${t.next?.length ? ` (${t.next[0]![0]})` : ""}`); } continue; }
+    if (!json) steps.begin(`Adding ${t.table}`);
+    const r = await way.pick(t.table, spec.columns, spec.key);
+    if (!("ok" in r)) {
+      refused.push({ table: t.table, message: r.error, code: r.status === 404 ? "not_found" : "refused" });
+      results.push({ table: t.table, error: r.error });
+      if (!json) { steps.fail(`Adding ${t.table}`); note(r.error); }
+      continue;
+    }
+    const b = r.ok;
+    file = b.file;
+    results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already });
+    added.push(b.table);
+    if (json) continue;
+    const l = addedLines(b, shown(b.file));
+    steps.done(l.line);
+    for (const x of l.notes) note(x);
+  }
+  const next: NextStep[] = added.length ? way.next(added.length) : [];
+  if (refused.length) {
+    // A TABLE NOT ADDED IS THE COMMAND'S FAILURE, in the shape every failure has (found by the CLI session test of the private repo:
+    // exit 1 with no error, and nothing on stderr): what is wrong, each table's reason, and next — the added ones' too
+    const f: Failure = {
+      message: specs.length === 1 ? `${refused[0]!.table} was not added` : `${refused.length} of ${specs.length} tables were not added: ${refused.map((x) => x.table).join(", ")}`,
+      code: refused.every((x) => x.code === "not_found") ? "not_found" : refused.every((x) => x.code === "usage") ? "usage" : "refused",
+      why: refused.map((x) => specs.length === 1 ? x.message : `${x.table}: ${x.message}`).join("; "),
+      next: [...next, ["mason tables", "the database's tables, as this user reads them"]],
+    };
+    if (json) { out(jsonText(ADD, { added: results, file, error: errorJson(f) }, f.next!)); return 1; }
+    return failed("add", f, { json: false });
+  }
+  if (json) out(jsonText(ADD, { added: results, file }, next));
+  else out(endText({ next }, st));
+  return 0;
+}
 
 /** What `mason add` prints for a table added: its line (✔ …), then its notes under it (the web page says the same,
  *  src/web/app.js; tests/web-page.test.ts holds the two equal). `file` is the sources file as the reader is shown it. */
-export function addedLines(b: PickAnswer, file: string): { line: string; notes: string[] } {
+export function addedLines(b: PickResult, file: string): { line: string; notes: string[] } {
   const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
   const s = b.skippedSecrets;
   return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
@@ -789,7 +866,8 @@ export function addedLines(b: PickAnswer, file: string): { line: string; notes: 
 const REMOVE_USAGE = `usage: mason remove <table>… [--json]
 
   Takes tables out of the project: each one's entry in the sources file (mason/sources/<name>.yml) is removed, the
-  rest of the file as it was. Mason then stops copying it and drops its copy.
+  rest of the file as it was. With Mason running it stops copying the table and drops its copy at once; with Mason
+  stopped, a copy an earlier run made is dropped at the next mason start.
 
     mason remove customers
     mason remove customers billing.invoices     several at once
@@ -797,8 +875,9 @@ const REMOVE_USAGE = `usage: mason remove <table>… [--json]
   --json   as data: { removed (the tables, schema.table), file (the sources file), next }
 `;
 
-export const REMOVE: CommandSpec & { needs: "run" } = {
-  needs: "run",
+export const REMOVE: CommandSpec & { needs: "project" } = {
+  // the project, not the run, as mason add
+  needs: "project",
   name: "remove",
   summary: "take tables out of the sources file: mason remove customers (its copy is dropped)",
   usage: REMOVE_USAGE,
@@ -812,30 +891,43 @@ export async function remove(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   const names = [...new Set(f.positionals)];
   if (!names.length) return failed("remove", { message: "name a table: mason remove customers (mason status lists the added ones)", code: "usage", usage: REMOVE_USAGE }, { json });
-  const run = await runOr(REMOVE, json);
-  if (!run) return 1;
-  return guarded("remove", json, async () => {
-    // the run's own removal (src/cli/run-server.ts removeTables): one path, so nothing can disagree with it
-    const r = await callRun(run, "POST", "/api/remove", { tables: names });
-    if (r.status !== 200) {
-      const message = String(r.body.error);
-      return failed("remove", { message: `${names.join(", ")} ${names.length === 1 ? "was" : "were"} not removed`, code: r.status === 404 ? "not_found" : r.status === 400 ? "usage" : "refused", why: message,
-        next: [["mason status", "the tables added"]] }, { json });
-    }
-    const b = r.body as unknown as { removed: string[]; file: string };
-    const next: NextStep[] = [["mason status", "the tables left"]];
-    if (json) { out(jsonText(REMOVE, { removed: b.removed, file: b.file }, next)); return 0; }
-    const rel = path.relative(process.cwd(), b.file);
-    out(reportText({ ...removedReport(b.removed, rel.startsWith("..") ? b.file : rel), next }, styleOut()));
-    return 0;
-  });
+  const where = await reach(REMOVE, json);
+  // (a state with no project never meets the need: reach said it)
+  if (where === null || where.project === null) return 1;
+  if (where.state === "up") {
+    // Mason up: the run removes it and drops the copy at once (src/cli/run-server.ts removeTables)
+    const run = where.run;
+    return guarded("remove", json, async () => removedAnswer(await viaRun<RemoveResult>(run, "/api/remove", { tables: names }), names, true, json));
+  }
+  // Mason down: the command cuts the entries itself, checked as the run checks them (src/cli/source-edit.ts removeEntries)
+  const down = await withoutRun("remove", where.project, json);
+  if (down === null) return 1;
+  return removedAnswer(edited(() => removeEntries(down.edit(), down.db, names)), names, false, json);
+}
+
+/** `mason remove`'s answer, the same whichever way the entries were cut; `running`: Mason is up, and dropped the copies. */
+function removedAnswer(r: Edited<RemoveResult>, names: readonly string[], running: boolean, json: boolean): number {
+  if (!("ok" in r)) {
+    return failed("remove", { message: `${names.join(", ")} ${names.length === 1 ? "was" : "were"} not removed`, code: r.status === 404 ? "not_found" : r.status === 400 ? "usage" : "refused", why: r.error,
+      next: [["mason status", "the tables added"]] }, { json });
+  }
+  const b = r.ok;
+  const next: NextStep[] = running ? [["mason status", "the tables left"]]
+    : [["mason start", "Mason in the background, for this project: it copies the tables left"], ["mason status", "the tables left"]];
+  if (json) { out(jsonText(REMOVE, { removed: b.removed, file: b.file }, next)); return 0; }
+  const rel = path.relative(process.cwd(), b.file);
+  out(reportText({ ...removedReport(b.removed, rel.startsWith("..") ? b.file : rel, { running }), next }, styleOut()));
+  return 0;
 }
 
 /** What `mason remove` prints for the tables removed, `file` the sources file as the reader is shown it (the web page
  *  says the same, src/web/app.js; tests/web-page.test.ts holds the two equal). */
-export function removedReport(removed: readonly string[], file: string): { headline: string; details: Array<[string, string]>; tips: string[] } {
+export function removedReport(removed: readonly string[], file: string, o: { running?: boolean } = {}): { headline: string; details: Array<[string, string]>; tips: string[] } {
+  const one = removed.length === 1;
   return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
-    tips: [`Mason stops copying ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its copy" : "their copies"}`] };
+    // Mason down (the web page always has a run): a copy an earlier run made is dropped by the next start's sync
+    tips: [o.running === false ? `a copy an earlier run made of ${one ? "it" : "them"} is dropped at the next mason start`
+      : `Mason stops copying ${one ? "it" : "them"} and drops ${one ? "its copy" : "their copies"}`] };
 }
 
 // ------------------------------------------------------------------ mason wait

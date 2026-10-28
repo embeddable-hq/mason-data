@@ -38,8 +38,17 @@ export function demoUrl(port: number): string {
 }
 
 export const SEED_COUNTS = { customers: 200, products: 50, orders: 5_000 } as const;
-/** the four tables, in the order they are made (a foreign key's target first) */
+/** the database's four tables, in the order they are made (a foreign key's target first) */
 export const DEMO_TABLES = ["customers", "products", "orders", "order_items"] as const;
+/**
+ * THE TABLE `mason init demo` LEAVES OUT of the sources file, for the person to add themselves: the first thing they do
+ * after `mason start` is a real `mason add` (or the web page's Add), and they see a copy begin. `order_items`, because
+ * its foreign keys' targets (`orders`, `products`) are among the ones added, so it joins cleanly when it arrives. The
+ * database holds it regardless, and the writer (`changeSql`) keeps inserting into it.
+ */
+export const DEMO_TABLE_TO_ADD = "order_items" satisfies (typeof DEMO_TABLES)[number];
+/** the tables `mason init demo` writes to the sources file: the database's, but the one left to add */
+export const DEMO_ADDED_TABLES: readonly string[] = DEMO_TABLES.filter((t) => t !== DEMO_TABLE_TO_ADD);
 /** an order's status moves along this path (`changeSql`); `cancelled` is a side exit */
 export const ORDER_STATUSES = ["pending", "paid", "shipped", "delivered"] as const;
 const ROWS_PER_INSERT = 1_000;

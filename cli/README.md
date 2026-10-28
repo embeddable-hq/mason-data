@@ -20,9 +20,9 @@ npm i -g @mason-data/cli
 cd my-app
 mason doctor                         # Node, memory, ports: what is missing, and what to do
 mason init                           # this folder becomes a project, on the database in .env's DATABASE_URL (checked first)
-mason start                          # Mason in the background, then returns
 mason tables                         # the tables: rows, keys, added; a table's columns with `mason tables orders`
-mason add orders customers           # copy them, added to the sources file (--columns id,status: those only)
+mason add orders customers           # add them to the sources file (--columns id,status: those only)
+mason start                          # Mason in the background, copying them, then returns
 mason wait                           # until every added table is copied and served
 mason user add metabase              # a user for a BI tool: its password, printed once, and the URL to paste
 mason ui                             # the status page and the users, in your browser
@@ -35,8 +35,8 @@ argument or it was only in the shell, and gitignores that file): change it there
 database is required.
 
 **No database at hand?** `mason init demo && mason start`, in a new folder, makes a project on a demo database Mason
-hosts itself — a small shop (`customers`, `products`, `orders`, `order_items`, all four added), kept in `.mason/demo/`,
-served on a port of this machine, with a new order every few seconds (`MASON_DEMO_CHANGE_MS`, default 5000) so
+hosts itself — a small shop (`customers`, `products`, `orders`, `order_items`; the first three added, `order_items`
+left for your first `mason add order_items` after `mason start`), kept in `.mason/demo/`, served on a port of this machine, with a new order every few seconds (`MASON_DEMO_CHANGE_MS`, default 5000) so
 `mason status` shows the copy keeping up. Nothing to install. It is read by polling only (it has no change log), and
 `mason destroy` removes it with the copy.
 
@@ -93,8 +93,8 @@ again and remove `mason/models/`.
 | `mason init [<postgres url>]` | Makes this folder a project: checks it can read the database (nothing is written when it cannot; `--skip-check` writes anyway), writes `.mason/config.json` (Mason's key, never the URL) and `mason/sources/<database>.yml` (keeping a sources file already there), adds the URL to `.env` when it was not there, and adds `.mason/` and that `.env` to `.gitignore`. The URL from the argument, else `DATABASE_URL` in `.env.local`, `.env` or the shell. `--name` sets the project's name (default: the folder's) — the database name a tool connects to — `--folder` where its files go, `--remote` allows a database on another machine. Refuses a folder already in a project, but for one with no sources file (an older Mason's), whose sources file alone it writes. |
 | `mason start` | Starts Mason for this folder's project in the background and returns once it is up. Run it again any time: it says so when Mason is already running. `--replication` reads the database's change log as production does (below); `--poll` goes back. `--self-signed-tls` serves the Postgres API over TLS; `--attach` stays in the foreground. |
 | `mason tables [<table>…] [--all]` | The tables this user can read against the sources file, one line each: rows, primary key, whether added (and with which columns), and why a table cannot be added yet (no primary key: the `--key` to add it by). Name a table (or pass `--all` for every one) for its columns: each one's type, what it references, and whether `mason add` would leave it out as a secret. It reads the project's database itself, so Mason need not be running. |
-| `mason add <table>… [--columns …] [--include …] [--key …]` | Copies tables into Mason, each one an entry of the sources file: every column (`orders: {}`), or `--columns id,status,created_at` for those (one table at a time; the key is written with them). Columns that look like secrets (`password`, `token`, `api_key`, `private_key`, …) are left out, named, and written as `exclude:`; `--include password_hash` adds one. `--key tenant_id,id` adds a table with no primary key, copied by those columns. Adding a table again with other columns changes its entry. |
-| `mason remove <table>…` | Takes tables out of the sources file — each one's entry, every other byte as it was — and Mason drops their copies. |
+| `mason add <table>… [--columns …] [--include …] [--key …]` | Copies tables into Mason, each one an entry of the sources file: every column (`orders: {}`), or `--columns id,status,created_at` for those (one table at a time; the key is written with them). Columns that look like secrets (`password`, `token`, `api_key`, `private_key`, …) are left out, named, and written as `exclude:`; `--include password_hash` adds one. `--key tenant_id,id` adds a table with no primary key, copied by those columns. Adding a table again with other columns changes its entry. Mason need not be running: the entry is checked against the database as the run checks it, and the copy begins at `mason start` (with Mason running, at once). |
+| `mason remove <table>…` | Takes tables out of the sources file — each one's entry, every other byte as it was — and Mason drops their copies: at once when it is running, else at the next `mason start`. Mason need not be running. |
 | `mason wait [--timeout <s>]` | Waits until every added table is copied and served, showing every added table on a line of its own: 100% for the finished ones, in the order they finished, and a bar for each still copying (rows, %, rate, time left) at the bottom. Exit 0 ready, 1 a copy failed (printed, with what to do), 124 timed out (default 600 s). |
 | `mason user add\|list\|remove <name>` | The users of the Postgres API: a name and a password that does not expire, as a BI tool's datasource form asks for them or an app's `DATABASE_URL` carries them. `add` prints the password once with the URL; `remove` refuses the next connection at once and ends the sessions it holds at their next statement, without a restart. |
 | `mason ui` | Opens the running Mason's web page in your browser: what `mason status` says, refreshed every 2 s, and the users of `mason user` (add one, its password shown once; remove one). It prints the URL with the run's token, which the page trades for a cookie on the first visit; `--no-open` prints it only, `--json` is `{ url, port }`. `mason start`'s alone: `mason serve` serves no page. |
@@ -125,7 +125,7 @@ runs in, or the nearest one above it.
    your shell names the port, or moves the project to it (said). It listens on 127.0.0.1 unless `MASON_PG_HOST` names
    another address; off this machine it needs TLS (`--self-signed-tls`, or `MASON_PG_TLS_CERT` / `MASON_PG_TLS_KEY`).
 4. **It runs in the background**, copying what the sources file names: `mason add` and `mason remove` change it at once,
-   a hand edit at the next `mason start`.
+   a hand edit (or an add or remove made while Mason was stopped) at the next `mason start`.
 
 Mason's own settings (`MASON_POLL_MS`, `MASON_DUCKDB_MEMORY`, `MASON_COPY_PARALLEL`, …) set in your shell reach Mason.
 A copy reads `MASON_COPY_PARALLEL` chunks at once (default 3), each sized to take about `MASON_COPY_CHUNK_SECONDS` to
