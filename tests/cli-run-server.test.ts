@@ -14,7 +14,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import type { CopyState, PolledTable } from "../src/duck/sync.ts";
-import type { LedgerRequest } from "../src/duck/requests.ts";
+import type { LedgerRequest, QuerySummary, RequestQuery } from "../src/duck/requests.ts";
+import type { CancelAnswer, RunningStatement } from "../src/api/postgres/server.ts";
 import * as syncModule from "../src/duck/sync.ts";
 // read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
 const { PollRefused } = syncModule as unknown as { PollRefused: typeof import("../src/duck/sync.ts").PollRefused };
@@ -66,14 +67,23 @@ const pollNow = (sources: string[]): Promise<{ at: string; tables: PolledTable[]
   return Promise.resolve({ at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, changed: 2, deleted: 1, rows: 3, ms: 40 })) });
 };
 // the request log's reads (src/duck/requests.ts), as the ledger answers them: the server passes them on, never a copy
-const asks: Array<{ limit: number; failed?: boolean }> = [];
+const asks: RequestQuery[] = [];
 const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", session: 3, applicationName: "Metabase", tokenName: "", user: "", method: "QUERY",
-  outcome: "refused", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, durationMs: 2, query: "SELECT * FROM nope", queryTruncated: false };
+  outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, durationMs: 2,
+  endedAt: "2026-10-24T10:04:00.002Z", bytesSent: 120, query: "SELECT * FROM nope", queryTruncated: false };
+const window = (days: number) => ({ days, covered: days, statements: 3, completed: 1, refused: 1, failed: 0, cancelled: 1, rows: 20, bytesSent: 900, durationMs: { avg: 5, p50: 5, p95: 5 } });
+const summary: QuerySummary = { keptDays: 7, day: window(1), week: window(7) };
+// the listener's statements running now, and its cancel (src/api/postgres/server.ts): a session running one, another idle
+const runningNow: RunningStatement = { session: 4, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-24T10:04:30.000Z", runningMs: 1500,
+  rows: 0, query: "SELECT count(*) FROM orders", queryTruncated: false };
+const cancels: number[] = [];
+const listener = { running: () => [runningNow], cancel: (session: number): CancelAnswer => { cancels.push(session); return session === 4 ? { cancelled: runningNow } : session === 5 ? { idle: 5 } : { unknown: session }; } };
 const lastUsedAsks: Array<{ name: string; since: string; until: string | null }> = [];
 const requests = {
   days: 7,
   lastUsed: async (u: Array<{ name: string; since: string; until: string | null }>) => { lastUsedAsks.push(...u); return u.map((x) => x.name === "metabase" ? "2026-10-24T10:04:00.000Z" : null); },
-  recent: async (o: { limit: number; failed?: boolean }) => { asks.push(o); return [request]; },
+  page: async (q: RequestQuery) => { asks.push(q); return { requests: [request], before: q.limit === 1 ? "2026-10-24T10:04:00.000Z~3" : null }; },
+  summary: async () => summary,
   slow: async () => [{ route: "postgres" as const, payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-24T10:03:00.000Z" }],
   refused: async () => ({ total: 3, refused: [{ route: "postgres" as const, payload: "SELECT * FROM nope", runs: 3, last: "2026-10-24T10:04:00.000Z", code: "42P01", message: 'relation "nope" does not exist' }] }),
 };
@@ -91,7 +101,7 @@ const ctx: RunContext = {
   folder: () => chosen, root: path.join(root, "app"), sources: () => ({ file: null, problem: null }), sourcesChanged: () => { changed++; }, log: (m) => logged.push(m),
   // the file as the run reads it: its URL resolved from no environment (the test's file writes it whole)
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
-  runUrl: "postgres://me@localhost:5432/app",
+  runUrl: "postgres://me@localhost:5432/app", listener,
   logs: runLog,
   duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, requests, events, restarts: () => restarts },
 };
@@ -331,9 +341,9 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     // the slow and refused statements are the request log's, in the shapes mason status renders
     assert.deepEqual((await get("/api/slow")).body, { slow: await requests.slow(), slowMs: 1000 });
     assert.deepEqual((await get("/api/refused")).body, await requests.refused());
-    assert.deepEqual((await get("/api/requests?limit=5&failed=1")).body, { requests: [request], keptDays: 7 });
+    assert.deepEqual((await get("/api/requests?limit=5&failed=1")).body, { requests: [request], keptDays: 7, before: null });
     assert.deepEqual((await get("/api/requests")).body.requests, [request]);
-    assert.deepEqual(asks, [{ limit: 5, failed: true }, { limit: 40, failed: false }], "-n and --failed reach the ledger; 40 by default");
+    assert.deepEqual(asks, [{ limit: 5, failed: true }, { limit: 40 }], "-n and --failed reach the ledger; 40 by default");
     const bad = await get("/api/requests?limit=0");
     assert.deepEqual([bad.status, bad.body.error], [400, "limit is a whole number of requests, 1 to 10000"]);
     // what proves a run is up (src/cli/runs.ts answers): the pid, and nothing of a service
@@ -515,4 +525,52 @@ test("GET /api/logs: the run's last entries from memory, { at, text } oldest fir
   const bad = await get("?lines=4");
   assert.deepEqual([bad.status, bad.body.error], [400, "lines is a whole number of log entries, 1 to 3 (all the run keeps)"]);
   assert.equal((await get("?since=yesterday")).status, 400);
+});
+
+test("the request log's filters and pages: each reaches the ledger as read by the one parser, a malformed one is refused in the Failure shape", async () => {
+  const get = async (p: string) => { const r = await call("GET", p); return { status: r.status, body: JSON.parse(r.text) as Record<string, unknown> }; };
+  asks.length = 0;
+  const ok = await get("/api/requests?limit=2&outcome=failed,cancelled&since=2026-10-24T09:00:00Z&until=2026-10-25&user=metabase&client=Metabase&before=2026-10-24T10:04:00.000Z~3");
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.deepEqual(asks[0], { limit: 2, outcomes: ["failed", "cancelled"], since: "2026-10-24T09:00:00.000Z", until: "2026-10-25T00:00:00.000Z", user: "metabase", client: "Metabase",
+    before: { at: "2026-10-24T10:04:00.000Z", seq: 3 } }, "every filter reaches the ledger, its times as ISO 8601 UTC");
+  assert.equal((await get("/api/requests?limit=1")).body.before, "2026-10-24T10:04:00.000Z~3", "a page with older rows hands on its position");
+  const refusals: Array<[string, string]> = [
+    ["outcome=cancel", 'outcome "cancel" is none of ok, refused, failed, cancelled — did you mean `cancelled`?'],
+    ["outcome=failed&failed=1", "failed is every outcome but ok: name it or outcome, never both"],
+    ["since=yesterday", 'since "yesterday" is not a time'],
+    ["since=2026-10-24T09:00", 'since "2026-10-24T09:00" is not a time'],
+    ["since=2026-10-25&until=2026-10-24", "since (2026-10-25T00:00:00.000Z) is not before until (2026-10-24T00:00:00.000Z): no request started in between"],
+    ["user=", "user names a mason user: it is empty"],
+    ["before=42", 'before "42" is not a position in the request log'],
+  ];
+  for (const [q, message] of refusals) {
+    const r = await get(`/api/requests?${q}`);
+    assert.equal(r.status, 400, q);
+    const f = r.body.failure as { code: string; message: string };
+    assert.deepEqual([r.body.error, f.code, f.message], [message, "usage", message], q);
+  }
+  assert.match(String(((await get("/api/requests?since=soon")).body.failure as { fix: string }).fix), /an age \(30m, 2h, 7d\) or an ISO 8601 date or time with its zone/);
+  assert.equal(asks.length, 2, "a refused read never reaches the ledger");
+});
+
+test("the query summary, the statements running now and a cancel: the ledger's and the listener's own, a cancel a POST under the run's guard", async () => {
+  const get = async (p: string) => { const r = await call("GET", p); return { status: r.status, body: JSON.parse(r.text) as Record<string, unknown> }; };
+  assert.deepEqual((await get("/api/queries")).body, { queries: summary });
+  assert.deepEqual((await get("/api/running")).body, { running: [runningNow] });
+  cancels.length = 0;
+  const cancel = async (body: unknown, o: { origin?: string | null; cookie?: string | null } = {}) => { const r = await call("POST", "/api/cancel", { body, ...o }); return { status: r.status, text: r.text }; };
+  assert.equal((await cancel({ session: 4 }, { cookie: null })).status, 403, "no token: refused");
+  assert.equal((await cancel({ session: 4 }, { origin: "http://evil.example" })).status, 403, "a write from another Origin: refused");
+  assert.deepEqual(cancels, [], "nothing the guard refused reached the listener");
+  const done = await cancel({ session: 4 });
+  assert.deepEqual([done.status, JSON.parse(done.text)], [200, { cancelled: runningNow }]);
+  const running = [{ command: "mason logs --running", what: "the statements running now, with their sessions" }];
+  const idle = await cancel({ session: 5 });
+  assert.deepEqual([idle.status, JSON.parse(idle.text).failure], [409, { code: "refused", message: "session 5 is running no statement: nothing to cancel", why: "its statement ended, or it is between two", next: running }]);
+  const gone = await cancel({ session: 77 });
+  assert.deepEqual([gone.status, JSON.parse(gone.text).failure], [404, { code: "not_found", message: "no session 77 is open", why: "it ended, or never was", next: running }]);
+  const bad = await cancel({ session: "4" });
+  assert.deepEqual([bad.status, JSON.parse(bad.text).failure.message], [400, "send { session }: the session's number, as mason logs --running lists it"]);
+  assert.deepEqual(cancels, [4, 5, 77]);
 });

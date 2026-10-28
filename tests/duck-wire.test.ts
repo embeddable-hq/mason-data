@@ -24,6 +24,7 @@ import { TABLES_SQL } from "../src/cli/preflight.ts";
 import { jsonbText } from "../src/duck/jsonb.ts";
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { CopyState } from "../src/duck/sync.ts";
+import type { ApiLogRow } from "../src/api/request-log.ts";
 import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
@@ -187,6 +188,8 @@ const schema: PgSchema = {
 /** the sync's copy state the listener reads for a table the catalog does not hold (`Sync.state` in a run) */
 let copies: CopyState[] = [];
 const logged: string[] = [];
+/** the request log's rows as the listener built them (src/api/request-log.ts ApiLogRow) */
+const recorded: ApiLogRow[] = [];
 /** every line, never cleared (a test that reads a line said once, at the catalog's start, cannot know when that was) */
 const everLogged: string[] = [];
 
@@ -209,7 +212,7 @@ before(async () => {
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "0.6.1", product: "mason-data",
     authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
     schema: () => schema,
-    record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
+    record: (r) => { recorded.push(r); }, log: (l) => (logged.push(l), everLogged.push(l)),
     duck: await store.listener(undefined, undefined, undefined, () => copies),
   });
 });
@@ -628,17 +631,21 @@ test("the BI-tools test: a sum over a CASE has the scale of the arms its rows to
 });
 
 /** One session over a raw socket, its reading in the test's hands (`pg` reads every reply as it comes). */
-async function rawSession(): Promise<{ socket: net.Socket; pid: number; secret: number; untilReady(): Promise<BackendMessage[]>; end(): void }> {
+async function rawSession(): Promise<{ socket: net.Socket; pid: number; secret: number; untilReady(): Promise<BackendMessage[]>; end(): void; readonly bytes: number }> {
   const socket = net.connect(api.port, "127.0.0.1");
   await new Promise<void>((r) => socket.once("connect", () => r()));
   let chunks: Buffer[] = [];
   let tail = Buffer.alloc(0);
   let wake: (() => void) | null = null;
+  /** the bytes the last untilReady read, ReadyForQuery included */
+  let bytes = 0;
   socket.on("data", (d: Buffer) => { chunks.push(d); tail = Buffer.concat([tail, d]).subarray(-6); wake?.(); });
   const ready = (): boolean => tail.length === 6 && tail[0] === 0x5a && tail.readInt32BE(1) === 5;
   const untilReady = async (): Promise<BackendMessage[]> => {
     while (!ready()) await new Promise<void>((r) => { wake = r; });
-    const ms = wire.replies(Buffer.concat(chunks));
+    const all = Buffer.concat(chunks);
+    bytes = all.length;
+    const ms = wire.replies(all);
     chunks = []; tail = Buffer.alloc(0);
     return ms;
   };
@@ -647,7 +654,7 @@ async function rawSession(): Promise<{ socket: net.Socket; pid: number; secret: 
   chunks = [];
   socket.write(wire.password(mintToken(API_KEY, 600).token));
   const key = (await untilReady()).find((m) => m.type === "BackendKeyData") as Extract<BackendMessage, { type: "BackendKeyData" }>;
-  return { socket, pid: key.pid, secret: key.secret, untilReady, end: () => { socket.destroy(); } };
+  return { socket, pid: key.pid, secret: key.secret, untilReady, end: () => { socket.destroy(); }, get bytes() { return bytes; } };
 }
 const dataRows = (ms: BackendMessage[]): Array<Extract<BackendMessage, { type: "DataRow" }>> => ms.filter((m) => m.type === "DataRow") as Array<Extract<BackendMessage, { type: "DataRow" }>>;
 const finished = (word: string): boolean => logged.some((l) => l.startsWith("statement:") && l.includes(word));
@@ -1254,4 +1261,62 @@ test("no rewrite of the statements above placed one of their nodes twice", async
   const rewrite = await import("../src/duck/rewrite.ts") as { nodesPlacedTwice?: () => readonly string[] };
   assert.ok(rewrite.nodesPlacedTwice !== undefined, "the rewrite has no detector of a node placed twice");
   assert.deepEqual(rewrite.nodesPlacedTwice(), [], "a rule placed a node in two places: clone it per use (Rewriter.cp)");
+});
+
+// THE BYTES SENT, per statement (src/api/request-log.ts bytesSent): what the client read for it, every frame from its
+// first to its CommandComplete or ErrorResponse — the ReadyForQuery after it is the protocol's, not the statement's
+test("the request log's bytes are the bytes the client read for the statement: an answer's rows and its tag, a refusal's ErrorResponse, a 150,000-row stream", async () => {
+  const s = await rawSession();
+  try {
+    const READY = 6;
+    const asked = async (sql: string): Promise<{ read: number; row: ApiLogRow }> => {
+      const from = recorded.length;
+      s.socket.write(wire.query(sql));
+      await s.untilReady();
+      const row = recorded.slice(from).find((r) => r.session === s.pid);
+      assert.ok(row !== undefined, `a row for ${sql}`);
+      return { read: s.bytes - READY, row };
+    };
+    for (const sql of ["SELECT count(*) FROM big", "SELECT * FROM nope"]) {
+      const { read, row } = await asked(sql);
+      assert.equal(row.bytesSent, read, sql);
+    }
+    const wide = await asked("SELECT v || repeat('z', 200) AS bytes_wide FROM big");
+    assert.equal(wide.row.bytesSent, wide.read);
+    assert.ok(wide.read > 30_000_000, "the stream's 30 MB, counted whole");
+  } finally { s.end(); }
+});
+
+// THE STATEMENTS RUNNING NOW, AND A CANCEL BY SESSION (`/api/running`, `POST /api/cancel`): the listener's own, and the
+// cancel is the CancelRequest's path — the client told 57014 "due to user request", recorded cancelled, the session on
+test("the statements running now, by session; a cancel by session stops one as a CancelRequest does, and says when there is nothing to stop", async () => {
+  const s = await rawSession();
+  try {
+    assert.deepEqual(api.running().filter((r) => r.session === s.pid), [], "an idle session runs nothing");
+    const from = recorded.length;
+    const t0 = Date.now();
+    s.socket.write(wire.query(SLOW));
+    let running = api.running().find((r) => r.session === s.pid);
+    for (const deadline = Date.now() + 10_000; running === undefined; running = api.running().find((r) => r.session === s.pid)) {
+      if (Date.now() > deadline) throw new Error("the statement never showed as running");
+      await sleep(20);
+    }
+    assert.deepEqual({ ...running, startedAt: "", runningMs: 0 }, { session: s.pid, user: "", applicationName: "", method: "QUERY", startedAt: "", runningMs: 0, rows: 0,
+      query: SLOW, queryTruncated: false });
+    assert.ok(Date.parse(running.startedAt) >= t0 - 5 && running.runningMs >= 0);
+    const answer = api.cancel(s.pid);
+    assert.ok("cancelled" in answer && answer.cancelled.session === s.pid && answer.cancelled.query === SLOW, JSON.stringify(answer));
+    const ms = await s.untilReady();
+    const error = ms.find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+    assert.deepEqual([error?.fields.C, error?.fields.M], ["57014", "canceling statement due to user request"]);
+    assert.ok(Date.now() - t0 < 10_000, `stopped after ${Date.now() - t0} ms`);
+    const row = recorded.slice(from).find((r) => r.session === s.pid);
+    assert.equal(row?.sqlstate, "57014", "recorded, as cancelled");
+    assert.ok(logged.some((l) => l === `[postgres] session ${s.pid}: its statement cancelled by mason cancel`), "the log says who cancelled it");
+    assert.ok(logged.some((l) => l.startsWith(`[postgres] session ${s.pid} cancelled: 57014 canceling statement due to user request — ${SLOW}`)), "its refusal line says cancelled");
+    assert.deepEqual(api.cancel(s.pid), { idle: s.pid }, "nothing running: nothing cancelled");
+    assert.deepEqual(api.cancel(999_999), { unknown: 999_999 });
+    s.socket.write(wire.query("SELECT count(*) FROM big"));
+    assert.equal(String(dataRows(await s.untilReady())[0]!.values[0]), "150000", "the session goes on");
+  } finally { s.end(); }
 });

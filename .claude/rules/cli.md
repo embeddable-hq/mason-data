@@ -24,7 +24,7 @@ CLI lacks).
   every option named in it, and a wrong option answered with the usage. A new command is added to the registry, or it
   does not run. **The list is the runbook** (the commands in the order a user will likely need them): `STEPS`
   (src/cli/registry.ts) names each command's step — Learn (`help` first), Set up (`doctor`, `init`, `start`), Add your
-  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`), Run (`status`, `ui`, `sync`, `logs`, `stop`, `destroy`), Go to
+  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`), Run (`status`, `ui`, `sync`, `logs`, `cancel`, `stop`, `destroy`), Go to
   production (`serve`) — and `mason --help` prints the steps as headings, and under Learn the guides too, a line each
   beside `mason help`; `COMMANDS` is derived from it. A command's old name (`dev`, `purge`, `rm`, `connect`, `list`, …)
   answers with the new one and exit 2 (src/cli/main.ts), never runs. Nothing a command prints refers to a repository
@@ -107,10 +107,15 @@ CLI lacks).
   `/api/ping` with the run's token and its own pid (`answers`, src/cli/runs.ts); a pid in the config that is alive is
   not proof — after a reboot the number belongs to someone else.
 - **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state`, `/api/slow`,
-  `/api/refused`, `/api/requests`, `/api/events`, `/api/users`, `POST /api/pick|remove|sync`), with the run's token as `Authorization:
+  `/api/refused`, `/api/requests`, `/api/queries`, `/api/running`, `/api/events`, `/api/users`, `POST /api/pick|remove|sync|cancel`), with the run's token as `Authorization:
   Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
   Under `mason start` it serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), whose users are
   `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`), so the page and the CLI cannot disagree.
+  **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
+  — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
+  worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint
+  (`/api/queries`, one scan of the ledger), never part of `/api/state`, which the page asks every 2 s. `mason cancel`
+  cancels through the listener's one path, the CancelRequest's (`interrupt`, src/api/postgres/server.ts).
 - **`mason wait` shows every added table and is exact** (after `mason add a b c` where `a` and `c` were quick, it showed
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still copying at the bottom — redrawn in place on a terminal, printed when it changes
