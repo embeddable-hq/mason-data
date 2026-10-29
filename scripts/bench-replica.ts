@@ -15,7 +15,7 @@
  *   node scripts/bench-replica.ts --postgres postgres://…  # a Postgres someone started (its user needs CREATEDB)
  *     --sizes 1M,10M,50M  --clients 1,8,32,128  --seconds 30  --warmup 5  --runs 2  --timeout 120 (a statement's limit, s)
  *     --memory 8GiB       # DuckDB's limit AND the container's --memory (default MASON_DUCKDB_MEMORY, else half the RAM)
- *     --label "<where>"   # the environment's name, written into the fixture and printed by the README
+ *     --label "<where>"   # the environment's name, written into the fixture and printed by docs/MEASUREMENTS.md
  *     --out tests/fixtures/bench-replica.json   --work <dir> (Mason's copy; default the OS temp dir)
  *     --reserve-gb 60     # a size whose estimate would leave less free disk than this is skipped, said
  *     --keep-postgres     # leave the bench-pg container (and its data) for the next run

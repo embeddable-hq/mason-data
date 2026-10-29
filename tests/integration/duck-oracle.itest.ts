@@ -68,7 +68,7 @@ const SHAPES = process.env.IT_ORACLE_SHAPES !== "0";
 /** `IT_ORACLE_JSON_PATHS=eager` stores every JSON path a statement reads before it is planned (src/duck/kept.ts, the
  *  test's own option): every such read is then answered from its stored column, and must still answer as Postgres */
 const EAGER_JSON = process.env.IT_ORACLE_JSON_PATHS === "eager";
-/** the DuckDB-alone pass's tallies (`duckdbAlone`, below): what README.md's comparison renders (tests/duck-gaps.test.ts) */
+/** the DuckDB-alone pass's tallies (`duckdbAlone`, below): what docs/SQL-SUPPORT.md's comparison renders (tests/duck-gaps.test.ts) */
 const ALONE_FIXTURE = path.join(REPO, "tests", "fixtures", "oracle-duckdb-alone.json");
 const UPDATE_FIXTURE = process.env.UPDATE_FIXTURE === "1";
 // the DuckDB-alone pass reads a timestamptz's JSON text in the process's zone (the client's conversion, not DuckDB's
@@ -247,7 +247,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
    * DUCKDB ALONE (why a user would not just use DuckDB by itself): the same statement, as written, to
    * a plain connection of the same copy — no analysis, no rewrite, no Mason function — scored by the oracle's own
    * verdict (names, rows, text; the OIDs taken as Postgres's, since DuckDB has none). The tallies are
-   * tests/fixtures/oracle-duckdb-alone.json, which README.md's comparison renders; UPDATE_FIXTURE=1 rewrites it, and
+   * tests/fixtures/oracle-duckdb-alone.json, which docs/SQL-SUPPORT.md's comparison renders; UPDATE_FIXTURE=1 rewrites it, and
    * a run whose tallies moved by more than a percentage point of the statements fails until it is.
    */
   const alone = await theStore.instance.connect();
@@ -352,7 +352,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   };
   await run("after the copy");
   alone.closeSync();
-  // the DuckDB-alone tallies, held to the fixture README.md renders (a percentage point of the statements of play)
+  // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of play)
   if (ONLY === null) {
     const fixture = { ...tallies, measured: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy" };
     const pct = (n: number): string => `${(100 * n / tallies.statements).toFixed(1)}%`;
@@ -364,7 +364,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       const was = JSON.parse(fs.readFileSync(ALONE_FIXTURE, "utf8")) as typeof fixture;
       const moved = (["mason", "duckdb"] as const).flatMap((side) => Object.entries(fixture[side]).filter(([k, n]) => Math.abs(n - (was[side] as Record<string, number>)[k]!) > tallies.statements / 100)
         .map(([k, n]) => `${side}.${k}: ${n} where the fixture has ${(was[side] as Record<string, number>)[k]}`));
-      assert.deepEqual(moved, [], `${ALONE_FIXTURE} is not what this run measured (README.md's comparison renders it): regenerate with UPDATE_FIXTURE=1 and read the diff`);
+      assert.deepEqual(moved, [], `${ALONE_FIXTURE} is not what this run measured (docs/SQL-SUPPORT.md's comparison renders it): regenerate with UPDATE_FIXTURE=1 and read the diff`);
     }
   }
   for (const round of [1, 2]) {
