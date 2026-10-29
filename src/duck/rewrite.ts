@@ -258,8 +258,13 @@ class Rewriter {
   private readonly nonEmpty = new WeakSet<Body>();
   /** the SELECTs and joins whose rows' order decides the answer (a LIMIT keeps the first of them, an aggregate or a
    *  window reads them in order): a LEFT lateral of a list is streamed there alone (markBounds, leftLateral) */
-  private readonly bounded = new WeakSet<Body>();
-  private boundedCount = 0;
+  private bounded = new WeakSet<Body>();
+  /** the same, were the statement's own rows bounded by a row count on the wire (an Execute's, markBounds): null when
+   *  they are (the plan made for that Execute) */
+  private boundedOnWire: WeakSet<Body> | null = null;
+  /** a LEFT lateral of a list left DuckDB's join that a row count on the wire would stream (leftLateral): the
+   *  listener plans the statement again for an Execute that sets one (PlannedSql.unboundedLateral) */
+  unboundedLateral = false;
   /** how the database changes a letter's case */
   private readonly caseMode: CaseMode;
 
@@ -2878,8 +2883,20 @@ class Rewriter {
    * rarg) and the walk follows it, so a SELECT's CTEs and arms are met after its FROM, and a CTE another CTE reads is
    * met before the one that reads it. So every SELECT of the statement is collected with the CTEs it sees (its own
    * WITH's and those around it, the nearest first), and `limitBounds` runs over them all until no more is bounded.
+   *
+   * `wire`: the statement's own rows are bounded by a row count the Execute sets on the wire (JDBC's setMaxRows or
+   * fetch size: the client reads the first rows and may read no more), which the rewrite never sees in the SQL — its
+   * outermost SELECT is bounded as a SELECT a LIMIT reads is (limitBounds: no aggregate, GROUP BY, DISTINCT, window or
+   * set operation but UNION ALL between, and under an ORDER BY only a LIMIT of its own, which a row count on the wire
+   * is not: DuckDB sorts every row first whichever plan it is given). Unless `wire`, the bounds a wire's row count
+   * would add are computed too (`boundedOnWire`), so the plan says whether such an Execute plans it again.
    */
-  markBounds(root: AstNode): void {
+  markBounds(root: AstNode, wire = false): void {
+    this.bounded = this.boundsOf(root, wire);
+    this.boundedOnWire = wire ? null : this.boundsOf(root, true);
+  }
+
+  private boundsOf(root: AstNode, wire: boolean): WeakSet<Body> {
     const selects: Array<{ b: Body; scope: ReadonlyMap<string, Body> }> = [];
     const select = (b: Body, outer: ReadonlyMap<string, Body>): void => {
       const scope = new Map(outer);
@@ -2897,11 +2914,14 @@ class Rewriter {
       for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) visit(x, scope);
     };
     visit(root, new Map());
+    const set = new WeakSet<Body>();
+    let count = 0;
+    const bound = (b: Body): void => { if (!set.has(b)) { set.add(b); count++; } };
+    if (wire && isNode(root) && kindOf(root) === "SelectStmt") bound(bodyOf(root));
     let before: number;
-    do { before = this.boundedCount; for (const s of selects) this.limitBounds(s.b, s.scope); } while (this.boundedCount !== before);
+    do { before = count; for (const s of selects) this.limitBounds(s.b, s.scope, set, bound); } while (count !== before);
+    return set;
   }
-
-  private bound(b: Body): void { if (!this.bounded.has(b)) { this.bounded.add(b); this.boundedCount++; } }
 
   /**
    * One SELECT's part of markBounds. Its FROM's order decides the answer where:
@@ -2923,16 +2943,16 @@ class Rewriter {
    * is computed whole, a call a row. Bounding too much costs time, never an answer (the streamed lateral is Postgres's
    * rows in Postgres's order); bounding too little keeps DuckDB's delimiter join, whose rows come in an order of its own.
    */
-  private limitBounds(b: Body, scope: ReadonlyMap<string, Body>): void {
+  private limitBounds(b: Body, scope: ReadonlyMap<string, Body>, bounded: WeakSet<Body>, bound: (b: Body) => void): void {
     const keeps = (n: unknown): boolean => isNode(n) && !(kindOf(n) === "A_Const" && bodyOf(n).isnull === true);
     const sort = (b.sortClause ?? []) as AstNode[];
     const inOrder = this.readsInOrder(b);
     if (!inOrder) {
-      if (!keeps(b.limitCount) && !keeps(b.limitOffset) && !this.bounded.has(b)) return;
+      if (!keeps(b.limitCount) && !keeps(b.limitOffset) && !bounded.has(b)) return;
       if (b.limitOption === "LIMIT_OPTION_WITH_TIES") return;
       // a UNION ALL's arms, each read in turn (a set operation's arm is a SELECT body, unwrapped: walkBody)
       if (b.op !== undefined && b.op !== "SETOP_NONE") {
-        if (b.op === "SETOP_UNION" && b.all === true && sort.length === 0) for (const arm of [b.larg, b.rarg]) if (arm !== null && typeof arm === "object" && !isNode(arm)) this.bound(arm as Body);
+        if (b.op === "SETOP_UNION" && b.all === true && sort.length === 0) for (const arm of [b.larg, b.rarg]) if (arm !== null && typeof arm === "object" && !isNode(arm)) bound(arm as Body);
         return;
       }
       if (sort.length > 0) {
@@ -2945,11 +2965,11 @@ class Rewriter {
     const visit = (x: unknown): void => {
       if (!isNode(x)) return;
       const xb = bodyOf(x);
-      if (kindOf(x) === "JoinExpr") { this.bound(xb); visit(xb.larg); visit(xb.rarg); return; }
-      if (kindOf(x) === "RangeSubselect" && isNode(xb.subquery)) { this.bound(bodyOf(xb.subquery as AstNode)); return; }
+      if (kindOf(x) === "JoinExpr") { bound(xb); visit(xb.larg); visit(xb.rarg); return; }
+      if (kindOf(x) === "RangeSubselect" && isNode(xb.subquery)) { bound(bodyOf(xb.subquery as AstNode)); return; }
       if (kindOf(x) === "RangeVar" && xb.schemaname === undefined) {
         const cte = scope.get(String(xb.relname));
-        if (cte !== undefined) this.bound(cte);
+        if (cte !== undefined) bound(cte);
       }
     };
     for (const x of (b.fromClause ?? []) as AstNode[]) visit(x);
@@ -3046,10 +3066,12 @@ class Rewriter {
    * an aggregate or a window reads them in order (`bounded`: markBounds, limitBounds) — and only for a
    * join that is LEFT, ON a literal TRUE, its right side one function of a list Mason writes (the json rows, an array
    * column's unnest), without ORDINALITY. A RIGHT or FULL join, another condition, or another function keeps DuckDB's
-   * own plan.
+   * own plan. Such a join a row count on the wire alone would bound (`boundedOnWire`) is left DuckDB's and said
+   * (`unboundedLateral`): the listener plans the statement again, bounded, for an Execute that sets one.
    */
   private leftLateral(b: Body): AstNode | null {
-    if (!this.bounded.has(b)) return null;
+    const bounded = this.bounded.has(b);
+    if (!bounded && this.boundedOnWire?.has(b) !== true) return null;
     const quals = b.quals as AstNode | undefined;
     if (b.jointype !== "JOIN_LEFT" || b.isNatural === true || b.usingClause !== undefined || quals === undefined || kindOf(quals) !== "A_Const" || bodyOf(quals).boolval?.boolval !== true) return null;
     const rarg = b.rarg as AstNode | undefined;
@@ -3065,6 +3087,7 @@ class Rewriter {
     if (args.length !== 1 || c.agg_star === true || c.func_variadic === true || kindOf(args[0]!) === "NamedArgExpr") return null;
     // an array's unnest is the list itself, named twice in its CASE (never empty): a column's alone, which costs nothing twice
     if (!LIST_ROWS.has(name) && !(name === "unnest" && kindOf(args[0]!) === "ColumnRef")) return null;
+    if (!bounded) { this.unboundedLateral = true; return null; }
     this.nonEmpty.add(r);
     const { quals: _true, ...rest } = b;
     return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
@@ -3904,8 +3927,9 @@ function nameTargets(v: unknown): void {
 }
 
 export function rewrite(stmt: AstNode, base: number, analysis: PgAnalysis, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(),
-  rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null):
-  { tree: AstNode; dropLast: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[] } {
+  rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null,
+  wireBound = false):
+  { tree: AstNode; dropLast: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
   const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, enums, kept);
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
@@ -3916,9 +3940,9 @@ export function rewrite(stmt: AstNode, base: number, analysis: PgAnalysis, colla
   nameTargets(own);
   r.indexShapes(own);
   const exact = r.exactThrough(own, analysis.fields);
-  r.markBounds(own);
+  r.markBounds(own, wireBound);
   const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;
-  return { tree, dropLast: r.excludeRank, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()] };
+  return { tree, dropLast: r.excludeRank, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral };
 }
 
 /** the functions whose every call is a new value (Postgres's volatile ones Mason answers) */
