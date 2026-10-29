@@ -242,6 +242,7 @@ export const VERIFIED: ReadonlyMap<string, string> = new Map([
   ["field:SUBLINK.subLinkType=0", "EXISTS (subquery)"],
   ["field:SUBLINK.subLinkType=2", "IN / op ANY (subquery)"],
   ["field:SUBLINK.subLinkType=4", "a scalar subquery"],
+  ["field:SUBLINK.subLinkType=6", "ARRAY(subquery)"],
   ["field:WINDOWCLAUSE.frameOptions=1058", "a window frame: the default window frame"],
   ["field:WINDOWCLAUSE.frameOptions=1059", "a window frame: RANGE UNBOUNDED PRECEDING"],
   ["field:WINDOWCLAUSE.frameOptions=1061", "a window frame: ROWS UNBOUNDED PRECEDING"],

@@ -1,0 +1,40 @@
+# the Postgres API (TCP, Mason's own TLS) and /healthz (cluster only): deploy/kubernetes/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mason.name" . }}-pg
+  labels:
+    {{- include "mason.labels" . | nindent 4 }}
+  {{- with .Values.pgService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.pgService.type }}
+  selector:
+    app: {{ include "mason.name" . }}
+  ports:
+    - name: pg
+      port: {{ .Values.pgService.port }}
+      targetPort: pg
+      protocol: TCP
+  {{- with .Values.pgService.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mason.name" . }}-health
+  labels:
+    {{- include "mason.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "mason.name" . }}
+  ports:
+    - name: health
+      port: 4140
+      targetPort: health
+      protocol: TCP

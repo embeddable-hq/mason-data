@@ -6,6 +6,9 @@ answers the Postgres protocol for BI tools and your app. Wherever your Postgres 
 The image is `ghcr.io/embeddable-hq/mason-data` (`main` is every merge, `<version>` a release; `MASON_TAG` in `.env`
 pins one), amd64 and arm64, public: nothing to log in to.
 
+This is the one-machine deployment, the one Mason was measured on. Fly.io, Kubernetes, Railway and AWS ECS each have a
+guide, and the platforms that cannot run Mason are named with why: [`deploy/README.md`](../README.md).
+
 ```bash
 mkdir -p mason                  # the project folder the container mounts (else Docker makes it root-owned, and mason add cannot write)
 cp .env.example .env            # DATABASE_URL, MASON_API_KEY (openssl rand -hex 24)

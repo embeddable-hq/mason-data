@@ -140,6 +140,16 @@ const REWRITTEN: Shape[] = [
   { name: "LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", sql: "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.meta FROM orders t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta ELSE NULL END) d ON TRUE LIMIT 100 OFFSET 0" },
   { name: "LEFT lateral preview: json_each, LIMIT 100 OFFSET 200", sql: "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.meta FROM orders t) AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(q.meta::text), 1, 1) = '{' THEN q.meta::json ELSE NULL END) d ON TRUE LIMIT 100 OFFSET 200" },
   { name: "LEFT lateral preview: jsonb_array_elements_text, LIMIT 100", sql: "SELECT t.id, e FROM orders t LEFT JOIN jsonb_array_elements_text(CASE WHEN jsonb_typeof(t.meta -> 'tags') = 'array' THEN t.meta -> 'tags' END) AS e ON TRUE LIMIT 100" },
+  // an unnest of an EXPRESSION: its list computed once (the one element of a list_transform's list), the same
+  // streaming UNNEST as a column's, read by a `*` too; counted, DuckDB's own join
+  { name: "LEFT lateral of an unnest of an expression, LIMIT 100", sql: "SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id, o.id * 10]) x ON true LIMIT 100" },
+  { name: "LEFT lateral of an unnest of string_to_array, LIMIT 100 OFFSET 1749950", sql: "SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.notes, ' ')) p ON TRUE LIMIT 100 OFFSET 1749950" },
+  { name: "LEFT lateral of an unnest of string_to_array read by a *, LIMIT 100 OFFSET 1749950", sql: "SELECT * FROM (SELECT t.id, t.notes FROM orders t) o LEFT JOIN unnest(string_to_array(o.notes, ' ')) p ON TRUE LIMIT 100 OFFSET 1749950" },
+  // an argument of TWO columns of the row: DuckDB's delimiter join for the lateral as it is, so computed by a step of
+  // its own before it (a projection under the same UNNEST), json rows and an unnest alike
+  { name: "LEFT lateral of an argument of two columns: jsonb_each, LIMIT 100", sql: "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN q.id % 3 <> 0 AND jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE LIMIT 100" },
+  { name: "LEFT lateral of an argument of two columns: unnest, LIMIT 100", sql: "SELECT o.id, x FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.customer_id]) x ON TRUE LIMIT 100" },
+  { name: "LEFT lateral of an unnest of string_to_array counted, no LIMIT (not rewritten)", sql: "SELECT count(*), count(p) FROM orders o LEFT JOIN unnest(string_to_array(o.notes, ' ')) p ON TRUE" },
   // sorted by a column of the table under a LIMIT: the top N's filter reaches the table's scan, so it streams too
   { name: "LEFT lateral sorted by a table column, LIMIT 100", sql: "SELECT q.id, d.key, d.value FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY q.id DESC LIMIT 100" },
   // where no LIMIT keeps the first rows every row is read either way, and DuckDB's own delimiter join calls the
@@ -360,7 +370,8 @@ function delimiterJoin(cte: JsonNode): boolean {
 
 /** the functions a truncation of a time is spelled with in the SQL Mason sends (`sends`) */
 const TIME_CALLS = ["date_trunc", "make_timestamptz", "make_timestamp", "epoch_us", "timezone", "current_setting"];
-/** what a sort, a group or a comparison reads beyond a value in the SQL Mason sends (`keys`) */
+/** what a sort, a group or a comparison reads beyond a value in the SQL Mason sends (`keys`); `list_transform` is
+ *  also the list a LEFT lateral's unnest of an expression computes once (leftLateral) */
 const KEY_SENDS: Array<[string, RegExp]> = [["icu_sort_key", /\bicu_sort_key\(/], ["list_transform", /\blist_transform\(/], ["a stored column", /\b__mason_json_[0-9a-f]{12}\b/]];
 /** a stored column's name is a hash of its read, a jsonb key's of its collation, its encoding and DuckDB's version
  *  (src/duck/kept.ts `orderId`): one name for all, so an upgrade that keeps the plan keeps the fixture */
@@ -726,8 +737,9 @@ for (const name of ["nulls idiom: a timestamp, LIMIT 100 OFFSET 0", "nulls idiom
 // was read (37.9 s for a 100-row preview over 22 M rows); the INNER one is a streaming UNNEST that stops at the LIMIT.
 // The bound grows with the threads: each reads about one 2,048-row vector before the LIMIT stops it (18,432 rows on
 // nine), so past ~48 threads, or if DuckDB ever hands threads finer tasks, the fast plan would cross a tenth too
-for (const name of ["LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", "LEFT lateral preview: json_each, LIMIT 100 OFFSET 200"]) {
-  test(`a LEFT lateral of json rows under a LIMIT reads few rows of the base, never all: ${name}`, async (t) => {
+for (const name of ["LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", "LEFT lateral preview: json_each, LIMIT 100 OFFSET 200",
+  "LEFT lateral of an argument of two columns: jsonb_each, LIMIT 100", "LEFT lateral of an argument of two columns: unnest, LIMIT 100", "LEFT lateral of an unnest of an expression, LIMIT 100"]) {
+  test(`a LEFT lateral of a list under a LIMIT reads few rows of the base, never all: ${name}`, async (t) => {
     const ss = await scans(sqlOf(name), "orders");
     t.diagnostic(said(ss));
     const rows = ss.reduce((n, s) => n + s.rows, 0);
@@ -763,6 +775,22 @@ test("a count over a LEFT lateral of json rows hands the function each distinct 
     // each distinct argument once, and the NULL's group: a margin for a document an argument writes two ways
     assert.ok(keys <= distinct * 1.05 + 1, `${name}: __mason_json_keys was handed ${keys} rows over ${distinct} distinct documents: per row, not per distinct document`);
   }
+});
+// leftLateral: an unnest of an expression streamed computes the expression ONCE a row — the CASE that keeps the list
+// never empty names a lambda's parameter twice, never the expression. The SQL sent names the expression once, and the
+// Mason function it is (string_to_array, a JavaScript call) is handed each of the million rows once: 2,000,000 named
+// twice. The OFFSET to the last rows streams them all.
+test("a LEFT lateral of an unnest of an expression computes the expression once a row, in the SQL sent and in the calls", async (t) => {
+  for (const name of ["LEFT lateral of an unnest of string_to_array, LIMIT 100 OFFSET 1749950", "LEFT lateral of an unnest of string_to_array read by a *, LIMIT 100 OFFSET 1749950"]) {
+    const { sent } = await explained(sqlOf(name));
+    assert.equal(sent.match(/__mason_string_to_array\(/g)?.length, 1, `${name}: the expression named other than once in the SQL sent\n${sent}`);
+    assert.doesNotMatch(sent, /LEFT JOIN/, `${name}: not streamed\n${sent}`);
+    const calls = (await rowsOf(sqlOf(name))).get("__mason_string_to_array") ?? 0;
+    t.diagnostic(`${name}: __mason_string_to_array handed ${calls} rows of ${ORDERS}`);
+    assert.equal(calls, ORDERS, `${name}: __mason_string_to_array was handed ${calls} rows of the base's ${ORDERS}: not once a row`);
+  }
+  const { sent } = await explained(sqlOf("LEFT lateral of an unnest of an expression, LIMIT 100"));
+  assert.equal(sent.match(/ARRAY\[o\.id, o\.id \* 10\]/g)?.length, 1, sent);
 });
 test("a LEFT lateral sorted by a table column under a LIMIT hands the function few rows of the base, never all", async (t) => {
   for (const name of ["LEFT lateral sorted by a table column, LIMIT 100", "LEFT lateral, the nulls idiom on a table column, LIMIT 100"]) {

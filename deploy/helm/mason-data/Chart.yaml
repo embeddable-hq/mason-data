@@ -1,0 +1,9 @@
+apiVersion: v2
+name: mason-data
+description: Mason, a drop-in analytical read replica for Postgres, as one StatefulSet with one volume (deploy/kubernetes/README.md)
+type: application
+version: 0.1.0
+appVersion: "main"
+home: https://github.com/embeddable-hq/mason-data
+sources:
+  - https://github.com/embeddable-hq/mason-data
