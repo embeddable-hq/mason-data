@@ -1127,7 +1127,7 @@ test("a copy stored in key order with an index is said as a retired layout and c
   const RETIRED = (syncModule as unknown as { RETIRED_LAYOUT?: string }).RETIRED_LAYOUT;
   try {
     await sync.open();
-    assert.equal(RETIRED, "stored in key order with an index, by an older Mason: copied again in heap order");
+    assert.equal(RETIRED, "stored in key order with an index, by an older Mason: read again whole, in heap order");
     assert.ok(logged.some((l) => l.startsWith(`public.t: its copy is ${RETIRED} — `)), `said by name at the start\n${logged.join("\n")}`);
     assert.ok(logged.some((l) => l.startsWith("removed old.db.stage-public_t.db: a copy's stage, from an older Mason")), logged.join("\n"));
     assert.deepEqual(fs.readdirSync(dir).filter((f) => f.startsWith("old.db.stage-")), [], "the old stage is removed");

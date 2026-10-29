@@ -58,7 +58,7 @@ let copies: CopyState[] = [];
 const asked: string[][] = [];
 const pollNow = (sources: string[]): Promise<{ at: string; tables: PolledTable[] }> => {
   asked.push(sources);
-  if (sources.includes("public.logs")) return Promise.reject(new PollRefused("nothing_yet", "public.logs is not copied yet (its copy has not finished): mason wait waits for it"));
+  if (sources.includes("public.logs")) return Promise.reject(new PollRefused("nothing_yet", "public.logs is not synced yet (its first sync has not finished): mason wait waits for it"));
   return Promise.resolve({ at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, changed: 2, deleted: 1, rows: 3, ms: 40 })) });
 };
 // the request log's reads (src/duck/requests.ts), as the ledger answers them: the server passes them on, never a copy
@@ -314,7 +314,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.deepEqual([polled.status, polled.body], [200, { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.customers", changed: 2, deleted: 1, rows: 3, ms: 40 }] }]);
     const refused = await post("/api/sync", { tables: ["public.logs"] });
     assert.deepEqual([refused.status, refused.body.code], [409, "nothing_yet"], "a refusal keeps the sync's code for the CLI");
-    assert.match(String(refused.body.error), /public\.logs is not copied yet/);
+    assert.match(String(refused.body.error), /public\.logs is not synced yet/);
     assert.equal((await post("/api/sync", { tables: [] })).status, 400);
     assert.deepEqual(asked, [["public.customers"], ["public.logs"]]);
     assert.deepEqual(s.body.engine, { name: "duckdb", file: duckFile, bytes: 10 });
@@ -339,7 +339,7 @@ test("the state says how each copy is kept current, as the sync's state has it (
   const streamed = { by: "replication" as const, slot: "mason_app", state: "left-out" as const, why: "publication app_pub does not carry public.orders",
     position: "0/16B3F28", lastCommit: null, notRunning: null };
   const recopied = { by: "recopy" as const, copiedAt: "2026-10-24T10:00:00.000Z" };
-  const waiting = { by: "poll" as const, sync: { mode: "off" as const }, syncedAt: null, nextAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" };
+  const waiting = { by: "poll" as const, sync: { mode: "off" as const }, syncedAt: null, nextAt: null, pending: "it waits for its first sync: it joins once synced and caught up by one poll" };
   copies = [
     { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: polled },
     { source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: streamed },

@@ -374,9 +374,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // supervisor to start it again: every session's statement in flight was told 57P02, and nothing can be answered after
   let crash: ((reason: string) => void) | null = null;
   store.onCrash((reason) => {
-    logLine(`[duckdb] the synced data's thread stopped: ${reason}`);
+    logLine(`[duckdb] the engine's thread stopped: ${reason}`);
     if (crash !== null) crash(reason);
-    else say(`  ! the synced data's thread stopped: ${reason}`);
+    else say(`  ! the engine's thread stopped: ${reason}`);
   });
   done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling to ${path.relative(project.root, duckFile)}.tmp`);
   const syncMode = changes === "replication" ? "replication" : syncModeOf(process.env);
@@ -520,7 +520,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     crash = (reason: string): void => {
       if (stopping) return;
       stopping = true;
-      say(`FATAL ERROR: Mason: the synced data's thread stopped (${reason})`);
+      say(`FATAL ERROR: Mason: the engine's thread stopped (${reason})`);
       clearInterval(refreshFacts);
       hosted.stopChanges?.();
       server.close();

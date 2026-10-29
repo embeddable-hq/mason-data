@@ -15,7 +15,7 @@ mason ui --json       # { url, port, next }
   version, how changes arrive — polling or logical replication), the warnings, each added table's copy (its bar, its
   percent, and the line `mason wait` prints: rows, chunks, rows a second, the time left, or why it failed), the
   statements answered slowly and the ones refused in the last day (`mason status` lists them), and whether every added
-  table is copied and served. The time it last heard from Mason is beside the title.
+  table is synced and served. The time it last heard from Mason is beside the title.
 - **Tables**: every table of the database, as `mason tables` lists them — its rows, its key, and whether it is added
   or why it cannot be added as it is (no primary key: the columns that tell its rows apart). A table not added has
   **Add**, which copies every column as `mason add <table>` does (a column that looks like a secret is left out, and

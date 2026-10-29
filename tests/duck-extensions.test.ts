@@ -80,7 +80,7 @@ test("without the package the resolver says why, and the instance keeps DuckDB's
     // a platform no package is built for: musl, Windows on arm64
     for (const [key, host] of [["linux-x64-musl", { platform: "linux", arch: "x64", musl: true }], ["win32-arm64", { platform: "win32", arch: "arm64", musl: false }]] as const) {
       assert.deepEqual(findExtensions({ host, engine: ENGINE, resolve: m.resolve }), { shipped: false, package: null,
-        why: `no package of the extensions Mason syncs with is built for ${key} (only darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64)` });
+        why: `no package of Mason's extensions is built for ${key} (only darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64)` });
     }
     // a package for another engine (a mismatched install), and one missing a file
     m.add("darwin-arm64", { engine: "v1.9.0" });
@@ -193,9 +193,9 @@ test("a platform's package is built from files held to their pinned checksums, w
 test("the copy that cannot load its extension says where it looked and the way out", () => {
   const { extensionFailure } = mod();
   assert.equal(extensionFailure({ shipped: true, package: "@mason-data/extensions-linux-x64", version: "1.2.3", directory: "/app/node_modules/@mason-data/extensions-linux-x64/extensions", platform: "linux-x64" }, "IO Error: bad file"),
-    "Mason could not load the postgres extension it syncs with from @mason-data/extensions-linux-x64 1.2.3 (/app/node_modules/@mason-data/extensions-linux-x64/extensions): IO Error: bad file. Install @mason-data/cli again; mason doctor checks it");
-  assert.equal(extensionFailure({ shipped: false, package: null, why: "no package of the extensions Mason syncs with is built for linux-x64-musl (only …)" }, "HTTP Error: no route"),
-    "Mason could not load the postgres extension it syncs with: HTTP Error: no route. no package of the extensions Mason syncs with is built for linux-x64-musl (only …), " +
+    "Mason could not load its postgres extension from @mason-data/extensions-linux-x64 1.2.3 (/app/node_modules/@mason-data/extensions-linux-x64/extensions): IO Error: bad file. Install @mason-data/cli again; mason doctor checks it");
+  assert.equal(extensionFailure({ shipped: false, package: null, why: "no package of Mason's extensions is built for linux-x64-musl (only …)" }, "HTTP Error: no route"),
+    "Mason could not load its postgres extension: HTTP Error: no route. no package of Mason's extensions is built for linux-x64-musl (only …), " +
     "so the first sync on a machine downloads it (then ~/.duckdb/extensions): connect to the internet once, and the sync is tried again at the next pass");
 });
 

@@ -109,7 +109,7 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
   }
   const stopped = await first.exited;
   assert.deepEqual(stopped, { code: 0, signal: null }, first.out());
-  assert.match(first.out(), /closed the copy \(it stays in /);
+  assert.match(first.out(), /closed the synced data \(it stays in /);
   const cfg = JSON.parse(fs.readFileSync(path.join(data, ".mason", "config.json"), "utf8")) as { running: unknown; served: boolean; lastStop: { at: string; how: string } };
   assert.equal(cfg.running, null, "the run recorded stopped");
   assert.equal(cfg.lastStop.how, "stopped by mason stop, or a shutdown (SIGTERM)", "and how, for mason status");

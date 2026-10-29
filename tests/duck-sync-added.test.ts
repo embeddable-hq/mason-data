@@ -217,9 +217,9 @@ test("a polled copy says its interval and last poll, an `off` one its age and th
   assert.equal("unsynced" in at(states, "big"), false);
   assert.equal(keptText(at(states, "big"), now), "off: last synced 3 days ago (2026-10-27 19:58:39 UTC); mason sync public.big syncs it now");
   const pending: Array<[string, string]> = [
-    ["changed", "its columns changed: it is copied again, then caught up by one poll"],
-    ["retired", "its copy is in an older Mason's layout, key order with an index: it is copied again, then caught up by one poll"],
-    ["outgrown", "a numeric value outgrew its copy's DECIMAL: it is copied again, wider, then caught up by one poll"],
+    ["changed", "its columns changed: it is read again whole, then caught up by one poll"],
+    ["retired", "it is in an older Mason's layout, key order with an index: it is read again whole, then caught up by one poll"],
+    ["outgrown", "a numeric value outgrew its synced DECIMAL column: it is read again whole, wider, then caught up by one poll"],
     ["caught", "it is caught up by one poll after its copy first"],
   ];
   for (const [name, why] of pending) {
@@ -327,21 +327,21 @@ test("a table not copied now says so in kept itself — waiting for its copy, it
   const five = every("5s", 5);
   assert.deepEqual(Object.fromEntries(Object.entries(poll).map(([k, v]) => [k, withoutNext(v as Kept)])), {
     a: { by: "poll", sync: five, syncedAt: "2026-10-27T19:58:39.000Z" },
-    waiting: { by: "poll", sync: five, syncedAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" },
-    failed: { by: "poll", sync: five, syncedAt: null, pending: "its copy failed (the source closed the connection): it joins once copied and caught up by one poll" },
+    waiting: { by: "poll", sync: five, syncedAt: null, pending: "it waits for its first sync: it joins once synced and caught up by one poll" },
+    failed: { by: "poll", sync: five, syncedAt: null, pending: "its first sync failed (the source closed the connection): it joins once synced and caught up by one poll" },
   });
   // a table not kept current now has no next poll
   assert.deepEqual([(poll.waiting as Kept).nextAt, (poll.failed as Kept).nextAt], [null, null]);
   const recopy = await keptBy({ mode: "recopy", tables, seed: seed() }, "poll");
   assert.deepEqual([recopy.waiting, recopy.failed], [
-    { by: "recopy", copiedAt: null, pending: "it waits for its copy: it is kept current once copied" },
-    { by: "recopy", copiedAt: (recopy.failed as { copiedAt: string | null }).copiedAt, pending: "its copy failed (the source closed the connection): it is kept current once copied" },
+    { by: "recopy", copiedAt: null, pending: "it waits for its first sync: it is kept current once synced" },
+    { by: "recopy", copiedAt: (recopy.failed as { copiedAt: string | null }).copiedAt, pending: "its first sync failed (the source closed the connection): it is kept current once synced" },
   ]);
   assert.equal("pending" in (recopy.a as object), false, "a copied table copied again whole is kept current");
   const repl = await keptBy({ mode: "replication", replication: replicationX, tables, seed: seed(slotAt) }, "replication");
   assert.deepEqual([repl.waiting, repl.failed].map((k) => { const r = k as { state: string; why: string | null }; return [r.state, r.why]; }), [
-    ["waiting", "it waits for its copy: it joins once copied and caught up by one poll"],
-    ["waiting", "its copy failed (the source closed the connection): it joins once copied and caught up by one poll"],
+    ["waiting", "it waits for its first sync: it joins once synced and caught up by one poll"],
+    ["waiting", "its first sync failed (the source closed the connection): it joins once synced and caught up by one poll"],
   ]);
 });
 

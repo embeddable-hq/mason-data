@@ -183,16 +183,16 @@ test("mason status and wait: each copied table says how it is kept current and h
   const st = { ...PLAIN, yellow: (x: string) => `<y>${x}</y>`, green: (x: string) => `<g>${x}</g>` };
   assert.match(paintBar(lines[0]!, st), /<g>█{20}<\/g>/);
   const behind = tableLines(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) },
-    kept: { by: "poll", sync: every30, syncedAt: "2026-10-29T11:00:00.000Z", nextAt: null, pending: "its columns changed: it is copied again, then caught up by one poll" } })] }), now);
-  assert.deepEqual(behind, ["public.orders  ████████████████████ 100%  1 rows · synced · NOT kept current (last synced 60 min ago): its columns changed: it is copied again, then caught up by one poll"]);
+    kept: { by: "poll", sync: every30, syncedAt: "2026-10-29T11:00:00.000Z", nextAt: null, pending: "its columns changed: it is read again whole, then caught up by one poll" } })] }), now);
+  assert.deepEqual(behind, ["public.orders  ████████████████████ 100%  1 rows · synced · NOT kept current (last synced 60 min ago): its columns changed: it is read again whole, then caught up by one poll"]);
   assert.match(paintBar(behind[0]!, st), /<y>█{20}<\/y>/);
   // ready all the same: it is synced and served
   assert.equal(readiness(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) }, kept: { by: "poll", sync: off, syncedAt: null, nextAt: null } })] })).ready, true);
 });
 
 test("a copy in a layout an older Mason kept says it is copied again, and is still copied, served and ready (src/duck/sync.ts RETIRED_LAYOUT)", () => {
-  const retired = t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 2_000_000, updatedAt: at(2), retired: "stored in key order with an index, by an older Mason: copied again in heap order" } });
-  assert.deepEqual(tableLines(state({ tables: [retired] })), ["public.orders  ████████████████████ 100%  2,000,000 rows · synced · stored in key order with an index, by an older Mason: copied again in heap order"]);
+  const retired = t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 2_000_000, updatedAt: at(2), retired: "stored in key order with an index, by an older Mason: read again whole, in heap order" } });
+  assert.deepEqual(tableLines(state({ tables: [retired] })), ["public.orders  ████████████████████ 100%  2,000,000 rows · synced · stored in key order with an index, by an older Mason: read again whole, in heap order"]);
   const r = readiness(state({ tables: [retired] }));
   assert.deepEqual([r.ready, r.waiting], [true, []], "its old copy serves: mason wait is ready");
 });
@@ -211,7 +211,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
       { table: "shop.lines", state: "catching-up", why: "caught up by one poll after its copy",
         catchUp: { phase: "polling", from: "2026-10-26T11:58:02.000Z", startedAt: "2026-10-26T12:00:07.000Z", held: 12, retryAt: null }, applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },
       { table: "public.events", state: "left-out", why: "publication app_pub does not carry public.events: ALTER PUBLICATION app_pub ADD TABLE public.events", applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },
-      { table: "public.big", state: "waiting", why: "it is being copied: it joins once copied and caught up by one poll", applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },
+      { table: "public.big", state: "waiting", why: "it is being read whole: it joins once synced and caught up by one poll", applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },
     ],
   };
   // read from the module's namespace: this file loads where it is missing, and the test fails by name (scripts/fails-without.ts)
@@ -222,7 +222,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
     "public.orders  streamed · 1,204 changes (1,000 inserts, 200 updates, 4 deletes) this run",
     "shop.lines     catching up by one poll from 2026-10-26 11:58 UTC: polling, for 3.0 s · the stream holds 12 changes of it meanwhile",
     "public.events  left out: publication app_pub does not carry public.events: ALTER PUBLICATION app_pub ADD TABLE public.events",
-    "public.big     not streamed yet: it is being copied: it joins once copied and caught up by one poll",
+    "public.big     not streamed yet: it is being read whole: it joins once synced and caught up by one poll",
   ]);
   // a stream that failed says why and when it starts again; a database that could not be asked says so, never a lag of 0
   assert.deepEqual(streamLines({ ...stream, running: false, failure: { error: "replication: the slot is in use\nmore", retryAt: "2026-10-26T12:00:40.000Z" },
@@ -244,7 +244,7 @@ test("mason status and wait --json say how each table is kept current (kept, src
   // an agent reading --json could not tell how a table was kept current, or why it was not: the text said it, the JSON
   // mapped a copy's fields one by one and left kept out
   const kepts: KeptCurrent[] = [
-    { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: at(1), nextAt: at(31), pending: "its columns changed: it is copied again, then caught up by one poll" },
+    { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: at(1), nextAt: at(31), pending: "its columns changed: it is read again whole, then caught up by one poll" },
     { by: "poll", sync: { mode: "off" }, syncedAt: at(1), nextAt: null },
     { by: "recopy", copiedAt: at(2) },
     { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C8", lastCommit: at(3), notRunning: "Mason is stopping" },
@@ -281,7 +281,7 @@ test("mason status and wait --json say how each table is kept current (kept, src
   for (const state of ["streamed", "catching-up", "waiting", "left-out"]) assert.match(decl, new RegExp(`\\b${state}\\b`));
   // the sync, the age and the next poll: how old a copy is, declared; pending is present only when it applies, and says
   // why the copy is not kept current, phase included
-  assert.match(decl, /syncedAt \(its first sync or its last poll\), nextAt \(when its next poll is due; null: off/);
+  assert.match(decl, /syncedAt \(its last whole read or poll\), nextAt \(when its next poll is due; null: off/);
   assert.match(decl, /pending \(only when it applies: why it is not kept current now, its phase included/);
   assert.match(decl, /by: recopy, copiedAt, pending \(only when it applies/);
   assert.match(WAIT.usage.replace(/\s+/g, " "), /pending, when it applies, says why it is not kept current now, its phase included/);

@@ -284,9 +284,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            all), readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }.
            Each table's kept is how it is kept current now (absent for a table the sync does not hold):
            { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
-           else off), syncedAt (its first sync or its last poll), nextAt (when its next poll is due; null: off, or not polled
-           now), pending (only when it applies: why it is not kept current now, its phase included: its first sync
-           waiting, running or failed, to be read again whole, caught up first) }
+           else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
+           now), pending (only when it applies: why it is not kept current now, its phase included: it waits for
+           its first sync, it is being read whole, its first sync failed, it is read again whole, caught up first) }
            or { by: recopy, copiedAt, pending (only when it applies, as the poll's) }
            or { by: replication, slot, state (streamed, catching-up, waiting, left-out), why, position, lastCommit,
            notRunning (why the stream is not running, null when it is) }; with Mason stopped: { running: false, project, source: { name,
@@ -1006,7 +1006,7 @@ export function removedReport(removed: readonly string[], file: string, o: { run
   return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
     // Mason down (the web page always has a run): a copy an earlier run made is dropped by the next start's sync
     tips: [o.running === false ? `what an earlier run synced of ${one ? "it" : "them"} is dropped at the next mason start`
-      : `Mason stops syncing ${one ? "it" : "them"} and drops ${one ? "its synced data" : "theirs"}`] };
+      : `Mason stops syncing ${one ? "it" : "them"} and drops ${one ? "its synced data" : "their synced data"}`] };
 }
 
 // ------------------------------------------------------------------ mason wait
@@ -1029,8 +1029,8 @@ const WAIT_USAGE = `usage: mason wait [--timeout <seconds>] [--json]
   --json                as data, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
                         kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how long, the
                         rate, the seconds left, while its chunks are read }; kept as mason status --json says it —
-                        { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its first sync or
-                        its last poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why
+                        { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its last whole read
+                        or poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why
                         it is not kept current now, its phase included),
                         stream (replication mode: where the stream is, as mason status --json says it), error (on a
                         failure or a timeout: { code, message, next }), next }

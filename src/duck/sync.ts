@@ -268,7 +268,7 @@ export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" |
  * never converted in place, but copied again through the normal path (`needsCopy`), serving as it was meanwhile. Found
  * by its constraint (`duckdb_constraints()`), which every copy of that layout carries and no copy of this one does.
  */
-export const RETIRED_LAYOUT = "stored in key order with an index, by an older Mason: copied again in heap order";
+export const RETIRED_LAYOUT = "stored in key order with an index, by an older Mason: read again whole, in heap order";
 
 /**
  * How long a failed copy waits before it is tried again: four times the attempt, at least 5 minutes, doubled for each
@@ -1246,7 +1246,7 @@ export class Sync {
    * every table again whole. Its failure is its caller's to say: the copies serve as they were, and the passes go on.
    */
   async pollNow(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
-    if (this.mode === "recopy") throw new PollRefused("refused", "this run copies every table again whole at each pass (MASON_DUCK_SYNC=recopy), so there is nothing to poll");
+    if (this.mode === "recopy") throw new PollRefused("refused", "this run reads every table again whole at each pass (MASON_DUCK_SYNC=recopy), so there is nothing to poll");
     const tables = sources.map((s) => {
       const t = this.tables.get(s);
       if (t === undefined) throw new PollRefused("not_found", `${s} is not added (mason add adds it)${didYouMean(s, [...this.tables.keys()])}`);
@@ -1263,9 +1263,9 @@ export class Sync {
     for (const t of tables) {
       const st = this.states.get(t.source);
       if (st?.phase !== "copied" || !this.snapshots.has(t.source) || this.copiedAs.get(t.source) !== columnsKey(t.columns)) {
-        throw new PollRefused("nothing_yet", `${t.source} is not copied yet (${st?.phase === "failed" ? `its copy failed: ${st.error ?? "mason logs says why"}` : "its copy has not finished"}): mason wait waits for it`);
+        throw new PollRefused("nothing_yet", `${t.source} is not synced yet (${st?.phase === "failed" ? `its first sync failed: ${st.error ?? "mason logs says why"}` : "its first sync has not finished"}): mason wait waits for it`);
       }
-      if (this.retired.has(t.source)) throw new PollRefused("nothing_yet", `${t.source} is ${RETIRED_LAYOUT} (its copy serves as it was): it is current once copied — mason wait waits for it`);
+      if (this.retired.has(t.source)) throw new PollRefused("nothing_yet", `${t.source} is ${RETIRED_LAYOUT} (its synced data serves as it was): it is current once read again — mason wait waits for it`);
       this.refuseRebuilding(t);
     }
     const poll = (async (): Promise<PolledTable[]> => {
@@ -1287,7 +1287,7 @@ export class Sync {
     this.running = poll.then(() => undefined, () => undefined).finally(() => { this.running = null; this.rearm(); });
     const found = await poll;
     const missing = tables.filter((t) => !found.some((f) => f.table === t.source));
-    if (missing.length) throw new Error(`${missing.map((t) => t.source).join(", ")} has a numeric value wider than its copy's DECIMAL: it is copied again at the next pass, and current once copied`);
+    if (missing.length) throw new Error(`${missing.map((t) => t.source).join(", ")} has a numeric value wider than its synced DECIMAL column: it is read again whole at the next pass, and current once read`);
     return { at: new Date().toISOString(), tables: found };
   }
 
@@ -1325,8 +1325,8 @@ export class Sync {
   private refuseRebuilding(t: AddedTable): void {
     const now = this.rebuildingNow?.source === t.source ? this.rebuildingNow.kind : null;
     if (now === null && !this.behind.has(t.source)) return;
-    const doing = now === "copy" ? "being copied again" : `being caught up by one poll ${this.behind.get(t.source)?.why ?? ""}`.trimEnd();
-    throw new PollRefused("nothing_yet", `${t.source} is ${doing} (its copy serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it`);
+    const doing = now === "copy" ? "being read again whole" : `being caught up by one poll ${this.behind.get(t.source)?.why ?? ""}`.trimEnd();
+    throw new PollRefused("nothing_yet", `${t.source} is ${doing} (its synced data serves as it was): it is caught up by one poll when that ends, so there is nothing to poll — mason wait waits for it`);
   }
 
   /** the source's connection, as the sync's own reads and replication make it (never DuckDB's: that is `attach`) */
@@ -1604,26 +1604,26 @@ export class Sync {
     const at = this.retries.get(source)?.at ?? 0;
     if (at > Date.now()) return `${why} — after a failure, tried again after ${clock(at)} UTC`;
     const ahead = this.rebuildingNow;
-    if (this.queued.has(source) && ahead !== null && ahead.source !== source) return `${why} — queued behind ${ahead.source}'s ${ahead.kind === "copy" ? "copy" : "catch-up"} (one rebuild at a time)`;
+    if (this.queued.has(source) && ahead !== null && ahead.source !== source) return `${why} — queued behind ${ahead.source}'s ${ahead.kind === "copy" ? "whole read" : "catch-up"} (one rebuild at a time)`;
     return why;
   }
 
   private notStreamedReason(source: string): string {
     const t = this.tables.get(source);
-    if (t === undefined) return "it is no longer added (its copy is dropped)";
+    if (t === undefined) return "it is no longer added (its synced data is dropped)";
     const gap = this.unpublished.get(source);
     if (gap !== undefined) return gap.split("\n")[0]!;
     const st = this.states.get(source);
-    if (this.copiedAs.has(source) && this.copiedAs.get(source) !== columnsKey(t.columns)) return "its columns changed: it is copied again, then caught up by one poll";
-    if (st?.phase === "copied" && !this.snapshots.has(source)) return "a numeric value outgrew its copy's DECIMAL: it is copied again, wider, then caught up by one poll";
-    if (st?.phase === "copied" && this.retired.has(source)) return "its copy is in an older Mason's layout, key order with an index: it is copied again, then caught up by one poll";
+    if (this.copiedAs.has(source) && this.copiedAs.get(source) !== columnsKey(t.columns)) return "its columns changed: it is read again whole, then caught up by one poll";
+    if (st?.phase === "copied" && !this.snapshots.has(source)) return "a numeric value outgrew its synced DECIMAL column: it is read again whole, wider, then caught up by one poll";
+    if (st?.phase === "copied" && this.retired.has(source)) return "it is in an older Mason's layout, key order with an index: it is read again whole, then caught up by one poll";
     // what follows the copy: a catch-up poll, then the stream or the polls; copied again whole, nothing (`keptOf`'s recopy)
-    const joins = this.mode === "recopy" ? "it is kept current once copied" : "it joins once copied and caught up by one poll";
-    if (st?.phase === "copying" || this.rebuildingNow?.source === source && this.rebuildingNow.kind === "copy") return `it is being copied: ${joins}`;
-    if (st?.phase === "failed") return `its copy failed (${(st.error ?? "").split("\n")[0]}): ${joins}`;
+    const joins = this.mode === "recopy" ? "it is kept current once synced" : "it joins once synced and caught up by one poll";
+    if (st?.phase === "copying" || this.rebuildingNow?.source === source && this.rebuildingNow.kind === "copy") return `it is being read whole: ${joins}`;
+    if (st?.phase === "failed") return `its first sync failed (${(st.error ?? "").split("\n")[0]}): ${joins}`;
     const b = this.behind.get(source);
     if (!this.needsCopy(t) && b !== undefined) return `it is caught up by one poll ${b.why} first`;
-    return `it waits for its copy: ${joins}`;
+    return `it waits for its first sync: ${joins}`;
   }
 
   /**

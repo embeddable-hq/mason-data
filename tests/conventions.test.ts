@@ -799,15 +799,16 @@ test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through 
 /**
  * WHAT MASON DOES TO A TABLE'S DATA IS "SYNC", NEVER "COPY" (CLAUDE.md "Vocabulary"): the README says "the first sync",
  * "the synced data", "each synced table", and a command that printed "the copy" beside it named one thing two ways. So
- * every literal a person or an agent may read in src/cli/ and src/web/ is held to it; a lowercase identifier ("copying",
- * a phase in a declared --json shape) is a value, not words, and what is a copy of something else (the clipboard's
- * Copy button, the password Mason keeps none of) is listed below by its phrase.
+ * every literal a person or an agent may read in src/cli/ and src/web/ is held to it; what is not the data's words is
+ * listed below by its phrase: a value of a declared --json shape (the field `copy`, the phase "copying"), and a copy of
+ * something else (the clipboard's Copy button, the password Mason keeps none of).
  */
 const COPY_WORD = /\bcop(?:y|ies|ied|ying)\b/i;
 const NOT_THE_DATA = [
-  /\bdata-copy\b/g, />Copy</g, /^Copied$/g, /Select and copy it/g, /I have copied it/g, // the web page's clipboard button
+  /\bdata-copy="[^"]*">Copy<\/button>/g, /\bdata-copy\b/g, /^Copied$/g, /Select and copy it/g, /I have copied it/g, // the clipboard
   /no copy of the password/g,                                                            // mason user add / the Users page
   /\{ table, copy, error/g, /\(copy: \{ phase/g, /addedColumns, copy, error/g,           // the --json field `copy`, by its name
+  /^(?:copy|copying|copied)$/g,                                                         // the field, and a phase's value
 ];
 
 /** Every string and template literal of a JS/TS source, as `{ line, text }`: a template's `${…}` read as code (its own
@@ -819,7 +820,7 @@ export function literals(src: string): Array<{ line: number; text: string }> {
   let i = 0;
   const regexMayStart = (): boolean => {
     const before = src.slice(Math.max(0, i - 12), i).trimEnd();
-    return before === "" || /[(,=:[!&|?{};+\-*%<>~^]$/.test(before) || /\b(?:return|typeof|case|in|of|void|throw|new|await|yield)$/.test(before);
+    return before === "" || /[(,=:[!&|?{};+\-*%<>~^]$/.test(before) && !/(?:\+\+|--)$/.test(before) || /\b(?:return|typeof|case|in|of|void|throw|new|await|yield)$/.test(before);
   };
   const code = (inTemplate: boolean): void => {
     let depth = 0;
@@ -856,7 +857,7 @@ export function literals(src: string): Array<{ line: number; text: string }> {
 export function copyWords(name: string, src: string): string[] {
   const texts = name.endsWith(".html")
     ? src.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, "")).split("\n").map((text, n) => ({ line: n + 1, text }))
-    : literals(src).filter((l) => !/^[a-z_]+$/.test(l.text));
+    : literals(src);
   return texts.filter((l) => COPY_WORD.test(NOT_THE_DATA.reduce((t, re) => t.replace(re, ""), l.text))).map((l) => `${name}:${l.line}: ${l.text}`);
 }
 
@@ -877,5 +878,12 @@ test("the copy-word guard catches the real thing", () => {
     '/* the copy */ const re = /^copied |its copy failed/;',
     'const b = `<button data-copy="${id}">Copy</button>`; const k = "MASON_COPY_PARALLEL, copyKey, rowsCopied";',
     'const half = rows / 2, say = "a / b"; // a division is not a regex',
+    'const p = done ? "copied" : "waiting"; type T = Pick<S, "copy" | "error">;',
   ].join("\n")), [], "an identifier, a phase value, a comment, a regex, the clipboard and a setting's name are not the data's words");
+});
+
+test("the copy-word guard reads past what only looks like an exception", () => {
+  assert.deepEqual(copyWords("a.html", '<th scope="col">Copy</th>'), ['a.html:1: <th scope="col">Copy</th>'], "Copy outside the clipboard button");
+  assert.deepEqual(copyWords("a.ts", 'const label = done ? "copies" : "syncing";'), ["a.ts:1: copies"], "a lowercase word that is no phase");
+  assert.deepEqual(copyWords("a.ts", 'i++ / 2; const s = "copy it";'), ["a.ts:1: copy it"], "a division after ++ is no regex");
 });

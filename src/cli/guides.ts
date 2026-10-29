@@ -94,7 +94,7 @@ ${codes}
   they take effect at once, else at mason start. An edit by hand is read at the next mason start (or the next add or
   remove). Column types are read from the database at every start. A change of a table's sync: keeps its synced data and
   catches it up by one poll. mason status --json says each table's kept: { sync, syncedAt, nextAt } — how old its
-  table is; a table synced days ago answers today's count(*) as of then.
+  synced data is; a table synced days ago answers today's count(*) as of then.
 
   A FIRST SESSION, as a shell runs it:
     mason doctor --json && mason init --json
@@ -142,7 +142,7 @@ names the tables the server syncs, and its url: names the variable that holds th
    write its file, so run one replica, with no autoscaling, and stop the old container before the new one starts.
    GET /healthz on MASON_HEALTH_PORT (4140) answers 503 while it starts and 200 once it serves; the first start takes
    about 15 seconds before that, then syncs the tables.
-   MEMORY: the synced data may use half the container's memory limit by default (else half the machine's RAM); the other
+   MEMORY: Mason may use half the container's memory limit by default (else half the machine's RAM); the other
    half is the page cache, Node and the catalog (~820 MB). Give the container enough that the page cache holds the
    columns your dashboards read: a query over a column it does not hold runs at the disk's speed. The benchmark's synced data
    was about a fifth of its tables in Postgres (10.1 GiB to 1.8 GiB, on a 15 GiB machine); mason status says yours.
