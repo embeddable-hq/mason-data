@@ -74,7 +74,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   statements, failed and p95 of the range (the request log's summary has a day and a week: the hour's cards say the
   day, by name), then who is connected now — a row per user and client, the 10 with the most sessions and one row for
   the others.
-- **Queries**, running now: each statement with **Cancel**, which asks first and stops that one statement, as
+- **Queries**, running now: each statement with how long it has run (moving with each poll; when it started is its title) and **Cancel**, which asks first and stops that one statement, as
   `mason cancel` does.
 - **Queries**, unsupported SQL: the statements of the range Mason refused for SQL it does not support, grouped by their
   entry of `docs/SQL-SUPPORT.md` (named, as the page cannot link into the repository), the most refused first — how

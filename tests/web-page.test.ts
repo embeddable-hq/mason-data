@@ -1185,9 +1185,11 @@ test("running now: a row each in the commands' words — held equal to mason log
   const html = renderRunning(RUNNING_NOW, null);
   const text = textOf(html);
   // under the section's own heading (Running now): no second title; the statement's number is No., its text Statement
-  assert.match(text, /^Session No\. User Client Started \(UTC\) Running for Rows Statement /);
-  assert.match(text, /12 45 metabase Metabase v0\.50 2026-10-28 09:04:00 2 min 1,200 rows sent SELECT customer_id, sum\(total\) FROM orders GROUP BY 1 Cancel/);
-  assert.match(text, /13 7 \(no application_name\) 2026-10-28 09:05:50 1\.5 s 1 row sent SELECT 1 <b> Cancel/);
+  assert.match(text, /^Session No\. User Client Running for Rows Statement /);
+  assert.ok(!text.includes("Started (UTC)"), "how long it has run is the one time a running statement says: when it started is its title");
+  assert.match(html, /<td class="num"><time datetime="2026-10-28T09:04:00\.000Z" title="started 2026-10-28 09:04:00 UTC">2 min<\/time><\/td>/);
+  assert.match(text, /12 45 metabase Metabase v0\.50 2 min 1,200 rows sent SELECT customer_id, sum\(total\) FROM orders GROUP BY 1 Cancel/);
+  assert.match(text, /13 7 \(no application_name\) 1\.5 s 1 row sent SELECT 1 <b> Cancel/);
   assert.ok(!html.includes("<b>"), "the statement is escaped");
   assert.match(html, /<code class="stmt" title="SELECT customer_id,\n {2}sum\(total\)\nFROM orders\nGROUP BY 1">/, "the whole statement is its title");
   // the words the page re-says are the CLI's: its line for each statement carries them
@@ -1203,6 +1205,7 @@ test("running now: a row each in the commands' words — held equal to mason log
   const asking = renderRunning(RUNNING_NOW, "12:45");
   assert.match(textOf(asking), /Cancel session 12's statement 45\? Its client is told so \(57014\)\. Cancel statement 45 Keep it running/);
   assert.match(asking, /data-confirm-cancel="12:45"/);
+  assert.match(asking, /<\/tr><tr class="under"><td colspan="8"><span class="confirm">Cancel session 12's statement 45\?/, "the question on a row of its own under the statement, which keeps its width");
   assert.ok(!/data-confirm-cancel="13:7"/.test(asking), "only the one asked");
   assert.equal(textOf(renderRunning([], null)), "No statement is running now.");
 });
@@ -1288,7 +1291,7 @@ test("the app: Cancel asks first; the confirm posts { session, statement } and r
   run.answers.set("GET /api/running", answer({ running: RUNNING_NOW.slice(1) }));
   run.asked.length = 0;
   assert.equal(await app.confirmCancelStatement(12, 45), true);
-  assert.deepEqual(run.asked, [`POST /api/cancel ${JSON.stringify({ session: 12, statement: 45 })}`, "GET /api/running"]);
+  assert.deepEqual(run.asked, [`POST /api/cancel ${JSON.stringify({ session: 12, statement: 45 })}`, "GET /api/running", "GET /api/state"], "the statements running and who is connected, read again");
   assert.match(textOf(app.view()["running-now"]!), /^Session No\. .* 13 7 .*Cancelled session 12's statement: it ends now/, "the statement ended: said under the table");
   // the session began another statement: the server refuses, and the page renders its Failure under the row
   const failure = { code: "refused", message: "session 13 runs another statement now (statement 8), not statement 7: nothing cancelled", why: "statement 7 ended, and the session began another",

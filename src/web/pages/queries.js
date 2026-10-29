@@ -102,8 +102,9 @@ export function statementCards(day, line = () => "", label = "last 24 hours") {
 
 /**
  * THE STATEMENTS RUNNING NOW (`mason logs --running --json`'s `running`): a row each — session, statement, user, client,
- * when it started, how long it has run, the rows sent so far, the statement — and Cancel. The one being cancelled
- * (`asking`, `session:statement`) asks first; `outcome` is what the last cancel answered (a Failure, or `{ cancelled }`),
+ * how long it has run (a relative time that moves with each poll; when it started, in UTC, its title), the rows sent so
+ * far, the statement — and Cancel. The one being cancelled (`asking`, `session:statement`) asks first, its question on
+ * a row under it (the statement keeps its width); `outcome` is what the last cancel answered (a Failure, or `{ cancelled }`),
  * said under the row it was for, or under the table when that statement has ended since.
  */
 export function renderRunning(running, asking = null, outcome = null) {
@@ -111,20 +112,20 @@ export function renderRunning(running, asking = null, outcome = null) {
   const answer = (r) => {
     if (outcome === null || outcome.key !== keyOf(r.session, r.statement)) return "";
     shown = true;
-    return `<tr class="under"><td colspan="9">${outcomeHtml(outcome)}</td></tr>`;
+    return `<tr class="under"><td colspan="8">${outcomeHtml(outcome)}</td></tr>`;
   };
   const rows = running.map((r) => {
     const key = keyOf(r.session, r.statement);
+    const ask = asking === key
+      ? `<tr class="under"><td colspan="8"><span class="confirm">Cancel session ${r.session}'s statement ${r.statement}? Its client is told so (57014).</span> ` +
+        `<button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel statement ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel>Keep it running</button></td></tr>` : "";
     return `<tr><td>${r.session}</td><td>${r.statement}</td><td>${esc(r.user)}</td><td>${esc(clientText(r.applicationName))}</td>` +
-      `<td>${esc(utcText(r.startedAt))}</td><td class="num">${esc(spanText(r.runningMs / 1000))}</td><td class="num">${esc(plural(r.rows, "row"))} sent</td>` +
-      `<td>${statementCell(r.query)}</td><td class="act">${asking === key
-        ? `<span class="confirm">Cancel session ${r.session}'s statement ${r.statement}? Its client is told so (57014).</span> ` +
-          `<button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel statement ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel>Keep it running</button>`
-        : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td></tr>${answer(r)}`;
+      `<td class="num"><time datetime="${esc(r.startedAt)}" title="started ${esc(utcText(r.startedAt))} UTC">${esc(spanText(r.runningMs / 1000))}</time></td><td class="num">${esc(plural(r.rows, "row"))} sent</td>` +
+      `<td>${statementCell(r.query)}</td><td class="act">${asking === key ? "" : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td></tr>${ask}${answer(r)}`;
   }).join("");
   const table = running.length
     ? `<div class="scroll"><table class="running"><thead><tr><th scope="col">Session</th><th scope="col" title="the statement's number in its session, as mason cancel --statement takes it">No.</th><th scope="col">User</th><th scope="col">Client</th>` +
-      `<th scope="col">Started (UTC)</th><th scope="col">Running for</th><th scope="col">Rows</th><th scope="col">Statement</th><th scope="col"></th></tr></thead><tbody>${rows}</tbody></table></div>`
+      `<th scope="col" class="num">Running for</th><th scope="col">Rows</th><th scope="col">Statement</th><th scope="col"></th></tr></thead><tbody>${rows}</tbody></table></div>`
     : empty("No statement is running now.");
   return table + (!shown && outcome !== null ? outcomeHtml(outcome) : "");
 }
@@ -242,7 +243,8 @@ export const page = {
         const r = await ctx.ask("/api/cancel", json("POST", { session, statement }));
         m.asking = null;
         m.outcome = "failure" in r ? { key: keyOf(session, statement), failure: r.failure } : { key: keyOf(session, statement), cancelled: r.body.cancelled };
-        await ctx.refresh([RUNNING]);
+        // who is connected says its running statements too: both read again, so neither says the cancelled one runs
+        await ctx.refresh([RUNNING, STATE]);
         return !("failure" in r);
       },
       /** Show the requests that pass these filters, from the newest. */
