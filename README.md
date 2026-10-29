@@ -93,8 +93,8 @@ cd your-app
 # echo "MASON_DATABASE_URL=postgres://me:secret@localhost:5432/your_app" >> .env
 mason init                           # creates mason/sources/<database>.yml (commit it) and .mason/ (local, gitignored)
 mason tables                         # lists the tables in your database, with their rows and keys
-mason add orders customers           # adds tables (use --columns id,status,total to copy only some columns)
-mason start                          # starts Mason in the background and begins the copy
+mason add orders customers           # adds tables to mason (use --columns id,status,total to copy only some columns)
+mason start                          # starts Mason in the background and begins the sync
 mason wait                           # waits until every added table is copied
 mason sync orders                    # reads the latest changes (by default, Mason syncs only when you ask)
 mason remove customers               # removes a table and deletes its copy
