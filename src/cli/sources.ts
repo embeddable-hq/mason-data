@@ -267,7 +267,7 @@ export const OLD_TABLES_DIR = "models";
 /**
  * THE PROJECT'S SOURCE FILE, read: the one file in `sources/` (a second is refused by name: one source per project for
  * now), parsed, its URL resolved — `${NAME}` from the project's .env.local or .env, else the shell (src/lib/dotenv.ts
- * `appEnvValue`, the order `mason init` reads DATABASE_URL in, so the two cannot disagree); `shellFirst` for a server
+ * `appEnvValue`, the order `mason init` reads MASON_DATABASE_URL and DATABASE_URL in, so the two cannot disagree); `shellFirst` for a server
  * (`mason serve`), configured by its environment alone. A project with no file is told what to write — one an older
  * Mason made (its tables listed in another folder, which nothing reads) that mason init writes it.
  */
