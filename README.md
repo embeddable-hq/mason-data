@@ -97,7 +97,7 @@ docker compose exec mason mason user add metabase
 | | |
 |---|---|
 | Image | `ghcr.io/embeddable-hq/mason-data`, amd64 and arm64: `main` is every merge, `<version>` a release. [`deploy/mason-data/README.md`](deploy/mason-data/README.md) is the walkthrough |
-| Replicas | run it as a single container per volume (DuckDB lets one process write its file), deployed stop-then-start (Kubernetes: `strategy: Recreate`). The copy is on the volume, so a restarted container is healthy again within seconds, with nothing copied again |
+| Replicas | one container per volume (DuckDB lets one process write its file), deployed stop-then-start (Kubernetes: `strategy: Recreate`). A deploy is a few seconds of downtime, not a fresh copy: the copy stays on the volume, a restarted Mason is healthy about half a second after it starts, and it picks up the changes made while it was down |
 | TLS | required off the container's loopback: `MASON_PG_SELF_SIGNED_TLS=1` makes a certificate on the volume (clients connect with `sslmode=require`), or mount a certificate from your CA |
 | Changes | polling needs a user that can `SELECT` the tables; `MASON_CHANGES=replication` reads the change log instead ([Logical replication](#logical-replication)) |
 | Settings | [`deploy/mason-data/README.md`](deploy/mason-data/README.md#settings) lists the ones to set and the ones worth deciding; `mason serve --help` has every one |
@@ -107,7 +107,8 @@ docker compose exec mason mason user add metabase
 <summary><b>Sizing: memory and CPU</b></summary>
 
 - **Memory**: the copy may use half the container's memory limit by default (else half the machine's RAM); the other
-  half is the page cache, the catalog (~820 MB) and Node. Give the container enough that the page cache holds the
+  half is the page cache, Node and the catalog. The catalog takes ~820 MB only while it is in use: it starts on a
+  tool's first catalog query and stops after 10 minutes without one. Give the container enough that the page cache holds the
   columns your dashboards read: a query over a column it does not hold runs at the disk's speed. The benchmark's copy
   was about a fifth of its tables in Postgres (10.1 GiB → 1.8 GiB, on a 15 GiB machine); `mason status` says yours. To
   set it, `MASON_DUCKDB_MEMORY=4GB` with the container's limit about twice that. A query that needs more fails on its
