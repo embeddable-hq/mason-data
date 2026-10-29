@@ -3296,6 +3296,9 @@ test("layout guard: a click moves no row and no column — a question, a form an
   assert.match(rule(".pop"), /position: fixed/, "a popover is over the rows, never between them");
   // FIXED COLUMNS: as wide as the header says, whatever a row holds now (Not added → Adding… → Waiting and its bar)
   assert.match(rule("table.catalog"), /table-layout: fixed; width: 100%; min-width: \d+px/);
+  // the users' too: Disable says "Disabled <when>", wider than Active, and must widen no column (found in the browser)
+  assert.match(rule("table.users"), /table-layout: fixed; width: 100%; min-width: \d+px/);
+  for (const c of ["status", "added", "last", "act"]) assert.match(rule(`table.users th.${c}`), /width: \d+px/, `the users' ${c} column has its width`);
   const heads = [...html.matchAll(/<th scope="col" class="([^"]+)">/g)].map((m) => m[1]!.split(" ").pop()!);
   assert.deepEqual(heads, ["name", "state", "rows", "key", "last", "size", "act"]);
   for (const c of heads.filter((x) => x !== "name")) assert.match(rule(`table.catalog th.${c}`), /width: \d+px/, `the ${c} column has its width`);

@@ -49,7 +49,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
   // a Remove's or a Disable's question is a popover beside the user's actions (`pop`), never a row: no row below it moves
   const pops = [];
   const ask = askOf(confirming);
-  return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col" class="num">Last used</th><th scope="col">URL</th><th scope="col"></th></tr></thead><tbody>${users.map((u) => {
+  return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col">URL</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null

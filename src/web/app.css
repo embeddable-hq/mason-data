@@ -553,6 +553,13 @@ table.users code.name { max-width: 24ch; }
 table.users td .warn { display: block; white-space: normal; min-width: 14em; }
 @media (max-width: 1100px) { table.users .copyrow.clipped code { max-width: 7em; } table.users code.name { max-width: 18ch; } }
 table.users td { white-space: nowrap; }
+/* FIXED COLUMNS, as the tables' catalog's: Disable → "Disabled <when>" widens no column and moves no button */
+table.users { table-layout: fixed; width: 100%; min-width: 960px; }
+table.users th.status { width: 224px; }
+table.users th.added { width: 188px; }
+table.users th.last { width: 112px; }
+table.users th.act { width: 240px; }
+table.users td { overflow: hidden; text-overflow: ellipsis; }
 #page-users td.mono { white-space: nowrap; }
 #page-users .added { border-left-color: var(--warn); border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); margin: 0 0 var(--space-4); }
 #page-users .added .headline { font-size: var(--text-lg); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
