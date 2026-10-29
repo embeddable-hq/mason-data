@@ -45,6 +45,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   24-hour sparkline once there are two hours to draw, and **each is a link** into the view that lists what it counts:
   the tables (the failed ones when a copy failed), Usage for the copy's file, Queries for the statements, the slow ones
   for the p95.
+- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ a table copied · ✓/○ a user
+  created · ✓/○ a first statement answered — each ○ with its one action (Add a table → Tables, Create a user → Users,
+  Copy the psql line → Connect's), from `/api/state`'s totals, `/api/users` (`mason user list --json`) and the request
+  log's week (`/api/queries`). Gone once the four are done; not drawn while a read it needs is unanswered or failed.
 - **Overview**, Connect: the Postgres API's URL with `<user>:<password>` in the credentials' place and its psql line —
   the lines `mason status` prints — each with **Copy**, and **Create a user** (the Users page). While nothing has asked
   Mason anything (no statement in the last day or week) it is **Connect your first tool**, right under the cards, saying

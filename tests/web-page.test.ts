@@ -133,7 +133,7 @@ const USAGE = { since: "2026-10-27T09:04:30.000Z", until: "2026-10-27T09:05:30.0
   copySizes: [{ table: "public.customers", bytes: 524_288, at: "2026-10-27T09:00:00.000Z" }, { table: "public.events", bytes: 3_221_225_472, at: "2026-10-27T09:00:00.000Z" }] };
 
 /** What the Overview reads, in order: the state every poll, the request log's every 30 s. */
-const STATUS_READS = ["GET /api/state", "GET /api/queries", "GET /api/events?failed=1&limit=5", "GET /api/requests?failed=1&limit=5", "GET /api/unsupported?limit=100"];
+const STATUS_READS = ["GET /api/state", "GET /api/queries", "GET /api/events?failed=1&limit=5", "GET /api/requests?failed=1&limit=5", "GET /api/unsupported?limit=100", "GET /api/users"];
 /** The Overview's first poll: those, and the last 24 hours of usage its cards' sparklines draw (read once a minute). */
 const STATUS_FIRST = [...STATUS_READS, "GET /api/usage?since=24h&step=3600"];
 /** The run's word at the top of the Overview, as it is written: a big dot, then the word. */
@@ -1046,7 +1046,7 @@ test("the Overview: Ready and Under way in mason status's words; nothing added s
   run.answers.set("GET /api/state", answer(NONE));
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
-  assert.match(textOf(app.view().status!), /^No table added yet \(4 in the database\)\. .* Mason Source /);
+  assert.match(textOf(app.view().status!), /^Getting started 3 of 4 done .* Add a table .* No table added yet \(4 in the database\)\. .* Mason Source /, "the checklist first: its one action is adding a table");
 });
 
 // ------------------------------------------------------------------ the Tables page: each copy's sync, Sync, the search box
@@ -2715,4 +2715,40 @@ test("the Users table's URL: one line, cut with an ellipsis in its cell, its who
   assert.match(html, /<span class="copyrow clipped"><code id="user-url-metabase" title="[^"]+">/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /\.copyrow\.clipped code \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);
+});
+
+test("the Overview's first-run checklist: running, a table copied, a user created, a first statement answered — each ○ with its one action; gone once all are done", async () => {
+  const renderChecklist = of<[unknown, unknown, unknown], string>(statusPage, "status.js", "renderChecklist");
+  const user = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true }] };
+  const noUser = { users: [{ ...user.users[0], removedAt: "2026-10-27T10:00:00.000Z" }] };
+  // a fresh install: a table added and copied, no user, nothing asked
+  const fresh = renderChecklist(RUNNING, NO_QUERIES, noUser);
+  assert.equal(textOf(fresh), "Getting started 2 of 4 done ✓ Mason is running (done) ✓ A table copied (done) ○ A user created (to do) Create a user ○ A first statement answered (to do) Copy the psql line then run a select on a copied table");
+  assert.match(fresh, /<li class="todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">A user created<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user<\/a><\/li>/, "the next step is the primary action");
+  assert.match(fresh, /<button type="button" class="small" data-copy="connect-psql">Copy the psql line<\/button>/, "Connect's psql line, copied by its own Copy's handler");
+  // nothing added: Add a table leads to Tables; nothing to copy the psql line for yet
+  const none = renderChecklist(NONE, NO_QUERIES, noUser);
+  assert.match(none, /○<\/span><span class="what">A table copied<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#tables">Add a table<\/a>/);
+  assert.ok(!none.includes("Copy the psql line"));
+  // copying: no action, it is under way
+  assert.match(textOf(renderChecklist({ ...COPYING, totals: { ...COPYING.totals!, copied: 0 } }, NO_QUERIES, noUser)), /○ A table copied \(to do\) copying now ○ A user created/);
+  // a user, no statement yet: the psql line is the primary action
+  assert.match(renderChecklist(RUNNING, NO_QUERIES, user), /<button type="button" class="small primary" data-copy="connect-psql">Copy the psql line<\/button>/);
+  // all four done: none; a read not answered, or that failed: none (never a ○ for what could not be told)
+  assert.equal(renderChecklist(RUNNING, QUERIES, user), "");
+  assert.equal(renderChecklist(RUNNING, undefined, user), "");
+  assert.equal(renderChecklist(RUNNING, NO_QUERIES, { failure: { code: "failed", message: "x" } }), "");
+  assert.equal(renderChecklist(RUNNING, { failure: { code: "failed", message: "x" } }, noUser), "");
+  // the app: the Overview reads the users (every 30 s) and draws it above the cards; its Copy is a Copy
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(RUNNING));
+  run.answers.set("GET /api/queries", answer(NO_QUERIES));
+  run.answers.set("GET /api/users", answer({ users: [] }));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  await app.poll();
+  assert.ok(run.asked.includes("GET /api/users"));
+  const text = textOf(app.view().status!);
+  assert.match(text, /^Ready Getting started 2 of 4 done /);
+  assert.ok(text.indexOf("Getting started") < text.indexOf("Tables synced"), "above the cards");
+  assert.match(text, /psql psql 'postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop' Copy/, "the psql line it copies is on the page, Connect's");
 });
