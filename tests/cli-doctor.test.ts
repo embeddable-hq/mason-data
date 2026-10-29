@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DOCTOR_USAGE, memoryCheck, NODE_MIN, nextSteps, nodeCheck, portsCheck, PORTS, verdictOf, type Check } from "../src/cli/doctor.ts";
+import * as doctorModule from "../src/cli/doctor.ts";
 import { defaultMemoryLimit, machineMemoryBytes } from "../src/duck/store.ts";
 import type { DevRun } from "../src/cli/runs.ts";
 import { newConfig, type Project } from "../src/cli/project.ts";
@@ -129,4 +130,19 @@ test("the next command follows the first failing check, in the order a first ses
   assert.equal(first([ok("mason start"), ok("project", "no table added yet (mason tables, then mason add <table>)")], run, project), "mason tables | mason add <table>");
   assert.equal(first([ok("mason start"), ok("project", "applied: 2 table(s)"), bad("queries")], run, project), "mason status");
   assert.equal(first([ok("mason start"), ok("project", "applied: 2 table(s)"), ok("queries")], run, project), "mason user add <name>");
+});
+
+test("extensions: the probe's verdict on its own line; not shipped and not downloaded yet is a question, never a failure", async () => {
+  // read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
+  const { extensionsCheck } = doctorModule as unknown as { extensionsCheck?: (probe: () => Promise<{ ok: boolean | null; detail: string }>) => Promise<Check> };
+  assert.equal(typeof extensionsCheck, "function", "src/cli/doctor.ts exports extensionsCheck");
+  const shipped = await extensionsCheck!(async () => ({ ok: true, detail: "postgres and inet ship with Mason (@mason-data/extensions-linux-x64 0.7.0): nothing is downloaded" }));
+  assert.deepEqual(shipped, { name: "extensions", ok: true, detail: "postgres and inet ship with Mason (@mason-data/extensions-linux-x64 0.7.0): nothing is downloaded" });
+  const later = await extensionsCheck!(async () => ({ ok: null, detail: "postgres and inet not on this machine yet, so the first copy downloads them and needs the internet once: …" }));
+  assert.equal(later.ok, null);
+  const ok: Check[] = [nodeCheck("24.1.0"), later];
+  assert.equal(verdictOf(ok, null, project).ready, true, "online, a first copy downloads them: still ready");
+  const broken = await extensionsCheck!(async () => ({ ok: false, detail: "@mason-data/extensions-linux-x64 0.7.0 is installed, and its inet does not load: … Install @mason-data/cli again" }));
+  assert.equal(verdictOf([nodeCheck("24.1.0"), broken], null, project).ready, false);
+  assert.match(DOCTOR_USAGE, /the copy's postgres and inet extensions/);
 });

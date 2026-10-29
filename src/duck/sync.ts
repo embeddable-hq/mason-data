@@ -66,6 +66,7 @@ import { createSlot, currentLsn, dropSlot, readSlot } from "../cdc/source.ts";
 import { addCounts, countsText, duckValue, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { namedPublicationVerdict, readNamedPublication } from "./publication.ts";
+import { extensionFailure, loadPostgresSql } from "./extensions.ts";
 import { BIG_TABLE_ROWS, intervalOf, syncText, syncWords, type TableSync } from "../lib/table-sync.ts";
 
 /** how a copied table is kept current: Mason's xmin poll (step 1), a whole copy again (step 0), or the database's
@@ -1925,14 +1926,14 @@ export class Sync {
    *  whose attach throws is not one: it never detaches */
   private async attach(): Promise<void> {
     if (!this.attached) {
-      // INSTALL fetches the extension from DuckDB's repository the first time on a machine (then ~/.duckdb/extensions):
-      // offline, the first copy fails here saying so — bundling it is the plan's step 3
+      // the extension ships with Mason (src/duck/extensions.ts): a LOAD from the platform's package, nothing downloaded;
+      // without the package, INSTALL fetches it the first time on a machine (then ~/.duckdb/extensions), said once,
+      // and offline the first copy fails here saying why
       if (!this.loaded) {
-        try { await this.store.writer.run("INSTALL postgres; LOAD postgres;"); }
-        catch (e) {
-          throw new Error(`DuckDB could not load its postgres extension: ${(e as Error).message}. The first copy on a machine downloads it from ` +
-            "DuckDB's extension repository (then ~/.duckdb/extensions): connect to the internet once, and the copy is tried again at the next pass");
-        }
+        const x = this.store.extensions;
+        if (!x.shipped) this.log(`the copy's extensions are not installed with Mason here: ${x.why}. The first copy on this machine downloads its postgres extension`);
+        try { await this.store.writer.run(loadPostgresSql(x)); }
+        catch (e) { throw new Error(extensionFailure(x, (e as Error).message)); }
         this.loaded = true;
       }
       await this.store.writer.run(`ATTACH ${literal(libpqString(this.source))} AS ${SRC} (TYPE postgres, READ_ONLY)`);

@@ -4,7 +4,11 @@
 #   1. the annotated tag v<version> on the merge commit (skipped when the tag already exists)
 #   2. the image (images-publish.yml, called as a job: a tag made by GITHUB_TOKEN never triggers another workflow)
 #   3. the CLI, @mason-data/cli, when its version is not on npm yet; this one also runs when the release page already
-#      exists and only the CLI is missing from npm, since its first publish is by hand and may not have happened
+#      exists and only the CLI is missing from npm, since its first publish is by hand and may not have happened.
+#      Its platform packages first (@mason-data/extensions-<platform>, the copy's extensions: src/duck/extensions.ts),
+#      at the same version, each built by cli/extensions.ts from the checksums cli/extensions.json pins and published
+#      unless that version is on npm already: the CLI is never published without them, since npm resolves its
+#      optional dependencies at install
 #   4. the GitHub release from the notes file, last: a release page means everything it names is published
 #
 # Every step is idempotent, so a failed run is re-run from the Actions page and picks up where it stopped. A merge
@@ -16,6 +20,17 @@
 # release.yml): the CLI's job then publishes with this workflow's OIDC identity. npm only offers it on a package that
 # already exists, so the package's FIRST publish is by hand (`npm publish` in cli/). Until it is set up, a granular
 # access token saved as the repository secret NPM_TOKEN works too; delete it afterwards.
+#
+# THE FIVE PLATFORM PACKAGES ARE PACKAGES OF THEIR OWN ON NPM, and each needs the same, once, BEFORE THE FIRST RELEASE
+# THAT SHIPS THEM IS MERGED — or that release fails at the extensions job (no trusted publisher can be added to a
+# package that does not exist yet, and no NPM_TOKEN is set): by an owner of @mason-data, `npm ci && node
+# cli/extensions.ts` at the repo's root, then
+#   (cd cli/platforms/darwin-arm64 && npm publish --access public)   # @mason-data/extensions-darwin-arm64
+#   (cd cli/platforms/darwin-x64   && npm publish --access public)   # @mason-data/extensions-darwin-x64
+#   (cd cli/platforms/linux-arm64  && npm publish --access public)   # @mason-data/extensions-linux-arm64
+#   (cd cli/platforms/linux-x64    && npm publish --access public)   # @mason-data/extensions-linux-x64
+#   (cd cli/platforms/win32-x64    && npm publish --access public)   # @mason-data/extensions-win32-x64
+# and then each one's trusted publisher on npmjs.com, as the CLI's (repository embeddable-hq/mason-data, release.yml).
 name: Release
 
 on:
@@ -108,10 +123,13 @@ jobs:
       contents: read
       packages: write
 
-  cli:
+  # the CLI's platform packages, before it: one a platform, each at the CLI's version (cli/extensions.ts)
+  extensions:
     needs: [decide, tag, image]
-    # after the image when this push releases; alone when the release exists and only the CLI is missing from npm
-    if: always() && needs.decide.result == 'success' && needs.decide.outputs.cli_publish == 'true' && needs.image.result != 'failure' && needs.tag.result != 'failure'
+    # ONLY for a release: this push releases (`version`), or the release exists and its CLI is missing from npm
+    # (`cli_publish`). A push that releases nothing publishes nothing. Within a release it publishes whichever of them
+    # npm lacks at the CLI's version, so a CLI published by hand before its packages is repaired by the release's run
+    if: always() && needs.decide.result == 'success' && (needs.decide.outputs.version != '' || needs.decide.outputs.cli_publish == 'true') && needs.image.result != 'failure' && needs.tag.result != 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -122,10 +140,40 @@ jobs:
           cache: npm
       # trusted publishing needs npm >= 11.5.1
       - run: npm install -g npm@latest
-      # the package builds from the repo's src/ with the repo's TypeScript (cli/build.ts, its prepack)
+      # the script reads the engine's version from the repo's @duckdb/node-api, which must be the one cli/extensions.json pins
       - run: npm ci
+      - name: build every platform's package, each file held to its pinned checksum
+        run: node cli/extensions.ts
+      - name: publish each one whose version is not on npm yet
+        env:
+          # Empty when the secret is not set, which is the trusted-publishing case.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for dir in cli/platforms/*/; do
+            name="$(node -p "require('./${dir}package.json').name")"; version="$(node -p "require('./${dir}package.json').version")"
+            if npm view "$name@$version" version >/dev/null 2>&1; then echo "$name $version is on npm already"; continue; fi
+            (cd "$dir" && npm publish --access public)
+          done
+
+  cli:
+    needs: [decide, tag, image, extensions]
+    # after the image and its platform packages when this push releases; alone when the release exists and only the CLI
+    # is missing from npm. Never without its platform packages published
+    if: always() && needs.decide.result == 'success' && needs.decide.outputs.cli_publish == 'true' && needs.image.result != 'failure' && needs.tag.result != 'failure' && needs.extensions.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+      # trusted publishing needs npm >= 11.5.1
+      - run: npm install -g npm@latest
+      # the package builds from the repo's src/ with the repo's TypeScript (cli/build.ts, its prepack); cli/ has no lock
+      # of its own (its optional platform packages are published by the job before this one)
       - run: npm ci
-        working-directory: cli
       - run: npm publish --access public
         working-directory: cli
         env:
@@ -133,9 +181,10 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   release:
-    needs: [decide, tag, image, cli]
-    # the release page comes last, once everything it names is published; a skipped cli job is not a failure
-    if: always() && needs.decide.outputs.version != '' && needs.tag.result == 'success' && needs.image.result == 'success' && needs.cli.result != 'failure'
+    needs: [decide, tag, image, extensions, cli]
+    # the release page comes last, once everything it names is published: a publish job that succeeded, or was skipped
+    # because npm has it already — never one that failed or was cancelled
+    if: always() && needs.decide.outputs.version != '' && needs.tag.result == 'success' && needs.image.result == 'success' && (needs.extensions.result == 'success' || needs.extensions.result == 'skipped') && (needs.cli.result == 'success' || needs.cli.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

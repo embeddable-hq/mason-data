@@ -30,8 +30,9 @@
  * kind decided; a refusal where Postgres answers must name a `refused` gap, and a gap none of the statements meets is
  * dead (docs/SQL-SUPPORT.md). Every difference is written to `IT_LOG_DIR` (default: the OS temp dir) `duck-oracle-differences.txt`.
  *
- * Needs IT_POSTGRES_URL (any wal_level; a database of its own is created and dropped), psql on PATH, and DuckDB's
- * postgres extension (downloaded once per machine).
+ * Needs IT_POSTGRES_URL (any wal_level; a database of its own is created and dropped), psql on PATH, and the copy's
+ * extensions installed from this platform's package (`node cli/extensions.ts --node-modules node_modules`, once): the
+ * oracle refuses to run on the engine's own install, so what it holds equal is what a user's install answers.
  */
 import { test, after } from "node:test";
 import * as assert from "node:assert/strict";
@@ -259,6 +260,17 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   sync.setViews(facts.views ?? []);
   await sync.once();
   assert.deepEqual(sync.state().filter((x) => x.phase !== "copied").map((x) => `${x.source} ${x.phase} ${x.error}`), [], "every table copied");
+  // THE ORACLE RUNS AS A USER'S INSTALL DOES, with the copy's extensions from this platform's package (src/duck/extensions.ts):
+  // autoinstall off and both files the package's, so every statement it holds equal is answered with nothing
+  // downloaded, and a regression to downloading fails here rather than passing on the engine's own install
+  const x = store.extensions;
+  assert.ok(x?.shipped, `the oracle runs with the copy's extensions installed from their package: ${x && !x.shipped ? x.why : "none found"}. ` +
+    "Run node cli/extensions.ts --node-modules node_modules once at the repo's root (CI's integration job does)");
+  const ext = (await store.writer.runAndReadAll("SELECT current_setting('autoinstall_known_extensions'), current_setting('extension_directory')")).getRowsJS();
+  assert.deepEqual(ext, [[false, x.directory]]);
+  const files = (await store.writer.runAndReadAll("SELECT extension_name, loaded, install_path FROM duckdb_extensions() WHERE extension_name IN ('postgres_scanner', 'inet') ORDER BY 1")).getRowsJS();
+  assert.deepEqual(files.map(([name, loaded, at]) => [name, loaded, String(at).startsWith(x.directory)]), [["inet", false, true], ["postgres_scanner", true, true]],
+    `the copy's postgres extension is loaded from the package and inet would autoload from it: ${JSON.stringify(files)}`);
   const theStore = store, theSync = sync;
   // WHAT EACH STATEMENT WAS MADE OF (src/duck/resolved.ts), recorded as it is planned — with nothing refused for being
   // unverified, since this run is what verifies it
