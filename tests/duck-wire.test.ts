@@ -1252,31 +1252,45 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>)[0]!.Mason.Copies[0]!;
   const copied = (kept: CopyState["kept"]): CopyState => ({ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 0.1, copiedAt: "2026-10-27 19:00:00+00", error: null, ...(kept ? { kept } : {}) });
   const head = "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; ";
-  const streamed = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C4D", lastCommit: "2026-10-29T08:15:02.512Z", running: true, failure: null } as const;
+  const streamed = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C4D", lastCommit: "2026-10-29T08:15:02.512Z", notRunning: null } as const;
+  const stream = { Slot: "mason_shop", "Applied Through": "0/1A2B3C4D", "Last Change Committed": "2026-10-29T08:15:02.512Z", "Stream Not Running": null };
+  /** the JSON says what the text says, and names a mode only for a copy that mode keeps current now */
+  const jsonSays = async (by: string | null, more: Record<string, unknown>): Promise<void> =>
+    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": by, "Kept Current": (await header()).slice(head.length, -1), ...more });
   try {
     copies = [copied(streamed)];
-    let h = await header();
+    const h = await header();
     assert.equal(h, `${head}kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)`);
     assert.doesNotMatch(h, /polling|last poll/);
-    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "logical replication", "Kept Current": h.slice(head.length, -1),
-      Slot: "mason_shop", "Stream State": "streamed", "Applied Through": "0/1A2B3C4D", "Last Change Committed": "2026-10-29T08:15:02.512Z" });
-    // the stream down, nothing applied yet this run: said, still never the poll
-    copies = [copied({ ...streamed, lastCommit: null, running: false, failure: "the database closed the connection" })];
-    assert.equal(await header(), `${head}kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, no change applied this run; the stream is not running now: the database closed the connection)`);
-    // a table being caught up, or left out of the publication, is said as status says it
+    await jsonSays("logical replication", { ...stream, "Stream State": "streamed" });
+    // the stream down, nothing applied yet this run: said with why, NOT kept current now, still never the poll
+    copies = [copied({ ...streamed, lastCommit: null, notRunning: "the database closed the connection · it starts again after 08:16 UTC" })];
+    assert.equal(await header(), `${head}streamed by logical replication (slot mason_shop), applied through 0/1A2B3C4D, no change applied this run; NOT kept current now, the stream is not running: the database closed the connection · it starts again after 08:16 UTC)`);
+    await jsonSays(null, { ...stream, "Stream State": "streamed", "Last Change Committed": null, "Stream Not Running": "the database closed the connection · it starts again after 08:16 UTC" });
+    // a table being caught up, or left out of the publication, is said as status says it, and no mode is said at work
     copies = [copied({ ...streamed, state: "catching-up", why: "caught up by one poll after its copy" })];
     assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: caught up by one poll after its copy)`);
+    await jsonSays(null, { ...stream, "Stream State": "catching-up" });
     copies = [copied({ ...streamed, state: "left-out", why: "the publication mason_pub does not publish public.orders" })];
     assert.equal(await header(), `${head}NOT kept current: left out of logical replication (slot mason_shop): the publication mason_pub does not publish public.orders)`);
+    await jsonSays(null, { ...stream, "Stream State": "left-out" });
+    copies = [copied({ ...streamed, state: "waiting", why: "its columns changed: it is copied again, then caught up by one poll" })];
+    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: its columns changed: it is copied again, then caught up by one poll)`);
+    await jsonSays(null, { ...stream, "Stream State": "waiting" });
     // a polled project keeps today's words, from the sync's last poll
     copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z" })];
     assert.equal(await header(), `${head}kept current by polling, last poll 2026-10-27 19:58:39 UTC)`);
     assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Kept Current": "kept current by polling, last poll 2026-10-27 19:58:39 UTC", "Last Poll": "2026-10-27T19:58:39.000Z" });
     copies = [copied({ by: "poll", polledAt: null })];
     assert.equal(await header(), `${head}kept current by polling, no poll recorded yet)`);
-    // over the poll's row limit: NOT kept current, as status says it
+    // over the poll's row limit: NOT kept current, as status says it, with the command that polls it
     copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z", unsynced: "over the 1,000,000-row sync limit" })];
-    assert.equal(await header(), `${head}NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-27 19:58:39 UTC): mason sync polls it now)`);
+    assert.equal(await header(), `${head}NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-27 19:58:39 UTC): mason sync public.orders polls it now)`);
+    await jsonSays(null, { "Last Poll": "2026-10-27T19:58:39.000Z" });
+    // served as copied and skipped by the passes until copied again: NOT kept current, and why
+    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z", pending: "its columns changed: it is copied again, then caught up by one poll" })];
+    assert.equal(await header(), `${head}NOT kept current (as of 2026-10-27 19:58:39 UTC): its columns changed: it is copied again, then caught up by one poll)`);
+    await jsonSays(null, { "Last Poll": "2026-10-27T19:58:39.000Z" });
     // a copy under way or failed says so before how it would be kept current
     copies = [{ ...copied(streamed), phase: "copying", rowsSoFar: 1200 }];
     assert.equal(await header(), `${head}being copied (1,200 rows so far): kept current once copied)`);
