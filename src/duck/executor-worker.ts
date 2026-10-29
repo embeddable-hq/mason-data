@@ -13,7 +13,7 @@
 import { parentPort, workerData, type TransferListItem } from "node:worker_threads";
 import type { DuckDBConnection, DuckDBInstance, DuckDBValue } from "@duckdb/node-api";
 import { openDuck, SessionRunner } from "./store.ts";
-import { FUNCTION_CALLS, registerLibcOrder, useCancelTable } from "./functions.ts";
+import { FUNCTION_CALLS, FUNCTION_ROWS, registerLibcOrder, useCancelTable } from "./functions.ts";
 import { stopPgEval } from "./pg-eval.ts";
 import { StatementError, type DuckAnswer } from "../api/postgres/server.ts";
 import { STOPPING, wireError, type Reply } from "./executor.ts";
@@ -119,6 +119,7 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
     }
     case "libc": registerLibcOrder(need(conns, 0, "connection"), m.order as Parameters<typeof registerLibcOrder>[1]); return { value: null };
     case "calls": return { value: Object.fromEntries(FUNCTION_CALLS) };
+    case "function rows": return { value: Object.fromEntries(FUNCTION_ROWS) };
     case "runner.open": {
       if (instance === null) throw new Error("the copy is not open (Mason bug: report it)");
       const n = nextRunner++;

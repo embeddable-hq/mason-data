@@ -256,6 +256,10 @@ class Rewriter {
   private readonly inFrom = new WeakSet<Body>();
   /** the set-returning functions in FROM a LEFT JOIN … ON TRUE reads, written as a list never empty (leftLateral) */
   private readonly nonEmpty = new WeakSet<Body>();
+  /** the SELECTs and joins whose rows' order decides the answer (a LIMIT keeps the first of them, an aggregate or a
+   *  window reads them in order): a LEFT lateral of a list is streamed there alone (markBounds, leftLateral) */
+  private readonly bounded = new WeakSet<Body>();
+  private boundedCount = 0;
   /** how the database changes a letter's case */
   private readonly caseMode: CaseMode;
 
@@ -2869,6 +2873,164 @@ class Rewriter {
   // --------------------------------------------------------------------------------------------- FROM
 
   /**
+   * WHERE THE ORDER OF A JOIN'S ROWS DECIDES THE ANSWER (leftLateral), computed for the whole statement before the walk
+   * (`rewrite`): libpg-query writes a SELECT's keys in its struct's order (fromClause … limitCount, withClause, larg,
+   * rarg) and the walk follows it, so a SELECT's CTEs and arms are met after its FROM, and a CTE another CTE reads is
+   * met before the one that reads it. So every SELECT of the statement is collected with the CTEs it sees (its own
+   * WITH's and those around it, the nearest first), and `limitBounds` runs over them all until no more is bounded.
+   */
+  markBounds(root: AstNode): void {
+    const selects: Array<{ b: Body; scope: ReadonlyMap<string, Body> }> = [];
+    const select = (b: Body, outer: ReadonlyMap<string, Body>): void => {
+      const scope = new Map(outer);
+      for (const c of (b.withClause?.ctes ?? []) as AstNode[]) {
+        const cb = isNode(c) ? bodyOf(c) : null;
+        if (cb !== null && typeof cb.ctename === "string" && isNode(cb.ctequery) && kindOf(cb.ctequery) === "SelectStmt") scope.set(cb.ctename, bodyOf(cb.ctequery));
+      }
+      selects.push({ b, scope });
+      for (const [k, x] of Object.entries(b)) { const arm = armOf(k, x); if (arm !== null) select(bodyOf(arm), scope); else visit(x, scope); }
+    };
+    const visit = (v: unknown, scope: ReadonlyMap<string, Body>): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x, scope); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v) && kindOf(v) === "SelectStmt") { select(bodyOf(v), scope); return; }
+      for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) visit(x, scope);
+    };
+    visit(root, new Map());
+    let before: number;
+    do { before = this.boundedCount; for (const s of selects) this.limitBounds(s.b, s.scope); } while (this.boundedCount !== before);
+  }
+
+  private bound(b: Body): void { if (!this.bounded.has(b)) { this.bounded.add(b); this.boundedCount++; } }
+
+  /**
+   * One SELECT's part of markBounds. Its FROM's order decides the answer where:
+   *  - a LIMIT or an OFFSET keeps the first of its rows — its own, or one around it whose rows are its rows in their
+   *    order (`bounded`: the SELECT reads it as a derived table or a CTE, or as an arm of its UNION ALL) — with no
+   *    aggregate, GROUP BY, DISTINCT, window or other set operation between, each of which reads every row first and
+   *    hands back an order of its own. Under an ORDER BY only a LIMIT of its own bounds (never WITH TIES: Mason ranks
+   *    every row for it, src/duck/rewrite.ts withTies), and only when its first key, once the nulls idiom is folded
+   *    (nullsKeyFolded), is a column of a table sorted bare (sortsByTableColumn): DuckDB's top N pushes its bound into
+   *    that table's scan as a filter, so the rows reaching the lateral are few (measured, docs/DESIGN.md "A LEFT lateral
+   *    of a list": 0.1–6 s streamed against 0.4–106 s for the delimiter join over 20 M rows); any other key — the
+   *    lateral's own column, an expression, a text under a collation, a citext, a char(n), a jsonb, each sorted by an
+   *    expression — is a top N over every row, each row's function calls paid in full;
+   *  - an aggregate that reads its rows in order (string_agg, array_agg, json_agg …) has no ORDER BY of its own, or a
+   *    window function that reads its frame in order (row_number, lag, first_value …, or such an aggregate) has a
+   *    window with no ORDER BY: Postgres hands each base row's members to it in their order (`readsInOrder`).
+   * Its joins, and the derived tables and CTEs its FROM reads, are bounded. An OFFSET alone is bounded for the
+   * answer's sake (Postgres's rows after it) and streams every row it does not skip; a CTE read twice or MATERIALIZED
+   * is computed whole, a call a row. Bounding too much costs time, never an answer (the streamed lateral is Postgres's
+   * rows in Postgres's order); bounding too little keeps DuckDB's delimiter join, whose rows come in an order of its own.
+   */
+  private limitBounds(b: Body, scope: ReadonlyMap<string, Body>): void {
+    const keeps = (n: unknown): boolean => isNode(n) && !(kindOf(n) === "A_Const" && bodyOf(n).isnull === true);
+    const sort = (b.sortClause ?? []) as AstNode[];
+    const inOrder = this.readsInOrder(b);
+    if (!inOrder) {
+      if (!keeps(b.limitCount) && !keeps(b.limitOffset) && !this.bounded.has(b)) return;
+      if (b.limitOption === "LIMIT_OPTION_WITH_TIES") return;
+      // a UNION ALL's arms, each read in turn (a set operation's arm is a SELECT body, unwrapped: walkBody)
+      if (b.op !== undefined && b.op !== "SETOP_NONE") {
+        if (b.op === "SETOP_UNION" && b.all === true && sort.length === 0) for (const arm of [b.larg, b.rarg]) if (arm !== null && typeof arm === "object" && !isNode(arm)) this.bound(arm as Body);
+        return;
+      }
+      if (sort.length > 0) {
+        const first = nullsKeyFolded(sort, b)[0];
+        if (!keeps(b.limitCount) || first === undefined || kindOf(first) !== "SortBy" || !this.sortsByTableColumn(bodyOf(first).node as AstNode, b, scope)) return;
+      }
+      if ((Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || b.distinctClause !== undefined) return;
+      if ((Array.isArray(b.windowClause) && b.windowClause.length > 0) || ((b.targetList ?? []) as AstNode[]).some((t) => this.hasAggregate(t) || hasWindow(t))) return;
+    } else if (b.op !== undefined && b.op !== "SETOP_NONE") return;
+    const visit = (x: unknown): void => {
+      if (!isNode(x)) return;
+      const xb = bodyOf(x);
+      if (kindOf(x) === "JoinExpr") { this.bound(xb); visit(xb.larg); visit(xb.rarg); return; }
+      if (kindOf(x) === "RangeSubselect" && isNode(xb.subquery)) { this.bound(bodyOf(xb.subquery as AstNode)); return; }
+      if (kindOf(x) === "RangeVar" && xb.schemaname === undefined) {
+        const cte = scope.get(String(xb.relname));
+        if (cte !== undefined) this.bound(cte);
+      }
+    };
+    for (const x of (b.fromClause ?? []) as AstNode[]) visit(x);
+  }
+
+  /** whether a SELECT's aggregate or window function reads its rows in the order they come (limitBounds): an
+   *  order-sensitive aggregate with no ORDER BY of its own (nor DISTINCT, whose values Postgres sorts), or a window
+   *  function that reads its frame in order over a window with no ORDER BY; not inside a subquery */
+  private readsInOrder(b: Body): boolean {
+    const windows = new Map(((b.windowClause ?? []) as AstNode[]).filter(isNode).map((w) => [String(bodyOf(w).name ?? ""), bodyOf(w)]));
+    const ordered = (w: Body | undefined): boolean => {
+      if (w === undefined) return false;
+      if (Array.isArray(w.orderClause) && w.orderClause.length > 0) return true;
+      return typeof w.refname === "string" && ordered(windows.get(w.refname));
+    };
+    const reads = (v: unknown): boolean => {
+      if (Array.isArray(v)) return v.some(reads);
+      if (v === null || typeof v !== "object") return false;
+      if (!isNode(v)) return Object.values(v as Body).some(reads);
+      if (kindOf(v) === "SubLink") return false;
+      if (kindOf(v) === "FuncCall") {
+        const c = bodyOf(v), name = lastName(c.funcname);
+        const aggregate = IN_ORDER_AGGREGATES.has(name) && c.agg_order === undefined && c.agg_distinct !== true;
+        if (c.over === undefined ? aggregate : (aggregate || IN_ORDER_WINDOWS.has(name)) && !ordered(c.over as Body)) return true;
+      }
+      return Object.values(bodyOf(v)).some(reads);
+    };
+    return reads(b.targetList) || reads(b.havingClause);
+  }
+
+  /** whether an ORDER BY key is a column of a table sorted as it is stored (limitBounds): an ordinal or an output
+   *  name is its target's expression, and a derived table's or a CTE's column is followed to what it selects */
+  private sortsByTableColumn(key: AstNode, b: Body, scope: ReadonlyMap<string, Body>): boolean {
+    const targets = (b.targetList ?? []) as AstNode[];
+    const n = constInt(key);
+    if (n !== null) return n >= 1 && n <= targets.length && this.tableColumn(bodyOf(targets[n - 1]!).val as AstNode, b, scope, 0);
+    const f = kindOf(key) === "ColumnRef" ? names(bodyOf(key).fields) : [];
+    const named = f.length === 1 ? targets.filter((t) => bodyOf(t).name === f[0]) : [];
+    return this.tableColumn(named.length === 1 ? bodyOf(named[0]!).val as AstNode : key, b, scope, 0);
+  }
+
+  /** a column of a table, or of a derived table or CTE that selects one, sorted bare: no collation's keys, citext's
+   *  lower(), char(n)'s rtrim() or jsonb's order key (sortBy), each an expression no top N filter reaches the scan by.
+   *  (A CTE is looked up among those the SELECT sees; a derived table's own WITH is not followed through its `*`.) */
+  private tableColumn(e: AstNode, select: Body, scope: ReadonlyMap<string, Body>, depth: number): boolean {
+    if (!isNode(e) || kindOf(e) !== "ColumnRef" || depth > 8) return false;
+    const t = this.typed(e);
+    if (t !== null) {
+      if (t.node !== "VAR" || t.functionColumn !== undefined || (t.levelsUp ?? 0) !== 0) return false;
+      if (t.type === JSONB || t.type === BPCHAR || t.type === INET || this.isCitext(t.type)) return false;
+      const c = this.textCollation(e);
+      if (c !== null && c.kind !== "bytes") return false;
+      if (t.relation !== undefined) return true;
+    }
+    // a derived table's or a CTE's column: what it selects under that name, or a column of the one table its * reads
+    const f = names(bodyOf(e).fields);
+    const col = f.at(-1), alias = f.length === 2 ? f[0] : undefined;
+    const sources: Array<{ alias: string; query: Body }> = [];
+    const from = (x: unknown): void => {
+      if (!isNode(x)) return;
+      const xb = bodyOf(x);
+      if (kindOf(x) === "JoinExpr") { from(xb.larg); from(xb.rarg); return; }
+      if (kindOf(x) === "RangeSubselect" && typeof xb.alias?.aliasname === "string" && isNode(xb.subquery) && xb.alias?.colnames === undefined) sources.push({ alias: xb.alias.aliasname, query: bodyOf(xb.subquery as AstNode) });
+      if (kindOf(x) === "RangeVar" && xb.schemaname === undefined && xb.alias?.colnames === undefined) {
+        const cte = scope.get(String(xb.relname));
+        if (cte !== undefined) sources.push({ alias: xb.alias?.aliasname ?? String(xb.relname), query: cte });
+      }
+    };
+    for (const x of (select.fromClause ?? []) as AstNode[]) from(x);
+    const matching = sources.filter((s) => alias === undefined || s.alias === alias);
+    if (col === undefined || matching.length !== 1) return false;
+    const q = matching[0]!.query;
+    if (q.op !== undefined && q.op !== "SETOP_NONE") return false;
+    const qt = (q.targetList ?? []) as AstNode[];
+    const hits = qt.filter((x) => isNode(bodyOf(x).val) && !hasStar(bodyOf(x).val) && (bodyOf(x).name ?? figureColname(bodyOf(x).val as AstNode)) === col);
+    if (hits.length === 1) return this.tableColumn(bodyOf(hits[0]!).val as AstNode, q, scope, depth + 1);
+    const qf = (q.fromClause ?? []) as AstNode[];
+    return t !== null && hits.length === 0 && qt.some((x) => hasStar(bodyOf(x).val)) && qf.length === 1 && kindOf(qf[0]!) === "RangeVar" && !scope.has(String(bodyOf(qf[0]!).relname));
+  }
+
+  /**
    * A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE (docs/DESIGN.md "A LEFT lateral of a list"): `FROM base LEFT JOIN
    * json_each(base.doc) d ON TRUE` is every base row with each of its members, or once with NULLs where it has none.
    * DuckDB plans a LEFT lateral as a delimiter join — the whole base grouped, the function called for every distinct
@@ -2876,12 +3038,18 @@ class Rewriter {
    * 22 M rows), and the join hands its rows back in an order of its own, so the LIMIT kept OTHER rows than Postgres's
    * (Postgres walks the base and each row's members in order). Written as an INNER lateral over a list that is never
    * empty — the members, or one NULL (`orNull`) — it is the same rows, and DuckDB runs it as a streaming UNNEST: in the
-   * base's order, the members in theirs, stopping at the LIMIT. That holds whatever stands above the join (a WHERE, an
-   * ORDER BY, an aggregate), so the condition is the join's alone: LEFT, ON a literal TRUE, its right side one function
-   * of a list Mason writes (the json rows, an array column's unnest), without ORDINALITY. A RIGHT or FULL join, another
-   * condition, or another function keeps DuckDB's own plan.
+   * base's order, the members in theirs, stopping at the LIMIT. But it calls the function once per ROW where the
+   * delimiter join calls it once per DISTINCT argument, so where every row is read anyway — a count, a GROUP BY, a
+   * DISTINCT, a window, a whole result, a sort by the lateral's own column — it is the slower plan (a count over 22 M
+   * rows of few distinct documents: 79 s joined, over 200 s streamed; 2.2 s against 62.5 s over 20 M rows of 2,000).
+   * So it is written only where the order of the join's rows decides the answer — a LIMIT keeps the first of them, or
+   * an aggregate or a window reads them in order (`bounded`: markBounds, limitBounds) — and only for a
+   * join that is LEFT, ON a literal TRUE, its right side one function of a list Mason writes (the json rows, an array
+   * column's unnest), without ORDINALITY. A RIGHT or FULL join, another condition, or another function keeps DuckDB's
+   * own plan.
    */
   private leftLateral(b: Body): AstNode | null {
+    if (!this.bounded.has(b)) return null;
     const quals = b.quals as AstNode | undefined;
     if (b.jointype !== "JOIN_LEFT" || b.isNatural === true || b.usingClause !== undefined || quals === undefined || kindOf(quals) !== "A_Const" || bodyOf(quals).boolval?.boolval !== true) return null;
     const rarg = b.rarg as AstNode | undefined;
@@ -3086,6 +3254,19 @@ const NOT_EXACT = new Error("not exact");
 /** a set operation's arm (libpg-query's `larg` / `rarg`: a SelectStmt's body, unwrapped), as the node it is */
 const armOf = (key: string, v: unknown): AstNode | null =>
   (key === "larg" || key === "rarg") && v !== null && typeof v === "object" && !Array.isArray(v) && !isNode(v) ? { SelectStmt: v as Body } : null;
+
+/** the aggregates whose answer follows the order their rows come in, without an ORDER BY of their own (readsInOrder) */
+const IN_ORDER_AGGREGATES = new Set(["string_agg", "array_agg", "json_agg", "jsonb_agg", "json_agg_strict", "jsonb_agg_strict", "json_object_agg",
+  "jsonb_object_agg", "json_object_agg_strict", "jsonb_object_agg_strict", "json_object_agg_unique", "jsonb_object_agg_unique",
+  "json_object_agg_unique_strict", "jsonb_object_agg_unique_strict", "xmlagg"]);
+/** the window functions that read their frame in order: over a window with no ORDER BY, the order the rows come in */
+const IN_ORDER_WINDOWS = new Set(["row_number", "ntile", "lag", "lead", "first_value", "last_value", "nth_value"]);
+
+/** whether an expression holds a window function (outside a subquery) */
+const hasWindow = (v: unknown): boolean => Array.isArray(v) ? v.some(hasWindow)
+  : v === null || typeof v !== "object" ? false
+  : isNode(v) ? kindOf(v) !== "SubLink" && ((kindOf(v) === "FuncCall" && bodyOf(v).over !== undefined) || Object.values(bodyOf(v)).some(hasWindow))
+  : Object.values(v as Body).some(hasWindow);
 
 const hasStar = (v: unknown): boolean => isNode(v) && kindOf(v) === "ColumnRef" && (bodyOf(v).fields as AstNode[]).some((f) => kindOf(f) === "A_Star");
 
@@ -3735,6 +3916,7 @@ export function rewrite(stmt: AstNode, base: number, analysis: PgAnalysis, colla
   nameTargets(own);
   r.indexShapes(own);
   const exact = r.exactThrough(own, analysis.fields);
+  r.markBounds(own);
   const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;
   return { tree, dropLast: r.excludeRank, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()] };
 }

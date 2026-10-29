@@ -1008,52 +1008,156 @@ test("date_trunc in a zone of its own is NULL in a NULL zone and reads a row's z
   } finally { await c.end(); }
 });
 
-// A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE IS AN INNER LATERAL OF A LIST NEVER EMPTY (src/duck/rewrite.ts
-// leftLateral): DuckDB planned the LEFT one as a delimiter join over the whole base (a BI tool's "expand the JSON"
-// preview, LIMIT 100 over 22 M rows: 37.9 s), handing its rows back in an order of its own, so a LIMIT kept other rows
-// than Postgres's; the INNER one is DuckDB's streaming UNNEST, in the base's order, stopping at the LIMIT.
-test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows in Postgres's order, and stops at its LIMIT", async () => {
+// A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE UNDER A LIMIT IS AN INNER LATERAL OF A LIST NEVER EMPTY
+// (src/duck/rewrite.ts leftLateral, limitBounds): DuckDB planned the LEFT one as a delimiter join over the whole base
+// (a BI tool's "expand the JSON" preview, LIMIT 100 over 22 M rows: 37.9 s), handing its rows back in an order of its
+// own, so a LIMIT kept other rows than Postgres's; the INNER one is DuckDB's streaming UNNEST, in the base's order,
+// stopping at the LIMIT. Where no LIMIT keeps the first rows (a count, a GROUP BY, a DISTINCT, a window, a whole
+// result, a sort by the lateral's own column) every row is read either way, and the delimiter join calls the function
+// once per DISTINCT document where the UNNEST calls it once per row: the count over 20 M rows of 2,000 documents took
+// 62.5 s streamed, 2.2 s joined (docs/DESIGN.md "A LEFT lateral of a list"), so DuckDB's own plan is kept there.
+test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT, in Postgres's order and streamed", async () => {
   const c = await client();
   const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  // documents beside NULL, an empty object and an empty array: the rows a LEFT JOIN keeps once, with NULLs (over a
+  // copied table: a statement that reads none is never DuckDB's)
+  const few = "(SELECT t.id, CASE t.id WHEN 1 THEN '{\"a\": 1, \"b\": [2]}'::jsonb WHEN 3 THEN '{}'::jsonb WHEN 4 THEN '{\"c\": null}'::jsonb WHEN 5 THEN '[]'::jsonb WHEN 6 THEN '[7, {}]'::jsonb END AS b FROM jdocs t) AS v";
+  const objects = "CASE WHEN jsonb_typeof(v.b) = 'object' THEN v.b END", arrays = "CASE WHEN jsonb_typeof(v.b) = 'array' THEN v.b END";
   try {
-    const left = [
+    const streamed = [
       // the preview, over jsonb and json, guarded to objects as the tool guards it, with and without an OFFSET
       "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.b FROM jdocs t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b ELSE NULL END) d ON TRUE LIMIT 6 OFFSET 0",
       "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.b FROM jdocs t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b ELSE NULL END) d ON TRUE LIMIT 9 OFFSET 11",
       "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.j FROM jdocs t) AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(q.j::text), 1, 1) = '{' THEN q.j::json ELSE NULL END) d ON TRUE LIMIT 7 OFFSET 2",
-      "SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN LATERAL jsonb_each_text(CASE WHEN jsonb_typeof(t.b -> 'o') = 'object' THEN t.b -> 'o' END) AS d ON true",
-      "SELECT t.id, e.v FROM jdocs t LEFT JOIN jsonb_array_elements(t.b -> 'arr') AS e(v) ON TRUE ORDER BY t.id DESC, e.v::text",
       "SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements_text(CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END) AS e ON TRUE LIMIT 4 OFFSET 3",
       "SELECT t.id, k FROM jdocs t LEFT JOIN jsonb_object_keys(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) AS k ON TRUE WHERE t.id > 1 LIMIT 5",
-      "SELECT o.id, tag FROM orders o LEFT JOIN unnest(o.tags) AS tag ON TRUE ORDER BY o.id, tag",
       "SELECT o.id, u FROM orders o LEFT JOIN unnest(o.tags) u ON TRUE LIMIT 3",
-      // sorted by the lateral's column, and counted: the same rows
-      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY d.key NULLS FIRST, q.id LIMIT 8",
-      "SELECT count(*), count(d.key) FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE",
+      // an OFFSET alone keeps Postgres's rows after it too
+      "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE OFFSET 20",
+      // the LIMIT outside: a derived table, a CTE, two levels down
+      "SELECT * FROM (SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE) AS s LIMIT 5 OFFSET 2",
+      "WITH s AS (SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE) SELECT s.key, s.id FROM s LIMIT 6",
+      "SELECT x.id FROM (SELECT s.id FROM (SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements(CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END) e ON TRUE) s WHERE s.id > 2) x LIMIT 4",
+      "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE WHERE t.id < 3 UNION ALL SELECT t.id, k FROM jdocs t LEFT JOIN jsonb_object_keys(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) AS k ON TRUE LIMIT 20",
+      // a CTE another CTE reads, and a CTE both arms of a UNION ALL read: met by the walk before the SELECT that bounds
+      // them (markBounds, a pre-pass)
+      "WITH a AS (SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE), b AS (SELECT a.key, a.id FROM a) SELECT * FROM b LIMIT 5 OFFSET 2",
+      "WITH s AS (SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE) SELECT s.id, s.key FROM s UNION ALL SELECT s.id, s.key FROM s LIMIT 20 OFFSET 30",
+      // an aggregate or a window reading the rows in order, with no ORDER BY of its own: Postgres's order of the members
+      "SELECT t.id, string_agg(d.key, ','), array_agg(d.key) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE GROUP BY t.id ORDER BY t.id",
+      "SELECT row_number() OVER () AS r, t.id, d.key FROM jdocs t LEFT JOIN json_each(CASE WHEN substring(ltrim(t.j::text), 1, 1) = '{' THEN t.j::json END) d ON TRUE ORDER BY 1",
+      // the nulls idiom on the table's column, folded to that one key before the bound is decided
+      "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY (t.id) IS NULL, t.id DESC, d.key LIMIT 6",
+      // ORDER BY a column of the table LIMIT: the top N's filter reaches the table's scan (by name, by ordinal, through a
+      // derived table), so the rows reaching the lateral are few
+      "SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY t.id DESC, d.key LIMIT 6",
+      "SELECT q.id, d.key FROM (SELECT t.id, t.b FROM jdocs t) q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY 1, 2 NULLS FIRST LIMIT 7 OFFSET 1",
+      // NULL, an empty object, an empty array: the one row each with NULLs, under a LIMIT
+      `SELECT v.id, d.key, d.value::text FROM ${few} LEFT JOIN jsonb_each(${objects}) d ON TRUE LIMIT 5`,
+      `SELECT v.id, e::text FROM ${few} LEFT JOIN jsonb_array_elements(${arrays}) e ON TRUE LIMIT 9`,
     ];
-    for (const sql of left) {
+    const joined = [
+      // no LIMIT: a whole result, sorted or not
+      "SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN LATERAL jsonb_each_text(CASE WHEN jsonb_typeof(t.b -> 'o') = 'object' THEN t.b -> 'o' END) AS d ON true",
+      "SELECT t.id, e.v FROM jdocs t LEFT JOIN jsonb_array_elements(t.b -> 'arr') AS e(v) ON TRUE ORDER BY t.id DESC, e.v::text",
+      "SELECT o.id, tag FROM orders o LEFT JOIN unnest(o.tags) AS tag ON TRUE ORDER BY o.id, tag",
+      // counted, over each kind of list
+      "SELECT count(*), count(d.key) FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE",
+      "SELECT count(*) FROM (SELECT q.id, d.key, d.value FROM (SELECT t.id, t.j FROM jdocs t) AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(q.j::text), 1, 1) = '{' THEN q.j::json ELSE NULL END) d ON TRUE) sub",
+      "SELECT count(*), count(e) FROM (SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements(CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END) e ON TRUE) sub",
+      // sorted by the lateral's own column: a top N over every row
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY d.key NULLS FIRST, q.id LIMIT 8",
+      // sorted by a table's column Mason sorts by an expression (a jsonb's order key, a citext's lower()): no filter
+      // reaches the scan, a top N over every row
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY q.b, q.id, d.key LIMIT 6",
+      "SELECT a.id, k FROM accounts a LEFT JOIN jsonb_object_keys(CASE WHEN a.id > 1 THEN '{\"x\": 1, \"y\": 2}'::jsonb END) AS k ON TRUE ORDER BY a.status, a.id, k LIMIT 5",
+      // WITH TIES: Mason ranks every row for it
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY q.id DESC, d.key FETCH FIRST 3 ROWS WITH TIES",
+      // grouped, distinct, windowed — with a LIMIT above too: each reads every row first
+      "SELECT d.key, count(*) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE GROUP BY 1 ORDER BY 1 NULLS FIRST",
+      "SELECT d.key, count(*) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 3",
+      "SELECT DISTINCT d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY 1 NULLS LAST",
+      "SELECT DISTINCT t.id FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY 1 LIMIT 4",
+      "SELECT t.id, d.key, count(*) OVER (PARTITION BY t.id), row_number() OVER (PARTITION BY t.id ORDER BY d.key) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY 1, 2 LIMIT 9",
+      // NULL, an empty object, an empty array: the one row each with NULLs, whole and counted
+      `SELECT v.id, d.key, d.value::text FROM ${few} LEFT JOIN jsonb_each(${objects}) d ON TRUE`,
+      `SELECT v.id, count(d.key), count(*) FROM ${few} LEFT JOIN jsonb_each(${objects}) d ON TRUE GROUP BY 1 ORDER BY 1`,
+      `SELECT count(*), count(e) FROM ${few} LEFT JOIN jsonb_array_elements(${arrays}) e ON TRUE`,
+    ];
+    for (const sql of streamed) {
       const from = logged.length;
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
       // an INNER lateral of a list never empty: the last argument of each list's function, or the array's CASE
       assert.match(sent(from), /CROSS JOIN LATERAL \( SELECT unnest\((CAST\()?(__mason_json_\w+\(getvariable\('__mason_session'\), .*, true\)|CASE WHEN len\()/, `${sql}\n${sent(from)}`);
       assert.doesNotMatch(sent(from), /LEFT JOIN/, sql);
     }
-    // DuckDB runs it as its UNNEST, no delimiter join over the base
-    const plan = (await c.query({ text: `EXPLAIN ${left[0]}`, rowMode: "array" })).rows.map((r) => String(r[0])).join("\n");
+    // a whole result without an ORDER BY is the same rows, in an order neither promises (the oracle's set comparison)
+    const asSet = (r: { fields: Array<[string, number]>; rows: unknown[][] }): { fields: Array<[string, number]>; rows: unknown[][] } =>
+      ({ fields: r.fields, rows: r.rows.map((x) => JSON.stringify(x)).sort().map((x) => JSON.parse(x) as unknown[]) });
+    for (const sql of joined) {
+      const from = logged.length;
+      if (/ORDER BY/.test(sql)) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      else assert.deepEqual(asSet(await answer(c, sql)), asSet(await postgres(sql)), sql);
+      // DuckDB's own LEFT lateral: no list padded with a NULL
+      assert.match(sent(from), /LEFT JOIN/, `${sql}\n${sent(from)}`);
+      assert.doesNotMatch(sent(from), /CROSS JOIN LATERAL|, true\)( AS JSON\[\])?\)|CASE WHEN len\(/, `${sql}\n${sent(from)}`);
+    }
+    // DuckDB runs the streamed one as its UNNEST, no delimiter join over the base
+    const plan = (await c.query({ text: `EXPLAIN ${streamed[0]}`, rowMode: "array" })).rows.map((r) => String(r[0])).join("\n");
     assert.doesNotMatch(plan, /delim/i, plan);
     assert.match(plan, /unnest/i, plan);
     // not a document's rows the function refuses (an array to jsonb_each): Postgres's error, whichever row it is
     await assert.rejects(c.query("SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(t.b) d ON TRUE"), (e: pg.DatabaseError) => e.code === "22023");
     await assert.rejects(postgres("SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(t.b) d ON TRUE"), /cannot call jsonb_each on a non-object/);
-    // what is not a LEFT … ON TRUE of a list keeps its own plan: an INNER lateral (a row with no members has none), a
-    // condition, a series
+    // what is not a LEFT … ON TRUE of a list keeps its own plan under a LIMIT too: an INNER lateral (a row with no
+    // members has none), a condition
     for (const sql of ["SELECT q.id, d.key FROM jdocs q CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d LIMIT 5",
-      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON d.key <> 'a' ORDER BY 1, 2"]) {
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON d.key <> 'a' ORDER BY 1, 2 LIMIT 20"]) {
       const from = logged.length;
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
       assert.doesNotMatch(sent(from), /, true\)\)/, `${sql}\n${sent(from)}`);
     }
   } finally { await c.end(); }
+});
+
+// A ROW LIMIT SET ON THE WIRE IS NOT A LIMIT THE REWRITE SEES (Mason gap row-limit-on-the-wire): the statement is
+// planned at its Parse, before an Execute's row count arrives, so a LEFT lateral with no LIMIT in its SQL keeps DuckDB's
+// delimiter join — every row computed before the first is sent, the first rows in its own order. The way out, a LIMIT in
+// the SQL, is streamed and Postgres's first rows.
+test("an Execute's row limit over a LEFT lateral keeps DuckDB's join; a LIMIT in the SQL streams Postgres's first rows", async () => {
+  // a closed portal's statement is logged once its result is released, a moment after the CloseComplete
+  const sent = async (from: number): Promise<string> => {
+    for (let i = 0; i < 200; i++) {
+      const line = logged.slice(from).findLast((l) => l.startsWith("statement: "));
+      if (line !== undefined) return line.replace(/^statement: [^—]*— /, "");
+      await sleep(10);
+    }
+    return "";
+  };
+  const lateral = "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE";
+  const firstRows = async (sql: string, maxRows: number): Promise<string[]> => {
+    const s = await rawSession();
+    try {
+      s.socket.write(Buffer.concat([wire.parse("", sql), wire.bind("p", "", [], [0]), wire.execute("p", maxRows), wire.sync()]));
+      const rows = dataRows(await s.untilReady()).map((m) => `${String(m.values[0])}:${String(m.values[1])}`);
+      // the portal closed: its statement is logged with the SQL DuckDB ran
+      s.socket.write(Buffer.concat([wire.close("P", "p"), wire.sync()]));
+      await s.untilReady();
+      return rows;
+    } finally { s.end(); }
+  };
+  const all = (await postgres(lateral)).rows.map((r) => `${String(r[0])}:${String(r[1])}`);
+  let from = logged.length;
+  const paged = await firstRows(lateral, 4);
+  const joined = await sent(from);
+  assert.match(joined, /LEFT JOIN/, joined);
+  assert.doesNotMatch(joined, /CROSS JOIN LATERAL/, joined);
+  assert.equal(paged.length, 4);
+  for (const r of paged) assert.ok(all.includes(r), `${r} is no row of Postgres's answer`);
+  from = logged.length;
+  assert.deepEqual(await firstRows(`${lateral} LIMIT 4`, 0), all.slice(0, 4));
+  const streamed = await sent(from);
+  assert.match(streamed, /CROSS JOIN LATERAL/, streamed);
 });
 
 // THE NULLS-PLACEMENT IDIOM IS ONE KEY (src/duck/rewrite.ts nullsKeyFolded): `ORDER BY (x) IS NULL ASC, x DESC` is

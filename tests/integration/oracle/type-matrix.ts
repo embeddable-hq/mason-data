@@ -750,6 +750,50 @@ function* matrix(): Generator<Matrixed> {
   }
   yield q("unnest of an enum array LEFT JOIN ON TRUE", "SELECT m.id, u, u::text FROM moods m LEFT JOIN unnest(m.ms) u ON TRUE ORDER BY 1, 3");
   yield q("count(*) over a LEFT JOIN json_each expansion", `SELECT count(*), count(s.key), count(DISTINCT s.key) FROM (SELECT q.*, d.key, d.value FROM (SELECT t.id, t.j FROM docs t) AS q LEFT JOIN json_each(${objectJson}) d ON TRUE) s`);
+  // where no LIMIT keeps the first rows, DuckDB's own delimiter join (limitBounds): counted over each kind of list, the
+  // empty object's and the NULL's one row included; grouped, distinct, windowed, with a LIMIT above those too
+  yield q("count(*) over a LEFT JOIN jsonb_each expansion, no LIMIT", `SELECT count(*), count(s.key), count(s.value) FROM (SELECT q.id, d.key, d.value FROM docs q LEFT JOIN LATERAL jsonb_each(${objectJsonb}) d ON TRUE) s`);
+  yield q("count(*) over a LEFT JOIN jsonb_array_elements expansion, no LIMIT", "SELECT count(*), count(s.e), count(DISTINCT s.e::text) FROM (SELECT q.id, e FROM docs q LEFT JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(q.jb) = 'array' THEN q.jb END) e ON TRUE) s");
+  yield q("jsonb_each LEFT JOIN ON TRUE, counted per row (the empty and NULL documents' one row)", `SELECT q.id, count(*), count(d.key) FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE GROUP BY q.id ORDER BY q.id`);
+  yield q("json_each LEFT JOIN ON TRUE, GROUP BY its key", `SELECT d.key, count(*), count(DISTINCT q.id) FROM docs q LEFT JOIN json_each(${objectJson}) d ON TRUE GROUP BY 1 ORDER BY 1 NULLS FIRST`);
+  yield q("jsonb_each LEFT JOIN ON TRUE, GROUP BY its key, limited", `SELECT d.key, count(*) FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 3`);
+  yield q("jsonb_each LEFT JOIN ON TRUE, DISTINCT", `SELECT DISTINCT d.key, jsonb_typeof(d.value) FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE ORDER BY 1 NULLS FIRST, 2 NULLS FIRST`);
+  yield q("jsonb_each LEFT JOIN ON TRUE, DISTINCT, limited", `SELECT DISTINCT q.id FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE WHERE d.key IS NULL ORDER BY 1 LIMIT 10`);
+  yield q("jsonb_each LEFT JOIN ON TRUE, under a window", `SELECT q.id, d.key, count(*) OVER (PARTITION BY q.id) AS n, row_number() OVER (PARTITION BY q.id ORDER BY d.key) AS r FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE ORDER BY 1, 2 NULLS FIRST`);
+  yield q("jsonb_each LEFT JOIN ON TRUE, under a window, limited", `SELECT q.id, d.key, count(*) OVER (PARTITION BY q.id) AS n FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE ORDER BY 1 DESC, 2 LIMIT 25`);
+  // a LIMIT outside the SELECT that holds the join (a derived table, a CTE): streamed, Postgres's rows
+  for (const [limit, label] of [["LIMIT 100 OFFSET 0", "limited"], ["LIMIT 40 OFFSET 23", "limited and offset"]] as const) {
+    yield q(`json_each LEFT JOIN ON TRUE in a derived table, ${label} outside`, `SELECT * FROM (SELECT q.id, d.key, d.value FROM (SELECT t.id, t.j FROM docs t) AS q LEFT JOIN json_each(${objectJson}) d ON TRUE) AS s ${limit}`);
+    yield q(`jsonb_each LEFT JOIN ON TRUE in a CTE, ${label} outside`, `WITH s AS (SELECT q.id, d.key, d.value::text AS v FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE) SELECT s.v, s.key, s.id FROM s ${limit}`);
+    yield q(`jsonb_array_elements LEFT JOIN ON TRUE two derived tables down, ${label} outside`, `SELECT x.id, x.e FROM (SELECT s.id, s.e::text AS e FROM (SELECT q.id, e FROM docs q LEFT JOIN jsonb_array_elements(CASE WHEN jsonb_typeof(q.jb) = 'array' THEN q.jb END) e ON TRUE) s WHERE s.id > 3) x ${limit}`);
+  }
+  // the LIMIT reaching the join through CTEs the walk meets before the SELECT that reads them (markBounds): a CTE read
+  // by another CTE, and a CTE both arms of a UNION ALL read
+  yield q("jsonb_each LEFT JOIN ON TRUE in a CTE another CTE reads, limited and offset outside", `WITH a AS (SELECT q.id, d.key, d.value::text AS v FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE), b AS (SELECT a.v, a.key, a.id FROM a) SELECT * FROM b LIMIT 40 OFFSET 23`);
+  yield q("jsonb_each LEFT JOIN ON TRUE in a CTE both arms of a UNION ALL read, limited outside", `WITH s AS (SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE) SELECT s.id, s.key FROM s UNION ALL SELECT s.id, s.key FROM s LIMIT 40 OFFSET 1280`);
+  // (a filter in the CTE that reads it: DuckDB plans the streamed lateral as a delimiter join, limit-lateral-filter)
+  yield q("jsonb_each LEFT JOIN ON TRUE in a CTE another CTE filters, limited and offset outside", `WITH a AS (SELECT q.id, d.key, d.value::text AS v FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE), b AS (SELECT * FROM a WHERE a.id > 3) SELECT * FROM b LIMIT 40 OFFSET 23`);
+  // an aggregate or a window that reads the rows in the order they come, with no ORDER BY of its own: Postgres hands
+  // each document's members in their order (readsInOrder)
+  yield q("json_each LEFT JOIN ON TRUE under string_agg with no ORDER BY", `SELECT q.id, string_agg(d.key, ',') FROM docs q LEFT JOIN json_each(${objectJson}) d ON TRUE GROUP BY q.id ORDER BY q.id`);
+  yield q("jsonb_each LEFT JOIN ON TRUE under array_agg, json_agg, jsonb_agg, json_object_agg with no ORDER BY", `SELECT q.id, array_agg(d.key), json_agg(d.key), jsonb_agg(d.value), json_object_agg(coalesce(d.key, '-'), d.value)::text FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE GROUP BY q.id ORDER BY q.id`);
+  yield q("jsonb_each LEFT JOIN ON TRUE under row_number, lag, first_value with no window ORDER BY", `SELECT q.id, d.key, row_number() OVER (PARTITION BY q.id) AS r, lag(d.key) OVER (PARTITION BY q.id) AS l, first_value(d.key) OVER (PARTITION BY q.id) AS f FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE ORDER BY 1, 3`);
+  yield q("jsonb_each LEFT JOIN ON TRUE under row_number() OVER ()", `SELECT row_number() OVER () AS r, q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE ORDER BY 1`);
+  yield q("jsonb_each LEFT JOIN ON TRUE under a named window with no ORDER BY", `SELECT q.id, d.key, row_number() OVER w AS r FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE WINDOW w AS (PARTITION BY q.id) ORDER BY 1, 3`);
+  // a correlated EXISTS and an IN (SELECT …) under the LIMIT
+  yield q("jsonb_each LEFT JOIN ON TRUE, a correlated EXISTS, limited", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE WHERE EXISTS (SELECT x.id FROM docs x WHERE x.id = q.id AND x.tags IS NOT NULL) LIMIT 40`);
+  yield q("jsonb_each LEFT JOIN ON TRUE, IN (SELECT …), limited", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE WHERE q.id IN (SELECT x.id FROM docs x WHERE x.ia IS NOT NULL) LIMIT 40`);
+  // a filter on the lateral's own column, and one on the base in the join's own SELECT, under a LIMIT: as written
+  // (the first differs, DuckDB's delimiter join: limit-lateral-filter; the parameters shape sends each literal as $1)
+  yield q("jsonb_each LEFT JOIN ON TRUE, filtered on the lateral's key, limited", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE WHERE d.key <> 'n' LIMIT 40`);
+  yield q("jsonb_each LEFT JOIN ON TRUE, filtered on the base in its own SELECT, limited", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE WHERE q.id > 3 LIMIT 40`);
+  // the nulls idiom over the lateral: once folded, one table column the top N's filter reaches the scan by
+  yield q("jsonb_each LEFT JOIN ON TRUE, the nulls idiom on the table's column, limited", `SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE ORDER BY (q.id) IS NULL, q.id DESC, d.key NULLS FIRST LIMIT 30`);
+  // ORDER BY a column of the table … LIMIT: streamed (the top N's filter reaches the scan), by name, by ordinal,
+  // through a derived table, descending; a json's key held twice is ordered by its value too
+  yield q("json_each LEFT JOIN ON TRUE, sorted by the table's column, limited", `SELECT q.id, d.key, d.value FROM docs q LEFT JOIN json_each(${objectJson}) d ON TRUE ORDER BY q.id DESC, d.key NULLS FIRST, d.value::text LIMIT 100`);
+  yield q("jsonb_each LEFT JOIN ON TRUE over a derived table, sorted by its ordinal, limited", `SELECT q.id, d.key, d.value::text FROM (SELECT t.id, t.jb FROM docs t) AS q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE ORDER BY 1, 2 NULLS FIRST LIMIT 100 OFFSET 40`);
+  yield q("jsonb_each LEFT JOIN ON TRUE in a derived table, sorted by the table's column outside, limited", `SELECT * FROM (SELECT q.id, d.key FROM docs q LEFT JOIN jsonb_each(${objectJsonb}) d ON TRUE) s ORDER BY s.id DESC, s.key NULLS LAST LIMIT 100`);
 
   // ---- the nulls-placement idiom as one key (src/duck/rewrite.ts nullsKeyFolded): `x IS [NOT] NULL, x` in each
   // direction, bare and parenthesised, limited or whole, beside other keys; and what is not the idiom -----------------

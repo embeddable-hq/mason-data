@@ -54,9 +54,19 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     arithmetic ~8; a TIMESTAMP ↔ TIMESTAMPTZ cast is ICU's too, so never "cast, truncate, cast back". The session's
     zone is read where the statement executes (`current_setting('TimeZone')`), never the rewriter's: a prepared
     statement's plan is made at its Parse and run after a later `SET TimeZone`;
-  - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty** (`leftLateral`, the functions'
-    `orNull`): DuckDB's LEFT lateral is a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a
-    100-row preview) and whose order kept other rows than Postgres's; the INNER one is its streaming UNNEST;
+  - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty only where its rows' order
+    decides the answer** (`leftLateral`, `markBounds`, `limitBounds`, the functions' `orNull`): DuckDB's LEFT lateral is
+    a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a 100-row preview) and whose order
+    kept other rows than Postgres's; the INNER one is its streaming UNNEST. But the UNNEST calls the function per ROW,
+    the delimiter join per DISTINCT argument, so where every row is read anyway (a count, a GROUP BY, a DISTINCT, a
+    window, a whole result, a sort by the lateral's column) DuckDB's own join stays (a count over 22 M rows: 79 s joined,
+    over 200 s streamed). Bounded: a LIMIT or OFFSET over the join, passing down through a derived table, a CTE and a
+    UNION ALL's arms; under an ORDER BY only a LIMIT (never WITH TIES), and only when its first key, the nulls idiom
+    folded, is a table's column sorted bare (no collation keys, citext, char(n), jsonb: the top N's filter reaches the
+    scan); and an order-sensitive aggregate or window (string_agg, array_agg, row_number …) with no ORDER BY of its
+    own. Decided in a pre-pass over the whole statement (the walk meets a CTE before the SELECT that reads it). Bounding
+    too much costs time, too little an answer; where DuckDB itself falls back to the delimiter join under a filter it
+    does not push down, the difference is registered (`limit-lateral-filter`, `row-limit-on-the-wire`);
   - **equivalent order keys are canonicalised: `x IS [NOT] NULL, x` is one key on `x` with its NULLS placed**
     (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
     Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's

@@ -381,6 +381,8 @@ export class Executor {
   /** how many vectors each Mason function was called with so far (src/duck/functions.ts FUNCTION_CALLS: the worker's
    *  count, the functions being its) — what a test or a measurement reads to know whether a statement reached one */
   async functionCalls(): Promise<Map<string, number>> { return new Map(Object.entries(await this.call<Record<string, number>>({ op: "calls" }))); }
+  /** how many rows each Mason function was handed so far, across its calls (src/duck/functions.ts FUNCTION_ROWS) */
+  async functionRows(): Promise<Map<string, number>> { return new Map(Object.entries(await this.call<Record<string, number>>({ op: "function rows" }))); }
 
   /** a wire session's connection: a slot of the cancel table, its connection on the worker */
   async runner(): Promise<DuckRunner> {

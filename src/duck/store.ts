@@ -179,6 +179,8 @@ export class DuckStore {
   onCrash(f: (reason: string) => void): void { this.executor.onCrash(f); }
   /** how many vectors each Mason function was called with so far, on the copy's thread (a test's, a measurement's) */
   functionCalls(): Promise<Map<string, number>> { return this.executor.functionCalls(); }
+  /** how many rows each Mason function was handed so far, on the copy's thread (a plan's cost in calls) */
+  functionRows(): Promise<Map<string, number>> { return this.executor.functionRows(); }
 
   /** a connection for one Postgres session (on the executor worker: SessionRunner) */
   runner(): Promise<DuckRunner> { return this.executor.runner(); }

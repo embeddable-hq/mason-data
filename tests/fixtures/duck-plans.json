@@ -129,6 +129,228 @@
       "full_sort": false
     },
     {
+      "name": "LEFT lateral sorted by a table column, LIMIT 100",
+      "sql": "SELECT q.id, d.key, d.value FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY q.id DESC LIMIT 100",
+      "plan": [
+        "TOP_N",
+        "  PROJECTION",
+        "    UNNEST",
+        "      TABLE_SCAN public.orders [top-N filter: id]"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral counted, no LIMIT: jsonb_each (not rewritten)",
+      "sql": "SELECT count(*) FROM (SELECT q.id, d.key, d.value FROM orders q LEFT JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE) sub",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  PROJECTION",
+        "    CTE",
+        "      TABLE_SCAN public.orders",
+        "      HASH_JOIN",
+        "        CTE_SCAN",
+        "        PROJECTION",
+        "          UNNEST",
+        "            HASH_GROUP_BY",
+        "              PROJECTION",
+        "                CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": true,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral counted, no LIMIT: json_each (not rewritten)",
+      "sql": "SELECT count(*) FROM (SELECT q.id, d.key, d.value FROM orders q LEFT JOIN LATERAL json_each(CASE WHEN substring(ltrim(q.meta::text), 1, 1) = '{' THEN q.meta::json END) d ON TRUE) sub",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  PROJECTION",
+        "    CTE",
+        "      TABLE_SCAN public.orders",
+        "      HASH_JOIN",
+        "        CTE_SCAN",
+        "        PROJECTION",
+        "          UNNEST",
+        "            HASH_GROUP_BY",
+        "              PROJECTION",
+        "                CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values",
+        "__mason_jsonb_text"
+      ],
+      "sends": [],
+      "delim_join": true,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral counted, no LIMIT: jsonb_array_elements (not rewritten)",
+      "sql": "SELECT count(*) FROM (SELECT t.id, e FROM orders t LEFT JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.meta -> 'tags') = 'array' THEN t.meta -> 'tags' END) e ON TRUE) sub",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  PROJECTION",
+        "    CTE",
+        "      TABLE_SCAN public.orders",
+        "      HASH_JOIN",
+        "        CTE_SCAN",
+        "        INOUT_FUNCTION",
+        "          PROJECTION calls __mason_json_elements",
+        "            PROJECTION",
+        "              PROJECTION calls __mason_json_get",
+        "                HASH_GROUP_BY",
+        "                  PROJECTION",
+        "                    CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_json_elements",
+        "__mason_json_get"
+      ],
+      "sends": [],
+      "delim_join": true,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral, the nulls idiom on a table column, LIMIT 100",
+      "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY (q.created_at) IS NULL, q.created_at DESC LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  TOP_N",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        UNNEST",
+        "          TABLE_SCAN public.orders [top-N filter: created_at]"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral sorted by a jsonb column, LIMIT 100 (not rewritten)",
+      "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY q.meta, q.id LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  TOP_N",
+        "    PROJECTION calls __mason_jsonb_key",
+        "      CTE",
+        "        TABLE_SCAN public.orders",
+        "        HASH_JOIN",
+        "          CTE_SCAN",
+        "          PROJECTION",
+        "            UNNEST",
+        "              HASH_GROUP_BY",
+        "                PROJECTION",
+        "                  CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values",
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": true,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral in a CTE another CTE reads, through a derived table, LIMIT 100 outside",
+      "sql": "WITH a AS (SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE), b AS (SELECT a.key, a.id FROM a) SELECT * FROM (SELECT * FROM b) s LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    LIMIT",
+        "      UNNEST",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral in a CTE both arms of a UNION ALL read, LIMIT 100 outside",
+      "sql": "WITH s AS (SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE) SELECT s.id, s.key FROM s UNION ALL SELECT s.id, s.key FROM s LIMIT 100 OFFSET 999950",
+      "plan": [
+        "LIMIT",
+        "  UNION",
+        "    PROJECTION",
+        "      UNNEST",
+        "        TABLE_SCAN public.orders",
+        "    PROJECTION",
+        "      UNNEST",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral under string_agg with no ORDER BY",
+      "sql": "SELECT q.id, string_agg(d.key, ',') FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE WHERE q.id < 1000 GROUP BY q.id ORDER BY q.id",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        PERFECT_HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                UNNEST",
+        "                  TABLE_SCAN public.orders [zone-map filter: id < constant]"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "LEFT lateral sorted by its own key, LIMIT 100 (not rewritten)",
+      "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY d.key, q.id LIMIT 100",
+      "plan": [
+        "TOP_N",
+        "  CTE",
+        "    TABLE_SCAN public.orders",
+        "    HASH_JOIN",
+        "      CTE_SCAN",
+        "      PROJECTION",
+        "        UNNEST",
+        "          HASH_GROUP_BY",
+        "            PROJECTION",
+        "              CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": true,
+      "full_sort": false
+    },
+    {
       "name": "LEFT lateral with a condition (not rewritten)",
       "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON d.key <> 'n' WHERE q.id < 1000 ORDER BY 1, 2",
       "plan": [
@@ -855,12 +1077,19 @@
       "name": "BI shape: json_each in a LEFT JOIN ON TRUE over a derived table, guarded by a CASE",
       "sql": "SELECT q.\"t.id\", q.\"t.payload\", q.domain, q.domain_if_then, d.key AS payload_key, d.value AS payload_value FROM (SELECT \"t\".\"id\" AS \"t.id\", \"t\".\"meta\" AS \"t.payload\", substring(((\"c\".\"email\")::varchar) from ('@(.*)')) AS domain, CASE WHEN ((substring(((\"c\".\"email\")::varchar) from ('@(.*)')))::varchar) = ('example.test') THEN ('x') ELSE ('y') END AS domain_if_then FROM \"public\".\"orders\" AS \"t\" LEFT JOIN \"public\".\"customers\" AS \"c\" ON \"c\".\"id\" = \"t\".\"customer_id\") AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(\"t.payload\"::text), 1, 1) = '{' THEN \"t.payload\"::json ELSE NULL END) d ON TRUE",
       "plan": [
-        "UNNEST",
+        "CTE",
         "  PROJECTION",
         "    PROJECTION",
         "      HASH_JOIN",
         "        TABLE_SCAN public.orders",
-        "        TABLE_SCAN public.customers"
+        "        TABLE_SCAN public.customers",
+        "  HASH_JOIN",
+        "    CTE_SCAN",
+        "    PROJECTION",
+        "      UNNEST",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            CTE_SCAN"
       ],
       "calls": [
         "__mason_json_keys",
@@ -868,7 +1097,7 @@
         "__mason_jsonb_text"
       ],
       "sends": [],
-      "delim_join": false,
+      "delim_join": true,
       "full_sort": false
     },
     {
@@ -882,8 +1111,15 @@
         "        CTE",
         "          CTE",
         "            CTE",
-        "              UNNEST",
+        "              CTE",
         "                TABLE_SCAN public.orders [zone-map filter: id < constant]",
+        "                HASH_JOIN",
+        "                  CTE_SCAN",
+        "                  PROJECTION",
+        "                    UNNEST",
+        "                      HASH_GROUP_BY",
+        "                        PROJECTION",
+        "                          CTE_SCAN",
         "              HASH_JOIN",
         "                CTE_SCAN",
         "                PROJECTION",
