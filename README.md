@@ -274,7 +274,7 @@ Mason is for scans and aggregates. A lookup through an index is faster on Postgr
 
 ### When to use Mason
 
-Use Mason for scans and aggregates: the queries that get slower as your data grows. On a replica, these queries
+Use Mason for analytical queries: the queries that get slower as your data grows. On a replica, these queries
 compete with each other and with everything else. Typical examples are dashboards, reports, BI tools, AI agents and
 customer-facing analytics.
 
