@@ -56,7 +56,13 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
     Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's
     (findTargetlistEntrySQL92), the same tree inside an expression the input's (`bareKeyIsInput`);
-  A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`.
+  A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
+  **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
+  independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the
+  nulls idiom with a bare name an output alias shadows, and with an integer constant; a prepared statement executed
+  after a later `SET`; `SELECT *` beside the named columns; each collation kind (C, ICU, a libc order) where a string
+  is compared, and equality apart from order (equality needs no collation); a NULL or a row-held argument where
+  Postgres is strict.
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
 - **DuckDB lives on the executor worker; the main thread never runs a Mason function and never waits for the

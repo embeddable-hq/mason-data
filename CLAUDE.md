@@ -76,11 +76,30 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   (`gh pr create`). A PR is where a person reviews and another agent comments, and a PR (or a commit on one) can always
   be thrown away or rolled back, where unpushed work can be lost. Don't leave work uncommitted or unpushed at the end
   of a task.
-- **Ask for a review before asking a person.** When the harness offers one, request a review of the diff from a
-  stronger model without being asked to, address what it finds, and only then hand the PR to a human.
+- **Every PR gets an independent review before a person sees it**: a reader in a FRESH context (another agent, or
+  the harness's review), given the diff and the code, never the author's conclusions or report, reading for wrong
+  answers. The author's own green oracle is not that evidence: three PRs whose oracle runs showed zero differences
+  carried eleven wrong answers an independent reader found (docs/DESIGN.md "The independent review"). Each confirmed
+  finding becomes an oracle statement and a test; what the reviewer judged correct is said too, so the author does not
+  re-check it.
+- **One review per PR, its findings in ONE message.** Findings sent to an author in three batches cost three fix
+  cycles, each a CI run; collect them, then send once.
+- **A brief says what the test must hold, not only what to build.** Name the shapes the oracle must hold up front
+  (`.claude/rules/duckdb.md` lists them for a rewrite: the grouped view ordered by its output name, the nulls idiom,
+  each collation kind, a prepared statement run after a SET): the first fix round of every PR was for shapes the brief
+  had not named.
+- **Iterate on a subset, run the full gate once.** While a change is being made, `IT_ORACLE_ONLY=<regex>` runs the
+  statements it touches; the full oracle (21,000 statements, minutes) runs ONCE before the push. A measurement's dataset
+  is built once and kept until the PR is pushed. Agents that ran the full oracle after every edit and built a 20 M-row
+  table twice spent about half an hour each on nothing new.
+- **Push early, read while CI runs.** Open the PR as soon as the first commit is green locally (CI is about twelve
+  minutes a run, and it gates every merge); read the diff and run the review while it runs; land fix commits in one
+  push, not one per finding.
 - **Delegate when it is faster, but merge nothing you have not read.** Independent pieces go to sub-agents, each in a
   worktree of its own; the one who merges reads each diff in full, verifies it (the check, and the integration suite when
-  the engine or the listener changed), and merges it. A sub-agent's report is its claim, not the evidence.
+  the engine or the listener changed), and merges it. A sub-agent's report is its claim, not the evidence. Two
+  implementations of two hours each ran side by side; the review-and-fix round after them was the next hour and a half,
+  so the time to land a batch is the slowest implementation plus one review cycle, never the sum.
 
 ## Git workflow
 
@@ -107,7 +126,9 @@ never carries an `ORDER BY`. `.claude/rules/duckdb.md` "The copy" has the rules 
 **A real database's data and structures are confidential.** No real table, column or dataset name, and no row, from
 any database Mason was run against, in the repo, a commit, a PR, an issue or a test: tests are written over synthetic schemas, and a finding from a real database is said
 in sizes and shapes ("a 22 M-row table with two wide JSON columns"). A real database's saved statements may RANK what is
-tested (the BI shapes), never appear.
+tested (the BI shapes), never appear. **Never print a real deployment's `mason status`, config or logs raw** into a
+transcript, a PR or an issue: the Database line names the source's host and user. Filter to the lines you need first; a
+filter that failed printed the host once, and a printed line cannot be unprinted.
 
 ## Commands
 

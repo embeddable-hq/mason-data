@@ -288,6 +288,27 @@ table (and the source password) through the attachment. Others, each fixed with 
 | a catalog portal closed by another session's Sync (every six-card Metabase dashboard) | a catalog statement's portal runs whole at its Bind |
 | one node placed in two arms of a CASE, the second left unqualified | a node is placed once (`nodesPlacedTwice`, held to none) |
 
+### The independent review (2026-10-28)
+
+**Decision.** Every PR is read for wrong answers by a reader in a fresh context before a person sees it, and its
+findings go back to the author in one message (CLAUDE.md "How work is done here").
+
+**Why.** Three PRs landed in one day — three rewrites for a BI tool's slow shapes (date_trunc of a timestamptz, a
+LEFT lateral of json rows, the nulls idiom), jsonb's order and equality, and that order stored as a column — each by an
+agent whose own oracle run showed zero differences over about 21,000 statements. Independent readers of the diffs,
+handed the code and not the authors' reports, found eleven wrong answers between them, every one a shape the authors'
+statements had not held: a grouped jsonb sorted by its ordinal or output name sorted by its text (a clone dropped the
+node's type); the nulls idiom folded a bare name an output alias shadowed, and an integer ordinal; a three-argument
+date_trunc never read a NULL or row-held zone for seconds and below; jsonb equality under glibc refused whole tables
+holding an emoji's variation selector, where equality needs no collation; a mark a write stored after a key was counted
+exact was read as a key. The authors fixed each with a test shown to fail without it, and the oracle gained the shapes.
+
+**What it cost.** Two implementations of 1 h 45 and 1 h 49 ran side by side; a review took 9 to 15 minutes; the fix
+rounds took 44 minutes and 1 h 28 (three batches of findings, three cycles); CI about 12 minutes a run, six runs,
+mostly overlapped. The batch landed in a little over three hours: the slowest implementation, one review cycle, and the
+CI runs that gated the merges — not the sum of the parts. Where time was spent on nothing new: each agent ran the full
+oracle several times while iterating, and one built a 20 M-row dataset twice.
+
 ### EXPLAIN
 
 **Decision.** Postgres's shape, DuckDB's plan inside. An EXPLAIN is the statement it explains: options read in Postgres's
