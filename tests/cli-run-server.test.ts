@@ -88,11 +88,12 @@ const lastUsedAsks: Array<{ name: string; since: string; until: string | null }>
 // the refused statements grouped by the entry that refused them (src/duck/requests.ts unsupported)
 const unsupportedAsks: Array<{ since: string; limit: number }> = [];
 const unsupportedSql = { gap: "quote-ident", title: "quote_ident()", runs: 2, users: ["alice"], clients: ["Metabase"], last: "2026-10-24T10:04:00.000Z", example: "SELECT quote_ident(name) FROM orders" };
+let summaryReads = 0;
 const requests = {
   days: 7,
   lastUsed: async (u: Array<{ name: string; since: string; until: string | null }>) => { lastUsedAsks.push(...u); return u.map((x) => x.name === "metabase" ? "2026-10-24T10:04:00.000Z" : null); },
   page: async (q: RequestQuery) => { asks.push(q); return { requests: [request], before: q.limit === 1 ? "2026-10-24T10:04:00.000Z~3" : null }; },
-  summary: async () => summary,
+  summary: async () => { summaryReads++; return summary; },
   slow: async () => [{ route: "postgres" as const, payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-24T10:03:00.000Z" }],
   refused: async () => ({ total: 3, refused: [{ route: "postgres" as const, payload: "SELECT * FROM nope", runs: 3, last: "2026-10-24T10:04:00.000Z", code: "42P01", message: 'relation "nope" does not exist' }] }),
   unsupported: async (q: { since: string; limit: number }) => { unsupportedAsks.push(q); return [unsupportedSql]; },
@@ -761,4 +762,25 @@ test("the lean state's size: 800 tables of 50 columns is under 400 B a table (it
   const c: RunContext = { ...ctx, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: wide, systemIdentifier: null }) };
   const bytes = JSON.stringify(runServerModule.runState(c, [], null)).length;
   assert.ok(bytes < 800 * 400, `${bytes} bytes`);
+});
+
+test("the summary (/api/queries) is one read shared for 30 s by every page and command that asks: a 7-day scan each was ~0.15 s", async () => {
+  const runServer = await import("../src/cli/run-server.ts") as unknown as { SUMMARY_TTL_MS?: number; timedCache?: <T>(read: () => Promise<T>, ms: number, clock?: () => number) => () => Promise<T> };
+  assert.equal(runServer.SUMMARY_TTL_MS, 30_000);
+  const before = summaryReads;
+  const answers = await Promise.all([call("GET", "/api/queries"), call("GET", "/api/queries"), call("GET", "/api/queries")]);
+  assert.ok(answers.every((a) => a.status === 200 && JSON.parse(a.text).queries.week.statements === 3));
+  assert.ok(summaryReads - before <= 1, `${summaryReads - before} reads for three asks within 30 s`);
+  // the cache itself, on a clock of its own: shared within the time, read again after it, a failure never kept
+  let now = 0, reads = 0, fail = false;
+  const cached = runServer.timedCache!(async () => { reads++; if (fail) throw new Error("the request log could not be read"); return reads; }, 30_000, () => now);
+  assert.deepEqual(await Promise.all([cached(), cached()]), [1, 1], "two at once: one read");
+  now = 29_999;
+  assert.equal(await cached(), 1);
+  now = 30_000;
+  assert.equal(await cached(), 2, "30 s on: read again");
+  now = 70_000; fail = true;
+  await assert.rejects(cached(), /could not be read/);
+  fail = false;
+  assert.equal(await cached(), 4, "the failed read is not kept: the next ask reads again");
 });

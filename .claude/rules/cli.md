@@ -114,7 +114,7 @@ CLI lacks).
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
   worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint
-  (`/api/queries`, one scan of the ledger), never part of `/api/state`, which the page asks every 2 s. `mason cancel`
+  (`/api/queries`, one scan of the ledger, shared for 30 s: `SUMMARY_TTL_MS`), never part of `/api/state`, which the page asks every 2 s. `mason cancel`
   cancels through the listener's one path, the CancelRequest's (`interrupt`, src/api/postgres/server.ts); what it
   names is the statement `mason logs --running` listed (`--statement`, `RunningStatement.statement`), refused 409 when
   the session runs another by then — a session's number alone is whatever it runs at the moment. **A time is read by ONE

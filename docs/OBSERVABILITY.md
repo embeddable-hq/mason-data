@@ -13,7 +13,7 @@ same JSON; the web page and the managed service read those endpoints, never a se
 |---|---|---|
 | `GET /api/state` | `mason status`, `mason wait` (with `?columns=1`) | each copy's rows, state and last sync (`tables[].sync`), the totals, the readiness; each table's columns only with `?columns=1` |
 | `GET /api/tables/<table>/columns` | `mason tables <table>` `columns` | one table's columns (`{ table, columns }`): the Tables page's form reads it as it opens |
-| `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent |
+| `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent; read at most once every 30 s, so up to 30 s old |
 | `GET /api/slow`, `GET /api/refused` | `mason status` | the slow statements; the refused and failed ones, each distinct one once |
 | `GET /api/unsupported?since=&limit=` | `mason status` `unsupported` | the refused statements grouped by the registry entry (docs/SQL-SUPPORT.md) that refused them: `[{ gap, title, runs, users, clients, last, example }]`, the most refused first; a day and 10 entries by default |
 | `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&slow=&search=&before=` | `mason logs --requests` | the request log, filtered and paged; `slow=1` (`--slow`) the ones that took `SLOW_MS` (1 s) or more, `search` (`--search`) a piece of the statement's text, any case |
@@ -301,8 +301,10 @@ other extension is off (src/duck/store.ts). From npm, `mason init` downloads it 
    machine of its platform (README "How you use it"). Shipping it in the npm package (~45 MB a platform) was not done.
 3. **Done**: Queries' `search` over 7 days was ~0.6 s every 5 s while shown (12 scans, ~7.2 s of a core a minute); a
    search is read every 30 s now (2, ~1.2 s a minute), and the log says "Refreshed every 30 s while searching".
-4. The summary is still a 7-day scan per ask (0.15 s): cache it for the 30 s the Overview waits, or derive the week
-   from the minute samples (whose p95s do not merge exactly).
+4. **Done**: the summary was a 7-day scan per ask (146–162 ms at 30 M rows), for each page and `mason status` that
+   asked. It is one read shared for 30 s now (`SUMMARY_TTL_MS`, src/cli/run-server.ts `timedCache`, by time only;
+   asks at once share the read in flight, a failed read is not kept): at most one scan every 30 s, whoever asks, so
+   **the summary is up to 30 s old** — on the Overview, Usage, Queries' cards and `mason status`.
 5. The three history tables (requests, sync events, usage) each repeat the same frame — two connections, the hourly
    trim, a failure said once per streak, the close: one module for it. `src/duck/events.ts` adds a third type import
    from src/cli/ (as requests.ts and sync.ts do): the shapes belong in src/duck/.

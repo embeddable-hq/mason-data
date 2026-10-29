@@ -405,8 +405,33 @@ export function pageFiles(dir: string = fileURLToPath(new URL("../web/", import.
   }));
 }
 
+/** How long `/api/queries`' summary is answered from the last read: the Overview asks every 30 s, Usage and Queries
+ *  too, and `mason status` at each run — each a 7-day scan of the request log (~0.15 s at 30 M rows). */
+export const SUMMARY_TTL_MS = 30_000;
+
+/**
+ * ONE READ SHARED FOR `ms`, by time only (`summaryCache`): every ask within `ms` of a read gets that read — the one in
+ * flight too, so two pages asking at once cost one scan. A read that fails is not kept: the next ask reads again. So the
+ * summary is up to `ms` old (docs/OBSERVABILITY.md says it).
+ */
+export function timedCache<T>(read: () => Promise<T>, ms: number, clock: () => number = Date.now): () => Promise<T> {
+  let kept: { at: number; value: Promise<T> } | null = null;
+  return () => {
+    const now = clock();
+    if (kept !== null && now - kept.at < ms) return kept.value;
+    const value = read();
+    const mine = { at: now, value };
+    kept = mine;
+    // a failure is the caller's answer (it awaits `value`); here it only means the read is not kept
+    value.catch(() => { if (kept === mine) kept = null; });
+    return value;
+  };
+}
+
 export function createRunServer(ctx: RunContext): http.Server {
   const saidErrors = new Set<string>();
+  // the last day's and week's statements, read at most once every SUMMARY_TTL_MS for every page and command that asks
+  const summary = timedCache(() => ctx.duck.requests.summary(), SUMMARY_TTL_MS);
   // read once, here: nothing a request names is ever read from disk (mason serve's run serves no page)
   const page = ctx.page ? pageFiles() : new Map<string, PageFile>();
   return http.createServer((req, res) => {
@@ -449,7 +474,8 @@ export function createRunServer(ctx: RunContext): http.Server {
         } else if (req.method === "GET" && url.pathname === "/api/queries") {
           // the last day's and week's statements in one scan of the request log (mason status); asked on its own, never
           // with /api/state, which the page asks every 2 s
-          sendJson(res, 200, { queries: await ctx.duck.requests.summary() });
+          // (cached SUMMARY_TTL_MS: up to 30 s old)
+          sendJson(res, 200, { queries: await summary() });
         } else if (req.method === "GET" && url.pathname === "/api/running") {
           sendJson(res, 200, { running: ctx.listener.running() });
         } else if (req.method === "POST" && url.pathname === "/api/cancel") {
