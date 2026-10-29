@@ -18,7 +18,7 @@ import { changeUsers, keyFingerprint, newUserId, readUsers, underKey, userPasswo
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { out as styleOut } from "./style.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive } from "../duck/grants.ts";
-import { problemText, readRoles, ROLE_NAME_RE, ROLE_NAME_RULE, ROLES_FILE, roleProblems, rolesFailure, rolesFile } from "./roles.ts";
+import { exampleRole, noRoleWayOut, problemText, readRoles, ROLE_NAME_RE, ROLE_NAME_RULE, ROLES_FILE, roleProblems, rolesFailure, rolesFile, userRole, type RoleFrom } from "./roles.ts";
 import { readSource, shownPath } from "./sources.ts";
 import { readState, type RunState } from "./commands.ts";
 import { RunUnreachable } from "./control.ts";
@@ -47,10 +47,14 @@ export const USER: CommandSpec & { needs: "project" } = {
   --role <role> limits what the user reads to a role of mason/roles.yml (beside the sources file): the tables, and
   the columns of each, it may read. A statement over anything else is refused as Postgres refuses it (42501,
   permission denied for table …), information_schema and mason mcp list the role only what it may read, and the
-  role is read with the user at every statement, so an edit of the file applies at the next one. A user with no
-  role reads every copied table. The file:
+  role is read with the user at every statement, so an edit of the file applies at the next one. A user added
+  without --role reads as the file's default: role; under a file with no default: it reads nothing; with no
+  roles file at all, every copied table. mason init writes the file:
 
+    default: everything              the role of a user added without --role
     roles:
+      everything:
+        tables: all                  every copied table and column, those added later included
       agent:                         the role's name (${ROLE_NAME_RULE})
         tables:
           orders: {}                 every column of a copied table
@@ -66,12 +70,14 @@ export const USER: CommandSpec & { needs: "project" } = {
     docker compose exec mason mason user add grafana   beside mason serve, in its data folder
 
   <name>    ${USER_NAME_RULE}
-  --json    as data: add { user (the name), id, addedAt, password, database, role (with --role), and once Mason runs
-            url, host, port, sslmode }; list { users: [{ name, id, addedAt, live, role?, roleKnown? }] };
+  --json    as data: add { user (the name), id, addedAt, password, database, role (the role it reads as: its own
+            or the file's default; absent when none), roleFrom (file: its own --role; default: the file's default;
+            none), readsNothing (true: no role under a file with no default), and once Mason runs url, host, port,
+            sslmode }; list { users: [{ name, id, addedAt, live, role?, roleFrom, readsNothing?, roleKnown? }] };
             remove { removed: { name, id, addedAt } }; next
 `,
   options: { json: { type: "boolean", default: false }, role: { type: "string" } },
-  json: ["user", "id", "addedAt", "password", "url", "host", "port", "database", "sslmode", "role", "users", "removed", "next"],
+  json: ["user", "id", "addedAt", "password", "url", "host", "port", "database", "sslmode", "role", "roleFrom", "readsNothing", "users", "removed", "next"],
 };
 
 
@@ -82,15 +88,17 @@ const liveOf = (u: MasonUser, apiKey: string): boolean => underKey(u, apiKey);
 // ONE implementation, for `mason user` and for the run's command server (src/cli/run-server.ts `/api/users`, the web
 // page's users): the same file, under the same lock, refused in the same sentences, so the two cannot disagree.
 
-/** A user as `mason user list --json` lists it: `role`, the role it was added with (none: every copied table);
- *  `roleKnown`, whether the roles file names that role now (false: its statements are refused until it does). */
-export interface UserRow { name: string; id: string; addedAt: string; live: boolean; role?: string; roleKnown?: boolean }
+/** A user as `mason user list --json` lists it: `role`, the role it reads as — its own, else the roles file's default
+ *  (src/cli/roles.ts userRole; `roleFrom` says which, `none` where there is neither); `readsNothing`, a user with no
+ *  role under a file with no default; `roleKnown`, for a user with a role of its own, whether the roles file names
+ *  it now (false: its statements are refused until it does). */
+export interface UserRow { name: string; id: string; addedAt: string; live: boolean; role?: string; roleFrom: RoleFrom; readsNothing?: true; roleKnown?: boolean }
 
 /** A user just added, in `mason user add --json`'s shape (`replaced`: in place of one the API key's rotation had removed). */
 export interface AddedUser {
   user: string; id: string; addedAt: string; password: string; database: string;
   url?: string; host?: string; port?: number; sslmode?: string;
-  role?: string;
+  role?: string; roleFrom: RoleFrom; readsNothing?: true;
   replaced: boolean;
 }
 
@@ -149,18 +157,18 @@ export async function rolesBeside(project: Project, run: DevRun | null): Promise
     // a run that does not answer its state (hung, or an older run without /api/state's roles): the file is read here
     // instead, as with Mason stopped — the user is still refused a role the file lacks, which is what this guards
     try { r = (await readState(run)).roles; } catch (e) { if (!(e instanceof RunUnreachable)) throw e; r = undefined; }
-    if (r !== undefined) return { file: r.file, grants: new Map(r.roles.map((n) => [n, { name: n, file: r.file ?? "", tables: new Map() } as RoleGrants])), problem: r.problem };
+    if (r !== undefined) return { file: r.file, grants: new Map(r.roles.map((n) => [n, { name: n, file: r.file ?? "", tables: new Map(), all: false } as RoleGrants])), problem: r.problem, default: r.default ?? null };
   }
   const read = readRoles(project.folder, project.root);
   if (read === null) return NO_ROLES;
   const file = shownPath(project.root, rolesFile(project.folder));
-  if ("message" in read) return { file, grants: new Map(), problem: problemText(read) };
+  if ("message" in read) return { file, grants: new Map(), problem: problemText(read), default: null };
   const src = readSource(project.folder, project.root);
   // the sources file unreadable here: the role's tables are held to it by mason start; the names are checked
   const copied = "message" in src ? null : src.tables.map((e) => ({ source: e.table, columns: e.columns === null ? null : e.columns.map((name) => ({ name })) }));
   const problems = copied === null ? [] : roleProblems(read, copied);
-  if (problems.length) return { file, grants: new Map(), problem: problemText(rolesFailure(read.file, project.root, problems)) };
-  return { file, grants: new Map(read.roles.map((r) => [r.name, { name: r.name, file, tables: new Map() } as RoleGrants])), problem: null };
+  if (problems.length) return { file, grants: new Map(), problem: problemText(rolesFailure(read.file, project.root, problems)), default: read.default };
+  return { file, grants: new Map(read.roles.map((r) => [r.name, { name: r.name, file, tables: new Map(), all: r.tables === "all" } as RoleGrants])), problem: null, default: read.default };
 }
 
 /** What to run after an add: with Mason up, the list and how to end it; with Mason stopped, mason start first. */
@@ -186,15 +194,21 @@ export function listUsers(file: string, apiKey: string, roles: RolesLive = NO_RO
   const r = readUsers(file);
   if ("problem" in r) return { message: `the list of users cannot be read: ${r.problem}`, code: "bad_config", why: "no user connects while it cannot be read",
     fix: `repair ${file}, or move it aside, which removes every user` };
-  return { users: r.users.map((u) => ({ name: u.name, id: u.id, addedAt: u.addedAt, live: liveOf(u, apiKey),
-    ...(u.role !== undefined ? { role: u.role, roleKnown: roles.problem === null && roles.grants.has(u.role) } : {}) })) };
+  return { users: r.users.map((u) => ({ name: u.name, id: u.id, addedAt: u.addedAt, live: liveOf(u, apiKey), ...roleFields(u, roles),
+    ...(u.role !== undefined ? { roleKnown: roles.problem === null && roles.grants.has(u.role) } : {}) })) };
+}
+
+/** a user's role as the JSON says it: the role it reads as, where from, and whether it reads nothing (src/cli/roles.ts userRole) */
+function roleFields(u: { role?: string | undefined }, roles: RolesLive): { role?: string; roleFrom: RoleFrom; readsNothing?: true } {
+  const r = userRole(u, roles);
+  return { ...(r.role !== undefined ? { role: r.role } : {}), roleFrom: r.roleFrom, ...(r.readsNothing ? { readsNothing: true as const } : {}) };
 }
 
 /**
  * ADD A USER to `file` under its lock: a new id, its password (said here, once, and kept nowhere), and — `link`, where
  * the run's Postgres API listens, when it is up — the URL to paste. A name taken by a live user is refused.
  */
-export function addUser(file: string, apiKey: string, name: string, o: { link: PostgresLink | null; database: string; role?: string }): AddedUser | Failure {
+export function addUser(file: string, apiKey: string, name: string, o: { link: PostgresLink | null; database: string; role?: string; roles?: RolesLive }): AddedUser | Failure {
   const usage = userNameProblem("add", name);
   if (usage !== null) return { message: usage, code: "usage" };
   const fingerprint = keyFingerprint(apiKey);
@@ -222,7 +236,7 @@ export function addUser(file: string, apiKey: string, name: string, o: { link: P
   const { link } = o;
   return { user: u.name, id: u.id, addedAt: u.addedAt, password, database: link?.database ?? o.database,
     ...(link !== null ? { url: connectionUrl(link, u.name, password), host: link.host, port: link.port, sslmode: link.sslmode ?? "disable" } : {}),
-    ...(u.role !== undefined ? { role: u.role } : {}), replaced };
+    ...roleFields(u, o.roles ?? NO_ROLES), replaced };
 }
 
 /** REMOVE A USER from `file` under its lock: it connects no more. A name the file lacks is refused with the closest it has. */
@@ -271,22 +285,27 @@ export async function user(argv: string[]): Promise<number> {
   const apiKey = project.config.apiKey;
 
   if (verb === "list") {
-    const r = listUsers(file, apiKey, await rolesBeside(project, w.state === "up" ? w.run : null));
+    const roles = await rolesBeside(project, w.state === "up" ? w.run : null);
+    const r = listUsers(file, apiKey, roles);
     if ("message" in r) return failed("user", r, { json });
     const next: NextStep[] = [["mason user add <name>", "a user for a tool: its password and URL, printed once"], ...(r.users.length ? [["mason user remove <name>", "that user connects no more"] as NextStep] : [])];
     if (json) { out(jsonText(USER, { users: r.users }, next)); return 0; }
     const s = styleOut();
     if (!r.users.length) { out(withEnd(`${s.bold(`No users yet for ${project.config.name}.`)}`, { next })); return 0; }
     const width = Math.max(...r.users.map((u) => u.name.length));
-    const lines = r.users.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${u.role !== undefined ? `role ${u.role}   ` : ""}${s.dim(`id ${u.id} · added ${u.addedAt.slice(0, 16).replace("T", " ")} UTC`)}` +
+    const rolesFileShown = roles.file ?? `mason/${ROLES_FILE}`;
+    const lines = r.users.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${u.role !== undefined ? `role ${u.role}${u.roleFrom === "default" ? " (default)" : ""}   ` : ""}${s.dim(`id ${u.id} · added ${u.addedAt.slice(0, 16).replace("T", " ")} UTC`)}` +
       (u.live ? "" : `   ${s.yellow("does not connect: the API key was rotated since it was added")}`) +
-      (u.roleKnown === false ? `   ${s.yellow(`its role ${u.role} is not in the roles file: its statements are refused`)}` : ""));
+      (u.roleKnown === false ? `   ${s.yellow(`its role ${u.role} is not in the roles file: its statements are refused`)}` : "") +
+      (u.readsNothing === true ? `   ${s.yellow(`has no role, and ${rolesFileShown} names no default: its statements are refused`)}` : ""));
     const rotated = r.users.filter((u) => !u.live);
     const orphan = r.users.find((u) => u.roleKnown === false);
+    const roleless = r.users.find((u) => u.readsNothing === true);
     out(withEnd(`${s.bold(`${r.users.length} user${r.users.length === 1 ? "" : "s"} of ${project.config.name}`)}\n${lines.join("\n")}`,
       { tips: [
         ...(rotated.length ? [`A user added under another API key does not connect: mason user remove ${rotated[0]!.name}, then mason user add ${rotated[0]!.name}.`] : []),
         ...(orphan ? [`A role the roles file (mason/${ROLES_FILE}) does not name reads nothing: add ${orphan.role} to it, or mason user remove ${orphan.name}, then mason user add ${orphan.name} --role <role>.`] : []),
+        ...(roleless ? [`A user with no role reads nothing while ${rolesFileShown} names no default: ${noRoleWayOut(roleless.name, rolesFileShown, exampleRole(roles))}.`] : []),
       ], next }));
     return 0;
   }
@@ -307,11 +326,12 @@ export async function user(argv: string[]): Promise<number> {
   const run = w.state === "up" ? w.run : null;
   const link: PostgresLink | null = run ? postgresLink(run.postgresUrl) : null;
   // the role must be one the roles file names NOW (the listener's reading while the run is up): refused before writing
+  const roles = await rolesBeside(project, run);
   if (role !== undefined) {
-    const problem = roleToAdd(role, await rolesBeside(project, run));
+    const problem = roleToAdd(role, roles);
     if (problem !== null) return failed("user", problem, { json });
   }
-  const r = addUser(file, apiKey, name!, { link, database: project.config.name, ...(role !== undefined ? { role } : {}) });
+  const r = addUser(file, apiKey, name!, { link, database: project.config.name, roles, ...(role !== undefined ? { role } : {}) });
   if ("message" in r) return failed("user", r, { json });
   const { replaced, ...added } = r;
   const next = addedNext(r.user, link !== null);
@@ -321,11 +341,14 @@ export async function user(argv: string[]): Promise<number> {
     details: [
       ...(r.url !== undefined ? [["url", r.url] as const, ["psql", psqlLine(r.url)] as const] : []),
       ["user", r.user], ["password", r.password], ["database", r.database],
-      ...(r.role !== undefined ? [["role", `${r.role} (mason/${ROLES_FILE} names what it reads)`] as const] : []),
+      ...(r.roleFrom === "file" ? [["role", `${r.role!} (mason/${ROLES_FILE} names what it reads)`] as const]
+        : r.roleFrom === "default" ? [["role", `${r.role!} (the file's default: ${roles.file ?? `mason/${ROLES_FILE}`})`] as const]
+        : r.readsNothing === true ? [["role", `none, and ${roles.file ?? `mason/${ROLES_FILE}`} names no default: it reads nothing until one is written`] as const] : []),
       ...(link !== null ? [["host", link.host] as const, ["port", String(link.port)] as const, ...(link.sslmode ? [["ssl mode", link.sslmode] as const] : [])] : []),
     ],
     tips: [
       "Paste it into the tool now: Mason keeps no copy of the password. Lost, remove the user and add it again.",
+      ...(r.readsNothing === true ? [`Its statements are refused until it has a role: ${noRoleWayOut(r.user, roles.file ?? `mason/${ROLES_FILE}`, exampleRole(roles))}.`] : []),
       ...(link === null ? ["Mason is not running: mason start, then mason status says the host and port this user connects to."] : []),
       ...listenerTips(run?.postgresListener ?? null),
       "It never expires: mason user remove ends it, at once and for every session it holds.",

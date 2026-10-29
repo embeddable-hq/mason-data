@@ -254,7 +254,11 @@ export function catalogViews(schema: PgSchema, roles: ReadonlyMap<string, RoleGr
  * while roles exist** (the review of #35): the catalog's one connection is the superuser's with `SET ROLE` on top, so
  * inside one statement `set_config('role', 'none', false)` was a permitted RESET ROLE and the statement's later
  * targets ran as the superuser (`information_schema` listed every hidden column's name); revoked, a role's session is
- * refused it (42501 `permission denied for function set_config`) and the superuser keeps it.
+ * refused it (42501 `permission denied for function set_config`) and the superuser keeps it. A role of `tables: all`
+ * (stage 1b) is resolved to a whole-table grant on every copied table (src/cli/roles.ts resolveRoles), so it is written
+ * here as per-table `GRANT SELECT`s, never `GRANT SELECT ON ALL TABLES IN SCHEMA`: the catalog is rebuilt from the
+ * resolved grants whenever the copied tables move, so a table added later is granted at that rebuild. The file's
+ * `default:` role is one of these roles: a user with no role of its own runs its catalog requests under it.
  */
 export function catalogRoles(schema: PgSchema, roles: ReadonlyMap<string, RoleGrants>): string[] {
   const out: string[] = [];

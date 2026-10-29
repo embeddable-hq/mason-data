@@ -56,7 +56,7 @@ import type { RawStmt } from "libpg-query";
 import { ApiError } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
-import { grantRefusal, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
+import { exampleRole, grantRefusal, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
 import { asRole, databaseNameSql, PgCatalog, unwrapRole } from "./catalog.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
@@ -985,7 +985,8 @@ class Session {
     // a refusal's statement is the one refuse() names (a simple Query's own statement, an Execute's portal's)
     const stored = storedPayload(sql ?? asked?.sql ?? "");
     const user = this.token?.user ?? refusedUser;
-    const role = this.token?.role;
+    // the EFFECTIVE role: the user's own, else the roles file's default (what the statement was held to)
+    const role = this.roleName();
     this.server.options.record({
       requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs: Date.now() - startedAt,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
@@ -1065,7 +1066,10 @@ class Session {
     const text = bytes.subarray(base, raw.stmt_len ? base + raw.stmt_len : bytes.length).toString("utf8");
     const { searchPath, timeZone } = under;
     const grants = this.grants();
-    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, grants?.name ?? "", () =>
+    // the plan cache's key is the role the plan is held to: the effective one (a default's plans are that role's), and
+    // a user with no role under a file with no default its own key, never a token's ("")
+    const key = grants?.noRole !== undefined ? "\u0000no role" : this.roleName() ?? "";
+    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, key, () =>
       this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound, grants));
   }
 
@@ -1074,26 +1078,54 @@ class Session {
    * every plan, every Execute and every catalog read — the user's role is re-read with the user before each statement
    * (`stillLive`), the roles file whenever it changes (`PgApiOptions.roles`), so a role given, taken or edited applies at
    * the next statement, with no restart. undefined: no roles anywhere (nothing to hold, and no reads to record);
-   * null: a session with no role beside roles (its plan still names its reads). FAIL CLOSED: a role the file no
-   * longer names, or a file that cannot be read as it is now, refuses the statement by name, never widens.
+   * null: a session held to nothing beside roles — a token's (its plan still names its reads). FAIL CLOSED: a role the
+   * file no longer names, or a file that cannot be read as it is now, refuses the statement by name, never widens.
+   *
+   * A USER WITH NO ROLE OF ITS OWN IS HELD TO WHAT THE FILE SAYS (stage 1b, never a default in the code): no roles file,
+   * every copied table; the file's `default:`, that role (read here at every statement, so an edit of `default:` applies
+   * at the next one); a file with no `default:`, nothing (`RoleGrants.noRole`: every statement that reads a copied table
+   * refused with the two ways out, src/duck/grants.ts noRoleRefusal). A token, which is no user, reads every copied table.
    */
   private grants(): RoleGrants | null | undefined {
     const live = this.server.rolesNow();
-    const role = this.token?.role;
-    if (role === undefined) return live.grants.size === 0 ? undefined : null;
+    const own = this.token?.role;
     const user = this.token?.user ?? this.user;
+    if (own === undefined) {
+      if (this.token?.user === undefined || live.file === null) return live.grants.size === 0 ? undefined : null;
+      if (live.problem !== null) {
+        throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the statements of the user ${JSON.stringify(user)} are refused: the user has no role of its own and the file's default cannot be read: ${live.problem}`,
+          hint: `fix ${live.file}: a user with no role is held to its default: line` }, 503);
+      }
+      if (live.default !== null) return live.grants.get(live.default) ?? this.notInFile(live, live.default, user);
+      return { name: "", file: live.file, tables: new Map(), all: false, noRole: { user, example: exampleRole(live) } };
+    }
     if (live.problem !== null) {
-      throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the role ${role}'s statements are refused: ${live.problem}`,
-        hint: `fix ${live.file ?? "the roles file"}: the role ${role} is the user ${JSON.stringify(user)}'s (a user with no role is not held to the file)` }, 503);
+      throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the role ${own}'s statements are refused: ${live.problem}`,
+        hint: `fix ${live.file ?? "the roles file"}: the role ${own} is the user ${JSON.stringify(user)}'s` }, 503);
     }
-    const g = live.grants.get(role);
-    if (g === undefined) {
-      const named = [...live.grants.keys()];
-      throw new PgError({ code: "42501", message: `permission denied: the role ${role} of the user ${JSON.stringify(user)} is not in ${live.file ?? "the project's roles file (mason/roles.yml)"}`,
-        detail: `the user keeps the role it was added with; a role the file no longer names reads nothing until it is added again or the user is made again${named.length ? ` (the roles: ${named.join(", ")})` : " (the file names no role)"}`,
-        hint: `add the role ${role} to ${live.file ?? "mason/roles.yml"}, or mason user remove ${user} and mason user add ${user}${named.length ? ` --role ${named[0]}` : ""}` }, 403);
-    }
-    return g;
+    return live.grants.get(own) ?? this.notInFile(live, own, user);
+  }
+
+  /** a role the roles file does not name (now): refused by name, never widened */
+  private notInFile(live: RolesLive, role: string, user: string): never {
+    const named = [...live.grants.keys()];
+    throw new PgError({ code: "42501", message: `permission denied: the role ${role} of the user ${JSON.stringify(user)} is not in ${live.file ?? "the project's roles file (mason/roles.yml)"}`,
+      detail: `the user keeps the role it was added with; a role the file no longer names reads nothing until it is added again or the user is made again${named.length ? ` (the roles: ${named.join(", ")})` : " (the file names no role)"}`,
+      hint: `add the role ${role} to ${live.file ?? "mason/roles.yml"}, or mason user remove ${user} and mason user add ${user}${named.length ? ` --role ${named[0]}` : ""}` }, 403);
+  }
+
+  /**
+   * THE ROLE THE SESSION IS HELD TO NOW, by name — the user's own, else (a user with none) the roles file's `default:`;
+   * undefined for a token, with no roles file, under a file with no default, or one that cannot be read (`grants`
+   * refuses that). Read by the catalog's `SET ROLE` (`catalogAs`), the plan cache's key and the request log's `role`,
+   * so each says the role the statement was held to. Never throws (the request log reads it).
+   */
+  private roleName(): string | undefined {
+    const own = this.token?.role;
+    if (own !== undefined) return own;
+    if (this.token?.user === undefined) return undefined;
+    const live = this.server.rolesNow();
+    return live.file !== null && live.problem === null ? live.default ?? undefined : undefined;
   }
 
   /** a plan's reads held to the session's role of THIS moment (a role given or taken since the Parse): refused as the
@@ -1101,9 +1133,14 @@ class Session {
   private heldToRole(plan: DuckPlan): void {
     const grants = this.grants();
     if (grants === null || grants === undefined) return;
-    if (plan.reads === undefined) {
+    if (plan.reads === undefined && grants.noRole === undefined) {
       throw new PgError({ code: "42501", message: `permission denied: the statement was prepared before the user ${JSON.stringify(this.token?.user ?? this.user)} had the role ${grants.name}`,
         hint: "prepare the statement again: its reads are then held to the role" }, 403);
+    }
+    if (plan.reads === undefined) {
+      // a plan made before any roles file existed, for a user the file now holds to nothing: prepared again, held then
+      throw new PgError({ code: "42501", message: `permission denied: the statement was prepared before ${grants.file} held the user ${JSON.stringify(grants.noRole!.user)} to a role`,
+        hint: "prepare the statement again: its reads are then held to the roles file" }, 403);
     }
     const refused = grantRefusal(plan.reads, grants);
     if (refused !== null) throw refused;
@@ -1116,16 +1153,19 @@ class Session {
    * role the catalog has not made yet (its rebuild a moment behind the file) refuses the statement, said; a role the
    * file no longer names is refused before it reaches the catalog (`grants`).
    */
-  private async catalogAs(message: Buffer): Promise<Array<{ type: string; frame: Buffer }>> {
-    const role = this.token?.role;
-    if (role === undefined) return splitFrames(await this.server.catalog.run(message));
+  private async catalogAs(message: Buffer): Promise<{ frames: Array<{ type: string; frame: Buffer }>; asRole: boolean }> {
+    // fail closed first (a role the file lacks, a file that cannot be read), then the role held to: the user's own or
+    // the file's default (`roleName`; both read the roles once, with no await between). A user the file holds to
+    // nothing (no default) asks the catalog as itself: a statement that reads no copied table is answered
     this.grants();
+    const role = this.roleName();
+    if (role === undefined) return { frames: splitFrames(await this.server.catalog.run(message)), asRole: false };
     const { frames, setRoleRefused } = unwrapRole(splitFrames(await this.server.catalog.run(asRole(message, role))));
     if (setRoleRefused !== null) {
       const e = relayedError(setRoleRefused);
       throw new PgError({ code: "42501", message: `permission denied: the catalog has no role ${role} yet (${e.message})`, hint: "run the statement again: the catalog is rebuilt with the roles as the roles file changes" }, 403);
     }
-    return frames;
+    return { frames, asRole: true };
   }
 
   /**
@@ -1353,7 +1393,7 @@ class Session {
   private dropPortals(): void { for (const name of [...this.portals.keys()]) this.dropPortal(name); }
 
   private async forwardSimple(text: string): Promise<Buffer[]> {
-    const reply = await this.catalogAs(frame("Q", cstr(text)));
+    const { frames: reply } = await this.catalogAs(frame("Q", cstr(text)));
     const err = reply.find((f) => f.type === "E");
     if (err !== undefined) throw relayedError(err.frame);
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
@@ -1495,7 +1535,7 @@ class Session {
 
   /** runs frames in the sidecar; throws the first ErrorResponse; returns the rest, less ReadyForQuery */
   private async catalogRun(...parts: Buffer[]): Promise<Buffer[]> {
-    const reply = await this.catalogAs(Buffer.concat(parts));
+    const { frames: reply, asRole: wrapped } = await this.catalogAs(Buffer.concat(parts));
     // the sidecar answered NOTHING to a batch: it is ignoring everything until a Sync (an earlier error nobody synced)
     // — a protocol state this server must never leave it in; said, never relayed as an empty answer
     if (reply.length === 0) throw new PgError({ code: "XX000", message: "the catalog Postgres answered nothing: report it (its extended-protocol state is out of step)" }, 500);
@@ -1505,7 +1545,7 @@ class Session {
       // sidecar is one connection every session shares: without this Sync one refused Parse silenced the catalog for
       // every session until a restart (review of #480). The Sync's own ReadyForQuery is consumed here. (A request run
       // as a role carries its own Sync, catalog.ts asRole: the RESET ROLE after it must run)
-      if (this.token?.role === undefined && !parts.some((p) => p[0] === 0x53 /* S */)) await this.server.catalog.run(frame("S"));
+      if (!wrapped && !parts.some((p) => p[0] === 0x53 /* S */)) await this.server.catalog.run(frame("S"));
       throw relayedError(err.frame);
     }
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);

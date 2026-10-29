@@ -496,7 +496,7 @@ test("the shop's schema starts the catalog, every foreign key in it", async () =
 // `catalogModule` is read by name, so a tree without these fails each test by name (scripts/fails-without.ts)
 
 /** a role's grants as src/cli/roles.ts resolves them (src/duck/grants.ts RoleGrants) */
-const grants = (name: string, tables: Array<[string, string[] | "all"]>) => ({ name, file: "mason/roles.yml",
+const grants = (name: string, tables: Array<[string, string[] | "all"]>) => ({ name, file: "mason/roles.yml", all: false,
   tables: new Map(tables.map(([table, cols]) => [table, { table, all: cols === "all", columns: cols === "all" ? [] : cols }])) });
 const twoRoles = () => new Map([
   ["agent", grants("agent", [["public.orders", ["id", "amount", "paid"]], ["public.regions", "all"]])],
@@ -524,6 +524,32 @@ test("catalogRoles: one NOLOGIN role per Mason role, USAGE on every table schema
   const m2 = catalogModule as unknown as { catalogViews: (s: PgSchema, r: Map<string, unknown>) => string[] };
   const [v] = m2.catalogViews({ ...schema, views: [{ schema: "public", name: "paid_orders", definition: " SELECT id FROM public.orders WHERE paid;" }] }, twoRoles());
   assert.equal(v, `CREATE SCHEMA IF NOT EXISTS "public"; CREATE VIEW "public"."paid_orders" AS  SELECT id FROM public.orders WHERE paid; GRANT USAGE ON SCHEMA "public" TO "agent"; GRANT SELECT ON "public"."paid_orders" TO "agent"; GRANT USAGE ON SCHEMA "public" TO "ops"; GRANT SELECT ON "public"."paid_orders" TO "ops";`);
+});
+
+test("catalogRoles: a role of tables: all (stage 1b) is granted every copied table whole, a table copied later at the rebuild — per table, never ON ALL TABLES", async () => {
+  // the role as src/cli/roles.ts reads and resolves it, imported here so a tree without tables: all fails this test by name
+  const r = await import("../../src/cli/roles.ts");
+  const m = catalogModule as unknown as { catalogRoles: (s: PgSchema, r: ReadonlyMap<string, unknown>) => string[] };
+  const file = r.parseRolesText("default: everything\nroles:\n  everything:\n    tables: all\n", "/p/mason/roles.yml");
+  assert.ok(!("problems" in file), JSON.stringify(file));
+  const copiedOf = (s: PgSchema) => s.tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, columns: t.columns.map((c) => ({ name: c.name })) }));
+  const resolved = r.resolveRoles(file, copiedOf(schema), "/p");
+  assert.ok(!("message" in resolved));
+  assert.deepEqual(m.catalogRoles(schema, resolved).slice(1), [
+    `CREATE ROLE "everything" NOLOGIN;`,
+    `GRANT USAGE ON SCHEMA "public" TO "everything";`,
+    `GRANT SELECT ON public."orders" TO "everything";`,
+    `GRANT SELECT ON public."customers" TO "everything";`,
+    `GRANT SELECT ON public."regions" TO "everything";`,
+  ]);
+  // the sources file adds a table in another schema: resolved again, the rebuild grants it too
+  const later: PgSchema = { ...schema, tables: [...schema.tables, { name: "invoices", schema: "billing", primaryKey: ["id"], columns: [{ name: "id", type: "int8" }], joins: [] }] };
+  const again = r.resolveRoles(file, copiedOf(later), "/p");
+  assert.ok(!("message" in again));
+  const ddl = m.catalogRoles(later, again);
+  assert.ok(ddl.includes(`GRANT USAGE ON SCHEMA "billing" TO "everything";`), ddl.join("\n"));
+  assert.ok(ddl.includes(`GRANT SELECT ON "billing"."invoices" TO "everything";`), ddl.join("\n"));
+  assert.ok(!ddl.some((l) => /ON ALL TABLES/.test(l)));
 });
 
 test("asRole wraps a request in SET ROLE … RESET ROLE, with a Sync where the request has none; unwrapRole strips the SET's and RESET's replies, and names a refused SET", () => {

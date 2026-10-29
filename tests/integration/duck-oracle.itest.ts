@@ -80,6 +80,8 @@ const tag = `it_duckoracle_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 /** the Postgres LOGIN role of the role cases (`roleCases`): a role is the cluster's, not the database's, so it is named
  *  for this run and dropped with the database */
 const ROLE_LOGIN = `${tag}_agent`;
+/** the Postgres LOGIN role of the `tables: all` role cases (stage 1b): GRANT SELECT ON ALL TABLES IN SCHEMA public */
+const ROLE_ALL = `${tag}_all`;
 const dbUrl = adminUrl ? (() => { const u = new URL(adminUrl); u.pathname = `/${tag}`; return u.toString(); })() : "";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-duck-oracle-"));
 const report = path.join(process.env.IT_LOG_DIR ?? os.tmpdir(), "duck-oracle-differences.txt");
@@ -228,7 +230,7 @@ after(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
   if (adminUrl) psql(adminUrl, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
   // the role cases' login role (its grants went with the database)
-  if (adminUrl) psql(adminUrl, `DROP ROLE IF EXISTS ${ROLE_LOGIN}`);
+  if (adminUrl) psql(adminUrl, `DROP ROLE IF EXISTS ${ROLE_LOGIN}; DROP ROLE IF EXISTS ${ROLE_ALL}`);
 });
 
 test("the DuckDB endpoint answers every statement exactly as Postgres does, before and after changes", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 1_800_000 }, async () => {
@@ -308,12 +310,12 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // orders, customers whole — mirrored by a Postgres role with the same GRANTs (`roleCases`, below); every other
   // session has no role, so every statement above is planned with its reads named (null grants) and nothing refused
   const ROLE_FILE = "mason/roles.yml";
-  const roles: RolesLive = { file: ROLE_FILE, problem: null, grants: new Map([["agent", { name: "agent", file: ROLE_FILE, tables: new Map([
+  let roles: RolesLive = { file: ROLE_FILE, problem: null, default: null, grants: new Map([["agent", { name: "agent", file: ROLE_FILE, all: false, tables: new Map([
     ["public.orders", { table: "public.orders", all: false, columns: ["id", "customer_id", "status", "amount"] }],
     ["public.customers", { table: "public.customers", all: true, columns: [] }]]) }]]) };
   server = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: tag, masonVersion: "oracle",
-    authenticate: (_password, user) => user === ROLE_LOGIN ? { user, role: "agent" } : {},
+    authenticate: (_password, user) => user === ROLE_LOGIN ? { user, role: "agent" } : user === ROLE_ALL ? { user, role: "everything" } : {},
     roles: () => roles,
     schema: () => theSync.schema(),
     record: () => undefined, log: (l) => log.push(l),
@@ -498,6 +500,42 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       }
     }
     console.log(`duck oracle: ${cases.length} role case(s) asked as a role of Postgres and a user of a Mason role, ${refusedAlike} refused alike by SQLSTATE and message`);
+    await allRoleCases();
+  }
+
+  /**
+   * `tables: all` (stage 1b), HELD TO POSTGRES'S `GRANT SELECT ON ALL TABLES IN SCHEMA public`: the Mason role resolved
+   * from the roles file's own words against the copied tables (src/cli/roles.ts), a Postgres role granted every table
+   * of the schema, and the same statements asked of both — every column of every table read, the catalog's answer.
+   */
+  async function allRoleCases(): Promise<void> {
+    const cases = [
+      { name: "tables: all, every column", sql: "SELECT * FROM public.orders ORDER BY id" },
+      { name: "tables: all, a column another role may not read", sql: "SELECT id, notes FROM public.orders ORDER BY id" },
+      { name: "tables: all, every table", sql: "SELECT count(*) FROM public.products" },
+      { name: "tables: all, information_schema.columns", sql: "SELECT table_name::text, column_name::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN ('orders', 'customers', 'products') ORDER BY 1, 2" },
+      { name: "tables: all, the privilege functions", sql: "SELECT has_table_privilege('public.orders', 'SELECT'), has_column_privilege('public.orders', 'notes', 'SELECT'), has_table_privilege('public.products', 'SELECT')" },
+    ].filter((q) => ONLY === null || ONLY.test(`role case: ${q.name}`));
+    if (cases.length === 0) return;
+    const r = await import("../../src/cli/roles.ts");
+    const file = r.parseRolesText("roles:\n  everything:\n    tables: all\n", ROLE_FILE);
+    assert.ok(!("problems" in file), JSON.stringify(file));
+    const copiedNow = theSync.schema().tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, columns: t.columns.map((c) => ({ name: c.name })) }));
+    const resolved = r.resolveRoles(file, copiedNow, dir);
+    assert.ok(!("message" in resolved), JSON.stringify(resolved));
+    // the catalog is rebuilt with the new role at the next statement (a new RolesLive object)
+    roles = { ...roles, grants: new Map([...roles.grants, ...resolved]) };
+    psql(dbUrl, `CREATE ROLE ${ROLE_ALL} LOGIN PASSWORD 'x'; GRANT CONNECT ON DATABASE ${tag} TO ${ROLE_ALL}; GRANT USAGE ON SCHEMA public TO ${ROLE_ALL}; ` +
+      `GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${ROLE_ALL};`);
+    const u = new URL(dbUrl); u.username = ROLE_ALL; u.password = "x";
+    const sourceAll = new pg.Client({ connectionString: u.toString(), application_name: "duck-oracle-role-all" });
+    const masonAll = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: ROLE_ALL, password: "x", application_name: "duck-oracle-role-all" });
+    for (const c of [sourceAll, masonAll]) { await c.connect(); clients.push(c); await c.query("SET TimeZone = 'UTC'"); }
+    for (const q of cases) {
+      const v = verdict(await ask(sourceAll, q.sql), await ask(masonAll, q.sql), ordered(q.sql));
+      if (v !== null) differences.push({ phase: "roles", group: "role case", kind: v.kind, name: `role case: ${q.name}`, detail: v.detail, sql: q.sql });
+    }
+    console.log(`duck oracle: ${cases.length} role case(s) asked as a role granted ALL TABLES IN SCHEMA public and a user of a Mason role of tables: all`);
   }
 
   // ---- the verdict ----------------------------------------------------------------------------------------------
