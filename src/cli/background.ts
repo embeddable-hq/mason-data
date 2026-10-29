@@ -36,6 +36,8 @@ const SUPERVISE = path.join(path.dirname(fileURLToPath(import.meta.url)), "super
 /** The commands to run next, as `mason start` prints them once the run is up: one a line, what each does beside it
  *  (not `mason status | mason logs | mason stop` on one line). */
 export const NEXT_STEPS: NextStep[] = [
+  // the web page first: a first-time user's most useful next step (the run serves it; mason ui opens it, signed in)
+  ["mason ui", UI.summary],
   ["mason tables", "the database's tables, and what you can add"],
   ["mason add <table>", "copy a table into Mason"],
   ["mason user add <name>", "a user for a BI tool or your app: its password and URL, printed once"],
