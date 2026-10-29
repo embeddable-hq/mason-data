@@ -31,6 +31,20 @@ test("the URL: the user defaults to the OS user, the database never defaults, a 
   assert.equal(source("postgres://me:p%40ss@localhost/app").password, "p@ss");
 });
 
+test("a URL that cannot be read is said with its password masked, whatever the password holds", () => {
+  // the problem is printed, and under mason mcp kept in the MCP client's log file
+  for (const [url, shown] of [
+    ["postgres://claude:s3cret@127.0.0.1:99999/shop", '"postgres://claude:****@127.0.0.1:99999/shop" is not a URL'],
+    ["postgres://claude:s3cret@[::1/shop", '"postgres://claude:****@[::1/shop" is not a URL'],
+    ["postgres://claude:s3/cr@et@local host/shop", '"postgres://claude:****@local host/shop" is not a URL'],
+  ] as const) {
+    const r = parseSource(url);
+    assert.ok("problem" in r, url);
+    assert.ok(r.problem.startsWith(shown), r.problem);
+    assert.doesNotMatch(r.problem, /s3cret|s3\/cr|cr@et/, "never the password");
+  }
+});
+
 test("a database elsewhere is remote, and read over TLS unless the URL says otherwise", () => {
   assert.equal(source("postgres://me@db.example.com/app").remote, true);
   assert.equal(source("postgres://me@db.example.com/app").sslmode, "require");

@@ -162,8 +162,12 @@ test("catalogDdl: tables, primary keys, comments, then the foreign keys", () => 
     `ALTER TABLE public."orders" ADD CONSTRAINT "orders_customer_id_fkey" FOREIGN KEY ("customer_id") REFERENCES public."customers" ("id");`,
     `ALTER TABLE public."orders" ADD CONSTRAINT "orders_referrer_id_fkey" FOREIGN KEY ("referrer_id") REFERENCES public."customers" ("id");`,
     `ALTER TABLE public."orders" ADD CONSTRAINT "orders_region_code_fkey" FOREIGN KEY ("region_code") REFERENCES public."regions" ("code");`,
+    WIRE_TYPE,
   ]);
 });
+
+/** the name of an OID the wire sent, with no type the source made: Postgres's (catalog.ts sourceTypeNames) */
+const WIRE_TYPE = "CREATE OR REPLACE FUNCTION public.mason_wire_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT pg_catalog.format_type($1, $2) $$;";
 
 test("catalogDdl: a join that cannot be a foreign key is a comment, never a refused constraint", () => {
   // a target column that is not the target's whole primary key; a target outside the schema; a column the table
@@ -186,7 +190,7 @@ test("catalogDdl: a join that cannot be a foreign key is a comment, never a refu
 
 test("catalogDdl: identifiers are double-quoted with an inner quote doubled; no primary key for a view", () => {
   const t: PgTable = { name: `we"ird`, primaryKey: [], columns: [{ name: `a"b`, type: "uuid" }], joins: [] };
-  assert.deepEqual(catalogDdl({ database: "x", tables: [t] }), [`CREATE TABLE public."we""ird" (\n  "a""b" uuid\n);`]);
+  assert.deepEqual(catalogDdl({ database: "x", tables: [t] }), [`CREATE TABLE public."we""ird" (\n  "a""b" uuid\n);`, WIRE_TYPE]);
 });
 
 // --- the instance -----------------------------------------------------------------------------------------------

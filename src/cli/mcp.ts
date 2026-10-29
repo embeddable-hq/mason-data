@@ -11,13 +11,14 @@
  * that wire: the tables and columns from the catalog (a real Postgres), the rows and how current each copy is from
  * EXPLAIN (FORMAT JSON)'s `Mason.Copies` — the sync's own words, the same line `mason status` prints.
  *
- * STDOUT IS THE PROTOCOL'S: newline-delimited JSON-RPC 2.0 frames and nothing else; what it says goes to stderr. A
- * tool's failure is Mason's refusal (SQLSTATE, message, DETAIL, HINT) as an MCP tool error, never a stack.
+ * STDOUT IS THE PROTOCOL'S: newline-delimited JSON-RPC 2.0 frames and nothing else (`CommandSpec.stdout`: no --json,
+ * every failure on stderr); what it says goes to stderr. A tool's failure is Mason's refusal (SQLSTATE, message,
+ * DETAIL, HINT) as an MCP tool error, never a stack.
  *
  * The protocol is written here, not taken from `@modelcontextprotocol/sdk`: that package brings seventeen runtime
  * dependencies (an HTTP server, an OAuth library, two schema validators) for the stdio surface this file holds whole —
- * initialize, ping, tools/list, tools/call, resources/list, resources/read — as src/cdc/pg-wire.ts holds the Postgres
- * client rather than `pg`.
+ * initialize, ping, tools/list, tools/call, resources/list, resources/read, cancellation — as src/cdc/pg-wire.ts holds
+ * the Postgres client rather than `pg`.
  */
 import { failed, parseCommand, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { whereIs } from "./state.ts";
@@ -25,6 +26,7 @@ import { withPlaceholders } from "./pg-url.ts";
 import { maskedUrl, parseSource, type Source } from "./preflight.ts";
 import { version } from "./version.ts";
 import { PgConnection, PgError, pgIdent, pgLiteral, socketErrorText, type ExtendedResult } from "../cdc/pg-wire.ts";
+import { qualifiedName, type TableName } from "../duck/explain.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 
 /** The URL a client is shown in the help: a user's, as mason user add prints it. */
@@ -33,45 +35,46 @@ const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/shop";
 export const MCP: CommandSpec = {
   name: "mcp",
   summary: "an MCP server on stdio, for Claude Code, Claude Desktop and other agents: the copy's tables, queries, refusals",
-  usage: `usage: mason mcp [--url <postgres://user:password@host:port/database>] [--json]
+  usage: `usage: mason mcp [--url <postgres://user:password@host:port/database>]
 
   An MCP (Model Context Protocol) server on stdin and stdout, for Claude Code, Claude Desktop and any MCP client.
   Its tools say what an agent would otherwise guess: the tables Mason serves, each one's columns, rows and how
   current its copy is, and each statement's answer with its Postgres types — or Mason's refusal, with what to write
-  instead. It connects to the Postgres API as a mason user, by the URL mason user add printed (--url, else
-  MASON_URL), so it works beside mason start or against a mason serve elsewhere, and every statement it runs is in
-  the request log under application_name mason-mcp/<the client's name>. It serves until the client closes stdin;
-  stdout is the protocol's, and what it says goes to stderr.
+  instead. It connects to the Postgres API as a mason user, by the URL mason user add printed (MASON_URL, else
+  --url), so it works beside mason start or against a mason serve elsewhere, and every statement it runs is in
+  the request log under application_name mason-mcp/<the client's name>. It serves until the client closes stdin.
+  Its stdout is the protocol's: it takes no --json, and a failure to start is said on stderr.
 
   Its tools: tables; describe (a table); query (one statement; max_rows default 200, at most 10000; timeout_ms
   default 30000, at most 300000); explain (a statement). Its resources: mason://help/agent and mason://help/mcp.
 
-  Claude Code (in the project's folder, with Mason running):
+  Claude Code (in the project's folder, with Mason running), the URL in the server's environment:
     mason user add claude                          the URL to paste, printed once
+    claude mcp add mason --env MASON_URL="${EXAMPLE_URL}" -- mason mcp
+  or on its command line, where ps shows it to this machine's users and claude mcp add prints it:
     claude mcp add mason -- mason mcp --url "${EXAMPLE_URL}"
-    claude mcp add --env MASON_URL="${EXAMPLE_URL}" mason -- mason mcp
 
-  Claude Desktop (claude_desktop_config.json; the full path to mason where the app cannot find it: which mason):
-    { "mcpServers": { "mason": { "command": "mason", "args": ["mcp"],
+  Claude Desktop (claude_desktop_config.json). The app often starts servers without your shell's PATH, where neither
+  mason nor the node its first line asks for is found: name both by their absolute paths (which node, which mason):
+    { "mcpServers": { "mason": { "command": "/absolute/path/to/node", "args": ["/absolute/path/to/mason", "mcp"],
         "env": { "MASON_URL": "${EXAMPLE_URL}" } } } }
 
   What the client runs:
-    mason mcp --url "${EXAMPLE_URL}"
     MASON_URL="${EXAMPLE_URL}" mason mcp
+    mason mcp --url "${EXAMPLE_URL}"
 
   --url <url>   the Postgres API as a mason user: what mason user add printed (default MASON_URL); TLS as its sslmode
                 says (a host off this machine: require when it names none)
-  --json        as data: a failure to start, { error, next }, on stdout; once it serves, stdout is the protocol's
 `,
-  options: { url: { type: "string" }, json: { type: "boolean", default: false } },
-  json: ["next"],
+  options: { url: { type: "string" } },
+  stdout: "protocol",
 };
 
 /** What the server says while it serves: a log line on stderr (stdout is the protocol's), which an MCP client keeps in
  *  its own log (Claude Code: claude --debug; Claude Desktop: mcp-server-mason.log). A failure to START is failed()'s. */
 const log = (m: string): void => { process.stderr.write(`[mason mcp] ${m}\n`); };
 
-const NEED_URL ="mason mcp needs a mason user's URL: --url, or MASON_URL";
+const NEED_URL = "mason mcp needs a mason user's URL: MASON_URL, or --url";
 const HELP_STEP: NextStep = ["mason help mcp", "how to add mason mcp to Claude Code or Claude Desktop"];
 const ADD_STEP: NextStep = ["mason user add claude", "a user for the agent: its password and URL, printed once"];
 
@@ -85,7 +88,7 @@ async function theUrl(given: string | undefined, cwd: string): Promise<{ url: st
   if (w.state === "up") {
     return { message: NEED_URL, code: "refused",
       why: `Mason is running for ${w.project.config.name} (${withPlaceholders(w.run.postgresUrl)}); an agent connects as a user of its own, and mason mcp makes none by itself`,
-      fix: `mason user add claude prints the URL, once; then mason mcp --url "<that URL>", or MASON_URL in the client's config`,
+      fix: "mason user add claude prints the URL, once; then MASON_URL=\"<that URL>\" in the client's config for mason mcp",
       next: [ADD_STEP, HELP_STEP] };
   }
   if (w.state === "stopped") {
@@ -147,8 +150,9 @@ function connectFailure(e: unknown, s: Source): Failure {
 export async function mcp(argv: string[]): Promise<number> {
   const f = parseCommand(MCP, argv);
   if (typeof f === "number") return f;
-  const json = f.values.json === true;
-  if (f.positionals.length) return failed("mcp", { message: `it takes no argument (${f.positionals.join(" ")}): the URL goes after --url`, code: "usage", usage: MCP.usage }, { json });
+  // every failure to start is said on stderr: stdout is the protocol's (MCP.stdout), --json or not
+  const json = false;
+  if (f.positionals.length) return failed("mcp", { message: `it takes no argument (${f.positionals.join(" ")}): the URL goes in MASON_URL, or after --url`, code: "usage", usage: MCP.usage }, { json });
   const u = await theUrl(f.values.url as string | undefined, process.cwd());
   if ("message" in u) return failed("mcp", u, { json });
   const source = theSource(u.url, u.from);
@@ -196,8 +200,9 @@ export const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "202
 /** JSON-RPC's own error codes, and MCP's for a resource it does not have. */
 const RPC = { parse: -32700, invalidRequest: -32600, noMethod: -32601, invalidParams: -32602, internal: -32603, noResource: -32002 } as const;
 
-type Id = string | number | null;
-interface Request { jsonrpc: "2.0"; id?: Id; method: string; params?: Record<string, unknown> }
+/** A request's id as MCP allows it: a string or an integer, never null. */
+type Id = string | number;
+const isId = (x: unknown): x is Id => typeof x === "string" || (typeof x === "number" && Number.isInteger(x));
 
 /** A tool's answer as MCP carries it: the JSON as text for the model (and as structuredContent for a client), or an error. */
 interface ToolAnswer { content: Array<{ type: "text"; text: string }>; structuredContent?: Record<string, unknown>; isError?: true }
@@ -208,8 +213,22 @@ class ToolError extends Error {
   constructor(text: string, structured: Record<string, unknown>) { super(text); this.structured = structured; }
 }
 
+/** An answer of Mason's this server could not read (EXPLAIN's JSON that does not parse): a bug to report, never a connection. */
+class BadAnswer extends Error {}
+
+/** A request this server answers with a JSON-RPC error (an unknown tool or resource), not a tool's own failure. */
+class RpcFailure extends Error {
+  readonly code: number;
+  constructor(code: number, message: string) { super(message); this.code = code; }
+}
+
+/** One request being answered: the connections it holds, so a cancellation reaches the statement running on them. */
+interface Call { connections: Set<PgConnection>; cancelled: boolean }
+
 export const MAX_ROWS = { default: 200, max: 10_000 } as const;
 export const TIMEOUT_MS = { default: 30_000, max: 300_000 } as const;
+/** how many EXPLAINs `tables` runs at once, each on a connection of its own */
+const COPIES_AT_ONCE = 4;
 
 /** The tools, as tools/list says them: names in Mason's words, each argument with what it is. */
 export const TOOLS = [
@@ -218,7 +237,7 @@ export const TOOLS = [
     title: "The tables Mason serves",
     description: "The tables Mason serves, each a copy of a table of the application's Postgres database: about how many rows each holds, " +
       "and how its copy is kept current (polled, streamed by logical replication, or not current, with when it last was). " +
-      "Start here: a statement can read only these.",
+      "Start here: a statement can read only these, named as listed.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
@@ -267,11 +286,21 @@ const INSTRUCTIONS = "Mason serves read-only copies of tables of an application'
   "Call tables first, describe a table before querying it, and write Postgres's SQL. Each table says how current its copy is. " +
   "When a statement is refused, its hint says what to write instead.";
 
+/** A relation the catalog lists: a copy, or a view over copies. */
+interface Relation extends TableName { kind: "table" | "view" }
+
+/** The relations Mason serves, as the catalog lists them (a catalog read: no row of the request log). */
+async function relations(pg: PgConnection): Promise<Relation[]> {
+  const r = await pg.query(`SELECT n.nspname, c.relname, c.relkind FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%' ORDER BY 1, 2`);
+  return r.rows.map(([schema, name, kind]) => ({ schema: schema!, name: name!, kind: kind === "v" || kind === "m" ? "view" : "table" }));
+}
+
 class McpServer {
   private applicationName = "mason-mcp";
   private readonly source: Source;
-  /** a type's name by its OID and modifier, as format_type says it */
-  private readonly typeNames = new Map<string, string>();
+  /** the requests being answered, by their id (a cancellation names one) */
+  private readonly calls = new Map<string, Call>();
 
   constructor(source: Source) { this.source = source; }
 
@@ -289,29 +318,55 @@ class McpServer {
   }
 
   private async one(msg: unknown): Promise<unknown> {
-    const m = msg as Partial<Request>;
-    if (typeof m !== "object" || m === null || m.jsonrpc !== "2.0" || typeof m.method !== "string") {
-      // an answer to a request of ours (we send none) or something that is no request: a request is answered, the rest dropped
-      return typeof m === "object" && m !== null && "id" in m && !("result" in m || "error" in m) ? rpcError((m.id ?? null) as Id, RPC.invalidRequest, "not a JSON-RPC 2.0 request") : null;
+    if (typeof msg !== "object" || msg === null || Array.isArray(msg)) return rpcError(null, RPC.invalidRequest, "a JSON-RPC message is an object");
+    const m = msg as Record<string, unknown>;
+    // an answer to a request of ours: this server sends none, so there is nothing to answer
+    if (!("method" in m) && ("result" in m || "error" in m)) return null;
+    const hasId = "id" in m;
+    if (hasId && !isId(m.id)) return rpcError(null, RPC.invalidRequest, "a request's id is a string or an integer");
+    if (m.jsonrpc !== "2.0" || typeof m.method !== "string") return rpcError(hasId ? m.id as Id : null, RPC.invalidRequest, "not a JSON-RPC 2.0 request: jsonrpc \"2.0\" and a method");
+    const method = m.method;
+    if (hasId && method.startsWith("notifications/")) return rpcError(m.id as Id, RPC.invalidRequest, `${method} is a notification: it carries no id`);
+    if ("params" in m && (typeof m.params !== "object" || m.params === null || Array.isArray(m.params))) {
+      return hasId ? rpcError(m.id as Id, RPC.invalidParams, "params is an object") : null;
     }
-    const notification = !("id" in m);
-    const id = (m.id ?? null) as Id;
-    const params = (typeof m.params === "object" && m.params !== null ? m.params : {}) as Record<string, unknown>;
+    const params = (m.params ?? {}) as Record<string, unknown>;
+    if (!hasId) { this.notification(method, params); return null; }
+    const id = m.id as Id;
+    const key = `${typeof id}:${id}`;
+    const call: Call = { connections: new Set(), cancelled: false };
+    this.calls.set(key, call);
     try {
-      const result = await this.method(m.method, params);
-      if (notification) return null;
-      if (result === undefined) return rpcError(id, RPC.noMethod, `there is no method ${m.method}`);
+      const result = await this.method(method, params, call);
+      if (call.cancelled) return null;
+      if (result === undefined) return rpcError(id, RPC.noMethod, `there is no method ${method}`);
       return { jsonrpc: "2.0", id, result };
     } catch (e) {
-      if (notification) { log(`${m.method}: ${(e as Error).message}`); return null; }
+      // a request the client cancelled is answered no further (MCP: the receiver SHOULD NOT send a response)
+      if (call.cancelled) return null;
       if (e instanceof RpcFailure) return rpcError(id, e.code, e.message);
-      log(`${m.method} failed: ${(e as Error).message}`);
+      log(`${method} failed: ${(e as Error).message}`);
       return rpcError(id, RPC.internal, (e as Error).message);
+    } finally { this.calls.delete(key); }
+  }
+
+  /** A notification: a cancellation ends its request's statement (Postgres's CancelRequest) and its connections. */
+  private notification(method: string, params: Record<string, unknown>): void {
+    if (method !== "notifications/cancelled") return;   // initialized, roots changed: nothing to do
+    const requestId = params.requestId;
+    const call = isId(requestId) ? this.calls.get(`${typeof requestId}:${requestId}`) : undefined;
+    if (call === undefined) return;   // answered already, or never asked: MCP says to ignore it
+    call.cancelled = true;
+    log(`request ${JSON.stringify(requestId)} cancelled by the client${typeof params.reason === "string" ? `: ${params.reason}` : ""}`);
+    for (const pg of call.connections) {
+      // the statement is cancelled where it runs, then its connection closed: the call's work ends at once
+      void pg.cancel().catch((e: unknown) => { log(`cancelling request ${JSON.stringify(requestId)}: ${(e as Error).message}`); })
+        .finally(() => pg.close());
     }
   }
 
   /** A method's result; undefined for a method this server does not have. */
-  private async method(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private async method(method: string, params: Record<string, unknown>, call: Call): Promise<unknown> {
     switch (method) {
       case "initialize": {
         const asked = params.protocolVersion;
@@ -326,7 +381,7 @@ class McpServer {
       }
       case "ping": return {};
       case "tools/list": return { tools: TOOLS };
-      case "tools/call": return this.call(params);
+      case "tools/call": return this.call(params, call);
       case "resources/list": return { resources: RESOURCES };
       case "resources/templates/list": return { resourceTemplates: [] };
       case "resources/read": {
@@ -335,24 +390,35 @@ class McpServer {
         const { guideText } = await import("./guides.ts");
         return { contents: [{ uri: r.uri, mimeType: r.mimeType, text: r.name === "agent" ? await guideText("agent") : MCP.usage }] };
       }
-      // a notification the client sends (initialized, cancelled, roots changed): nothing to answer
-      default: return method.startsWith("notifications/") ? null : undefined;
+      default: return undefined;
     }
   }
 
-  private async call(params: Record<string, unknown>): Promise<ToolAnswer> {
+  private async call(params: Record<string, unknown>, call: Call): Promise<ToolAnswer> {
     const name = params.name;
+    if (typeof name !== "string") throw new RpcFailure(RPC.invalidParams, `tools/call names its tool (name): ${TOOLS.map((t) => t.name).join(", ")}`);
     const tool = TOOLS.find((t) => t.name === name);
-    if (tool === undefined) throw new RpcFailure(RPC.invalidParams, `there is no tool ${JSON.stringify(name)}${typeof name === "string" ? didYouMean(name, TOOLS.map((t) => t.name)) : ""}: ${TOOLS.map((t) => t.name).join(", ")}`);
-    const args = (typeof params.arguments === "object" && params.arguments !== null ? params.arguments : {}) as Record<string, unknown>;
+    if (tool === undefined) throw new RpcFailure(RPC.invalidParams, `there is no tool ${JSON.stringify(name)}${didYouMean(name, TOOLS.map((t) => t.name))}: ${TOOLS.map((t) => t.name).join(", ")}`);
+    if (params.arguments !== undefined && (typeof params.arguments !== "object" || params.arguments === null || Array.isArray(params.arguments))) {
+      throw new RpcFailure(RPC.invalidParams, "a tool's arguments are an object");
+    }
+    const args = (params.arguments ?? {}) as Record<string, unknown>;
     try {
-      const value = await this.tool(tool.name, args);
+      const value = await this.tool(tool.name, args, call);
       // EXPLAIN is lines of text, read as psql prints them; every other answer is its JSON
       return { content: [{ type: "text", text: tool.name === "explain" ? String(value.plan) : pretty(value) }], structuredContent: value };
     } catch (e) {
       if (e instanceof ToolError) return { content: [{ type: "text", text: e.message }], structuredContent: e.structured, isError: true };
-      if (e instanceof PgError) return refusal(e);
-      // the connection itself: Mason down, or restarting; said as a tool error, so the agent can say it and try again
+      if (e instanceof PgError) return refusal(e, 0);
+      if (call.cancelled) throw e;
+      // an answer of Mason's this server could not read, or a fault of its own: said so, to report — never "Mason is down"
+      if (e instanceof BadAnswer || e instanceof TypeError || e instanceof RangeError || e instanceof ReferenceError || e instanceof SyntaxError) {
+        log(`${tool.name}: ${(e as Error).stack ?? (e as Error).message}`);
+        const text = `mason mcp could not read Mason's answer: ${(e as Error).message}. This is a bug in mason mcp: report it, with the statement.`;
+        return { content: [{ type: "text", text }], structuredContent: { error: { message: text } }, isError: true };
+      }
+      // what is left is the connection's (pg-wire throws a PgError for every answer the server gave): Mason down, or
+      // restarting; said as a tool error, so the agent can say it and try again
       const reason = e instanceof Error ? socketErrorText(e) : String(e);
       log(`${tool.name}: ${reason}`);
       const text = `Mason did not answer (${this.source.host}:${this.source.port}): ${reason}. mason status, beside the run, says whether it is up.`;
@@ -360,151 +426,208 @@ class McpServer {
     }
   }
 
-  private async tool(name: (typeof TOOLS)[number]["name"], args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async tool(name: (typeof TOOLS)[number]["name"], args: Record<string, unknown>, call: Call): Promise<Record<string, unknown>> {
     switch (name) {
-      case "tables": { argsOf(name, args, []); return this.session(TIMEOUT_MS.default, (pg) => this.tables(pg)); }
+      case "tables": { argsOf(name, args, []); return this.session(call, TIMEOUT_MS.default, (pg) => this.tables(pg, call)); }
       case "describe": {
         argsOf(name, args, ["table"]);
         const table = text(args, "table");
-        return this.session(TIMEOUT_MS.default, (pg) => this.describe(pg, table));
+        return this.session(call, TIMEOUT_MS.default, (pg) => this.describe(pg, call, table));
       }
       case "query": {
         argsOf(name, args, ["sql", "max_rows", "timeout_ms"]);
         const sql = text(args, "sql");
         const maxRows = int(args, "max_rows", MAX_ROWS.default, MAX_ROWS.max);
         const timeoutMs = int(args, "timeout_ms", TIMEOUT_MS.default, TIMEOUT_MS.max);
-        return this.session(timeoutMs, (pg) => this.query(pg, sql, maxRows, timeoutMs));
+        return this.session(call, timeoutMs, (pg) => this.query(pg, sql, maxRows, timeoutMs));
       }
       case "explain": {
         argsOf(name, args, ["sql", "analyze", "timeout_ms"]);
         const sql = text(args, "sql");
         if (args.analyze !== undefined && typeof args.analyze !== "boolean") throw badArgument("analyze", "true or false");
         const timeoutMs = int(args, "timeout_ms", TIMEOUT_MS.default, TIMEOUT_MS.max);
-        return this.session(timeoutMs, (pg) => this.explain(pg, sql, args.analyze === true, timeoutMs));
+        return this.session(call, timeoutMs, (pg) => this.explain(pg, sql, args.analyze === true, timeoutMs));
       }
     }
+  }
+
+  /** A connection of this call's, closed when it ends; a cancellation of the call reaches it (`notification`). */
+  private async open(call: Call): Promise<PgConnection> {
+    const pg = await connect(this.source, this.applicationName);
+    call.connections.add(pg);
+    if (call.cancelled) pg.close();
+    return pg;
   }
 
   /**
    * A connection for one tool call, closed after it: a statement's timeout or a dropped session never outlives the call,
    * and a Mason restarted between calls is simply reached again. A server that never answers is let go 10 s past the limit.
    */
-  private async session<T>(timeoutMs: number, work: (pg: PgConnection) => Promise<T>): Promise<T> {
-    const pg = await connect(this.source, this.applicationName);
+  private async session<T>(call: Call, timeoutMs: number, work: (pg: PgConnection) => Promise<T>): Promise<T> {
+    const pg = await this.open(call);
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<never>((_, reject) => {
       timer = setTimeout(() => { pg.close(); reject(new Error(`no answer ${Math.round(timeoutMs / 1000) + 10} s after the statement was sent`)); }, timeoutMs + 10_000);
     });
     try { return await Promise.race([work(pg), late]); }
-    finally { clearTimeout(timer); pg.close(); }
+    finally { clearTimeout(timer); for (const c of call.connections) c.close(); call.connections.clear(); }
   }
 
-  /** Each table the catalog has, with its rows and how its copy is kept current (`copies`). */
-  private async tables(pg: PgConnection): Promise<Record<string, unknown>> {
-    const r = await pg.query(`SELECT n.nspname, c.relname, c.relkind FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-      WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%' ORDER BY 1, 2`);
-    const all = r.rows.map(([schema, table, kind]) => ({ table: `${schema}.${table}`, schema: schema!, name: table!, view: kind === "v" || kind === "m" }));
-    const copies = await this.copies(pg, all.filter((t) => !t.view).map((t) => [t.schema, t.name]));
-    return {
-      tables: all.map((t) => t.view ? { table: t.table, kind: "view" } : { table: t.table, kind: "table", ...copyFacts(copies.get(t.table)) }),
-    };
+  /** Each relation the catalog lists, named as a statement writes it, with its copy's rows and how it is kept current. */
+  private async tables(pg: PgConnection, call: Call): Promise<Record<string, unknown>> {
+    const all = await relations(pg);
+    const copies = await this.copies(pg, call, all.filter((t) => t.kind === "table"));
+    return { tables: all.map((t) => t.kind === "view" ? { table: qualifiedName(t), kind: "view" } : { table: qualifiedName(t), kind: "table", ...copyFacts(copies.get(qualifiedName(t))) }) };
   }
 
   /**
    * HOW EACH COPY IS KEPT CURRENT, and its rows: EXPLAIN (FORMAT JSON)'s `Mason.Copies`, the sync's own words (what
-   * `mason status` prints), read over the wire so a remote mason serve answers as a local run does. One EXPLAIN reads
-   * every table (a UNION ALL of each), so a call is one request of the log; a table it cannot plan is asked alone.
+   * `mason status` prints), read over the wire so a remote mason serve answers as a local run does. One EXPLAIN a table
+   * (a union of them all failed whole for one table it could not plan, and left a refusal in the request log the agent
+   * never sent), several at once on connections of this call's. In a run the catalog lists only the tables copied
+   * (src/duck/sync.ts schemaBuilt), so an EXPLAIN refused here is a table removed between the two reads, said as its
+   * kept line.
    */
-  private async copies(pg: PgConnection, tables: ReadonlyArray<readonly [string, string]>): Promise<Map<string, CopyRow | { error: string }>> {
+  private async copies(pg: PgConnection, call: Call, tables: readonly TableName[]): Promise<Map<string, CopyRow | { error: string }>> {
     const out = new Map<string, CopyRow | { error: string }>();
-    if (tables.length === 0) return out;
-    const read = (t: readonly [string, string]): string => `SELECT 1 FROM ${pgIdent(t[0])}.${pgIdent(t[1])}`;
-    const explain = async (list: ReadonlyArray<readonly [string, string]>): Promise<void> => {
-      const r = await pg.extended(`EXPLAIN (FORMAT JSON) ${list.map(read).join(" UNION ALL ")}`, 0);
-      const doc = JSON.parse(r.rows.map((row) => row[0] ?? "").join("\n")) as Array<{ Mason?: { Copies?: CopyRow[] } }>;
-      for (const c of doc[0]?.Mason?.Copies ?? []) out.set(c.Table, c);
+    const explainOne = async (on: PgConnection, t: TableName): Promise<void> => {
+      const key = qualifiedName(t);
+      let r: ExtendedResult;
+      try { r = await on.extended(`EXPLAIN (FORMAT JSON) SELECT 1 FROM ${pgIdent(t.schema)}.${pgIdent(t.name)}`, 0); }
+      catch (e) { if (!(e instanceof PgError)) throw e; out.set(key, { error: e.fields.M ?? e.message }); return; }
+      const text = r.rows.map((row) => row[0] ?? "").join("\n");
+      let doc: Array<{ Mason?: { Copies?: CopyRow[] } }>;
+      try { doc = JSON.parse(text) as typeof doc; }
+      catch (e) { throw new BadAnswer(`EXPLAIN (FORMAT JSON) of ${key} is not JSON (${(e as Error).message}): ${text.slice(0, 200)}`); }
+      const copy = doc[0]?.Mason?.Copies?.find((c) => c.Table === key);
+      if (copy !== undefined) out.set(key, copy);
     };
-    try { await explain(tables); }
-    catch (e) {
-      if (!(e instanceof PgError)) throw e;
-      for (const t of tables) {
-        try { await explain([t]); }
-        catch (one) { if (!(one instanceof PgError)) throw one; out.set(`${t[0]}.${t[1]}`, { error: one.fields.M ?? one.message }); }
-      }
-    }
+    const queue = [...tables];
+    const worker = async (on: PgConnection): Promise<void> => { for (let t = queue.shift(); t !== undefined; t = queue.shift()) await explainOne(on, t); };
+    const extra = await Promise.all(Array.from({ length: Math.max(0, Math.min(COPIES_AT_ONCE, tables.length) - 1) }, () => this.open(call)));
+    await Promise.all([pg, ...extra].map(worker));
     return out;
   }
 
-  private async describe(pg: PgConnection, asked: string): Promise<Record<string, unknown>> {
-    let found;
-    try {
-      found = await pg.query(`SELECT c.oid::int8::text, n.nspname, c.relname, c.relkind, obj_description(c.oid, 'pg_class') FROM pg_catalog.pg_class c
-        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(${pgLiteral(asked)})`);
-    } catch (e) {
-      // a name to_regclass cannot read (`a.b.c.d`) is no table, said as one
-      if (!(e instanceof PgError)) throw e;
-      found = { rows: [] };
+  /**
+   * ONE RELATION THE CATALOG LISTS, found by its name as `tables` prints it (`public."Clients"`), as the catalog holds
+   * it (`public.Clients`), as a bare name in public (`orders`), or as Postgres reads a name (`sqlName`: quoting,
+   * folding): never a relation `tables` does not list (pg_class, information_schema). Read here, never by to_regclass:
+   * a name Postgres cannot read would be a refusal in the request log the agent never sent.
+   */
+  private async describe(pg: PgConnection, call: Call, asked: string): Promise<Record<string, unknown>> {
+    const listed = await relations(pg);
+    const found = listed.find((t) => qualifiedName(t) === asked || `${t.schema}.${t.name}` === asked)
+      ?? listed.find((t) => t.schema === "public" && (t.name === asked || qualifiedName(t) === `public.${asked}`))
+      ?? read(sqlName(asked), listed);
+    if (found === undefined) {
+      const names = listed.map(qualifiedName);
+      // a bare name of a table in another schema: that table, with its schema (items is sales.items)
+      const elsewhere = listed.filter((t) => t.name.toLowerCase() === asked.replace(/^"|"$/g, "").toLowerCase()).map(qualifiedName);
+      const hint = elsewhere.length ? ` — did you mean ${elsewhere.map((n) => `\`${n}\``).join(" or ")}?` : didYouMean(asked, [...names, ...listed.filter((t) => t.schema === "public").map((t) => qualifiedName(t).slice("public.".length))]);
+      throw new ToolError(`there is no table ${JSON.stringify(asked)} Mason serves${hint}. The tables: ${names.join(", ") || "none yet"}.`,
+        { error: { message: `there is no table ${JSON.stringify(asked)}`, tables: names } });
     }
-    const row = found.rows[0];
-    if (row === undefined) {
-      const names = (await this.tables(pg)).tables as Array<{ table: string }>;
-      const all = names.map((t) => t.table);
-      const bare = all.map((t) => t.replace(/^public\./, ""));
-      throw new ToolError(`there is no table ${JSON.stringify(asked)} Mason serves${didYouMean(asked, [...all, ...bare])}. The tables: ${all.join(", ") || "none yet"}.`,
-        { error: { message: `there is no table ${JSON.stringify(asked)}`, tables: all } });
-    }
-    const [oid, schema, table, kind, comment] = row as [string, string, string, string, string | null];
-    const columns = await pg.query(`SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, col_description(a.attrelid, a.attnum)
-      FROM pg_catalog.pg_attribute a WHERE a.attrelid = ${oid} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`);
+    const { schema, name, kind } = found;
+    const rel = `${pgLiteral(qualifiedName(found))}::regclass`;
+    // pg_catalog.format_type, written out: these are the catalog's own OIDs (mason_wire_type names the wire's)
+    const columns = await pg.query(`SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull, pg_catalog.col_description(a.attrelid, a.attnum)
+      FROM pg_catalog.pg_attribute a WHERE a.attrelid = ${rel} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`);
     const key = await pg.query(`SELECT a.attname FROM pg_catalog.pg_index i JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
-      WHERE i.indrelid = ${oid} AND i.indisprimary ORDER BY array_position(i.indkey::int2[], a.attnum)`);
-    const foreign = await pg.query(`SELECT pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE conrelid = ${oid} AND contype = 'f' ORDER BY conname`);
-    const view = kind === "v" || kind === "m";
-    const copy = view ? undefined : (await this.copies(pg, [[schema, table]])).get(`${schema}.${table}`);
+      WHERE i.indrelid = ${rel} AND i.indisprimary ORDER BY array_position(i.indkey::int2[], a.attnum)`);
+    const foreign = await pg.query(`SELECT pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE conrelid = ${rel} AND contype = 'f' ORDER BY conname`);
+    const comment = (await pg.query(`SELECT pg_catalog.obj_description(${rel}, 'pg_class')`)).rows[0]?.[0] ?? null;
+    const copy = kind === "view" ? undefined : (await this.copies(pg, call, [{ schema, name }])).get(qualifiedName(found));
     return {
-      table: `${schema}.${table}`, kind: view ? "view" : "table",
+      table: qualifiedName(found), kind,
       ...(comment ? { comment } : {}),
-      columns: columns.rows.map(([name, type, notNull, c]) => ({ name, type, not_null: notNull === "t", ...(c ? { comment: c } : {}) })),
+      columns: columns.rows.map(([n, type, notNull, c]) => ({ name: n, type, not_null: notNull === "t", ...(c ? { comment: c } : {}) })),
       key: key.rows.map(([k]) => k),
       foreign_keys: foreign.rows.map(([d]) => d),
-      ...(view ? {} : copyFacts(copy)),
+      ...(kind === "view" ? {} : copyFacts(copy)),
     };
   }
 
   private async query(pg: PgConnection, sql: string, maxRows: number, timeoutMs: number): Promise<Record<string, unknown>> {
     await pg.query(`SET statement_timeout = ${timeoutMs}`);
     const r = await pg.extended(sql, maxRows);
+    if (r.empty) throw badArgument("sql", "a statement (it holds only comments or whitespace)");
     return { columns: await this.columns(pg, r), rows: r.rows, row_count: r.rows.length, truncated: r.suspended, ...(r.command ? { command: r.command } : {}) };
   }
 
   private async explain(pg: PgConnection, sql: string, analyze: boolean, timeoutMs: number): Promise<Record<string, unknown>> {
     await pg.query(`SET statement_timeout = ${timeoutMs}`);
-    const r = await pg.extended(`EXPLAIN ${analyze ? "(ANALYZE) " : ""}${sql}`, 0);
+    const prefix = `EXPLAIN ${analyze ? "(ANALYZE) " : ""}`;
+    let r: ExtendedResult;
+    // a refusal's position is the statement's, not the EXPLAIN's around it
+    try { r = await pg.extended(`${prefix}${sql}`, 0); }
+    catch (e) { if (e instanceof PgError) throw new ToolAnswerError(refusal(e, prefix.length)); throw e; }
+    if (r.empty) throw badArgument("sql", "a statement (it holds only comments or whitespace)");
     return { plan: r.rows.map((row) => row[0] ?? "").join("\n") };
   }
 
-  /** The answer's columns with their Postgres types, as format_type names them (`numeric(12,2)`), asked once per type. */
+  /**
+   * The answer's columns with their Postgres types: the RowDescription's OID and modifier named by the listener's
+   * catalog, whose `mason_wire_type` names the OID the wire sends for a type the source made (an enum, a citext) —
+   * src/api/postgres/catalog.ts `sourceTypeNames`, the one place a wire OID is named; format_type would give an OID the
+   * catalog holds too its catalog meaning. Asked again each call: the catalog is rebuilt when the copied tables change.
+   */
   private async columns(pg: PgConnection, r: ExtendedResult): Promise<Array<{ name: string; type: string }>> {
+    if (r.fields.length === 0) return [];
     const k = (f: { typeOid: number; typmod: number }): string => `${f.typeOid}:${f.typmod}`;
-    const unknown = [...new Map(r.fields.filter((f) => !this.typeNames.has(k(f))).map((f) => [k(f), f])).values()];
-    if (unknown.length) {
-      const names = await pg.query(`SELECT ${unknown.map((f) => `format_type(${f.typeOid}, ${f.typmod})`).join(", ")}`);
-      unknown.forEach((f, i) => { this.typeNames.set(k(f), names.rows[0]?.[i] ?? String(f.typeOid)); });
-    }
-    return r.fields.map((f) => ({ name: f.name, type: this.typeNames.get(k(f))! }));
+    const distinct = [...new Map(r.fields.map((f) => [k(f), f])).values()];
+    const names = await pg.query(`SELECT ${distinct.map((f) => `mason_wire_type(${f.typeOid}, ${f.typmod})`).join(", ")}`);
+    const named = new Map(distinct.map((f, i) => [k(f), names.rows[0]?.[i] ?? String(f.typeOid)]));
+    return r.fields.map((f) => ({ name: f.name, type: named.get(k(f))! }));
   }
 }
 
-/** A JSON-RPC error answer. */
-function rpcError(id: Id, code: number, message: string): unknown { return { jsonrpc: "2.0", id, error: { code, message } }; }
-
-/** A request this server answers with a JSON-RPC error (an unknown tool or resource), not a tool's own failure. */
-class RpcFailure extends Error {
-  readonly code: number;
-  constructor(code: number, message: string) { super(message); this.code = code; }
+/** A table's name as Postgres reads one: `schema.name` or `name` (in public, the search_path's first), a part in double
+ *  quotes as written (`""` a quote), any other folded to lower case; null for what is not a name of one or two parts. */
+export function sqlName(text: string): string[] | null {
+  const parts: string[] = [];
+  const s = text.trim();
+  let at = 0;
+  for (;;) {
+    if (s[at] === '"') {
+      let out = "", end = at + 1;
+      for (;; end++) {
+        if (end >= s.length) return null;   // an unclosed quote
+        if (s[end] === '"') { if (s[end + 1] === '"') { out += '"'; end++; continue; } break; }
+        out += s[end];
+      }
+      if (out === "") return null;
+      parts.push(out);
+      at = end + 1;
+    } else {
+      const m = /^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*/.exec(s.slice(at));
+      if (m === null) return null;
+      parts.push(m[0].toLowerCase());
+      at += m[0].length;
+    }
+    if (at === s.length) break;
+    if (s[at] !== ".") return null;
+    at++;
+  }
+  return parts.length <= 2 ? parts : null;
 }
 
-/** A copy as EXPLAIN (FORMAT JSON) says it (src/duck/explain.ts `keptJson`). */
+/** the listed relation a name read by `sqlName` names */
+const read = (parts: string[] | null, listed: readonly Relation[]): Relation | undefined => {
+  if (parts === null) return undefined;
+  const [schema, name] = parts.length === 1 ? ["public", parts[0]] : parts;
+  return listed.find((t) => t.schema === schema && t.name === name);
+};
+
+/** A tool's answer already made (explain's refusal, its position moved): thrown through the tool, returned as it is. */
+class ToolAnswerError extends ToolError {
+  constructor(answer: ToolAnswer) { super(answer.content[0]!.text, answer.structuredContent ?? {}); }
+}
+
+/** A JSON-RPC error answer. */
+function rpcError(id: Id | null, code: number, message: string): unknown { return { jsonrpc: "2.0", id, error: { code, message } }; }
+
+/** A copy as EXPLAIN (FORMAT JSON) says it (src/duck/explain.ts `keptJson`): `Table` as qualifiedName writes it. */
 interface CopyRow { Table: string; "Estimated Rows": number | null; "Kept Current By": string | null; "Kept Current": string }
 
 /** A copy's facts as the tools say them: about how many rows, how it is kept current, and what keeps it current now. */
@@ -514,10 +637,12 @@ function copyFacts(c: CopyRow | { error: string } | undefined): Record<string, u
   return { rows_about: c["Estimated Rows"], kept: c["Kept Current"], kept_current_by: c["Kept Current By"] };
 }
 
-/** A refusal as the model reads it: Postgres's fields, as psql prints them, and the same as structured content. */
-function refusal(e: PgError): ToolAnswer {
+/** A refusal as the model reads it: Postgres's fields, as psql prints them, and the same as structured content.
+ *  `shift`: the characters this server put before the statement (EXPLAIN's), taken off its position. */
+function refusal(e: PgError, shift: number): ToolAnswer {
   const f = e.fields;
-  const error = { sqlstate: e.code, message: f.M ?? e.message, ...(f.D ? { detail: f.D } : {}), ...(f.H ? { hint: f.H } : {}), ...(f.P ? { position: Number(f.P) } : {}) };
+  const position = f.P !== undefined && Number(f.P) > shift ? Number(f.P) - shift : undefined;
+  const error = { sqlstate: e.code, message: f.M ?? e.message, ...(f.D ? { detail: f.D } : {}), ...(f.H ? { hint: f.H } : {}), ...(position !== undefined ? { position } : {}) };
   const text = [`${f.S ?? "ERROR"} ${e.code}: ${error.message}`, ...(f.D ? [`DETAIL: ${f.D}`] : []), ...(f.H ? [`HINT: ${f.H}`] : [])].join("\n");
   return { content: [{ type: "text", text }], structuredContent: { error }, isError: true };
 }

@@ -53,7 +53,7 @@ CLI lacks).
   a command that does several things prints them as a checklist (`checklist` / `stepRenderer`, src/cli/style.ts: `mason
   init`, `mason add`, `mason start`); a list command lists names first and says the rest for one (`mason tables`; `--all`
   for every one at once). `mason` alone says where you are and what to run next; `mason help` is every command.
-- **Every command but `help` takes `--json`, and every `--json` answer is ONE OBJECT WITH `next`** (both readers
+- **Every command but `help` and `mcp` takes `--json`, and every `--json` answer is ONE OBJECT WITH `next`** (both readers
   benefit from next steps): `jsonText(spec, value, next)` (src/cli/command.ts) prints it, adds `next: [{ command,
   what }]` from the SAME `NextStep` list the human output prints, and refuses a key the spec does not declare —
   `CommandSpec.json` names the answer's top-level keys, its usage's `--json` line names each (`tests/cli-help.test.ts`),
@@ -189,7 +189,8 @@ CLI lacks).
   prints, never "token" or "credentials". `mason connect` (a token for a day) is gone: `mason user`
   is enough.
 - **`mason mcp` is an MCP server on stdio, a client of the Postgres API as a `mason user`** (src/cli/mcp.ts, docs/DESIGN.md
-  "An MCP server"): stdout is the protocol's (JSON-RPC frames alone), every log line goes to stderr; a tool's failure is
+  "An MCP server"): stdout is the protocol's (JSON-RPC frames alone), every log line goes to stderr, and so does a
+  failure to start — it takes no `--json` (`CommandSpec.stdout: "protocol"`; tests/cli-help.test.ts); a tool's failure is
   Mason's refusal (SQLSTATE, message, DETAIL, HINT) as an MCP tool error, never a stack; it never makes a user by itself
   (no URL: refused, naming `mason user add claude`); its tools read only the wire, so a remote `mason serve` answers as a
   local run does (tests/cli-mcp.test.ts).

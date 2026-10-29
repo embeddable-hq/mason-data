@@ -56,6 +56,8 @@ export interface ExtendedResult {
   suspended: boolean;
   /** CommandComplete's tag (`SELECT 3`); "" when the portal was suspended */
   command: string;
+  /** the text held no statement (EmptyQueryResponse: only comments or whitespace) */
+  empty: boolean;
 }
 
 export interface QueryResult {
@@ -121,43 +123,33 @@ export class PgConnection {
 
   /** TCP connect, the SSL negotiation and the startup exchange; `hold` is told the live socket, for a timeout to destroy. */
   private async handshake(hold: (s: net.Socket | tls.TLSSocket) => void): Promise<void> {
-    const o = this.opts;
-    const mode = o.sslmode ?? "prefer";
-    const raw = await new Promise<net.Socket>((resolve, reject) => {
-      const s = net.connect({ host: o.host, port: o.port });
-      hold(s);
-      s.once("connect", () => resolve(s));
-      s.once("error", (e) => reject(new Error(`connecting to ${o.host}:${o.port}: ${socketErrorText(e)}`)));
-    });
-    let sock: net.Socket | tls.TLSSocket = raw;
-    if (mode !== "disable" && mode !== "allow") {
-      // SSLRequest: length 8, code 80877103; the server answers one byte, S or N
-      raw.write(Buffer.from([0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f]));
-      const answer = await new Promise<string>((resolve, reject) => {
-        raw.once("data", (d) => resolve(String.fromCharCode(d[0]!)));
-        raw.once("error", reject);
-      });
-      if (answer === "S") {
-        const verify = mode === "verify-ca" || mode === "verify-full";
-        sock = await new Promise<tls.TLSSocket>((resolve, reject) => {
-          const t = tls.connect({
-            socket: raw, rejectUnauthorized: verify,
-            ...(mode === "verify-full" ? { servername: o.host } : { checkServerIdentity: () => undefined }),
-          });
-          hold(t);
-          t.once("secureConnect", () => resolve(t));
-          t.once("error", reject);
-        });
-      } else if (mode !== "prefer") {
-        raw.destroy();
-        throw new Error(`sslmode=${mode}, but ${o.host} does not accept TLS`);
-      }
-    }
+    const sock = await transport(this.opts, hold);
     this.socket = sock;
     sock.on("data", (d: Buffer) => this.onData(d));
     sock.on("error", (e) => this.fail(e));
     sock.on("close", () => this.fail(new Error("connection closed by the server")));
     await this.startup();
+  }
+
+  /** the server's key for this session (BackendKeyData), for a CancelRequest */
+  private key: { pid: number; secret: number } | null = null;
+
+  /**
+   * ASK THE SERVER TO CANCEL THIS SESSION'S RUNNING STATEMENT (Postgres's CancelRequest, on a connection of its own,
+   * TLS as this one's sslmode): the statement ends with 57014 on this connection, which stays usable. Resolves once
+   * the request is written.
+   */
+  async cancel(): Promise<void> {
+    const key = this.key;
+    if (key === null) throw new Error("the server sent no key for this session: it cannot be cancelled");
+    let held: net.Socket | tls.TLSSocket | null = null;
+    const timer = setTimeout(() => { (held as net.Socket | tls.TLSSocket | null)?.destroy(); }, this.opts.connectTimeoutMs ?? 15_000);
+    try {
+      const s = await transport(this.opts, (x) => { held = x; });
+      const b = Buffer.alloc(16);
+      b.writeInt32BE(16, 0); b.writeInt32BE(80877102, 4); b.writeInt32BE(key.pid, 8); b.writeInt32BE(key.secret, 12);
+      await new Promise<void>((resolve, reject) => { s.once("error", reject); s.end(b, () => resolve()); });
+    } finally { clearTimeout(timer); }
   }
 
   private fail(e: Error): void {
@@ -200,6 +192,13 @@ export class PgConnection {
   private parameter(body: Buffer): void {
     const [k, v] = cstrings(body, 2);
     if (k !== undefined) this.parameters[k] = v ?? "";
+  }
+
+  /** the next message of a statement's reply; when the server closed the connection after an ErrorResponse it sent
+   *  (a FATAL: a user removed, a shutdown) and before ReadyForQuery, that error — never the bare "connection closed" */
+  private async reply(error: PgError | null): Promise<BackendMessage> {
+    try { return await this.next(); }
+    catch (e) { throw error ?? e; }
   }
 
   private next(): Promise<BackendMessage> {
@@ -247,7 +246,7 @@ export class PgConnection {
       const m = await this.next();
       if (m.type === "E") throw new PgError(errorFields(m.body));
       if (m.type === "R") { await this.auth(m.body); continue; }
-      if (m.type === "K") continue; // BackendKeyData
+      if (m.type === "K") { this.key = { pid: m.body.readInt32BE(0), secret: m.body.readInt32BE(4) }; continue; } // BackendKeyData
       if (m.type === "Z") return;
       throw new Error(`unexpected message ${m.type} during startup`);
     }
@@ -315,7 +314,7 @@ export class PgConnection {
     let result: QueryResult = { fields: [], rows: [], command: "" };
     let error: PgError | null = null;
     for (;;) {
-      const m = await this.next();
+      const m = await this.reply(error);
       switch (m.type) {
         case "T": result = { fields: rowDescription(m.body), rows: [], command: "" }; break;
         case "D": result.rows.push(dataRow(m.body)); break;
@@ -338,7 +337,7 @@ export class PgConnection {
     this.send("Q", cstr(sql));
     let error: PgError | null = null;
     for (;;) {
-      const m = await this.next();
+      const m = await this.reply(error);
       switch (m.type) {
         case "D": if (error === null) yield dataRow(m.body); break;
         case "E": error = new PgError(errorFields(m.body)); break;
@@ -362,18 +361,19 @@ export class PgConnection {
     this.send("D", Buffer.concat([Buffer.from("P"), cstr("")]));
     this.send("E", Buffer.concat([cstr(""), int32(maxRows)]));
     this.send("S", Buffer.alloc(0));
-    const result: ExtendedResult = { fields: [], rows: [], suspended: false, command: "" };
+    const result: ExtendedResult = { fields: [], rows: [], suspended: false, command: "", empty: false };
     let error: PgError | null = null;
     for (;;) {
-      const m = await this.next();
+      const m = await this.reply(error);
       switch (m.type) {
         case "T": result.fields = rowFields(m.body); break;
         case "D": if (error === null) result.rows.push(dataRow(m.body)); break;
         case "s": result.suspended = true; break;
         case "C": result.command = cstrings(m.body)[0] ?? ""; break;
         case "E": error = new PgError(errorFields(m.body)); break;
+        case "I": result.empty = true; break;
         case "Z": if (error) throw error; return result;
-        default: break;   // ParseComplete, BindComplete, NoData, EmptyQueryResponse
+        default: break;   // ParseComplete, BindComplete, NoData
       }
     }
   }
@@ -428,6 +428,42 @@ export class PgConnection {
 }
 
 // ------------------------------------------------------------------ helpers
+
+/** TCP connect and the SSL negotiation (libpq's sslmode): the socket a startup, or a CancelRequest, is written to. */
+async function transport(o: PgConnectOptions, hold: (s: net.Socket | tls.TLSSocket) => void): Promise<net.Socket | tls.TLSSocket> {
+  const mode = o.sslmode ?? "prefer";
+  const raw = await new Promise<net.Socket>((resolve, reject) => {
+    const s = net.connect({ host: o.host, port: o.port });
+    hold(s);
+    s.once("connect", () => resolve(s));
+    s.once("error", (e) => reject(new Error(`connecting to ${o.host}:${o.port}: ${socketErrorText(e)}`)));
+  });
+  let sock: net.Socket | tls.TLSSocket = raw;
+  if (mode !== "disable" && mode !== "allow") {
+    // SSLRequest: length 8, code 80877103; the server answers one byte, S or N
+    raw.write(Buffer.from([0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f]));
+    const answer = await new Promise<string>((resolve, reject) => {
+      raw.once("data", (d) => resolve(String.fromCharCode(d[0]!)));
+      raw.once("error", reject);
+    });
+    if (answer === "S") {
+      const verify = mode === "verify-ca" || mode === "verify-full";
+      sock = await new Promise<tls.TLSSocket>((resolve, reject) => {
+        const t = tls.connect({
+          socket: raw, rejectUnauthorized: verify,
+          ...(mode === "verify-full" ? { servername: o.host } : { checkServerIdentity: () => undefined }),
+        });
+        hold(t);
+        t.once("secureConnect", () => resolve(t));
+        t.once("error", reject);
+      });
+    } else if (mode !== "prefer") {
+      raw.destroy();
+      throw new Error(`sslmode=${mode}, but ${o.host} does not accept TLS`);
+    }
+  }
+  return sock;
+}
 
 /** `16/B374D848` -> its 64-bit position; throws on anything else. */
 export function parseLsn(text: string): bigint {

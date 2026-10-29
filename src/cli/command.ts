@@ -30,6 +30,10 @@ export interface CommandSpec {
   /** what it needs to do its work (src/cli/state.ts): a project, a run, or the service; nothing when absent. Its gate
    *  (`reach`) reads it, and tests/cli-state-matrix.test.ts holds it to the code it answers in each state below it */
   needs?: "project" | "run";
+  /** "protocol": its stdout is a protocol's (`mason mcp`'s MCP frames), so it takes no --json and every failure — a
+   *  wrong line, a refusal, a crash — is said on stderr, `--json` on the line or not: one JSON object on stdout would
+   *  be a frame the client cannot read */
+  stdout?: "protocol";
 }
 
 export interface Command extends CommandSpec { run: (argv: string[]) => Promise<number> }
@@ -43,7 +47,7 @@ const HELP: Options = { help: { type: "boolean", short: "h" } };
 export function parseCommand(spec: CommandSpec, argv: string[]): { values: Record<string, string | boolean | string[] | boolean[] | undefined>; positionals: string[] } | number {
   let parsed;
   try { parsed = parseArgs({ args: argv, options: { ...spec.options, ...HELP }, allowPositionals: true }); }
-  catch (e) { return failed(spec.name, { message: (e as Error).message, code: "usage", usage: spec.usage, next: [[`mason ${spec.name} --help`, "its usage, with every option"]] }, { json: wantsJson(argv) }); }
+  catch (e) { return failed(spec.name, { message: (e as Error).message, code: "usage", usage: spec.usage, next: [[`mason ${spec.name} --help`, "its usage, with every option"]] }, { json: wantsJson(argv, spec) }); }
   if (parsed.values.help) { process.stdout.write(spec.usage); return 0; }
   return { values: parsed.values as Record<string, string | boolean | string[] | boolean[] | undefined>, positionals: parsed.positionals };
 }
@@ -122,8 +126,9 @@ export function nextJson(steps: readonly NextStep[] = []): Array<{ command: stri
 }
 
 /** Whether a command line asked for data: `--json` anywhere on it (read before the line is parsed, so a wrong line
- *  is answered in JSON too). */
-export const wantsJson = (argv: readonly string[]): boolean => argv.includes("--json");
+ *  is answered in JSON too) — never for a command whose stdout is a protocol's (`CommandSpec.stdout`), whose every
+ *  failure is said on stderr. */
+export const wantsJson = (argv: readonly string[], spec?: Pick<CommandSpec, "stdout">): boolean => spec?.stdout !== "protocol" && argv.includes("--json");
 
 /**
  * A COMMAND'S --json ANSWER (an agent wants clear, unambiguous context and a machine-readable format, and a person

@@ -1559,6 +1559,54 @@ test("an EXPLAIN is the statement it explains: a write under EXPLAIN ANALYZE is 
   } finally { await c.end(); }
 });
 
+test("a refusal of the statement an EXPLAIN explains is placed where Postgres places it: in the whole text, past EXPLAIN and its options", async () => {
+  const c = await client();
+  try {
+    const position = async (sql: string, values?: unknown[]): Promise<unknown> => {
+      try { await c.query(values === undefined ? sql : { text: sql, values }); }
+      catch (e) { return (e as pg.DatabaseError).position; }
+      throw new Error(`answered: ${sql}`);
+    };
+    const truthPosition = async (sql: string): Promise<unknown> => {
+      try { await truth.query(sql); }
+      catch (e) { return String((e as { position?: unknown }).position); }
+      throw new Error(`the truth answered: ${sql}`);
+    };
+    for (const sql of ["EXPLAIN SELECT nosuch FROM orders", "EXPLAIN (ANALYZE) SELECT nosuch FROM orders", "  explain  (FORMAT JSON)\n SELECT 1 FROM nowhere",
+      "EXPLAIN SELECT 'héllo', nosuch FROM orders"]) {
+      const want = await truthPosition(sql);
+      assert.ok(Number(want) > "EXPLAIN".length, `${sql}: the truth's position is the whole text's (${want})`);
+      assert.equal(await position(sql), want, sql);
+      assert.equal(await position(sql, []), want, `${sql} (Parse)`);
+    }
+  } finally { await c.end(); }
+});
+
+test("the catalog names the OID the wire sends for a type the source made as the source names it, and its own OIDs as it holds them", async () => {
+  const c = await client();
+  try {
+    // the OIDs the wire sends for an enum, its array, a citext: the source's (here the truth's), which the catalog lacks
+    const r = await c.query({ text: "SELECT m, ms FROM moods LIMIT 0", rowMode: "array" });
+    const a = await c.query({ text: "SELECT status FROM accounts LIMIT 0", rowMode: "array" });
+    const oids = [...r.fields.map((f) => f.dataTypeID), a.fields[0]!.dataTypeID];
+    const named = async (q: (sql: string) => Promise<unknown[][]>): Promise<unknown[][]> =>
+      q(`SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`);
+    const truthNames = (await truth.query<unknown[]>(`SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`, [], { rowMode: "array" })).rows;
+    assert.deepEqual(truthNames, [["mood", "mood[]", "citext", "integer", "character varying(10)"]]);
+    // mason_wire_type names what the wire sent; format_type too, but for an OID the catalog holds itself (both count
+    // from 16384: here the array's OID is the catalog's row type of moods), which keeps the catalog's meaning
+    assert.deepEqual((await answer(c, `SELECT ${oids.map((o) => `mason_wire_type(${o}, -1)`).join(", ")}, mason_wire_type(23, -1), mason_wire_type(1043, 14)`)).rows, truthNames);
+    const catalogHas = (await answer(c, `SELECT ${oids.map((o) => `EXISTS (SELECT FROM pg_type WHERE oid = ${o})`).join(", ")}`)).rows[0]!;
+    const formatted = (await named(async (sql) => (await answer(c, sql)).rows))[0]!;
+    oids.forEach((o, i) => {
+      if (catalogHas[i] === "f") assert.equal(formatted[i], truthNames[0]![i], `format_type(${o}): the wire's name`);
+    });
+    // the catalog's own OIDs, as pg_attribute holds them: the catalog's names
+    assert.deepEqual((await answer(c, "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'moods'::regclass AND attnum > 0 ORDER BY attnum")).rows,
+      [["id", "integer"], ["m", "mood"], ["ms", "mood[]"]]);
+  } finally { await c.end(); }
+});
+
 test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and computes after it, and DuckDB's plan in Postgres's layout", async () => {
   const c = await client();
   try {

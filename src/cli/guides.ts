@@ -34,22 +34,23 @@ async function agentGuide(): Promise<string> {
   // imported here, not at the top: the registry imports this file for the HELP usage
   const { STEPS } = await import("./registry.ts");
   const { FAILURE_CODES } = await import("./command.ts");
-  const noJson = new Set(["help"]);
   const w = Math.max(...STEPS.flatMap(([, cs]) => cs.map((c) => c.name.length))) + "mason  --json".length;
-  const commands = STEPS.map(([step, cs]) => `  ${step}\n${cs.map((c) => `    ${`mason ${c.name}${noJson.has(c.name) ? "" : " --json"}`.padEnd(w)}  ${c.summary}`).join("\n")}`).join("\n");
+  const commands = STEPS.map(([step, cs]) => `  ${step}\n${cs.map((c) => `    ${`mason ${c.name}${Object.hasOwn(c.options, "json") ? " --json" : ""}`.padEnd(w)}  ${c.summary}`).join("\n")}`).join("\n");
   const codes = Object.entries(FAILURE_CODES).map(([code, what]) => `    ${code.padEnd(12)} ${what}`).join("\n");
   return `DRIVING MASON FROM A CODING AGENT — the same commands a person runs, answered as data
 
   Every command prints for a person, or with --json one JSON object for a program. One prints text alone: mason help
-  (this reference); mason logs --json is the log's lines, or with --requests the request log. Nothing a command prints
+  (this reference); mason mcp's stdout is the MCP protocol's, so it takes no --json and says a failure to start on
+  stderr; mason logs --json is the log's lines, or with --requests the request log. Nothing a command prints
   refers to a file this package does not ship.
 
   AN AGENT WITH MCP (Claude Code, Claude Desktop, any MCP client) adds Mason as an MCP server first, then asks with
   its tools rather than through a shell: tables (each copy's rows and how current it is), describe, query (rows with
   their Postgres types, or the refusal with what to write instead) and explain. In the project's folder, Mason running:
     mason user add claude --json              its url, printed once
-    claude mcp add mason -- mason mcp --url "<url>"
-  mason help mcp says the rest: Claude Desktop's config, MASON_URL, a mason serve elsewhere.
+    claude mcp add mason --env MASON_URL="<url>" -- mason mcp
+  (the server's name before --env, which takes every value after it). mason help mcp says the rest: Claude Desktop's
+  config, a mason serve elsewhere.
 
   THE COMMANDS, in the order a project takes them (mason --help lists the same):
 ${commands}

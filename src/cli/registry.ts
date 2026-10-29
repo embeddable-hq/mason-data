@@ -201,7 +201,7 @@ export function topUsage(s: Style = styleOut()): string {
     "",
     para("mason <command> --help (or mason help <command>) says how to use one, with examples; the guides are offline and short enough to read whole."),
     para("A command means the project of the folder it runs in (or above it)."),
-    para("Every command but help takes --json: one JSON object for a program, always with next (what to run " +
+    para("Every command but help and mcp (whose stdout is the MCP protocol's) takes --json: one JSON object for a program, always with next (what to run " +
       "next); a failure is { error: { code, message, why, fix }, next }. The exit code says how it went: 0 done, 1 failed " +
       "with the reason, 2 a wrong command line, 124 mason wait timed out. Driving Mason from a coding agent: mason help agent."),
     "",

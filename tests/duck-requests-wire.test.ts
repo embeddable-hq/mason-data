@@ -104,6 +104,29 @@ test("every statement DuckDB answered and every refusal is a row of _mason.reque
   assert.deepEqual(said, []);
 });
 
+test("a statement an Execute's row count stopped is a row of _mason.requests when its portal is dropped, with the rows it sent", async () => {
+  recorded = [];
+  await ledger.flush();
+  const before = (await ledger.recent({ limit: 1000 })).length;
+  const { PgConnection } = await import("../src/cdc/pg-wire.ts");
+  const c = await PgConnection.connect({ host: "127.0.0.1", port: api.port, user: "mason", password: mintToken(API_KEY, 600).token, database: "app",
+    sslmode: "disable", connectTimeoutMs: 5_000, applicationName: "jdbc-maxrows" });
+  try {
+    // JDBC's setMaxRows, mason mcp's max_rows: one Execute at a row count, then Sync drops the portal unread
+    const cut = await c.extended("SELECT id FROM orders ORDER BY id", 2);
+    assert.deepEqual([cut.rows, cut.suspended], [[["1"], ["2"]], true]);
+    // and read to its end: its row at its last row, as before
+    const whole = await c.extended("SELECT id FROM orders ORDER BY id DESC", 5);
+    assert.deepEqual([whole.rows.length, whole.suspended], [3, false]);
+  } finally { c.close(); }
+  await ledger.flush();
+  const rows = (await ledger.recent({ limit: 1000 })).slice(before);
+  assert.deepEqual(rows.map((r) => [r.method, r.outcome, r.rows, r.query, r.applicationName]), [
+    ["EXECUTE", "ok", 2, "SELECT id FROM orders ORDER BY id", "jdbc-maxrows"],
+    ["EXECUTE", "ok", 3, "SELECT id FROM orders ORDER BY id DESC", "jdbc-maxrows"],
+  ], "one row each: the one stopped at its row count with the rows it sent");
+});
+
 test("a ledger that cannot write leaves every answer as it was, and says so once", async () => {
   failWrites = "disk full";
   const c = await client("psql");

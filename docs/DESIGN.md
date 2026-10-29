@@ -985,14 +985,23 @@ user` runs beside the process holding DuckDB's lock. Named as Postgres names it 
 ### An MCP server (2026-10-29)
 
 **Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is
-a client of the Postgres API like any tool, connected as a `mason user` by the URL `mason user add` printed (`--url`,
-`MASON_URL`), with `application_name` `mason-mcp/<client>`. Its tools are named in Mason's words: `tables` (each copy's
+a client of the Postgres API like any tool, connected as a `mason user` by the URL `mason user add` printed
+(`MASON_URL`, or `--url`, where `ps` shows it), with `application_name` `mason-mcp/<client>`. It takes no `--json`
+(`CommandSpec.stdout: "protocol"`): a failure to start is the failure shape on stderr, the MCP client's log. Its tools are named in Mason's words: `tables` (each copy's
 rows and how it is kept current), `describe` (columns, Postgres types, key, foreign keys), `query` (one statement through
 the extended protocol, `max_rows` the Execute's row count so the server stops there and says so, `timeout_ms` a
 `SET statement_timeout`) and `explain`; the agent's guide and `mason help mcp` are its resources. The rows and the kept
-line come from `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` over the wire, one EXPLAIN of every table, never the run's
-command server: a remote `mason serve` answers as a local run does, and the words are the sync's own, as `mason status`
-prints them. With no URL it refuses and names `mason user add claude`; it never makes a user: a password is the person's
+line come from `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` over the wire, never the run's command server: a remote
+`mason serve` answers as a local run does, and the words are the sync's own, as `mason status` prints them. One
+EXPLAIN a table, a few at once: a union of them all failed whole for one table it could not plan, and left a refusal
+in the request log the agent never sent. A table is named as a statement writes it (`public."Clients"`, the formatter
+EXPLAIN's text uses), and `describe` reads a name as Postgres does (quoting, folding) in mcp itself, never by
+`to_regclass`, whose refusal of a name it cannot read would be a row of the request log too. A column's type is named
+by the catalog's `mason_wire_type`: the wire sends the SOURCE's OID for a type the source made (an enum, a citext),
+which the catalog holds under another OID — and both count from 16384, so `format_type` of the wire's OID can be
+another relation's row type in the catalog; the catalog's map of source OIDs is the one place a wire OID is named.
+A request the client cancels (`notifications/cancelled`) is a CancelRequest for its statement, and is answered no
+further. With no URL it refuses and names `mason user add claude`; it never makes a user: a password is the person's
 to hand out. The protocol is written by hand (initialize, ping, tools/list, tools/call, resources/list, resources/read)
 rather than taken from `@modelcontextprotocol/sdk`, whose seventeen runtime dependencies (an HTTP server, an OAuth
 library, two schema validators) are for the transports this command does not serve; `src/cdc/pg-wire.ts` is its
@@ -1014,7 +1023,8 @@ resource server, publishing its protected-resource metadata, the bearer token ma
 log still names who asked — or, before an authorization server exists, a user's password as a bearer token for the
 clients that take a static header. The tool code would not change; the transport and the login would.
 
-**Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`); `tests/cli-mcp.test.ts`.
+**Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`), `src/api/postgres/catalog.ts`
+(`sourceTypeNames`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
 
 ## The request log
 
