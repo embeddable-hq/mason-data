@@ -1130,12 +1130,23 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT
 test("an Execute's row count over a LEFT lateral streams Postgres's first rows: planned again once, kept, the portal paged on", async () => {
   const duck = await store.listener(undefined, undefined, undefined, () => copies);
   const planned: Array<{ text: string; wire: boolean }> = [];
+  /** the search_path and TimeZone each plan made again for a row count was made under */
+  const under: string[] = [];
+  /** held until the test lets a plan made again for a row count go on */
+  let gate: Promise<void> = Promise.resolve();
+  let skew = false;
   const counted = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
     authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
     schema: () => schema,
     record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
-    duck: { ...duck, plan: (...a: Parameters<typeof duck.plan>) => { planned.push({ text: a[1], wire: a[8] === true }); return duck.plan(...a); } },
+    duck: { ...duck, plan: async (...a: Parameters<typeof duck.plan>) => {
+      planned.push({ text: a[1], wire: a[8] === true });
+      if (a[8] === true) { under.push(`${a[5]} | ${a[6]}`); await gate; }
+      const p = await duck.plan(...a);
+      // a schema moved between the Parse and the Execute: the plan made again answers another column
+      return skew && a[8] === true ? { ...p, fields: p.fields!.map((f, i) => i === 0 ? { ...f, name: "moved" } : f) } : p;
+    } },
   });
   // a portal's statement is logged once its result is released, a moment after its last rows
   const sent = async (from: number): Promise<string> => {
@@ -1263,6 +1274,55 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
     // the SQL sent is the join's, and DuckDB plans its delimiter join
     assert.match(plain.join("\n"), /Sent to DuckDB: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
     assert.doesNotMatch(plain.join("\n"), /CROSS JOIN LATERAL/, plain.join("\n"));
+
+    // planned again under the search_path and TimeZone of its Parse, never a later SET's
+    const zoned = `${lateral} WHERE t.id > 0`;
+    s.socket.write(Buffer.concat([wire.parse("zoned", zoned), wire.sync()]));
+    await s.untilReady();
+    s.socket.write(wire.query("SET TimeZone = 'Europe/Berlin'; SET search_path = sales, public"));
+    await s.untilReady();
+    assert.deepEqual((await paged("zoned", "z", 3)).pages.flat(), all);
+    assert.equal(under.at(-1), '"$user", public | UTC');
+    s.socket.write(wire.query("SET TimeZone = 'UTC'; SET search_path = DEFAULT"));
+    await s.untilReady();
+
+    // a plan made again that answers other columns than the Parse said (the schema moved) is not run: the Parse's is,
+    // kept for the next Execute too
+    const moved = `${lateral} WHERE t.id > 1`;
+    s.socket.write(Buffer.concat([wire.parse("moved", moved), wire.sync()]));
+    await s.untilReady();
+    skew = true;
+    from = logged.length;
+    const movedRows = (await paged("moved", "m", 4)).pages.flat();
+    skew = false;
+    const movedAll = await truthRows(moved);
+    assert.deepEqual(asSet(movedRows), asSet(movedAll));
+    assert.match(await sent(from), /LEFT JOIN/);
+    assert.ok(logged.slice(from).some((l) => /answers other columns than its Parse said/.test(l)), logged.slice(from).join("\n"));
+    const plans = planned.length;
+    assert.deepEqual(asSet((await paged("moved", "m2", 4)).pages.flat()), asSet(movedAll));
+    assert.equal(planned.length, plans, "the Parse's plan kept: nothing planned again");
+
+    // a CancelRequest landing while the statement is planned again is answered: 57014, and the session goes on
+    const cancelled = `${lateral} WHERE t.id > 2`;
+    s.socket.write(Buffer.concat([wire.parse("cancelled", cancelled), wire.sync()]));
+    await s.untilReady();
+    let release = (): void => undefined;
+    gate = new Promise<void>((r) => { release = r; });
+    const replans = under.length;
+    s.socket.write(Buffer.concat([wire.bind("k", "cancelled", [], [0]), wire.execute("k", 5), wire.sync()]));
+    for (let i = 0; i < 500 && under.length === replans; i++) await sleep(10);
+    assert.equal(under.length, replans + 1, "planned again");
+    const cancel = net.connect(counted.port, "127.0.0.1");
+    await new Promise<void>((r) => cancel.once("connect", () => r()));
+    cancel.end(wire.cancelRequest(s.pid, s.secret));
+    await sleep(100);
+    release();
+    gate = Promise.resolve();
+    const refused = (await s.untilReady()).find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+    assert.deepEqual([refused?.fields.C, refused?.fields.M], ["57014", "canceling statement due to user request"]);
+    s.socket.write(Buffer.concat([wire.close("P", "k"), wire.sync()]));
+    await s.untilReady();
 
     // statement_timeout stops the statement planned again as any other: 57014, and the session goes on
     const slow = "SELECT a.id, d.key FROM late a CROSS JOIN late b LEFT JOIN jsonb_each(a.j) d ON TRUE WHERE d.value::text || (b.j ->> 'n') = 'never'";

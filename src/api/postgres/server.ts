@@ -1057,15 +1057,21 @@ class Session {
    * portal's result is begun ONCE, from whichever plan its first Execute picked; an Execute after a PortalSuspended
    * reads on from that result, never runs it again. A plan made again over a schema moved since the Parse, whose
    * result or parameters are not the ones the Parse described, is not run: the Parse's plan is (what a client was told
-   * of the result stands).
+   * of the result stands). Planning again is the statement's own time: a CancelRequest landing meanwhile aborts its
+   * controller (`running`, answered 57014 as the statement begins), and a session closed meanwhile runs nothing.
    */
-  private async boundOnWire(statement: Statement, plan: DuckPlan): Promise<DuckPlan> {
+  private async boundOnWire(statement: Statement, plan: DuckPlan, controller: AbortController): Promise<DuckPlan> {
     if (plan.sql.unboundedLateral !== true || statement.raw === null) return plan;
     if (statement.duckOnWire === undefined) {
-      const bounded = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.vars, true);
+      this.running = controller;
+      let bounded: DuckPlan;
+      try { bounded = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.vars, true); }
+      finally { this.settled(); }
       const shape = (p: DuckPlan): string => JSON.stringify([p.params, p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null]);
       statement.duckOnWire = shape(bounded) === shape(plan) ? bounded : plan;
+      if (statement.duckOnWire === plan) this.server.log(`session ${this.id}: a statement planned again for an Execute's row count answers other columns than its Parse said (the schema moved): its Parse's plan runs`);
     }
+    if (this.phase === "closed") throw new PgError({ code: "08006", message: "the session closed while its statement was planned" });
     return statement.duckOnWire;
   }
 
@@ -1518,7 +1524,7 @@ class Session {
     if (portal.cursor === undefined) {
       if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a DuckDB statement without its plan: report it (Mason's Postgres listener)" });
       // a row count on the wire bounds the rows: the plan made for it where it differs (boundOnWire)
-      const plan = m.maxRows > 0 ? await this.boundOnWire(statement, statement.duck) : statement.duck;
+      const plan = m.maxRows > 0 ? await this.boundOnWire(statement, statement.duck, controller) : statement.duck;
       const exec = this.txNow ??= this.server.now();
       const answer = await this.duckAnswer(plan, portal.params, portal.resultFormats, { parse: statement.parsedNow ?? exec, exec }, controller);
       portal.cursor = answer.cursor;

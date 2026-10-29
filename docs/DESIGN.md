@@ -620,9 +620,18 @@ aggregate), and one where every row is read whatever the client reads — an agg
 a set operation other than UNION ALL — and an ORDER BY: a row count on the wire is no LIMIT DuckDB sees, so no top N
 pushes it into the scan and DuckDB sorts every row first whichever plan it is given (where the delimiter join is the
 cheaper). A plan made again over a schema moved since the Parse whose parameters or result columns are not the Parse's
-is not run (the Parse's is: the client was told that result). EXPLAIN explains the statement's own plan, the one an
+is not run (the Parse's is: the client was told that result; the log says so). Planning again is the statement's own
+time: a CancelRequest or the statement_timeout landing meanwhile is answered 57014 as for any statement (until the
+review it was lost there: the controller was not yet the session's `running`). EXPLAIN explains the statement's own plan, the one an
 Execute with no row count runs. (`tests/duck-wire.test.ts` "an Execute's row count over a LEFT lateral"; the oracle has
 no portal shape: it sends every statement whole, so a row count on the wire is held there alone.)
+
+The cost, not measured: a client that reads a WHOLE result through repeated Executes with a row count (JDBC's fetch
+size with autocommit off, a node cursor, an export) now takes the streamed plan, which calls the function once per row
+where the delimiter join calls it once per distinct document — the trade the measurements above make against a full
+read (2.2 s joined against 62.5 s streamed for a count over 20 M rows of 2,000 documents). The row count says the
+client may stop early, never that it will; a page's first rows being Postgres's, and sent as soon as they are read, is
+what the bound buys, as a LIMIT's does. Measure a fetch-size export over few distinct documents before tuning this.
 
 What DuckDB does on its own: it plans the streamed `CROSS JOIN LATERAL (SELECT unnest(…))` as a delimiter join again
 when a filter sits above it that it does not push down to the base — a WHERE on the lateral's own column, one holding a
