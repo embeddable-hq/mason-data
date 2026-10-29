@@ -116,25 +116,46 @@ out, and the commands to run next.
 ## Presentation
 
 The page looks like Mason's own: a mason lays stone and brick course by course, and Mason builds a copy of a Postgres
-table by table and keeps it standing. Charcoal ink on warm limestone paper, mortar greys for every hairline and ONE
-brick red for the accent and the primary action; in the dark, basalt and slate with the brick glowing. Mono first —
+table by table and keeps it standing. Warm graphite words on a clean stone white, quiet low-contrast surfaces, mortar-grey
+hairlines and ONE patina — a desaturated verdigris, the green copper and weathered stone take on — for the accent and
+the primary action, used sparingly; in the dark, a calm charcoal slate (never black) with the patina lifted. No big
+inverted band: the sidebar's head, the nav's current row, a table's header row and the raw log are tinted surfaces. Mono first —
 Geist Mono for the chrome, the labels, the numbers and the tables, Geist Sans for a sentence of prose — under a slab
 display face (Zilla Slab) for a page's title, the run's word and a card's number, so the page has a voice of its own
-and the data still reads as a tool's printout. Boxes are square, framed in ink and set on two stepped stones (a near
-and a far offset, never a blur), so their depth reads as stacked stone; a table's header row is a carved lintel in
-small capitals. The motif stays in the chrome, never on a number: a copy's bar is a wall of bricks in running bond,
+and the data still reads as a tool's printout. Boxes are square, framed in a hairline and lifted by a quiet stone step (a
+1 px hairline-tone offset and a soft, low-opacity shadow), a hint of stacked stone and no heavier; a table's header row
+is a carved lintel in small capitals on pale stone. The motif stays in the chrome, never on a number: a copy's bar is a wall of bricks in running bond,
 laid left to right as the copy goes (within one brick, 5%, of its share, the % beside it as the CLI prints it), the
 bricks laid since the last read dropping into place and a finished copy laying its last (still under
 `prefers-reduced-motion`); a state's marker is a small stone block, a page's title stands on a course of bricks, the
 Getting-started steps are courses of a wall, an empty state is a footing with nothing on it yet, and the mark is an
 arch of bricks with its keystone, drawn inline. All of it is borders and boxes: no gradient, no image. A left sidebar
 as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge when it is the demo database; the nav,
-each link an icon and its label, the one shown an ink row with a brick at its edge; at its foot how long ago Mason last
+each link an icon and its label, the one shown a pale stone row with the patina at its edge; at its foot how long ago Mason last
 answered — `Updated 3 s ago`, which keeps counting when it stops answering — and the version), the time range as a
 segmented control at the top of the Observability views, and on the Overview the run's word beside a big brick, a
 grid of KPI cards, then dense tables. Colour says a state and nothing else — a green, amber, red or gray marker always
-beside its word (the failed red a wine, never the brick) — besides the brick accent for focus, links, laid bricks and
-a chart's mark. It follows the system's light or dark theme, and every text colour meets 4.5:1 on its surface in both.
+beside its word (the failed red a rose, never the accent) — besides the patina accent for focus, links, the current
+nav row, the brick being laid, the primary action and a chart's mark. A copy's bricks are laid in patina, then green
+once served, rose when it failed and amber when not kept current: tints validated together, in both themes, by the
+dataviz skill's `validate_palette.js --pairs all` (each mid-lightness, chroma ≥ 0.10, worst colour-blind ΔE 7.0 light
+and 8.5 dark, worst normal-vision ΔE ≥ 17), never colour alone (the copy's word is beside the bar). It follows the system's light or dark theme, and every text colour meets WCAG AA, 4.5:1, on every surface it sits
+on in both (the lowest pair 4.63:1 light, 4.64:1 dark; the body text 13.9:1 and 13.1:1).
+
+**The palette, and two alternates.** The accent is a patina because it is a mason's colour that is not brick: the
+verdigris on copper and old stone, cool and calm beside the warm stone white, and far in hue from every state (green,
+amber, rose). Two alternates are ready as token swaps (both checked for AA; replace these lines in `src/web/app.css`):
+
+| | patina (shipped) | clay rose | bluestone |
+|---|---|---|---|
+| light `--accent`, `--cta`, `--chart-mark` | `#2b6f70` | `#8d4f4a` | `#41668d` |
+| light `--cta-hover` · `--accent-soft` · `--cta-line` | `#235d5e` · `#e2eeed` · `#255f60` | `#79403c` · `#fbeae8` · `#79403c` | `#335578` · `#e7f0f8` · `#335578` |
+| light `--brick` (a laid brick) | `#199eaa` | `#199eaa` (kept: a clay brick fails the colour-blind check beside the served green) | `#528ac3` |
+| dark `--accent`, `--cta-hover`, `--chart-mark` | `#6cbcb8` | `#e09e97` | `#90b5dc` |
+| dark `--cta` · `--accent-soft` · `--cta-fg` | `#5aaba7` · `#1b3434` · `#0d1919` | `#d18882` · `#34211f` · `#1d0e0d` | `#78a3cf` · `#1b2835` · `#0c1520` |
+| dark `--brick` | `#1ea2a8` | `#1ea2a8` (kept) | `#528ac3` |
+
+Bluestone's bricks pass the same validator in both themes; clay rose keeps the patina's bricks.
 
 Every colour, space, radius, font and size is a CSS custom property on `:root` in `src/web/app.css` (`--bg`,
 `--surface`, `--line`, `--fg`, `--muted`, `--accent`, `--brick`, `--ok`, `--warn`, `--bad`, `--unknown`, `--stone-1/2`,

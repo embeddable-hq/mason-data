@@ -851,7 +851,7 @@ test("the shell: a sidebar nav — Overview · Tables · Users, the Observabilit
   }
   assert.ok(!html.includes('id="subnav"'), "no head above the view's title");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.nav a\[aria-current="page"\] \{[^}]*background: var\(--fg\)/, "the page shown is the nav's inverted (ink) row");
+  assert.match(css, /\.nav a\[aria-current="page"\] \{[^}]*background: var\(--current\);[^}]*box-shadow: inset 3px 0 0 var\(--accent\)/, "the page shown is the nav's pale stone row, the accent at its edge");
   assert.match(css, /\.range a\[aria-current="true"\]/, "the range chosen is the raised segment");
   const app = fn<[unknown], App>("createApp")(fakeRun().fetch);
   assert.match(textOf(app.view()["usage-queries"]!), /Asking Mason/);
