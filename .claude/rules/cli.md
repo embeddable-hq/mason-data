@@ -106,7 +106,7 @@ CLI lacks).
 - **Up means it answers** (what a reboot does to a run): a run is up only when its command server answers
   `/api/ping` with the run's token and its own pid (`answers`, src/cli/runs.ts); a pid in the config that is alive is
   not proof — after a reboot the number belongs to someone else.
-- **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state`, `/api/slow`,
+- **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state?columns=1` (the page polls it lean), `/api/slow`,
   `/api/refused`, `/api/unsupported`, `/api/requests`, `/api/queries`, `/api/running`, `/api/events`, `/api/usage`, `/api/logs`, `/api/users`, `POST /api/pick|remove|sync|cancel`), with the run's token as `Authorization:
   Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
   Under `mason start` it serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), whose users are

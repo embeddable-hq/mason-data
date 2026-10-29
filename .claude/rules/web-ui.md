@@ -53,7 +53,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   not read is `unknown` with its reason, never 0, and one it does not say is not shown** (`{ error }` fields of
   `/api/state`: `stream.slotWal`, `engine.restarts`, `disk`, `sessions`).
 - **Tables are added and removed through the commands' own endpoints** (the Tables page): the list is
-  `GET /api/state` `tables` (`mason tables --json`'s), Add is `POST /api/pick` `{ table, picked: true, columns?, key? }`
+  `GET /api/state` `tables` (`mason tables --json`'s, LEAN: no table's columns — the page polls it every 2 s, and the
+  columns were most of it, 3.4 MB at 800 tables of 50; `?columns=1` adds them, which `mason status --json` asks), a
+  form's columns are `GET /api/tables/<table>/columns`, read once as Columns… or Name its key… opens, Add is `POST /api/pick` `{ table, picked: true, columns?, key? }`
   (`mason add`, the run's `pick`), Remove is `POST /api/remove` `{ tables }` (`mason remove`), and after either the page
   reads the state again. The columns and the key are TICKED from the table's own columns, never typed: the page sends
   the list as it is, and an empty one as no list (every column; its primary key) — no second grammar of `--columns`.
@@ -169,3 +171,4 @@ adds pages, not endpoints.
 | The unsupported SQL (Queries' panel, over the range; the Overview's line, the last day) | `GET /api/unsupported?since=&limit=` | `mason status --json` `unsupported` (`unsupportedLines`) |
 | The copy's progress | `GET /api/state` `tables[].copy.progress`, `readiness` | `mason wait --json` (`tableLine`, `copyingText` already render it) |
 | Sync on demand | `POST /api/sync` `{ tables }` | `mason sync --json` |
+| A table's columns (the Columns… form) | `GET /api/tables/<table>/columns` (`{ table, columns }`; never in the polled `GET /api/state`, whose `?columns=1` has every table's) | `mason tables <table> --json` `columns` |

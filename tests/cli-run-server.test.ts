@@ -218,7 +218,7 @@ test("the commands' way in: the run's token as a Bearer header, no cookie and no
   const b = JSON.parse(ok.text) as { addedKey: string[]; columns: string[]; already: boolean; file: string };
   assert.deepEqual([b.addedKey, b.columns, b.already, b.file], [["id"], ["id", "name"], false, sourceFile]);
   assert.match(fs.readFileSync(sourceFile, "utf8"), /\ntables:\n {2}customers:\n {4}columns: \[id, name\]\n$/);
-  const state = JSON.parse((await bearer("GET", "/api/state")).text) as { project: string | null; tables: Array<{ table: string; added: boolean; addedColumns: string[] | null; columns: unknown[] }> };
+  const state = JSON.parse((await bearer("GET", "/api/state?columns=1")).text) as { project: string | null; tables: Array<{ table: string; added: boolean; addedColumns: string[] | null; columns: unknown[] }> };
   const customers = state.tables.find((t) => t.table === "public.customers")!;
   assert.deepEqual(customers.columns, [
     { name: "id", type: "bigint", nullable: true, comment: null, references: null },
@@ -732,4 +732,33 @@ test("/api/state says where a tool connects: the Postgres API's URL with <user>:
   // the web page's Connect panel renders this; mason status --json says the same object (with the listener)
   assert.deepEqual(state.postgres, { url: "postgresql://127.0.0.1:5433/app", host: "127.0.0.1", port: 5433, database: "app",
     shown: "postgres://<user>:<password>@127.0.0.1:5433/app", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/app'" });
+});
+
+test("/api/state is lean, as the page polls it every 2 s: no table's columns; ?columns=1 carries them (mason status --json), and one table's are GET /api/tables/<table>/columns", async () => {
+  const lean = JSON.parse((await call("GET", "/api/state")).text) as { tables: Array<{ table: string; columns?: unknown }> };
+  assert.equal(lean.tables.length, tables.length);
+  assert.ok(lean.tables.every((t) => !("columns" in t)), "no table's columns in the state the page polls");
+  const full = JSON.parse((await call("GET", "/api/state?columns=1")).text) as { tables: Array<{ table: string; columns: Array<{ name: string }> }> };
+  assert.deepEqual(full.tables.map((t) => t.columns.map((c) => c.name).join(",")), ["id,name", "id,name", "id,name", "tenant_id,id,body", "id,customer_id"]);
+  const { columns: _, ...rest } = full.tables[4]!;
+  assert.deepEqual(rest, lean.tables[4], "the same state, the columns left out: one computation");
+  const one = await call("GET", `/api/tables/${encodeURIComponent("public.orders")}/columns`);
+  assert.equal(one.status, 200);
+  assert.deepEqual(JSON.parse(one.text), { table: "public.orders", columns: full.tables[4]!.columns }, "the columns the state's full form says, references included");
+  assert.deepEqual(JSON.parse(one.text).columns[1], { name: "customer_id", type: "bigint", nullable: true, comment: null, references: { table: "public.customers", column: "id" } });
+  assert.equal(JSON.parse((await call("GET", "/api/tables/public.Shouty/columns")).text).table, "public.Shouty");
+  const gone = await call("GET", "/api/tables/public.gone/columns");
+  assert.equal(gone.status, 404);
+  const failure = JSON.parse(gone.text).failure as { code: string; message: string; next: unknown[] };
+  assert.equal(failure.code, "not_found");
+  assert.equal(failure.message, 'the database has no table "public.gone" this user can read');
+  assert.ok(failure.next.length, "with what to run next");
+});
+
+test("the lean state's size: 800 tables of 50 columns is under 400 B a table (it was 4.3 KB with their columns)", async () => {
+  const runServerModule = await import("../src/cli/run-server.ts");
+  const wide = Array.from({ length: 800 }, (_, i) => table({ table: `t_${i}`, columns: Array.from({ length: 50 }, (_, j) => col(j ? `column_${j}` : "id")) }));
+  const c: RunContext = { ...ctx, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: wide, systemIdentifier: null }) };
+  const bytes = JSON.stringify(runServerModule.runState(c, [], null)).length;
+  assert.ok(bytes < 800 * 400, `${bytes} bytes`);
 });

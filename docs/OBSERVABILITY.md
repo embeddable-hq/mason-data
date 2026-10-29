@@ -11,7 +11,8 @@ same JSON; the web page and the managed service read those endpoints, never a se
 
 | Endpoint | Command | What |
 |---|---|---|
-| `GET /api/state` | `mason status`, `mason tables`, `mason wait` | each copy's rows, state and last sync (`tables[].sync`), the totals, the readiness |
+| `GET /api/state` | `mason status`, `mason wait` (with `?columns=1`) | each copy's rows, state and last sync (`tables[].sync`), the totals, the readiness; each table's columns only with `?columns=1` |
+| `GET /api/tables/<table>/columns` | `mason tables <table>` `columns` | one table's columns (`{ table, columns }`): the Tables page's form reads it as it opens |
 | `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent |
 | `GET /api/slow`, `GET /api/refused` | `mason status` | the slow statements; the refused and failed ones, each distinct one once |
 | `GET /api/unsupported?since=&limit=` | `mason status` `unsupported` | the refused statements grouped by the registry entry (docs/SQL-SUPPORT.md) that refused them: `[{ gap, title, runs, users, clients, last, example }]`, the most refused first; a day and 10 entries by default |
@@ -82,7 +83,8 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   copy's own size, in replication mode its stream state, its error, **Sync** (`POST /api/sync`) and Remove; one not added
   its rows and key and why it cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
-  (2 s), `/api/usage` `copySizes` (60 s).
+  (2 s, lean: no table's columns), `/api/usage` `copySizes` (60 s), and a table's columns once as its form opens
+  (`/api/tables/<table>/columns`).
 - **Users** (`#users`): today's add form and Remove, and each user's status (Active / Removed), when it was added, its
   last use, and its URL without the password (**Copy**). Reads `/api/users?lastUsed=1` (on opening, then 30 s).
 - **Observability › Queries** (`#observability/queries`): who is connected now (`sessions` of `/api/state`: the 10
@@ -286,8 +288,10 @@ other extension is off (src/duck/store.ts). From npm, the first copy on a machin
 
 **Left, most worth it first**:
 
-1. `/api/state` carries every catalog table's columns, polled every 2 s: ~0.6 MB at 800 narrow tables, ~4 MB at 800
-   tables of 50 columns. A `?columns=0` for the Overview, or the columns only on Tables' Columns… dialog.
+1. **Done**: `/api/state` carried every catalog table's columns, polled every 2 s. It is lean now: 800 tables of 5
+   columns 465 KB → **134 KB**, of 50 columns 3,414 KB → **134 KB** (built and serialised 4.6 → 1.2 ms); a form's
+   columns are `GET /api/tables/<table>/columns`, read once as Columns… or Name its key… opens, and `?columns=1` keeps
+   them for `mason status --json` (its shape unchanged).
 2. From npm, an offline machine's first copy fails (the extension download); `mason doctor` could say whether it is
    installed, and `mason init` fetch it while online. Shipping it in the npm package is ~45 MB a platform.
 3. Queries' `search` over 7 days is ~0.6 s every 5 s while it is shown: poll a search less often, or only on asking.

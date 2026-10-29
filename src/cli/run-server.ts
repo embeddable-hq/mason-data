@@ -32,7 +32,7 @@ import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT, withLastUsed } from "./user.ts";
 import { postgresFacts, postgresLink } from "./pg-url.ts";
-import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
+import { catalogTable, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamStatus } from "../duck/sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
@@ -123,9 +123,12 @@ export interface RefusedQuery {
 /**
  * The run's state, in the shape mason status / wait read (`RunState`, src/cli/commands.ts): each table of the database,
  * added or not, and each added one's copy as the sync has it, so `mason wait` is ready exactly when every added table is
- * copied.
+ * copied. LEAN unless `columns` is asked: each table's columns are most of its bytes (800 tables of 50 columns, 3.4 MB
+ * with them, 0.3 MB without), and the page polls the state every 2 s for none of them — its Columns… form reads one
+ * table's on opening (`GET /api/tables/<table>/columns`, `tableColumns`); `mason status --json` asks with them
+ * (`?columns=1`), its shape unchanged. One computation either way: the columns are left out, never built apart.
  */
-export function runState(ctx: RunContext, copies: readonly CopyState[], stream: StreamStatus | null, now = Date.now()): unknown {
+export function runState(ctx: RunContext, copies: readonly CopyState[], stream: StreamStatus | null, now = Date.now(), { columns = false }: { columns?: boolean } = {}): unknown {
   const folder = ctx.folder();
   const sources = ctx.sources();
   const by = new Map(copies.map((c) => [c.source, c]));
@@ -135,8 +138,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   const disk = ctx.duck.disk();
   const tables = facts.tables.map((t) => {
     const c = by.get(t.source), entry = sources.file?.tables.find((e) => e.table === t.source);
+    const { columns: cols, ...catalog } = catalogTable(t, entry);
     return {
-      ...catalogTable(t, entry),
+      ...catalog, ...(columns ? { columns: cols } : {}),
       // a table the sync has not reached is waiting for its copy (no copy yet), never "copying 0"
       // a copy in a retired layout (src/duck/sync.ts RETIRED_LAYOUT) serves until it is copied again: done, and said
       copy: c && c.phase !== "waiting" ? { phase: (c.phase === "copied" ? "done" : c.phase === "failed" ? "failed" : "copying") as "copying" | "done" | "failed",
@@ -193,8 +197,22 @@ function fileBytes(file: string): number | null {
   try { return fs.statSync(file).size; } catch { return null; }   // a size is a nicety of mason status: unknown, not an error
 }
 
-async function state(ctx: RunContext): Promise<unknown> {
-  return runState(ctx, ctx.duck.copies(), await ctx.duck.stream());
+async function state(ctx: RunContext, columns = false): Promise<unknown> {
+  return runState(ctx, ctx.duck.copies(), await ctx.duck.stream(), Date.now(), { columns });
+}
+
+/**
+ * `GET /api/tables/<table>/columns`: one table's columns as the state says them with `?columns=1` (sources.ts
+ * catalogTable: name, type, nullable, comment, references) — what the page's Columns… form ticks, read when it opens.
+ * A table the catalog lacks (dropped since the run read it) is a 404 in the failure shape.
+ */
+export function tableColumns(ctx: RunContext, table: string): { table: string; columns: CatalogColumn[] } {
+  const t = ctx.facts().tables.find((x) => x.source === table);
+  if (t === undefined) {
+    const message = `the database has no table ${JSON.stringify(table)} this user can read`;
+    throw new Refusal(404, message, { message, code: "not_found", why: "it was dropped since Mason read the catalog, or never was", next: [["mason tables", "the tables it has, as this user reads them"]] });
+  }
+  return { table: t.source, columns: catalogTable(t, undefined).columns };
 }
 
 /**
@@ -410,7 +428,11 @@ export function createRunServer(ctx: RunContext): http.Server {
           // what proves a run is up (src/cli/runs.ts answers): this token answered, by this process
           sendJson(res, 200, { pid: process.pid });
         } else if (req.method === "GET" && url.pathname === "/api/state") {
-          sendJson(res, 200, await state(ctx));
+          // lean, as the page polls it; ?columns=1 with each table's columns (mason status --json)
+          sendJson(res, 200, await state(ctx, url.searchParams.get("columns") === "1"));
+        } else if (req.method === "GET" && /^\/api\/tables\/[^/]+\/columns$/.test(url.pathname)) {
+          // one table's columns, read when the page's Columns… form opens (never with the state, polled every 2 s)
+          sendJson(res, 200, tableColumns(ctx, decodeURIComponent(url.pathname.split("/")[3]!)));
         } else if (req.method === "GET" && url.pathname === "/api/slow") {
           // the last day's slow statements, from the request log (src/duck/requests.ts)
           sendJson(res, 200, { slow: await ctx.duck.requests.slow(SLOW_MS), slowMs: SLOW_MS });
