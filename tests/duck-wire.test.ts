@@ -1032,6 +1032,29 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT
       "SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements_text(CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END) AS e ON TRUE LIMIT 4 OFFSET 3",
       "SELECT t.id, k FROM jdocs t LEFT JOIN jsonb_object_keys(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) AS k ON TRUE WHERE t.id > 1 LIMIT 5",
       "SELECT o.id, u FROM orders o LEFT JOIN unnest(o.tags) u ON TRUE LIMIT 3",
+      // an unnest of an EXPRESSION, its list computed once (by a step of its own before the lateral; inside it, a
+      // list_transform's one element, where it reads an array — DuckDB plans such a step as its delimiter join — or a
+      // `*` or a join's name reads the join): Postgres's first rows, (1,1) before (1,10) — DuckDB's delimiter join had
+      // (1,10) first; NULL and empty arrays one row each; a text split, an array of a json's values; an array column's
+      // list changed; two in one FROM; read by a `*` and by a join's name
+      "SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id, o.id * 10]) x ON true LIMIT 1",
+      "SELECT o.id, t FROM orders o LEFT JOIN unnest(array_append(o.tags, 'z')) AS t ON TRUE LIMIT 4",
+      "SELECT o.id, t FROM orders o LEFT JOIN unnest(o.tags[2:]) AS t ON TRUE LIMIT 4",
+      "SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id, o.id * 10]) x ON true LIMIT 3",
+      "SELECT o.id, x FROM orders o LEFT JOIN unnest(CASE o.id WHEN 2 THEN NULL::bigint[] WHEN 3 THEN ARRAY[]::bigint[] ELSE ARRAY[o.id + 1, o.id] END) AS x ON TRUE LIMIT 5",
+      "SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.status, 'a')) AS p ON TRUE LIMIT 4",
+      "SELECT o.id, v FROM orders o LEFT JOIN unnest(ARRAY[o.meta ->> 'k', o.meta #>> '{k}', o.tags[1]]) AS v ON TRUE LIMIT 5",
+      "SELECT o.id, x, y FROM orders o LEFT JOIN unnest(ARRAY[o.id, -o.id]) x ON TRUE LEFT JOIN unnest(string_to_array(o.status, 'a')) y ON TRUE LIMIT 7",
+      "SELECT * FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.id * 10]) x ON TRUE LIMIT 3",
+      "SELECT j.* FROM (orders o LEFT JOIN unnest(ARRAY[o.id, o.id * 10]) x ON TRUE) AS j LIMIT 3",
+      // a list that reads TWO columns of the row (DuckDB's delimiter join, the rows in its order, until the argument
+      // was computed by a step of its own before the lateral): an unnest, a json document's members, a text split
+      "SELECT o.id, x FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.qty::bigint]) x ON TRUE LIMIT 4",
+      "SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.status || ',' || o.id, ',')) p ON TRUE LIMIT 5",
+      "SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN t.id > 1 AND jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE LIMIT 6",
+      "SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements_text(CASE WHEN t.id % 2 = 1 AND jsonb_typeof(t.b -> 'arr') = 'array' THEN t.b -> 'arr' END) e ON TRUE LIMIT 6",
+      // two columns and an array: no step (DuckDB plans that step as a delimiter join), the lateral streams as it is
+      "SELECT o.id, t FROM orders o LEFT JOIN unnest(array_append(o.tags, o.status)) t ON TRUE LIMIT 4",
       // an OFFSET alone keeps Postgres's rows after it too
       "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE OFFSET 20",
       // the LIMIT outside: a derived table, a CTE, two levels down
@@ -1087,8 +1110,9 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT
     for (const sql of streamed) {
       const from = logged.length;
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
-      // an INNER lateral of a list never empty: the last argument of each list's function, or the array's CASE
-      assert.match(sent(from), /CROSS JOIN LATERAL \( SELECT unnest\((CAST\()?(__mason_json_\w+\(getvariable\('__mason_session'\), .*, true\)|CASE WHEN len\()/, `${sql}\n${sent(from)}`);
+      // an INNER lateral of a list never empty: the last argument of each list's function, or the array's CASE (in a
+      // lambda where the join is read whole)
+      assert.match(sent(from), /CROSS JOIN LATERAL \( SELECT unnest\((CAST\()?(__mason_json_\w+\(getvariable\('__mason_session'\), .*, true\)|CASE WHEN len\(|\(list_transform\(list_value\()/, `${sql}\n${sent(from)}`);
       assert.doesNotMatch(sent(from), /LEFT JOIN/, sql);
     }
     // a whole result without an ORDER BY is the same rows, in an order neither promises (the oracle's set comparison)
@@ -1103,9 +1127,11 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT
       assert.doesNotMatch(sent(from), /CROSS JOIN LATERAL|, true\)( AS JSON\[\])?\)|CASE WHEN len\(/, `${sql}\n${sent(from)}`);
     }
     // DuckDB runs the streamed one as its UNNEST, no delimiter join over the base
-    const plan = (await c.query({ text: `EXPLAIN ${streamed[0]}`, rowMode: "array" })).rows.map((r) => String(r[0])).join("\n");
-    assert.doesNotMatch(plan, /delim/i, plan);
-    assert.match(plan, /unnest/i, plan);
+    for (const sql of streamed) {
+      const plan = (await c.query({ text: `EXPLAIN ${sql}`, rowMode: "array" })).rows.map((r) => String(r[0])).join("\n");
+      assert.doesNotMatch(plan, /delim/i, `${sql}\n${plan}`);
+      assert.match(plan, /unnest/i, plan);
+    }
     // not a document's rows the function refuses (an array to jsonb_each): Postgres's error, whichever row it is
     await assert.rejects(c.query("SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(t.b) d ON TRUE"), (e: pg.DatabaseError) => e.code === "22023");
     await assert.rejects(postgres("SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(t.b) d ON TRUE"), /cannot call jsonb_each on a non-object/);
@@ -1237,6 +1263,35 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
       from = logged.length;
       assert.deepEqual((await paged("", "d", 4)).pages.flat(), await truthRows(sql), sql);
       assert.doesNotMatch(await sent(from), /LEFT JOIN/, sql);
+      assert.deepEqual(planned.slice(-2), [{ text: sql, wire: false }, { text: sql, wire: true }], sql);
+    }
+    // an unnest of an EXPRESSION, by a row count of 1 and of 3: Postgres's first rows, (1,1) before (1,10) — DuckDB's
+    // delimiter join answered (1,10) first — its list computed once, by a step of its own before the lateral (or
+    // inside it, where it reads an array or a `*` reads the join); NULL and empty arrays one row each; a text split; a
+    // json document's members over an argument of two columns
+    const once = / AS __mason_arg1 \) AS __mason_arg1 CROSS JOIN LATERAL \( SELECT unnest\(CASE WHEN len\(__mason_arg1\.__mason_arg1\)/;
+    const inside = /CROSS JOIN LATERAL \( SELECT unnest\(\(list_transform\(list_value\(/;
+    for (const [sql, form] of [
+      ["SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id, o.id * 10]) x ON true", once],
+      ["SELECT o.id, t FROM orders o LEFT JOIN unnest(array_append(o.tags, 'z')) AS t ON TRUE", inside],
+      ["SELECT o.id, x FROM orders o LEFT JOIN unnest(CASE o.id WHEN 2 THEN NULL::bigint[] WHEN 3 THEN ARRAY[]::bigint[] ELSE ARRAY[o.id + 1, o.id] END) AS x ON TRUE", once],
+      ["SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.status || ',' || o.id, ',')) AS p ON TRUE", once],
+      ["SELECT * FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.id * 10]) x ON TRUE", inside],
+      ["SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN t.id > 1 AND jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE", / AS __mason_arg1 \) AS __mason_arg1 CROSS JOIN LATERAL \( SELECT unnest\(__mason_json_keys\(getvariable\('__mason_session'\), __mason_arg1\.__mason_arg1, /],
+    ] as const) {
+      const want = await truthRows(sql);
+      if (sql.startsWith("SELECT o.id, x FROM orders o LEFT JOIN LATERAL")) assert.deepEqual(want.slice(0, 2), ['["1","1"]', '["1","10"]'], "Postgres's own first rows");
+      s.socket.write(Buffer.concat([wire.parse("", sql), wire.sync()]));
+      await s.untilReady();
+      for (const n of [1, 3]) {
+        from = logged.length;
+        const got = await paged("", "u", n);
+        assert.deepEqual(got.pages[0], want.slice(0, n), `${sql}: the first ${n}`);
+        assert.deepEqual(got.pages.flat(), want, sql);
+        const streamedSql = await sent(from);
+        assert.doesNotMatch(streamedSql, /LEFT JOIN/, `${sql}\n${streamedSql}`);
+        assert.match(streamedSql, form, `${sql}\n${streamedSql}`);
+      }
       assert.deepEqual(planned.slice(-2), [{ text: sql, wire: false }, { text: sql, wire: true }], sql);
     }
     planned.length = 2;

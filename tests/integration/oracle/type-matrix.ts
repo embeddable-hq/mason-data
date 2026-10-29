@@ -772,6 +772,45 @@ function* matrix(): Generator<Matrixed> {
     yield q(`unnest of int[], date[], uuid[] LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, a, b, c FROM docs q LEFT JOIN unnest(q.ia) a ON TRUE LEFT JOIN unnest(q.da) b ON TRUE LEFT JOIN unnest(q.ua) c ON TRUE ${limit}`);
   }
   yield q("unnest of an enum array LEFT JOIN ON TRUE", "SELECT m.id, u, u::text FROM moods m LEFT JOIN unnest(m.ms) u ON TRUE ORDER BY 1, 3");
+  // an unnest of an EXPRESSION (leftLateral): its list computed once, streamed under a bound in Postgres's order — the
+  // first row (1,1), where DuckDB's delimiter join had (1,10); NULL and empty arrays one row each; an array column's
+  // list changed (which a step of its own before the lateral would have made DuckDB's delimiter join); read by a `*`
+  for (const [limit, label] of [["LIMIT 1", "limited to 1"], ["LIMIT 3", "limited to 3"], ["", "whole"]] as const) {
+    yield q(`unnest of ARRAY[o.id, o.id * 10] LEFT JOIN LATERAL ON true, ${label}`, `SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id, o.id * 10]) x ON true ${limit}`);
+  }
+  for (const [limit, label] of [["LIMIT 50 OFFSET 7", "limited"], ["", "whole"]] as const) {
+    yield q(`unnest of a NULL or empty array expression LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, x FROM docs q LEFT JOIN unnest(CASE WHEN q.id % 3 = 0 THEN NULL::int[] WHEN q.id % 3 = 1 THEN ARRAY[]::int[] ELSE ARRAY[q.id, q.id % 7] END) x ON TRUE ${limit}`);
+    yield q(`unnest of ARRAY[]::int[] LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, x FROM docs q LEFT JOIN unnest(ARRAY[]::int[]) x ON TRUE ${limit}`);
+    yield q(`unnest of a NULL array LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, x FROM docs q LEFT JOIN unnest(NULL::text[]) x ON TRUE ${limit}`);
+    yield q(`unnest of an array of json paths LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, v FROM docs q LEFT JOIN unnest(ARRAY[q.jb ->> 'event', q.jb #>> '{nested,k}', q.j ->> 'z']) v ON TRUE ${limit}`);
+    // (a subquery in the argument: a delimiter join in every form, limit-lateral-filter)
+    yield q(`unnest of a json array's elements as an array LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, v FROM docs q LEFT JOIN unnest(ARRAY(SELECT e FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(q.jb) = 'array' THEN q.jb END) e)) v ON TRUE ${limit}`);
+    yield q(`unnest(string_to_array(<a list's text>, ',')) LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, p FROM docs q LEFT JOIN unnest(string_to_array(array_to_string(q.tags, ',', '*'), ',')) p ON TRUE ${limit}`);
+    yield q(`two unnests of expressions LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, a, b FROM docs q LEFT JOIN unnest(q.ia || q.id) a ON TRUE LEFT JOIN unnest(array_append(q.tags, 'z')) b ON TRUE ${limit}`);
+    yield q(`unnest of an expression LEFT JOIN ON TRUE read by a *, ${label}`, `SELECT * FROM (SELECT t.id, t.tags FROM docs t) q LEFT JOIN unnest(array_append(q.tags, 'x')) x ON TRUE ${limit}`);
+    yield q(`unnest of an expression LEFT JOIN ON TRUE in a join with a name of its own, ${label}`, `SELECT w.* FROM ((SELECT t.id, t.ia FROM docs t) q LEFT JOIN unnest(ARRAY[q.id, -q.id]) x ON TRUE) AS w ${limit}`);
+  }
+  // (orders' rows move in Postgres's heap as the rounds change them: sorted, and by the lateral's column after)
+  for (const sep of [",", " "]) {
+    yield q(`unnest(string_to_array(col, '${sep}')) LEFT JOIN ON TRUE, sorted by the table's column, limited`, `SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.notes, '${sep}')) p ON TRUE ORDER BY o.id DESC, p NULLS FIRST LIMIT 50 OFFSET 7`);
+    yield q(`unnest(string_to_array(col, '${sep}')) LEFT JOIN ON TRUE, whole`, `SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.notes, '${sep}')) p ON TRUE`);
+  }
+  // a list whose argument reads TWO or more columns of the row: DuckDB's delimiter join, the rows in its order, until
+  // the argument was computed by a step of its own before the lateral (leftLateral) — json rows and an unnest alike;
+  // an array among them keeps the lateral as it is (DuckDB streams it there, and plans the step as its join)
+  for (const [limit, label] of [["LIMIT 40 OFFSET 7", "limited"], ["", "whole"]] as const) {
+    yield q(`jsonb_each LEFT JOIN ON TRUE, guarded by two columns, ${label}`, `SELECT q.id, d.key, d.value::text FROM docs q LEFT JOIN jsonb_each(CASE WHEN q.id % 4 <> 1 AND jsonb_typeof(q.jb) = 'object' THEN q.jb END) d ON TRUE ${limit}`);
+    yield q(`json_each_text / jsonb_array_elements_text LEFT JOIN ON TRUE, of two columns, ${label}`, "SELECT q.id, a.key, a.value, e FROM docs q LEFT JOIN json_each_text(CASE WHEN q.id > 5 THEN " + objectJson + " END) a ON TRUE " +
+      `LEFT JOIN jsonb_array_elements_text(CASE WHEN q.id % 2 = 0 AND jsonb_typeof(q.jb) = 'array' THEN q.jb END) e ON TRUE ${limit}`);
+    yield q(`unnest of an array of two columns LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, x FROM docs q LEFT JOIN unnest(ARRAY[q.id, length(q.j::text)]) x ON TRUE ${limit}`);
+    yield q(`unnest of two columns and an array LEFT JOIN ON TRUE, ${label}`, `SELECT q.id, x FROM docs q LEFT JOIN unnest(array_append(q.ia, q.id)) x ON TRUE ${limit}`);
+  }
+  // (read by a `*`: the step's column would be read too, so DuckDB's delimiter join stays — limit-lateral-filter)
+  yield q("jsonb_each LEFT JOIN ON TRUE, guarded by two columns, read by a *, limited", "SELECT * FROM (SELECT t.id, t.jb FROM docs t) q LEFT JOIN jsonb_each(CASE WHEN q.id % 4 <> 1 AND jsonb_typeof(q.jb) = 'object' THEN q.jb END) d ON TRUE LIMIT 40 OFFSET 7");
+  yield q("unnest of an expression LEFT JOIN ON TRUE, sorted by the table's column, limited", "SELECT o.id, x FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.id * 10, NULL]) x ON TRUE ORDER BY o.id DESC, x NULLS FIRST LIMIT 7");
+  yield q("unnest of an expression LEFT JOIN ON TRUE under string_agg with no ORDER BY", "SELECT q.id, string_agg(x::text, ',') FROM docs q LEFT JOIN unnest(ARRAY[q.id * 10, q.id]) x ON TRUE GROUP BY q.id ORDER BY q.id");
+  yield q("unnest of an expression LEFT JOIN ON TRUE in a derived table, limited outside", "SELECT s.x, s.id FROM (SELECT q.id, x FROM docs q LEFT JOIN unnest(ARRAY[q.id * 10, q.id]) x ON TRUE) s LIMIT 9 OFFSET 3");
+  yield q("unnest of an expression LEFT JOIN ON TRUE, counted (DuckDB's own join)", "SELECT count(*), count(x) FROM orders o LEFT JOIN unnest(CASE WHEN o.id % 2 = 0 THEN ARRAY[o.id, o.id] END) x ON TRUE");
   yield q("count(*) over a LEFT JOIN json_each expansion", `SELECT count(*), count(s.key), count(DISTINCT s.key) FROM (SELECT q.*, d.key, d.value FROM (SELECT t.id, t.j FROM docs t) AS q LEFT JOIN json_each(${objectJson}) d ON TRUE) s`);
   // where no LIMIT keeps the first rows, DuckDB's own delimiter join (limitBounds): counted over each kind of list, the
   // empty object's and the NULL's one row included; grouped, distinct, windowed, with a LIMIT above those too

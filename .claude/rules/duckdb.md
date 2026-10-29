@@ -64,9 +64,16 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     UNION ALL's arms; under an ORDER BY only a LIMIT (never WITH TIES), and only when its first key, the nulls idiom
     folded, is a table's column sorted bare (no collation keys, citext, char(n), jsonb: the top N's filter reaches the
     scan); and an order-sensitive aggregate or window (string_agg, array_agg, row_number …) with no ORDER BY of its
-    own. Decided in a pre-pass over the whole statement (the walk meets a CTE before the SELECT that reads it). Bounding
-    too much costs time, too little an answer; where DuckDB itself falls back to the delimiter join under a filter it
-    does not push down, the difference is registered (`limit-lateral-filter`). **A row count an Execute sets on the
+    own. **DuckDB streams the INNER lateral only where its list reads ONE column of the row or an array column**; two
+    or more and no array is its delimiter join again. So such an argument (any list function's), and an unnest's
+    expression of any columns, is computed ONCE by a step of its own before it, `CROSS JOIN LATERAL (SELECT e AS __mason_arg<n>)
+    AS __mason_arg<n>` (a projection under the UNNEST, free; the never-empty CASE names the step's column twice) —
+    never where e reads an array (DuckDB plans THAT step as its join: an unnest's e is then computed once inside,
+    `list_transform(list_value(e), l -> CASE … l … END)[1]`, a list copy a row, 12–23 ms a million rows), nor where
+    a `*` or a join's name reads the join (`markWholeReads`: the step's column would be read). Decided in a pre-pass
+    over the whole statement (the walk meets a CTE before the SELECT that reads it). Bounding too much costs time, too
+    little an answer; where DuckDB itself falls back to the delimiter join — under a filter it does not push down, an
+    argument holding a subquery, two columns under a `*` — the difference is registered (`limit-lateral-filter`). **A row count an Execute sets on the
     wire is a bound the Parse's plan cannot see**: the plan says where a lateral was left joined that such a bound
     would stream (`PlannedSql.unboundedLateral`, the pre-pass run again with the outermost SELECT bounded — never a
     re-parse), and the portal's first Execute with a row count runs the statement planned again with `wireBound`

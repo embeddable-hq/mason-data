@@ -578,7 +578,8 @@ as far; not measured there yet.
 #### A LEFT lateral of a list
 
 **Decision.** `FROM base LEFT JOIN <the rows of a list> ON TRUE` — `json_each`, `jsonb_each`, their `_text`,
-`json(b)_array_elements(_text)`, `json(b)_object_keys`, and `unnest` of an array column — WHERE ITS ROWS' ORDER DECIDES
+`json(b)_array_elements(_text)`, `json(b)_object_keys`, and `unnest` of an array (a column, or any expression computed
+once: "An unnest of an expression, an argument of two columns" below) — WHERE ITS ROWS' ORDER DECIDES
 THE ANSWER is an INNER lateral over a list that is never empty: the rows, or one NULL where there are none
 (`leftLateral`; the functions' `orNull` argument, `src/duck/functions.ts`). The join must be LEFT, ON a literal TRUE, one
 such function on its right, no ORDINALITY; and it must be bounded (`markBounds`, `limitBounds`):
@@ -717,6 +718,52 @@ keeps its rows, not Postgres's (`limit-lateral-filter`, a decided difference, ea
 the base in the join's own SELECT, or a literal one through a derived table, stays the UNNEST). And a window function
 over PARTITION BY with no ORDER BY numbers a partition's rows in DuckDB's partitioning's order, streamed or not
 (`window-partition-order`). Main sent the same SQL for each of these.
+
+**An unnest of an expression, an argument of two columns (2026-10-29).** Until then only an unnest of an array COLUMN
+was streamed: its never-empty form names the list twice (`CASE WHEN len(l) > 0 THEN l ELSE [NULL] END`), which costs a
+column nothing, and an expression there was left DuckDB's delimiter join — under a LIMIT or a row count on the wire,
+rows in an order of its own and no registry entry: `SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id,
+o.id*10]) x ON true LIMIT 1` answered `(1,10)` where Postgres answers `(1,1)` (a review of PR #27, on a real listener;
+fourteen of the oracle's new statements differed on main, two of them json rows). Now an unnest of any expression streams, the expression
+computed ONCE: by a step of its own before the lateral, `CROSS JOIN LATERAL (SELECT e AS __mason_arg<n>) AS __mason_arg<n>`, which
+DuckDB plans as a projection under the same UNNEST, the CASE naming the step's column twice at no cost but the
+expression's; or, where the step is no form (below), inside the lateral as the one element of a list whose lambda names
+it twice, `list_transform(list_value(e), l -> CASE … l … END)[1]`, a copy of the list a row more. Named twice, Mason's
+string_to_array (a JavaScript function) would be handed every row twice — the plan fixture holds it at the million
+rows once, in both forms.
+
+Making it stream showed what decides DuckDB 2.0's plan of the streamed lateral: the columns of the row its list reads.
+One column, or any array column among them, is its UNNEST; two or more and no array is its delimiter join again, in
+every spelling — so a json function's argument of two columns (`jsonb_each(CASE WHEN q.id > 0 AND jsonb_typeof(q.jb) =
+'object' THEN q.jb END)`) had kept DuckDB's order on main too, unregistered. Such an argument, of any of the list
+functions, is computed by the same step now, the lateral reading its one column. The step is no form for every
+argument: DuckDB plans it as a delimiter join once it reads an array column (`array_append(tags, …)`, `tags[2:]`, even
+`[len(tags)]`), where the lateral without it streams; a `*` of the SELECT that holds the join, or a join's own name,
+reads its column; and an argument holding a subquery is a delimiter join in every form (a correlated `FROM (SELECT e AS
+l)`, a CTE and VALUES too). The last two are registered (`limit-lateral-filter`, with the other forms of DuckDB's
+falling back to its join under a streamed lateral). Which forms DuckDB 2.0 streams, by what the list reads (EXPLAIN
+over 10,000 rows):
+
+| the argument reads | the lateral as it is | a step of its own before it |
+|---|---|---|
+| one column (`[a, a * 10]`, `[s, upper(s)]`, a json column's path) | streamed | streamed |
+| two or more columns (`[a, b]`, a json path and a column, a struct's field and a column) | delimiter join | streamed |
+| an array column, alone or with others (`list_append(l1, a)`, `[len(l1), len(l2)]`) | streamed | delimiter join |
+| a subquery (`ARRAY(SELECT …)`, a scalar subquery) | delimiter join | delimiter join |
+
+Measured on the laptop (10 cores), DuckDB alone over 1 M rows (a NULL list every 7th, an empty one every 7th, else 3
+integers), every row streamed (an OFFSET past the end), best of three:
+
+| list | bare (INNER, no padding) | the CASE, named twice | `list_transform`, named once | a step of its own |
+|---|---|---|---|---|
+| the column `t.arr` (main's form: the CASE) | 7 ms | 9 ms | 25 ms | 85 ms, a delimiter join |
+| `string_to_array(t.s, ',')`, the same lists | 32 ms | 59 ms | 55 ms | 37 ms |
+| `ARRAY[t.id, t.id * 10]` | 7 ms | 12 ms | 19 ms | 8 ms |
+| `list_reverse(t.arr)` | 16 ms | 28 ms | 33 ms | 77 ms, a delimiter join |
+
+So the step costs nothing but the expression where DuckDB streams it (37 ms against string_to_array's own 32, 8 against
+7), the list_transform a copy of the list a row over the bare expression (12–23 ms a million rows here, more for longer
+lists: 24 elements cost 88 ms), and the CASE named twice the expression's own time again; a column keeps the CASE.
 
 #### Nulls placed by a key of their own
 

@@ -131,6 +131,8 @@ const JSONB_WAY_OUT = "compare a member (j ->> 'k'), or j::text for the canonica
 const BOOL = 16, UUID = 2950, TIME = 1083, BYTEA = 17;
 /** pg_type's array types of the element types above */
 const ARRAYS = new Set([1000, 1001, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 1022, 1028, 1115, 1182, 1183, 1185, 1187, 1231, 2951, 199, 3807]);
+/** inet[], which the copy holds as a list of its text (src/duck/sync.ts KEPT_ARRAYS) */
+const INET_ARRAY = 1041;
 /** pg_collation's C and POSIX: byte order */
 const BYTE_COLLATIONS = new Set([950, 951]);
 
@@ -256,6 +258,13 @@ class Rewriter {
   private readonly inFrom = new WeakSet<Body>();
   /** the set-returning functions in FROM a LEFT JOIN … ON TRUE reads, written as a list never empty (leftLateral) */
   private readonly nonEmpty = new WeakSet<Body>();
+  /** such a function whose argument a step of its own before the lateral computes: the step's column (leftLateral) */
+  private readonly stepArg = new WeakMap<Body, AstNode>();
+  /** the steps leftLateral wrote, each named for its number in the statement */
+  private steps = 0;
+  /** the joins whose every column a `*` of the SELECT that holds them, or a join's own name, reads (markWholeReads):
+   *  a step written into one would be a column of the answer (leftLateral) */
+  private readonly readWhole = new WeakSet<Body>();
   /** the SELECTs and joins whose rows' order decides the answer (a LIMIT keeps the first of them, an aggregate or a
    *  window reads them in order): a LEFT lateral of a list is streamed there alone (markBounds, leftLateral) */
   private bounded = new WeakSet<Body>();
@@ -3112,10 +3121,11 @@ class Rewriter {
    * rows of few distinct documents: 79 s joined, over 200 s streamed; 2.2 s against 62.5 s over 20 M rows of 2,000).
    * So it is written only where the order of the join's rows decides the answer — a LIMIT keeps the first of them, or
    * an aggregate or a window reads them in order (`bounded`: markBounds, limitBounds) — and only for a
-   * join that is LEFT, ON a literal TRUE, its right side one function of a list Mason writes (the json rows, an array
-   * column's unnest), without ORDINALITY. A RIGHT or FULL join, another condition, or another function keeps DuckDB's
-   * own plan. Such a join a row count on the wire alone would bound (`boundedOnWire`) is left DuckDB's and said
-   * (`unboundedLateral`): the listener plans the statement again, bounded, for an Execute that sets one.
+   * join that is LEFT, ON a literal TRUE, its right side one function of a list Mason writes (the json rows, an array's
+   * unnest: a column's, or an expression's, computed once), without ORDINALITY. A RIGHT or FULL join, another
+   * condition, or another function keeps DuckDB's own plan. Such a join a row count on the wire alone would bound
+   * (`boundedOnWire`) is left DuckDB's and said (`unboundedLateral`): the listener plans the statement again, bounded,
+   * for an Execute that sets one.
    */
   private leftLateral(b: Body): AstNode | null {
     const bounded = this.bounded.has(b);
@@ -3133,12 +3143,85 @@ class Rewriter {
     const args = (c.args ?? []) as AstNode[];
     const name = lastName(c.funcname);
     if (args.length !== 1 || c.agg_star === true || c.func_variadic === true || kindOf(args[0]!) === "NamedArgExpr") return null;
-    // an array's unnest is the list itself, named twice in its CASE (never empty): a column's alone, which costs nothing twice
-    if (!LIST_ROWS.has(name) && !(name === "unnest" && kindOf(args[0]!) === "ColumnRef")) return null;
+    if (!LIST_ROWS.has(name) && name !== "unnest") return null;
     if (!bounded) { this.unboundedLateral = true; return null; }
     this.nonEmpty.add(r);
     const { quals: _true, ...rest } = b;
-    return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
+    // DuckDB 2.0 streams the INNER lateral only where its list reads ONE column of the row, or an array column
+    // (measured, docs/DESIGN.md "A LEFT lateral of a list"): one that reads two or more is its delimiter join again,
+    // the rows in an order of its own. Such an argument is computed by a step of its own before the lateral, `CROSS
+    // JOIN LATERAL (SELECT <arg> AS __mason_arg<n>) AS __mason_arg<n>` (a name no column of the query has) — a
+    // projection under the same UNNEST — and the lateral reads the step's one column; so is an unnest's expression of
+    // any columns, whose never-empty CASE then names the step's column twice, at no cost but the expression's. Not where the argument reads an array (DuckDB plans that
+    // step as a delimiter join, and the lateral streams without it: an unnest's expression is computed once inside,
+    // rangeFunction's list_transform), nor where a `*` or a join's name reads every column of the join (the step's
+    // would be one of them), nor for a subquery (a delimiter join in every form): `limit-lateral-filter`, decided
+    const arg = args[0]!;
+    if (kindOf(arg) === "ColumnRef" || this.readWhole.has(b)) return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
+    const reads = this.rowReads(arg);
+    if (reads === null || (reads < 2 && name !== "unnest")) return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
+    const alias = `__mason_arg${++this.steps}`;
+    const sub: Body = { targetList: [{ ResTarget: { name: alias, val: arg } }], op: "SETOP_NONE" };
+    this.done.add(sub);
+    this.stepArg.set(r, { ColumnRef: { fields: [S(alias), S(alias)] } });
+    const step: AstNode = { RangeSubselect: { lateral: true, subquery: { SelectStmt: sub }, alias: { aliasname: alias } } };
+    return { JoinExpr: { ...rest, jointype: "JOIN_INNER", larg: { JoinExpr: { jointype: "JOIN_INNER", larg: b.larg, rarg: step } } } };
+  }
+
+  /** how many columns of the row an argument reads (each named once), or null where it reads an array, a whole row,
+   *  a column whose type Postgres did not say, or holds a subquery: a step before the lateral is no help there
+   *  (leftLateral) */
+  private rowReads(arg: AstNode): number | null {
+    const seen = new Set<string>();
+    let plain = true;
+    const visit = (v: unknown): void => {
+      if (!plain) return;
+      if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v)) {
+        if (kindOf(v) === "SubLink") { plain = false; return; }
+        if (kindOf(v) === "ColumnRef") {
+          const t = this.typed(v)?.type;
+          if (t === undefined || ARRAYS.has(t) || this.enums.arrays.has(t) || this.isRowType(t) || (this.userTypes.has(t) && !this.isCitext(t)) || t === INET_ARRAY) { plain = false; return; }
+          seen.add(JSON.stringify(names(bodyOf(v).fields)));
+          return;
+        }
+      }
+      for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) visit(x);
+    };
+    visit(arg);
+    return plain ? seen.size : null;
+  }
+
+  /**
+   * The joins whose every column the answer reads (leftLateral): those in the FROM of a SELECT whose list holds a bare
+   * `*`, and those inside a join that has a name of its own (`(a JOIN b) AS j`, read whole by `j.*` or `j`). A column a
+   * step added to one would be a column of the answer that Postgres's has not.
+   */
+  markWholeReads(root: AstNode): void {
+    const joins = (x: unknown): void => {
+      if (!isNode(x) || kindOf(x) !== "JoinExpr") return;
+      const j = bodyOf(x);
+      this.readWhole.add(j);
+      joins(j.larg); joins(j.rarg);
+    };
+    const bareStar = (t: unknown): boolean => {
+      const v = isNode(t) ? bodyOf(t).val : undefined;
+      if (!isNode(v) || kindOf(v) !== "ColumnRef") return false;
+      const fields = (bodyOf(v).fields ?? []) as AstNode[];
+      return fields.length === 1 && kindOf(fields[0]!) === "A_Star";
+    };
+    const visit = (v: unknown): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v)) {
+        const b = bodyOf(v);
+        if (kindOf(v) === "SelectStmt" && ((b.targetList ?? []) as unknown[]).some(bareStar)) for (const f of (b.fromClause ?? []) as unknown[]) joins(f);
+        if (kindOf(v) === "JoinExpr" && b.alias !== undefined) joins(v);
+      }
+      for (const [k, x] of Object.entries(isNode(v) ? bodyOf(v) : v as Body)) visit(armOf(k, x) ?? x);
+    };
+    visit(root);
   }
 
   private rangeFunction(b: Body): AstNode | null {
@@ -3147,7 +3230,9 @@ class Rewriter {
     if (first === undefined || kindOf(first) !== "FuncCall") return null;
     const call = bodyOf(first);
     const name = lastName(call.funcname);
-    const args = (call.args ?? []) as AstNode[];
+    // a LEFT lateral's argument computed by a step of its own before it (leftLateral): its column, in its place
+    const stepped = this.stepArg.get(b);
+    const args = stepped !== undefined ? [stepped] : (call.args ?? []) as AstNode[];
     const alias = b.alias as Body | undefined;
     const aliasName = alias?.aliasname as string | undefined;
     const colnames = names(alias?.colnames);
@@ -3224,12 +3309,22 @@ class Rewriter {
         const item = bodyOf(items[0]!);
         return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [fn("unnest", [keys]), ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
       }
-      // an array column's elements, never empty: its list where it has one, else one NULL (leftLateral)
+      // an array's elements, never empty: its list where it has one, else one NULL (leftLateral). The CASE names the
+      // list twice: a column's (or the column of the step leftLateral computed the expression in) costs nothing
+      // twice; an expression left here (it reads an array, holds a subquery, or a `*` reads the join) would be
+      // computed twice (a call of Mason's string_to_array a row more), so it is computed ONCE, the one element of a
+      // list whose lambda names it twice: `list_transform(list_value(<expr>), __mason_l -> CASE … __mason_l …
+      // END)[1]`, a copy of its list a row more, the same streaming UNNEST (measured: docs/DESIGN.md "A LEFT lateral
+      // of a list")
       case "unnest": {
         if (!orNull) return null;
         const list = args[0]!;
         const column = colnames[0] ?? aliasName ?? name;
-        return listLateral([{ name: column, list: caseWhen([[op(">", fn("len", [this.clone(list)]), intConst(0)), list]], arrayOf([nullConst()])) }], aliasName ?? name, this.done);
+        const never = (l: () => AstNode): AstNode => caseWhen([[op(">", fn("len", [l()]), intConst(0)), l()]], arrayOf([nullConst()]));
+        const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_l")] } });
+        const once = kindOf(list) === "ColumnRef" ? never(() => this.clone(list))
+          : { A_Indirection: { arg: fn("list_transform", [fn("list_value", [list]), op("->", each(), never(each))]), indirection: [{ A_Indices: { uidx: intConst(1) } }] } };
+        return listLateral([{ name: column, list: once }], aliasName ?? name, this.done);
       }
       default: return null;
     }
@@ -3990,6 +4085,7 @@ export function rewrite(stmt: AstNode, base: number, analysis: PgAnalysis, colla
   r.repeatedKeyCounts(own);
   const exact = r.exactThrough(own, analysis.fields);
   r.markBounds(own, wireBound);
+  r.markWholeReads(own);
   const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;
   return { tree, dropLast: r.excludeRank, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral };
 }

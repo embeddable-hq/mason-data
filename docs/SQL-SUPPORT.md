@@ -16,7 +16,7 @@ each). The copy is read-only.
 
 | Postgres | Mason |
 |---|---|
-| A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 85 forms of them verified |
+| A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 86 forms of them verified |
 | The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 241 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
@@ -24,10 +24,10 @@ each). The copy is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 2,998 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,058 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 2,998 statements | Mason | DuckDB alone |
+| Of 3,058 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 95% | 31% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
@@ -116,7 +116,7 @@ Answered, but not as Postgres answers. Each is a decided difference the oracle c
 |---|---|---|---|---|
 | `libc-symbol-punctuation` | text ordered under a libc collation where punctuation or a space follows a digit or a symbol and a later letter differs only in case ('1-X' beside '1x') | the punctuation outranks the case: 1-X < 1x | the case outranks the punctuation: 1x < 1-X | ORDER BY lower(x), x when the case must not decide first |
 | `limit-errors` | a select-list value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out, where no index gives the ORDER BY | raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers) | answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does | none needed for an answer; filter the bad rows out to have neither raise |
-| `limit-lateral-filter` | a LEFT JOIN of a json document's rows ON TRUE (json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, with a filter above the join that DuckDB does not push down to the base: a WHERE on the lateral's own column (d.key <> 'n'), one holding a bound parameter ($1) in a SELECT around the join, or one in a SELECT that reads the join through a CTE | the first rows of the base, in its order, each row's members in theirs | DuckDB plans the lateral under such a filter as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (a filter on the base in the join's own SELECT, literal or parameter, or a literal one around it through a derived table, keeps Postgres's) | ORDER BY the base's key before the LIMIT, or filter the base in the SELECT that holds the join |
+| `limit-lateral-filter` | a LEFT JOIN of a list's rows ON TRUE (json_each, jsonb_array_elements, unnest, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, where DuckDB plans the streamed lateral as its delimiter join: under a filter above the join that DuckDB does not push down to the base — a WHERE on the lateral's own column (d.key <> 'n'), one holding a bound parameter ($1) in a SELECT around the join, or one in a SELECT that reads the join through a CTE — or over an argument that holds a subquery (unnest(ARRAY(SELECT …))), or that reads two or more columns of the row and no array (CASE WHEN t.kind = 'doc' THEN t.body END) in a SELECT whose list is a bare * or inside a join with a name of its own | the first rows of the base, in its order, each row's members in theirs | DuckDB plans such a lateral as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (a filter on the base in the join's own SELECT, literal or parameter, or a literal one around it through a derived table, keeps Postgres's; an argument of two columns elsewhere is computed in a step of its own before the lateral, which a * would read as a column) | ORDER BY the base's key before the LIMIT, filter the base in the SELECT that holds the join, or name the columns instead of * |
 | `window-partition-order` | a window function that reads its frame in order (row_number, lag, lead, first_value, last_value, nth_value, ntile) over a window with PARTITION BY and no ORDER BY | a partition's rows in the order its sort hands them back: in practice the order they came in | a partition's rows in the order DuckDB's partitioning hands them back, another one | ORDER BY in the window (OVER (PARTITION BY a ORDER BY b)) |
 | `mixed-scale-numeric` | a numeric column whose values have several scales: an integer UNION ALL a numeric, lead(x, 1, 0) beside numeric(2,1) values, an unconstrained column holding 1 and 1.50 | each value its own scale: 1, 1.5 | one scale per column: 1.0, 1.5 | cast to numeric(p, s), or round(x, s) |
 | `unicode-16-case` | upper / lower of letters added in Unicode 16 | maps them (its own Unicode 16 tables) | leaves them as they are (DuckDB's ICU predates Unicode 16) | none needed for letters before Unicode 16 |
@@ -143,7 +143,7 @@ Not about one statement: what the prototype cannot do yet.
 | `numeric-parameter` | a numeric parameter ($1) compared in a WHERE | exact | a double (exact to 15 digits) | a literal |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (992)
+## What is verified (993)
 
 ### Types (49)
 
@@ -1073,9 +1073,10 @@ Not about one statement: what the prototype cannot do yet.
 - an item of the SELECT list
 - an operator
 
-### Forms of a construct (85)
+### Forms of a construct (86)
 
 - AND
+- ARRAY(subquery)
 - CURRENT_DATE
 - CURRENT_TIMESTAMP
 - DISTINCT ON
