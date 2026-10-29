@@ -110,7 +110,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.doesNotMatch(sources, /order_items/, "order_items is the person's to add");
     assert.equal(config().demo, true);
     assert.ok(!fs.existsSync(demoDir), "nothing is hosted before mason start");
-    // THE DEMO ON A PORT THE OS HANDS OUT, never the 5434 init prefers (src/cli/demo.ts DEMO_PORT): init takes 5434
+    // THE DEMO ON A PORT THE OS NEVER HANDS OUT (out of its ephemeral range, claimed: tests/test-ports.ts), never the 5434 init prefers (src/cli/demo.ts DEMO_PORT): init takes 5434
     // whenever it is free at that moment, and another run of this file (a second worktree's check), another test's demo
     // or the developer's own demo in another folder may hold it by the time this one starts or is asked "not
     // running". The port lives in .env's URL alone by design (demoPort), so the URL is the place to move it
@@ -119,7 +119,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     fs.writeFileSync(path.join(root, ".env"), fs.readFileSync(path.join(root, ".env"), "utf8").replace(demoUrl, `postgres://demo@127.0.0.1:${own}/demo`));
     demoUrl = envUrl();
     demoPort = own;
-    assert.equal(demoUrl, `postgres://demo@127.0.0.1:${own}/demo`, "the demo's URL moved to the OS's port");
+    assert.equal(demoUrl, `postgres://demo@127.0.0.1:${own}/demo`, "the demo's URL moved to the port picked out of the OS's range");
   });
 
   test("mason tables before any start: the failure shape, the demo database runs inside mason start", async () => {
