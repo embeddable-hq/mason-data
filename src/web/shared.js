@@ -63,6 +63,19 @@ export function duration(seconds) {
   return m < 90 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
+/** A duration in milliseconds as a person reads it: `512 ms`, `13.7 s`, `2 min 5 s`, `1 h 4 min` (src/cli/readiness.ts
+ *  `msText`, held equal by the tests): every statement's, sync's and percentile's time on the page. */
+export function msText(ms) {
+  const v = Math.max(0, ms);
+  if (Math.round(v) < 1000) return `${Math.round(v)} ms`;
+  const tenths = Math.round(v / 100);
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)} s`;
+  const s = Math.round(v / 1000);
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
+  const m = Math.round(s / 60);
+  return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+
 /** A span of seconds as the stream's lines say it: `0.3 s` under ten seconds, then `duration` (src/cli/commands.ts `spanText`). */
 export const spanText = (seconds) => seconds < 10 ? `${Math.max(0, seconds).toFixed(1)} s` : duration(seconds);
 
@@ -319,22 +332,43 @@ export function button(label, data = {}, variant = "") {
   return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}>${esc(label)}</button>`;
 }
 
-/** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
-export const copyable = (id, text) => `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small")}</span>`;
+/** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. `clip`:
+ *  one line, cut by the stylesheet with an ellipsis in a narrow cell (a table's URL column), its whole the title —
+ *  Copy copies the whole either way. */
+export const copyable = (id, text, { clip = false } = {}) =>
+  `<span class="copyrow${clip ? " clipped" : ""}"><code id="${esc(id)}"${clip ? ` title="${esc(text)}"` : ""}>${esc(text)}</code> ${button("Copy", { copy: id }, "small")}</span>`;
+
+/** How long a Copy button says Copied (or what to press) before it says Copy again. */
+export const COPIED_MS = 2000;
 
 /**
  * A COPY BUTTON CLICKED (`data-copy`, a `copyable`'s), on whichever page: its code's text to the clipboard, the button
- * then saying Copied; when the clipboard refuses (a browser setting), the text is selected for the reader's own copy and
- * the button says why. null for a button that is no Copy, so a page's `click` asks it first.
+ * then saying Copied for COPIED_MS and Copy again. When the clipboard refuses (no permission, an insecure origin, a
+ * browser setting), the text is selected and copied as a selection is (`execCommand("copy")`); when that fails too, it
+ * stays selected and the button says what to press. null for a button that is no Copy, so a page's `click` asks it first.
  */
 export function copyClick(d, button, { doc, win }) {
   if (d.copy === undefined) return null;
-  const text = doc.getElementById(d.copy)?.textContent ?? "";
-  return Promise.resolve().then(() => win.navigator.clipboard.writeText(text)).then(() => { button.textContent = "Copied"; }, (err) => {
-    win.getSelection()?.selectAllChildren(doc.getElementById(d.copy));
-    button.textContent = `Select and copy it (${err?.message ?? err})`;
+  const el = doc.getElementById(d.copy);
+  const text = el?.textContent ?? "";
+  const say = (word) => {
+    button.textContent = word;
+    if (button.dataset) button.dataset.copied = "";
+    win.setTimeout?.(() => { button.textContent = "Copy"; if (button.dataset) delete button.dataset.copied; }, COPIED_MS);
+  };
+  return Promise.resolve().then(() => win.navigator.clipboard.writeText(text)).then(() => say("Copied"), () => {
+    // no clipboard: the text selected, and copied as a selection is (what a person's own Copy would do)
+    const selection = win.getSelection?.();
+    if (el && selection) selection.selectAllChildren(el);
+    let copied = false;
+    try { copied = doc.execCommand?.("copy") === true; } catch { copied = false; }   // refused outright: said below, the text left selected
+    say(copied ? "Copied" : `Selected: press ${/Mac|iPhone|iPad/.test(win.navigator.platform ?? win.navigator.userAgent ?? "") ? "⌘C" : "Ctrl+C"}`);
   });
 }
+
+/** What the request log does not list (src/cli/commands.ts `UNLISTED_STATEMENTS`, held equal by the tests): a statement
+ *  that reads no copied table is the catalog's to answer, and not recorded — so a `select 1` never shows on Queries. */
+export const UNLISTED_STATEMENTS = "A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed";
 
 /** The hash of the page that makes a user (src/web/app.js PAGES): where Connect's Create a user leads. */
 export const USERS_HASH = "#users";
@@ -346,11 +380,13 @@ export const USERS_HASH = "#users";
  * place. `first` (nothing has asked Mason anything yet) leads with what the URL is for. Nothing from a run that does
  * not say it.
  */
-export function renderConnect(pg, { first = false } = {}) {
+export function renderConnect(pg, { first = false, table = null } = {}) {
   if (!pg || typeof pg.shown !== "string") return "";
+  // a first statement to type that the request log lists (one that reads a copied table: UNLISTED_STATEMENTS)
+  const tryIt = first && table ? `<dt>Then try</dt><dd>${copyable("connect-try", `select count(*) from ${entryName(table)};`)} <span class="dim">it shows on Queries</span></dd>` : "";
   return `<div class="connect${first ? " first" : ""}"><p class="connect-title">${first ? "Connect your first tool" : "Connect"}</p>` +
     (first ? `<p class="lead">Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL.</p>` : "") +
-    `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd></dl>` +
+    `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd>${tryIt}</dl>` +
     `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p></div>`;
 }
 

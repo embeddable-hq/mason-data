@@ -13,9 +13,13 @@ const USERS_EVERY_MS = 30_000;
 /** A time as `mason user list` stamps it: `2026-10-27 09:10`, UTC. */
 const stamp = utcMinute;
 
-/** When a user was last used, as `mason user list` says it: the time, or why not (unknown, or not within the log's days). */
-export function lastUsedText(u, lastUsedNote, requestLogDays) {
-  return u.lastUsedAt != null ? `${stamp(u.lastUsedAt)} UTC` : lastUsedNote != null ? "unknown" : `not used in the last ${requestLogDays ?? "?"} days`;
+/** When a user was last used, as `mason user list` says it (src/cli/user.ts `lastUsedText`, held equal by the tests): the
+ *  time, or why not — unknown, never (added within the log's days, and no statement since), or not within the log's days. */
+export function lastUsedText(u, lastUsedNote, requestLogDays, now = Date.now()) {
+  if (u.lastUsedAt != null) return `${stamp(u.lastUsedAt)} UTC`;
+  if (lastUsedNote != null) return "unknown";
+  if (requestLogDays != null && u.addedAt != null && now - Date.parse(u.addedAt) < requestLogDays * 86_400_000) return "never";
+  return `not used in the last ${requestLogDays ?? "?"} days`;
 }
 
 /**
@@ -31,13 +35,13 @@ export function renderUsers(list, confirming = null, now = Date.now()) {
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
   return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col" class="num">Last used</th><th scope="col">URL</th><th scope="col"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
-    const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays);
+    const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
       ? `<span title="${esc(last)}">${esc(duration(Math.max(0, (now - Date.parse(u.lastUsedAt)) / 1000)))} ago</span>` : esc(last);
     return `<tr${active ? "" : ` class="removed"`}><th scope="row">${code(u.name)} <span class="dim">id ${esc(u.id)}</span></th>` +
       `<td>${active ? status("ok", "Active") : status("unknown", `Removed ${stamp(u.removedAt)} UTC`)}${active && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
-      `<td>${active && u.url ? copyable(`user-url-${u.name}`, u.url) : ""}</td>` +
+      `<td>${active && u.url ? copyable(`user-url-${u.name}`, u.url, { clip: true }) : ""}</td>` +
       `<td class="act">${!active ? "" : confirming === u.name
         ? `<span class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</span> ` +
           `${button(`Remove ${u.name}`, { confirmRemove: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "" }, "small")}`

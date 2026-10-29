@@ -18,6 +18,22 @@ export function duration(seconds: number): string {
   return m < 90 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
+/**
+ * A DURATION IN MILLISECONDS as a person reads it, the one formatter of a statement's, a sync's or a percentile's time
+ * (the web page's `msText`, src/web/shared.js, held equal by the tests): `512 ms` under a second, then `13.7 s`, then
+ * `2 min 5 s`, then `1 h 4 min` (a 13,703 ms statement read as thirteen thousand of something).
+ */
+export function msText(ms: number): string {
+  const v = Math.max(0, ms);
+  if (Math.round(v) < 1000) return `${Math.round(v)} ms`;
+  const tenths = Math.round(v / 100);
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)} s`;
+  const s = Math.round(v / 1000);
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
+  const m = Math.round(s / 60);
+  return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+
 export interface Readiness {
   /** true: every added table is copied */
   ready: boolean;

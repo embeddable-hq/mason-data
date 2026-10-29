@@ -28,7 +28,7 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | `#observability/logs` | Observability › Logs; `?failures=1` ticks Failures only |
 
 The hashes of before the Observability group still land on their view: `#status` is the Overview, `#queries`, `#usage` and
-`#logs` the Observability views. At the top of each Observability view is **the time range the three share**: a segmented control — Last hour · 24 hours · 7 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`)
+`#logs` the Observability views. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — Last hour · 24 hours · 7 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`)
 — kept in the hash, so a link carries it (the sidebar's links to the three keep it too). Queries reads the request log since then, Usage the samples of that span (a
 minute a point for the hour, an hour for the day, six hours for the week), Logs the sync's events since then; each
 view's own filters compose with it. Only the view shown asks Mason anything, each read at the rate its data changes,
@@ -45,6 +45,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   24-hour sparkline once there are two hours to draw, and **each is a link** into the view that lists what it counts:
   the tables (the failed ones when a copy failed), Usage for the copy's file, Queries for the statements, the slow ones
   for the p95.
+- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ a table copied · ✓/○ a user
+  created · ✓/○ a first statement answered — each ○ with its one action (Add a table → Tables, Create a user → Users,
+  Copy the psql line → Connect's), from `/api/state`'s totals, `/api/users` (`mason user list --json`) and the request
+  log's week (`/api/queries`). Gone once the four are done; not drawn while a read it needs is unanswered or failed.
 - **Overview**, Connect: the Postgres API's URL with `<user>:<password>` in the credentials' place and its psql line —
   the lines `mason status` prints — each with **Copy**, and **Create a user** (the Users page). While nothing has asked
   Mason anything (no statement in the last day or week) it is **Connect your first tool**, right under the cards, saying
@@ -74,7 +78,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   statements, failed and p95 of the range (the request log's summary has a day and a week: the hour's cards say the
   day, by name), then who is connected now — a row per user and client, the 10 with the most sessions and one row for
   the others.
-- **Queries**, running now: each statement with **Cancel**, which asks first and stops that one statement, as
+- **Queries**, running now: each statement with how long it has run (moving with each poll; when it started is its title) and **Cancel**, which asks first and stops that one statement, as
   `mason cancel` does.
 - **Queries**, unsupported SQL: the statements of the range Mason refused for SQL it does not support, grouped by their
   entry of `docs/SQL-SUPPORT.md` (named, as the page cannot link into the repository), the most refused first — how
@@ -85,6 +89,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   client; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
   opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.
+  A statement that reads no copied table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
+  answered without the copy and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
+  page says so, as `mason logs --requests` does when it lists none; while nothing is listed, Connect offers a first
+  statement that is (`select count(*) from <a copied table>;`).
 - **Observability › Usage** (`#observability/usage`): cards for the range (statements, failed, p95, rows sent, bytes
   sent), each with a sparkline.
 - **Usage**, charts and tables: four charts over the range (statements, p95, the copy's size, rows in the copy), their

@@ -58,6 +58,9 @@ import { page as usersPage } from "./pages/users.js";
 import { page as usagePage } from "./pages/usage.js";
 import { page as logsPage } from "./pages/logs.js";
 
+/** What the shell itself reads when the page shown does not: the state (the sidebar's project, badge and version). */
+const SHELL_STATE = { path: "/api/state", everyMs: 60_000 };
+
 /** The longest a pointer's press holds the page's writes (a click is well under it): see `pressedAt`. */
 export const PRESS_HOLD_MS = 2000;
 
@@ -133,16 +136,15 @@ export const renderNav = (shown, range = DEFAULT_RANGE) => `<ul>${tabs().map((t)
 }).join("")}</ul>`;
 
 /**
- * THE HEAD OF A GROUP'S PAGE (the Observability views'): the group's name and the time range they share as a segmented
- * control — each a link to the same view at that range, so the hash is the state and Back goes to the range before.
- * The views themselves are the sidebar's links. "" for a page of its own.
+ * THE TIME RANGE OF A GROUP'S PAGE (the Observability views'), written beside the view's title in ONE header row (its
+ * section's `range-<id>`; the group's name is the sidebar's heading): a segmented control — each a link to the same view
+ * at that range, so the hash is the state and Back goes to the range before. "" for a page of its own.
  */
 export function renderSubnav(shown, range = DEFAULT_RANGE) {
   const p = PAGES.find((x) => x.id === shown);
   if (!p?.parent) return "";
   const r = rangeOf(range);
-  return `<p class="crumb">${esc(GROUPS[p.parent]?.title ?? p.parent)}</p>` +
-    `<div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) =>
+  return `<div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) =>
       `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}>${esc(v.label)}</a>`).join("")}</div>`;
 }
 
@@ -191,7 +193,10 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     /** Read the shown page's reads that are due: those at the poll's rate every time, the slower ones once their time is up. */
     async poll() {
       const page = pages.get(m.shown);
-      const reads = page.reads();
+      // the sidebar's project, demo badge and version are the state's: a page that does not read it (Users) has it read
+      // once a minute beside its own, so a page opened at its own address never shows an empty sidebar
+      const pageReads = page.reads();
+      const reads = pageReads.some((r) => r.path === SHELL_STATE.path) ? pageReads : [...pageReads, SHELL_STATE];
       const at = now().getTime();
       const due = reads.filter((r) => r.everyMs <= POLL_MS || !store.has(r.path) || at - store.get(r.path).at >= r.everyMs - POLL_MS / 2);
       const rs = await Promise.all(due.map((r) => ask(r.path)));
@@ -204,7 +209,8 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       const st = store.get("/api/state")?.body;
       return {
         nav: renderNav(m.shown, m.range),
-        subnav: renderSubnav(m.shown, m.range),
+        // the range control in the shown view's header row (each group page's own slot; the others empty)
+        ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range) : ""])),
         where: st ? renderWhere(st) : "",
         // the demo database is said beside its name, so a person never takes it for their own
         badge: st?.source?.demo ? badge("demo", "accent") : "",

@@ -258,7 +258,7 @@ test("mason status's slow and refused statements: each on one line with its time
   assert.deepEqual(slowLines([{ route: "postgres", payload: "SELECT count(*)\n  FROM public.orders\n  GROUP BY status", runs: 1, medianMs: 2500, maxMs: 2500, latestMs: 2500,
     last: "2026-10-26T10:00:05.000Z" }], PLAIN), [
     "\nSlow queries (the last day, still 1 s or more; slowest first):",
-    "  2,500 ms last time (1 run, median 2,500 ms), last 2026-10-26 10:00 UTC",
+    "  2.5 s last time (1 run, median 2.5 s), last 2026-10-26 10:00 UTC",
     "    SELECT count(*) FROM public.orders GROUP BY status",
   ]);
   assert.deepEqual(slowLines([], PLAIN), [], "nothing slow: no section");
@@ -313,12 +313,19 @@ test("mason status's query errors: the latest refused, failed or cancelled state
   assert.match(STATUS.usage, /recentErrors: \{ sync: [^]*queries: \[[^]*queriesError/, "mason status's usage names recentErrors.queries and queriesError");
 });
 
+test("msText: a duration in ms as a person reads it — ms under a second, then tenths of a second, then minutes and seconds, then hours and minutes", () => {
+  const { msText } = commands;
+  const cases: Array<[number, string]> = [[0, "0 ms"], [3, "3 ms"], [512.4, "512 ms"], [999.4, "999 ms"], [999.6, "1.0 s"], [1234, "1.2 s"], [13_703, "13.7 s"],
+    [59_949, "59.9 s"], [59_960, "1 min"], [125_000, "2 min 5 s"], [3_599_400, "59 min 59 s"], [3_599_600, "1 h"], [3_840_000, "1 h 4 min"], [-5, "0 ms"]];
+  for (const [ms, text] of cases) assert.equal(msText(ms), text, `msText(${ms})`);
+});
+
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
   const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", status: "completed", sqlstate: null, message: null,
     rows: 20, durationMs: 1234, query: "SELECT id\n FROM public.orders LIMIT 20" }, PLAIN),
-    "2026-10-26 14:02:11  ok                1,234 ms      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
+    "2026-10-26 14:02:11  ok                   1.2 s      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:12.000Z", applicationName: "", tokenName: "bi", outcome: "refused", status: "failed", sqlstate: "42P01",
     message: 'relation "nope" does not exist\nsecond', rows: null, durationMs: 3, query: "SELECT * FROM nope" }, PLAIN),
     '2026-10-26 14:02:12  refused 42P01         3 ms               (no application_name) (token bi)  SELECT * FROM nope — relation "nope" does not exist');
@@ -370,7 +377,7 @@ const sample = { at: "2026-10-28T09:05:00.000Z", seconds: 300, copyBytes: 5 * 2 
 test("mason usage: a span a line under its heading — the statements, their errors, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
   const { sampleHeading, spanSeconds, USAGE } = usageCli as UsageCli;
   assert.equal(sampleHeading(false), "time (UTC)        statements   errors         p95    rows sent        copy           rows  failing      oldest  memory");
-  assert.equal(sampleLine(sample, false), "2026-10-28 09:05       1,204        3    1,830 ms       98,765     5.0 GiB     12,345,678        1        75 s  900.0 MiB (copy 300.0 MiB of 8.0 GiB)");
+  assert.equal(sampleLine(sample, false), "2026-10-28 09:05       1,204        3       1.8 s       98,765     5.0 GiB     12,345,678        1        75 s  900.0 MiB (copy 300.0 MiB of 8.0 GiB)");
   assert.equal(sampleLine({ ...sample, statements: 0, statementsRefused: 0, statementsFailed: 0, durationP95Ms: null, tablesFailed: 0, oldestSyncSeconds: null, copyMemoryBytes: null, streamLagSeconds: 3, streamLagBytes: 10 }, true),
     "2026-10-28 09:05           0                    –       98,765     5.0 GiB     12,345,678                    –        3 s  900.0 MiB", "nothing to say is blank or a dash; the lag with replication");
   assert.equal(sampleHeading(true).endsWith("oldest        lag  memory"), true);
@@ -554,10 +561,10 @@ test("mason status's queries: the last day and the last week a line each — eve
   const queryLines = (commands as Record<string, unknown>).queryLines as ((q: unknown, st: typeof PLAIN) => string[]) | undefined;
   assert.equal(typeof queryLines, "function");
   const w = (days: number, covered: number) => ({ days, covered, statements: 1204, completed: 1190, refused: 10, failed: 2, cancelled: 2, rows: 52_000, bytesSent: 3 * 1024 * 1024,
-    durationMs: { avg: 120, p50: 40, p95: 900 } });
+    durationMs: { avg: 120, p50: 40, p95: 13_703 } });
   assert.deepEqual(queryLines!({ keptDays: 3, day: w(1, 1), week: { ...w(7, 3), durationMs: null } }, PLAIN), [
     "\nQueries (the completed ones' time: average / p50 / p95; mason logs --requests lists each):",
-    "  last day    1,204 statements: 1,190 completed, 10 refused, 2 failed, 2 cancelled · 120 / 40 / 900 ms · 52,000 rows, 3.0 MiB sent",
+    "  last day    1,204 statements: 1,190 completed, 10 refused, 2 failed, 2 cancelled · 120 ms / 40 ms / 13.7 s · 52,000 rows, 3.0 MiB sent",
     "  last week   1,204 statements: 1,190 completed, 10 refused, 2 failed, 2 cancelled · 52,000 rows, 3.0 MiB sent (the request log keeps 3 days: MASON_REQUEST_LOG_DAYS)",
   ]);
   assert.deepEqual(queryLines!({ error: "the run answered 500" }, PLAIN), ["\nQueries: could not read them (the run answered 500; mason logs has the detail)"]);
@@ -623,6 +630,11 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     assert.equal(slow.code, 0, slow.stdout + slow.stderr);
     assert.deepEqual(asked.at(-1), { limit: 40, minMs: 1000, search: "from orders" });
     assert.equal((JSON.parse(slow.stdout) as { next: Array<{ command: string }> }).next[0]!.command, "mason logs --requests --slow --search 'from orders' --before 2026-10-24T10:00:00.000Z~7");
+    // none listed, nothing filtered: what the log does not list, so a select 1 typed to test the connection is not looked for in vain
+    const none = await run(["logs", "--requests"]);
+    assert.equal(none.code, 0, none.stdout + none.stderr);
+    assert.match(none.stdout, /^No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.\n\nTip: A statement that reads no copied table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not\s+listed\./);
+    assert.ok(!(await run(["logs", "--requests", "--slow"])).stdout.includes("reads no copied table"), "a filter that passes none says nothing of it");
     // a mistake: exit 2, in the flag's name, before the run is asked
     const before = asked.length;
     for (const [argv, words] of [

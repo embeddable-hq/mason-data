@@ -9,7 +9,7 @@
  * Reads `/api/queries`, `/api/usage` and its copy sizes every 60 s (a sample is taken a minute). Every number a chart
  * draws is also text, in a card or the hours' table. A page module (src/web/app.js has the contract). Never the engine's name.
  */
-import { esc, n, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, nextSort, readPart, usagePath, utcMinute, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
+import { esc, n, msText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, nextSort, readPart, usagePath, utcMinute, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 import { statementCards, summaryWindow } from "./queries.js";
 
@@ -24,7 +24,7 @@ const th = (cols) => `<thead><tr>${cols.map((c) => `<th scope="col">${esc(c)}</t
 const num = (v) => `<td class="num">${esc(v)}</td>`;
 
 /** The duration cell as `mason status` says it: `average / p50 / p95 ms`; empty when no statement completed (src/cli/commands.ts `queryLines`). */
-export const durationsText = (d) => d === null ? "–" : `${n(d.avg)} / ${n(d.p50)} / ${n(d.p95)} ms`;
+export const durationsText = (d) => d === null ? "–" : `${msText(d.avg)} / ${msText(d.p50)} / ${msText(d.p95)}`;
 /** The caveat of a window the request log keeps fewer days of than it asks (src/cli/commands.ts `queryLines`); "" when it keeps all. */
 export const coveredText = (w) => w.covered < w.days ? `the request log keeps ${w.covered} day${w.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS` : "";
 
@@ -48,7 +48,7 @@ export function sampleCells(s) {
   const bad = s.statementsRefused + s.statementsFailed + s.statementsCancelled;
   return {
     time: utcMinute(s.at), statements: n(s.statements), errors: bad === 0 ? "" : n(bad),
-    rowsSent: n(s.rowsSent), bytesSent: bytesText(s.bytesSent), p95: s.durationP95Ms === null ? "–" : `${n(s.durationP95Ms)} ms`,
+    rowsSent: n(s.rowsSent), bytesSent: bytesText(s.bytesSent), p95: s.durationP95Ms === null ? "–" : msText(s.durationP95Ms),
     copy: s.copyBytes === null ? "–" : fileSize(s.copyBytes), rows: n(s.copyRows), failing: s.tablesFailed === 0 ? "" : n(s.tablesFailed),
     oldest: s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds), lag: s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds),
     memory: `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (copy ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`,
@@ -59,7 +59,7 @@ export function sampleCells(s) {
  *  says it), the axis's unit]. One series each, from a zero baseline. "Statements" is "Statements an hour" by the step. */
 const CHARTS = [
   ["usage-statements", "Statements", "statements", "bars", n, "count"],
-  ["usage-p95", "p95 duration", "durationP95Ms", "line", (v) => `${n(Math.round(v))} ms`, "ms"],
+  ["usage-p95", "p95 duration", "durationP95Ms", "line", (v) => msText(v), "ms"],
   ["usage-copy-bytes", "Size of the copy", "copyBytes", "line", fileSize, "bytes"],
   ["usage-copy-rows", "Rows in the copy", "copyRows", "line", n, "count"],
 ];

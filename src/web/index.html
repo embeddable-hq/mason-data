@@ -30,8 +30,6 @@
 <div class="content">
 <div id="poll"></div>
 <main>
-  <!-- the Observability views' head: the group's name and the time range the three share (src/web/app.js renderSubnav); empty elsewhere -->
-  <div id="subnav" class="subnav"></div>
   <section id="page-status" aria-labelledby="status-h">
     <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason copies the tables you add from your Postgres, keeps them current, and answers analytics SQL at a Postgres URL of its own. Here: whether the copy is ready, how to connect, and what it answered — what <code>mason status</code> says.</p></div>
     <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
@@ -49,7 +47,8 @@
     <div id="tables"></div>
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>
-    <div class="page-head"><h2 id="queries-h">Queries</h2><p class="desc">The statements the Postgres API answers: who is connected, what runs now, the SQL it refused as unsupported, and every statement that ran, as <code>mason status</code> and <code>mason logs</code> list them.</p></div>
+    <!-- an Observability view's head is ONE row: its title left, the time range the three share right (src/web/app.js renderSubnav) -->
+    <div class="page-head"><div class="head-row"><h2 id="queries-h">Queries</h2><div id="range-queries" class="head-range"></div></div><p class="desc">The statements the Postgres API answers: who is connected, what runs now, the SQL it refused as unsupported, and every statement that ran, as <code>mason status</code> and <code>mason logs</code> list them.</p></div>
     <div id="queries-kpis"></div>
     <h3>Connected now</h3>
     <div id="connected-now"></div>
@@ -59,7 +58,7 @@
     <h3>Unsupported SQL</h3>
     <div id="unsupported"></div>
     <h3>Request log</h3>
-    <p class="lead">The statements answered, refused or cancelled, as <code>mason logs --requests</code> lists them, newest first, over the time range above. Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone.</p>
+    <p class="lead">The statements answered, refused or cancelled, as <code>mason logs --requests</code> lists them, newest first, over the time range above. Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone. A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed.</p>
     <form id="request-filters" class="toolbar" autocomplete="off">
       <div class="field"><label for="rq-status">Status</label>
         <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
@@ -89,7 +88,7 @@
     <div id="users"></div>
   </section>
   <section id="page-usage" aria-labelledby="usage-h" hidden>
-    <div class="page-head"><h2 id="usage-h">Usage</h2><p class="desc">What the Postgres API answered over the time range and each copy's size, as <code>mason usage</code> prints them.</p></div>
+    <div class="page-head"><div class="head-row"><h2 id="usage-h">Usage</h2><div id="range-usage" class="head-range"></div></div><p class="desc">What the Postgres API answered over the time range and each copy's size, as <code>mason usage</code> prints them.</p></div>
     <div id="usage-kpis"></div>
     <div id="usage-charts"></div>
     <h3>The last day and the last week</h3>
@@ -100,7 +99,7 @@
     <div id="usage-sizes"></div>
   </section>
   <section id="page-logs" aria-labelledby="logs-h" hidden>
-    <div class="page-head"><h2 id="logs-h">Logs</h2><p class="desc">The sync's events, as <code>mason logs --events</code> lists them, and the run's own log behind a details.</p></div>
+    <div class="page-head"><div class="head-row"><h2 id="logs-h">Logs</h2><div id="range-logs" class="head-range"></div></div><p class="desc">The sync's events, as <code>mason logs --events</code> lists them, and the run's own log behind a details.</p></div>
     <div class="toolbar"><div id="logs-filters" class="fields"></div><label class="check" for="logs-failures-only"><input type="checkbox" id="logs-failures-only"> Failures only</label></div>
     <div id="logs-events"></div>
     <div id="logs-run"></div>

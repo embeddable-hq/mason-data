@@ -17,7 +17,7 @@
 /** Where each card leads: the views that list what it counts (src/web/app.js hashes). */
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
   slow: "#observability/queries?slow=1", failedQueries: "#observability/queries?status=failed", failedEvents: "#observability/logs?failures=1" };
-import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
+import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
@@ -117,9 +117,10 @@ export function sourceRows(s) {
     ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
-    ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
-        `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · ${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
+    // in a web developer's words first (checked every 5 s, streamed as they happen); the mechanism an operator needs in parentheses
+    ["Changes", s.source.replication ? `streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
+        `${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll checks every ${s.engine.pollSeconds} s instead`
+      : `checked every ${s.engine.pollSeconds} s (a SELECT of each table's changed rows) · ${s.source.demo ? "the demo database is checked this way only" : "mason start --replication streams them as they happen instead"}`],
   ];
 }
 
@@ -182,8 +183,8 @@ export function renderKpis(s, o = {}) {
       const day = q.queries.day;
       const bad = day.refused + day.failed + day.cancelled;
       list.push(card("Statements, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : "", LINKS.queries),
-        card("p95, last day", day.durationMs === null ? "–" : `${n(day.durationMs.p95)} ms`,
-          day.durationMs === null ? "no statement completed" : `average ${n(day.durationMs.avg)} ms · p50 ${n(day.durationMs.p50)} ms`, line("p95"), "", LINKS.slow));
+        card("p95, last day", day.durationMs === null ? "–" : msText(day.durationMs.p95),
+          day.durationMs === null ? "no statement completed" : `average ${msText(day.durationMs.avg)} · p50 ${msText(day.durationMs.p50)}`, line("p95"), "", LINKS.slow));
     }
   }
   return cards(list);
@@ -260,7 +261,7 @@ export function renderQueries(q) {
   if (q === undefined) return "";
   if ("failure" in q) return `<p class="count">Queries: could not read them (${esc(firstLine(q.failure.message))}; ${code("mason logs")} has the detail)</p>`;
   const w = q.queries;
-  const ms = (x) => `${n(x)} ms`;
+  const ms = msText;
   const row = (label, x) => `<tr><th scope="row">${esc(label)}</th>${[n(x.statements), n(x.completed), n(x.refused), n(x.failed), n(x.cancelled),
     x.durationMs === null ? "" : ms(x.durationMs.avg), x.durationMs === null ? "" : ms(x.durationMs.p50), x.durationMs === null ? "" : ms(x.durationMs.p95),
     n(x.rows), bytesText(x.bytesSent)].map((v) => `<td class="num">${esc(v)}</td>`).join("")}</tr>`;
@@ -275,7 +276,7 @@ export function renderQueries(q) {
 /** A failed statement's cells, as mason status's `Query errors` line says them (src/cli/commands.ts `requestLine`): when,
  *  the outcome and SQLSTATE, how long, the rows sent, who, the statement on one line and the error's first line. */
 export function requestCells(r) {
-  return [utcText(r.startedAt), r.outcome === "ok" ? "ok" : `${r.outcome} ${r.sqlstate ?? ""}`.trim(), `${n(r.durationMs)} ms`,
+  return [utcText(r.startedAt), r.outcome === "ok" ? "ok" : `${r.outcome} ${r.sqlstate ?? ""}`.trim(), msText(r.durationMs),
     r.rows === null ? "" : `${n(r.rows)} row${r.rows === 1 ? "" : "s"}`,
     `${clientText(r.applicationName)}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`,
     oneLine(r.query, 120) || "(no statement)", r.message ? firstLine(r.message) : ""];
@@ -315,6 +316,34 @@ export function renderRecentErrors(events, requests, unsupported) {
 }
 
 /**
+ * THE FIRST-RUN CHECKLIST, while setting up is not done: Mason is running (the state answered), a table copied (`totals`:
+ * one served), a user created (`/api/users`: one not removed), a first statement answered (`/api/queries`: one completed
+ * in the week the log keeps) — each ✓ or ○, a ○ with its one action: Add a table (Tables), Create a user (Users), the
+ * psql line's Copy (Connect's, under it). "" once all four are done, and while a read it needs has not answered or
+ * could not be read: a checklist never says ○ for what it could not tell. `users` is `/api/users`' body (or `{ failure }`).
+ */
+export function renderChecklist(s, queries, users) {
+  if (queries === undefined || users === undefined || "failure" in queries || "failure" in users) return "";
+  const added = s.tables.some((t) => t.added);
+  const copied = (s.totals?.copied ?? 0) > 0;
+  const user = users.users.some((u) => u.removedAt == null);
+  const answered = queries.queries.week.completed > 0;
+  if (copied && user && answered) return "";
+  const copying = added && !copied && copyingCount(s) > 0;
+  const steps = [
+    ["Mason is running", true, ""],
+    ["A table copied", copied, copying ? `<span class="dim">copying now</span>` : added ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
+    ["A user created", user, `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
+    // the psql line is Connect's (rendered under the checklist once a table is added): its Copy copies it
+    ["A first statement answered", answered, copied ? `${`<button type="button" class="small${user ? " primary" : ""}" data-copy="connect-psql">Copy the psql line</button>`} <span class="dim">then run a select on a copied table</span>` : ""],
+  ];
+  const done = steps.filter(([, ok]) => ok).length;
+  return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title">Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
+    steps.map(([what, ok, action]) => `<li class="${ok ? "step-done" : "step-todo"}"><span class="mark" aria-hidden="true">${ok ? "✓" : "○"}</span><span class="what">${esc(what)}<span class="sr">${ok ? " (done)" : " (to do)"}</span></span>${ok ? "" : action}</li>`).join("") +
+    `</ol></div>`;
+}
+
+/**
  * THE OVERVIEW from `/api/state` and the request log's reads (`o.queries`, `o.events`, `o.requests`, `o.unsupported`, `o.usage`:
  * each the body, or `{ failure }`; `o.now` the clock; `o.open(key)` whether a details is open): the word, the cards,
  * the copies not finished, the facts, the stream, the statements, the recent errors. Never the engine's name.
@@ -325,8 +354,8 @@ export function renderStatus(s, o = {}) {
   // how to connect, once a table is added: first under the cards while nothing has asked Mason anything (the last
   // day's and week's statements, read as none), else after the facts, for the next tool
   const first = isFirstConnect(o.queries);
-  const connect = added ? renderConnect(s.postgres, { first }) : "";
-  return renderHealth(s) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
+  const connect = added ? renderConnect(s.postgres, { first, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) : "";
+  return renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }
 
@@ -339,7 +368,7 @@ export const UNSUPPORTED_LIMIT = 100;
 
 /** What the page reads every 30 s beside the state: the request log's summary, the recent errors, and the last day's
  *  unsupported SQL. */
-const SLOWER = ["/api/queries", `/api/events?failed=1&limit=${RECENT_ERRORS}`, `/api/requests?failed=1&limit=${RECENT_ERRORS}`, `/api/unsupported?limit=${UNSUPPORTED_LIMIT}`];
+const SLOWER = ["/api/queries", `/api/events?failed=1&limit=${RECENT_ERRORS}`, `/api/requests?failed=1&limit=${RECENT_ERRORS}`, `/api/unsupported?limit=${UNSUPPORTED_LIMIT}`, "/api/users"];
 
 /** A read as `renderStatus` takes it: the body, or `{ failure }` when it could not be read; undefined before any read. */
 const asRequest = (r) => r === undefined ? undefined : r.failure ? { failure: r.failure } : r.body;
@@ -359,8 +388,8 @@ export const page = {
       view() {
         const st = ctx.read("/api/state");
         if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
-        const [queries, events, requests, unsupported] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body) }) };
+        const [queries, events, requests, unsupported, users] = SLOWER.map((p) => asRequest(ctx.read(p)));
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body) }) };
       },
       toggle: (target) => opened.toggle(target),
       // Connect's Copy buttons
