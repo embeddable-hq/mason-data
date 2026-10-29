@@ -1,6 +1,6 @@
 /**
  * THE TOOLS' RECORDED STATEMENTS: every statement psql, pgjdbc, node-postgres, Metabase, Grafana, DBeaver and Superset
- * were recorded sending, and Postico's connect (tests/postgres-api/corpus/) is sent to the Postgres listener, over DuckDB tables shaped as the
+ * were recorded sending, and Postico's SHOW ALL (tests/postgres-api/corpus/) is sent to the Postgres listener, over DuckDB tables shaped as the
  * shop's (one row each, corpus/shop.ts), and must be ANSWERED: a catalog statement by the catalog Postgres, anything
  * that reads a table by DuckDB. What a tool sends that is refused for want of a rewrite is in `KNOWN_GAPS`, with why.
  */

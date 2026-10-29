@@ -197,7 +197,8 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   only — never by sniffing an environment variable that names an agent. A failure is one shape for both: what is wrong,
   why, the way out, what to run next (`Failure`, `src/cli/command.ts`).
 - **A refusal on the wire is Postgres's** (SQLSTATE, message, DETAIL, HINT), and every refusal names its registry entry
-  (`src/duck/gaps.ts`): a refusal without one does not compile.
+  (`src/duck/gaps.ts`): a DuckDB-side refusal without one does not compile; a `PgError` 0A000 in src/api/ without one fails
+  `tests/conventions.test.ts` (six older ones are ratcheted there).
 - **Never swallow an error.** No bare `.catch(() => {})`, no empty `catch {}`, no `2>/dev/null` or `|| true` over a failure
   you have not reasoned about. **A step that fails must never report success.** If a failure is genuinely tolerable,
   catch it narrowly, say why in a comment, log it, and — if the operation changed state — VERIFY the outcome afterwards.

@@ -13,8 +13,9 @@
  * a metric as a column (Metabase's fingerprinting and its derived tables name every column the catalog listed) are
  * taken out of the statements they were in. What a tool sends is otherwise as recorded.
  *
- * DBeaver was driven by a person at the screen (its navigator has no headless mode) under the same trace. Tableau and
- * Power BI are not recorded.
+ * DBeaver was driven by a person at the screen (its navigator has no headless mode) under the same trace.
+ * Postico's entry is the exception: one statement (SHOW ALL), taken from the refusal line Mason's log wrote at its
+ * connect, no trace, its version not recorded. Tableau and Power BI are not recorded.
  */
 
 export interface ToolCorpus {

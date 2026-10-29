@@ -2138,6 +2138,21 @@ test("SHOW ALL is Postgres's three text columns, a row per setting in Postgres's
   } finally { s.end(); }
 });
 
+// THE STARTUP'S ParameterStatus, pinned: made from the REPORTED set through sessionSetting (no longer a literal list),
+// each name in Postgres's spelling, in this order, with the session's values (a change-detector: read the diff)
+test("the startup reports the fourteen parameters Postgres reports, in Postgres's spelling and order, with the session's values", async () => {
+  const version = (await truth.query<{ server_version: string }>("SHOW server_version")).rows[0]!.server_version;
+  const s = await rawSession();
+  try {
+    assert.deepEqual([...s.reported], [
+      ["application_name", ""], ["client_encoding", "UTF8"], ["DateStyle", "ISO, MDY"], ["default_transaction_read_only", "on"],
+      ["in_hot_standby", "on"], ["integer_datetimes", "on"], ["IntervalStyle", "postgres"], ["is_superuser", "off"],
+      ["search_path", '"$user", public'], ["server_encoding", "UTF8"], ["server_version", version], ["session_authorization", "mason"],
+      ["standard_conforming_strings", "on"], ["TimeZone", "UTC"],
+    ]);
+  } finally { s.end(); }
+});
+
 // A `#>` PATH ELEMENT IS AN INDEX AS POSTGRES'S strtoint READS IT (jsonfuncs.c): white space before it and a sign are
 // read, anything after the digits is not — `{+1}` and `{" 1"}` are index 1 of an array, `{"1 "}` is no index (NULL on
 // an array) — and on an object every element is a key. One definition (src/duck/functions.ts pathIndex) for the
