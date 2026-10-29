@@ -88,7 +88,9 @@ yours: over the Postgres protocol.
 **1. Add your tables and start Mason.**
 
 ```bash
-cd your-app                          # Mason reads DATABASE_URL from .env.local, .env or the shell
+cd your-app
+# Mason looks for DATABASE_URL in .env.local, .env or the shell. If it isn't there yet:
+# echo "DATABASE_URL=postgres://me:secret@localhost:5432/your_app" >> .env
 mason init                           # creates mason/sources/<database>.yml (commit it) and .mason/ (local, gitignored)
 mason tables                         # lists the tables in your database, with their rows and keys
 mason add orders customers           # adds tables (use --columns id,status,total to copy only some columns)
