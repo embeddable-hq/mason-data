@@ -12,7 +12,7 @@
  * while the log is empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away.
  */
 import { msText, agoText, bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText, details, createOpenSet, card, cards, empty, panel, status, skeleton,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText, unsupportedEntry, rangeOf, readPart, renderConnect, copyClick, UNLISTED_STATEMENTS } from "../shared.js";
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText, unsupportedEntry, rangeOf, readPart, renderConnect, copyClick, UNLISTED_STATEMENTS, pop, fresh, actId } from "../shared.js";
 
 const RUNNING = "/api/running";
 const STATE = "/api/state";
@@ -41,8 +41,8 @@ const keyOf = (session, statement) => `${session}:${statement}`;
 
 /** What a cancel answered, as `mason cancel` says it: its headline, or the refusal as the Failure. */
 function outcomeHtml(o) {
-  if (o.failure) return renderFailure(o.failure);
-  return `<p class="done" role="status"><span class="headline" title="SQLSTATE 57014">Cancelled session ${o.cancelled.session}'s statement: it ends now, and its client gets a "canceling statement" error.</span></p>`;
+  if (o.failure) return `${renderFailure(o.failure)}<p class="pop-actions"><button type="button" class="small" data-dismiss-cancelled data-pop-close>Dismiss</button></p>`;
+  return `<p class="done"><span class="headline" title="SQLSTATE 57014">Cancelled session ${o.cancelled.session}'s statement: it ends now, and its client gets a "canceling statement" error.</span></p>`;
 }
 
 /**
@@ -107,31 +107,35 @@ export function statementCards(day, line = () => "", label = "last 24 hours") {
 /**
  * THE STATEMENTS RUNNING NOW (`mason logs --running --json`'s `running`): a row each — session, statement, user, client,
  * how long it has run (a relative time that moves with each poll; when it started, in UTC, its title), the rows sent so
- * far, the statement — and Cancel. The one being cancelled (`asking`, `session:statement`) asks first, its question on
- * a row under it (the statement keeps its width); `outcome` is what the last cancel answered (a Failure, or `{ cancelled }`),
- * said under the row it was for, or under the table when that statement has ended since.
+ * far, the statement — and Cancel. The one being cancelled (`asking`, `session:statement`) asks first, its question a
+ * popover beside its Cancel (`pop`: no row is inserted, so none below moves; its Cancel stays, held down); `outcome` is
+ * what the last cancel answered (a Failure, or `{ cancelled, at }`), a popover beside the row it was for — or beside the
+ * part when that statement has ended since — gone by itself after OUTCOME_MS at `now` (a refusal stays until dismissed).
  */
-export function renderRunning(running, asking = null, outcome = null) {
+export function renderRunning(running, asking = null, outcome = null, now = Date.now()) {
+  const pops = [];
+  const said = fresh(outcome, now) ? outcome : null;
   let shown = false;
-  const answer = (r) => {
-    if (outcome === null || outcome.key !== keyOf(r.session, r.statement)) return "";
-    shown = true;
-    return `<tr class="under"><td colspan="8">${outcomeHtml(outcome)}</td></tr>`;
-  };
   const rows = running.map((r) => {
     const key = keyOf(r.session, r.statement);
-    const ask = asking === key
-      ? `<tr class="under asking"><td colspan="8"><div class="under-body"><span class="confirm" title="SQLSTATE 57014">Cancel session ${r.session}'s statement ${r.statement}? Its client gets a "canceling statement" error.</span> ` +
-        `<button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel statement ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel>Keep it running</button></div></td></tr>` : "";
+    const anchor = actId("running", key);
+    if (asking === key) {
+      pops.push(pop(anchor, `<p class="confirm" title="SQLSTATE 57014">Cancel session ${r.session}'s statement ${r.statement}? Its client gets a "canceling statement" error.</p>` +
+        `<p class="pop-actions"><button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel statement ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel data-pop-close>Keep it running</button></p>`,
+        { kind: "dialog", label: `Cancel session ${r.session}'s statement ${r.statement}?` }));
+    }
+    if (said !== null && said.key === key) { shown = true; pops.push(pop(anchor, outcomeHtml(said))); }
     return `<tr><td>${r.session}</td><td>${r.statement}</td><td><span class="clip" title="${esc(r.user)}">${esc(r.user)}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num"><time datetime="${esc(r.startedAt)}" title="started ${esc(utcText(r.startedAt))} UTC">${esc(spanText(r.runningMs / 1000))}</time></td><td class="num">${esc(plural(r.rows, "row"))} sent</td>` +
-      `<td>${statementCell(r.query)}</td><td class="act">${asking === key ? "" : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td></tr>${ask}${answer(r)}`;
+      `<td>${statementCell(r.query)}</td><td class="act" id="${esc(anchor)}">${asking === key ? `<button type="button" class="danger small" aria-expanded="true" disabled>Cancel</button>` : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td></tr>`;
   }).join("");
   const table = running.length
     ? `<div class="scroll"><table class="running"><thead><tr><th scope="col">Session</th><th scope="col" title="the statement's number in its session, as mason cancel --statement takes it">No.</th><th scope="col">User</th><th scope="col">Client</th>` +
       `<th scope="col" class="num">Running for</th><th scope="col">Rows</th><th scope="col">Statement</th><th scope="col"></th></tr></thead><tbody>${rows}</tbody></table></div>`
     : empty("No statement is running now.");
-  return table + (!shown && outcome !== null ? outcomeHtml(outcome) : "");
+  // the statement ended since: said beside the part, which is there whatever it lists
+  if (said !== null && !shown) pops.push(pop("running-now", outcomeHtml(said)));
+  return table + pops.join("");
 }
 
 /**
@@ -198,9 +202,10 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     // the rest of a request is its expanded row: the whole id, when it started and ended, the bytes sent, the statement and error (each capped)
     const stmt = capped(r.query || "(no statement)", STATEMENT_MAX, "mason logs --requests --json");
     const err = capped(r.message ?? "", STATEMENT_MAX, "mason logs --requests --json");
-    const more = open ? `<tr class="detail"><td colspan="${REQUEST_COLUMNS.length}">${rowsHtml([["Query id", r.requestId], ["Started (UTC)", utcText(r.startedAt)], ["Ended (UTC)", utcText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
+    // its body is as wide as the row and no wider (`.detail-body`): a long statement scrolls in its box, never widens a column
+    const more = open ? `<tr class="detail"><td colspan="${REQUEST_COLUMNS.length}"><div class="detail-body">${rowsHtml([["Query id", r.requestId], ["Started (UTC)", utcText(r.startedAt)], ["Ended (UTC)", utcText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
       `<pre class="stmt">${esc(stmt.text)}</pre>${stmt.cut ? `<p class="dim cut">${esc(stmt.cut)}${r.queryTruncated ? " (as the log kept it)" : ""}</p>` : r.queryTruncated ? `<p class="dim cut">the request log kept the statement cut</p>` : ""}` +
-      `${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(err.text)}</pre>${err.cut ? `<p class="dim cut">${esc(err.cut)}</p>` : ""}` : ""}</td></tr>` : "";
+      `${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(err.text)}</pre>${err.cut ? `<p class="dim cut">${esc(err.cut)}</p>` : ""}` : ""}</div></td></tr>` : "";
     return row + more;
   }).join("");
   const sortNote = sort.key === "started" && sort.dir === "desc" ? ""
@@ -243,11 +248,12 @@ export const page = {
     const actions = {
       askCancelStatement(session, statement) { m.asking = keyOf(session, statement); m.outcome = null; },
       dismissCancelStatement() { m.asking = null; },
+      dismissCancelled() { m.outcome = null; },
       /** POST /api/cancel { session, statement }: the statement listed, never the one the session runs next (409). */
       async confirmCancelStatement(session, statement) {
         const r = await ctx.ask("/api/cancel", json("POST", { session, statement }));
         m.asking = null;
-        m.outcome = "failure" in r ? { key: keyOf(session, statement), failure: r.failure } : { key: keyOf(session, statement), cancelled: r.body.cancelled };
+        m.outcome = "failure" in r ? { key: keyOf(session, statement), failure: r.failure } : { key: keyOf(session, statement), cancelled: r.body.cancelled, at: ctx.now().getTime() };
         // who is connected says its running statements too: both read again, so neither says the cancelled one runs
         await ctx.refresh([RUNNING, STATE]);
         return !("failure" in r);
@@ -292,7 +298,7 @@ export const page = {
         return {
           "queries-kpis": !running && !sessions && !q ? skeleton(2) : renderQueryKpis(sessions, running?.running, q === undefined ? undefined : q.body ? q.body : { failure: q.failure }, ctx.range()),
           "connected-now": renderSessions(ctx.read(STATE)?.body?.sessions),
-          "running-now": running ? renderRunning(running.running, m.asking, m.outcome) : "",
+          "running-now": running ? renderRunning(running.running, m.asking, m.outcome, ctx.now().getTime()) : "",
           unsupported: readPart(ctx, unsupportedPath(ctx.range()), (b) => renderUnsupported(b, (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span), true),
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
             span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(ctx.read(STATE)?.body?.postgres, { first: true, table: ctx.read(STATE)?.body?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) }) : "") +
@@ -325,6 +331,7 @@ export const page = {
         const pair = (v) => v.split(":").map(Number);
         if (d.askCancel !== undefined) return actions.askCancelStatement(...pair(d.askCancel)) ?? true;
         if (d.dismissCancel !== undefined) return actions.dismissCancelStatement() ?? true;
+        if (d.dismissCancelled !== undefined) return actions.dismissCancelled() ?? true;
         if (d.confirmCancel !== undefined) return actions.confirmCancelStatement(...pair(d.confirmCancel));
         if (d.sortTable === "requests") return actions.sortRequests(d.sortKey) ?? true;
         if (d.older !== undefined) return actions.olderRequests();

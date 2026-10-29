@@ -10,7 +10,7 @@
  * `copySizes` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
-import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, POLL_MS } from "../shared.js";
+import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, fresh, actId, ROOMS, POLL_MS } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
@@ -43,8 +43,8 @@ export function syncedReport(b, picked, unsynced) {
 /** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current. */
 function renderSynced(b, table, s) {
   const r = syncedReport(b, [table], s.tables.filter((t) => t.table === table));
-  return `<div class="done" role="status"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
-    `${button("Dismiss", { dismissSynced: "" }, "small")}</div>`;
+  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
+    `${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}</div>`;
 }
 
 /** The filter beside the search box: which of the database's tables are listed. */
@@ -104,33 +104,33 @@ const shownFileOf = (s, file) => s?.source?.file === file && typeof s.source.sho
  *  the sources file named as `file` (as `mason add` names it: from the project's root). */
 export function renderTableAdded(b, file = b.file) {
   const l = addedLines(b, file);
-  return `<div class="done" role="status"><p class="headline">${esc(l.line)}</p>${l.notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
-    `${button("Dismiss", { dismissOutcome: "" }, "small")}</div>`;
+  return `<div class="done"><p class="headline">${esc(l.line)}</p>${l.notes.map((x) => `<p class="note">${esc(x)}</p>`).join("")}` +
+    `${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</div>`;
 }
 
 /** Tables just removed (`/api/remove`'s answer, `mason remove --json`'s shape): what `mason remove` prints, the file named
  *  as `file`. */
 export function renderTablesRemoved(b, file = b.file) {
   const r = removedReport(b.removed, file);
-  return `<div class="done" role="status"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
-    `${button("Dismiss", { dismissOutcome: "" }, "small")}</div>`;
+  return `<div class="done"><p class="headline">${esc(r.headline)}</p>${rowsHtml(r.details)}${r.tips.map((x) => `<p class="tip">Tip: ${esc(x)}</p>`).join("")}` +
+    `${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}</div>`;
 }
 
 const tick = (name, c, on) => `<label class="tick"><input type="checkbox" name="${name}" value="${esc(c.name)}"${on ? " checked" : ""}> ${code(c.name)} <span class="dim">${esc(c.type)}</span></label>`;
 
 /** The form that adds a table with the columns ticked (`--columns`) and, for one with no primary key, its key (`--key`).
  *  The ticks live in the document while the person ticks (the tables part is held still meanwhile: the page's `held`);
- *  `ticked`, what a refused submit sent, writes them back when the refusal is said under the form. `cols` is what
+ *  `ticked`, what a refused submit sent, writes them back when the refusal is said over the form, in its popover. `cols` is what
  *  `GET /api/tables/<table>/columns` answered for it — { table, columns } or { table, failure } — or null while it is read. */
 function pickForm(t, cols, ticked = null) {
   const name = entryName(t.table);
-  if (cols?.table !== t.table) return `<p class="dim">Reading ${esc(name)}'s columns…</p>${button("Cancel", { cancelChoose: "" }, "small")}`;
-  if ("failure" in cols) return `${renderFailure(cols.failure)}${button("Cancel", { cancelChoose: "" }, "small")}`;
+  if (cols?.table !== t.table) return `<p class="dim">Reading ${esc(name)}'s columns…</p>${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}`;
+  if ("failure" in cols) return `${renderFailure(cols.failure)}${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}`;
   const boxes = (field) => cols.columns.map((c) => tick(field, c, ticked?.[field]?.includes(c.name) ?? false)).join("");
   return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
     (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart, as ${code(`mason add ${name} --key`)}</legend>${boxes("key")}</fieldset>`) +
     `<fieldset><legend>Its columns, as ${code(`mason add ${name} --columns`)} (none ticked: as ${code(`mason add ${name}`)}, every column)</legend>${boxes("columns")}</fieldset>` +
-    `<button type="submit" class="primary small">Add ${esc(name)}</button> ${button("Cancel", { cancelChoose: "" }, "small")}</form>`;
+    `<button type="submit" class="primary small">Add ${esc(name)}</button> ${button("Cancel", { cancelChoose: "", popClose: "" }, "small")}</form>`;
 }
 
 /** The cards over the list: the tables added of all, those synced, those failed and the copies' rows (`/api/state`
@@ -158,47 +158,57 @@ export function renderTablesCards(s) {
  * one with no primary key. `ui.choosing` is the table whose form is open (`ui.ticked` its boxes ticked: { columns, key };
  * `ui.columns` its columns as read when it opened: { table, columns } | { table, failure }, null while read);
  * `ui.outcome` what the last add or remove answered ({ table, added } | { table, removed } | { table, failure }) and
- * `ui.synced` what the last sync did, each under its table; `ui.syncing` the tables whose sync is asked; `ui.filter` the
+ * `ui.synced` what the last sync did, each a popover beside its table's actions (`at`: when, gone after OUTCOME_MS at `ui.now`); `ui.syncing` the tables whose sync is asked; `ui.filter` the
  * search box's text and `ui.show` the state filter (a key of SHOWS).
  */
 export function renderTables(s, ui = {}) {
   const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
+  const now = ui.now ?? Date.now();
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
-  const stream = s.stream ? new Map(streamRows(s.stream, ui.now ?? Date.now()).tables) : null;
-  // SEVEN NARROW COLUMNS, NOTHING LONG IN A CELL: a table's state is its word over its copy's bar; its last sync an age
-  // over how long it took; and whatever is said at length — the words `mason wait` prints, an error, why it cannot be
-  // added, its stream state, a Remove's question — is a line of its own UNDER the row, across every column (`under`).
-  // So the table fits its card at a laptop's width, and a confirm never pushes Remove off the right edge.
-  const head = [["Table", "name"], ["State", ""], ["Rows", "num"], ["Key", ""], ["Last sync", "num"], ["Size", "num"], ["", "act"]];
+  const stream = s.stream ? new Map(streamRows(s.stream, now).tables) : null;
+  // SEVEN NARROW COLUMNS OF FIXED WIDTHS, NOTHING LONG IN A CELL, AND NOTHING A CLICK INSERTS: a table's state is its word
+  // over its copy's bar (a line kept for it when it has none); its last sync an age over how long it took; whatever is
+  // said at length — the words `mason wait` prints, an error, why it cannot be added, its stream state — is ITS NOTE, a
+  // line of its own under the row, across every column, written for every row (empty when it says nothing), so a note
+  // that comes or goes moves no row. A question (Remove), a form (Columns…) and what an action answered are POPOVERS
+  // beside the row's actions (`pop`), written after the table: a click moves no other row and no column
+  // (`table-layout: fixed`, the stylesheet's widths by the header's classes; a button whose label changes keeps its room).
+  const head = [["Table", "name"], ["State", "state"], ["Rows", "num rows"], ["Key", "key"], ["Last sync", "num last"], ["Size", "num size"], ["", "act"]];
   const sizeOf = new Map(sizes && !("failure" in sizes) ? sizes.copySizes.map((c) => [c.table, c.bytes]) : []);
   const under = (html, cls = "") => `<tr class="under${cls ? ` ${cls}` : ""}"><td colspan="${head.length}"><div class="under-body">${html}</div></td></tr>`;
   const cell = (v, cls = "", title = "") => `<td${cls ? ` class="${cls}"` : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(v)}</td>`;
+  // the popovers of the rows written, in their order: after the table, each anchored to its row's actions
+  const pops = [];
   const line = (t) => {
     const f = tableFacts(t);
     const name = entryName(t.table);
     const y = t.sync;
     const adding_ = adding.includes(t.table);
     const asking = removing === t.table;
-    const act = adding_ ? `<button type="button" class="primary small" disabled>Adding…</button>` : t.added
-      ? (syncing.includes(t.table) ? `<button type="button" class="small" disabled>Syncing…</button>` : button("Sync", { syncTable: t.table }, "small")) + " " +
-        // while it asks, Remove stays where it was (the row does not move), held down: the question under the row answers it
-        (asking ? `<button type="button" class="danger small" aria-expanded="true" disabled>Remove</button>` : button("Remove", { removeTable: t.table }, "danger small"))
+    const anchor = actId("tables", t.table);
+    const syncedNow = synced?.table === t.table && !("failure" in synced) && fresh(synced, now);
+    const act = adding_ ? button("Adding…", {}, "primary small", { disabled: true }) : t.added
+      // Sync → Syncing… → Synced ✓ in the one room (ROOMS.sync), so the actions never move
+      ? (syncing.includes(t.table) ? button("Syncing…", {}, "small", { room: ROOMS.sync, disabled: true }) : button(syncedNow ? "Synced ✓" : "Sync", { syncTable: t.table }, "small", { room: ROOMS.sync })) + " " +
+        // while it asks, Remove stays where it was, held down: the question beside it answers it
+        (asking ? button("Remove", {}, "danger small", { disabled: true, expanded: true }) : button("Remove", { removeTable: t.table }, "danger small"))
       : t.reason === null
-        ? `${button("Add", { addTable: t.table }, "primary small")} ${button("Columns…", { choose: t.table }, "small")}`
-        : t.key.length ? "" : button("Name its key…", { choose: t.table }, "small");
+        ? `${button("Add", { addTable: t.table }, "primary small")} ${choosing === t.table ? button("Columns…", {}, "small", { disabled: true, expanded: true }) : button("Columns…", { choose: t.table }, "small")}`
+        : t.key.length ? "" : choosing === t.table ? button("Name its key…", {}, "small", { disabled: true, expanded: true }) : button("Name its key…", { choose: t.table }, "small");
     // a failed copy's rows so far are none: the copy it serves meanwhile is said by its error and mason status
     const rows = t.added && t.copy && t.copy.phase !== "failed" ? n(t.copy.rowsCopied) : f.size;
     // EVERY ADDED TABLE HAS ITS BAR, as `mason status` and `mason wait` print one for each (src/cli/commands.ts
     // `tableLines`): full at 100% once copied, red when its copy failed, amber when it is not kept current, moving while
-    // it copies, the indeterminate shimmer while it waits — the Overview's renderer (`copyBar`), its words the line's
+    // it copies, the indeterminate shimmer while it waits — the Overview's renderer (`copyBar`), its words the line's;
+    // a table with none keeps its line, empty, so the row is as tall either way
     const l = t.added && !adding_ ? tableLine(t) : null;
-    const bar = l ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</span>` : "";
+    const bar = l ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</span>` : `<span class="copyline none" aria-hidden="true"></span>`;
     const state = adding_ ? status("warn", "Adding…") : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
     const took = t.added && y?.syncSeconds != null ? `<span class="took" title="${esc(tookTitle(y))}">took ${esc(tookText(y))}</span>` : "";
     const last = t.added && y?.syncedAt && y?.ageSeconds != null
       ? `<td class="num"><span title="${esc(`${utcText(y.syncedAt)} UTC`)}">${esc(`${duration(y.ageSeconds)} ago`)}</span>${took}</td>` : `<td class="num">${took}</td>`;
-    // what is said at length, under the row: the words the CLI prints after a bar that is not full and current, an error
-    // (its first line; the whole in a details), why it cannot be added as it is, its stream state (replication mode)
+    // what is said at length, its note under the row: the words the CLI prints after a bar that is not full and current,
+    // an error (its first line; the whole in a details), why it cannot be added as it is, its stream state (replication mode)
     const said_ = adding_ ? `<span class="dim">adding it to the sources file…</span>`
       : t.added ? [
         l && l.state !== "done" && !t.error ? `<span class="what-copy t-${l.state}">${esc(l.what)}</span>` : "",
@@ -206,16 +216,26 @@ export function renderTables(s, ui = {}) {
         stream && stream.get(t.table) ? `<span class="stream dim">Stream: ${esc(stream.get(t.table))}</span>` : "",
       ].filter(Boolean).join("")
       : f.state ? `<span class="dim">${esc(f.state)}</span>` : "";
-    const note = said_ ? under(said_, "note") : "";
-    const confirm = asking ? under(`<span class="confirm">Remove ${esc(name)}? ${esc(removedReport([t.table], "").tips[0])}.</span> ` +
-      `${button(`Remove ${name}`, { confirmRemoveTable: t.table }, "danger small")} ${button("Cancel", { cancelRemoveTable: "" }, "small")}`, "asking") : "";
-    const said = (outcome?.table !== t.table ? "" : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added, shownFileOf(s, outcome.added.file)) : renderTablesRemoved(outcome.removed, shownFileOf(s, outcome.removed.file)))) +
-      (synced?.table !== t.table ? "" : under("failure" in synced ? renderFailure(synced.failure) : renderSynced(synced.synced, t.table, s)));
-    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${note ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
-      `<td class="state">${state}${bar}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +
+    const note = under(said_, "note");
+    if (asking) {
+      pops.push(pop(anchor, `<p class="confirm">Remove ${esc(name)}? ${esc(removedReport([t.table], "").tips[0])}.</p>` +
+        `<p class="pop-actions">${button(`Remove ${name}`, { confirmRemoveTable: t.table }, "danger small")} ${button("Cancel", { cancelRemoveTable: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Remove ${name}?` }));
+    }
+    // a refused add with its form open: the refusal is said in the form's popover, over the boxes as they were ticked
+    const formOpen = choosing === t.table && !t.added;
+    const refusedHere = outcome?.table === t.table && "failure" in outcome;
+    if (formOpen) pops.push(pop(anchor, (refusedHere ? renderFailure(outcome.failure) : "") + pickForm(t, columns, ticked), { kind: "dialog", label: `Add ${name}` }));
+    if (outcome?.table === t.table && fresh(outcome, now) && !(formOpen && refusedHere)) {
+      pops.push(pop(anchor, "failure" in outcome ? `${renderFailure(outcome.failure)}${button("Dismiss", { dismissOutcome: "", popClose: "" }, "small")}`
+        : "added" in outcome ? renderTableAdded(outcome.added, shownFileOf(s, outcome.added.file)) : renderTablesRemoved(outcome.removed, shownFileOf(s, outcome.removed.file))));
+    }
+    if (synced?.table === t.table && fresh(synced, now)) {
+      pops.push(pop(anchor, "failure" in synced ? `${renderFailure(synced.failure)}${button("Dismiss", { dismissSynced: "", popClose: "" }, "small")}` : renderSynced(synced.synced, t.table, s)));
+    }
+    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
+      `<td class="state">${state}${bar}</td>${cell(rows, "num")}${cell(f.key, "mono", f.key)}${last}` +
       `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a copy's size is measured every 10 min")) : cell("", "num")}` +
-      `<td class="act">${act}</td></tr>` + note + confirm +
-      (choosing === t.table && !t.added ? under(pickForm(t, columns, ticked)) : "") + said;
+      `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
   const added = s.tables.filter((t) => t.added).length;
   // a refusal for a table the list does not have (dropped since the run read the catalog): said above the list
@@ -227,9 +247,10 @@ export function renderTables(s, ui = {}) {
   const written = shown.filter((t, i) => i < limit || t.table === choosing || t.table === removing);
   const matching = filter.trim() ? `<p class="count dim">${n(shown.length)} with “${esc(filter.trim())}” in the name</p>` : "";
   const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The copies' own sizes: could not read them (${esc(firstLine(sizes.failure.message))}; ${code("mason usage")} has them)</p>` : "";
+  const rowsHtml_ = written.map(line).join("");
   return stray + (added ? "" : empty("No table added yet", `Add one from the list, as ${code("mason add <table>")} does.`)) + matching +
     panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +
-      `<tbody>${written.map(line).join("")}</tbody></table>`) + moreRows("tables", Math.min(limit, shown.length), shown.length, TABLE_ROWS) +
+      `<tbody>${rowsHtml_}</tbody></table>`) + pops.join("") + moreRows("tables", Math.min(limit, shown.length), shown.length, TABLE_ROWS) +
     (!shown.length ? `<p class="dim">No ${show === "added" ? "added " : show === "failed" ? "failed " : show === "not-added" ? "table that is not added, " : ""}table${filter.trim() ? `'s name has “${esc(filter.trim())}”` : ""}.</p>` : "") + sizesFailed +
     (added ? `<p class="dim">A copy's own size is measured every 10 minutes (${code("mason usage")}).</p>` : "");
 }
@@ -257,22 +278,24 @@ export const page = {
       if (m.choosing === null) m.ticked = null;
     };
     const actions = {
-      /** Add a table (`mason add`): the answer under its line, then the state read again — the Overview shows its copy starting. */
+      /** Add a table (`mason add`): the answer beside its actions, then the state read again — the Overview shows its copy starting. */
       async addTable(table, columns = [], key = []) {
         if (m.adding.includes(table)) return false;
         // from the click: the row says Adding… (the page paints before the answer), then the state read again shows the copy
         m.adding = [...m.adding, table];
+        if (m.choosing !== table) { m.outcome = null; m.synced = null; }
         const r = await ctx.ask("/api/pick", json("POST", pickBody(table, columns, key)));
         m.adding = m.adding.filter((x) => x !== table);
-        // refused: said under the form, which is written again with the boxes the person had ticked
+        // refused: said over the form, in its popover, written again with the boxes the person had ticked
         if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
-        m.outcome = { table, added: r.body }; m.choosing = null; m.columns = null; hold();
+        m.outcome = { table, added: r.body, at: ctx.now().getTime() }; m.choosing = null; m.columns = null; hold();
         await ctx.refresh(["/api/state"]);
         return true;
       },
       /** Open a table's form: its columns read now, once (the state the page polls carries none). */
       async choose(table) {
-        m.choosing = table; m.removing = null; m.ticked = null; m.columns = null; hold();
+        // a question opened takes the last answer away: two popovers never stand on one another
+        m.choosing = table; m.removing = null; m.ticked = null; m.columns = null; m.outcome = null; m.synced = null; hold();
         const r = await ctx.ask(columnsPath(table));
         // closed, or another table's opened, while it was read: that answer is not this form's
         if (m.choosing !== table) return false;
@@ -280,24 +303,25 @@ export const page = {
         return true;
       },
       cancelChoose() { m.choosing = null; m.columns = null; hold(); },
-      askRemoveTable(table) { m.removing = table; m.choosing = null; hold(); },
+      askRemoveTable(table) { m.removing = table; m.choosing = null; m.outcome = null; m.synced = null; hold(); },
       cancelRemoveTable() { m.removing = null; hold(); },
-      /** Remove a table (`mason remove`), once asked: the answer under its line, then the state read again. */
+      /** Remove a table (`mason remove`), once asked: the answer beside its actions, then the state read again. */
       async confirmRemoveTable(table) {
         const r = await ctx.ask("/api/remove", json("POST", { tables: [table] }));
         m.removing = null; hold();
         if ("failure" in r) { m.outcome = { table, failure: r.failure }; return false; }
-        m.outcome = { table, removed: r.body };
+        m.outcome = { table, removed: r.body, at: ctx.now().getTime() };
         await ctx.refresh(["/api/state"]);
         return true;
       },
       dismissOutcome() { m.outcome = null; },
-      /** Sync a table now (`mason sync <table>`): the answer under its row, then the state read again. */
+      /** Sync a table now (`mason sync <table>`): the answer beside its Sync, then the state read again. */
       async syncTable(table) {
         m.syncing = [...m.syncing, table];
+        m.outcome = null; m.synced = null;
         const r = await ctx.ask("/api/sync", json("POST", { tables: [table] }));
         m.syncing = m.syncing.filter((x) => x !== table);
-        m.synced = "failure" in r ? { table, failure: r.failure } : { table, synced: r.body };
+        m.synced = "failure" in r ? { table, failure: r.failure } : { table, synced: r.body, at: ctx.now().getTime() };
         await ctx.refresh(["/api/state"]);
         return !("failure" in r);
       },

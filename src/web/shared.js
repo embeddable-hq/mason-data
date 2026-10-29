@@ -346,16 +346,71 @@ export const panel = (html) => `<div class="panel">${html}</div>`;
 
 /** A button: `button("Sync", { sync: "public.orders" }, "primary")` → data-sync="public.orders"; `variant` primary,
  *  danger or "" (secondary), with " small" for a compact one in a row. */
-export function button(label, data = {}, variant = "") {
+export function button(label, data = {}, variant = "", { room = "", disabled = false, expanded = false } = {}) {
   const attrs = Object.entries(data).map(([k, v]) => ` data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${esc(v)}"`).join("");
-  return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}>${esc(label)}</button>`;
+  return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}${room ? ` data-room="${esc(room)}"` : ""}${expanded ? ` aria-expanded="true"` : ""}${disabled ? " disabled" : ""}>${esc(label)}</button>`;
+}
+
+/**
+ * A BUTTON WHOSE LABEL CHANGES KEEPS ITS WIDTH: `room` is its longest label (Sync → Syncing… → Synced ✓, Copy → Copied),
+ * written as `data-room` and laid by the stylesheet as an invisible line of no height under the label
+ * (`button[data-room]::after`), so the button is as wide as its widest word whichever it says — and its row and its
+ * column never move when it changes. The rooms of the buttons whose label changes, by what they do.
+ */
+export const ROOMS = { sync: "Syncing…", add: "Adding…", copy: "Press ⌘C" };
+
+/**
+ * A POPOVER ANCHORED TO WHAT ASKED FOR IT — a confirm, a form, what an action answered — so nothing is inserted into a
+ * table and no row below moves (docs/WEB-UI.md "Presentation"): written into its part AFTER the table (never a row of
+ * it), `position: fixed` and placed by `placePops` beside its anchor (`anchor`: an element's id, a row's actions cell)
+ * after each write, and again on a scroll or a resize. `kind`: `dialog` (a question or a form: Escape presses its
+ * `data-pop-close` button) or `status` (an answer: read out, and gone by itself — the page's OUTCOME_MS — unless it is a
+ * refusal). `label` names a dialog for a screen reader.
+ */
+export const pop = (anchor, html, { kind = "status", label = "" } = {}) =>
+  `<div class="pop ${kind === "dialog" ? "ask" : "said"}" data-anchor="${esc(anchor)}" role="${kind === "dialog" ? "dialog" : "status"}"${label ? ` aria-label="${esc(label)}"` : ""}>${html}</div>`;
+
+/** How long what an action answered stays beside its button before it goes by itself (a refusal stays until dismissed). */
+export const OUTCOME_MS = 8000;
+
+/** Whether an answer recorded at `at` (ms) is still shown at `now`: a refusal always (until dismissed), else OUTCOME_MS. */
+export const fresh = (o, now) => o !== null && o !== undefined && ("failure" in o || o.at === undefined || now - o.at < OUTCOME_MS);
+
+/** An element's id for a row's actions cell (a popover's anchor): unique in the document, whatever the name holds. */
+export const actId = (page, key) => `act-${page}-${key}`;
+
+/**
+ * EVERY POPOVER PLACED BESIDE ITS ANCHOR (the shell calls it after each write, a scroll and a resize): under the anchor,
+ * its right edge on the anchor's — above it when there is no room below — and kept inside the window with a 16 px
+ * gutter. `position: fixed`, so a card that scrolls sideways (`.panel`) never clips it. A popover whose anchor is not in
+ * the document is hidden. Returns the popovers placed, for the shell to focus a new dialog's first button.
+ */
+export function placePops(doc, win) {
+  const placed = [];
+  if (typeof doc?.querySelectorAll !== "function") return placed;
+  const gutter = 16, gap = 4;
+  const vw = win.innerWidth ?? 0, vh = win.innerHeight ?? 0;
+  for (const el of doc.querySelectorAll(".pop[data-anchor]")) {
+    const a = doc.getElementById(el.dataset.anchor);
+    if (a === null || typeof a.getBoundingClientRect !== "function") { el.hidden = true; continue; }
+    el.hidden = false;
+    const r = a.getBoundingClientRect();
+    const w = el.offsetWidth, h = el.offsetHeight;
+    const left = Math.max(gutter, Math.min(r.right - w, vw - gutter - w));
+    const below = r.bottom + gap;
+    const top = below + h <= vh - gutter || r.top - gap - h < gutter ? below : r.top - gap - h;
+    el.style.left = `${Math.round(left)}px`;
+    el.style.top = `${Math.round(top)}px`;
+    placed.push(el);
+  }
+  return placed;
 }
 
 /** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. `clip`:
  *  one line, cut by the stylesheet with an ellipsis in a narrow cell (a table's URL column), its whole the title —
  *  Copy copies the whole either way. */
 export const copyable = (id, text, { clip = false } = {}) =>
-  `<span class="copyrow${clip ? " clipped" : ""}"><code id="${esc(id)}"${clip ? ` title="${esc(text)}"` : ""}>${esc(text)}</code> ${button("Copy", { copy: id }, "small")}</span>`;
+  `<span class="copyrow${clip ? " clipped" : ""}"><code id="${esc(id)}"${clip ? ` title="${esc(text)}"` : ""}>${esc(text)}</code> ${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}</span>`;
 
 /** How long a Copy button says Copied (or what to press) before it says Copy again. */
 export const COPIED_MS = 2000;
@@ -364,7 +419,7 @@ export const COPIED_MS = 2000;
  * A COPY BUTTON CLICKED (`data-copy`, a `copyable`'s), on whichever page: its code's text to the clipboard, the button
  * then saying Copied for COPIED_MS and Copy again. When the clipboard refuses (no permission, an insecure origin, a
  * browser setting), the text is selected and copied as a selection is (`execCommand("copy")`); when that fails too, it
- * stays selected and the button says what to press. null for a button that is no Copy, so a page's `click` asks it first.
+ * stays selected and the button says what to press (in its room: `ROOMS.copy`). null for a button that is no Copy, so a page's `click` asks it first.
  */
 export function copyClick(d, button, { doc, win }) {
   if (d.copy === undefined) return null;
@@ -373,7 +428,7 @@ export function copyClick(d, button, { doc, win }) {
   const say = (word) => {
     button.textContent = word;
     if (button.dataset) button.dataset.copied = "";
-    win.setTimeout?.(() => { button.textContent = "Copy"; if (button.dataset) delete button.dataset.copied; }, COPIED_MS);
+    win.setTimeout?.(() => { button.textContent = "Copy"; if (button.dataset) delete button.dataset.copied; if ("title" in button) button.title = ""; }, COPIED_MS);
   };
   return Promise.resolve().then(() => win.navigator.clipboard.writeText(text)).then(() => say("Copied"), () => {
     // no clipboard: the text selected, and copied as a selection is (what a person's own Copy would do)
@@ -381,7 +436,10 @@ export function copyClick(d, button, { doc, win }) {
     if (el && selection) selection.selectAllChildren(el);
     let copied = false;
     try { copied = doc.execCommand?.("copy") === true; } catch { copied = false; }   // refused outright: said below, the text left selected
-    say(copied ? "Copied" : `Selected: press ${/Mac|iPhone|iPad/.test(win.navigator.platform ?? win.navigator.userAgent ?? "") ? "⌘C" : "Ctrl+C"}`);
+    // what to press, in the button's own room (ROOMS.copy: it never grows); the whole sentence its title
+    const mac = /Mac|iPhone|iPad/.test(win.navigator.platform ?? win.navigator.userAgent ?? "");
+    if (!copied && "title" in button) button.title = `Selected: press ${mac ? "⌘C" : "Ctrl+C"} to copy it`;
+    say(copied ? "Copied" : mac ? "Press ⌘C" : "Ctrl+C");
   });
 }
 

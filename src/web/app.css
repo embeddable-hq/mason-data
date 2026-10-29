@@ -3,7 +3,7 @@
    words on a stone white (charcoal slate in the dark), mortar greys for every hairline, ONE patina (verdigris) for the
    accent and the primary action; mono first (Geist Mono for the chrome, the labels, the numbers and the tables; Geist
    Sans for a sentence of prose) under a slab display face (Zilla Slab) for the titles and the big numbers; square boxes
-   framed in a hairline, lifted by a quiet stone step; a copy's bar a wall of bricks in running bond. Colour otherwise says a
+   framed in a hairline, lifted by a quiet stone step; a copy's bar a thin solid line with its % at the end. Colour otherwise says a
    state (ok / warn / bad / unknown), always beside its word. No gradient, no image: every texture is a border or a box.
    Every font is Mason's own file (src/web/vendor/, served from the allowlist): nothing is fetched from elsewhere. */
 
@@ -49,10 +49,11 @@
   --chrome-bg: var(--side); --chrome-fg: var(--fg); --chrome-muted: var(--muted); --chrome-line: var(--line-strong);
   --thead-bg: #f3f1ed; --thead-fg: #2d2a27; --thead-muted: #615c56; --zebra: #f9f8f6;
   --code-bg: #f4f2ee; --code-fg: #36322e; --code-muted: #69645d;
-  /* a copy's bar: a laid brick patina, an unlaid one pale stone, the mortar the box's own colour; served, failed and not
-     kept current their own tints (validated together: dataviz's validate_palette.js, --pairs all, the words beside) */
-  --brick: #199eaa; --brick-empty: #e8e5df; --mortar: var(--surface); --glow: 0 0 0 transparent;
-  --brick-ok: #33733f; --brick-warn: #c29647; --brick-bad: #a85071;
+  /* the motifs' laid brick (the title's course, the checklist) patina; a copy's bar: its fill patina while it copies, its
+     track pale stone, served, failed and not kept current their own tints (validated together: dataviz's
+     validate_palette.js, --pairs all, the words beside) */
+  --brick: #199eaa; --glow: 0 0 0 transparent;
+  --bar-track: #e8e5df; --bar-ok: #33733f; --bar-warn: #c29647; --bar-bad: #a85071;
   /* a chart (src/web/charts.js reads these): its trend in mortar grey, its mark and latest point the patina */
   --chart-trend: #b8b2a8; --chart-mark: #2b6f70; --chart-grid: #ebe8e2; --chart-text: #69645d;
   /* what dims the page under the phone's open menu */
@@ -85,8 +86,8 @@
     --drop: 1px 1px 0 var(--stone-1), 0 2px 8px -2px rgb(0 0 0 / 0.3); --drop-hover: 2px 2px 0 var(--stone-1), 0 8px 18px -8px rgb(0 0 0 / 0.5);
     --thead-bg: #20232a; --thead-fg: #e7e5e1; --thead-muted: #aaa69f; --zebra: #1f2227;
     --code-bg: #121417; --code-fg: #dcdad5; --code-muted: #97938c;
-    --brick: #1ea2a8; --brick-empty: #2c3038; --mortar: var(--surface); --glow: 0 0 0 transparent;
-    --brick-ok: #2f743d; --brick-warn: #b58a3a; --brick-bad: #b35274;
+    --brick: #1ea2a8; --glow: 0 0 0 transparent;
+    --bar-track: #2c3038; --bar-ok: #2f743d; --bar-warn: #b58a3a; --bar-bad: #b35274;
     --chart-trend: #4f555e; --chart-mark: #6cbcb8; --chart-grid: #2a2e35; --chart-text: #97938c;
     --scrim: rgb(0 0 0 / 0.5);
     color-scheme: dark;
@@ -255,9 +256,9 @@ button.small { height: 28px; padding: 0 var(--space-2); font-size: var(--text-xs
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button.primary:disabled, button:disabled:hover { opacity: 0.5; background: var(--btn); }
 button.primary:disabled { background: var(--cta); }
-/* the confirm of a destructive action (Remove orders, Cancel statement 3): filled red, the one button that does it */
-.confirm ~ button.danger { background: var(--bad); color: var(--surface); border-color: var(--bad); }
-.confirm ~ button.danger:hover { opacity: 0.88; background: var(--bad); }
+/* the confirm of a destructive action (Remove orders, Cancel statement 3), in its popover: filled red, the one button that does it */
+.pop-actions button.danger { background: var(--bad); color: var(--surface); border-color: var(--bad); }
+.pop-actions button.danger:hover { opacity: 0.88; background: var(--bad); }
 
 /* ---------------------------------------------------------------- form controls */
 form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-3) 0; }
@@ -346,28 +347,20 @@ table.errors td { overflow-wrap: anywhere; }
 .facts dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); }
 tr.warn th, tr.warn td { color: var(--warn); }
 
-/* A COPY'S BAR: a wall of two courses in running bond (copyBar, src/web/pages/status.js): the top course ten bricks, the
-   bottom a half, nine and a half; a laid brick is patina, an unlaid one pale stone, the mortar the box's own colour.
-   Its colour follows the copy's state as the line's word does: laid in green once served, rose when it failed, amber when
-   not kept current. Bricks laid since the last read drop into place, once (not under prefers-reduced-motion). */
+/* A COPY'S BAR (copyBar, src/web/pages/status.js): a thin rounded track and a solid fill to the share, its % at the end.
+   The fill's colour follows the copy's state as the line's word does: the patina while it copies, green once served,
+   rose when it failed, amber when not kept current; waiting, no fill, the track's quiet shimmer (not under
+   prefers-reduced-motion). The share drawn never goes backwards (createMonotone). */
 td.bar { white-space: nowrap; width: 1%; }
-.copybar { display: inline-flex; vertical-align: middle; padding: 1px; background: var(--mortar); border: 1px solid var(--line-strong); }
-.copybar .wall { display: grid; grid-template-columns: repeat(20, 5px); grid-template-rows: 5px 5px; gap: 1px; }
-.copybar i { display: block; grid-column: span 2; background: var(--brick-empty); }
-.copybar i.h { grid-column: span 1; }
-.copybar i.on { background: var(--brick); box-shadow: var(--glow); }
-.t-done .copybar i.on { background: var(--brick-ok); box-shadow: none; }
-.t-failed .copybar i.on { background: var(--brick-bad); box-shadow: none; }
-.t-unsynced .copybar i.on { background: var(--brick-warn); box-shadow: none; }
-/* the brick being laid: its outline in patina, breathing while the copy reads */
-.copybar i.next { background: var(--accent-soft); outline: 1px solid var(--brick); outline-offset: -1px; animation: brick-next 1.6s ease-in-out infinite; }
-@keyframes brick-next { 50% { opacity: 0.45; } }
-.copybar i.drop { animation: brick-drop 0.42s cubic-bezier(0.3, 1.5, 0.6, 1) both; }
-@keyframes brick-drop { from { transform: translateY(-9px); opacity: 0; } 70% { opacity: 1; } }
-/* a copy just finished: its wall settles once, as the last brick lands */
-.t-done .copybar:has(i.drop) { animation: wall-settle 0.6s ease-out 0.3s both; }
-@keyframes wall-settle { 40% { transform: translateY(1px); box-shadow: 0 0 0 3px var(--ok-soft); } }
-@media (prefers-reduced-motion: reduce) { .copybar i.next, .copybar i.drop, .t-done .copybar:has(i.drop) { animation: none; } }
+.copybar { display: inline-flex; align-items: center; vertical-align: middle; width: 120px; }
+.copybar .track { display: block; position: relative; width: 100%; height: 6px; border-radius: 3px; background: var(--bar-track); overflow: hidden; }
+.copybar .fill { display: block; height: 100%; border-radius: 3px; background: var(--brick); }
+.t-done .copybar .fill { background: var(--bar-ok); }
+.t-failed .copybar .fill { background: var(--bar-bad); }
+.t-unsynced .copybar .fill { background: var(--bar-warn); }
+.copybar.indeterminate .track { animation: bar-wait 1.6s ease-in-out infinite; }
+@keyframes bar-wait { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .copybar.indeterminate .track { animation: none; } }
 .pct { display: inline-block; min-width: 3.2em; text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--muted); }
 .t-failed .what, .s-failed .what { color: var(--bad); }
 .t-unsynced .what { color: var(--warn); }
@@ -432,26 +425,49 @@ details.memory, details#logs-raw { margin: var(--space-4) 0; }
 #page-tables td.mono { white-space: nowrap; color: var(--muted); }
 .err { color: var(--bad); overflow-wrap: anywhere; }
 #page-tables .done button { margin-top: var(--space-1); }
-/* THE TABLES LIST FITS ITS CARD (src/web/pages/tables.js renderTables): seven short cells a row, the name the column
-   that gives (cut with an ellipsis, its whole the title), and everything long on a line of its own under the row,
-   across every column — a copy's words, an error, a reason, the stream, a Remove's question. The row's actions never
-   wrap and never leave the card: on a phone, where the table scrolls inside its card, they stay pinned at its right. */
-table.catalog th.name { width: 100%; max-width: 0; }
-table.catalog code.name { display: block; max-width: 100%; min-width: 8ch; }
+/* THE TABLES LIST FITS ITS CARD AND NOTHING A CLICK DOES MOVES IT (src/web/pages/tables.js renderTables): seven short
+   cells a row at FIXED widths (`table-layout: fixed`: a column is as wide as its header says, whatever a row's cells
+   hold now), the name the column that gives (cut with an ellipsis, its whole the title); every row two lines (its state
+   over its bar, a line kept when it has none) and its note under it, across every column, written for every row (empty
+   when it says nothing). A question, a form and an answer are popovers beside the row's actions (`.pop`), never a row.
+   The row's actions never wrap and never leave the card: they stay pinned at its right where the table scrolls. */
+table.catalog { table-layout: fixed; width: 100%; min-width: 840px; }
+table.catalog th.state { width: 146px; }
+table.catalog th.rows { width: 116px; }
+table.catalog th.key { width: 104px; }
+table.catalog th.last { width: 104px; }
+table.catalog th.size { width: 100px; }
+table.catalog th.act { width: 172px; }
+table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }
+table.catalog code.name { display: block; max-width: 100%; }
 table.catalog td.state { white-space: nowrap; }
-table.catalog td.state .copyline { display: flex; flex-wrap: nowrap; margin-top: var(--space-1); }
+table.catalog td.state .copyline { display: flex; flex-wrap: nowrap; align-items: center; height: 18px; margin-top: var(--space-1); }
 table.catalog td.state .pct { min-width: 0; }
-table.catalog td.state .copybar .wall { grid-template-columns: repeat(20, 3px); grid-template-rows: 4px 4px; }
+table.catalog td.state .copybar { width: 64px; }
 table.catalog td.num .took { display: block; color: var(--muted); font-size: var(--text-xs); }
-table.catalog tr.has-note > * { padding-bottom: var(--space-1); }
+table.catalog tbody tr:not(.under) > * { padding-bottom: var(--space-1); }
 table.catalog tr.under > td { padding-top: 0; }
-table.catalog tr.note .under-body { font-size: var(--text-sm); display: flex; flex-wrap: wrap; gap: 2px var(--space-3); }
+table.catalog tr.note .under-body { font-size: var(--text-sm); line-height: 20px; display: flex; flex-wrap: wrap; gap: 2px var(--space-3); min-height: 20px; }
 .under-body { min-width: 0; overflow-wrap: anywhere; }
-.under-body > .confirm { color: var(--muted); margin-right: var(--space-2); }
-/* a confirm's button names what it removes: a long name is cut with an ellipsis, never past the card (its name is still its whole text) */
-.under-body button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
-tr.asking .under-body { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-tr.asking .under-body > .confirm { margin-right: 0; }
+/* A POPOVER (`pop`, src/web/shared.js): fixed beside the button that asked, over the rows, never between them; placed by
+   placePops after each write. A question or a form scrolls in itself when long; an answer goes by itself. */
+.pop { position: fixed; top: 0; left: 0; z-index: 40; width: max-content; max-width: min(30rem, calc(100vw - 32px)); padding: var(--space-3) var(--space-4);
+  background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop-hover); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.pop[hidden] { display: none; }
+.pop.ask { max-height: min(70vh, 34rem); overflow-y: auto; border-top: 3px solid var(--accent); }
+.pop.ask:has(.confirm) { border-top-color: var(--bad); }
+.pop.said { border-left: 4px solid var(--ok); }
+.pop.said:has(.failure) { border-left-color: var(--bad); }
+.pop > :first-child { margin-top: 0; }
+.pop > :last-child { margin-bottom: 0; }
+.pop .confirm { margin: 0 0 var(--space-2); color: var(--fg); }
+.pop .pop-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; }
+.pop .done { border: 0; box-shadow: none; padding: 0; margin: 0; background: none; }
+/* a confirm's button names what it removes: a long name is cut with an ellipsis, never past the popover (its name is still its whole text) */
+.pop button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+/* A BUTTON WHOSE LABEL CHANGES KEEPS ITS WIDTH (`room`, src/web/shared.js ROOMS): its longest label laid under it, unseen
+   and of no height, so Sync, Syncing… and Synced ✓ (Copy, Copied) are one width */
+button[data-room]::after { content: attr(data-room); display: block; height: 0; overflow: hidden; visibility: hidden; }
 td.act, th.act { white-space: nowrap; text-align: right; }
 td.act > * { vertical-align: middle; }
 table.catalog td.act, table.catalog th.act { position: sticky; right: 0; }
@@ -472,11 +488,12 @@ table.catalog tbody tr:hover > td.act { background: var(--hover); }
 }
 /* a phone: the table scrolls inside its card, so a line under a row stays in the card's view, never as wide as the table */
 @media (max-width: 640px) {
-  /* the table scrolls: the name keeps its room (cut at 22ch), never the column that gives */
-  table.catalog th.name { width: auto; max-width: none; }
-  table.catalog code.name { max-width: 22ch; }
+  /* the table scrolls inside its card (.panel) at its least width (table.catalog's min-width), still a table — a block
+     would lose its fixed columns — the name still the column that gives */
+  table.catalog { display: table; min-width: 940px; }
 }
 @media (max-width: 640px) { tr.under .under-body { position: sticky; left: var(--space-3); max-width: calc(100vw - 2 * var(--gutter) - 2 * var(--space-3)); } }
+@media (max-width: 640px) { table.catalog tr.under > td { overflow: visible; } }
 tr.removed > * { color: var(--muted); }
 form.formcard { margin: 0 0 var(--space-5); padding: var(--space-3) var(--space-4); background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); }
 form.formcard input { width: 18em; }
@@ -561,16 +578,22 @@ table.users td { white-space: nowrap; }
 #page-queries table.requests td.when { white-space: nowrap; color: var(--muted); }
 #page-queries .err { margin-top: 2px; font-size: var(--text-xs); color: var(--bad); overflow-wrap: anywhere; }
 #page-queries tr.detail > td { background: var(--sunken); }
+/* an expanded row pushes the rows under it down (the reader asked) but never widens a column: its body takes the row's
+   width and adds none of its own (width 0, at least the row's), a long statement scrolling in its box */
+#page-queries tr.detail .detail-body { width: 0; min-width: 100%; overflow-wrap: anywhere; }
 #page-queries tr.detail:hover > td { background: var(--sunken); }
 #page-queries tr.detail pre.stmt { font-family: var(--font-mono); color: var(--fg); }
 #page-queries tr.detail pre.error { color: var(--bad); }
 #page-queries table.sessions td:first-child { font-weight: 600; }
 
 /* Usage: four small charts in a grid, each under its title; a card with no drawn chart takes no room */
-.chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: var(--space-6) var(--space-4); margin: var(--space-6) 0 var(--space-6); }
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr)); gap: var(--space-6) var(--space-4); margin: var(--space-6) 0 var(--space-6); }
 .chart-card { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4); min-width: 0; }
-.chart-card > .card-label:first-child { width: fit-content; max-width: 100%; margin: calc(-1 * var(--space-4) - 0.8em) 0 var(--space-2) calc(-1 * var(--space-2));
-  padding: 0 var(--space-2); background: var(--surface); color: var(--fg); font-size: var(--text-sm); font-weight: 700; line-height: 1.6; }
+/* a chart's title INSIDE its card, over its chart (never on the card's edge: a title set into the frame floated out of
+   it), and the chart as wide as the card's content (charts.js sizes uPlot from its holder's clientWidth, again whenever
+   the holder's width changes): nothing of a chart card leaves it, at any width */
+.chart-card > .card-label:first-child { max-width: 100%; margin: 0 0 var(--space-2); color: var(--fg); font-size: var(--text-sm); font-weight: 700; line-height: 1.6; }
+.chart-card .chart { min-width: 0; max-width: 100%; }
 .chart-card:not(:has(.chart.drawn)) { display: none; }
 .chart-card .chart.series { margin: var(--space-2) 0 0; }
 details.hours { margin: var(--space-3) 0; }
@@ -675,12 +698,9 @@ ul.unsupported .clip { max-width: min(40em, 100%); }
 .unsupported-line { margin: var(--space-4) 0 0; overflow-wrap: anywhere; }
 .unsupported-line a.see { margin-left: var(--space-2); font-size: var(--text-sm); }
 
-/* a table's copy on the Tables page: the Overview's bar (copyBar) and the words mason wait prints, in the Note cell;
-   a table waiting for its copy has no brick laid, its first one breathing */
+/* a table's copy on the Tables page: the Overview's bar (copyBar) and the words mason wait prints, on its note line */
 .copyline { display: inline-flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .copyline .what-copy { color: var(--muted); }
-/* a table waiting for its copy: no brick laid, the first one breathing (.copybar i.next) */
-.copybar.indeterminate { border-style: dashed; }
 
 /* a phone: the five ranges closer, so the control fits the page's width (it scrolls inside itself, never the page, if not) */
 @media (max-width: 640px) { .range a, .range .off { padding: 0 var(--space-2); } }

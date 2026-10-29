@@ -49,7 +49,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, POLL_MS } from "./shared.js";
+import { esc, badge, icon, createAsk, renderFailure, updatedText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -269,6 +269,22 @@ export function start(doc, win) {
       written.set(id, html);
     }
     if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
+    place();
+  };
+  // THE POPOVERS (a confirm, a form, an answer: `pop` of shared.js) placed beside their buttons after every write, and
+  // again on a scroll or a resize; a question or a form that has just opened takes the focus (a form's first box, a
+  // question's Cancel: never the destructive button, which Enter would press), and
+  // Escape answers it with its own Cancel (`data-pop-close`)
+  let dialogs = new Set();
+  const place = () => {
+    const now = new Set();
+    for (const el of placePops(doc, win)) {
+      if (el.getAttribute?.("role") !== "dialog") continue;
+      const key = `${el.dataset.anchor}|${el.getAttribute("aria-label") ?? ""}`;
+      now.add(key);
+      if (!dialogs.has(key)) (el.querySelector?.("input") ?? el.querySelector?.("[data-pop-close]"))?.focus?.({ preventScroll: true });
+    }
+    dialogs = now;
   };
   let busy = false;
   const poll = async () => {
@@ -290,7 +306,12 @@ export function start(doc, win) {
     if (focus) (open ? doc.getElementById("nav")?.querySelector?.("a") : menuButton)?.focus?.();
   };
   const inMenu = (t) => Boolean(t) && (sidebar?.contains?.(t) ?? false);
-  doc.addEventListener("keydown", (e) => { if (e.key === "Escape" && menuOpen) { e.preventDefault?.(); setMenu(false, true); } });
+  doc.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (menuOpen) { e.preventDefault?.(); setMenu(false, true); return; }
+    const close = doc.querySelector?.(".pop.ask:not([hidden]) [data-pop-close]");
+    if (close) { e.preventDefault?.(); close.click(); }
+  });
   doc.addEventListener("focusin", (e) => { if (menuOpen && !inMenu(e.target)) setMenu(false, false); });
   doc.addEventListener("submit", async (e) => {
     const r = shownPage().submit?.(e.target, win.FormData) ?? null;
@@ -326,6 +347,8 @@ export function start(doc, win) {
   doc.addEventListener("pointerdown", () => { pressedAt = Date.now(); });
   for (const type of ["pointerup", "pointercancel"]) doc.addEventListener(type, () => { pressedAt = null; win.setTimeout(paint, 0); });
   win.addEventListener?.("hashchange", () => { if (menuOpen) setMenu(false, true); app.show(win.location.hash, { doc }); paint(); void poll(); });
+  win.addEventListener?.("scroll", place, { capture: true, passive: true });
+  win.addEventListener?.("resize", place);
   if (charts !== null) {
     win.addEventListener?.("resize", () => charts.resize());
     win.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", () => charts.retheme());

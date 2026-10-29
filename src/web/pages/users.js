@@ -3,7 +3,7 @@
  * /api/users/<name>. An added user's password lives in this page's memory until the person dismisses it, never in
  * storage, a URL or a log line.
  */
-import { badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, renderFailure, status, utcMinute } from "../shared.js";
+import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, status, utcMinute } from "../shared.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
 const USERS = "/api/users?lastUsed=1";
@@ -27,28 +27,32 @@ export function lastUsedText(u, lastUsedNote, requestLogDays, now = Date.now()) 
  * in mono with its id muted, its status as a dot and the word (Active, or Removed and when), when it was added, when it
  * was last used (an age, `lastUsedText`'s UTC time in a title; or the note why it is not known), its URL without the
  * password (Copy), and Remove. The active ones first; a removed user is listed after them, muted, without Remove. The
- * one being removed asks first (`confirming`, its name). `now` is the page's clock, in ms.
+ * one being removed asks first (`confirming`, its name), in a popover beside its Remove; a refused Remove (`refused`:
+ * { name, failure }) is said there too, until dismissed. `now` is the page's clock, in ms.
  */
-export function renderUsers(list, confirming = null, now = Date.now()) {
+export function renderUsers(list, confirming = null, now = Date.now(), refused = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
   if (!users.length) return empty("No users yet", `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
+  // a Remove's question is a popover beside the user's Remove (`pop`), never a row: no row below it moves
+  const pops = [];
   return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col" class="num">Last used</th><th scope="col">URL</th><th scope="col"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
       ? `<span title="${esc(last)}">${esc(duration(Math.max(0, (now - Date.parse(u.lastUsedAt)) / 1000)))} ago</span>` : esc(last);
-    // a Remove's question is a row of its own under the user's, across every column: the row keeps its width
     const asking = active && confirming === u.name;
-    const ask = asking ? `<tr class="under asking"><td colspan="6"><div class="under-body"><span class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</span> ` +
-      `${button(`Remove ${u.name}`, { confirmRemove: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "" }, "small")}</div></td></tr>` : "";
+    const anchor = actId("users", u.name);
+    if (asking) pops.push(pop(anchor, `<p class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</p>` +
+      `<p class="pop-actions">${button(`Remove ${u.name}`, { confirmRemove: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Remove ${u.name}?` }));
+    else if (refused?.name === u.name) pops.push(pop(anchor, `${renderFailure(refused.failure)}<p class="pop-actions">${button("Dismiss", { dismissRefused: "", popClose: "" }, "small")}</p>`));
     return `<tr${active ? "" : ` class="removed"`}><th scope="row"><code class="name" title="${esc(u.name)}">${esc(u.name)}</code> <span class="dim">id ${esc(u.id)}</span></th>` +
       `<td>${active ? status("ok", "Active") : status("unknown", `Removed ${stamp(u.removedAt)} UTC`)}${active && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
       `<td>${active && u.url ? copyable(`user-url-${u.name}`, u.url, { clip: true }) : ""}</td>` +
-      `<td class="act">${!active ? "" : asking ? `<button type="button" class="danger small" aria-expanded="true" disabled>Remove</button>`
-        : button("Remove", { remove: u.name }, "danger small")}</td></tr>${ask}`;
-  }).join("")}</tbody></table>`) + `${note("Last used", list.lastUsedNote)}${note("URL", list.urlNote)}`;
+      `<td class="act" id="${esc(anchor)}">${!active ? "" : asking ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
+        : button("Remove", { remove: u.name }, "danger small")}</td></tr>`;
+  }).join("")}</tbody></table>`) + pops.join("") + `${note("Last used", list.lastUsedNote)}${note("URL", list.urlNote)}`;
 }
 
 /**
@@ -71,7 +75,7 @@ export const page = {
   id: "users",
   title: "Users",
   create(ctx) {
-    const m = { actionFailure: null, added: null, confirming: null };
+    const m = { actionFailure: null, added: null, confirming: null, refused: null };
     const users = () => ctx.read(USERS)?.body ?? null;
     const actions = {
       async addUser(name) {
@@ -82,17 +86,19 @@ export const page = {
         await ctx.refresh([USERS]);
         return true;
       },
-      askRemove(name) { m.confirming = name; m.actionFailure = null; },
+      askRemove(name) { m.confirming = name; m.actionFailure = null; m.refused = null; },
       cancelRemove() { m.confirming = null; },
       async confirmRemove(name) {
         m.actionFailure = null;
         const r = await ctx.ask(`/api/users/${encodeURIComponent(name)}`, json("DELETE"));
         m.confirming = null;
-        if ("failure" in r) { m.actionFailure = r.failure; return false; }
+        // refused: said beside the user's Remove, as its question was (nothing above the table moves it)
+        if ("failure" in r) { m.refused = { name, failure: r.failure }; return false; }
         await ctx.refresh([USERS]);
         return true;
       },
       dismissAdded() { m.added = null; },
+      dismissRefused() { m.refused = null; },
     };
     return {
       model: m,
@@ -105,7 +111,7 @@ export const page = {
       view() {
         const u = users();
         return {
-          users: u ? renderUsers(u, m.confirming, ctx.now().getTime()) : "",
+          users: u ? renderUsers(u, m.confirming, ctx.now().getTime(), m.refused) : "",
           added: m.added ? renderAdded(m.added) : "",
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",
         };
@@ -120,6 +126,7 @@ export const page = {
         if (d.cancelRemove !== undefined) return actions.cancelRemove() ?? true;
         if (d.confirmRemove !== undefined) return actions.confirmRemove(d.confirmRemove);
         if (d.dismissAdded !== undefined) return actions.dismissAdded() ?? true;
+        if (d.dismissRefused !== undefined) return actions.dismissRefused() ?? true;
         return copyClick(d, button, { doc, win });
       },
     };

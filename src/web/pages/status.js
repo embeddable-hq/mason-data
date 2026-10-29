@@ -72,40 +72,22 @@ export function tableLine(t) {
 }
 
 /**
- * THE WALL OF A COPY'S BAR: two courses of bricks in running bond (docs/WEB-UI.md "Presentation"), the top course ten
- * whole bricks, the bottom one a half, nine whole and a half — each brick's `at` the share (in %) where its right edge
- * stands. A brick is laid once the share reaches its right edge, so the wall fills left to right, both courses at once,
- * its leading edge stepped as a wall under construction is, and never further than the share: within a brick (5%) of it.
+ * A COPY'S BAR, the one renderer of the Overview's "copies not finished" and the Tables page's rows: a thin rounded
+ * track and a solid fill to the share drawn, its % as text at the bar's END (as `mason wait` prints it beside its bar),
+ * with an explicit `role="progressbar"` and `aria-valuemin/max/now` (and a text label, `aria-valuetext`, the line's
+ * words); the track is `aria-hidden` drawing. `l` is `tableLine`'s, `fraction` the share to draw (`monotone`'s; the
+ * line's own by default): the fill's colour is the line's state (the stylesheet's `.t-<state>`: green served, the accent
+ * while it copies, amber not kept current, rose failed). A table waiting for its copy has no value: no fill but the
+ * stylesheet's quiet shimmer over the track, `aria-valuenow` and the % left out. `from`, the share at the page's last
+ * read (`monotone.before`), is kept for the callers; the fill's own transition moves it from there.
  */
-export const BRICKS = [
-  ...Array.from({ length: 10 }, (_, k) => ({ course: 0, half: false, at: (k + 1) * 10 })),
-  { course: 1, half: true, at: 5 }, ...Array.from({ length: 9 }, (_, j) => ({ course: 1, half: false, at: (2 * j + 3) * 5 })), { course: 1, half: true, at: 100 },
-];
-
-/**
- * A COPY'S BAR, the one renderer of the Overview's "copies not finished" and the Tables page's rows: a wall of bricks
- * (`BRICKS`) with an explicit `role="progressbar"` and `aria-valuemin/max/now` (and a text label, `aria-valuetext`, the
- * line's words); its bricks are `aria-hidden` drawing. `l` is `tableLine`'s, `fraction` the share to draw (`monotone`'s;
- * the line's own by default). A table waiting for its copy has no value: no brick is laid, the first one the stylesheet's
- * quiet pulse, `aria-valuenow` and the % left out. The % beside any other is `percent` of the same share. While it copies,
- * the next brick to lay is marked (`next`). `from` is the share this bar showed at the page's last read (`monotone.before`):
- * the bricks laid since are `drop` — the stylesheet drops them into place, once, and not under prefers-reduced-motion —
- * so a bar the page re-reads unchanged moves nothing, and one whose copy just finished lays its last bricks.
- */
-export function copyBar(table, l, fraction = l.fraction, from) {
+export function copyBar(table, l, fraction = l.fraction, _from) {
   const waiting = l.state === "waiting";
   const value = Math.floor(Math.max(0, Math.min(1, fraction)) * 100);
-  const was = from === undefined ? value : Math.floor(Math.max(0, Math.min(1, from)) * 100);
-  const laid = waiting ? 0 : value;
-  const next = l.state === "copying" || waiting ? BRICKS.filter((b) => b.at > laid).sort((x, y) => x.at - y.at)[0] : undefined;
-  const bricks = BRICKS.map((b) => {
-    const cls = [b.half ? "h" : "b", b.at <= laid ? "on" : "", b.at <= laid && b.at > was ? "drop" : "", b === next ? "next" : ""].filter(Boolean).join(" ");
-    return `<i class="${cls}"></i>`;
-  }).join("");
   return `<span class="copybar${waiting ? " indeterminate" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100"` +
     `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: its copy`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}">` +
-    `<span class="wall" aria-hidden="true">${bricks}</span></span>` +
-    // a copy not begun has no share yet: no "0%" beside its pulse (its line says it waits)
+    `<span class="track" aria-hidden="true"><span class="fill"${waiting ? "" : ` style="width: ${value}%"`}></span></span></span>` +
+    // a copy not begun has no share yet: no "0%" at its end (its line says it waits)
     (waiting ? "" : ` <span class="pct">${percent(fraction)}</span>`);
 }
 
@@ -119,7 +101,7 @@ export function createMonotone() {
   const seen = new Map();
   let before = new Map();
   return {
-    /** The shares of the read before the last `of`: each copying table's, so a bar lays only the bricks since (`copyBar`'s `from`). */
+    /** The shares of the read before the last `of`: each copying table's (`copyBar`'s `from`). */
     get before() { return before; },
     of(s) {
       before = new Map(seen);

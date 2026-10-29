@@ -48,6 +48,25 @@ interface App {
 const textOf = (html: string): string => html.replace(/<[^>]*>/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
   .replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
 
+/** The popovers of some HTML (`pop` of src/web/shared.js: a confirm, a form, an answer, written after its table), each
+ *  { anchor, html }, in their order; `popOf(html, anchor)` the one beside that element (a row's actions), or "". */
+const popsOf = (html: string): Array<{ anchor: string; html: string }> => {
+  const out: Array<{ anchor: string; html: string }> = [];
+  for (const m of html.matchAll(/<div class="pop [^"]*" data-anchor="([^"]*)"/g)) {
+    let depth = 0, i = m.index!;
+    const tag = /<\/?div\b[^>]*>/g;
+    tag.lastIndex = i;
+    for (let t = tag.exec(html); t !== null; t = tag.exec(html)) {
+      depth += t[0].startsWith("</") ? -1 : 1;
+      if (depth === 0) { out.push({ anchor: m[1]!.replace(/&quot;/g, "\"").replace(/&amp;/g, "&"), html: html.slice(i, tag.lastIndex) }); break; }
+    }
+  }
+  return out;
+};
+const popOf = (html: string, anchor: string): string => popsOf(html).find((p) => p.anchor === anchor)?.html ?? "";
+/** The HTML without its popovers: what the table itself says. */
+const withoutPops = (html: string): string => popsOf(html).reduce((h, p) => h.replace(p.html, ""), html);
+
 // ------------------------------------------------------------------ fixtures: the server's runState over synthetic copies
 
 const col = (name: string, type = "text") => ({ name, type, notNull: false, comment: null });
@@ -258,7 +277,7 @@ test("copying: the bar's share, the rows, the chunks, the rate and the time left
   assert.match(text, /public\.orders 15% copying 321,000 of ~2,000,000 rows · 2 chunks reading \(14 s\), 3 of ~20 in · 52,300 rows\/s · ~6 min left/);
   // a copy not begun: its shimmer and its words, never a "0%" beside them (it reads as stuck before it starts)
   assert.match(text, /public\.orders 15% copying .* public\.events waiting for its copy to start/);
-  assert.match(html, /<tr class="t-waiting"><th scope="row"><code class="name" title="public\.events">public\.events<\/code><\/th><td class="bar"><span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.events: its copy" aria-valuetext="waiting for its copy to start"><span class="wall" aria-hidden="true">(?:<i class="[a-z ]+"><\/i>){21}<\/span><\/span><\/td>/);
+  assert.match(html, /<tr class="t-waiting"><th scope="row"><code class="name" title="public\.events">public\.events<\/code><\/th><td class="bar"><span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.events: its copy" aria-valuetext="waiting for its copy to start"><span class="track" aria-hidden="true"><span class="fill"[^>]*><\/span><\/span><\/span><\/td>/);
   assert.match(text, /^Under way .* Copies not finished \(2 of 3 added\) Table Copy public\.orders 15% /);
   assert.ok(!/public\.customers/.test(text), "a copy that is done is not a bar");
 });
@@ -298,22 +317,24 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.match(text, /public\.event_log Not added ~900 rows no key Name its key… cannot be added as it is: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id \(its unique index event_log_tenant_id_id_key\) public\.staging /);
   assert.match(html, /<\/tr><tr class="under note"><td colspan="7"><div class="under-body"><span class="dim">cannot be added as it is: no primary key/, "the reason on a line of its own under its row, across every column");
   assert.match(text, /public\.staging Not added rows unknown key id Add Columns… A copy's own size/);
-  assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers">Sync<\/button>/);
+  assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync<\/button>/);
   assert.ok(!/data-sync-table="public\.(audit|event_log)"/.test(html), "no Sync for a table not added");
   assert.match(html, /<button type="button" class="primary small" data-add-table="public\.audit">Add<\/button>/);
   assert.ok(!/data-add-table="public\.(event_log|customers)"/.test(html), "no Add for a table that cannot be added as it is, nor for one added");
   assert.match(html, /<button type="button" class="danger small" data-remove-table="public\.customers">Remove<\/button>/);
   assert.ok(!/duckdb/i.test(html), "never the engine's name");
-  // Remove asks first, on its own line only
+  // Remove asks first, in a popover beside its Remove: the table says what it said before, the question is after it
   const asking = renderTables(CATALOG_STATE, { removing: "public.customers" });
-  assert.match(textOf(asking), /public\.customers Synced 100% 1,200 key id — Sync Remove Remove customers\? Mason stops copying it and drops its copy\. Remove customers Cancel public\.orders /);
-  // the question is a row of its own under the table's, across every column: the row keeps its width, its Remove where it was, held down
-  assert.match(asking, /<td class="act"><button type="button" class="small" data-sync-table="public\.customers">Sync<\/button> <button type="button" class="danger small" aria-expanded="true" disabled>Remove<\/button><\/td><\/tr><tr class="under asking"><td colspan="7"><div class="under-body"><span class="confirm">Remove customers\?/);
+  assert.equal(textOf(withoutPops(asking)), textOf(html), "the rows say what they said: nothing is inserted between them");
+  assert.equal(textOf(popOf(asking, "act-tables-public.customers")), "Remove customers? Mason stops copying it and drops its copy. Remove customers Cancel");
+  // its Remove where it was, held down; the question a dialog anchored to the row's actions, written after the table
+  assert.match(asking, /<td class="act" id="act-tables-public\.customers"><button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync<\/button> <button type="button" class="danger small" aria-expanded="true" disabled>Remove<\/button><\/td><\/tr>/);
+  assert.match(asking, /<\/table><\/div><div class="pop ask" data-anchor="act-tables-public\.customers" role="dialog" aria-label="Remove customers\?"><p class="confirm">Remove customers\?/);
   assert.match(asking, /<button type="button" class="danger small" data-confirm-remove-table="public\.customers">Remove customers<\/button>/);
   assert.match(asking, /data-confirm-remove-table="public\.customers"/);
   assert.ok(!/data-confirm-remove-table="public\.orders"/.test(asking), "only the one asked");
   // the form: a table with no primary key ticks its key and its columns, one with a key its columns only
-  assert.match(textOf(renderTables(CATALOG_STATE, { choosing: "public.event_log" })), /public\.event_log .* Reading event_log's columns… Cancel public\.staging/, "the form waits for its columns, read when it opens");
+  assert.equal(textOf(popOf(renderTables(CATALOG_STATE, { choosing: "public.event_log" }), "act-tables-public.event_log")), "Reading event_log's columns… Cancel", "the form waits for its columns, read when it opens");
   const keyForm = renderTables(CATALOG_STATE, { choosing: "public.event_log", columns: columnsOf("public.event_log") });
   assert.match(keyForm, /<form class="pick" data-pick-form="public\.event_log"/);
   assert.match(keyForm, /<button type="submit" class="primary small">Add event_log<\/button>/);
@@ -324,9 +345,10 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.ok(!/name="key"/.test(columnsForm) && !/Its key/.test(columnsForm), "a table with a primary key is copied by it: no key to name");
   assert.deepEqual([...columnsForm.matchAll(/name="columns" value="([^"]*)"/g)].map((m) => m[1]), ["id", "email", "password_hash"]);
   assert.ok(!/pattern=|required/.test(keyForm + columnsForm), "the server judges what is sent, never the page");
-  // what an add or a remove answered is said under its table; a refusal for a table the list lacks, above the list
+  // what an add or a remove answered is said beside its table's actions; a refusal for a table the list lacks, above the list
   const said = renderTables(CATALOG_STATE, { outcome: { table: "public.accounts", added: PICKED.secret } });
-  assert.match(textOf(said), /public\.accounts Not added ~300 rows key id Add Columns… Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash .* public\.event_log /);
+  assert.match(textOf(popOf(said, "act-tables-public.accounts")), /^Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash .* Dismiss$/);
+  assert.equal(textOf(withoutPops(said)), textOf(html), "and nothing inserted into the table");
   const gone = renderTables(CATALOG_STATE, { outcome: { table: "public.gone", failure: { code: "not_found", message: "public.gone is not a table of shop that this user can read" } } });
   assert.match(textOf(gone), /^✗ public\.gone is not a table of shop that this user can read Table State /);
   assert.equal(textOf(renderTables({ ...NONE, tables: [] })), "shop has no table this user can read.");
@@ -350,7 +372,7 @@ test("the users: a row each, active first then removed without Remove; Remove as
   const NOW_U = Date.parse("2026-10-28T09:15:59.000Z");
   const html = renderUsers(list, null, NOW_U);
   assert.match(textOf(html), /User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC 60 min ago postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove grafana id fedcba9876543210 Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days postgres:\/\/grafana@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
-  assert.match(html, /<code id="user-url-metabase" title="postgres:\/\/metabase@127\.0\.0\.1:5433\/shop">postgres:\/\/metabase@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="user-url-metabase">Copy<\/button>/);
+  assert.match(html, /<code id="user-url-metabase" title="postgres:\/\/metabase@127\.0\.0\.1:5433\/shop">postgres:\/\/metabase@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="user-url-metabase" data-room="Press ⌘C">Copy<\/button>/);
   // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
   assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
@@ -380,12 +402,12 @@ test("a user just added: the password and the URL to paste, each with a copy but
   const text = textOf(html);
   // the rows mason user add prints, its psql line included, their labels capitalised; each to paste with a Copy
   assert.match(text, /^The user metabase added: its password is shown this once Shown once URL postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy psql psql postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy User metabase Password mason_0123456789abcdef_a{32} Copy Database shop Host 127\.0\.0\.1 Port 5433 /);
-  assert.match(html, /<code id="added-psql">psql postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="added-psql">Copy<\/button>/);
+  assert.match(html, /<code id="added-psql">psql postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="added-psql" data-room="Press ⌘C">Copy<\/button>/);
   // and where its statements will show
   assert.match(text, /Run the psql line, or connect your tool: each statement it sends shows on Observability › Queries \. I have copied it$/);
   assert.match(html, /<a href="#observability\/queries">Observability › Queries<\/a>/);
   assert.match(text, /Paste it into the tool now: Mason keeps no copy of the password, and this page will not show it again\./);
-  assert.match(html, /<code id="added-password">mason_0123456789abcdef_a{32}<\/code> <button type="button" class="small" data-copy="added-password">Copy<\/button>/);
+  assert.match(html, /<code id="added-password">mason_0123456789abcdef_a{32}<\/code> <button type="button" class="small" data-copy="added-password" data-room="Press ⌘C">Copy<\/button>/);
   assert.match(html, /<span class="badge warn">Shown once<\/span>/, "a clear note that it is shown once");
   assert.match(html, /<button type="button" class="primary" data-dismiss-added="">I have copied it<\/button>/);
   assert.ok(!/ssl mode/.test(text), "disable is said by leaving it out, as mason user add does");
@@ -513,7 +535,7 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE
   assert.equal(app.model.confirming, null);
 });
 
-test("the app: Add sends POST /api/pick, says what was added under its table, and reads the state again: the copy shows starting", async () => {
+test("the app: Add sends POST /api/pick, says what was added beside its table's actions, and reads the state again: the copy shows starting", async () => {
   const run = fakeRun();
   run.answers.set("GET /api/state", answer(CATALOG_STATE));
   const app = fn<[unknown], App>("createApp")(run.fetch);
@@ -529,7 +551,8 @@ test("the app: Add sends POST /api/pick, says what was added under its table, an
   assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET /api/state"],
     "every column, as mason add accounts asks; then the state again (the page's own read: nothing else)");
   const v = app.view();
-  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id — Sync Remove waiting for its copy to start Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
+  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id — Sync Remove waiting for its copy to start public\.event_log/);
+  assert.match(textOf(popOf(v.tables!, "act-tables-public.accounts")), /^Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
   assert.match(textOf(v.status!), /public\.accounts waiting for its copy to start/, "the Overview shows the copy starting");
   app.dismissOutcome();
   assert.ok(!/Added public\.accounts/.test(app.view().tables!));
@@ -552,7 +575,7 @@ test("the app: the form sends the columns ticked as columns and the key's as key
   assert.equal(run.asked[0], `POST /api/pick ${JSON.stringify({ table: "public.event_log", picked: true, key: ["tenant_id", "id"] })}`, "no column ticked: every column");
 });
 
-test("the app: a refusal to add renders the server's Failure under its table, in its words, and the form stays open", async () => {
+test("the app: a refusal to add renders the server's Failure in its table's form, in its words, and the form stays open", async () => {
   const run = fakeRun();
   run.answers.set("GET /api/state", answer(CATALOG_STATE));
   const app = fn<[unknown], App>("createApp")(run.fetch);
@@ -565,7 +588,7 @@ test("the app: a refusal to add renders the server's Failure under its table, in
   assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.event_log", picked: true })}`], "nothing read again: nothing changed");
   const tables = app.view().tables!;
   assert.ok(tables.includes(`<div class="failure" role="alert"><p class="message"><span class="mark" aria-hidden="true">✗</span> ${message}</p></div>`), "the server's words, as renderFailure says them");
-  assert.match(tables, /data-pick-form="public\.event_log"/, "the form stays, to name its key");
+  assert.match(popOf(tables, "act-tables-public.event_log"), /^<div class="pop ask"[^>]*><div class="failure" role="alert">.*data-pick-form="public\.event_log"/s, "the form stays, to name its key, under the refusal");
   // refused with boxes ticked: the form written again under its refusal keeps them ticked
   await app.addTable("public.event_log", ["payload"], ["id"]);
   assert.deepEqual([...app.view().tables!.matchAll(/name="(key|columns)" value="([^"]*)" checked/g)].map((m) => `${m[1]}=${m[2]}`), ["key=id", "columns=payload"]);
@@ -574,7 +597,7 @@ test("the app: a refusal to add renders the server's Failure under its table, in
   const file = "mason/sources/ has 2 source files: one source per project for now";
   run.answers.set("POST /api/pick", answer({ error: file, failure: { code: "refused", message: file, next: [] } }, 409));
   await app.addTable("public.audit");
-  assert.match(textOf(app.view().tables!), /public\.audit Not added ~50 rows key id Add Columns… ✗ mason\/sources\/ has 2 source files: one source per project for now public\.accounts/);
+  assert.match(textOf(popOf(app.view().tables!, "act-tables-public.audit")), /^✗ mason\/sources\/ has 2 source files: one source per project for now Dismiss$/);
 });
 
 test("the app: Remove asks first, Cancel takes it back, the confirm sends POST /api/remove and reads the state again", async () => {
@@ -583,7 +606,7 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends POST /
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
   app.askRemoveTable("public.accounts");
-  assert.match(textOf(app.view().tables!), /Remove accounts\? Mason stops copying it and drops its copy\. Remove accounts Cancel/);
+  assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.accounts")), "Remove accounts? Mason stops copying it and drops its copy. Remove accounts Cancel");
   app.cancelRemoveTable();
   assert.ok(!/Mason stops copying it/.test(app.view().tables!));
   assert.equal(app.model.removing, null);
@@ -595,13 +618,14 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends POST /
   run.asked.length = 0;
   assert.equal(await app.confirmRemoveTable("public.accounts"), true);
   assert.deepEqual(run.asked, [`POST /api/remove ${JSON.stringify({ tables: ["public.accounts"] })}`, "GET /api/state"]);
-  assert.match(textOf(app.view().tables!), /public\.accounts Not added ~300 rows key id Add Columns… Removed public\.accounts from mason\/sources\/shop\.yml Tip: Mason stops copying it and drops its copy/);
+  assert.match(textOf(app.view().tables!), /public\.accounts Not added ~300 rows key id Add Columns… public\.event_log/);
+  assert.match(textOf(popOf(app.view().tables!, "act-tables-public.accounts")), /^Removed public\.accounts from mason\/sources\/shop\.yml Tip: Mason stops copying it and drops its copy/);
   assert.equal(app.model.removing, null);
   // refused: the server's words
   const message = "shop.yml names no table orders — did you mean `orders`? (it names customers)";
   run.answers.set("POST /api/remove", answer({ error: message, failure: { code: "not_found", message, next: [] } }, 404));
   assert.equal(await app.confirmRemoveTable("public.orders"), false);
-  assert.match(textOf(app.view().tables!), /public\.orders .* ✗ shop\.yml names no table orders — did you mean `orders`\? \(it names customers\)/);
+  assert.match(textOf(popOf(app.view().tables!, "act-tables-public.orders")), /^✗ shop\.yml names no table orders — did you mean `orders`\? \(it names customers\) Dismiss$/);
 });
 
 // ------------------------------------------------------------------ the files: under the CSP, never the token
@@ -760,7 +784,8 @@ test("in the browser: the tables are written when they change, never at every po
   run.answers.set("GET /api/state", rowsOf(350));
   tick(); await settle();
   assert.equal(tables.writes, writes, "rows that moved while a Remove asks do not write the tables again: the confirm stays the one clicked");
-  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id — Sync Remove copying .* Remove orders\? .* public\.audit Not added ~50 rows key id Add Columns… /);
+  assert.match(textOf(tables.html), /public\.orders Syncing 15% 280,000 key id — Sync Remove copying .* public\.audit Not added ~50 rows key id Add Columns… /);
+  assert.match(textOf(popOf(tables.html, "act-tables-public.orders")), /^Remove orders\? /, "the confirm, beside the row it asks about");
   await on.get("click")!({ target: { closest: () => ({ dataset: { cancelRemoveTable: "" } }) } });
   assert.match(textOf(tables.html), /public\.audit Not added ~350 rows key id/, "Cancel writes the rows as they are now");
   await on.get("click")!({ target: { closest: () => ({ dataset: { choose: "public.audit" } }) } });
@@ -1081,7 +1106,7 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   // a failed copy's error is a red line, its whole error in a details
   assert.match(html, /<span class="err">poll: connection reset<\/span><details data-open="error:public\.orders"><summary>the whole error<\/summary><pre>poll: connection reset\nthe sync tries it again in 5 s<\/pre><\/details>/);
   assert.match(html, /<td class="state"><span class="indicator bad"><span class="dot" aria-hidden="true"><\/span>Failed<\/span><span class="copyline t-failed"><span class="copybar" /, "a failed copy's bar is red (its line's class)");
-  assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers">Sync<\/button>/);
+  assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync<\/button>/);
   assert.match(html, /<th scope="row" class="name"><code class="name" title="public\.customers">public\.customers<\/code><\/th>/, "a name in mono, cut by the stylesheet, its whole the title");
   // the cells are the commands': the age's and the span's functions, the size's
   const ages = SYNCED.tables.filter((t) => t.added).map((t) => `${commands.duration(t.sync!.ageSeconds!)} ago`);
@@ -1099,10 +1124,10 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   assert.match(textOf(renderTables(SYNCED, { sizes: { failure: { code: "failed", message: "the samples cannot be read" } } })), /The copies' own sizes: could not read them \(the samples cannot be read; mason usage has them\)/);
   assert.ok(!/own size is measured/.test(textOf(renderTables(NONE, { sizes: USAGE }))), "nothing added: no copies to measure");
   // a sync asked: its button says so, no second one
-  assert.match(renderTables(SYNCED, { sizes: USAGE, syncing: ["public.customers"] }), /<button type="button" class="small" disabled>Syncing…<\/button>/);
+  assert.match(renderTables(SYNCED, { sizes: USAGE, syncing: ["public.customers"] }), /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/);
 });
 
-test("Tables: what a sync did is said as mason sync says it, under its table; a refusal is the server's Failure", async () => {
+test("Tables: what a sync did is said as mason sync says it, beside its Sync; a refusal is the server's Failure", async () => {
   const cli = syncCommand as unknown as { syncedReport?: (b: unknown, picked: string[], unsynced: unknown[]) => unknown };
   assert.equal(typeof cli.syncedReport, "function", "src/cli/sync.ts exports syncedReport");
   const syncedReport = of<[unknown, string[], unknown[]], unknown>(tablesPage, "tables.js", "syncedReport");
@@ -1120,7 +1145,10 @@ test("Tables: what a sync did is said as mason sync says it, under its table; a 
   run.asked.length = 0;
   assert.equal(await app.syncTable("public.events"), true);
   assert.deepEqual(run.asked, [`POST /api/sync ${JSON.stringify({ tables: ["public.events"] })}`, "GET /api/state"], "mason sync events; then the state again");
-  assert.match(textOf(app.view().tables!), /public\.events Synced .* Sync Remove .*Synced public\.events: 1,234 row\(s\) written, 5 deleted\. public\.events 1,234 changed, 5 deleted, 30,001,229 rows now · 8\.5 s Tip: public\.events is over the poll's row limit: it stays as of this sync until the next mason sync \(mason start --replication keeps every table current\) Dismiss public\.audit /);
+  // the button says it in its own room, and what the sync did is said beside it, as mason sync prints it
+  assert.match(textOf(app.view().tables!), /public\.events Synced .* Synced ✓ Remove .* public\.audit /);
+  assert.match(app.view().tables!, /<button type="button" class="small" data-sync-table="public\.events" data-room="Syncing…">Synced ✓<\/button>/);
+  assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.events")), "Synced public.events: 1,234 row(s) written, 5 deleted. public.events 1,234 changed, 5 deleted, 30,001,229 rows now · 8.5 s Tip: public.events is over the poll's row limit: it stays as of this sync until the next mason sync (mason start --replication keeps every table current) Dismiss");
   app.dismissSynced();
   assert.ok(!/Synced public\.events:/.test(app.view().tables!));
   const message = "public.orders has no copy yet: it is synced once it is copied";
@@ -1166,7 +1194,7 @@ test("Tables: the search box and the state filter narrow the one list, their tex
   run.fetch = async (p, init) => { if (p === "/api/sync") await answered; return fetchNow(p, init); };
   const click = on.get("click")!({ target: { closest: () => ({ dataset: { syncTable: "public.customers" } }) } });
   await settle();
-  assert.match(el("tables").html, /<button type="button" class="small" disabled>Syncing…<\/button>/, "said while it runs");
+  assert.match(el("tables").html, /<button type="button" class="small" data-room="Syncing…" disabled>Syncing…<\/button>/, "said while it runs");
   release();
   await click;
   assert.match(textOf(el("tables").html), /Synced public\.customers: 1 row\(s\) written, 0 deleted\./);
@@ -1180,7 +1208,7 @@ test("Tables: the search box and the state filter narrow the one list, their tex
 // ------------------------------------------------------------------ the Queries and Users pages
 
 type QueriesApp = App & {
-  askCancelStatement(session: number, statement: number): void; dismissCancelStatement(): void; confirmCancelStatement(session: number, statement: number): Promise<boolean>;
+  askCancelStatement(session: number, statement: number): void; dismissCancelStatement(): void; dismissCancelled(): void; confirmCancelStatement(session: number, statement: number): Promise<boolean>;
   filterRequests(f: Record<string, string>): Promise<void>; olderRequests(): Promise<void>; newestRequests(): Promise<void>;
 };
 const RUNNING_NOW = [
@@ -1219,21 +1247,28 @@ test("running now: a row each in the commands' words — held equal to mason log
   }
   assert.match(html, /<button type="button" class="danger small" data-ask-cancel="12:45">Cancel<\/button>/, "Cancel is a small danger button");
   const asking = renderRunning(RUNNING_NOW, "12:45");
-  assert.match(textOf(asking), /Cancel session 12's statement 45\? Its client gets a "canceling statement" error\. Cancel statement 45 Keep it running/);
+  assert.equal(textOf(popOf(asking, "act-running-12:45")), "Cancel session 12's statement 45? Its client gets a \"canceling statement\" error. Cancel statement 45 Keep it running");
   assert.match(asking, /data-confirm-cancel="12:45"/);
-  assert.match(asking, /<\/tr><tr class="under asking"><td colspan="8"><div class="under-body"><span class="confirm" title="SQLSTATE 57014">Cancel session 12's statement 45\?/, "the question on a row of its own under the statement, which keeps its width");
+  // the question a popover beside its Cancel, which stays where it was, held down: no row inserted, the columns as they were
+  assert.equal(textOf(withoutPops(asking)), text, "the table says what it said");
+  assert.match(asking, /<td class="act" id="act-running-12:45"><button type="button" class="danger small" aria-expanded="true" disabled>Cancel<\/button><\/td>/);
   assert.ok(!/data-confirm-cancel="13:7"/.test(asking), "only the one asked");
   assert.equal(textOf(renderRunning([], null)), "No statement is running now.");
 });
 
-test("running now: the answer to a cancel is said under its row, a refusal as the CLI's Failure, and under the table once the statement ended", () => {
-  const renderRunning = fn<[unknown[], string | null, unknown], string>("renderRunning");
+test("running now: the answer to a cancel is said beside its row's Cancel, a refusal as the CLI's Failure, beside the part once the statement ended, and goes by itself", () => {
+  const renderRunning = fn<[unknown[], string | null, unknown, number?], string>("renderRunning");
   const done = renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0] });
-  assert.match(textOf(done), /Cancel Cancelled session 12's statement: it ends now, and its client gets a "canceling statement" error\. 13 7 /, "under the row it was for");
+  assert.equal(textOf(popOf(done, "act-running-12:45")), "Cancelled session 12's statement: it ends now, and its client gets a \"canceling statement\" error.", "beside the row it was for");
+  assert.equal(textOf(withoutPops(done)), textOf(renderRunning(RUNNING_NOW, null, null)), "no row inserted");
+  // a cancel's answer goes by itself after OUTCOME_MS; a refusal stays until dismissed
+  const at = Date.parse("2026-10-28T09:00:00.000Z");
+  assert.ok(popOf(renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0], at }, at + 7_000), "act-running-12:45"));
+  assert.equal(popsOf(renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0], at }, at + 8_000)).length, 0, "gone after 8 s");
   const refused = { key: "12:45", failure: { code: "refused", message: "session 12 runs another statement now (statement 46), not statement 45: nothing cancelled", why: "statement 45 ended, and the session began another",
     fix: "mason cancel 12 --statement 46 stops the one it runs now", next: [{ command: "mason logs --running", what: "the statements running now, with their sessions" }] } };
-  assert.match(textOf(renderRunning(RUNNING_NOW.slice(0, 1), null, refused)), /^Session No\. .* ✗ session 12 runs another statement now \(statement 46\), not statement 45: nothing cancelled why statement 45 ended, and the session began another fix mason cancel 12 --statement 46 stops the one it runs now Next: mason logs --running the statements running now, with their sessions$/);
-  assert.equal(textOf(renderRunning([], null, { key: "12:45", cancelled: RUNNING_NOW[0] })), "No statement is running now. Cancelled session 12's statement: it ends now, and its client gets a \"canceling statement\" error.");
+  assert.equal(textOf(popOf(renderRunning(RUNNING_NOW.slice(0, 1), null, { ...refused, at: 0 }, Date.now()), "act-running-12:45")), "✗ session 12 runs another statement now (statement 46), not statement 45: nothing cancelled why statement 45 ended, and the session began another fix mason cancel 12 --statement 46 stops the one it runs now Next: mason logs --running the statements running now, with their sessions Dismiss");
+  assert.equal(textOf(popOf(renderRunning([], null, { key: "12:45", cancelled: RUNNING_NOW[0] }), "running-now")), "Cancelled session 12's statement: it ends now, and its client gets a \"canceling statement\" error.", "the statement ended: beside the part");
 });
 
 test("the request log: a row each, newest first, in the commands' words — held equal to mason logs --requests' line — Older and Newest", () => {
@@ -1309,14 +1344,17 @@ test("the app: Cancel asks first; the confirm posts { session, statement } and r
   run.asked.length = 0;
   assert.equal(await app.confirmCancelStatement(12, 45), true);
   assert.deepEqual(run.asked, [`POST /api/cancel ${JSON.stringify({ session: 12, statement: 45 })}`, "GET /api/running", "GET /api/state"], "the statements running and who is connected, read again");
-  assert.match(textOf(app.view()["running-now"]!), /^Session No\. .* 13 7 .*Cancelled session 12's statement: it ends now/, "the statement ended: said under the table");
-  // the session began another statement: the server refuses, and the page renders its Failure under the row
+  assert.match(textOf(app.view()["running-now"]!), /^Session No\. .* 13 7 .*Cancelled session 12's statement: it ends now/, "the statement ended: said beside the part");
+  assert.match(popOf(app.view()["running-now"]!, "running-now"), /Cancelled session 12's statement/);
+  // the session began another statement: the server refuses, and the page renders its Failure beside the row's Cancel
   const failure = { code: "refused", message: "session 13 runs another statement now (statement 8), not statement 7: nothing cancelled", why: "statement 7 ended, and the session began another",
     fix: "mason cancel 13 --statement 8 stops the one it runs now", next: [{ command: "mason logs --running", what: "the statements running now, with their sessions" }] };
   run.answers.set("POST /api/cancel", answer({ error: failure.message, failure }, 409));
   app.askCancelStatement(13, 7);
   assert.equal(await app.confirmCancelStatement(13, 7), false);
-  assert.match(textOf(app.view()["running-now"]!), /13 7 .* Cancel ✗ session 13 runs another statement now \(statement 8\), not statement 7: nothing cancelled why statement 7 ended, and the session began another fix mason cancel 13 --statement 8 stops the one it runs now Next: mason logs --running/);
+  assert.match(textOf(popOf(app.view()["running-now"]!, "act-running-13:7")), /^✗ session 13 runs another statement now \(statement 8\), not statement 7: nothing cancelled why statement 7 ended, and the session began another fix mason cancel 13 --statement 8 stops the one it runs now Next: mason logs --running/);
+  app.dismissCancelled();
+  assert.equal(popsOf(app.view()["running-now"]!).length, 0, "a refusal stays until dismissed");
 });
 
 test("the app: the newest page is read every 5 s; Older reads the page before with its cursor and stops polling it; Newest returns", async () => {
@@ -2100,6 +2138,61 @@ test("the charts are an addition: the cards say every number as text, a holder o
   assert.equal(broken.count(), 0);
 });
 
+test("a chart stays in its card: sized to its holder's width when drawn and whenever that width changes (not only the window's resize); its title inside the card, never on its edge", async () => {
+  const sized: Array<{ width: number; height: number }> = [];
+  let made = 0;
+  class FakePlot {
+    root = {};
+    constructor(o: { width: number; height: number }) { made++; sized.push({ width: o.width, height: o.height }); }
+    setData() { /* the same data */ } setSize(s: { width: number; height: number }) { sized.push(s); } destroy() { /* gone */ }
+  }
+  const el = { dataset: { chart: "usage-statements" }, clientWidth: 488, clientHeight: 0, classList: { add() { /* drawn */ } }, appendChild() { /* moved */ } };
+  // a ResizeObserver the test drives: the holder's width changes without any window resize
+  let observed: unknown[] = [];
+  let notify!: (entries: Array<{ target: unknown }>) => void;
+  class FakeObserver { constructor(cb: typeof notify) { notify = cb; } observe(x: unknown) { observed.push(x); } unobserve(x: unknown) { observed = observed.filter((y) => y !== x); } disconnect() { observed = []; } }
+  const doc = { documentElement: {}, querySelectorAll: () => [el] };
+  const win = { getComputedStyle: () => ({ getPropertyValue: () => "" }), console: { warn: () => undefined }, ResizeObserver: FakeObserver };
+  const createCharts = charts.createCharts as unknown as (o: unknown) => { mount(s: unknown): Promise<boolean>; count(): number };
+  const c = createCharts({ doc, win, load: async () => FakePlot });
+  const spec = { kind: "bars", label: "Statements an hour", x: [3600, 7200, 10_800], y: [1, 2, 3] };
+  await c.mount({ "usage-statements": spec });
+  assert.equal(made, 1);
+  assert.equal(sized[0]!.width, 488, "drawn at its holder's width: the card's content, never wider");
+  assert.deepEqual(observed, [el], "its holder watched");
+  // the card narrowed (a grid that reflowed, the sidebar become a rail): the chart follows, with no window resize
+  el.clientWidth = 312;
+  notify([{ target: el }]);
+  assert.equal(sized.at(-1)!.width, 312, "re-measured: the chart's width ≤ its card's");
+  const n = sized.length;
+  notify([{ target: el }]);
+  assert.equal(sized.length, n, "the same width: not sized again (no loop with its own height)");
+  await c.mount({});
+  assert.deepEqual(observed, [], "a chart destroyed: its holder no longer watched");
+  // the stylesheet: a chart card's title sits inside it (no negative margin pulling it onto the frame), the grid never
+  // asks more than its width, and the chart's holder no wider than the card
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const label = /\.chart-card > \.card-label:first-child \{([^}]*)\}/.exec(css)?.[1] ?? assert.fail("the chart card's title rule");
+  assert.ok(!/margin:[^;]*(calc\(\s*-|-1 \*|(^|[\s(])-\d)/.test(label), `the title inside its card, no negative margin: ${label}`);
+  assert.match(css, /\.chart-grid \{[^}]*minmax\(min\(420px, 100%\), 1fr\)/, "a column never wider than the page");
+  assert.match(css, /\.chart-card \.chart \{ min-width: 0; max-width: 100%; \}/);
+});
+
+test("a popover is placed beside its anchor: under it, its right edge on the anchor's, above when no room below, inside the window; hidden when its anchor is gone", () => {
+  const placePops = fn<[unknown, unknown], unknown[]>("placePops");
+  const pop = (anchor: string) => ({ dataset: { anchor }, offsetWidth: 300, offsetHeight: 120, hidden: false, style: {} as Record<string, string> });
+  const rect = (left: number, top: number, w: number, h: number) => ({ getBoundingClientRect: () => ({ left, top, right: left + w, bottom: top + h, width: w, height: h }) });
+  const anchors: Record<string, unknown> = { a: rect(900, 100, 160, 36), low: rect(900, 760, 160, 36), left: rect(10, 100, 100, 36) };
+  const pops = [pop("a"), pop("low"), pop("left"), pop("gone")];
+  const doc = { querySelectorAll: () => pops, getElementById: (id: string) => anchors[id] ?? null };
+  placePops(doc, { innerWidth: 1280, innerHeight: 900 });
+  assert.deepEqual(pops[0]!.style, { left: "760px", top: "140px" }, "under it, right edges aligned");
+  assert.deepEqual(pops[1]!.style, { left: "760px", top: "636px" }, "no room below: above it");
+  assert.deepEqual(pops[2]!.style, { left: "16px", top: "140px" }, "never past the window's left gutter");
+  assert.equal(pops[3]!.hidden, true, "its anchor gone: hidden");
+  assert.deepEqual(placePops({}, {}), [], "a document that cannot place one: none");
+});
+
 // ------------------------------------------------------------------ the restyled Queries, Usage and Logs pages (docs/WEB-UI.md "Presentation")
 
 const queriesModule = await import(path.join(WEB, "pages", "queries.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
@@ -2494,10 +2587,10 @@ test("the buttons: every one has a visible label; a primary, a destructive one a
   for (const html of htmls) {
     for (const b of html.matchAll(/<button[^>]*>([\s\S]*?)<\/button>/g)) assert.ok(textOf(b[1]!).replace(/[↑↓↕]/g, "").trim().length > 0, `a button with no label: ${b[0]}`);
   }
-  assert.match(htmls[1]!, /<span class="confirm">Remove orders\?.*<\/span> <button type="button" class="danger small" data-confirm-remove-table="public\.orders">Remove orders<\/button>/);
+  assert.match(htmls[1]!, /<p class="confirm">Remove orders\?.*<\/p><p class="pop-actions"><button type="button" class="danger small" data-confirm-remove-table="public\.orders">Remove orders<\/button>/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /button\.small \{ height: 28px;/);
-  assert.match(css, /\.confirm ~ button\.danger \{ background: var\(--bad\); color: var\(--surface\)/, "the confirm of a destructive action is filled red");
+  assert.match(css, /\.pop-actions button\.danger \{ background: var\(--bad\); color: var\(--surface\)/, "the confirm of a destructive action is filled red");
   assert.match(css, /button\.primary \{ background: var\(--cta\)/, "the primary action is the one warm fill");
   assert.match(css, /button:focus-visible \{ outline: 2px solid var\(--accent\)/);
   assert.match(css, /button:disabled \{ opacity: 0\.5; cursor: not-allowed; \}/);
@@ -2609,7 +2702,7 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   // answered: the state is read again and the row shows the copy waiting to start, an indeterminate bar
   row = accountsRow(app.view().tables!);
   assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id — Sync Remove waiting for its copy to start/);
-  assert.match(row, /<span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.accounts: its copy" aria-valuetext="waiting for its copy to start"><span class="wall" aria-hidden="true">(?:<i class="[a-z ]+"><\/i>){21}<\/span><\/span>/);
+  assert.match(row, /<span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.accounts: its copy" aria-valuetext="waiting for its copy to start"><span class="track" aria-hidden="true"><span class="fill"[^>]*><\/span><\/span><\/span>/);
   assert.ok(!/aria-valuenow/.test(row), "waiting: no value, an indeterminate bar");
   // copying 37%: the bar's value, the aria, and the words mason wait prints (copyingText, held equal)
   const at37 = accountsCopy(withShare(0.37));
@@ -2622,7 +2715,7 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   assert.match(textOf(row), /37% .* copying 41,111 rows · past the ~300 estimated · 2 chunks reading \(14 s\), 3 of ~20 in · 52,300 rows\/s · ~6 min left/);
   assert.ok(textOf(row).includes(words), "the words are copyingText's, held equal to the CLI's");
   // the Overview draws the same bar from the same renderer
-  const bar = row.match(/<span class="copybar"[^>]*><span class="wall" aria-hidden="true">(?:<i class="[a-z ]+"><\/i>){21}<\/span><\/span> <span class="pct">37%<\/span>/)![0];
+  const bar = row.match(/<span class="copybar"[^>]*><span class="track" aria-hidden="true"><span class="fill"[^>]*><\/span><\/span><\/span> <span class="pct">37%<\/span>/)![0];
   assert.ok(app.view().status!.includes(bar), "one renderer: the Overview's bar is the Tables row's");
   // a state that says less (a share that went back) is not drawn backwards
   run.answers.set("GET /api/state", answer(accountsCopy(withShare(0.2))));
@@ -2651,49 +2744,40 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   assert.match(accountsRow(app.view().tables!), /aria-valuenow="5" .*5%/);
 });
 
-test("a copy's bar is a wall of bricks in running bond: laid left to right within a brick of its share, its %, aria and words the line's; the bricks since the last read drop, once", () => {
+test("a copy's bar is a thin solid line: a track and a fill to its share, its % at its end, its colour the line's state; aria and words the line's; no bricks", () => {
   const copyBar = of<[string, { state: string; fraction: number; what: string }, number?, number?], string>(statusPage, "status.js", "copyBar");
-  const bricks = (html: string) => [...html.matchAll(/<i class="([a-z ]+)"><\/i>/g)].map((m) => m[1]!.split(" "));
   const t = commands.copyingText(41_111, 300, progress);
   const line = { state: "copying", fraction: 0.37, what: `copying ${t.text}` };
   const html = copyBar("public.accounts", line);
-  // the progressbar is the wall's box: its value, its label, its words (the line's, held to the CLI's copyingText); the bricks are drawing
+  // the progressbar: its value, its label, its words (the line's, held to the CLI's copyingText); the track is drawing
   assert.match(html, /^<span class="copybar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="37" aria-label="public\.accounts: its copy" aria-valuetext="37%, copying /);
   assert.ok(html.includes(`aria-valuetext="37%, ${line.what.replace(/'/g, "&#39;")}"`), "its words are the line's");
-  assert.match(html, /<span class="wall" aria-hidden="true">(?:<i class="[a-z ]+"><\/i>){21}<\/span><\/span> <span class="pct">37%<\/span>$/, "21 bricks, then the % as mason wait prints it");
-  // two courses in running bond: ten whole over a half, nine whole and a half
-  const shape = bricks(html).map((c) => c[0]).join("");
-  assert.equal(shape, "bbbbbbbbbb" + "h" + "bbbbbbbbb" + "h");
-  // laid: every brick whose right edge the share has reached, never one past it — and the wall reads within a brick (5%) of the share
-  const BRICKS = statusPage.BRICKS as unknown as Array<{ at: number }>;
-  for (const pct of [0, 3, 5, 14, 37, 50, 64, 95, 99, 100]) {
-    const b = bricks(copyBar("t", { ...line, fraction: pct / 100 }));
-    b.forEach((c, i) => assert.equal(c.includes("on"), BRICKS[i]!.at <= pct, `${pct}%: the brick to ${BRICKS[i]!.at}% ${c.includes("on") ? "laid" : "not laid"}`));
-    const edge = Math.max(0, ...BRICKS.filter((x) => x.at <= pct).map((x) => x.at));
-    assert.ok(pct - edge < 5, `${pct}%: its wall reaches ${edge}%, within a brick`);
-    assert.equal(b.filter((c) => c.includes("next")).length, pct === 100 ? 0 : 1, `${pct}%: the next brick to lay, one, while it copies`);
-  }
-  // waiting: no brick laid, no value, no %; its first brick (the bottom course's half) the one to lay
+  assert.match(html, /<span class="track" aria-hidden="true"><span class="fill" style="width: 37%"><\/span><\/span><\/span> <span class="pct">37%<\/span>$/, "one solid fill to the share, then the % at the bar's end, as mason wait prints it");
+  // the fill is the share, floored as the % is, never past 100 nor under 0
+  for (const pct of [0, 3, 37, 99, 100]) assert.match(copyBar("t", { ...line, fraction: pct / 100 }), new RegExp(`style="width: ${pct}%".* <span class="pct">${pct}%</span>$`));
+  assert.match(copyBar("t", { ...line, fraction: 1.4 }), /style="width: 100%"/);
+  assert.match(copyBar("t", { ...line, fraction: -1 }), /style="width: 0%"/);
+  // waiting: no fill, no value, no %; the track's shimmer
   const waiting = copyBar("t", { state: "waiting", fraction: 0, what: "waiting for its copy to start" });
-  assert.match(waiting, /^<span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="t: its copy" aria-valuetext="waiting for its copy to start">/);
-  assert.ok(!/aria-valuenow|class="pct"| on/.test(waiting));
-  assert.deepEqual(bricks(waiting).findIndex((c) => c.includes("next")), 10);
-  // done, failed: every brick laid, none to lay
-  for (const state of ["done", "failed", "unsynced"]) assert.ok(bricks(copyBar("t", { state, fraction: 1, what: "" })).every((c) => c.includes("on") && !c.includes("next")), state);
-  // the bricks laid since the last read drop: none when the share did not move, or on a first read (no share before)
-  const drops = (h: string) => bricks(h).filter((c) => c.includes("drop")).length;
-  assert.equal(drops(copyBar("t", line)), 0, "a first read lays without a drop");
-  assert.equal(drops(copyBar("t", line, 0.37, 0.37)), 0, "a re-read of the same share moves nothing");
-  assert.equal(drops(copyBar("t", line, 0.37, 0.24)), 3, "24% → 37%: the bricks at 25, 30 and 35 drop");
-  assert.ok(bricks(copyBar("t", line, 0.37, 0.24)).every((c) => !c.includes("drop") || c.includes("on")), "only a laid brick drops");
-  assert.equal(drops(copyBar("t", { state: "done", fraction: 1, what: "" }, 1, 0.9)), 3, "a copy just finished lays its last bricks: 95 and the two at 100");
-  // the stylesheet: a dropped brick and the next one move only without prefers-reduced-motion; no gradient or image
-  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.copybar i\.drop \{ animation: brick-drop/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.copybar i\.next, \.copybar i\.drop, [^}]*\{ animation: none; \} \}/);
+  assert.equal(waiting, `<span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="t: its copy" aria-valuetext="waiting for its copy to start"><span class="track" aria-hidden="true"><span class="fill"></span></span></span>`);
+  // no brick is left of the old bar: no <i>, no BRICKS, no wall in the stylesheet
+  assert.ok(!/<i[ >]/.test(html + waiting), "no brick");
+  assert.equal((statusPage as Record<string, unknown>).BRICKS, undefined);
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.ok(!/\.copybar i\b|\.wall\b|brick-drop|brick-next|wall-settle/.test(css), "the brick wall's rules are gone");
+  // the fill's colour is the line's state: the accent while it copies, green served, rose failed, amber not kept current
+  assert.match(css, /\.copybar \.fill \{[^}]*background: var\(--brick\);/);
+  assert.match(css, /\.t-done \.copybar \.fill \{ background: var\(--bar-ok\); \}/);
+  assert.match(css, /\.t-failed \.copybar \.fill \{ background: var\(--bar-bad\); \}/);
+  assert.match(css, /\.t-unsynced \.copybar \.fill \{ background: var\(--bar-warn\); \}/);
+  assert.match(css, /\.copybar \.track \{[^}]*border-radius: 3px;[^}]*background: var\(--bar-track\);/, "a thin rounded track");
+  // the shimmer while waiting only without prefers-reduced-motion; no gradient or image
+  assert.match(css, /\.copybar\.indeterminate \.track \{ animation: bar-wait/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.copybar\.indeterminate \.track \{ animation: none; \} \}/);
+  assert.ok(!/gradient\(/.test(css));
 });
 
-test("the monotone remembers the read before: a page draws the bricks since, and a copy that finished lays its last", () => {
+test("the monotone remembers the read before: a copy's share is never drawn backwards, and a copy that finished leaves its last", () => {
   const createMonotone = of<[], { of(s: unknown): Map<string, number>; before: Map<string, number> }>(statusPage, "status.js", "createMonotone");
   const m = createMonotone();
   const at = (share: number) => accountsCopy(withShare(share));
@@ -2744,12 +2828,12 @@ test("the Overview, nothing asked yet: Connect your first tool under the cards �
     `URL ${SHOP_PG.shown.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy psql ${SHOP_PG.psql.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy ` +
     "Then try select count\\(\\*\\) from customers; Copy it shows on Queries " +
     "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it\\. Mason Source "));
-  assert.match(html, /<code id="connect-try">select count\(\*\) from customers;<\/code> <button type="button" class="small" data-copy="connect-try">Copy<\/button>/,
+  assert.match(html, /<code id="connect-try">select count\(\*\) from customers;<\/code> <button type="button" class="small" data-copy="connect-try" data-room="Press ⌘C">Copy<\/button>/,
     "a first statement that the request log lists: one that reads a copied table (the first copied), never a select 1 it does not");
   // first under the cards, before the facts: the most important thing on a fresh install is how to reach it
   assert.ok(text.indexOf("Connect your first tool") > text.indexOf("p95, last day") && text.indexOf("Connect your first tool") < text.indexOf("Mason Source"));
-  assert.match(html, /<code id="connect-url">postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="connect-url">Copy<\/button>/);
-  assert.match(html, /<code id="connect-psql">psql &#39;postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop&#39;<\/code> <button type="button" class="small" data-copy="connect-psql">Copy<\/button>/);
+  assert.match(html, /<code id="connect-url">postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="connect-url" data-room="Press ⌘C">Copy<\/button>/);
+  assert.match(html, /<code id="connect-psql">psql &#39;postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop&#39;<\/code> <button type="button" class="small" data-copy="connect-psql" data-room="Press ⌘C">Copy<\/button>/);
   assert.match(html, /<a class="btn primary" href="#users">Create a user<\/a>/, "a link to the page that makes one");
 });
 
@@ -2804,19 +2888,22 @@ test("a Copy button, on any page: its code's text to the clipboard, Copied for 2
   await copyClick({ copy: "connect-psql" }, r, { doc: { ...doc, execCommand: (c: string) => { execs.push(c); return true; } }, win: refused });
   assert.deepEqual([selected, execs, r.textContent], [[code], ["copy"], "Copied"]);
   // and no clipboard at all (navigator.clipboard undefined on an insecure origin), the selection's copy refused too: what to press
-  const q = { textContent: "Copy", dataset: {} as Record<string, string> };
+  // in the button's own room (ROOMS.copy), so it never grows; the whole sentence is its title
+  const q = { textContent: "Copy", title: "", dataset: {} as Record<string, string> };
   await copyClick({ copy: "connect-psql" }, q, { doc: { ...doc, execCommand: () => false }, win: { ...refused, navigator: { platform: "Linux x86_64" } } });
-  assert.equal(q.textContent, "Selected: press Ctrl+C");
+  assert.deepEqual([q.textContent, q.title], ["Ctrl+C", "Selected: press Ctrl+C to copy it"]);
   await copyClick({ copy: "connect-psql" }, q, { doc: { ...doc, execCommand: () => { throw new Error("no"); } }, win: refused });
-  assert.equal(q.textContent, "Selected: press ⌘C");
+  assert.deepEqual([q.textContent, q.title], ["Press ⌘C", "Selected: press ⌘C to copy it"]);
+  const ROOMS = (page as Record<string, unknown>).ROOMS as Record<string, string>;
+  for (const label of ["Copy", "Copied", "Press ⌘C", "Ctrl+C"]) assert.ok([...label].length <= [...ROOMS.copy!].length, `${label} fits the Copy button's room`);
   assert.equal(copyClick({ sync: "x" }, b, { doc, win: {} }), null, "not a Copy: the page's own click goes on");
 });
 
 test("the Users table's URL: one line, cut with an ellipsis in its cell, its whole the title; Copy copies the whole", () => {
   const copyable = fn<[string, string, { clip?: boolean }?], string>("copyable");
   const url = "postgres://metabase@127.0.0.1:5433/a-long-project-name";
-  assert.equal(copyable("u", url, { clip: true }), `<span class="copyrow clipped"><code id="u" title="${url}">${url}</code> <button type="button" class="small" data-copy="u">Copy</button></span>`);
-  assert.equal(copyable("u", url), `<span class="copyrow"><code id="u">${url}</code> <button type="button" class="small" data-copy="u">Copy</button></span>`, "elsewhere, the whole on its line");
+  assert.equal(copyable("u", url, { clip: true }), `<span class="copyrow clipped"><code id="u" title="${url}">${url}</code> <button type="button" class="small" data-copy="u" data-room="Press ⌘C">Copy</button></span>`);
+  assert.equal(copyable("u", url), `<span class="copyrow"><code id="u">${url}</code> <button type="button" class="small" data-copy="u" data-room="Press ⌘C">Copy</button></span>`, "elsewhere, the whole on its line");
   const html = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url }],
     lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, NOW);
   assert.match(html, /<span class="copyrow clipped"><code id="user-url-metabase" title="[^"]+">/);
@@ -2898,7 +2985,7 @@ test("Tables: the state the page polls carries no table's columns; a form reads 
   const message = 'the database has no table "public.audit" this user can read';
   run.answers.set("GET /api/tables/public.audit/columns", answer({ error: message, failure: { code: "not_found", message, next: [] } }, 404));
   assert.equal(await app.choose("public.audit"), true);
-  assert.match(textOf(app.view().tables!), /public\.audit Not added ~50 rows key id Add Columns… ✗ the database has no table "public\.audit" this user can read Cancel/);
+  assert.equal(textOf(popOf(app.view().tables!, "act-tables-public.audit")), "✗ the database has no table \"public.audit\" this user can read Cancel");
   // closed before its columns came: the answer is not written into another table's form
   const opening = app.choose("public.accounts");
   app.cancelChoose();
@@ -2912,38 +2999,112 @@ test("Tables: the state the page polls carries no table's columns; a form reads 
 
 const queriesPage = await import(path.join(WEB, "pages", "queries.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
 
-test("layout guard: a row's actions never hold a question — a confirm is a row of its own under its row, across every column; the actions never wrap; a table's card scrolls, never the page", () => {
+test("layout guard: a click moves no row and no column — a question, a form and an answer are popovers beside the button, never a row; a changing label keeps its room; fixed columns; the actions never wrap; a table's card scrolls, never the page", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  const renderUsers = fn<[unknown, string | null, number?], string>("renderUsers");
+  const renderUsers = fn<[unknown, string | null, number?, unknown?], string>("renderUsers");
   const renderRunning = fn<[unknown[], string | null, unknown?], string>("renderRunning");
-  const users = { users: [{ name: "a".repeat(40), id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url: "postgres://x@127.0.0.1:5433/shop" }],
-    lastUsedNote: null, urlNote: null, requestLogDays: 7 };
-  const cases: Array<[string, string]> = [
-    ["the Tables page's Remove", renderTables(CATALOG_STATE, { removing: "public.customers" })],
-    ["the Users page's Remove", renderUsers(users, "a".repeat(40))],
-    ["Running now's Cancel", renderRunning(RUNNING_NOW, "12:45")],
+  const users = { users: [{ name: "a".repeat(40), id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url: "postgres://x@127.0.0.1:5433/shop" },
+    { name: "b", id: "fedcba9876543210", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url: "postgres://b@127.0.0.1:5433/shop" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 };
+  const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] };
+  const failure = { code: "refused", message: "no" };
+  // [what, the page before the click, after it, the popover's anchor]
+  const cases: Array<[string, string, string, string]> = [
+    ["the Tables page's Remove", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { removing: "public.customers" }), "act-tables-public.customers"],
+    ["the Tables page's Columns…", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { choosing: "public.audit", columns: columnsOf("public.audit") }), "act-tables-public.audit"],
+    ["the Tables page's Name its key…", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { choosing: "public.event_log" }), "act-tables-public.event_log"],
+    ["the Tables page's Add, answered", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { outcome: { table: "public.accounts", added: PICKED.secret } }), "act-tables-public.accounts"],
+    ["the Tables page's Add, refused", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { outcome: { table: "public.audit", failure } }), "act-tables-public.audit"],
+    ["the Tables page's Remove, answered", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { outcome: { table: "public.accounts", removed: { removed: ["public.accounts"], file: FILE } } }), "act-tables-public.accounts"],
+    ["the Tables page's Sync, answered", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced } }), "act-tables-public.customers"],
+    ["the Tables page's Sync, refused", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { synced: { table: "public.customers", failure } }), "act-tables-public.customers"],
+    ["the Users page's Remove", renderUsers(users, null), renderUsers(users, "a".repeat(40)), `act-users-${"a".repeat(40)}`],
+    ["the Users page's Remove, refused", renderUsers(users, null), renderUsers(users, null, Date.now(), { name: "b", failure }), "act-users-b"],
+    ["Running now's Cancel", renderRunning(RUNNING_NOW, null), renderRunning(RUNNING_NOW, "12:45"), "act-running-12:45"],
+    ["Running now's Cancel, answered", renderRunning(RUNNING_NOW, null), renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0] }), "act-running-12:45"],
   ];
-  for (const [what, html] of cases) {
-    const columns = [...(html.match(/<thead><tr>(.*?)<\/tr><\/thead>/s)?.[1] ?? assert.fail(`${what}: a header`)).matchAll(/<th scope="col"/g)].length;
-    for (const m of html.matchAll(/<td class="act">(.*?)<\/td>/gs)) assert.ok(!/confirm|data-confirm/.test(m[1]!), `${what}: no question in a row's actions (${m[1]})`);
-    assert.match(html, new RegExp(`<tr class="under asking"><td colspan="${columns}"><div class="under-body"><span class="confirm"`), `${what}: the question spans the ${columns} columns, under its row`);
+  const rowsOf = (html: string) => [...html.matchAll(/<tr\b[^>]*>/g)].map((m) => m[0]);
+  const cellsOf = (html: string) => [...html.matchAll(/<t[hd]\b[^>]*>/g)].length;
+  for (const [what, before, after, anchor] of cases) {
+    // ONE popover, beside the button, written after the table — never inside it
+    const pops = popsOf(after);
+    assert.equal(pops.length, 1, `${what}: one popover`);
+    assert.equal(pops[0]!.anchor, anchor, `${what}: anchored to its row's actions`);
+    assert.ok(after.includes(`<td class="act" id="${anchor.replace(/"/g, "&quot;")}">`), `${what}: its anchor is the row's actions cell, in the page`);
+    assert.ok(after.indexOf(pops[0]!.html) > after.lastIndexOf("</table>"), `${what}: after the table`);
+    // NO ROW INSERTED, NONE TAKEN AWAY, NO CELL ADDED: the table is the same rows, the same cells, as before the click
+    const table = withoutPops(after);
+    assert.deepEqual(rowsOf(table).length, rowsOf(before).length, `${what}: no row inserted under the table's row`);
+    assert.equal(cellsOf(table), cellsOf(before), `${what}: no cell added`);
+    assert.ok(!/class="under asking"|class="confirm"|data-confirm|data-pick-form/.test(table), `${what}: no question or form in the table`);
+    for (const m of table.matchAll(/<td class="act"[^>]*>(.*?)<\/td>/gs)) assert.ok(!/confirm|data-confirm/.test(m[1]!), `${what}: no question in a row's actions (${m[1]})`);
+    // a question or a form is a dialog with its Cancel (Escape presses it); an answer is a status
+    assert.match(pops[0]!.html, /^<div class="pop (ask" data-anchor="[^"]*" role="dialog" aria-label="[^"]+"|said" data-anchor="[^"]*" role="status")/, `${what}: a dialog or a status`);
+    if (pops[0]!.html.startsWith('<div class="pop ask"')) assert.match(pops[0]!.html, /data-pop-close/, `${what}: its Cancel answers Escape`);
   }
-  // the Tables page writes nothing long in a cell: seven a row, its notes a line under it
+  // THE TABLES LIST: every row its note line under it, empty or not, so a note that comes or goes moves no row
   const html = renderTables(CATALOG_STATE);
+  const trs = rowsOf(html).slice(1);
+  trs.forEach((tr, i) => assert.equal(tr.startsWith('<tr class="under note"'), i % 2 === 1, `row ${i}: a table's row, then its note line: ${tr}`));
   for (const row of html.split("<tr").filter((r) => r.includes('<th scope="row" class="name">'))) assert.equal([...row.matchAll(/<td/g)].length, 6, `six cells beside the name: ${row.slice(0, 120)}`);
   assert.ok(!/class="what"/.test(html), "no Note column");
+  // a table not added keeps its bar's line, empty, so Add → its bar moves no row
+  assert.match(html, /Not added<\/span><span class="copyline none" aria-hidden="true"><\/span><\/td>/);
+  // BUTTONS WHOSE LABEL CHANGES keep the room of the longest: Sync → Syncing… → Synced ✓ one width
+  const ROOMS = (page as Record<string, unknown>).ROOMS as Record<string, string>;
+  for (const label of ["Sync", "Syncing…", "Synced ✓"]) assert.ok([...label].length <= [...ROOMS.sync!].length, `${label} fits Sync's room`);
+  const syncing = renderTables(CATALOG_STATE, { syncing: ["public.customers"] });
+  const sync = renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced, at: 0 }, now: 1 });
+  for (const h of [html, syncing, sync]) assert.match(h, /<button type="button" class="small"[^>]* data-room="Syncing…"[^>]*>(Sync|Syncing…|Synced ✓)<\/button> <button type="button" class="danger small"/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   // a selector's declarations, wherever it is listed (comments aside; a media query's rules count too)
   const rule = (sel: string) => [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => m[1]!.split(",").map((x) => x.trim()).includes(sel)).map((m) => m[2]!).join(";");
+  assert.match(rule("button[data-room]::after"), /content: attr\(data-room\); display: block; height: 0;/, "the room is an unseen line of no height: it widens, never heightens");
+  assert.match(rule(".pop"), /position: fixed/, "a popover is over the rows, never between them");
+  // FIXED COLUMNS: as wide as the header says, whatever a row holds now (Not added → Adding… → Waiting and its bar)
+  assert.match(rule("table.catalog"), /table-layout: fixed; width: 100%; min-width: \d+px/);
+  const heads = [...html.matchAll(/<th scope="col" class="([^"]+)">/g)].map((m) => m[1]!.split(" ").pop()!);
+  assert.deepEqual(heads, ["name", "state", "rows", "key", "last", "size", "act"]);
+  for (const c of heads.filter((x) => x !== "name")) assert.match(rule(`table.catalog th.${c}`), /width: \d+px/, `the ${c} column has its width`);
   assert.match(rule("td.act"), /white-space: nowrap/, "a row's actions never wrap");
   assert.match(rule(".panel"), /overflow-x: auto/, "a table in a card scrolls inside it");
   assert.match(rule(".scroll"), /overflow-x: auto/);
   assert.match(rule(".table-wrap"), /overflow-x: auto/, "a bare table too wide scrolls inside its box");
-  assert.match(rule("table.catalog th.name"), /width: 100%; max-width: 0/, "the table's name is the column that gives, so the list fits its card");
-  assert.match(rule(".under-body button"), /max-width: 100%/, "a confirm's button names a long table, cut, never past the card");
+  assert.match(rule(".pop button"), /max-width: 100%/, "a confirm's button names a long table, cut, never past the popover");
   assert.match(rule("table.errors td"), /overflow-wrap: anywhere/, "a user or client name without spaces wraps in its cell");
   // the Overview's eleven numbers scroll in their box
   assert.match(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { now: NOW, queries: QUERIES }), /<div class="table-wrap"><table class="queries">/);
+  // AN EXPANDER the reader asked for (a request's details) pushes the rows under it down, but never widens a column: its
+  // body adds no width of its own (a 64 KiB statement without a space measured 117 → 576 px for the Statement column)
+  const long = { ...REQUESTS[0], query: `select ${"a".repeat(2000)} from orders` };
+  const opened = fn<[unknown, unknown?], string>("renderRequests")({ requests: [long], keptDays: 7, before: null }, { isOpen: () => true });
+  assert.match(opened, /<tr class="detail"><td colspan="\d+"><div class="detail-body">.*<\/div><\/td><\/tr>/s);
+  assert.match(rule("#page-queries tr.detail .detail-body"), /width: 0; min-width: 100%/);
+});
+
+test("an answer beside its button goes by itself after OUTCOME_MS; a refusal stays until dismissed", async () => {
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  assert.equal((page as Record<string, unknown>).OUTCOME_MS, 8000);
+  const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] };
+  const at = 1_000_000;
+  const shown = (now: number, o: Record<string, unknown>) => popsOf(renderTables(CATALOG_STATE, { ...o, now })).length;
+  assert.equal(shown(at + 7_999, { synced: { table: "public.customers", synced, at } }), 1);
+  assert.equal(shown(at + 8_000, { synced: { table: "public.customers", synced, at } }), 0, "a sync's answer, gone");
+  assert.match(renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced, at }, now: at + 100 }), />Synced ✓<\/button>/, "the button says it meanwhile");
+  assert.match(renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced, at }, now: at + 8_000 }), /data-room="Syncing…">Sync<\/button>/, "then Sync again");
+  assert.equal(shown(at + 8_000, { outcome: { table: "public.accounts", added: PICKED.secret, at } }), 0, "an add's answer, gone");
+  assert.equal(shown(at + 60_000, { synced: { table: "public.customers", failure: { code: "refused", message: "no" }, at } }), 1, "a refusal stays");
+  // the app stamps an answer with its clock, so the page shown a poll later has it gone
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(SYNCED));
+  let t = Date.parse("2026-10-27T09:05:30.000Z");
+  const app = fn<[unknown, () => Date], App & { syncTable(t: string): Promise<boolean> }>("createApp")(run.fetch, () => new Date(t));
+  app.show("tables");
+  await app.poll();
+  run.answers.set("POST /api/sync", answer(synced));
+  await app.syncTable("public.customers");
+  assert.equal(popsOf(app.view().tables!).length, 1);
+  t += 8_000;
+  assert.equal(popsOf(app.view().tables!).length, 0, "eight seconds on: gone, no click needed");
 });
 
 test("every added table has its bar on the Tables page, as mason status draws one for each: full when copied, red when failed, amber when not kept current, the shimmer while waiting", () => {
