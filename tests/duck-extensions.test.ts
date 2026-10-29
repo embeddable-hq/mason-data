@@ -153,6 +153,14 @@ test("a platform's package is built from files held to their pinned checksums, w
     assert.deepEqual([pkg.os, pkg.cpu, pkg.libc], [["linux"], ["x64"], ["glibc"]], "npm installs it on glibc Linux x64 alone");
     assert.deepEqual([packageJson(manifest, "darwin-arm64", "1.2.3").os, packageJson(manifest, "darwin-arm64", "1.2.3").cpu, packageJson(manifest, "darwin-arm64", "1.2.3").libc], [["darwin"], ["arm64"], undefined]);
     assert.equal(fs.readFileSync(path.join(out, "LICENSE"), "utf8"), fs.readFileSync(path.join(ROOT, "cli", "extensions-LICENSE"), "utf8"));
+    // every licence the LICENSE carries is in the manifest's expression, and the other way round
+    assert.equal(pkg.license, "MIT AND PostgreSQL AND Apache-2.0");
+    const license = fs.readFileSync(path.join(out, "LICENSE"), "utf8");
+    for (const [id, text] of [["MIT", /Permission is hereby granted, free of charge/], ["PostgreSQL", /PostgreSQL Global Development Group/], ["Apache-2.0", /Apache License\s+Version 2\.0/]] as const) {
+      assert.match(license, text, `LICENSE carries ${id}'s text`);
+    }
+    assert.match(license, /The OpenSSL Project Authors/);
+    assert.equal((pkg.repository as { directory: string }).directory, "cli/platforms/linux-x64");
     // what the resolver finds in it, as installed
     const found = findExtensions({ host: { platform: "linux", arch: "x64", musl: false }, engine: ENGINE, resolve: (id) => path.join(dir, "node_modules", id) });
     assert.equal(found.shipped, true);
@@ -166,6 +174,13 @@ test("a platform's package is built from files held to their pinned checksums, w
     await buildPackage({ manifest, platform: "linux-x64", cliVersion: "1.2.4", dir: out, fetchGz });
     assert.deepEqual(asked, []);
     assert.equal((JSON.parse(fs.readFileSync(path.join(out, "package.json"), "utf8")) as { version: string }).version, "1.2.4");
+    // built elsewhere from a package already built: its files are copied, not fetched
+    asked.length = 0;
+    const elsewhere = path.join(dir, "elsewhere", "extensions-linux-x64");
+    await buildPackage({ manifest, platform: "linux-x64", cliVersion: "1.2.4", dir: elsewhere, reuse: [out], fetchGz });
+    assert.deepEqual(asked, []);
+    assert.deepEqual(fs.readFileSync(path.join(elsewhere, "extensions", ENGINE, "linux_amd64", "inet.duckdb_extension")), files.inet);
+    fs.rmSync(path.join(dir, "elsewhere"), { recursive: true });
     // a file that is not the pinned one fails the build, and nothing is written
     const other = path.join(dir, "other");
     await assert.rejects(buildPackage({ manifest, platform: "linux-x64", cliVersion: "1.2.3", dir: other, fetchGz: async () => zlib.gzipSync(Buffer.from("something else")) }),
@@ -193,7 +208,7 @@ test("mason doctor's probe loads the package's files as the run would: a file th
     const root = m.add(key);
     const probe = await probeExtensions({ shipped: true, package: `@mason-data/extensions-${key}`, version: "9.8.7", directory: path.join(root, "extensions"), platform: key });
     assert.equal(probe.ok, false);
-    assert.match(probe.detail, new RegExp(`^@mason-data/extensions-${key} 9\\.8\\.7 is installed, and its postgres_scanner does not load: .+\\. Install @mason-data/cli again$`));
+    assert.match(probe.detail, new RegExp(`^@mason-data/extensions-${key} 9\\.8\\.7 is installed, and its postgres extension does not load: .+\\. Install @mason-data/cli again$`));
     if (key === hostKey(thisHost())) assert.doesNotMatch(probe.detail, /not found|does not exist/i, `the empty file was read: ${probe.detail}`);
   } finally { fs.rmSync(m.dir, { recursive: true, force: true }); }
 });

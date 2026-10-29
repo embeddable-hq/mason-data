@@ -8,6 +8,11 @@ export IT_POSTGRES_URL=postgres://postgres:<password>@localhost:5432/postgres   
 npm run test:integration
 ```
 
+**Once per checkout, `node cli/extensions.ts --node-modules node_modules`**: it installs this platform's package of the
+copy's extensions into `node_modules`, as `npm install -g @mason-data/cli` installs it for a user, so every file runs
+with nothing downloaded (`src/duck/extensions.ts`). The oracle refuses to run without it: what it holds equal must be
+what a user's install answers, and a regression to downloading must fail it, never pass on the engine's own install.
+
 `IT_POSTGRES_URL` is a libpq URL to a Postgres — locally Postgres.app or a container, in CI a `postgres:18` service
 switched to `wal_level=logical`. `psql` must be on PATH. **Every file writes only inside a database it creates on that
 server (`it_<name>_<random>`) and drops at the end**, so point it at a throwaway server, never a shared one: its user

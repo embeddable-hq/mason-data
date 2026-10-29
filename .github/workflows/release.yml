@@ -19,9 +19,18 @@
 # @mason-data org (Settings -> Trusted publisher -> GitHub Actions, repository embeddable-hq/mason-data, workflow
 # release.yml): the CLI's job then publishes with this workflow's OIDC identity. npm only offers it on a package that
 # already exists, so the package's FIRST publish is by hand (`npm publish` in cli/). Until it is set up, a granular
-# access token saved as the repository secret NPM_TOKEN works too; delete it afterwards. Each platform package is a
-# package of its own on npm, so each needs the same, once: its first publish by hand (`node cli/extensions.ts`, then
-# `npm publish --access public` in cli/platforms/<platform>/), then its own trusted publisher, this workflow.
+# access token saved as the repository secret NPM_TOKEN works too; delete it afterwards.
+#
+# THE FIVE PLATFORM PACKAGES ARE PACKAGES OF THEIR OWN ON NPM, and each needs the same, once, BEFORE THE FIRST RELEASE
+# THAT SHIPS THEM IS MERGED — or that release fails at the extensions job (no trusted publisher can be added to a
+# package that does not exist yet, and no NPM_TOKEN is set): by an owner of @mason-data, `npm ci && node
+# cli/extensions.ts` at the repo's root, then
+#   (cd cli/platforms/darwin-arm64 && npm publish --access public)   # @mason-data/extensions-darwin-arm64
+#   (cd cli/platforms/darwin-x64   && npm publish --access public)   # @mason-data/extensions-darwin-x64
+#   (cd cli/platforms/linux-arm64  && npm publish --access public)   # @mason-data/extensions-linux-arm64
+#   (cd cli/platforms/linux-x64    && npm publish --access public)   # @mason-data/extensions-linux-x64
+#   (cd cli/platforms/win32-x64    && npm publish --access public)   # @mason-data/extensions-win32-x64
+# and then each one's trusted publisher on npmjs.com, as the CLI's (repository embeddable-hq/mason-data, release.yml).
 name: Release
 
 on:
@@ -43,7 +52,6 @@ jobs:
     outputs:
       version: ${{ steps.decide.outputs.version }}
       cli_publish: ${{ steps.decide.outputs.cli_publish }}
-      extensions_publish: ${{ steps.decide.outputs.extensions_publish }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,7 +70,7 @@ jobs:
           version="$(ls release-notes 2>/dev/null | sed -n 's/^v\([0-9][0-9.]*\)\.md$/\1/p' | sort -V | tail -1)"
           if [ -z "$version" ]; then
             echo "no release-notes/v<version>.md yet: nothing to release"
-            echo "version=" >> "$GITHUB_OUTPUT"; echo "cli_publish=false" >> "$GITHUB_OUTPUT"; echo "extensions_publish=false" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"; echo "cli_publish=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           cli="$(node -p 'require("./cli/package.json").version')"
@@ -75,17 +83,6 @@ jobs:
             echo "@mason-data/cli $cli is on npm already"; echo "cli_publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "@mason-data/cli $cli is not on npm: it is published"; echo "cli_publish=true" >> "$GITHUB_OUTPUT"
-          fi
-          # its platform packages are judged on their own too: a CLI on npm whose packages are not (its first publish by
-          # hand, or a run stopped between them) installs without them, and its first copy downloads the extensions
-          missing=""
-          for name in $(node -p 'Object.keys(require("./cli/package.json").optionalDependencies ?? {}).join(" ")'); do
-            npm view "$name@$cli" version >/dev/null 2>&1 || missing="$missing $name"
-          done
-          if [ -n "$missing" ]; then
-            echo "not on npm at $cli, published:$missing"; echo "extensions_publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "every platform package is on npm at $cli"; echo "extensions_publish=false" >> "$GITHUB_OUTPUT"
           fi
           if gh release view "v$version" --json tagName >/dev/null 2>&1; then
             echo "v$version is released already: nothing else to do"
@@ -129,9 +126,10 @@ jobs:
   # the CLI's platform packages, before it: one a platform, each at the CLI's version (cli/extensions.ts)
   extensions:
     needs: [decide, tag, image]
-    # whenever one of them is missing from npm at the CLI's version (`decide`), or the CLI is: alone when the release
-    # exists and only they are missing
-    if: always() && needs.decide.result == 'success' && (needs.decide.outputs.extensions_publish == 'true' || needs.decide.outputs.cli_publish == 'true') && needs.image.result != 'failure' && needs.tag.result != 'failure'
+    # ONLY for a release: this push releases (`version`), or the release exists and its CLI is missing from npm
+    # (`cli_publish`). A push that releases nothing publishes nothing. Within a release it publishes whichever of them
+    # npm lacks at the CLI's version, so a CLI published by hand before its packages is repaired by the release's run
+    if: always() && needs.decide.result == 'success' && (needs.decide.outputs.version != '' || needs.decide.outputs.cli_publish == 'true') && needs.image.result != 'failure' && needs.tag.result != 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

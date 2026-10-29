@@ -147,7 +147,7 @@ export async function probeExtensions(x: Extensions = findExtensions()): Promise
       if (x.shipped) {
         for (const n of EXTENSION_NAMES) {
           try { await c.run(`LOAD ${n}`); }
-          catch (e) { return { ok: false, detail: `${x.package} ${x.version} is installed, and its ${n} does not load: ${(e as Error).message.split("\n")[0]}. Install @mason-data/cli again` }; }
+          catch (e) { return { ok: false, detail: `${x.package} ${x.version} is installed, and its ${n.replace("_scanner", "")} extension does not load: ${(e as Error).message.split("\n")[0]}. Install @mason-data/cli again` }; }
         }
         return { ok: true, detail: `postgres and inet ship with Mason (${x.package} ${x.version}): nothing is downloaded` };
       }

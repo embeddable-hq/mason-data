@@ -148,12 +148,15 @@ jobs:
 
       - run: npm ci
 
-      # this runner's platform package, for the integration test that copies with nothing downloaded
+      # this runner's platform package, built into cli/platforms/ (extensions.itest.ts installs it read-only on its own)
+      # and installed into node_modules as a user's install has it: every integration test then runs in SHIPPED mode,
+      # nothing downloaded, and the oracle refuses to run otherwise (the reuse path makes the second command free)
       - uses: actions/cache@v4
         with:
           path: cli/platforms
           key: extensions-${{ hashFiles('cli/extensions.json') }}
       - run: node cli/extensions.ts linux-x64
+      - run: node cli/extensions.ts --node-modules node_modules
 
       - name: logical replication on the service Postgres
         run: |

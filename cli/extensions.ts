@@ -66,8 +66,10 @@ export function packageJson(m: Manifest, p: ExtensionPlatform, cliVersion: strin
     version: cliVersion,
     description: `The copy's postgres and inet extensions for @mason-data/cli on ${p} (engine ${m.engine}), so Mason downloads nothing after npm install`,
     homepage: "https://masondata.ai",
-    repository: { type: "git", url: "git+https://github.com/embeddable-hq/mason-data.git", directory: "cli" },
-    license: "MIT AND PostgreSQL",
+    // built by this script; the package's own folder is cli/platforms/<platform>/, which is not committed
+    repository: { type: "git", url: "git+https://github.com/embeddable-hq/mason-data.git", directory: `cli/platforms/${p}` },
+    // the extensions' own (MIT), and what postgres_scanner links: libpq (PostgreSQL) and OpenSSL (Apache-2.0)
+    license: "MIT AND PostgreSQL AND Apache-2.0",
     os: [os],
     cpu: [cpu],
     ...(os === "linux" ? { libc: ["glibc"] } : {}),
@@ -84,18 +86,19 @@ const readme = (m: Manifest, p: ExtensionPlatform): string =>
 
 /**
  * ONE PLATFORM'S PACKAGE at `dir`, written whole or not at all: built in a folder beside it and renamed into place.
- * `fetchGz` is a test's; `reuse` keeps a file already at `dir` whose checksum is the pin's.
+ * A file already at `dir`, or in a package at one of `reuse`, whose checksum is the pin's is kept rather than fetched.
+ * `fetchGz` is a test's.
  */
-export async function buildPackage(o: { manifest: Manifest; platform: ExtensionPlatform; cliVersion: string; dir: string; fetchGz?: (url: string) => Promise<Buffer> }): Promise<void> {
+export async function buildPackage(o: { manifest: Manifest; platform: ExtensionPlatform; cliVersion: string; dir: string; reuse?: string[]; fetchGz?: (url: string) => Promise<Buffer> }): Promise<void> {
   const { manifest: m, platform: p, dir } = o;
   const tmp = `${dir}.building-${process.pid}`;
   fs.rmSync(tmp, { recursive: true, force: true });
   try {
     for (const name of EXTENSION_NAMES) {
-      const kept = extensionFile(dir, m.engine, p, name);
       const pin = m.files[p]?.[name];
-      const reuse = pin !== undefined && fs.existsSync(kept) && fs.statSync(kept).size === pin.bytes && sha256(fs.readFileSync(kept)) === pin.sha256;
-      const bytes = reuse ? fs.readFileSync(kept) : await fetchPinned(m, p, name, o.fetchGz ?? httpFetch);
+      const kept = [dir, ...(o.reuse ?? [])].map((d) => extensionFile(d, m.engine, p, name))
+        .find((f) => pin !== undefined && fs.existsSync(f) && fs.statSync(f).size === pin.bytes && sha256(fs.readFileSync(f)) === pin.sha256);
+      const bytes = kept !== undefined ? fs.readFileSync(kept) : await fetchPinned(m, p, name, o.fetchGz ?? httpFetch);
       const to = extensionFile(tmp, m.engine, p, name);
       fs.mkdirSync(path.dirname(to), { recursive: true });
       fs.writeFileSync(to, bytes);
@@ -145,7 +148,8 @@ async function main(argv: string[]): Promise<void> {
     if (!(key in EXTENSION_PLATFORMS)) throw new Error(`no package of the copy's extensions is built for ${key} (only ${Object.keys(EXTENSION_PLATFORMS).join(", ")})`);
     const p = key as ExtensionPlatform;
     const dir = path.join(path.resolve(nodeModules), packageName(p));
-    await buildPackage({ manifest: m, platform: p, cliVersion, dir });
+    // the platform's package already built in cli/platforms/ (CI builds it first) is copied, not fetched again
+    await buildPackage({ manifest: m, platform: p, cliVersion, dir, reuse: [path.join(CLI, "platforms", p)] });
     console.log(`installed ${packageName(p)} ${cliVersion} at ${dir}`);
     return;
   }
