@@ -603,7 +603,7 @@ export class KeptJsonPaths implements KeptRoutes {
   async swapping(c: DuckConnection, source: string, columns: readonly string[]): Promise<void> {
     this.gone = [];
     for (const p of this.physical(source).filter((x) => !columns.includes(x.column))) {
-      const why = `${p.column} is no longer a column of the synced ${source}`;
+      const why = `${p.column} is no longer a column of the synced table ${source}`;
       await c.run(`UPDATE ${PATHS_TABLE} SET state = 'dropped', why = ${literal(why)} WHERE name = ${literal(p.name)}`);
       this.gone.push({ p, why });
     }

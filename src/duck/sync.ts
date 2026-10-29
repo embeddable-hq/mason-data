@@ -2489,7 +2489,7 @@ export class Sync {
         // the stream (or the other tables' polls) goes on: the slot holds no WAL for this copy, and the table joins once
         // caught up from the copy's snapshot
         const beside = this.mode === "replication" ? "beside the stream, which goes on keeping the other tables current: it is streamed once caught up by one poll from the snapshot it was read at"
-          : this.mode === "poll" ? "beside the other tables' polls: it is caught up by one poll from the snapshot it was read at once read" : "beside the other tables";
+          : this.mode === "poll" ? "beside the other tables' polls: once read, it is caught up by one poll from the snapshot it was read at" : "beside the other tables";
         const again = this.retired.has(t.source) ? `, again (it is ${RETIRED_LAYOUT})` : "";
         this.log(`syncing ${t.source}${again}: ${t.rows === null ? "rows unknown" : `about ${t.rows} row(s)`}, ${t.bytes} source bytes, ${beside}`);
       }

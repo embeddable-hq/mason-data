@@ -267,7 +267,7 @@ export class Executor {
       if ("pong" in m) return;
       if ("log" in m) { this.log(m.log); return; }
       if (m.id === this.shutdownId) {
-        if (!m.ok) this.log(`closing the synced data failed: ${errorOf(m.error).message}`);
+        if (!m.ok) this.log(`closing the engine failed: ${errorOf(m.error).message}`);
         this.shutdownAnswered();
         return;
       }

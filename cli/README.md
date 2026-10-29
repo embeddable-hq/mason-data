@@ -196,7 +196,7 @@ and says `mason user add claude`.
 
 | Tool | Arguments | What it answers |
 |---|---|---|
-| `tables` | none | each table Mason serves, named as a statement writes it (`public.orders`, `public."Clients"`): `rows_about` (the database's estimate), `kept` (how it is kept current, as `mason status` says it) and `kept_current_by` (`polling`, `logical replication`, `copying again`, or null when nothing keeps it current now) |
+| `tables` | none | each table Mason serves, named as a statement writes it (`public.orders`, `public."Clients"`): `rows_about` (the synced table's estimated row count), `kept` (how it is kept current, as `mason status` says it) and `kept_current_by` (`polling`, `logical replication`, `copying again`, or null when nothing keeps it current now) |
 | `describe` | `table` (as `tables` names it, or a bare name in `public`) | its columns with their Postgres types and NOT NULL, its primary key, its foreign keys, comments, and the same rows and `kept` |
 | `query` | `sql`, `max_rows` (200, at most 10,000), `timeout_ms` (30,000, at most 300,000) | `columns` (name, Postgres type), `rows` as Postgres's text, `truncated` when `max_rows` cut it; a refusal is a tool error with the SQLSTATE, message, DETAIL and HINT (the way out) |
 | `explain` | `sql`, `analyze`, `timeout_ms` | Mason's EXPLAIN: each synced table read with its rows and how current it is, the SQL it runs, the plan |
