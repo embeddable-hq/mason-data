@@ -137,7 +137,7 @@ function renderReplica(f: Fixture): { section: string; headline: string } {
       [[`${lookup.title}, ${where(largest, at)} (p50)`, secondsText(lp.p50Ms), secondsText(lm.p50Ms), masonIs(lp.p50Ms, lm.p50Ms)]]),
   ]);
   /** `design` is the link to docs/DESIGN.md from where the note is printed */
-  const shortNote = (design: string): string => `Mason is for scans and aggregates${lookupSlower ? `; a lookup through an index stays Postgres's ([docs/DESIGN.md](${design}) "Heap order, no index")` : ""}.`;
+  const shortNote = (design: string): string => `Mason is for scans and aggregates${lookupSlower ? `; a lookup through an index is faster on Postgres ([docs/DESIGN.md](${design}) "Heap order, no index")` : ""}.`;
 
   const rowsContext = `**At ${clientsText(rowsAt)}**, ${rowsSweep !== null ? "a dashboard's concurrency, the tables growing about √10 a step" : "every size measured"}. ` +
     `Each p95 is of the mix: the ${f.queries.length} statements below, each client running them in turn.`;
@@ -345,7 +345,7 @@ test("a grid: the section reads from whatever sizes and client counts the fixtur
   assert.match(text, /\| 10 M rows, 4 clients \| 2\.06 \| 0\.14 \| 15× faster \|\n\| 50 M rows, 4 clients \|[^\n]*\n\| 50 M rows, 64 clients \|/, "the short version: the first and last along the rows, the last along the clients");
   assert.match(text, /\| one order by its primary key, 50 M rows, 4 clients \(p50\) \| 0\.0020 \| 0\.0010 \| 2\.0× faster \|/, "the point lookup at the largest cell, by p50");
   assert.match(text, /\*\*At 50,000,000 rows and 4 clients\*\*, each statement inside the mix/, "the largest size, at the most clients at or under 32");
-  assert.match(text, /Mason is for scans and aggregates\.\n/, "no lookup stays Postgres's when Mason answered it faster");
+  assert.match(text, /Mason is for scans and aggregates\.\n/, "no lookup is called faster on Postgres when Mason answered it faster");
   assert.match(text, /Mason answers every statement faster here, at p50\./);
   assert.match(text, /<details><summary>How it was measured<\/summary>\n\n[^]*Not measured: 100,000,000 rows \(not enough disk\)\.[^]*\n\n<\/details>\n$/);
   assert.equal(perStatementClients([1, 8, 32, 128]), 32);
@@ -401,7 +401,7 @@ test("Mason is: the ratio of the two, one decimal under 10 and none above, faste
   for (const c of g.cells) if (c.rows === 3e7 && c.query === "point_lookup") c.p50Ms = c.engine === "postgres" ? 12.56 : 993.71;
   const text = renderReplicaSection(g);
   assert.match(text, /\| one order by its primary key, 30 M rows, 8 clients \(p50\) \| 0\.013 \| 0\.99 \| 79× slower \|/);
-  assert.match(text, /Mason is for scans and aggregates; a lookup through an index stays Postgres's/);
+  assert.match(text, /Mason is for scans and aggregates; a lookup through an index is faster on Postgres/);
   assert.match(text, /\| one order by its primary key \| 0\.013 \| 2\.06 \| 0\.99 \| 0\.14 \| 79× slower \|/, "the statement's ratio is of its p50s");
   assert.match(text, /Postgres is faster at "one order by its primary key": it reads it through an index, and Mason's copy has none/);
   assert.match(text, /\| 1,000,000 \| 2\.06 \| 0\.14 \| 15× faster \| /);

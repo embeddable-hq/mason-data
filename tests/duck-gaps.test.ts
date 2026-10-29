@@ -59,7 +59,7 @@ export function renderReadmeSupport(gaps: Record<string, Gap>, verified: Readonl
   const wrong = m.differs === 0 ? "none was answered with a wrong value" : `${m.differs.toLocaleString("en-US")} were answered with a wrong value`;
   return `${README_START}
 Of the ${alone.statements.toLocaleString("en-US")} statements the oracle also sends to a plain DuckDB connection, Mason answers ${pct(m.exact)} exactly as Postgres
-does, ${pct(m.decided)} differently by a decision it lists, and refuses ${pct(m.refused)} by name, saying what to write instead;
+does, ${pct(m.decided)} differently by a decision it lists, and refuses ${pct(m.refused)} with an error saying what to write instead;
 ${wrong}. DuckDB alone, over the same tables, answers ${pct(alone.duckdb.exact)} of them exactly. [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md),
 rendered from the code, names the ${verified.size.toLocaleString("en-US")} pieces verified (types, functions, operators, aggregates, window functions,
 casts, constructs and their forms), the ${of("refused")} shapes refused, the ${of("differs")} answered differently and the ${of("limit")} limits, each
