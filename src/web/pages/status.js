@@ -117,9 +117,10 @@ export function sourceRows(s) {
     ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
-    ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
-        `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · ${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
+    // in a web developer's words first (checked every 5 s, streamed as they happen); the mechanism an operator needs in parentheses
+    ["Changes", s.source.replication ? `streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
+        `${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll checks every ${s.engine.pollSeconds} s instead`
+      : `checked every ${s.engine.pollSeconds} s (a SELECT of each table's changed rows) · ${s.source.demo ? "the demo database is checked this way only" : "mason start --replication streams them as they happen instead"}`],
   ];
 }
 

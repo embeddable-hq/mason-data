@@ -50,8 +50,12 @@ const TABLE_ROWS = 100;
 /** Whether an added table's copy or sync failed (the Failed filter, the Overview's failed card). */
 const failedTable = (t) => t.added && (t.sync?.state === "failed" || Boolean(t.error));
 
-/** How long a sync took, as the commands say it (`spanText`) but for one under a tenth of a second, which is not worth a digit: `<0.1 s (poll)`. */
-export const tookText = (y) => `${y.syncSeconds < 0.1 ? "<0.1 s" : spanText(y.syncSeconds)} (${y.syncedBy})`;
+/** What brought a copy current, in a web developer's words (`/api/state` `tables[].sync.syncedBy` keeps the mechanism's
+ *  name for an operator: copy, poll, catch-up, stream). */
+export const SYNCED_BY = { copy: "copied whole", poll: "changes checked", "catch-up": "changes checked", stream: "streamed" };
+/** How long a sync took, as the commands say it (`spanText`) but for one under a tenth of a second, which is not worth a
+ *  digit, and what did it: `<0.1 s (changes checked)`. */
+export const tookText = (y) => `${y.syncSeconds < 0.1 ? "<0.1 s" : spanText(y.syncSeconds)} (${SYNCED_BY[y.syncedBy] ?? y.syncedBy})`;
 
 /** A table's facts as `mason tables` says them on its line (src/cli/commands.ts `tableFacts`): its size, its key, and
  *  added or why it cannot be added as it is (null: neither). */

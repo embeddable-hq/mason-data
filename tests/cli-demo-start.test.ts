@@ -172,7 +172,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const text = await mason(["status"]);
     assert.equal(text.code, 0, said(text));
     assert.match(text.stdout, new RegExp(`the demo database Mason hosts \\(postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo · Postgres 18[.\\d]*\\)`));
-    assert.match(text.stdout, /the demo database is read by polling only/);
+    assert.match(text.stdout, /^ {2}Changes +checked every 5 s \(a SELECT of each table's changed rows\) · the demo database is checked this way only$/m);
     assert.match(text.stdout, /^Tables \(3 of 4 added\):$/m);
     for (const t of ["customers", "products", "orders"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · copied$`, "m"));
   });

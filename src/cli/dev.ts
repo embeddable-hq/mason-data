@@ -461,8 +461,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   cfg.running = { pid: process.pid, controlUrl: `http://127.0.0.1:${setupPort}`, token, postgresUrl, postgresListener: pgTls.listener };
   cfg.lastRun = new Date().toISOString();
   writeConfig(home, cfg);
-  done(`Mason is up: ${sync.state().length} table(s) added, kept current ${syncMode === "replication" ? `by logical replication (slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})`
-    : `every ${pollMs / 1000} s ${syncMode === "poll" ? "by polling with SELECTs (xmin)" : "by copying each table again whole (MASON_DUCK_SYNC=recopy)"}`}`);
+  done(`Mason is up: ${sync.state().length} table(s) added, kept current: ${syncMode === "replication" ? `changes streamed as they happen (logical replication: slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})`
+    : syncMode === "poll" ? `changes checked every ${pollMs / 1000} s (a SELECT of each table's changed rows)` : `each table copied again whole every ${pollMs / 1000} s (MASON_DUCK_SYNC=recopy)`}`);
   // THE DEMO'S WRITER: a round of changes every MASON_DEMO_CHANGE_MS, begun once the run is up, said in the log
   if (demo !== null && demoChangeMs !== null) hosted.stopChanges = demoChanges(demo, demoChangeMs, (l) => logLine(`[demo] ${l}`));
   // the stop is in place BEFORE the ready line: a supervisor or a test signals on reading it, and a SIGTERM that found

@@ -224,7 +224,7 @@ test("a demo project's database row says it is the demo database Mason hosts, po
   assert.equal((RUNNING.source as { demo?: boolean }).demo, false);
   const rows = sourceRows(DEMO);
   assert.deepEqual(rows.find(([k]) => k === "Database"), ["Database", "the demo database Mason hosts (postgres://demo@127.0.0.1:5434/demo · Postgres 16.4)"]);
-  assert.deepEqual(rows.find(([k]) => k === "Changes"), ["Changes", "polling with SELECTs (xmin), every 5 s · the demo database is read by polling only"]);
+  assert.deepEqual(rows.find(([k]) => k === "Changes"), ["Changes", "checked every 5 s (a SELECT of each table's changed rows) · the demo database is checked this way only"]);
   assert.deepEqual(fn<[unknown], unknown>("sourceRows")(DEMO), rows);
 });
 
@@ -235,7 +235,7 @@ test("running: the database masked, each table copied with its rows, the counts,
   const text = textOf(html);
   assert.match(text, /Database postgres:\/\/shop:\*\*\*\*@db\.example\.com:5432\/shop · Postgres 16\.4/);
   assert.ok(!text.includes("secret"), "the password is the run's to mask, and it did");
-  assert.match(text, /Changes polling with SELECTs \(xmin\), every 5 s/);
+  assert.match(text, /Changes checked every 5 s \(a SELECT of each table's changed rows\) · mason start --replication streams them as they happen instead/);
   assert.match(text, /Tables synced 3 of 3 added/);
   assert.ok(!/Copies not finished|100%/.test(text), "every copy is done: no bar (the Tables page lists them)");
   assert.ok(!text.includes("public.audit"), "a table not added is not a line");
@@ -266,7 +266,8 @@ test("failed: its error on its line and in full, the warning, a table not kept c
   assert.match(html, /<details data-open="error:public\.orders"><summary>the whole error<\/summary><pre>could not read the next chunk: connection reset\nthe sync tries it again in 5 min<\/pre><\/details>/);
   assert.match(text, /public\.events 100% 30,000,000 rows · copied, NOT kept current \(over the poll's row limit; as of 2026-10-27 09:04 UTC\) — mason sync events, or mason start --replication/);
   assert.match(text, /Warning mason\/sources\/shop\.yml: tables\.ordrs: no such table/);
-  assert.match(text, /Changes logical replication: slot mason_dev_shop, publication app_pub \(named: read as it is, never altered\)/);
+  assert.match(text, /Changes streamed as they happen \(logical replication: slot mason_dev_shop, publication app_pub, named: read as it is, never altered\) · mason start --poll checks every 5 s instead/);
+  assert.ok(!/xmin|polling with SELECTs|goes back to polling/.test(text), "how the changes arrive is said in a web developer's words");
   assert.match(text, /Queries: could not read them \(the request log cannot be read; mason logs has the detail\)/);
   assert.match(text, /^Failed /);
   assert.match(html, /<tr class="warn"><th scope="row">Warning<\/th>/, "a warning is marked");
@@ -996,7 +997,7 @@ test("the Overview: the word, the facts (tables synced N of M, rows, the last sy
     // the cards first: the copies in all, their rows, the last sync, the copy's file, the last day's statements and p95
     assert.match(text, /^Failed Tables synced 2 of 3 added, 1 failed Rows 30,001,200 Last sync 30 s ago 2026-10-27 09:05:00 UTC The copy's file unknown its size could not be read Statements, last day 1,234 1,200 completed, 34 refused, failed or cancelled p95, last day 380 ms average 42 ms · p50 12 ms /);
     assert.match(html, /<a class="card bad link" href="#tables\?show=failed"><p class="card-label">Tables synced<\/p><p class="card-value">2 of 3<\/p><p class="card-sub">added, 1 failed<\/p><\/a>/, "a card: its label, its value, its sub-line — and a link to the failed tables");
-    assert.match(text, / Mason Source .* Database postgres:.* Changes polling /);
+    assert.match(text, / Mason Source .* Database postgres:.* Changes checked every /);
     assert.match(text, / Source mason\/sources\/shop\.yml \(the tables it names are added\) Database /, "the sources file from the project's root, as mason status names it");
     assert.doesNotMatch(html, /\/app\//, "never an absolute path");
     assert.match(html, /<caption>Mason<\/caption><tbody><tr><th scope="row">Source<\/th>/, "ONE table of the other facts, each a row headed by its name");
@@ -1051,13 +1052,13 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   const html = renderTables(SYNCED, { sizes: USAGE });
   const text = textOf(html);
   assert.match(text, /^Table State Rows Key Last sync Took Size of the copy Note /);
-  assert.match(text, /public\.customers Synced 1,200 key id 30 s ago 0\.4 s \(poll\) 512\.0 KiB Sync Remove /);
-  assert.match(text, /public\.orders Failed ~2,000,000 rows key id 65 min ago 63 s \(copy\) poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s Sync Remove /);
-  assert.match(text, /public\.events Synced 30,000,000 key id 2 min ago 13 min \(copy\) 3\.0 GiB Sync Remove /);
+  assert.match(text, /public\.customers Synced 1,200 key id 30 s ago 0\.4 s \(changes checked\) 512\.0 KiB Sync Remove /);
+  assert.match(text, /public\.orders Failed ~2,000,000 rows key id 65 min ago 63 s \(copied whole\) poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s Sync Remove /);
+  assert.match(text, /public\.events Synced 30,000,000 key id 2 min ago 13 min \(copied whole\) 3\.0 GiB Sync Remove /);
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… /, "a table not added has no sync, and is in the same table");
   assert.equal([...html.matchAll(/<table /g)].length, 1);
   // the last sync is an age, its UTC time in a title; rows, age, span and size are mono and right-aligned
-  assert.match(html, /<td class="num" title="2026-10-27 09:05:00 UTC">30 s ago<\/td><td class="num">0\.4 s \(poll\)<\/td><td class="num">512\.0 KiB<\/td>/);
+  assert.match(html, /<td class="num" title="2026-10-27 09:05:00 UTC">30 s ago<\/td><td class="num">0\.4 s \(changes checked\)<\/td><td class="num">512\.0 KiB<\/td>/);
   assert.match(html, /<td class="num">1,200<\/td>/);
   // a failed copy's error is a red line, its whole error in a details
   assert.match(html, /<span class="err">poll: connection reset<\/span><details data-open="error:public\.orders"><summary>the whole error<\/summary><pre>poll: connection reset\nthe sync tries it again in 5 s<\/pre><\/details>/);
@@ -1070,7 +1071,8 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   assert.ok(text.includes(commands.fileSize(3_221_225_472)) && text.includes(commands.spanText(0.42)));
   // a sync under a tenth of a second is not worth a digit; one over keeps the commands' span
   const tookText = of<[unknown], string>(tablesPage, "tables.js", "tookText");
-  assert.deepEqual([{ syncSeconds: 0.04, syncedBy: "poll" }, { syncSeconds: 0.1, syncedBy: "poll" }, { syncSeconds: 63, syncedBy: "copy" }].map(tookText), ["<0.1 s (poll)", "0.1 s (poll)", "63 s (copy)"]);
+  assert.deepEqual([{ syncSeconds: 0.04, syncedBy: "poll" }, { syncSeconds: 0.1, syncedBy: "poll" }, { syncSeconds: 63, syncedBy: "copy" }, { syncSeconds: 2, syncedBy: "catch-up" }, { syncSeconds: 1, syncedBy: "stream" }].map(tookText),
+    ["<0.1 s (changes checked)", "0.1 s (changes checked)", "63 s (copied whole)", "2.0 s (changes checked)", "1.0 s (streamed)"], "what synced a copy, in plain words");
   // the states, as the run decides them: copying is Syncing, a table not reached Waiting
   assert.match(textOf(renderTables(COPYING, { sizes: USAGE })), /public\.orders Syncing 280,000 .* public\.events Waiting /);
   // the sizes could not be read: said once, the rest shown
@@ -1665,7 +1667,7 @@ test("the Overview: replication mode says the changes — running or not and why
   assert.match(textOf(renderStatus(REPL(STREAMS[3]![1]), { now: NOW })), /the database's position could not be read: connection refused Lag bytes behind unknown/);
   assert.ok(!/Changes \(the stream/.test(textOf(renderStatus(RUNNING, { now: NOW }))), "polling: no stream block");
   // the facts' own Changes row (how changes arrive) is still the one table's
-  assert.match(text, /Changes logical replication: slot mason_dev_shop, publication app_pub/);
+  assert.match(text, /Changes streamed as they happen \(logical replication: slot mason_dev_shop, publication app_pub/);
 });
 
 test("the Overview: the slot's WAL is the CLI's slotText; lost, past its cap, uncapped and unreadable are warnings, a healthy slot is not", () => {
