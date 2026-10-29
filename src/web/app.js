@@ -68,7 +68,7 @@ export function copyingText(copied, rowsEstimate, p) {
 
 /**
  * AN ADDED TABLE'S LINE, as `mason status` and `mason wait` print it after its bar (src/cli/commands.ts `tableLines`):
- * its state (done, failed, copying, waiting), how full its bar is, and what it says — a copied one with how it is kept
+ * its state (done, unsynced, failed, copying, waiting), how full its bar is, and what it says — a copied one with how it is kept
  * current and how old its copy is (`keptAge`).
  */
 export function tableLine(t, now = Date.now()) {
@@ -79,6 +79,10 @@ export function tableLine(t, now = Date.now()) {
   }
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its copy to start" };
   const age = keptAge(t, now);
+  // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
+  if (t.kept?.by === "poll" && t.kept.pending !== undefined) {
+    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
+  }
   return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
 }
 

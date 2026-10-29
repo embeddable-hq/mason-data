@@ -5,7 +5,7 @@
  * in the same words at both entrances:
  *
  *   off               nothing after the first copy until `mason sync <table>`, which polls it once, now (the default)
- *   poll <interval>   the xmin poll every <interval>: <n>s, <n>m or <n>h, a whole number, at least 1s
+ *   poll <interval>   the xmin poll every <interval>: <n>s, <n>m or <n>h, a whole number, at least 1s, at most 24h
  *
  * `replication` is a word of the grammar but not of this release: logical replication is still the project's
  * (`mason start --replication`), and the value is refused with that way out. The engine never decides how a table is
@@ -23,6 +23,9 @@ export const DEFAULT_SYNC: TableSync = { mode: "off" };
 
 /** the shortest interval a poll takes: below a second a full scan of the table on the source is the source's whole time */
 export const MIN_POLL_SECONDS = 1;
+/** the longest: a day. Longer is `off` with `mason sync <table>` from a scheduler (and an instant past a Date's range,
+ *  a review finding: `poll 9999999999999s` broke every status line) */
+export const MAX_POLL_SECONDS = 86_400;
 
 /**
  * A TABLE THIS BIG IS NOT POLLED UNLESS ITS ENTRY SAYS SO (it was the run's POLL_ROW_LIMIT, which left such a table
@@ -73,11 +76,13 @@ function parseInterval(v: string): { every: string; seconds: number } | { proble
     return { problem: `${v}: ${word} is not a unit of an interval — ${days ? `days are hours${days}` : how}` };
   }
   const seconds = n * UNIT_SECONDS[unit];
-  const written = `${m[1]}${unit}`;
   if (!Number.isInteger(n)) return { problem: `${v}: an interval is a whole number — write poll ${intervalOf(seconds)}` };
   if (seconds < MIN_POLL_SECONDS) return { problem: `${v} is under the shortest interval, ${MIN_POLL_SECONDS}s: write poll ${MIN_POLL_SECONDS}s or longer` };
-  if (written !== v) return { problem: `${JSON.stringify(v)}: write poll ${written}` };
-  return { every: written, seconds };
+  if (seconds > MAX_POLL_SECONDS) return { problem: `${v} is over the longest interval, ${intervalOf(MAX_POLL_SECONDS)}: write poll ${intervalOf(MAX_POLL_SECONDS)}, or off with mason sync <table> run by a scheduler` };
+  // the number as a number is written (`05s` is `5s`): two spellings of one interval would read as a change of sync
+  const canonical = `${n}${unit}`;
+  if (canonical !== v) return { problem: `${JSON.stringify(v)}: write poll ${canonical}` };
+  return { every: canonical, seconds };
 }
 
 /**
@@ -130,7 +135,7 @@ export function pollMsRetired(env: Readonly<Record<string, string | undefined>>)
   const v = env.MASON_POLL_MS;
   if (v === undefined || v === "") return null;
   const ms = Number(v);
-  const line = `sync: poll ${Number.isFinite(ms) && ms >= MIN_POLL_SECONDS * 1000 ? intervalOf(ms / 1000) : "5s"}`;
+  const line = `sync: poll ${Number.isFinite(ms) && ms >= MIN_POLL_SECONDS * 1000 ? intervalOf(Math.min(ms / 1000, MAX_POLL_SECONDS)) : "5s"}`;
   return `MASON_POLL_MS=${v} is no longer read: how often each table is polled is the sources file's sync: — write ${line} at its top ` +
     "(every table) or on a table's entry, then unset MASON_POLL_MS";
 }

@@ -344,3 +344,70 @@ test("a table not copied now says so in kept itself — waiting for its copy, it
     ["waiting", "its copy failed (the source closed the connection): it joins once copied and caught up by one poll"],
   ]);
 });
+
+// THE PASS LOOP'S TIMER (src/duck/sync.ts `nextPassDelay`, `rearm`; the review of issue 33's PR 1): a real Sync over a
+// seeded ledger, its private schedule read and driven as the run drives it — the source is never reached (`attach`
+// refuses at once) and no pass runs (a timer set is read, then cleared)
+type Schedule = {
+  nextPassDelay(): number | null; followUp(source: string): void; attach(): Promise<void>;
+  stopped: boolean; timer: NodeJS.Timeout | null; due: Map<string, number>; behind: Map<string, { why: string }>;
+  queued: Map<string, unknown>; rebuildingNow: { source: string; kind: string } | null;
+};
+const scheduleOf = (s: SyncClass): Schedule => s as unknown as Schedule;
+/** the sync's timer, read and cleared (null: none set), so no pass it would run ever starts */
+const takeTimer = (s: Schedule): NodeJS.Timeout | null => { const t = s.timer; if (t !== null) clearTimeout(t); s.timer = null; return t; };
+const polledUnder = (n: string, sync: string): string =>
+  `INSERT INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at, sync) VALUES ('public.${n}', '100:100:', '2026-10-27 19:58:39+00', '${sync}')`;
+
+test("a table being caught up, queued or rebuilt is not due to a pass: the loop waits for its catch-up, never runs every few ms polling nothing", async () => {
+  await withSync({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }], seed: async (run) => { await run(copied("a")); await run(lastPoll("a")); } }, async (sync) => {
+    const s = scheduleOf(sync);
+    assert.equal(s.nextPassDelay(), 0, "copied and its interval long past: a pass at once");
+    s.behind.set("public.a", { why: "after its copy" });
+    assert.equal(s.nextPassDelay(), 5_000, "owed its catch-up and nothing queued it: a pass after the interval, to queue it");
+    s.queued.set("public.a", { kind: "catch-up" });
+    assert.equal(s.nextPassDelay(), null, "its catch-up queued: that polls it, then times the next pass (counted as due, a pass every few ms polled nothing)");
+    s.queued.clear();
+    s.rebuildingNow = { source: "public.a", kind: "catch-up" };
+    assert.equal(s.nextPassDelay(), null, "its catch-up running: the same");
+    s.rebuildingNow = null;
+    s.behind.clear();
+  });
+});
+
+test("a table out of its copy is polled from then on: the timer is set again after its catch-up, and after a mason sync that held the pass slot", async () => {
+  await withSync({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }, { ...table("b"), sync: OFF }],
+    seed: async (run) => { for (const n of ["a", "b"]) { await run(copied(n)); await run(lastPoll(n)); } } }, async (sync) => {
+    const s = scheduleOf(sync);
+    s.stopped = false;
+    s.attach = async () => { throw new Error("no source in this test"); };
+    try {
+      // a's catch-up ended with no pass running and no timer (the last pass ended while a copied): followUp times one
+      s.due.set("public.a", Date.now() + 3_600_000);
+      assert.equal(takeTimer(s), null);
+      s.followUp("public.a");
+      assert.notEqual(takeTimer(s), null, "the next pass timed for a's next poll");
+      // mason sync b held the pass slot while a came out of its catch-up: its end times the next pass, replacing an
+      // earlier timer (a's next poll moved: the old one would run a pass that polls nothing)
+      const stale = setTimeout(() => undefined, 7_200_000);
+      s.timer = stale;
+      await assert.rejects(sync.pollNow(["public.b"]), /no source in this test/);
+      // the slot's release runs after the poll's failure reaches the caller: a turn later
+      await new Promise((r) => setImmediate(r));
+      const after = takeTimer(s);
+      clearTimeout(stale);
+      assert.ok(after !== null && after !== stale, "mason sync's end set the timer again, from the state then");
+    } finally { takeTimer(s); s.stopped = true; }
+  });
+});
+
+test("a sync changed is a catch-up by one poll in poll mode alone, said once; under replication, or with its columns changed too, no catch-up is promised", async () => {
+  const seed = async (run: (sql: string) => Promise<unknown>): Promise<void> => { await run(copied("a")); await run(polledUnder("a", "poll 5m")); };
+  const switched = (lines: readonly string[]) => lines.filter((l) => / sync: .* → /.test(l));
+  assert.deepEqual(switched(await startLine({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }], seed })),
+    ["public.a: sync: poll 5m → poll 30s: its copy is kept, and caught up by one poll now"], "changed by hand while Mason was down: seen at the start");
+  assert.deepEqual(switched(await startLine({ mode: "replication", replication: replicationX, tables: [{ ...table("a"), sync: every("30s", 30) }], seed })), [],
+    "the stream keeps every table current: no poll is owed, and none is said (at every start, again)");
+  assert.deepEqual(switched(await startLine({ mode: "poll", tables: [{ ...table("a", 10, [column("id"), column("added", "text")]), sync: every("30s", 30) }], seed })), [],
+    "its columns changed too: it is copied again (said as such), never 'its copy is kept'");
+});

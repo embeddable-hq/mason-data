@@ -178,7 +178,7 @@ per poll. **Where.** `src/duck/sync.ts`, `src/cdc/poll.ts`; `tests/integration/d
 
 **Decision** (2026-10-29). How a copy stays current after its first copy is the sources file's `sync:`, at the top of
 the file for every table and on an entry for that one: `off` (the default) reads it again only at `mason sync <table>`,
-`poll <interval>` (`<n>s|m|h`, at least 1 s) polls it at that interval. One grammar (`parseSync`, src/lib/table-sync.ts)
+`poll <interval>` (`<n>s|m|h`, 1 s to 24 h) polls it at that interval. One grammar (`parseSync`, src/lib/table-sync.ts)
 read by the file's reader and by `mason add --sync`; `replication` is a word of it, refused until a table can be
 streamed alone (`mason start --replication` keeps every table current meanwhile). The run is ONE pass loop that polls
 the tables due (`Sync.dueAt`), never a timer a table: a pass also queues copies, drops removed tables and attaches the

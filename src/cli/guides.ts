@@ -80,7 +80,7 @@ ${codes}
     kind: postgres
     url: \${DATABASE_URL}          a variable from .env.local, .env or the shell; a literal URL is allowed for local dev
     sync: off                     how each table is kept current after its first copy: off (the default; mason sync
-                                  <table> reads it again) or poll <interval> (poll 5s, poll 5m, poll 1h; at least 1s)
+                                  <table> reads it again) or poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h)
     tables:
       orders:                     a bare name is in public; billing.invoices names its schema
         columns: [id, status]     these columns (the primary key is always copied)

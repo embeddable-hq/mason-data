@@ -1207,16 +1207,16 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
     psql(url, "INSERT INTO manual VALUES (6, 'new'); INSERT INTO fast VALUES (6, 'new'); INSERT INTO slow VALUES (6, 'new')");
     const changedAt = Date.now();
     // the 2s table: current within its interval (and a pass's own time)
-    await until("the poll 2s table to have the new row", async () => await count("fast") === 6, 8_000);
+    // its rows are visible a moment before its pass reads the ledger's polled_at again: both are waited for
+    await until("the poll 2s table to have the new row, its syncedAt moved with its poll", async () => await count("fast") === 6 && syncedAt(sync, "public.fast")! > before["public.fast"]!, 8_000);
     const fastSeen = Date.now();
-    assert.ok(syncedAt(sync, "public.fast")! > before["public.fast"]!, "its syncedAt moved with its poll");
     // the 10s table: not polled before its interval, its syncedAt where its catch-up left it
     if (fastSeen < Date.parse(before["public.slow"]!) + 9_000) {
       assert.equal(await count("slow"), 5, "the poll 10s table is not polled before its interval");
       assert.equal(syncedAt(sync, "public.slow"), before["public.slow"], "its syncedAt moves only with its own poll");
     } else assert.fail(`the 2s table took ${(fastSeen - changedAt) / 1000} s: too late to tell the 10s table's interval apart`);
     // then it is, once its interval passed since its last poll
-    await until("the poll 10s table to have the new row", async () => await count("slow") === 6, 20_000);
+    await until("the poll 10s table to have the new row, its syncedAt moved", async () => await count("slow") === 6 && syncedAt(sync, "public.slow") !== before["public.slow"], 20_000);
     const slowPolled = Date.parse(syncedAt(sync, "public.slow")!);
     assert.ok(slowPolled - Date.parse(before["public.slow"]!) >= 9_500, `its next poll waited its interval: ${slowPolled - Date.parse(before["public.slow"]!)} ms`);
     // the off table: unchanged though rows changed on the source, its syncedAt as its copy left it

@@ -371,6 +371,12 @@ test("sync: every mistake on one report, at its key, with the line to write — 
   assert.equal(one("poll 2d"), "sync: 2d: d is not a unit of an interval — days are hours: write poll 48h");
   assert.equal(one("poll soon"), 'sync: "soon" is not an interval: an interval is <n>s, <n>m or <n>h, a whole number, at least 1s (poll 5s, poll 5m or poll 1h)');
   assert.equal(one("off 5m"), "sync: off takes no interval: write off, or poll 5m");
+  // at most a day (a longer one is off and mason sync from a scheduler; a huge one was an instant past a Date's range and
+  // broke every status line), and one spelling of each interval (05s and 5s would read as a change of sync)
+  assert.equal(one("poll 25h"), "sync: 25h is over the longest interval, 24h: write poll 24h, or off with mason sync <table> run by a scheduler");
+  assert.equal(one("poll 9999999999999s"), "sync: 9999999999999s is over the longest interval, 24h: write poll 24h, or off with mason sync <table> run by a scheduler");
+  assert.equal(one("poll 05s"), 'sync: "05s": write poll 5s');
+  assert.deepEqual((parse(`${head}sync: poll 24h\ntables: {}\n`) as Sources.SourceFile).sync, poll("24h", 86_400), "a day is the longest, and taken");
   assert.equal(one("5"), "sync: is the number 5: write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
   // on an entry, at the entry's key
   assert.equal(one("poll", "entry"), "tables.orders.sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)");
@@ -413,6 +419,9 @@ test("mason add --sync's line: written on the entry alone, its columns, key and 
   assert.equal(set(polled, "public.orders", null), mine);
   // a flow entry ({}): written again a key a line, the comment after it on its key's line kept
   assert.equal(set(mine, "public.customers", OFF), mine.replace("  customers: {}   # every column\n", "  customers:   # every column\n    sync: off\n"));
+  // an entry with no value: its comment kept on its key's line (a review finding: it was dropped)
+  const bare = `${head}tables:\n  orders:   # the shop's\n  customers: {}\n`;
+  assert.equal(set(bare, "public.orders", poll("30s", 30)), `${head}tables:\n  orders:   # the shop's\n    sync: poll 30s\n  customers: {}\n`);
   // an entry whose only key is sync, taken out: {} again
   const only = `${head}tables:\n  orders:\n    sync: poll 5s\n`;
   assert.equal(set(only, "public.orders", null), `${head}tables:\n  orders: {}\n`);

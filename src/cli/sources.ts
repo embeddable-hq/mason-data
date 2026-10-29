@@ -583,8 +583,10 @@ function withEntrySyncLf(text: string, e: Pick<TableEntry, "name" | "table" | "c
   if (sync === null) return { text };
   // a flow map (`orders: {}`, `orders: { columns: [id] }`) or nothing: the entry written again, a comment on its line kept
   const k = same.pair.key as Ranged, v = value as Ranged | null;
-  const end = lineEnd(v?.range ? v.range[1] : k.range![1]);
-  const comment = /(\s+#.*)$/.exec(text.slice(v?.range ? v.range[1] : k.range![1], end).replace(/\n$/, ""))?.[1] ?? "";
+  // an entry with no value (`orders:   # c`) has an empty scalar placed AT its comment: the comment is read from the key
+  const after = v?.range && v.range[1] > v.range[0] ? v.range[1] : k.range![1];
+  const end = lineEnd(after);
+  const comment = /(\s+#.*)$/.exec(text.slice(after, end).replace(/\n$/, ""))?.[1] ?? "";
   const indent = text.slice(lineStart(k.range![0]), k.range![0]);
   const lines = entryText({ ...e, name: same.name, sync }, indent).split("\n");
   lines[0] = `${lines[0]}${comment}`;

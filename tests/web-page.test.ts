@@ -222,6 +222,19 @@ test("copying: the bar's share, the rows, the chunks, the rate and the time left
   assert.match(text, /Under way: public\.orders: copying 15% · 321,000 of ~2,000,000 rows .* public\.events: waiting for its copy to start/);
 });
 
+test("a copy the poll does not keep current is the page's warning, as mason status paints it: its line's words equal, its state unsynced", () => {
+  const BEHIND = stateOf([{ ...copied("public.orders", 2_000_000, "2026-10-27T09:00:09.000Z"),
+    kept: { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: "2026-10-27T09:00:09.000Z", nextAt: null, pending: "caught up by one poll first (after its copy)" } }]);
+  const t = BEHIND.tables.find((x) => x.table === "public.orders")!;
+  const line = fn<[unknown], { state: string; what: string }>("tableLine")(t);
+  assert.equal(line.state, "unsynced", "the page's warning colour (app.css .t-unsynced), never done's");
+  assert.match(line.what, /^2,000,000 rows · copied · NOT kept current \(last synced .* ago\): caught up by one poll first \(after its copy\)$/);
+  // the CLI paints the same words yellow (paintBar): the same text, the same warning
+  const cli = commands.tableLines(BEHIND).find((l) => l.startsWith("public.orders"))!;
+  assert.ok(cli.endsWith(line.what), `${cli}\n${line.what}`);
+  assert.match(fn<[unknown, unknown?], string>("renderStatus")(BEHIND, { slow: SLOW, refused: REFUSED }), /<tr class="t-unsynced"><th scope="row"><code>public\.orders<\/code>/);
+});
+
 test("failed: its error on its line and in full, the warning, a table whose sync is off with its age, Failed — and a request count that could not be read", () => {
   const html = fn<[unknown, unknown?], string>("renderStatus")(FAILED, { slow: { failure: { code: "failed", message: "the request log cannot be read\nmore" } }, refused: REFUSED });
   const text = textOf(html);

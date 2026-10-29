@@ -931,10 +931,12 @@ export class Sync {
       const was = prev !== undefined ? syncText(this.syncOf(prev)) : this.recordedSync.get(t.source) ?? null;
       if (was === null || was === now) continue;
       this.due.delete(t.source);
-      const copied = this.states.get(t.source)?.phase === "copied" && this.snapshots.has(t.source);
-      if (!copied) continue;
+      // only the poll reads sync: (replication streams every table, recopy copies every one again), and a table whose
+      // columns changed too is copied again with them, its new sync recorded at that copy's swap
+      const copied = this.states.get(t.source)?.phase === "copied" && this.snapshots.has(t.source) && this.copiedAs.get(t.source) === columnsKey(t.columns);
+      if (this.mode !== "poll" || !copied) continue;
       this.switched.add(t.source);
-      this.log(`${t.source}: sync: ${was} → ${now}: its copy is kept, and caught up by one poll now${this.mode === "replication" ? " (the stream keeps it current meanwhile: sync: is the poll's)" : ""}`);
+      this.log(`${t.source}: sync: ${was} → ${now}: its copy is kept, and caught up by one poll now`);
     }
     // loud: the copy goes with the table's entry, and comes back only by reading the source again (the test server: a 53 GB
     // copy, 21 minutes of a production replica, dropped by a project file moved aside)
@@ -1034,8 +1036,15 @@ export class Sync {
   private nextPassDelay(): number | null {
     if (this.passFailed || this.waiting()) return this.intervalMs;
     if (this.mode === "recopy") return nextPollDelayMs(this.intervalMs, this.lastPassMs);
-    const dues = [...this.tables.values()].filter((t) => !this.needsCopy(t)).flatMap((t) => this.dueAt(t) ?? []);
+    // a table copying, queued, or owed its catch-up is not polled by a pass (its catch-up polls it, then `rearm`): counted
+    // as due it would run a pass every few ms that polls nothing and attaches the source each time
+    const dues = [...this.tables.values()].filter((t) => this.pollable(t)).flatMap((t) => this.dueAt(t) ?? []);
     return dues.length ? passDelayMs(Math.min(...dues), Date.now(), this.lastPassMs) : null;
+  }
+
+  /** a table a pass would poll now if it were due: copied, not queued or rebuilt, and not owed its catch-up */
+  private pollable(t: AddedTable): boolean {
+    return !this.needsCopy(t) && !this.behind.has(t.source) && !this.queued.has(t.source) && this.rebuildingNow?.source !== t.source;
   }
 
   /** the source's views (src/cli/preflight.ts VIEWS_SQL), served over the copied tables: in the catalog from the next
@@ -1270,7 +1279,9 @@ export class Sync {
       } finally { await this.onWriter(async () => { await this.detach(); await this.readPolledAt(); }); }
     })();
     // the pass slot is held until it ends (kick and once queue behind it); its failure reaches the caller through `poll`
-    this.running = poll.then(() => undefined, () => undefined).finally(() => { this.running = null; });
+    // and the next pass timed again as a pass's end times it (`rearm`): a copy that ended meanwhile found the slot held,
+    // and a polled table's next poll moved past the timer set before
+    this.running = poll.then(() => undefined, () => undefined).finally(() => { this.running = null; this.rearm(); });
     const found = await poll;
     const missing = tables.filter((t) => !found.some((f) => f.table === t.source));
     if (missing.length) throw new Error(`${missing.map((t) => t.source).join(", ")} has a numeric value wider than its copy's DECIMAL: it is copied again at the next pass, and current once copied`);
@@ -2034,7 +2045,7 @@ export class Sync {
     // POLL MODE: the tables due (`dueAt`: a polled one past its interval, one whose sync changed), and not a table whose
     // new columns could not be copied (its copy failed above): it is not polled with them
     const now = Date.now();
-    const kept = this.mode === "poll" ? [...this.tables.values()].filter((t) => !this.needsCopy(t) && (this.dueAt(t) ?? Infinity) <= now) : [];
+    const kept = this.mode === "poll" ? [...this.tables.values()].filter((t) => this.pollable(t) && (this.dueAt(t) ?? Infinity) <= now) : [];
     for (const t of kept) {
       if (this.stopped) break;
       // A TRANSACTION PER TABLE, on the writer's turn: one table's slow scan holds no other, and a batch of the stream

@@ -474,7 +474,7 @@ current as its `sync:` says — `off` (the default: read again only at `mason sy
   covers `xmin`). ("The poll")
 - **How often a table is polled is ITS `sync:`, never the run's** (src/lib/table-sync.ts; one 22 M-row table and a
   776-row one shared one interval, and a row limit in the run left the big one never polled, said only on its line):
-  `off` (the default) is read again only at `mason sync`, `poll <interval>` at that interval, at least 1 s. ONE pass loop
+  `off` (the default) is read again only at `mason sync`, `poll <interval>` at that interval, 1 s to 24 h. ONE pass loop
   polls the tables due (`dueAt`), never a timer a table; a table's next poll is its interval after its last, stretched
   to four times that poll's time (`nextPollAt`), and the passes to four times the last pass (`passDelayMs`). The sync a
   table was last polled or copied under is `_mason.poll_state.sync`: a change (live or made while Mason was down) keeps

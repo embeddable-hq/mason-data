@@ -739,7 +739,7 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
 
   After its first copy, a table is kept current as the file's sync: says — at the top for every table (mason init
   writes sync: off: read again only by mason sync <table>), or on its own entry. --sync writes the table's own:
-  off, or poll <interval> (poll 5s, poll 5m, poll 1h; at least 1s). On a table already added, --sync alone changes
+  off, or poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h). On a table already added, --sync alone changes
   its sync: line and nothing else; its copy is kept and caught up by one poll. Without --sync a new entry follows the
   file's — but a table of more than ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows under a file that polls is written sync: off and said,
   since each poll scans a table whole on your database. A table of tens of millions of rows set to poll more often than

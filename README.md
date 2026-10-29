@@ -129,7 +129,7 @@ you edit by hand is applied at the next `mason start`, and a mistake in it is re
   orders`, which polls the tables you name once, right away — before a report, from cron, at the end of a deploy.
   Between syncs Mason does not touch your database for it. A file that writes no `sync:` is `off`, and `mason start`
   says so.
-- **`sync: poll <interval>`** (`5s`, `5m`, `1h`; at least `1s`): the table is polled at that interval — its changed
+- **`sync: poll <interval>`** (`5s`, `5m`, `1h`; from `1s` to `24h`, a longer wait being `off` with `mason sync` from a scheduler): the table is polled at that interval — its changed
   rows found by `xmin` in one transaction over one snapshot. Postgres has no index on `xmin`, so each poll reads the
   whole table: every few seconds suits a small table, every hour a big one. Mason waits at least four times as long as
   a poll took before that table's next.
