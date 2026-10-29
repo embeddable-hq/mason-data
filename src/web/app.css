@@ -217,7 +217,9 @@ label.tick { display: inline-flex; align-items: baseline; gap: var(--space-1); m
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--space-3); margin: 0 0 var(--space-5); }
 /* by count, so no card is left alone on a row: one row on a wide screen; on a narrower one six as two rows of three,
    five as three over two (a six-column grid, the last two spanning half each), four as two by two */
-@media (min-width: 1100px) { .cards.n4 { grid-template-columns: repeat(4, 1fr); } .cards.n5 { grid-template-columns: repeat(5, 1fr); } .cards.n6 { grid-template-columns: repeat(6, 1fr); } }
+@media (min-width: 1100px) { .cards.n4 { grid-template-columns: repeat(4, 1fr); } .cards.n5 { grid-template-columns: repeat(5, 1fr); } .cards.n6 { grid-template-columns: repeat(3, 1fr); } }
+/* six in one row only where each card is still wide enough for its sub-line (the sidebar takes 232 px of the width) */
+@media (min-width: 1440px) { .cards.n6 { grid-template-columns: repeat(6, 1fr); } }
 @media (min-width: 641px) and (max-width: 1099px) {
   .cards.n4 { grid-template-columns: repeat(4, 1fr); }
   .cards.n6 { grid-template-columns: repeat(3, 1fr); }
