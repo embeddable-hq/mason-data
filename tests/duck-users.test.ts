@@ -132,7 +132,7 @@ test("a DISABLED user is kept with disabledAt and its password: its login (right
   const disabled = (e: unknown): boolean => e instanceof ApiError && e.status === 401 && e.code === "user_disabled" && e.userName === "metabase";
   assert.throws(() => live.recheck(token), (e: unknown) => disabled(e) && (e as Error).message === "the user \"metabase\" was disabled");
   assert.throws(() => live.login("metabase", m.password), (e: unknown) => disabled(e) &&
-    (e as Error).message === "role \"metabase\" is not permitted to log in: the user \"metabase\" is disabled (mason user enable metabase lets it connect again, with the same password)");
+    (e as Error).message === "role \"metabase\" is not permitted to log in");
   // its state is said only to the holder of its password: a forged one is a wrong password, as for any user
   refused(() => live.login("metabase", `mason_${m.id}_${"0".repeat(32)}`), 401, /^not a password of this project's users: mason user list shows them$/, "metabase");
   // enabled: disabledAt gone, the same id, so the same password and the held token are live again

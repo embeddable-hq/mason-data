@@ -235,9 +235,9 @@ export class LiveUsers {
   }
 }
 
-/** A disabled user's refused login: Postgres's sentence for a role without LOGIN, then why and the way out. */
-export const disabledMessage = (name: string): string =>
-  `role "${name}" is not permitted to log in: the user "${name}" is disabled (mason user enable ${name} lets it connect again, with the same password)`;
+/** A disabled user's refused login: Postgres's sentence for a role without LOGIN, and it alone — why is its DETAIL,
+ *  the way out its HINT (src/api/postgres/server.ts), as Postgres splits them. */
+export const disabledMessage = (name: string): string => `role "${name}" is not permitted to log in`;
 
 /**
  * HOW THE DUCKDB RUN'S LISTENER TAKES A PASSWORD (src/cli/dev.ts; the tests wire the same): a user's password (its shape)

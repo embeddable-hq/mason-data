@@ -43,9 +43,9 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
   statement, whatever it is. A file that cannot be read refuses every user's connection and statement (57P03, the
   reason said), never lets one in. `mason destroy` keeps it, as it keeps the API key.
 - **A disabled user is kept, with its password** (`disabledAt` in the file): its login, the password right, is refused
-  as Postgres refuses a role without LOGIN — `28000`, `role "metabase" is not permitted to log in: the user "metabase"
-  is disabled (mason user enable metabase lets it connect again, with the same password)`, DETAIL `Mason:
-  user_disabled` — and a session it holds ends, FATAL (28000, "was disabled"), at its next statement, as a removed
+  as Postgres refuses a role without LOGIN — `28000`, `role "metabase" is not permitted to log in`, DETAIL `the user
+  "metabase" is disabled (mason user disable). Mason: user_disabled`, HINT `mason user enable metabase lets it connect
+  again, with the same password` — and a session it holds ends, FATAL (28000, "was disabled"), at its next statement, as a removed
   user's does. A wrong password for it is a wrong password (28P01): the state is told only to the login's holder.
   `mason user enable` clears it: the same password connects again. Disabling one disabled already (or enabling one
   that is not) says so and changes nothing, exit 0.

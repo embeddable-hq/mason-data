@@ -887,10 +887,11 @@ class Session {
       // a revocation record that could not be read is no wrong password: the server could not tell, said as such
       const unknown = err instanceof ApiError && err.status === 503;
       // a disabled user (`mason user disable`): its password was right, so it is no wrong password but a role that may
-      // not log in, which Postgres refuses 28000 "role … is not permitted to log in" (the message says it whole)
+      // not log in, which Postgres refuses 28000 "role … is not permitted to log in": that sentence alone, why in DETAIL,
+      // the way out in HINT, as Postgres splits them
       const disabled = err instanceof ApiError && err.code === USER_DISABLED;
       const refused = disabled
-        ? new PgError({ code: "28000", message, detail: `Mason: ${USER_DISABLED}`, hint: `mason user enable ${this.user} lets it connect again, with the same password` }, 401)
+        ? new PgError({ code: "28000", message, detail: `the user "${this.user}" is disabled (mason user disable). Mason: ${USER_DISABLED}`, hint: `mason user enable ${this.user} lets it connect again, with the same password` }, 401)
         : new PgError({ code: unknown ? "57P03" : "28P01",
           message: unknown ? `the password could not be checked for user "${this.user}": ${message}` : `password authentication failed for user "${this.user}": ${message}`,
           hint: unknown ? "connect again once Mason can read its list of users"

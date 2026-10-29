@@ -279,8 +279,10 @@ test("mason user disable, beside the listener: a held session ends at its next s
   // a new login with its right password: 28000, Postgres's words for a role that may not log in, then Mason's way out
   const refused = await refusedWith({ url: added.url as string });
   assert.equal(refused.code, "28000");
-  assert.equal(refused.message, `role "tableau" is not permitted to log in: the user "tableau" is disabled (mason user enable tableau lets it connect again, with the same password)`);
-  assert.equal(refused.detail, "Mason: user_disabled");
+  // Postgres's sentence alone; why in DETAIL, the way out in HINT, as Postgres splits them (review: the message once carried all three)
+  assert.equal(refused.message, `role "tableau" is not permitted to log in`);
+  assert.equal(refused.detail, `the user "tableau" is disabled (mason user disable). Mason: user_disabled`);
+  assert.equal(refused.hint, "mason user enable tableau lets it connect again, with the same password");
   // a WRONG password for it is a wrong password, as before: its state is told only to the holder of the login
   const wrong = await refusedWith({ user: "tableau", password: `mason_${added.id as string}_${"0".repeat(32)}` });
   assert.equal(wrong.code, "28P01");
