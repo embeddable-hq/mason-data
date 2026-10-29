@@ -260,8 +260,10 @@ export function renderWhere(s) {
  */
 export function renderUsers(list, confirming = null) {
   if (!list.users.length) return `<p class="dim">No users yet.</p>`;
-  return `<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Added</th><th scope="col"></th></tr></thead><tbody>${list.users.map((u) =>
+  return `<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Added</th><th scope="col"></th></tr></thead><tbody>${list.users.map((u) =>
     `<tr><th scope="row">${code(u.name)}${u.live ? "" : ` <span class="warn">does not connect: the API key was rotated since it was added</span>`}</th>` +
+    // the user's role (mason user add --role): what it may read; none, every copied table; one the roles file does not name, said
+    `<td>${u.role === undefined ? `<span class="dim">every table</span>` : `${code(u.role)}${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}`}</td>` +
     `<td class="dim">${esc(u.addedAt.slice(0, 16).replace("T", " "))} UTC · id ${esc(u.id)}</td>` +
     `<td class="act">${confirming === u.name
       ? `<span class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</span> ` +

@@ -34,9 +34,9 @@ test("every request is read back as the listener built it: the statement, the ou
   await ledger.flush();
   const all = await ledger.recent({ limit: 10 });
   assert.deepEqual(all.map((r) => r.requestId), ["a1", "a2", "a3"], "newest last");
-  assert.deepEqual(all[0], { requestId: "a1", startedAt: new Date(t0).toISOString(), session: 4, applicationName: "Metabase", tokenName: "", user: "", method: "QUERY", outcome: "ok",
+  assert.deepEqual(all[0], { requestId: "a1", startedAt: new Date(t0).toISOString(), session: 4, applicationName: "Metabase", tokenName: "", user: "", role: "", method: "QUERY", outcome: "ok",
     sqlstate: null, message: null, detail: null, hint: null, rows: 20, durationMs: 12, query: "SELECT id FROM public.orders LIMIT 20", queryTruncated: false });
-  assert.deepEqual(all[1], { requestId: "a2", startedAt: new Date(t0 + 1000).toISOString(), session: 4, applicationName: "", tokenName: "bi-tool", user: "", method: "EXECUTE", outcome: "refused",
+  assert.deepEqual(all[1], { requestId: "a2", startedAt: new Date(t0 + 1000).toISOString(), session: 4, applicationName: "", tokenName: "bi-tool", user: "", role: "", method: "EXECUTE", outcome: "refused",
     sqlstate: "42P01", message: 'relation "nope" does not exist', detail: "the detail", hint: "the hint", rows: null, durationMs: 3, query: "SELECT * FROM nope", queryTruncated: false },
     "a client with no application_name is '', never the log's placeholder");
   assert.deepEqual([all[2]!.outcome, all[2]!.queryTruncated], ["failed", true]);

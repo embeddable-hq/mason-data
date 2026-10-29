@@ -47,7 +47,8 @@ import { copyChunkSecondsOf, copyParallelOf, Sync, syncModeOf, type CopyState } 
 import { storeJsonPathsOf } from "../duck/kept.ts";
 import { readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
 import { isLibcCollation } from "../duck/rewrite.ts";
-import { listenerLogins, LiveUsers, USERS_FILE } from "../duck/users.ts";
+import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
+import { LiveRoles, readRoles, resolveRoles, usersWithoutRole } from "./roles.ts";
 import { READY_LINE } from "./supervise.ts";
 import { changesOf, dropOwnReplication, dropStatements, madeReplication, namedPublication, projectReplication, replicationReadiness } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
@@ -298,6 +299,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (!Array.isArray(firstTables)) return failed("start", firstTables, { json: false });
   // what the run copies: the sources file as last read, and what is wrong with it now (an edit the run cannot take)
   let sources: RunSources = { file: src, tables: firstTables, problem: null };
+  // THE ROLES FILE (mason/roles.yml, src/cli/roles.ts): what each role may read, held against the tables the sources
+  // file copies before anything opens — a table it does not copy or a column the copy lacks refuses the start by name;
+  // the listener reads the file again whenever it changes (LiveRoles), no restart
+  const rolesRead = readRoles(folder, project.root);
+  if (rolesRead !== null && "message" in rolesRead) return failed("start", rolesRead, { json: false });
+  if (rolesRead !== null) {
+    const resolved = resolveRoles(rolesRead, firstTables, project.root);
+    if ("message" in resolved) return failed("start", resolved, { json: false });
+  }
 
   // how many of a copy's chunks are read at once, each a backend on the database (src/duck/sync.ts COPY_PARALLEL)
   let copyParallel: number;
@@ -389,11 +399,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // THE USERS (src/duck/users.ts): `mason user` edits the file beside this process; the listener re-reads it at every
   // connection and before every statement of a user's session, so a removal takes effect without a restart
   const users = new LiveUsers(path.join(home, USERS_FILE), cfg.apiKey);
+  // THE ROLES (src/cli/roles.ts): the file read again when it or the copied tables change; a session with a role is
+  // held to it at every statement, and the catalog is rebuilt with the roles (src/api/postgres/server.ts)
+  const liveRoles = new LiveRoles(folder, project.root, () => sources.tables);
   let api: PgApiServer;
   try {
     api = await startPostgresApi({
       port: pgAddress.port, host: pgAddress.host, tls: pgTls.tls, database: cfg.name, masonVersion: o.version, product: "mason-data", statementTimeoutMs,
       ...listenerLogins(users, cfg.apiKey),
+      roles: () => liveRoles.now(),
       schema: () => sync.schema(),
       record: (row) => requests.record(row),
       log: logLine,
@@ -403,6 +417,17 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   } catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await store.close(); return 1; }
   done(`Postgres listener on ${listenerText(pgTls.listener, api.port)}; ${statementTimeoutMs === 0 ? "statements without a time limit" : `each statement at most ${timeoutSetting.trim()}`} (MASON_STATEMENT_TIMEOUT); ` +
     `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS; mason logs --requests)`);
+  {
+    // a user whose role the file no longer names reads nothing until it is added again (fail closed): said here, by name
+    const roles = liveRoles.now();
+    const list = readUsers(path.join(home, USERS_FILE));
+    const orphans = "users" in list ? usersWithoutRole(list.users, new Set(roles.grants.keys())) : [];
+    if (roles.grants.size > 0) done(`${roles.grants.size} role${roles.grants.size === 1 ? "" : "s"} from ${roles.file} (${[...roles.grants.keys()].join(", ")}); a user with none reads every copied table`);
+    for (const u of orphans) {
+      say(`  ! the user ${u.name} has the role ${u.role}, which ${roles.file ?? "no roles file (mason/roles.yml)"} ${roles.file === null ? "exists to name" : "does not name"}: ` +
+        `its statements are refused until the role is in the file, or mason user remove ${u.name} and mason user add ${u.name}${roles.grants.size ? ` --role ${[...roles.grants.keys()][0]}` : ""}`);
+    }
+  }
 
   const setupPort = await freePort(o.port, chosen);
   const token = newToken();
@@ -413,6 +438,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     page: o.serve === undefined,
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database: cfg.name, postgresUrl },
+    roles: () => liveRoles.now(),
     ...(changes === "replication" ? { publication: { name: repl.publication, owned: repl.owned } } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,

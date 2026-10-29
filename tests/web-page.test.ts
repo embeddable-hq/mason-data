@@ -277,9 +277,13 @@ test("a Failure renders as the CLI's four parts: ✗ what is wrong, why, fix, th
 test("the users: a line each with when it was added, one rotated away said so; Remove asks first; none is said", () => {
   const renderUsers = fn<[unknown, string | null], string>("renderUsers");
   const list = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true },
-    { name: "grafana", id: "fedcba9876543210", addedAt: "2026-10-20T08:00:00.000Z", live: false }] };
+    { name: "grafana", id: "fedcba9876543210", addedAt: "2026-10-20T08:00:00.000Z", live: false },
+    // a user with a role (mason user add --role), and one whose role the roles file no longer names
+    { name: "agent", id: "0000000000000001", addedAt: "2026-10-29T08:00:00.000Z", live: true, role: "agent", roleKnown: true },
+    { name: "old", id: "0000000000000002", addedAt: "2026-10-29T08:00:00.000Z", live: true, role: "gone", roleKnown: false }] };
   const html = renderUsers(list, null);
-  assert.match(textOf(html), /metabase 2026-10-27 09:10 UTC · id 0123456789abcdef Remove grafana does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC/);
+  assert.match(textOf(html), /^User Role Added metabase every table 2026-10-27 09:10 UTC · id 0123456789abcdef Remove grafana does not connect: the API key was rotated since it was added every table 2026-10-20 08:00 UTC/);
+  assert.match(textOf(html), /agent agent 2026-10-29 08:00 UTC · id 0000000000000001 Remove old gone not in the roles file: its statements are refused 2026-10-29/);
   assert.match(html, /<button type="button" data-remove="metabase">Remove<\/button>/);
   const asking = renderUsers(list, "metabase");
   assert.match(textOf(asking), /Remove metabase\? It connects no more, and the sessions it holds end at their next statement\. Remove metabase Cancel/);
@@ -346,7 +350,7 @@ test("the app: a poll writes the status and the users and when; a poll that fail
   assert.equal(v.updated, "Updated 14:03:05");
   assert.equal(v.poll, "");
   assert.match(textOf(v.status!), /public\.orders 15% copying/);
-  assert.match(textOf(v.users!), /^User Added metabase 2026-10-27 09:10 UTC/);
+  assert.match(textOf(v.users!), /^User Role Added metabase every table 2026-10-27 09:10 UTC/);
   assert.deepEqual(run.asked, ["GET /api/state", "GET /api/slow", "GET /api/refused", "GET /api/users"]);
   // the run stops
   run.answers.clear();

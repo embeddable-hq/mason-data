@@ -313,7 +313,7 @@ test("mason status's slow and refused statements: each on one line with its time
 
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
-  const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "" };
+  const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", role: "" };
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", sqlstate: null, message: null,
     rows: 20, durationMs: 1234, query: "SELECT id\n FROM public.orders LIMIT 20" }, PLAIN),
     "2026-10-26 14:02:11  ok              1,234 ms      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
@@ -458,4 +458,69 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     server.close();
     fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables: {}\n`);
   }
+});
+
+test("mason user add --role with Mason stopped: the role must be one the roles file names, checked against the sources file; list says each user's role, and one the file no longer names", async () => {
+  // src/cli/roles.ts and src/cli/user.ts roleToAdd: a stopped project with a sources file and no run (the role is read
+  // from the file here; with Mason up it is the listener's, tests/duck-roles-wire.test.ts and the state matrix)
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-user-role-")));
+  opened.push(async () => { fs.rmSync(root, { recursive: true, force: true }); });
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
+  fs.writeFileSync(path.join(folder, "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n");
+  const rolesFile = path.join(folder, "roles.yml");
+  const run = (argv: string[]) => runMason(root, argv, matrixEnv());
+  const failure = (a: Answer): Failure & { code: string } => (JSON.parse(a.stdout) as { error: Failure & { code: string } }).error;
+  // no roles file: refused before anything is written, with the lines to write
+  const none = await run(["user", "add", "bot", "--role", "agent", "--json"]);
+  assert.equal(none.code, 1, none.stdout + none.stderr);
+  assert.deepEqual([failure(none).code, failure(none).message], ["not_found", "there is no role agent: this project has no roles file"]);
+  assert.equal(failure(none).fix, "write mason/roles.yml:\n  roles:\n    agent:\n      tables:\n        <a copied table>: {}\nthen mason user add <name> --role agent");
+  // the file's mistakes, each at its key: a misspelt top key, a role with no table, a table the sources file does not copy, a column both listed and excluded
+  for (const [text, want] of [
+    ["role:\n  agent:\n    tables:\n      orders: {}\n", /unexpected key role — did you mean `roles`\? — a roles file takes roles alone/],
+    ["roles:\n  agent: {}\n", /roles\.agent\.tables: missing — write tables: \{ orders: \{\} \}, the tables the role may read \(a role with no table reads nothing: remove it instead\)/],
+    ["roles:\n  agent:\n    tables:\n      products: {}\n", /roles\.agent\.tables\.products: public\.products is not a table the sources file copies — a role reads copied tables only \(copied: orders, customers; mason add products copies it\)/],
+    ["roles:\n  agent:\n    tables:\n      orders:\n        columns: [id]\n        exclude: [notes]\n", /roles\.agent\.tables\.orders: columns and exclude together — columns names what the role reads, exclude what it may not read of every column; keep one/],
+  ] as const) {
+    fs.writeFileSync(rolesFile, text);
+    const a = await run(["user", "add", "bot", "--role", "agent", "--json"]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    const f = failure(a);
+    assert.equal(f.code, "bad_roles", JSON.stringify(f));
+    assert.match(`${f.message}: ${f.why ?? ""}`, want, JSON.stringify(f));
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "users.json")), "nothing written");
+  }
+  // a good file: a role the file does not name is refused with the closest it does; the right one is written
+  fs.writeFileSync(rolesFile, "roles:\n  agent:\n    tables:\n      orders: {}\n      customers:\n        columns: [name]\n  ops:\n    tables:\n      customers: {}\n");
+  const typo = await run(["user", "add", "bot", "--role", "agnet", "--json"]);
+  assert.equal(typo.code, 1, typo.stdout + typo.stderr);
+  assert.deepEqual([failure(typo).code, failure(typo).message, failure(typo).why], ["not_found", "there is no role agnet in mason/roles.yml — did you mean `agent`?", "the roles: agent, ops"]);
+  const added = await run(["user", "add", "bot", "--role", "agent", "--json"]);
+  assert.equal(added.code, 0, added.stdout + added.stderr);
+  const a = JSON.parse(added.stdout) as { user: string; role: string; password: string; url?: string };
+  assert.deepEqual([a.user, a.role, a.url], ["bot", "agent", undefined]);
+  assert.match(a.password, /^mason_[0-9a-f]{16}_[0-9a-f]{32}$/);
+  const person = await run(["user", "add", "ops-bot", "--role", "ops"]);
+  assert.equal(person.code, 0, person.stdout + person.stderr);
+  assert.match(person.stdout, /^ {2}role +ops \(mason\/roles\.yml names what it reads\)$/m);
+  // a name of another shape, and --role on list: usage, exit 2
+  assert.equal((await run(["user", "add", "x", "--role", "Agent"])).code, 2);
+  assert.equal((await run(["user", "list", "--role", "agent"])).code, 2);
+  // list: each user's role; the file edited under one, said
+  const list = await run(["user", "list", "--json"]);
+  assert.equal(list.code, 0, list.stdout + list.stderr);
+  assert.deepEqual((JSON.parse(list.stdout) as { users: Array<{ name: string; role?: string; roleKnown?: boolean }> }).users.map((u) => [u.name, u.role, u.roleKnown]), [["bot", "agent", true], ["ops-bot", "ops", true]]);
+  fs.writeFileSync(rolesFile, "roles:\n  agent:\n    tables:\n      orders: {}\n");
+  const orphan = await run(["user", "list"]);
+  assert.equal(orphan.code, 0, orphan.stdout + orphan.stderr);
+  assert.match(orphan.stdout, /^ {2}bot +role agent +id [0-9a-f]{16}/m);
+  assert.match(orphan.stdout, /^ {2}ops-bot +role ops +id [0-9a-f]{16}.*its role ops is not in the roles file: its statements are refused$/m);
+  assert.match(orphan.stdout, /A role the roles file \(mason\/roles\.yml\) does not name reads nothing: add ops to it, or mason user remove ops-bot, then mason user add ops-bot --role <role>\./);
+  // a user with no role is listed as before
+  assert.equal((await run(["user", "add", "plain", "--json"])).code, 0);
+  const plain = (JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: Array<{ name: string; role?: string }> }).users.find((u) => u.name === "plain");
+  assert.ok(plain !== undefined && !("role" in plain) && !("roleKnown" in plain), JSON.stringify(plain));
 });

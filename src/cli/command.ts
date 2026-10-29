@@ -154,6 +154,7 @@ export const FAILURE_CODES = {
   no_project: "no Mason project here or above (mason init makes one)",
   bad_config: "this folder is a Mason project whose .mason/config.json cannot be read: repair it, or move .mason/ aside and mason init",
   bad_source: "the project's sources file (mason/sources/<name>.yml) is missing or names something wrong: the file, the key and the way out are said",
+  bad_roles: "the project's roles file (mason/roles.yml) names something wrong: a table the sources file does not copy, a column the copy lacks, a role with no table; the file, the key and the way out are said",
   not_running: "Mason is not running for the project (mason start)",
   unreachable: "Mason is running but does not answer (mason logs says why)",
   not_found: "a name nothing has: a table, a column, a user",

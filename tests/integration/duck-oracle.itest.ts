@@ -58,6 +58,7 @@ import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
 import { GAP_MARK, GAPS, type GapId } from "../../src/duck/gaps.ts";
+import type { RolesLive } from "../../src/duck/grants.ts";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const adminUrl = process.env.IT_POSTGRES_URL;
@@ -75,6 +76,9 @@ const UPDATE_FIXTURE = process.env.UPDATE_FIXTURE === "1";
 // answer): UTC, as the session's TimeZone is, so that pass is not charged for the machine's clock
 process.env.TZ = "UTC";
 const tag = `it_duckoracle_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
+/** the Postgres LOGIN role of the role cases (`roleCases`): a role is the cluster's, not the database's, so it is named
+ *  for this run and dropped with the database */
+const ROLE_LOGIN = `${tag}_agent`;
 const dbUrl = adminUrl ? (() => { const u = new URL(adminUrl); u.pathname = `/${tag}`; return u.toString(); })() : "";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-duck-oracle-"));
 const report = path.join(process.env.IT_LOG_DIR ?? os.tmpdir(), "duck-oracle-differences.txt");
@@ -204,6 +208,8 @@ after(async () => {
   store?.close();
   fs.rmSync(dir, { recursive: true, force: true });
   if (adminUrl) psql(adminUrl, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
+  // the role cases' login role (its grants went with the database)
+  if (adminUrl) psql(adminUrl, `DROP ROLE IF EXISTS ${ROLE_LOGIN}`);
 });
 
 test("the DuckDB endpoint answers every statement exactly as Postgres does, before and after changes", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 1_800_000 }, async () => {
@@ -268,9 +274,17 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   const resolvedOf = new Map<string, readonly string[]>();
   const planOf = duck.plan.bind(duck);
   duck.plan = async (...a) => { const p = await planOf(...a); resolvedOf.set(a[1], p.resolved); return p; };
+  // THE ROLE (GitHub issue 30, src/duck/grants.ts): one Mason role as `mason/roles.yml` resolves it — three columns of
+  // orders, customers whole — mirrored by a Postgres role with the same GRANTs (`roleCases`, below); every other
+  // session has no role, so every statement above is planned with its reads named (null grants) and nothing refused
+  const ROLE_FILE = "mason/roles.yml";
+  const roles: RolesLive = { file: ROLE_FILE, problem: null, grants: new Map([["agent", { name: "agent", file: ROLE_FILE, tables: new Map([
+    ["public.orders", { table: "public.orders", all: false, columns: ["id", "customer_id", "status", "amount"] }],
+    ["public.customers", { table: "public.customers", all: true, columns: [] }]]) }]]) };
   server = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: tag, masonVersion: "oracle",
-    authenticate: () => ({}),
+    authenticate: (_password, user) => user === ROLE_LOGIN ? { user, role: "agent" } : {},
+    roles: () => roles,
     schema: () => theSync.schema(),
     record: () => undefined, log: (l) => log.push(l),
     duck,
@@ -356,6 +370,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   };
   await run("after the copy");
   alone.closeSync();
+  await roleCases();
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of play)
   if (ONLY === null) {
     const fixture = { ...tallies, measured: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy" };
@@ -375,6 +390,66 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     psql(dbUrl, mutations(round) + typedMutations(round));
     await sync.once();
     await run(`after changes round ${round}`);
+  }
+
+  /**
+   * ROLES, HELD TO POSTGRES'S OWN GRANTS: a Postgres role with `GRANT SELECT (columns)` on orders and `GRANT SELECT` on
+   * customers, a session as it, and a Mason session as a user with the role above; every statement asked of both —
+   * what a role may read, and a hidden column read in every shape a statement can read one — must be answered alike,
+   * and a refusal must carry the same SQLSTATE AND MESSAGE (`permission denied for table orders`: Postgres never names
+   * the column; Mason's DETAIL does). The catalog too: information_schema and the privilege functions answer for the
+   * role as Postgres's do. (A view is not asked: every role may see a view in Mason, docs/POSTGRES-API.md "Roles".)
+   */
+  async function roleCases(): Promise<void> {
+    const cases: Array<{ name: string; sql: string; values?: string[] }> = [
+      { name: "granted columns", sql: "SELECT id, status, amount FROM public.orders ORDER BY id" },
+      { name: "count(*) over a partly granted table", sql: "SELECT count(*) FROM public.orders" },
+      { name: "a GROUP BY of granted columns", sql: "SELECT status, count(*), sum(amount) FROM public.orders GROUP BY status ORDER BY status" },
+      { name: "a join on granted columns", sql: "SELECT c.name, count(o.id) FROM public.orders o JOIN public.customers c ON c.id = o.customer_id GROUP BY c.name ORDER BY c.name" },
+      { name: "a whole table granted, *", sql: "SELECT * FROM public.customers ORDER BY id" },
+      { name: "no table read", sql: "SELECT 1 + 1 AS two" },
+      { name: "a parameter over granted columns", sql: "SELECT id FROM public.orders WHERE status = $1 ORDER BY id", values: ["paid"] },
+      { name: "a hidden column in a WHERE", sql: "SELECT id FROM public.orders WHERE notes IS NULL" },
+      { name: "a hidden column in a CTE", sql: "WITH n AS (SELECT notes FROM public.orders) SELECT count(*) FROM n" },
+      { name: "a hidden column in a subquery", sql: "SELECT (SELECT max(notes) FROM public.orders) AS m" },
+      { name: "a hidden column in a USING join", sql: "SELECT o.status FROM public.orders o JOIN public.customers c USING (tenant_id)" },
+      { name: "a hidden column in a NATURAL join", sql: "SELECT o.status FROM public.orders o NATURAL JOIN public.customers c" },
+      { name: "a hidden column in a window's PARTITION BY", sql: "SELECT id, row_number() OVER (PARTITION BY notes ORDER BY id) FROM public.orders" },
+      { name: "a hidden column in an ORDER BY", sql: "SELECT id FROM public.orders ORDER BY notes, id" },
+      { name: "a hidden column in a GROUP BY", sql: "SELECT notes, count(*) FROM public.orders GROUP BY notes" },
+      { name: "a hidden column in a CASE", sql: "SELECT CASE WHEN notes IS NULL THEN 0 ELSE 1 END FROM public.orders" },
+      { name: "a hidden column in a lateral's argument", sql: "SELECT x.n FROM public.orders o CROSS JOIN LATERAL (SELECT o.notes AS n) x" },
+      { name: "a hidden column under a parameter", sql: "SELECT id FROM public.orders WHERE notes = $1", values: ["x"] },
+      { name: "SELECT * on a partly granted table", sql: "SELECT * FROM public.orders" },
+      { name: "t.* on a partly granted table", sql: "SELECT o.* FROM public.orders o" },
+      { name: "a whole-row reference", sql: "SELECT o FROM public.orders o" },
+      { name: "a count(*) whose join reads a hidden column", sql: "SELECT count(*) FROM public.orders o JOIN public.customers c ON c.name = o.notes" },
+      { name: "a table the role lacks", sql: "SELECT count(*) FROM public.products" },
+      { name: "a system column", sql: "SELECT xmin::text FROM public.orders" },
+      { name: "information_schema.columns for the role", sql: "SELECT table_name::text, column_name::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN ('orders', 'customers', 'products') ORDER BY 1, 2" },
+      { name: "information_schema.tables for the role", sql: "SELECT table_name::text FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name IN ('orders', 'customers', 'products') ORDER BY 1" },
+      { name: "the privilege functions for the role", sql: "SELECT has_table_privilege('public.orders', 'SELECT'), has_any_column_privilege('public.orders', 'SELECT'), has_column_privilege('public.orders', 'notes', 'SELECT'), " +
+        "has_column_privilege('public.orders', 'status', 'SELECT'), has_table_privilege('public.customers', 'SELECT'), has_table_privilege('public.products', 'SELECT')" },
+      // current_user is the ROLE's name under SET ROLE on both (the Postgres login here is it_agent, the Mason role agent: asked of neither)
+    ].filter((q) => ONLY === null || ONLY.test(`role case: ${q.name}`));
+    if (cases.length === 0) return;
+    psql(dbUrl, `CREATE ROLE ${ROLE_LOGIN} LOGIN PASSWORD 'x'; GRANT CONNECT ON DATABASE ${tag} TO ${ROLE_LOGIN}; GRANT USAGE ON SCHEMA public TO ${ROLE_LOGIN}; ` +
+      `GRANT SELECT (id, customer_id, status, amount) ON public.orders TO ${ROLE_LOGIN}; GRANT SELECT ON public.customers TO ${ROLE_LOGIN};`);
+    const u = new URL(dbUrl); u.username = ROLE_LOGIN; u.password = "x";
+    const sourceAgent = new pg.Client({ connectionString: u.toString(), application_name: "duck-oracle-role" });
+    const masonAgent = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: ROLE_LOGIN, password: "x", application_name: "duck-oracle-role" });
+    for (const c of [sourceAgent, masonAgent]) { await c.connect(); clients.push(c); await c.query("SET TimeZone = 'UTC'"); }
+    let refusedAlike = 0;
+    for (const q of cases) {
+      const [want, got] = [await ask(sourceAgent, q.sql, q.values), await ask(masonAgent, q.sql, q.values)];
+      const v = verdict(want, got, ordered(q.sql));
+      if (v !== null) { differences.push({ phase: "roles", group: "role case", kind: v.kind, name: `role case: ${q.name}`, detail: v.detail, sql: q.sql }); continue; }
+      if ("code" in want && "code" in got) {
+        refusedAlike++;
+        if (want.message !== got.message) differences.push({ phase: "roles", group: "role case", kind: "text", name: `role case: ${q.name}`, detail: `${JSON.stringify(got.message)} where Postgres says ${JSON.stringify(want.message)}`, sql: q.sql });
+      }
+    }
+    console.log(`duck oracle: ${cases.length} role case(s) asked as a role of Postgres and a user of a Mason role, ${refusedAlike} refused alike by SQLSTATE and message`);
   }
 
   // ---- the verdict ----------------------------------------------------------------------------------------------
