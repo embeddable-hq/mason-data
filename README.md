@@ -89,8 +89,8 @@ yours: over the Postgres protocol.
 
 ```bash
 cd your-app
-# Mason looks for DATABASE_URL in .env.local, .env or the shell. If it isn't there yet:
-# echo "DATABASE_URL=postgres://me:secret@localhost:5432/your_app" >> .env
+# Mason looks for MASON_DATABASE_URL, then DATABASE_URL, in .env.local, .env or the shell. If neither is there yet:
+# echo "MASON_DATABASE_URL=postgres://me:secret@localhost:5432/your_app" >> .env
 mason init                           # creates mason/sources/<database>.yml (commit it) and .mason/ (local, gitignored)
 mason tables                         # lists the tables in your database, with their rows and keys
 mason add orders customers           # adds tables (use --columns id,status,total to copy only some columns)
@@ -100,8 +100,9 @@ mason sync orders                    # reads the latest changes (by default, Mas
 mason remove customers               # removes a table and deletes its copy
 ```
 
-No `DATABASE_URL`? Run `mason init <url>` instead, and Mason writes the URL to `.env` for you. If your app's
-`DATABASE_URL` points to a different database, Mason writes `MASON_DATABASE_URL` instead and leaves yours alone.
+Your app's `DATABASE_URL` works as it is. Set `MASON_DATABASE_URL` when Mason should copy a different database: Mason
+reads it first. You can also run `mason init <url>`, and Mason writes the URL to `.env` for you. The sources file
+names the variable Mason read, and the URL itself stays in `.env`.
 
 The sources file lists the tables Mason copies. It also says how each table stays up to date: synced when you ask,
 polled, or replicated (see [Choosing what to sync](#choosing-what-to-sync)).
