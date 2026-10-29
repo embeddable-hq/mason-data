@@ -12,7 +12,7 @@ A drop-in replacement for a Postgres read replica, built for exceptionally fast 
 
 - [Getting started](#getting-started)
   - [Try the demo](#try-the-demo)
-  - [On your app's database](#on-your-apps-database)
+  - [Try with your data](#try-with-your-data)
   - [Going to production](#going-to-production)
 - [Syncing from Postgres](#syncing-from-postgres)
   - [Choosing what to sync](#choosing-what-to-sync)
@@ -67,7 +67,7 @@ The demo shop has four tables: `customers`, `products`, `orders` and `order_item
 (`sync: poll 5s`), so `mason status` shows the copy keeping up. Mason reads the demo database the same way it reads
 yours: over the Postgres protocol.
 
-### On your app's database
+### Try with your data
 
 **1. Add your tables and start Mason.**
 
