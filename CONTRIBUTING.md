@@ -29,11 +29,14 @@ afterwards. If you can write the case yourself, that is the whole first half of 
 
 ## Running the checks
 
+A checkout needs Node ≥ 23.6 (the root `package.json`'s `engines`): its TypeScript is run directly by Node's type
+stripping, with no build step. The published CLI is compiled and needs less (`cli/README.md` says what).
+
 ```bash
 npm install && npm run check        # typecheck + the offline tests, a few minutes
 ```
 
-The integration tests, the oracle included, need a throwaway Postgres (each file makes and drops a database on it;
+The integration tests run the real copy, stream, listener and `mason serve`, and the oracle; they need a throwaway Postgres (each file makes and drops a database on it;
 `tests/integration/README.md`):
 
 ```bash

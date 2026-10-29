@@ -1144,8 +1144,8 @@ a real database's rows.
 
 **Decision.** Every oracle run asks each statement, as written, of a plain DuckDB connection over the same copy
 (`duckdbAlone`); `tests/fixtures/oracle-duckdb-alone.json` holds the tallies, rendered in docs/SQL-SUPPORT.md's table (the README says the headline), and a move of
-over a percentage point fails until it is rewritten. **Why.** It measures what Mason adds over its engine: of 2,753
-statements Mason answers 94.7 % exactly (1.0 % a decided difference, 4.3 % refused by name, no wrong value); DuckDB alone
+over a percentage point fails until it is rewritten. **Why.** It measures what Mason adds over its engine (docs/SQL-SUPPORT.md "Why not DuckDB by
+itself" has the current run's tallies). When it was added, of 2,753 statements Mason answered 94.7 % exactly (1.0 % a decided difference, 4.3 % refused by name, no wrong value); DuckDB alone
 30.9 % exactly, 25.0 % the right rows under its own names, 16.2 % refused with its error, 12.6 % a wrong value, 6.1 % wrong
 rows or order. By group on DuckDB alone: common whole statements 80 % identical, the BI shapes 21 %, the type matrix 36 %;
 what fails includes integer division (`7 / 2` is 3.5), LIKE's escapes, an array's text (`[0,1]`), a libc collation's order.

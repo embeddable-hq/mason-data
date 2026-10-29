@@ -189,7 +189,20 @@ ${table(["rows", "clients", ...mixHead], ["---:", "---:", ...mixAlign], others.m
     "To rerun: `node scripts/bench-replica.ts` ([docs/BENCHMARK.md](BENCHMARK.md) says how, and how to publish a result here).",
   ].join("\n\n");
 
+  // the headline's lead: the range of the short version's "faster" cells, at p95, as the table says them
+  const leads = glance.flatMap(([r, c]) => {
+    const p = find(r, c, "postgres", "mix")?.p95Ms ?? NaN, m = find(r, c, "mason", "mix")?.p95Ms ?? NaN;
+    return Number.isFinite(p) && Number.isFinite(m) && m > 0 && m < p ? [p / m] : [];
+  });
+  const ratioText = (x: number): string => `${x < 9.95 ? x.toFixed(1) : x.toFixed(0)}×`;
+  const [lo, hi] = [ratioText(Math.min(...leads)), ratioText(Math.max(...leads))];
+  const lead = "A sum by status over every order, a top-N joined to its customers, a group-by over a JSON field: " + (leads.length === 0
+    ? "each compares with Postgres at p95 as below, as the tables grow and as more dashboards ask at once:"
+    : `each comes back ${lo === hi ? lo : `${lo} to ${hi}`} faster than on Postgres at p95, and keeps that lead as the tables grow and as more dashboards ask at once:`);
+
   const headline = `${HEADLINE_START}
+${lead}
+
 ${shortTable}
 
 ${shortNote("docs/DESIGN.md")} Each p95 is of a dashboard's mix of ${f.queries.length} statements, measured on ${env.label}, against ${pgVersion}, ${env.postgres.where}; [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every measurement and how it was taken.
@@ -292,6 +305,10 @@ test("the headline is the short version's table, the note and a link to the rest
   assert.ok(short !== undefined, "the section has the short version's table");
   assert.ok(headline.includes(`${short}\n\nMason is for scans and aggregates`), "the README's table is the section's");
   assert.match(headline, /\[docs\/MEASUREMENTS\.md\]\(docs\/MEASUREMENTS\.md\) has every measurement/);
+  // the lead's range is the table's: the least and the most of its mix rows' "× faster", as the table writes them
+  const ratios = short.split("\n").filter((l) => !l.includes("(p50)")).flatMap((l) => [.../\| ([\d.]+)× faster \|$/.exec(l) ?? []].slice(1)).map(Number);
+  assert.ok(ratios.length >= 2, "the short version has mix rows Mason answers faster");
+  assert.ok(headline.startsWith(`${HEADLINE_START}\nA sum by status over every order, a top-N joined to its customers, a group-by over a JSON field: each comes back ${Math.min(...ratios)}× to ${Math.max(...ratios)}× faster than on Postgres at p95,`), headline.split("\n")[1]);
   const links = (text: string): string[] => [...text.matchAll(/\]\(([^)#\s]+)\)/g)].map((m) => m[1]!).filter((l) => !/^https?:/.test(l));
   for (const [text, from] of [[headline, ROOT], [section, path.join(ROOT, "docs")]] as const) {
     const gone = links(text).filter((l) => !fs.existsSync(path.join(from, l)));

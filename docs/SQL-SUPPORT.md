@@ -7,16 +7,6 @@
 > commit you are reading. To change the wording, edit the renderer; to change what is answered or refused, change the
 > source; an edit made here is undone by the next `UPDATE_FIXTURE=1 npm test`.
 
-Mason answers a statement on DuckDB only when it can give **exactly** the answer Postgres gives: the same columns,
-types, values, text and order (docs/DESIGN.md). Everything a statement is made of — each
-function, operator, aggregate, cast, type and construct Postgres resolved it to — must be on the **verified** list at
-the end: pieces a statement of tests/integration/duck-oracle.itest.ts used, which Mason answered exactly as a real
-Postgres did, after a copy and after two rounds of changes. A statement using anything else is refused
-(SQLSTATE 0A000, `Mason gap unverified`), and the error names each piece.
-
-What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
-says what to write instead in its hint.
-
 ## At a glance
 
 Mason is a drop-in replacement for a Postgres read replica: the SQL a tool sends Postgres is answered as Postgres
@@ -52,6 +42,18 @@ each sent as written to Mason and to a plain DuckDB connection over the same cop
 A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
 statement. The oracle's statements are adversarial by design (NULL beside '', ties, every type's edge values), so
 plain reports fare better on DuckDB alone than this table says — and still not as Postgres.
+
+## How a statement is decided
+
+Mason answers a statement on DuckDB only when it can give **exactly** the answer Postgres gives: the same columns,
+types, values, text and order (docs/DESIGN.md). Everything a statement is made of — each
+function, operator, aggregate, cast, type and construct Postgres resolved it to — must be on the **verified** list at
+the end: pieces a statement of tests/integration/duck-oracle.itest.ts used, which Mason answered exactly as a real
+Postgres did, after a copy and after two rounds of changes. A statement using anything else is refused
+(SQLSTATE 0A000, `Mason gap unverified`), and the error names each piece.
+
+What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
+says what to write instead in its hint.
 
 ## Refused (46)
 

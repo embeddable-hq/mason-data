@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check [docs/SQL-SUPPORT.md](../blob/main/docs/SQL-SUPPORT.md) "Known differences" first: a difference listed there is decided and documented. Everything else is a bug, and your report becomes a test case in `tests/integration/postgres-cases.ts`.
+        Check [docs/SQL-SUPPORT.md](../blob/main/docs/SQL-SUPPORT.md) "Answered differently" first: a difference listed there is decided and documented. Everything else is a bug, and your report becomes a test case in `tests/integration/postgres-cases.ts`.
   - type: textarea
     id: statement
     attributes:

@@ -58,11 +58,12 @@ export function renderReadmeSupport(gaps: Record<string, Gap>, verified: Readonl
   const m = alone.mason;
   const wrong = m.differs === 0 ? "none was answered with a wrong value" : `${m.differs.toLocaleString("en-US")} were answered with a wrong value`;
   return `${README_START}
-Of the oracle's ${alone.statements.toLocaleString("en-US")} statements, Mason answers ${pct(m.exact)} exactly as Postgres does, ${pct(m.decided)} differently by a decision
-it lists, and refuses ${pct(m.refused)} by name, saying what to write instead; ${wrong}. A plain DuckDB
-connection over the same tables answers ${pct(alone.duckdb.exact)} of them exactly. [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md), rendered from the code,
-names the ${verified.size.toLocaleString("en-US")} pieces verified (types, functions, operators, aggregates, casts, constructs), the ${of("refused")} shapes
-refused, the ${of("differs")} known differences and the ${of("limit")} limits, each with what to write instead.
+Of the ${alone.statements.toLocaleString("en-US")} statements the oracle also sends to a plain DuckDB connection, Mason answers ${pct(m.exact)} exactly as Postgres
+does, ${pct(m.decided)} differently by a decision it lists, and refuses ${pct(m.refused)} by name, saying what to write instead;
+${wrong}. DuckDB alone, over the same tables, answers ${pct(alone.duckdb.exact)} of them exactly. [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md),
+rendered from the code, names the ${verified.size.toLocaleString("en-US")} pieces verified (types, functions, operators, aggregates, window functions,
+casts, constructs and their forms), the ${of("refused")} shapes refused, the ${of("differs")} answered differently and the ${of("limit")} limits, each
+with what to write instead.
 `;
 }
 
@@ -133,6 +134,9 @@ export function renderGaps(gaps: Record<string, Gap>, verified: ReadonlyMap<stri
 > commit you are reading. To change the wording, edit the renderer; to change what is answered or refused, change the
 > source; an edit made here is undone by the next \`UPDATE_FIXTURE=1 npm test\`.
 
+${renderAtAGlance(gaps, verified, alone)}
+## How a statement is decided
+
 Mason answers a statement on DuckDB only when it can give **exactly** the answer Postgres gives: the same columns,
 types, values, text and order (docs/DESIGN.md). Everything a statement is made of — each
 function, operator, aggregate, cast, type and construct Postgres resolved it to — must be on the **verified** list at
@@ -143,7 +147,6 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (\`Mason gap <id>\`) and
 says what to write instead in its hint.
 
-${renderAtAGlance(gaps, verified, alone)}
 ## Refused (${of("refused").length})
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
@@ -189,7 +192,7 @@ test("the README's block is in its body, before License, and says each count doc
   const doc = renderGaps(GAPS, VERIFIED);
   const kinds = ["refused", "differs", "limit"] as const;
   const n = Object.fromEntries(kinds.map((k) => [k, Object.values(GAPS).filter((g) => g.kind === k).length]));
-  assert.ok(text.includes(`the ${VERIFIED.size.toLocaleString("en-US")} pieces verified (types, functions, operators, aggregates, casts, constructs), the ${n.refused} shapes refused, the ${n.differs} known differences and the ${n.limit} limits`), text);
+  assert.ok(text.includes(`the ${VERIFIED.size.toLocaleString("en-US")} pieces verified (types, functions, operators, aggregates, window functions, casts, constructs and their forms), the ${n.refused} shapes refused, the ${n.differs} answered differently and the ${n.limit} limits`), text);
   for (const heading of [`## What is verified (${VERIFIED.size})`, `## Refused (${n.refused})`, `## Answered differently (${n.differs})`, `## Limits of the prototype (${n.limit})`, "## At a glance", "## Why not DuckDB by itself"]) {
     assert.ok(doc.includes(`\n${heading}\n`), `docs/SQL-SUPPORT.md has ${heading}`);
   }
