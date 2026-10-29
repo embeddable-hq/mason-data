@@ -76,6 +76,31 @@ test("SHOW ssl and current_setting('ssl') say what the session is: on over TLS, 
   } finally { await p.end(); }
 });
 
+// SHOW ALL's rows are read by the reader SHOW <name> reads (server.ts sessionSetting): the TLS parameters first
+test("SHOW ALL's ssl rows say what the session is, as SHOW ssl does: on with the listener's TLS over TLS, off plain", async () => {
+  const settings = async (c: pg.Client): Promise<Map<string, string>> =>
+    new Map((await c.query<{ name: string; setting: string }>("SHOW ALL")).rows.map((r) => [r.name, r.setting]));
+  const s = client(secure, { rejectUnauthorized: false });
+  await s.connect();
+  try {
+    const all = await settings(s);
+    assert.equal(all.get("ssl"), "on");
+    assert.equal(all.get("ssl_library"), "OpenSSL");
+    assert.equal(all.get("ssl_min_protocol_version"), tls.DEFAULT_MIN_VERSION);
+    assert.equal(all.get("ssl_ciphers"), tls.DEFAULT_CIPHERS);
+    assert.equal(all.get("ssl_cert_file"), "server.crt", "the rest is the catalog's");
+    for (const name of ["ssl", "ssl_library", "ssl_ciphers", "ssl_groups", "ssl_cert_file"]) assert.equal(all.get(name), await one(s, `SHOW ${name}`), `${name}: SHOW ALL's row is SHOW's`);
+  } finally { await s.end(); }
+
+  const p = client(plain, false);
+  await p.connect();
+  try {
+    const all = await settings(p);
+    assert.equal(all.get("ssl"), "off");
+    for (const name of ["ssl", "ssl_library", "ssl_ciphers"]) assert.equal(all.get(name), await one(p, `SHOW ${name}`), `${name}: SHOW ALL's row is SHOW's`);
+  } finally { await p.end(); }
+});
+
 /** A whole session over `socket` once it is open: startup, password, the statement and Terminate in one write (the
  *  server reads them in order), and every byte it answers until it closes. */
 const session = (socket: tls.TLSSocket, sql: string): Promise<Buffer> => new Promise((resolve, reject) => {

@@ -65,7 +65,7 @@ import {
   closeComplete, commandComplete, dataRow, emptyQueryResponse, errorResponse, noData, noticeResponse, parameterDescription,
   parameterStatus, parseComplete, portalSuspended, readyForQuery, rowDescription, sslResponse, type ErrorFields,
   type FieldDescription, type FrontendMessage,
-  cstr, int16, int32, frame, decodeNoticeFrame, splitFrames, MAX_MESSAGE_LENGTH,
+  cstr, int16, int32, frame, decodeBackend, decodeNoticeFrame, splitFrames, MAX_MESSAGE_LENGTH,
 } from "./protocol.ts";
 import { typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
 import { Unsupported, duckTranslate, type Translation } from "./translate.ts";
@@ -815,12 +815,12 @@ class Session {
   }
 
   private reportedParameters(): Array<[string, string]> {
-    return [
-      ["application_name", this.vars.applicationName], ["client_encoding", "UTF8"], ["DateStyle", "ISO, MDY"],
-      ["default_transaction_read_only", "on"], ["in_hot_standby", "on"], ["integer_datetimes", "on"], ["IntervalStyle", "postgres"],
-      ["is_superuser", "off"], ["search_path", this.vars.searchPath], ["server_encoding", "UTF8"], ["server_version", SERVER_VERSION],
-      ["session_authorization", this.user], ["standard_conforming_strings", "on"], ["TimeZone", this.vars.timeZone],
-    ];
+    // each value `sessionSetting`'s, the one SHOW and SHOW ALL answer: a reported value and a shown one never part
+    return [...REPORTED].sort().map((name): [string, string] => {
+      const value = this.sessionSetting(name);
+      if (value === null) throw new PgError({ code: "XX000", message: `the reported parameter ${name} has no value of this session's (Mason bug: report it)` }, 500);
+      return [spell(name), value];
+    });
   }
 
   // ---------------------------------------------------------------- session parameters
@@ -1297,9 +1297,20 @@ class Session {
       "default_transaction_read_only", "transaction_read_only"].includes(name);
   }
 
+  /**
+   * WHAT THIS SESSION ANSWERS FOR ONE PARAMETER, by its name in any case: `SHOW <name>`, SHOW ALL's row of that name and
+   * the ParameterStatus the startup reports all read it, so a tool reads ONE string however it asks. The TLS parameters
+   * first (`tlsParameters`), then those this server fixes (`fixedParameter`), then the session's own SETs (`vars.other`);
+   * null for one the catalog Postgres answers as its own.
+   */
+  private sessionSetting(name: string): string | null {
+    const n = name.toLowerCase();
+    return tlsParameters(this.socket instanceof tls.TLSSocket)[n] ?? fixedParameter(n, this.vars, this.user) ?? this.vars.other.get(n) ?? null;
+  }
+
   private async showStatement(name: string): Promise<Buffer[]> {
-    if (name === "all") throw new PgError({ code: "0A000", message: "SHOW ALL is not supported: SHOW one parameter" });
-    const value = tlsParameters(this.socket instanceof tls.TLSSocket)[name] ?? fixedParameter(name, this.vars, this.user) ?? this.vars.other.get(name) ?? null;
+    if (name === "all") return this.showAll();
+    const value = this.sessionSetting(name);
     if (value === null) {
       const reply = splitFrames(await this.server.catalog.run(frame("Q", cstr(`SHOW ${quoteIdent(name)}`))));
       const err = reply.find((f) => f.type === "E");
@@ -1307,6 +1318,30 @@ class Session {
       return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
     }
     return [rowDescription([fieldOf(spell(name), "text", 0)]), dataRow([Buffer.from(value, "utf8")]), commandComplete("SHOW")];
+  }
+
+  /**
+   * SHOW ALL (Postico sends it at every connection): the catalog Postgres's own answer — its RowDescription relayed as it
+   * is (name, setting, description: text, as Postgres's), a row per parameter in its order — with the setting of each row
+   * this session decides replaced by `sessionSetting`'s, so the row and `SHOW <name>` are one string. Mason's settings,
+   * never the source database's (Mason gap show-all). A parameter Postgres's SHOW ALL leaves out is left out here too,
+   * though the session set it or reports it: a placeholder (`SET myapp.x`), session_authorization, is_superuser, role
+   * (GUC_NO_SHOW_ALL) — the catalog, a Postgres, lists exactly the names Postgres lists.
+   */
+  private async showAll(): Promise<Buffer[]> {
+    const reply = splitFrames(await this.server.catalog.run(frame("Q", cstr("SHOW ALL"))));
+    const err = reply.find((f) => f.type === "E");
+    if (err !== undefined) throw relayedError(err.frame);
+    return reply.filter((f) => f.type !== "Z").map((f) => {
+      if (f.type !== "D") return f.frame;
+      const [row] = decodeBackend(f.frame);
+      const name = row?.type === "DataRow" && row.values.length === 3 ? row.values[0] : null;
+      if (row?.type !== "DataRow" || name === null || name === undefined) {
+        throw new PgError({ code: "XX000", message: "the catalog Postgres answered SHOW ALL with a row other than name, setting, description (Mason bug: report it)" }, 500);
+      }
+      const value = this.sessionSetting(name.toString("utf8"));
+      return value === null ? f.frame : dataRow([name, Buffer.from(value, "utf8"), row.values[2] ?? null]);
+    });
   }
 
   /** a SHOW's RowDescription, for a Describe: the frame its answer starts with (the column is named by the parameter) */

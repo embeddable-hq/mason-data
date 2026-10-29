@@ -109,7 +109,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `infinite-interval` | an infinite interval read from a text (Postgres 17+) | infinity, -infinity | refused when a row holds one (DuckDB's interval has no infinity) | filter it out first, or read it as text |
 | `relative-time-literal` | a relative time combined with anything else ('today 10:00', 'now'::date + …  written as one literal), or read from a row as a date or a time | the transaction's start (a row's value: when the row is read) | refused (a bare 'now', 'today', 'tomorrow', 'yesterday' literal is answered: the transaction's start at the Parse) | current_date + time '10:00', now(), current_date + 1 |
 
-## Answered differently (15)
+## Answered differently (16)
 
 Answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
@@ -130,6 +130,7 @@ Answered, but not as Postgres answers. Each is a decided difference the oracle c
 | `jsonb-equal-text` | GROUP BY or DISTINCT of jsonb values that are equal but written apart ('1.0' and '1.00', '{"a": 1}' and '{"a": 1.0}') | one group, written as the value its plan reads first | one group, written as the value DuckDB reads first: either may be any of them | GROUP BY j::text where the text must decide |
 | `char-n-minmax` | greatest / least of a char(n) beside a text | compares without the padding, answers the first of equal values | compares the padded text | cast the char(n) to text first |
 | `nested-exact-numeric` | an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …) | exact digits at every step | the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x), it is exact | compute it in the outermost query, or round(…, n) inside |
+| `show-all` | SHOW ALL | every server setting with the source database's values | every setting the listener's catalog Postgres has, with this session's values laid over (search_path, TimeZone, ssl, …): Mason's settings, never your source database's | SHOW <name> for a setting; the source's settings are the source's |
 
 ## Limits of the prototype (7)
 

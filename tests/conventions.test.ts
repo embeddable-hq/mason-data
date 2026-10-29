@@ -690,3 +690,55 @@ test("the link guard would catch the real thing", () => {
   ]);
   assert.deepEqual(brokenLinks("README.md", "```\n[x](nothing.md)\n```", read), [], "a link in a code fence is code");
 });
+
+/**
+ * EVERY REFUSAL ON THE WIRE NAMES ITS REGISTRY ENTRY (CLAUDE.md "Conventions"; src/duck/gaps.ts): the listener refused
+ * Postico's SHOW ALL, at every connection, with a bare `PgError` 0A000 that named no gap, so docs/SQL-SUPPORT.md never
+ * listed it and the oracle never met it. A `new PgError({ code: "0A000", … })` in src/api/ names its gap (`gapMark(…)`,
+ * or `Mason gap <id>` in its words); those that did not when this guard was written are listed by their message's first
+ * words, a ratchet: none is added, and one fixed or gone is taken off the list.
+ */
+export function bareRefusals(src: string): string[] {
+  return [...src.matchAll(/new PgError\(\{\s*code:\s*"0A000",\s*message:\s*["`]([^"`]{0,40})/g)]
+    .filter((m) => { const end = src.indexOf("})", m.index); return !/gapMark\(|Mason gap [a-z0-9-]/.test(src.slice(m.index, end < 0 ? undefined : end)); })
+    .map((m) => m[1]!);
+}
+const BARE_REFUSALS_WHEN_GUARDED = [
+  "startup options ${JSON.stringify(options)}",
+  "DateStyle ${value} is not supported: this API",
+  "extra_float_digits ${n} is not supported: this",
+  "standard_conforming_strings off is not supported",
+  "EXPLAIN of this statement is not supported",
+  "Mason cannot find the statement this EXPLAIN",
+].map((s) => s.slice(0, 40));
+
+test("a statement refused 0A000 by the listener names its gap (src/duck/gaps.ts): no new bare refusal", () => {
+  const bare = scannedFiles(["src/api"]).flatMap((f) => bareRefusals(f.src).map((m) => ({ file: f.name, m })));
+  assert.deepEqual(bare.filter((b) => !BARE_REFUSALS_WHEN_GUARDED.includes(b.m)).map((b) => `${b.file}: ${b.m}…`), [],
+    "a refusal that names no gap: register it in src/duck/gaps.ts and name it (gapMark), or answer the statement");
+  assert.deepEqual(BARE_REFUSALS_WHEN_GUARDED.filter((k) => !bare.some((b) => b.m === k)), [], "a listed bare refusal is gone: take it off BARE_REFUSALS_WHEN_GUARDED");
+});
+
+test("the bare-refusal guard catches the real thing", () => {
+  assert.deepEqual(bareRefusals('if (name === "all") throw new PgError({ code: "0A000", message: "SHOW ALL is not supported: SHOW one parameter" });'), ["SHOW ALL is not supported: SHOW one para"]);
+  assert.deepEqual(bareRefusals('throw new PgError({ code: "0A000", message: `x is not supported (${gapMark("show-all")})` });'), []);
+  assert.deepEqual(bareRefusals('throw new PgError({ code: "0A000", message: "x", detail: "Mason gap explain-option" });'), []);
+  assert.deepEqual(bareRefusals('throw new PgError({ code: "22023", message: "a bad value" });'), [], "another SQLSTATE is Postgres's own refusal");
+});
+
+/**
+ * WHAT A SESSION SAYS A PARAMETER IS, ONE READER (src/api/postgres/server.ts `sessionSetting`; a fact derived in several
+ * places): `SHOW <name>`, SHOW ALL's row of that name and the ParameterStatus the startup reports each read it, so a tool
+ * reads one string however it asks. `fixedParameter` is called by that reader alone.
+ */
+test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through one reader (sessionSetting)", () => {
+  const server = "src/api/postgres/server.ts";
+  const src = fs.readFileSync(path.join(ROOT, server), "utf8");
+  for (const start of ["private async showStatement(", "private async showAll(", "private reportedParameters("]) {
+    const at = src.indexOf(start);
+    assert.ok(at >= 0, `${server} has no ${start}`);
+    assert.match(src.slice(at, src.indexOf("\n  }\n", at)), /this\.sessionSetting\(/, `${start}…): read the value through sessionSetting`);
+  }
+  const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
+  assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
+});

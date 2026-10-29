@@ -249,4 +249,15 @@ export const TOOLS: ToolCorpus[] = [
       "SELECT\n  DATE_TRUNC('DAY', created_at) AS created_at,\n  COUNT(*) AS count\nFROM public.orders\nWHERE\n  created_at >= TO_TIMESTAMP('2026-01-01 00:00:00.000000', 'YYYY-MM-DD HH24:MI:SS.US')\n  AND created_at < TO_TIMESTAMP('2027-01-01 00:00:00.000000', 'YYYY-MM-DD HH24:MI:SS.US')\nGROUP BY\n  DATE_TRUNC('DAY', created_at)\nLIMIT 1000",
     ],
   },
+  {
+    // ONLY THIS STATEMENT IS RECORDED SO FAR: not a trace of a session, but the refusal line Mason's log wrote at every
+    // Postico connection (`refused: 0A000 SHOW ALL is not supported`, before SHOW ALL was answered). What else Postico
+    // sends when it lists the catalog and opens a table is to be recorded under MASON_PG_TRACE=1, as the tools above were
+    tool: "Postico",
+    version: "not recorded (the refusal line names no version)",
+    recorded: "its connect, as Mason's log said it (a simple Query)",
+    statements: [
+      "SHOW ALL",
+    ],
+  },
 ];

@@ -660,8 +660,9 @@ test("the BI-tools test: a sum over a CASE has the scale of the arms its rows to
   } finally { await c.end(); }
 });
 
-/** One session over a raw socket, its reading in the test's hands (`pg` reads every reply as it comes). */
-async function rawSession(port = api.port): Promise<{ socket: net.Socket; pid: number; secret: number; untilReady(): Promise<BackendMessage[]>; end(): void }> {
+/** One session over a raw socket, its reading in the test's hands (`pg` reads every reply as it comes); `startup` adds
+ *  to its startup packet, and `reported` is the ParameterStatus the startup answered. */
+async function rawSession(port = api.port, startup: Record<string, string> = {}): Promise<{ socket: net.Socket; pid: number; secret: number; reported: Map<string, string>; untilReady(): Promise<BackendMessage[]>; end(): void }> {
   const socket = net.connect(port, "127.0.0.1");
   await new Promise<void>((r) => socket.once("connect", () => r()));
   let chunks: Buffer[] = [];
@@ -675,12 +676,14 @@ async function rawSession(port = api.port): Promise<{ socket: net.Socket; pid: n
     chunks = []; tail = Buffer.alloc(0);
     return ms;
   };
-  socket.write(wire.startup({ user: "mason", database: "app" }));
+  socket.write(wire.startup({ user: "mason", database: "app", ...startup }));
   while (chunks.length === 0) await new Promise<void>((r) => { wake = r; });
   chunks = [];
   socket.write(wire.password(mintToken(API_KEY, 600).token));
-  const key = (await untilReady()).find((m) => m.type === "BackendKeyData") as Extract<BackendMessage, { type: "BackendKeyData" }>;
-  return { socket, pid: key.pid, secret: key.secret, untilReady, end: () => { socket.destroy(); } };
+  const started = await untilReady();
+  const key = started.find((m) => m.type === "BackendKeyData") as Extract<BackendMessage, { type: "BackendKeyData" }>;
+  const reported = new Map(started.flatMap((m) => m.type === "ParameterStatus" ? [[m.name, m.value] as const] : []));
+  return { socket, pid: key.pid, secret: key.secret, reported, untilReady, end: () => { socket.destroy(); } };
 }
 const dataRows = (ms: BackendMessage[]): Array<Extract<BackendMessage, { type: "DataRow" }>> => ms.filter((m) => m.type === "DataRow") as Array<Extract<BackendMessage, { type: "DataRow" }>>;
 const finished = (word: string): boolean => logged.some((l) => l.startsWith("statement:") && l.includes(word));
@@ -2071,6 +2074,68 @@ test("a ->> of a computed jsonb reads a key held twice as Postgres does, and a c
     }
     assert.deepEqual(wrong, []);
   } finally { await c.end(); }
+});
+
+// SHOW ALL (Postico sends it at every connection, and it was refused by a bare PgError no gap named): Postgres's shape —
+// the catalog Postgres's own RowDescription — and a row per setting Postgres lists, in its order, each this session's
+// value where the session decides it. ONE reader (server.ts `sessionSetting`) answers SHOW <name>, SHOW ALL's row and
+// the startup's ParameterStatus, so the three never part. The values are Mason's, never the source's (Mason gap show-all)
+test("SHOW ALL is Postgres's three text columns, a row per setting in Postgres's order, each the string SHOW <name> answers in the session (Mason gap show-all)", async () => {
+  const described = (ms: BackendMessage[]): BackendMessage | undefined => ms.find((m) => m.type === "RowDescription");
+  const text = (r: Extract<BackendMessage, { type: "DataRow" }>, i: number): string | null => r.values[i]?.toString("utf8") ?? null;
+  const errors = (ms: BackendMessage[]): BackendMessage[] => ms.filter((m) => m.type === "ErrorResponse");
+  const want = wire.replies(await truth.execProtocolRaw(wire.query("SHOW ALL")));
+  const s = await rawSession(api.port, { application_name: "postico-at-startup" });
+  try {
+    // what the startup reported is what SHOW ALL lists before any SET
+    s.socket.write(wire.query("SHOW ALL"));
+    const atStart = new Map(dataRows(await s.untilReady()).map((r) => [text(r, 0) ?? "", text(r, 1)]));
+    assert.ok(s.reported.has("TimeZone") && s.reported.has("DateStyle"), "the startup reported its parameters");
+    for (const [name, value] of s.reported) if (atStart.has(name)) assert.equal(atStart.get(name), value, `${name} as reported`);
+    s.socket.write(wire.query("SET TimeZone = 'Europe/Berlin'; SET search_path = sales, public; SET work_mem = '64MB'; SET myapp.flag = 'on'"));
+    assert.deepEqual(errors(await s.untilReady()), []);
+    s.socket.write(wire.query("SHOW ALL"));
+    const simple = await s.untilReady();
+    assert.deepEqual(errors(simple), []);
+    // the RowDescription is Postgres's, field for field: name, setting, description, each text (25), of no table, typmod -1
+    assert.deepEqual(described(simple), described(want));
+    const fields = described(simple);
+    assert.deepEqual(fields?.type === "RowDescription" ? fields.fields.map((f) => [f.name, f.tableOid, f.typeOid, f.typeModifier, f.format]) : null,
+      [["name", 0, 25, -1, 0], ["setting", 0, 25, -1, 0], ["description", 0, 25, -1, 0]]);
+    assert.deepEqual(simple.find((m) => m.type === "CommandComplete"), { type: "CommandComplete", tag: "SHOW" });
+    const rows = dataRows(simple);
+    const names = rows.map((r) => text(r, 0) ?? "");
+    // every name Postgres lists, each once, in Postgres's order (by name without regard to case: guc_name_compare)
+    assert.deepEqual(names, dataRows(want).map((r) => text(r, 0)));
+    assert.equal(new Set(names.map((n) => n.toLowerCase())).size, names.length, "no name twice");
+    assert.deepEqual(names, [...names].sort((a, b) => { const x = a.toLowerCase(), y = b.toLowerCase(); return x < y ? -1 : x > y ? 1 : 0; }));
+    // left out as Postgres leaves them out, though the session set or reports them: a placeholder, the GUC_NO_SHOW_ALL ones
+    for (const hidden of ["myapp.flag", "session_authorization", "is_superuser", "role"]) assert.ok(!names.includes(hidden), `${hidden} is not listed`);
+    const setting = new Map(rows.map((r) => [text(r, 0) ?? "", text(r, 1)]));
+    assert.equal(setting.get("TimeZone"), "Europe/Berlin", "the session's SET");
+    assert.equal(setting.get("search_path"), "sales, public", "the session's SET");
+    assert.equal(setting.get("application_name"), "postico-at-startup", "the startup packet's");
+    assert.equal(setting.get("DateStyle"), "ISO, MDY");
+    assert.equal(setting.get("work_mem"), "64MB", "a SET the catalog Postgres validated, kept by the session");
+    assert.equal(setting.get("ssl"), "off", "a plain session on loopback");
+    // a row's setting is the string SHOW <name> answers in the same session: every one the session decides, and every
+    // 20th of the catalog's own (each SHOW of those is a round trip to the catalog Postgres, ~15 ms)
+    const decided = new Set(["TimeZone", "search_path", "application_name", "DateStyle", "IntervalStyle", "work_mem", "ssl", "server_version", "server_version_num",
+      "client_encoding", "server_encoding", "extra_float_digits", "transaction_isolation", "default_transaction_isolation", "default_transaction_read_only",
+      "transaction_read_only", "in_hot_standby", "integer_datetimes", "standard_conforming_strings", "max_identifier_length"]);
+    const asked = names.filter((n, i) => decided.has(n) || i % 20 === 0);
+    assert.equal(asked.filter((n) => decided.has(n)).length, decided.size, "every decided name is listed");
+    s.socket.write(wire.query(asked.map((n) => `SHOW "${n}"`).join("; ")));
+    const shown = await s.untilReady();
+    assert.deepEqual(errors(shown), []);
+    assert.deepEqual(dataRows(shown).map((r) => text(r, 0)), asked.map((n) => setting.get(n)));
+    // the extended protocol (Parse, Bind, Describe the portal, Execute): the same RowDescription and rows
+    s.socket.write(wire.extended("SHOW ALL", [], [0]));
+    const extended = await s.untilReady();
+    assert.deepEqual(errors(extended), []);
+    assert.deepEqual(described(extended), described(want));
+    assert.deepEqual(dataRows(extended), rows);
+  } finally { s.end(); }
 });
 
 // A `#>` PATH ELEMENT IS AN INDEX AS POSTGRES'S strtoint READS IT (jsonfuncs.c): white space before it and a sign are
