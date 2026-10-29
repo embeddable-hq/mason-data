@@ -160,7 +160,7 @@ export async function orientation(cwd: string, s: Style = styleOut()): Promise<s
     ? [["Project", `${project.config.name}, files in ${project.folder}`], ["Mason", run ? `running (pid ${run.pid})` : "not running"]]
     : [["Project", "none here: mason init makes this folder one"]];
   const next: NextStep[] = !project
-    ? [["mason init", "make this folder a project (DATABASE_URL from .env, or mason init postgres://…)"],
+    ? [["mason init", "make this folder a project (MASON_DATABASE_URL or DATABASE_URL from .env, or mason init postgres://…)"],
       ["mason init demo", "or try it on a demo database Mason makes itself: nothing to install"],
       ["mason doctor", "what this machine needs for Mason, and whether it has it"]]
     : !run ? [["mason start", "start Mason for this project, in the background"], ["mason status", "the project and its tables"]]
