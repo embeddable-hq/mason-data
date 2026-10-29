@@ -88,7 +88,7 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
     assert.deepEqual(up.tables, { total: 0, copied: 0, copying: 0, waiting: 0, failed: 0 });
     assert.match(first.out(), /^mason serve: served, the project in .*project, the state in .*data\/\.mason$/m);
     assert.match(first.out(), /mason start: ready/);
-    assert.match(first.out(), /\[sync\]|\[duckdb\]/, "the run's log is on stdout");
+    assert.match(first.out(), /\[sync\]|\[copy\]/, "the run's log is on stdout");
     assert.doesNotMatch(first.out(), new RegExp(KEY), "the API key is never printed");
 
     // beside it, in its data folder, as `docker compose exec mason mason add …`

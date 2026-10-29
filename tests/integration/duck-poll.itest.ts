@@ -210,7 +210,7 @@ test("an unconstrained or wide numeric is copied and polled exactly, and copied 
     await same("the first copy", 18);
     // q is a numeric(65,30) whose values use 2 decimals: 12 digits do not fit at 30, they do at 2 (the wire writes 30)
   assert.equal(await typesOf(), "id INTEGER, a DECIMAL(38,18), p DECIMAL(38,30), huge DOUBLE, odd DOUBLE, q DECIMAL(38,2)");
-    assert.ok(logged.some((l) => /public\.amounts\.huge: values of 41 digit\(s\) and 0 decimal\(s\) do not fit DuckDB's DECIMAL\(38\): copied as a double/.test(l)), logged.join("\n"));
+    assert.ok(logged.some((l) => /public\.amounts\.huge: values of 41 digit\(s\) and 0 decimal\(s\) do not fit the copy's DECIMAL\(38\): copied as a double/.test(l)), logged.join("\n"));
     assert.ok(logged.some((l) => /public\.amounts\.odd: 1 value\(s\) NaN or Infinity/.test(l)), logged.join("\n"));
     assert.ok(logged.some((l) => /public\.amounts\.a: values of 1 to 18 decimals: Mason answers each with 18, Postgres with its own/.test(l)), logged.join("\n"));
 
