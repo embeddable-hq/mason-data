@@ -240,7 +240,7 @@ test("failed: its error on its line and in full, the warning, a table whose sync
   const text = textOf(html);
   assert.match(text, /public\.orders 100% its copy failed: could not read the next chunk: connection reset/);
   assert.match(html, /<details><summary>the whole error<\/summary><pre>could not read the next chunk: connection reset\nthe sync tries it again in 5 min<\/pre><\/details>/);
-  assert.match(text, /public\.events 100% 30,000,000 rows · copied · sync: off, last synced \d+ days? ago — mason sync events syncs it now/);
+  assert.match(text, /public\.events 100% 30,000,000 rows · copied · sync: off, last synced \d+ days? ago — mason sync events syncs it now; sync: poll 5m on its entry polls it/);
   assert.match(text, /Warning mason\/sources\/shop\.yml: tables\.ordrs: no such table/);
   assert.match(text, /Changes logical replication: slot mason_dev_shop, publication app_pub \(named: read as it is, never altered\)/);
   assert.match(text, /Slow queries: could not read them \(the request log cannot be read; mason logs has the detail\)/);

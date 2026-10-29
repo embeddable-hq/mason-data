@@ -174,7 +174,7 @@ test("mason status and wait: each copied table says how it is kept current and h
     t({ table: "public.small", added: true, copy: { phase: "done", rowsCopied: 7, updatedAt: at(5) } }),
   ] }), now);
   assert.deepEqual(lines, [
-    "public.orders  ████████████████████ 100%  22,086,165 rows · copied · sync: off, last synced 3 days ago — mason sync orders syncs it now",
+    "public.orders  ████████████████████ 100%  22,086,165 rows · copied · sync: off, last synced 3 days ago — mason sync orders syncs it now; sync: poll 5m on its entry polls it",
     "shop.events    ████████████████████ 100%  3 rows · copied · polled every 30s, last 4 s ago",
     "public.fresh   ████████████████████ 100%  5 rows · copied · polled every 30s, not polled yet",
     "public.small   ████████████████████ 100%  7 rows · copied",
@@ -464,6 +464,26 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then remove customers/);
     // a name the file does not have, with the closest it has
     await same(["remove", "customer"], /shop\.yml names no table customer — did you mean `customers`\?/);
+
+    // WHAT TO RUN NEXT, Mason up (a review finding): --sync alone on a table already added starts no copy (it is caught up
+    // by one poll), so the next step is mason status, never mason wait's "the copy has started"; a new table's is mason wait
+    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n`);
+    writeRunning(s.root, { port: ctx.port, token: ctx.token });
+    try {
+      const resync = await runMason(app, ["add", "customers", "--sync", "poll 30s", "--json"], matrixEnv());
+      assert.equal(resync.code, 0, resync.stdout + resync.stderr);
+      assert.deepEqual((JSON.parse(resync.stdout) as { next: unknown }).next, [
+        { command: "mason status", what: "its sync and its copy's age: it is caught up by one poll, never copied again" },
+        { command: "mason user add <name>", what: "a user for your BI tool or psql: it prints the password and the URL to paste" }]);
+      assert.match(fs.readFileSync(s.file, "utf8"), /\n {2}customers:\n {4}sync: poll 30s\n$/);
+      const person = await runMason(app, ["add", "customers", "--sync", "off"], matrixEnv());
+      assert.match(person.stdout, /Next:\n {2}mason status +its sync and its copy's age: it is caught up by one poll, never copied again\n/);
+      const fresh = await runMason(app, ["add", "products", "--json"], matrixEnv());
+      assert.equal(fresh.code, 0, fresh.stdout + fresh.stderr);
+      assert.equal((JSON.parse(fresh.stdout) as { next: Array<{ command: string; what: string }> }).next[0]!.command, "mason wait", "a new table's copy begins");
+      const both2 = await runMason(app, ["add", "customers", "orders", "--sync", "poll 1m", "--json"], matrixEnv());
+      assert.equal((JSON.parse(both2.stdout) as { next: Array<{ command: string }> }).next[0]!.command, "mason wait", "one of them is new: its copy begins");
+    } finally { writeRunning(s.root, null); }
   } finally {
     server.close();
     fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables: {}\n`);

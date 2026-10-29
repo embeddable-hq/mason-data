@@ -1007,6 +1007,8 @@ export class Sync {
    *  times that poll (`nextPollDelayMs`), and its sync now the one recorded (the poll wrote it, `poll`) */
   private polledNow(t: AddedTable, ms: number): void {
     const s = this.syncOf(t);
+    // synced now, said from now: its rows are in before the pass re-reads the ledger's polled_at (`readPolledAt`)
+    this.polledAt.set(t.source, new Date().toISOString());
     this.switched.delete(t.source);
     this.lastPollMs.set(t.source, ms);
     this.recordedSync.set(t.source, syncText(s));
@@ -2254,7 +2256,12 @@ export class Sync {
     }
     // the copy's view of its visible columns, made again (its own transaction: DuckDB writes one database a transaction)
     await this.kept.swapped(t.source);
-    if (o.snapshot !== null) { this.snapshots.set(t.source, o.snapshot); this.recordedSync.set(t.source, syncText(this.syncOf(t))); this.switched.delete(t.source); this.due.delete(t.source); }
+    if (o.snapshot !== null) {
+      this.snapshots.set(t.source, o.snapshot); this.recordedSync.set(t.source, syncText(this.syncOf(t))); this.switched.delete(t.source); this.due.delete(t.source);
+      // synced as of its copy, said from now (a review finding: until the next pass re-read the ledger, a table just
+      // copied said "never synced"); the ledger's polled_at, written above, replaces it at that read
+      this.polledAt.set(t.source, new Date().toISOString());
+    }
     // the columns this copy holds, from its swap on: what every write to it is shaped by (`asCopied`)
     this.copiedColumns.set(t.source, [...t.columns]);
     if (o.behind !== null) {

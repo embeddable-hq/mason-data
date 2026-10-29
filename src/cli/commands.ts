@@ -212,7 +212,8 @@ export function keptAge(t: Pick<TableState, "table" | "kept">, now: number = Dat
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`;
   if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
-  if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${tableArg(t.table)} syncs it now`;
+  // the line to write as well as the command: a project an older Mason polled is off after the upgrade
+  if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${tableArg(t.table)} syncs it now; sync: poll 5m on its entry polls it`;
   return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)}`}`;
 }
 
@@ -828,7 +829,10 @@ export async function add(argv: string[]): Promise<number> {
       const s = await readState(run);
       return addTables({ tables: s.tables, file: s.source.file ?? null,
         pick: (table, columns, key) => viaRun<PickResult>(run, "/api/pick", { table, picked: true, columns, ...(key ? { key } : {}), ...(sync ? { sync: syncText(sync) } : {}), keep }),
-        next: (n) => [["mason wait", `until ${n === 1 ? "its copy finishes" : "their copies finish"} (the copy has started)`], READY_STEPS[0]!] }, specs, json);
+        // --sync alone on tables already added: no copy starts (each is caught up by one poll), so wait has nothing to wait for
+        next: (n, wereAdded) => keep && wereAdded === n
+          ? [["mason status", `${n === 1 ? "its sync and its copy's age: it is" : "their sync and their copies' age: each is"} caught up by one poll, never copied again`], READY_STEPS[0]!]
+          : [["mason wait", `until ${n === 1 ? "its copy finishes" : "their copies finish"} (the copy has started)`], READY_STEPS[0]!] }, specs, json);
     });
   }
   // Mason down: the command writes the entry itself, checked as the run checks it; the copy begins at mason start
@@ -846,13 +850,15 @@ interface AddWay {
   tables: readonly CatalogTable[];
   file: string | null;
   pick: (table: string, columns: string[], key: string[] | null) => Promise<Edited<PickResult>>;
-  next: (n: number) => NextStep[];
+  /** what to run once `n` tables are added, `wereAdded` of them named by the file before */
+  next: (n: number, wereAdded: number) => NextStep[];
 }
 
 /** `mason add`'s checklist and answer, the same whichever way the tables are added (`AddWay`). */
 async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; columns: string[]; key: string[] | null }>, json: boolean): Promise<number> {
   const results: unknown[] = [];
   const added: string[] = [];
+  let wereAdded = 0;
   let file: string | null = way.file;
   // the tables that could not be added, each with its reason and code: the command's failure, in the failure shape
   const refused: Array<{ table: string; message: string; code: string }> = [];
@@ -879,12 +885,13 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
     results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already,
       sync: b.sync, bigOff: b.bigOff, pollCost: b.pollCost });
     added.push(b.table);
+    if (t.added) wereAdded++;
     if (json) continue;
     const l = addedLines(b, shown(b.file));
     steps.done(l.line);
     for (const x of l.notes) note(x);
   }
-  const next: NextStep[] = added.length ? way.next(added.length) : [];
+  const next: NextStep[] = added.length ? way.next(added.length, wereAdded) : [];
   if (refused.length) {
     // A TABLE NOT ADDED IS THE COMMAND'S FAILURE, in the shape every failure has (found by the CLI session test of the private repo:
     // exit 1 with no error, and nothing on stderr): what is wrong, each table's reason, and next — the added ones' too

@@ -282,7 +282,7 @@ test("mason status --json says how each table is kept current as the sync derive
   assert.deepEqual(withoutNext(by("a").kept), { by: "poll", sync: every("30s", 30), syncedAt: asOf });
   assert.deepEqual(by("big").kept, { by: "poll", sync: OFF, syncedAt: asOf, nextAt: null });
   const lines = tableLines(poll.json, Date.parse("2026-10-30T20:58:39.000Z"));
-  assert.match(lines.find((l) => l.startsWith("public.big"))!, /copied · sync: off, last synced 3 days ago — mason sync big syncs it now$/);
+  assert.match(lines.find((l) => l.startsWith("public.big"))!, /copied · sync: off, last synced 3 days ago — mason sync big syncs it now; sync: poll 5m on its entry polls it$/);
   assert.match(lines.find((l) => l.startsWith("public.a "))!, /copied · polled every 30s, last 3 days ago$/);
 
   // REPLICATION MODE: streamed, and caught up by one poll first — the stream section's state and why are kept's
@@ -410,4 +410,22 @@ test("a sync changed is a catch-up by one poll in poll mode alone, said once; un
     "the stream keeps every table current: no poll is owed, and none is said (at every start, again)");
   assert.deepEqual(switched(await startLine({ mode: "poll", tables: [{ ...table("a", 10, [column("id"), column("added", "text")]), sync: every("30s", 30) }], seed })), [],
     "its columns changed too: it is copied again (said as such), never 'its copy is kept'");
+});
+
+test("a table just copied says its copy's age at once, never 'never synced' until the next pass reads the ledger again", async () => {
+  await withSync({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }], seed: async (run) => {
+    // the side table a copy built, ready to be swapped in (src/duck/sync.ts swap)
+    await run("CREATE TABLE public.a__mason_copy (id BIGINT)");
+    await run(`INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.a', 'copied', 0, 0, 1.0, now(), NULL, '${JSON.stringify([column("id")])}')`);
+  } }, async (sync) => {
+    const swap = (sync as unknown as { swap(t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null }): Promise<void> }).swap.bind(sync);
+    const kept = () => sync.state().find((x) => x.source === "public.a")!.kept as Kept;
+    assert.equal(kept().syncedAt, null, "before its copy: never synced");
+    await swap({ ...table("a"), sync: every("30s", 30) }, "public.a__mason_copy", { snapshot: "100:100:", behind: "after its copy" });
+    const k = kept();
+    assert.ok(typeof k.syncedAt === "string" && Date.now() - Date.parse(k.syncedAt) < 60_000, `synced as of its copy: ${JSON.stringify(k)}`);
+    const line = tableLines(runState(runContext([{ ...table("a"), sync: every("30s", 30) }], "poll"), sync.state(), null) as RunState).find((l) => l.startsWith("public.a"))!;
+    assert.match(line, /NOT kept current \(last synced \d+ s ago\): /, line);
+    assert.doesNotMatch(line, /never synced/);
+  });
 });

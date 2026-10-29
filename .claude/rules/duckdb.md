@@ -483,7 +483,10 @@ current as its `sync:` says — `off` (the default: read again only at `mason sy
   that polls, and warns a poll of over `COSTLY_POLL_ROWS` under a minute with its estimate and basis. A setting that
   sets an interval for every table (`MASON_POLL_MS`) refuses the start. DETECTOR: `kept` on every table's line
   (`mason status`, `wait`, EXPLAIN, the MCP tools) says its sync and its copy's age; `tests/duck-sync-schedule.test.ts`
-  and `tests/integration/duck-poll.itest.ts` hold the schedule and the switch. ("Each table's sync")
+  and `tests/integration/duck-poll.itest.ts` hold the schedule and the switch. ("Each table's sync") A pass is ONE
+  attachment of the source (`attach` / `detach`: a new connection on the database), so at `poll 1s`, the floor, a
+  table costs the source a connection a second beside its scan; holding the attachment across close passes is a later
+  step, measured first.
 - **Replication has no gap, by construction**: a table is copied only after the publication carries it and the slot
   exists, joins the stream only once caught up, and a key's changes replayed in commit order end at its state whatever
   they start from; a slot new to the copy is caught up the same way, by ONE poll from the watermarks, never a fresh

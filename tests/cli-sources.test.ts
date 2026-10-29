@@ -363,8 +363,8 @@ test("sync: every mistake on one report, at its key, with the line to write — 
   assert.equal(one("poll 500ms"), "sync: 500ms is under the shortest interval, 1s (a poll scans the table whole on your database): write poll 1s or longer");
   assert.equal(one("poll 0s"), "sync: 0s is under the shortest interval, 1s: write poll 1s or longer");
   assert.equal(one("poll"), "sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)");
-  assert.equal(one("polling 5s"), "sync: polling is not a sync — did you mean `poll 5s`?: write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
-  assert.equal(one("Off"), "sync: Off is not a sync — did you mean `off`?: write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
+  assert.equal(one("polling 5s"), "sync: polling is not a sync — did you mean `poll 5s`? Write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
+  assert.equal(one("Off"), "sync: Off is not a sync — did you mean `off`? Write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
   assert.equal(one("replication"), "sync: replication is not in this release yet: mason start --replication keeps every table current (write off or poll <interval> here)");
   assert.equal(one("poll 5 minutes"), 'sync: "5 minutes": write poll 5m');
   assert.equal(one("poll 1.5h"), "sync: 1.5h: an interval is a whole number — write poll 90m");
@@ -386,7 +386,7 @@ test("sync: every mistake on one report, at its key, with the line to write — 
   // all of a file's mistakes on ONE report
   assert.deepEqual(problems(`${head}sync: poll\ntables:\n  orders: { sync: polling 5s }\n  customers: { sync: poll 500ms }\n`), [
     "sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)",
-    "tables.orders.sync: polling is not a sync — did you mean `poll 5s`?: write off, or poll <interval> (poll 5s, poll 5m or poll 1h)",
+    "tables.orders.sync: polling is not a sync — did you mean `poll 5s`? Write off, or poll <interval> (poll 5s, poll 5m or poll 1h)",
     "tables.customers.sync: 500ms is under the shortest interval, 1s (a poll scans the table whole on your database): write poll 1s or longer",
   ]);
 });

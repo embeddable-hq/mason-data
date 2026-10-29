@@ -154,10 +154,20 @@ function syncCounts(tables: ReadonlyArray<{ sync?: TableSync }>): string {
  * THE SOURCES FILE'S DEFAULT SYNC, SAID ONCE AT THE START: what every table without its own `sync:` gets — `off` (the
  * default, said as such when the file writes none) or the file's `poll <interval>` — and how to change it. In
  * replication mode the stream keeps every table current, and the file's sync: is the poll's.
+ *
+ * AN UPGRADE THAT STOPS THE POLLS IS SAID LOUDLY (issue 33's review): a file an older Mason wrote has no `sync:`
+ * anywhere, and its tables were polled every 5 s; from this release they are `off`. When the copy already holds
+ * `copiedBefore` of its tables and no `sync:` is written at all, the line says how many are no longer polled and the
+ * exact line that keeps them current as before.
  */
-export function syncDefaultLine(file: SourceFile, shown: string, replication: boolean): string {
+export function syncDefaultLine(file: SourceFile, shown: string, replication: boolean, copiedBefore = 0): string {
   const d = effectiveSync(file, undefined);
   if (replication) return `sync: logical replication keeps every table current; ${shown}'s sync: (${syncText(d.sync)}${d.from === "default" ? ", the default" : ""}) is the poll's, read when mason start --poll goes back to it`;
+  const noneWritten = d.from === "default" && file.tables.every((e) => e.sync === null);
+  if (noneWritten && copiedBefore > 0) {
+    return `sync: off (the default): ${copiedBefore === 1 ? "1 table is" : `${copiedBefore} tables are`} no longer polled; write \`sync: poll 5s\` at the top of ${shown} ` +
+      "to keep them current as before, or `mason sync <table>` when you need it";
+  }
   if (d.from === "default") return `sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of ${shown} polls every table, or on an entry that one`;
   return d.sync.mode === "off" ? `sync: off (${shown}): after its first copy, a table is read again only by mason sync <table>, unless its entry says sync: poll <interval>`
     : `sync: ${syncText(d.sync)} (${shown}): every table without a sync: of its own is polled every ${d.sync.every}`;
@@ -362,6 +372,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^copied |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
     syncMode === "replication" ? repl : null, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths } });
   await sync.open();
+  // the tables this copy already holds, before this start copies anything: an upgrade from a Mason that polled every
+  // table says how many are no longer polled (`syncDefaultLine`)
+  const copiedBefore = sync.state().filter((s) => s.phase === "copied" && sources.tables.some((t) => t.source === s.source)).length;
   // a database restored to another server: its transaction ids are not the watermarks', so every table is read again
   if (move.action === "reread") { await sync.rereadAll(); say(`  ${source.database} is on another server than the copy was taken from: reading its tables again`); }
   if (move.action !== "same") { cfg.sourceServer = { systemIdentifier: facts.systemIdentifier, database: source.database }; writeConfig(home, cfg); }
@@ -464,7 +477,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   done(`Mason is up: ${sync.state().length} table(s) added, kept current ${syncMode === "replication" ? `by logical replication (slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})`
     : syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)}` : `every ${PASS_RETRY_MS / 1000} s by copying each table again whole (MASON_DUCK_SYNC=recopy)`}`);
   // THE FILE'S DEFAULT, SAID ONCE (issue 33: nothing Mason does to your database is a hidden default)
-  say(`  ${syncDefaultLine(sources.file, shownPath(project.root, sources.file.file), syncMode === "replication")}`);
+  const defaultLine = syncDefaultLine(sources.file, shownPath(project.root, sources.file.file), syncMode === "replication", syncMode === "poll" ? copiedBefore : 0);
+  say(`  ${defaultLine}`);
+  logLine(`[sync] ${defaultLine}`);
   // THE DEMO'S WRITER: a round of changes every MASON_DEMO_CHANGE_MS, begun once the run is up, said in the log
   if (demo !== null && demoChangeMs !== null) hosted.stopChanges = demoChanges(demo, demoChangeMs, (l) => logLine(`[demo] ${l}`));
   // the stop is in place BEFORE the ready line: a supervisor or a test signals on reading it, and a SIGTERM that found

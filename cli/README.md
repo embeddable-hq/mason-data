@@ -152,8 +152,8 @@ there (`mason status` lists them); `MASON_STORE_JSON_PATHS=off` turns that off.
 | `--attach` | Stay in the foreground: the terminal shows Mason's progress, and Ctrl-C stops it. |
 
 A database on another machine needs `mason init --remote`, which records that you mean it: the copy leaves the
-database's network, and each added table under the row limit is read whole every few seconds (`--replication` reads only
-its changes). Point it at a read replica, never the primary your app writes to.
+database's network, and each polled table is read whole at its `sync:` interval (`--replication` reads only its
+changes). Point it at a read replica, never the primary your app writes to.
 
 **When the database moves.** Mason records the Postgres server it copied from. The same database on a new server (a
 restore, a move to another host) is read again at the next `mason start`: every row is compared with the copy, and only

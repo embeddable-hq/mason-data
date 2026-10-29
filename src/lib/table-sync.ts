@@ -109,7 +109,8 @@ export function parseSync(v: unknown): TableSync | { problem: string } {
   // a misspelt mode: the line it may have meant, its interval kept when it reads as one
   const near = closest(mode, MODES);
   const meant = near === "poll" && rest !== "" && !("problem" in parseInterval(rest)) ? `poll ${rest}` : near;
-  return { problem: `${mode} is not a sync${meant !== null ? ` — did you mean \`${meant}\`?` : ""}: write ${SYNC_FORMS}` };
+  // a question ends its sentence: "did you mean `poll 5s`? Write off, …"
+  return { problem: meant !== null ? `${mode} is not a sync — did you mean \`${meant}\`? Write ${SYNC_FORMS}` : `${mode} is not a sync: write ${SYNC_FORMS}` };
 }
 
 /** a sync for a person: `off`, `polled every 30s` */
