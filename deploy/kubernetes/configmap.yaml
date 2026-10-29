@@ -1,0 +1,25 @@
+# THE PROJECT FOLDER as a ConfigMap, mounted read-only at /mason/project: the sources file (which tables the server
+# copies; `url: ${DATABASE_URL}` names the Secret's variable) and mason.yml (the Mason version it is written for).
+# Make it from the mason/ folder your laptop's `mason init` and `mason add` wrote, and commit that folder:
+#
+#   kubectl create configmap mason-project --from-file=sources.yml=mason/sources/app.yml --from-file=mason.yml=mason/mason.yml
+#
+# mason serve writes nothing in a project folder that has a sources file, so read-only is fine. It means `mason add`
+# beside the server cannot write it: change the ConfigMap, then `kubectl rollout restart statefulset/mason`; the table is
+# copied (or dropped) at the next start. (To let `mason add` work beside the server, keep the project on the volume
+# instead: MASON_PROJECT=/mason/data/project, and drop this mount.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mason-project
+data:
+  # mason/sources/<name>.yml: one entry per table; a bare name is in public, else schema.table
+  sources.yml: |
+    kind: postgres
+    url: ${DATABASE_URL}
+    tables:
+      orders: {}
+  # mason/mason.yml: an image of another minor version refuses to start; an image tagged `main` holds no project to a
+  # version. Copy yours, or leave the key out.
+  mason.yml: |
+    version: 0.6.1

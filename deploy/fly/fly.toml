@@ -1,0 +1,75 @@
+# MASON ON FLY.IO: one Machine, one volume, `mason serve`. deploy/fly/README.md is the walkthrough.
+#
+#   fly launch --no-deploy --copy-config --name <app> --region <region>   # the app, from this file
+#   fly secrets set DATABASE_URL=postgres://… MASON_API_KEY=$(openssl rand -hex 24)
+#   fly deploy --ha=false                                                 # makes the volume, starts the Machine
+#   fly ssh console -u node -C "mason add public.orders"
+#
+# ONE Machine, always: the copy is one file with one writer. A Machine with a volume is updated in place (stopped,
+# then started on the same volume with the new image), which is the stop-before-start a deploy must be here; a second
+# Machine would get a second, empty volume and its own copy. Never `fly scale count 2`.
+# Every key is from https://docs.fly.io/reference/configuration (the section is named at each).
+
+app = "mason-data"          # fly launch --name sets yours
+primary_region = "ams"      # fly platform regions; the volume lives in it
+
+# Top-level: SIGTERM is mason serve's stop (a copy in flight interrupted and rolled back, the copy closed); a minute is
+# plenty. kill_timeout's default is 5 s, its maximum 300.
+kill_timeout = 60
+
+[build]
+  # `main` is every merge, `<version>` a release. To ship your committed mason/ folder in the image instead of keeping
+  # it on the volume, point this at a Dockerfile of two lines (README.md "The project folder").
+  image = "ghcr.io/embeddable-hq/mason-data:main"
+
+[env]
+  # Off loopback the Postgres API needs TLS: a certificate made on the volume at the first start (clients connect with
+  # sslmode=require), or MASON_PG_TLS_CERT / MASON_PG_TLS_KEY naming one a CA signed. mason serve --help has every setting.
+  MASON_PG_SELF_SIGNED_TLS = "1"
+  # The project folder (sources/, mason.yml) on the volume: a Machine's root filesystem is replaced at every deploy, so
+  # what `mason add` adds beside the server survives only here. Remove this line when the image carries mason/.
+  MASON_PROJECT = "/mason/data/project"
+  # The copy's memory: half of [[vm]] memory; change the two together (deploy/mason-data/README.md "Memory").
+  MASON_DUCKDB_MEMORY = "4GB"
+
+[deploy]
+  # [deploy] strategy: "rolling" is "The default strategy for apps with or without volumes"; "canary" and "bluegreen"
+  # "cannot be used for Machines with attached volumes". With one Machine, rolling is: stop it, update it, start it.
+  strategy = "rolling"
+
+# [[mounts]]: the copy and Mason's state. initial_size is read only when fly deploy creates the volume; a volume is
+# extended, never shrunk (auto_extend_size_* keys exist, README.md).
+[[mounts]]
+  source = "mason_data"
+  destination = "/mason/data"
+  initial_size = "20GB"
+
+# [[services]]: the Postgres API as raw TCP. No handlers on the port: Mason's TLS is the TLS end to end (a "tls"
+# handler would end it at Fly's edge, and the Postgres protocol's own TLS handshake would not pass).
+[[services]]
+  protocol = "tcp"
+  internal_port = 5433
+  auto_stop_machines = "off"    # a stopped Machine is a copy that is not kept current
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 5433
+
+# [checks]: GET /healthz on 4140 answers 503 while it starts and 200 once it serves. The first start takes ~15 s on an
+# idle machine, minutes on a loaded one: grace_period covers it. "Needs to be available on 0.0.0.0" (it is).
+[checks]
+  [checks.healthz]
+    type = "http"
+    port = 4140
+    path = "/healthz"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "2m"
+
+# [[vm]]: memory first, then cores (deploy/mason-data/README.md "CPU, disk and the instance"). A performance size takes
+# memory in 2048 MB steps, up to 8 GB per CPU (https://docs.fly.io/machines/guides-examples/machine-sizing).
+[[vm]]
+  cpu_kind = "performance"
+  cpus = 2
+  memory = "8gb"

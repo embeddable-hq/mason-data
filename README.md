@@ -213,6 +213,8 @@ docker compose exec mason mason user add metabase
 
 - The image is `ghcr.io/embeddable-hq/mason-data` (`main` is every merge, `<version>` a release),
   amd64 and arm64; [`deploy/mason-data/README.md`](deploy/mason-data/README.md) is the walkthrough.
+- Fly.io, Kubernetes (manifests and a Helm chart), Railway and AWS ECS each have a guide, and the platforms that
+  cannot run Mason are named with why: [`deploy/README.md`](deploy/README.md).
 - **One container per volume, never two**: DuckDB lets one process write its file. Run one replica,
   and stop the old container before the new one starts.
 - Off the container's loopback the Postgres API needs TLS: `MASON_PG_SELF_SIGNED_TLS=1` makes a
@@ -248,6 +250,7 @@ production run must set and the ones worth deciding; `mason serve --help` has ev
 | [`docs/DESIGN.md`](docs/DESIGN.md) | the design: how a statement is answered, the copy, replication, the decisions and measurements behind them |
 | [`docs/BENCHMARK.md`](docs/BENCHMARK.md) | Mason against a Postgres read replica: running the benchmark and publishing its result |
 | [`deploy/mason-data/README.md`](deploy/mason-data/README.md) | running the image on a server |
+| [`deploy/README.md`](deploy/README.md) | which platforms fit (Fly.io, Kubernetes, Railway, AWS ECS, each with a guide) and which do not, and why |
 | [`release-notes/`](release-notes/README.md) | what each release changes for you, and what to do before upgrading |
 | [`CLAUDE.md`](CLAUDE.md) | the rules of the codebase, for anyone changing it, human or not; each subsystem's own rules are in `.claude/rules/` |
 

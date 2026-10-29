@@ -1,0 +1,121 @@
+# MASON ON KUBERNETES: a StatefulSet of ONE replica. The copy is one file with one writer, so the old pod must be gone
+# before the new one starts, on the same volume:
+# - a StatefulSet's RollingUpdate deletes a pod and recreates it ("delete and recreate each Pod ... one at a time",
+#   waiting until the new one is Running and Ready), and a pod's identity (its name, its PVC) exists at most once;
+# - a Deployment would need `strategy: Recreate` ("All existing Pods are killed before new ones are created"); its
+#   default RollingUpdate starts the new pod beside the old, and a pod deleted by hand is replaced at once "even if the
+#   old Pod is still in a Terminating state". Prefer the StatefulSet; with a Deployment, Recreate is mandatory.
+# Never replicas: 2, and no HorizontalPodAutoscaler.
+# https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/
+# https://kubernetes.io/docs/concepts/workloads/controllers/deployment/ (Strategy)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mason
+spec:
+  replicas: 1
+  serviceName: mason-health
+  selector:
+    matchLabels:
+      app: mason
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: mason
+    spec:
+      # SIGTERM is mason serve's stop (a copy in flight interrupted and rolled back, the copy closed); the kubelet sends
+      # SIGKILL when this expires. The default is 30 s.
+      terminationGracePeriodSeconds: 60
+      # the image runs as node (uid 1000); fsGroup makes the volume writable by it whatever the provisioner's owner
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      containers:
+        - name: mason
+          # `main` is every merge, `<version>` a release
+          image: ghcr.io/embeddable-hq/mason-data:main
+          ports:
+            - name: pg
+              containerPort: 5433
+            - name: health
+              containerPort: 4140
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mason
+                  key: DATABASE_URL
+            - name: MASON_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mason
+                  key: MASON_API_KEY
+            # off loopback the Postgres API needs TLS: a certificate made on the volume (clients: sslmode=require), or
+            # MASON_PG_TLS_CERT / MASON_PG_TLS_KEY naming one a CA signed, mounted from a kubernetes.io/tls Secret
+            - name: MASON_PG_SELF_SIGNED_TLS
+              value: "1"
+            # the copy's memory: half the container's memory limit (the default reads the cgroup limit and takes half;
+            # said here so the two are changed together). The other half is the page cache, Node and the catalog.
+            - name: MASON_DUCKDB_MEMORY
+              value: "4GB"
+            # more settings (mason serve --help): MASON_CHANGES=replication with PG_PUBLICATION, MASON_POLL_MS, …
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              memory: 8Gi
+          # /healthz: 503 while it starts, 200 once it serves. The first start takes ~15 s on an idle node, minutes on a
+          # loaded one: the startup probe allows 30 × 10 s = 5 minutes, and liveness and readiness run only after it
+          # has succeeded once. https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /mason/data
+            - name: project
+              mountPath: /mason/project
+              readOnly: true
+      volumes:
+        - name: project
+          configMap:
+            name: mason-project
+            items:
+              - key: sources.yml
+                path: sources/app.yml
+              - key: mason.yml
+                path: mason.yml
+  # THE VOLUME: a block device (ReadWriteOnce from a block StorageClass: gp3 on EKS, pd-ssd / premium-rwo on GKE,
+  # managed-csi on AKS), never NFS, EFS or Azure Files: the copy needs a block device's file locking and random reads.
+  # The PVC outlives the StatefulSet ("Deleting and/or scaling a StatefulSet down will not delete the volumes"): delete
+  # it by hand to start over, and the next start copies the tables again.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 20Gi

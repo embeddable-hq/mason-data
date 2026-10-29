@@ -1,0 +1,43 @@
+# MASON'S HELM VALUES: the decisions a deployment makes, and nothing else. Every other setting the plain manifests
+# carry (one replica, the probes, the 60 s grace, the read-only project folder) is fixed in the templates, because it is
+# what the copy requires, not a choice. deploy/kubernetes/README.md is the walkthrough.
+
+image:
+  repository: ghcr.io/embeddable-hq/mason-data
+  tag: main                 # `main` is every merge, `<version>` a release
+
+database:
+  url: ""                   # DATABASE_URL: the database to copy from (Mason only reads it)
+  apiKey: ""                # MASON_API_KEY: what the users' passwords are made with, at least 32 characters (openssl rand -hex 24)
+  existingSecret: ""        # instead of the two above: a Secret with the keys DATABASE_URL and MASON_API_KEY
+
+project:
+  # mason/sources/<name>.yml, as `mason init` and `mason add` wrote it: the tables the server copies
+  sources: |
+    kind: postgres
+    url: ${DATABASE_URL}
+    tables: {}
+  # mason/mason.yml: the version the project is written for (an image of another minor version refuses to start;
+  # an image tagged `main` holds no project to a version). Empty: no mason.yml.
+  masonYml: ""
+
+storage:
+  className: gp3            # a BLOCK StorageClass (gp3, pd-ssd, premium-rwo, managed-csi); never NFS, EFS or Azure Files
+  size: 20Gi                # the copy is about a fifth of the tables in Postgres; `mason status` says its size
+
+memory:
+  limit: 8Gi                # the container's memory limit
+  copy: 4GB                 # MASON_DUCKDB_MEMORY: what the copy may use, half the limit; the rest is the page cache
+cpu: "2"                    # the CPU request (no limit: one statement may use every core)
+
+pgService:                  # the Postgres API, 5433, for tools outside the cluster
+  type: LoadBalancer        # a TCP load balancer; ClusterIP when a TCP ingress of your own fronts it
+  port: 5433
+  annotations: {}           # e.g. service.beta.kubernetes.io/aws-load-balancer-type: nlb
+  loadBalancerSourceRanges: []
+
+tls:
+  selfSigned: true          # MASON_PG_SELF_SIGNED_TLS=1: a certificate made on the volume; clients use sslmode=require
+  certSecret: ""            # or a kubernetes.io/tls Secret (tls.crt, tls.key) a CA signed; selfSigned is then ignored
+
+settings: {}                # more of `mason serve --help`, e.g. MASON_CHANGES: replication, PG_PUBLICATION: app_pub, MASON_POLL_MS: "10000"

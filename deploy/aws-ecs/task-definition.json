@@ -1,0 +1,51 @@
+{
+  "family": "mason-data",
+  "requiresCompatibilities": ["EC2"],
+  "networkMode": "bridge",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/mason-data-execution",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/mason-data-task",
+  "containerDefinitions": [
+    {
+      "name": "mason",
+      "image": "ghcr.io/embeddable-hq/mason-data:main",
+      "essential": true,
+      "memory": 12288,
+      "portMappings": [
+        { "containerPort": 5433, "hostPort": 5433, "protocol": "tcp" },
+        { "containerPort": 4140, "hostPort": 4140, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "MASON_PG_SELF_SIGNED_TLS", "value": "1" },
+        { "name": "MASON_PROJECT", "value": "/mason/data/project" },
+        { "name": "MASON_DUCKDB_MEMORY", "value": "6GB" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:eu-west-1:123456789012:parameter/mason/DATABASE_URL" },
+        { "name": "MASON_API_KEY", "valueFrom": "arn:aws:ssm:eu-west-1:123456789012:parameter/mason/MASON_API_KEY" }
+      ],
+      "mountPoints": [
+        { "sourceVolume": "mason-data", "containerPath": "/mason/data", "readOnly": false }
+      ],
+      "healthCheck": {
+        "command": ["CMD", "node", "-e", "fetch('http://127.0.0.1:4140/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 120
+      },
+      "stopTimeout": 60,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/mason-data",
+          "awslogs-region": "eu-west-1",
+          "awslogs-stream-prefix": "mason",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    { "name": "mason-data", "host": { "sourcePath": "/mnt/mason" } }
+  ]
+}

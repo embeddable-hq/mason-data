@@ -1,0 +1,14 @@
+{
+  "cluster": "mason",
+  "serviceName": "mason-data",
+  "taskDefinition": "mason-data",
+  "launchType": "EC2",
+  "schedulingStrategy": "REPLICA",
+  "desiredCount": 1,
+  "deploymentConfiguration": {
+    "minimumHealthyPercent": 0,
+    "maximumPercent": 100,
+    "deploymentCircuitBreaker": { "enable": true, "rollback": true }
+  },
+  "enableExecuteCommand": true
+}

@@ -1,0 +1,9 @@
+Mason is starting: one pod, {{ include "mason.name" . }}-0, its copy on the PVC data-{{ include "mason.name" . }}-0.
+
+  kubectl rollout status statefulset/{{ include "mason.name" . }}      # Ready once /healthz answers 200 (~15 s; minutes on a loaded node)
+  kubectl exec statefulset/{{ include "mason.name" . }} -- mason tables
+  kubectl exec statefulset/{{ include "mason.name" . }} -- mason user add metabase   # a user for the BI tool: URL and password, printed once
+  kubectl get service {{ include "mason.name" . }}-pg                   # the address a tool connects to, port {{ .Values.pgService.port }}, sslmode=require
+
+To add a table: put it in project.sources and `helm upgrade`; the pod restarts and copies it.
+Never scale past one replica: the copy is one file with one writer.
