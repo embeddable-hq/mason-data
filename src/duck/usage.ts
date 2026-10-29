@@ -333,7 +333,9 @@ export class UsageSampler {
       const want = new Set(copied);
       const tables = (await this.reader.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE NOT internal AND database_name = current_database() AND schema_name <> '${MASON_SCHEMA}'`))
         .getRowsJS() as Array<[string, string]>;
-      const block = Number((await this.reader.runAndReadAll("SELECT block_size FROM pragma_database_size()")).getRowsJS()[0]![0]);
+      // THE COPY'S OWN database: pragma_database_size() has a row for every attached one, and the in-memory catalog the
+      // visible names live in (src/duck/kept.ts) has block_size 0 — read first, it made every copy "0 B"
+      const block = Number((await this.reader.runAndReadAll("SELECT block_size FROM pragma_database_size() WHERE database_name = current_database()")).getRowsJS()[0]![0]);
       for (const [schema, table] of tables) {
         const name = `${schema}.${table}`;
         if (!want.has(name)) continue;
@@ -397,7 +399,7 @@ export class UsageSampler {
 
   /** Each copy's own bytes as last measured within the retention, by table. */
   async copySizes(): Promise<CopySize[]> {
-    const rows = (await this.reader.runAndReadAll(`SELECT table_name, arg_max(bytes, sampled_at) AS bytes, epoch_ms(max(sampled_at)) AS at FROM ${SIZES_TABLE} GROUP BY table_name ORDER BY table_name`))
+    const rows = (await this.reader.runAndReadAll(`SELECT table_name, arg_max(bytes, sampled_at) AS bytes, epoch_ms(max(sampled_at)) AS at FROM ${SIZES_TABLE} WHERE bytes > 0 GROUP BY table_name ORDER BY table_name`))
       .getRowsJS() as Array<[string, bigint | number, bigint | number]>;
     return rows.map(([table, bytes, at]) => ({ table, bytes: Number(bytes), at: new Date(Number(at)).toISOString() }));
   }

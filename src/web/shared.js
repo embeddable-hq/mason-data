@@ -104,14 +104,16 @@ export const eventCells = (e) => ({ time: utcText(e.at), kind: e.kind, table: e.
 
 /**
  * AN ENTRY OF THE UNSUPPORTED SQL (`/api/unsupported`'s `unsupported[]`: { gap, title, runs, users, clients, last,
- * example }) in mason status's two lines (src/cli/commands.ts `unsupportedLines`, held equal by the tests): how many
- * statements used what, and its entry of docs/SQL-SUPPORT.md (the page cannot link into the repository: it names it);
- * then when the latest was, who sent them, and the latest on one line (`example`, cut as the CLI cuts it).
+ * example }) in mason status's three lines (src/cli/commands.ts `unsupportedLines`, held equal by the tests): what they
+ * used (the entry's title), how many statements and who sent them; when the latest was and it on one line (`example`,
+ * cut as the CLI cuts it); and `how`, where the way out is (the page cannot link into the repository: it names it). The
+ * entry's id (`gap`) is only the title's text, never in a line.
  */
 export function unsupportedEntry(g) {
   const who = [...(g.users.length ? [`as ${g.users.join(", ")}`] : []), ...(g.clients.length ? [`from ${g.clients.join(", ")}`] : [])];
-  return { headline: `${n(g.runs)} statement${g.runs === 1 ? "" : "s"} used ${g.title ?? "what this Mason no longer lists"} — docs/SQL-SUPPORT.md ${g.gap}`,
-    last: `last ${utcMinute(g.last)}${who.length ? ` ${who.join(" ")}` : ""}`, example: oneLine(g.example, 100) };
+  const title = g.title ?? "SQL this Mason no longer lists";
+  return { headline: `${title}: ${n(g.runs)} statement${g.runs === 1 ? "" : "s"}${who.length ? ` ${who.join(" ")}` : ""}`,
+    last: `last ${utcMinute(g.last)}`, how: `How to rewrite it: see docs/SQL-SUPPORT.md › ${title}`, id: g.gap, example: oneLine(g.example, 100) };
 }
 
 /** A share (0 to 1) as the commands print it beside a bar: whole percent, rounded down (`12%`). */

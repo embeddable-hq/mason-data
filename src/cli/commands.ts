@@ -594,11 +594,13 @@ const STATUS_UNSUPPORTED = 5;
 export function unsupportedLines(u: readonly UnsupportedSql[] | { error: string }, st: Style): string[] {
   if ("error" in u) return [`\n${st.bold("Unsupported SQL")}: could not read it (${firstLine(u.error)}; mason logs has the detail)`];
   if (!u.length) return [];
-  const lines = [`\n${st.bold("Unsupported SQL")} ${st.dim("(the last day's refused statements by what they used, the most first; docs/SQL-SUPPORT.md has each one's way out)")}:`];
+  const lines = [`\n${st.bold("Unsupported SQL")} ${st.dim("(the last day's refused statements by what they used, the most first)")}:`];
   for (const g of u) {
-    lines.push(`  ${n(g.runs)} statement${g.runs === 1 ? "" : "s"} used ${g.title ?? "what this Mason no longer lists"} — docs/SQL-SUPPORT.md ${g.gap}`);
+    const title = g.title ?? "SQL this Mason no longer lists";
     const who = [...(g.users.length ? [`as ${g.users.join(", ")}`] : []), ...(g.clients.length ? [`from ${g.clients.join(", ")}`] : [])];
-    lines.push(`    last ${g.last.slice(0, 16).replace("T", " ")}${who.length ? ` ${who.join(" ")}` : ""} — ${oneLine(g.example)}`);
+    lines.push(`  ${title}: ${n(g.runs)} statement${g.runs === 1 ? "" : "s"}${who.length ? ` ${who.join(" ")}` : ""}`);
+    lines.push(`    last ${g.last.slice(0, 16).replace("T", " ")} — ${oneLine(g.example)}`);
+    lines.push(`    How to rewrite it: see docs/SQL-SUPPORT.md › ${title}`);
   }
   return lines;
 }
