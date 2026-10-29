@@ -109,15 +109,15 @@ test("mason start says the file's sync once — and LOUDLY when an upgrade stops
   const older = file("kind: postgres\nurl: x\ntables:\n  orders: {}\n  customers: {}\n  events: {}\n");
   // a file an older Mason wrote, over its copy of three tables: they were polled every 5 s, and are off from now
   assert.equal(line(older, "mason/sources/app.yml", false, 3),
-    "sync: off (the default): 3 tables are no longer polled; write `sync: poll 5s` at the top of mason/sources/app.yml to keep them current as before, " +
+    "sync: off (the default): 3 tables are not polled (an older Mason polled every table every 5 s); write `sync: poll 5s` at the top of mason/sources/app.yml to keep them current as before, " +
     "or `mason sync <table>` when you need it");
-  assert.match(line(older, "mason/sources/app.yml", false, 1), /^sync: off \(the default\): 1 table is no longer polled; /);
+  assert.match(line(older, "mason/sources/app.yml", false, 1), /^sync: off \(the default\): 1 table is not polled \(an older Mason polled every table every 5 s\); /);
   // a new project (nothing copied yet): the default said, how to change it
   assert.equal(line(older, "mason/sources/app.yml", false, 0),
     "sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of mason/sources/app.yml polls every table, or on an entry that one");
   // a sync: written anywhere is a choice made: never the upgrade's warning
-  assert.doesNotMatch(line(file("kind: postgres\nurl: x\nsync: off\ntables:\n  orders: {}\n"), "f", false, 3), /no longer polled/);
-  assert.doesNotMatch(line(file("kind: postgres\nurl: x\ntables:\n  orders: { sync: poll 30s }\n  events: {}\n"), "f", false, 3), /no longer polled/);
+  assert.doesNotMatch(line(file("kind: postgres\nurl: x\nsync: off\ntables:\n  orders: {}\n"), "f", false, 3), /are not polled|is not polled/);
+  assert.doesNotMatch(line(file("kind: postgres\nurl: x\ntables:\n  orders: { sync: poll 30s }\n  events: {}\n"), "f", false, 3), /are not polled|is not polled/);
   // under replication the stream keeps every table current: nothing stopped
-  assert.doesNotMatch(line(older, "f", true, 3), /no longer polled/);
+  assert.doesNotMatch(line(older, "f", true, 3), /are not polled|is not polled/);
 });

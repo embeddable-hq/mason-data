@@ -157,15 +157,18 @@ function syncCounts(tables: ReadonlyArray<{ sync?: TableSync }>): string {
  *
  * AN UPGRADE THAT STOPS THE POLLS IS SAID LOUDLY (issue 33's review): a file an older Mason wrote has no `sync:`
  * anywhere, and its tables were polled every 5 s; from this release they are `off`. When the copy already holds
- * `copiedBefore` of its tables and no `sync:` is written at all, the line says how many are no longer polled and the
- * exact line that keeps them current as before.
+ * `copiedBefore` of its tables and no `sync:` is written at all, the line says how many are not polled, that an older
+ * Mason polled them, and the exact line that keeps them current as before — true too of a hand-written file on a
+ * project that never polled.
  */
 export function syncDefaultLine(file: SourceFile, shown: string, replication: boolean, copiedBefore = 0): string {
   const d = effectiveSync(file, undefined);
   if (replication) return `sync: logical replication keeps every table current; ${shown}'s sync: (${syncText(d.sync)}${d.from === "default" ? ", the default" : ""}) is the poll's, read when mason start --poll goes back to it`;
   const noneWritten = d.from === "default" && file.tables.every((e) => e.sync === null);
   if (noneWritten && copiedBefore > 0) {
-    return `sync: off (the default): ${copiedBefore === 1 ? "1 table is" : `${copiedBefore} tables are`} no longer polled; write \`sync: poll 5s\` at the top of ${shown} ` +
+    // true of a file an older Mason polled and of one written by hand that never was: "not polled", the old way said
+    return `sync: off (the default): ${copiedBefore === 1 ? "1 table is" : `${copiedBefore} tables are`} not polled (an older Mason polled every table every 5 s); ` +
+      `write \`sync: poll 5s\` at the top of ${shown} ` +
       "to keep them current as before, or `mason sync <table>` when you need it";
   }
   if (d.from === "default") return `sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of ${shown} polls every table, or on an entry that one`;
@@ -373,7 +376,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     syncMode === "replication" ? repl : null, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths } });
   await sync.open();
   // the tables this copy already holds, before this start copies anything: an upgrade from a Mason that polled every
-  // table says how many are no longer polled (`syncDefaultLine`)
+  // table says how many are not polled (`syncDefaultLine`)
   const copiedBefore = sync.state().filter((s) => s.phase === "copied" && sources.tables.some((t) => t.source === s.source)).length;
   // a database restored to another server: its transaction ids are not the watermarks', so every table is read again
   if (move.action === "reread") { await sync.rereadAll(); say(`  ${source.database} is on another server than the copy was taken from: reading its tables again`); }
