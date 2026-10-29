@@ -91,6 +91,7 @@ const unsupportedSql = { gap: "quote-ident", title: "quote_ident()", runs: 2, us
 let summaryReads = 0;
 // one time range's statements, who sent them and the slowest (src/duck/requests.ts window, clients, slowest)
 const activityAsks: Array<[string, string]> = [];
+const durationAsks: Array<[string, string, number]> = [];
 const client = { user: "metabase", tokenName: "", client: "Metabase", statements: 3, failed: 1, sessions: 2, last: "2026-10-24T10:04:00.000Z" };
 const requests = {
   days: 7,
@@ -98,8 +99,10 @@ const requests = {
   page: async (q: RequestQuery) => { asks.push(q); return { requests: [request], before: q.limit === 1 ? "2026-10-24T10:04:00.000Z~3" : null }; },
   summary: async () => { summaryReads++; return summary; },
   window: async (since: string) => { activityAsks.push(["window", since]); return window(1); },
-  clients: async (since: string) => { activityAsks.push(["clients", since]); return [client]; },
+  clients: async (since: string) => { activityAsks.push(["clients", since]); return { clients: [client], total: { clients: 120, sessions: 300 } }; },
   slowest: async (since: string) => { activityAsks.push(["slowest", since]); return [request]; },
+  // the request log's p50 / p95 by bucket (src/duck/requests.ts durationsBy): one bucket has statements, one has none
+  durationsBy: async (since: string, until: string, step: number) => { durationAsks.push([since, until, step]); return new Map([[Date.parse("2026-10-28T09:00:00.000Z"), { p50: 12, p95: 340 }]]); },
   slow: async () => [{ route: "postgres" as const, payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-24T10:03:00.000Z" }],
   refused: async () => ({ total: 3, refused: [{ route: "postgres" as const, payload: "SELECT * FROM nope", runs: 3, last: "2026-10-24T10:04:00.000Z", code: "42P01", message: 'relation "nope" does not exist' }] }),
   unsupported: async (q: { since: string; limit: number }) => { unsupportedAsks.push(q); return [unsupportedSql]; },
@@ -114,7 +117,8 @@ let disk: { path: string; freeBytes: number | null; projectedBytes: number | nul
 // usage over time (src/duck/usage.ts), as UsageSampler answers it
 const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
 const copySize = { table: "public.orders", bytes: 4_194_304, at: "2026-10-28T09:10:00.000Z" };
-const usage = { days: 7, sampleSeconds: 60, samples: async (o: { since: string; until: string; stepSeconds?: number }) => { usageAsks.push(o); return []; }, copySizes: async () => [copySize] };
+let usageSamples: Array<Record<string, unknown>> = [];
+const usage = { days: 7, sampleSeconds: 60, samples: async (o: { since: string; until: string; stepSeconds?: number }) => { usageAsks.push(o); return usageSamples as never[]; }, copySizes: async () => [copySize] };
 const usersFile = path.join(root, "app", ".mason", "users.json");
 const API_KEY = "k".repeat(48);
 const ctx: RunContext = {
@@ -401,7 +405,8 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     // one time range of the request log, for Usage: an hour by default, since by the one time grammar, each read given it
     const act = await get("/api/activity?since=15m");
     assert.equal(act.status, 200);
-    assert.deepEqual([act.body.window, act.body.clients, act.body.slowest, act.body.keptDays], [window(1), [client], [request], 7]);
+    assert.deepEqual([act.body.window, act.body.clients, act.body.clientsTotal, act.body.slowest, act.body.keptDays], [window(1), [client], { clients: 120, sessions: 300 }, [request], 7],
+      "the clients listed, and the totals over every one");
     const fifteen = Date.parse(String(act.body.since));
     assert.ok(Math.abs(fifteen - (Date.now() - 15 * 60_000)) < 5000, `15m is a quarter of an hour ago: ${String(act.body.since)}`);
     assert.deepEqual(activityAsks.splice(0).map(([k, at]) => [k, at === act.body.since]), [["window", true], ["clients", true], ["slowest", true]]);
@@ -471,6 +476,19 @@ test("usage over time: /api/usage passes since, until and step to the samples, a
     [400, 'step is a whole number of seconds, 60 (a sample\'s interval) to 604800 (the 7 days kept), not "5m"'],
   ]);
   assert.ok(refusals.every((r) => (r.body.failure as { code?: string } | undefined)?.code === "usage"), "each in the Failure shape");
+  // A POINT OF MORE THAN A MINUTE: its p50 and p95 are its statements', from the request log — never the highest of its
+  // minutes' p95s (the samples' own, re-bucketed by max: one slow minute was the hour's "p95")
+  usageSamples = [{ at: "2026-10-28T09:00:00.000Z", durationP50Ms: 900, durationP95Ms: 5000 }, { at: "2026-10-28T10:00:00.000Z", durationP50Ms: 8, durationP95Ms: 30 }];
+  durationAsks.length = 0;
+  try {
+    const hourly = await get("/api/usage?since=2026-10-28T09:00:00Z&until=2026-10-28T11:00:00Z&step=3600");
+    assert.deepEqual((hourly.body.samples as Array<Record<string, unknown>>).map((x) => [x.durationP50Ms, x.durationP95Ms]), [[12, 340], [null, null]],
+      "the bucket's statements' p95; a bucket with none completed has none");
+    assert.deepEqual(durationAsks, [["2026-10-28T09:00:00.000Z", "2026-10-28T11:00:00.000Z", 3600]]);
+    const minutes = await get("/api/usage?since=2026-10-28T09:00:00Z&until=2026-10-28T11:00:00Z&step=60");
+    assert.deepEqual((minutes.body.samples as Array<Record<string, unknown>>).map((x) => x.durationP95Ms), [5000, 30], "a minute a point is the samples' own");
+    assert.equal(durationAsks.length, 1, "and reads no request log");
+  } finally { usageSamples = []; }
 });
 
 test("a usage sample reads /api/state's own facts: the copy file's bytes, the totals, the stalest ADDED table's age, the stream's lag, the copies served", async () => {
@@ -840,6 +858,10 @@ test("/api/state is lean, as the page polls it every 2 s: no table's columns; ?c
   assert.equal(failure.code, "not_found");
   assert.equal(failure.message, 'the database has no table "public.gone" this user can read');
   assert.ok(failure.next.length, "with what to run next");
+  // a path that is no URL-encoded name (a broken escape) is the caller's mistake, 400 by name — never the server's 500
+  const broken = await call("GET", "/api/tables/public.%E0%A4%A/columns");
+  assert.equal(broken.status, 400);
+  assert.match(JSON.parse(broken.text).error as string, /does not name a table: GET \/api\/tables\/<schema\.table, URL-encoded>\/columns/);
 });
 
 test("the lean state's size: 800 tables of 50 columns is under 400 B a table (it was 4.3 KB with their columns)", async () => {

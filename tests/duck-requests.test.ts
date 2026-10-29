@@ -307,9 +307,14 @@ test("one time range of the log (window, clients, slowest): its statements folde
   const w = await ledger.window(since, now);
   assert.deepEqual({ ...w, days: Math.round(w.days * 96), covered: Math.round(w.covered * 96) }, { days: 1, covered: 1, statements: 5, completed: 4, refused: 1, failed: 0, cancelled: 0, rows: 3, bytesSent: 30,
     durationMs: { avg: 240, p50: 25, p95: 769 } }, "the summary's fold over the range: a quarter of an hour is 1/96 of a day, all of it kept");
-  assert.deepEqual(await ledger.clients(since), [
+  const who = await ledger.clients(since, 1);
+  assert.deepEqual([who.clients.length, who.total], [1, { clients: 2, sessions: 3 }], "the totals over every client, never the first limit's");
+  assert.deepEqual((await ledger.clients(since)).clients, [
     { user: "alice", tokenName: "", client: "Metabase", statements: 4, failed: 0, sessions: 2, last: at.toISOString() },
     { user: "bob", tokenName: "", client: "psql", statements: 1, failed: 1, sessions: 1, last: at.toISOString() }], "the most statements first; the refused login and the hour-old one are not in it");
+  // by bucket: the completed ones' p50 and p95 (quantile_cont, as the summary's), the refused one and the old one not in it
+  const step = 900, d = await ledger.durationsBy(since, new Date(now + 60_000).toISOString(), step);
+  assert.deepEqual([...d.values()], [{ p50: 25, p95: 769 }], "one bucket: 10, 20, 30, 900 ms, rounded as the window's");
   const slowest = await ledger.slowest(since, 2);
   assert.deepEqual(slowest.map((r) => [r.requestId, r.durationMs]), [["a3", 900], ["a2", 30]], "the completed ones, slowest first, within the range: the hour-old 5 s one is not");
   await ledger.close();

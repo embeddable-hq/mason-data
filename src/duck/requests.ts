@@ -422,16 +422,36 @@ export class RequestLedger {
   /**
    * WHO CONNECTED from `since` on, by the statements they sent: a row per user and client (application_name) — its
    * statements, the failed ones (refused or failed, as the Failed card counts them: a cancel is not), the sessions they came from and when the latest started —
-   * the most statements first, `limit` of them. A session that sent only what the log does not list (select 1, SET, a
+   * the most statements first, `limit` of them, and the totals over every one (`total`: how many clients, how many
+   * sessions — a card says them, so they are never the first `limit`'s). A session that sent only what the log does not list (select 1, SET, a
    * catalog query) is not here; the live sessions are `/api/state`'s. Committed rows only.
    */
-  async clients(since: string, limit = 50): Promise<ClientActivity[]> {
+  async clients(since: string, limit = 50): Promise<{ clients: ClientActivity[]; total: { clients: number; sessions: number } }> {
+    // the totals over EVERY client, before the LIMIT (a window over the groups): a card says them, never the first `limit`'s
     const rows = (await this.history.reader.runAndReadAll(`SELECT user_name, token_name, application_name, count(*) AS statements, ` +
+      `count(*) OVER () AS total_clients, sum(count(DISTINCT session)) OVER () AS total_sessions, ` +
       `count(*) FILTER (WHERE (${outcomeSql("sqlstate")}) IN ('refused', 'failed')) AS failed, count(DISTINCT session) AS sessions, max(started_at) AS last ` +
       `FROM ${REQUESTS_TABLE} WHERE started_at >= $1::TIMESTAMPTZ AND method <> 'CONNECT' GROUP BY ALL ORDER BY statements DESC, last DESC LIMIT $2`,
     [since, limit])).getRowObjectsJson();
-    return rows.map((r) => ({ user: String(r.user_name ?? ""), tokenName: String(r.token_name ?? ""), client: String(r.application_name ?? ""),
-      statements: Number(r.statements), failed: Number(r.failed), sessions: Number(r.sessions), last: new Date(String(r.last)).toISOString() }));
+    const first = rows[0] as Record<string, unknown> | undefined;
+    return { total: { clients: Number(first?.total_clients ?? 0), sessions: Number(first?.total_sessions ?? 0) },
+      clients: rows.map((r) => ({ user: String(r.user_name ?? ""), tokenName: String(r.token_name ?? ""), client: String(r.application_name ?? ""),
+        statements: Number(r.statements), failed: Number(r.failed), sessions: Number(r.sessions), last: new Date(String(r.last)).toISOString() })) };
+  }
+
+  /**
+   * THE COMPLETED STATEMENTS' p50 AND p95 IN BUCKETS of `stepSeconds` from `since` until `until`, by when each started
+   * (quantile_cont, as `summary`'s): what a chart of more than a minute a point plots. A bucket's p95 is the p95 of its
+   * statements, never the highest of its minutes' p95s — one slow minute in an hour was the hour's "p95". By bucket
+   * start, epoch ms; a bucket with no completed statement is absent. Committed rows only.
+   */
+  async durationsBy(since: string, until: string, stepSeconds: number): Promise<Map<number, { p50: number; p95: number }>> {
+    const rows = (await this.history.reader.runAndReadAll(`SELECT epoch_ms(time_bucket(to_seconds($3::BIGINT), started_at, $1::TIMESTAMPTZ)) AS at, ` +
+      `quantile_cont(duration_ms, 0.5) AS p50, quantile_cont(duration_ms, 0.95) AS p95 FROM ${REQUESTS_TABLE} ` +
+      `WHERE started_at >= $1::TIMESTAMPTZ AND started_at < $2::TIMESTAMPTZ AND method <> 'CONNECT' AND (${outcomeSql("sqlstate")}) = 'ok' GROUP BY 1`,
+    [since, until, stepSeconds])).getRowsJS();
+    // rounded as the summary's and a sample's are (src/duck/usage.ts quantileCont): one ms, one definition
+    return new Map(rows.map(([at, p50, p95]) => [Number(at), { p50: Math.round(Number(p50)), p95: Math.round(Number(p95)) }]));
   }
 
   /** The slowest `limit` completed statements started from `since` on, slowest first: what ran longest in a time range

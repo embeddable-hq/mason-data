@@ -15,8 +15,10 @@
  */
 
 /** Where each card leads: the views that list what it counts (src/web/app.js hashes). */
-const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
-  slow: "#observability/queries?slow=1", failedQueries: "#observability/queries?status=failed", failedEvents: "#observability/syncs?failures=1" };
+// each with the range of what it counts — the statements of the last day, the sync's failures of the days kept — never
+// the Observability views' default, Now: a card that says 12 failed must land on the 12
+const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
+  slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
 import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
@@ -279,7 +281,7 @@ export function renderQueries(q) {
     ["Statements", "Completed", "Refused", "Failed", "Cancelled", "Average", "p50", "p95", "Rows sent", "Sent"].map((h) => `<th scope="col">${h}</th>`).join("") +
     `</tr></thead><tbody>${row("Last day", w.day)}${row("Last week", w.week)}</tbody></table></div>` +
     (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS.</p>` : "") +
-    `<p class="dim">The slow and the refused statements, and every other, are on <a href="${LINKS.queries}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
+    `<p class="dim">The slow and the refused statements, and every other, are on <a href="${esc(LINKS.queries)}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
 }
 
 /** A failed statement's cells, as mason status's `Query errors` line says them (src/cli/commands.ts `requestLine`): when,
@@ -308,7 +310,7 @@ export function renderUnsupportedLine(u) {
   const [top, ...rest] = u.unsupported;
   if (top === undefined) return "";
   return `<p class="unsupported-line"><strong>Unsupported SQL, the last day:</strong> <span title="docs/SQL-SUPPORT.md entry ${esc(top.gap)}">${esc(unsupportedEntry(top).headline)}</span>` +
-    `${rest.length ? ` (and ${n(rest.length)} other${rest.length === 1 ? "" : "s"})` : ""} <a class="see" href="${LINKS.queries}">See all</a></p>`;
+    `${rest.length ? ` (and ${n(rest.length)} other${rest.length === 1 ? "" : "s"})` : ""} <a class="see" href="${esc(LINKS.queries)}">See all</a></p>`;
 }
 
 /**
@@ -321,7 +323,7 @@ export function renderRecentErrors(events, requests, unsupported) {
   const part = (title, r, list, head, cells, more, href, outcomeAt) => r === undefined ? ""
     : "failure" in r ? `<h3>${title}</h3><p class="count">Could not read them (${esc(firstLine(r.failure.message))}; ${code("mason logs")} has the detail)</p>`
     : !list(r).length ? `<h3>${title}</h3><p class="dim">None.</p>`
-    : `<table class="errors"><caption>${title} (the latest, newest last; ${code(more)} lists each) <a class="see" href="${href}">See all</a></caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
+    : `<table class="errors"><caption>${title} (the latest, newest last; ${code(more)} lists each) <a class="see" href="${esc(href)}">See all</a></caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${list(r).map((x) => cellsRow(cells(x), outcomeAt)).join("")}</tbody></table>`;
   return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], (e) => Object.values(eventCells(e)), "mason logs --events", LINKS.failedEvents) +
     part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed", LINKS.failedQueries, 1) +

@@ -196,8 +196,10 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     show(hash, env = {}) {
       const r = parseHash(hash);
       m.shown = r.id;
-      // what is shown is read again now, whatever its rate: a range that is not Now is read once, when it is chosen
+      // what is shown is read again now, whatever its rate: a range that is not Now is read once, when it is chosen —
+      // and until it is, it says no "as of" (the last one was another page's, or another range's)
       app.markStale();
+      m.rangeReadAt = null;
       if (PAGES.find((p) => p.id === r.id)?.parent) m.range = rangeOf(r.params.range);
       pages.get(r.id).route?.(r.params, env);
     },
@@ -297,10 +299,15 @@ export function start(doc, win) {
     dialogs = now;
   };
   let busy = false;
+  // a poll asked while one is in flight (a Refresh, a link followed) runs when it ends, never dropped: what it was
+  // asked for may be what the one in flight did not read
+  let again = false;
   const poll = async () => {
-    if (busy || doc.visibilityState !== "visible") return;
+    if (doc.visibilityState !== "visible") return;
+    if (busy) { again = true; return; }
     busy = true;
     try { await app.poll(); } finally { busy = false; paint(); }
+    if (again) { again = false; await poll(); }
   };
   const shownPage = () => app.pages.get(app.model.shown);
   // THE PHONE'S MENU: the sidebar's nav as a sheet, opened by its button (shown below 640 px only). Open, the focus is

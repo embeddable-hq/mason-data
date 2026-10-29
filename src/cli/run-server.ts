@@ -98,7 +98,7 @@ export interface RunContext {
     /** the disk the copy's file is on: free, and what the copies running are projected to add (src/duck/sync.ts diskStatus) */
     disk: () => DiskStatus;
     /** the Postgres listener's requests (src/duck/requests.ts, `_mason.requests`): mason status and mason logs --requests */
-    requests: Pick<RequestLedger, "page" | "slow" | "refused" | "unsupported" | "summary" | "window" | "clients" | "slowest" | "days" | "lastUsed">;
+    requests: Pick<RequestLedger, "page" | "slow" | "refused" | "unsupported" | "summary" | "window" | "clients" | "slowest" | "durationsBy" | "days" | "lastUsed">;
     /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
     events: Pick<SyncEvents, "recent" | "days">;
     /** usage over time (src/duck/usage.ts, `_mason.usage`): mason usage */
@@ -244,7 +244,8 @@ const DAY_S = 86_400;
 /**
  * `GET /api/usage?since=&until=&step=`: the samples from `since` (default an hour ago) until `until` (default
  * now), oldest first; with `step` (seconds, at least a sample's interval) re-bucketed in one query, each count summed and
- * each level at its highest. And each copy's own bytes as last measured, how often a sample is taken, and the days
+ * each level at its highest — but the p50 and p95 of a point of more than a minute are its statements', read from the
+ * request log by when each started (`durationsBy`). And each copy's own bytes as last measured, how often a sample is taken, and the days
  * kept. `mason usage --json` is this.
  */
 export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now()): Promise<{ since: string; until: string; stepSeconds: number | null; sampleSeconds: number;
@@ -262,23 +263,31 @@ export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now(
   if (step !== null && (!Number.isInteger(step) || step < u.sampleSeconds || step > u.days * DAY_S)) {
     throw new Refusal(400, `step is a whole number of seconds, ${u.sampleSeconds} (a sample's interval) to ${u.days * DAY_S} (the ${u.days} days kept), not ${JSON.stringify(stepText)}`);
   }
-  const samples = await u.samples({ since, until, ...(step === null ? {} : { stepSeconds: step }) });
+  const read = await u.samples({ since, until, ...(step === null ? {} : { stepSeconds: step }) });
+  // a point of more than a minute: its p50 and p95 are its statements', from the request log (`durationsBy`), never
+  // the highest of its minutes' (a sample keeps its minute's alone)
+  const durations = step !== null && step > u.sampleSeconds ? await ctx.duck.requests.durationsBy(since, until, step) : null;
+  const samples = durations === null ? read : read.map((s) => {
+    const d = durations.get(Date.parse(s.at));
+    return { ...s, durationP50Ms: d?.p50 ?? null, durationP95Ms: d?.p95 ?? null };
+  });
   return { since, until, stepSeconds: step, sampleSeconds: u.sampleSeconds, keptDays: u.days, samples, copySizes: await u.copySizes() };
 }
 
 /**
  * `GET /api/activity?since=`: what the Postgres API answered from `since` on (default an hour ago; the one time grammar,
  * src/cli/request-filter.ts `timeOf`), for the Usage page's time range — the window's statements (src/duck/requests.ts
- * `window`), who sent them (`clients`: a row per user and client) and the slowest that completed (`slowest`); and the
+ * `window`), who sent them (`clients`: a row per user and client, the 50 with the most statements; `clientsTotal`:
+ * how many clients and sessions in all) and the slowest that completed (`slowest`); and the
  * days the request log keeps. Read once per range chosen, every 5 s while the range is Now.
  */
 export async function activity(ctx: RunContext, q: URLSearchParams, now = Date.now()): Promise<{ since: string; window: QueryWindow; clients: ClientActivity[];
-  slowest: LedgerRequest[]; keptDays: number }> {
+  clientsTotal: { clients: number; sessions: number }; slowest: LedgerRequest[]; keptDays: number }> {
   const sinceText = q.get("since");
   const since = sinceText === null ? new Date(now - 3_600_000).toISOString() : timeParam("since", sinceText, now);
   const r = ctx.duck.requests;
-  const [window, clients, slowest] = await Promise.all([r.window(since, now), r.clients(since), r.slowest(since)]);
-  return { since, window, clients, slowest, keptDays: r.days };
+  const [window, who, slowest] = await Promise.all([r.window(since, now), r.clients(since), r.slowest(since)]);
+  return { since, window, clients: who.clients, clientsTotal: who.total, slowest, keptDays: r.days };
 }
 
 /** how many registry entries `/api/unsupported` answers unless `limit` says, and at most */
@@ -472,7 +481,10 @@ export function createRunServer(ctx: RunContext): http.Server {
           sendJson(res, 200, await state(ctx, url.searchParams.get("columns") === "1"));
         } else if (req.method === "GET" && /^\/api\/tables\/[^/]+\/columns$/.test(url.pathname)) {
           // one table's columns, read when the page's Columns… form opens (never with the state, polled every 2 s)
-          sendJson(res, 200, tableColumns(ctx, decodeURIComponent(url.pathname.split("/")[3]!)));
+          let table: string;
+          try { table = decodeURIComponent(url.pathname.split("/")[3]!); }
+          catch { throw new Refusal(400, `${url.pathname} does not name a table: GET /api/tables/<schema.table, URL-encoded>/columns`); }
+          sendJson(res, 200, tableColumns(ctx, table));
         } else if (req.method === "GET" && url.pathname === "/api/slow") {
           // the last day's slow statements, from the request log (src/duck/requests.ts)
           sendJson(res, 200, { slow: await ctx.duck.requests.slow(SLOW_MS), slowMs: SLOW_MS });

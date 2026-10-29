@@ -214,9 +214,9 @@ export function renderUnsupported(b, span = RANGES[DEFAULT_RANGE].span) {
  * WHO SENT STATEMENTS IN A PAST RANGE (`/api/activity` `clients`: [{ user, tokenName, client, statements, failed,
  * sessions, last }], the most statements first): a row per user and client — its statements, the failed ones, the
  * sessions they came from, when the latest started — and Queries, its statements on Observability › Queries. Past
- * `top`, the others in one row. `span` the range's words.
+ * `top`, the others in one row; `total` how many clients in all (`clientsTotal`: the endpoint lists 50). `span` the range's words.
  */
-export function renderClients(clients, { top = SESSIONS_TOP, range = DEFAULT_RANGE, now = Date.now() } = {}) {
+export function renderClients(clients, { top = SESSIONS_TOP, range = DEFAULT_RANGE, now = Date.now(), total = clients.length } = {}) {
   const span = RANGES[rangeOf(range)].span;
   if (!clients.length) return empty(`No client sent a statement the request log lists in ${span}.`);
   const shown = clients.slice(0, top), rest = clients.slice(top);
@@ -228,7 +228,7 @@ export function renderClients(clients, { top = SESSIONS_TOP, range = DEFAULT_RAN
     shown.map((c) => `<tr>${cell(who(c))}${cell(clientText(c.client))}<td class="num">${esc(n(c.statements))}</td><td class="num">${c.failed ? esc(n(c.failed)) : ""}</td>` +
       `<td class="num">${esc(n(c.sessions))}</td><td><time datetime="${esc(c.last)}" title="${esc(utcText(c.last))} UTC">${esc(agoText(c.last, now))}</time></td><td class="act">${queriesLink(c.user, c.client, range)}</td></tr>`).join("") +
     (rest.length ? `<tr class="others"><td colspan="2">${esc(n(rest.length))} other client${rest.length === 1 ? "" : "s"}</td><td class="num">${esc(n(sum("statements")))}</td><td class="num">${esc(n(sum("failed")))}</td><td class="num">${esc(n(sum("sessions")))}</td><td></td><td></td></tr>` : "") +
-    `</tbody></table>`) + `<p class="dim">${esc(plural(clients.length, "client"))}${clients.length >= 50 ? " (the 50 with the most statements)" : ""} sent statements in ${esc(span)}. A session that sent only what the log does not list (select 1, SET, a catalog query) is not here.</p>`;
+    `</tbody></table>`) + `<p class="dim">${esc(plural(total, "client"))}${total > clients.length ? ` (the ${esc(n(clients.length))} with the most statements are listed)` : ""} sent statements in ${esc(span)}. A session that sent only what the log does not list (select 1, SET, a catalog query) is not here.</p>`;
 }
 
 /**
@@ -267,7 +267,9 @@ export function renderUsageKpis({ activity, usage, sessions, running, range = DE
       : card("Connected now", plural(sessions.open, "session"), plural(sessions.byClient.length, "client")));
     if (running) list.push(card("Running now", n(running.length), running.length ? `the longest for ${spanText(Math.max(...running.map((x) => x.runningMs)) / 1000)}` : "no statement is running"));
   } else if (activity && !("failure" in activity)) {
-    list.push(card(`Clients, ${label}`, n(activity.clients.length), plural(activity.clients.reduce((a, c) => a + c.sessions, 0), "session")));
+    // the totals over every client, never the 50 the table lists (`clientsTotal`)
+    const total = activity.clientsTotal;
+    list.push(card(`Clients, ${label}`, n(total.clients), plural(total.sessions, "session")));
   }
   if (activity === undefined) return cards(list) + skeleton(2);
   if ("failure" in activity) return cards([...list, card(`Statements, ${label}`, "unknown", `could not read them: ${firstLine(activity.failure.message)}`)]);
@@ -380,7 +382,7 @@ export const page = {
           "usage-kpis": renderUsageKpis({ activity: a === undefined ? undefined : a.body ?? { failure: a.failure }, usage: ctx.read(samples())?.body, sessions, running: running?.running, range }),
           "usage-charts": renderCharts(ctx.read(samples())?.body, range),
           "usage-connected-h": live ? "Connected now" : `Connected in ${esc(span)}`,
-          "usage-connected": live ? renderSessions(sessions, SESSIONS_TOP, range) : part(activity(), (b) => renderClients(b.clients, { range, now }), false),
+          "usage-connected": live ? renderSessions(sessions, SESSIONS_TOP, range) : part(activity(), (b) => renderClients(b.clients, { range, now, total: b.clientsTotal.clients }), false),
           "usage-running-h": live ? "Running now" : `Slowest in ${esc(span)}`,
           "usage-running-lead": live ? `As <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.`
             : `The statements that took longest to complete, as the request log recorded them.`,

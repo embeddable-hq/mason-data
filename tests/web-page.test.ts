@@ -147,9 +147,10 @@ const QUERIES = { queries: { keptDays: 3,
 /** `GET /api/activity?since=`'s answer (src/cli/run-server.ts `activity`): the range's window, who sent statements, the slowest. */
 const CLIENTS = [{ user: "metabase", tokenName: "", client: "Metabase v0.50", statements: 1100, failed: 9, sessions: 3, last: "2026-10-27T09:05:00.000Z" },
   { user: "", tokenName: "ci", client: "", statements: 104, failed: 0, sessions: 1, last: "2026-10-27T08:05:30.000Z" }];
-const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; slowest?: unknown[] } = {}) => ({ since: "2026-10-26T09:05:30.000Z", keptDays: 7,
+const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; slowest?: unknown[]; clientsTotal?: { clients: number; sessions: number } } = {}) => ({ since: "2026-10-26T09:05:30.000Z", keptDays: 7,
   window: { days: 1, covered: 1, statements: 1204, completed: 1190, refused: 10, failed: 2, cancelled: 2, rows: 52_000, bytesSent: 3_145_728, durationMs: { avg: 120, p50: 40, p95: 900 }, ...o.window },
-  clients: o.clients ?? CLIENTS, slowest: o.slowest ?? [] });
+  clients: o.clients ?? CLIENTS, slowest: o.slowest ?? [],
+  clientsTotal: o.clientsTotal ?? { clients: (o.clients ?? CLIENTS).length, sessions: (o.clients ?? CLIENTS).reduce((a: number, c) => a + (c as { sessions: number }).sessions, 0) } });
 const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s" };
 const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
 const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", tokenName: "", user: "metabase",
@@ -269,7 +270,7 @@ test("running: the database masked, each table copied with its rows, the counts,
   assert.ok(!/Copies not finished|100%/.test(text), "every copy is done: no bar (the Tables page lists them)");
   assert.ok(!text.includes("public.audit"), "a table not added is not a line");
   assert.ok(!/Slow queries|Refused queries|Ready: every added table/.test(text), "the counts and the readiness line repeated the statements, the errors and the word");
-  assert.match(html, /<a href="#observability\/queries">Observability › Queries<\/a>/, "the statements are listed on Observability's Queries");
+  assert.match(html, /<a href="#observability\/queries\?range=24h">Observability › Queries<\/a>/, "the statements are listed on Observability's Queries");
   assert.equal([...html.matchAll(/<table class="facts-table"/g)].length, 1, "ONE table of facts");
   assert.match(html, HEALTH("ok", "Ready"));
   assert.ok(!/duckdb/i.test(html), "the engine is named in the code and the docs, never on the page");
@@ -326,10 +327,10 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync now<\/button>/);
   assert.ok(!/data-sync-table="public\.(audit|event_log)"/.test(html), "no Sync for a table not added");
   // View syncs: its sync events, on Observability › Syncs narrowed to it (a link, before Sync now)
-  assert.match(html, /<td class="act" id="act-tables-public\.customers"><a class="btn small" href="#observability\/syncs\?table=public\.customers">View syncs<\/a> <button type="button" class="small" data-sync-table="public\.customers"/);
+  assert.match(html, /<td class="act" id="act-tables-public\.customers"><a class="btn small" href="#observability\/syncs\?table=public\.customers&amp;range=7d">View syncs<\/a> <button type="button" class="small" data-sync-table="public\.customers"/);
   const syncsHref = (await import(path.join(WEB, "pages", "tables.js") as string) as { syncsHref?: (t: string) => string }).syncsHref;
   assert.equal(typeof syncsHref, "function", "src/web/pages/tables.js exports syncsHref");
-  assert.equal(syncsHref!("billing.invoices & co"), "#observability/syncs?table=billing.invoices%20%26%20co");
+  assert.equal(syncsHref!("billing.invoices & co"), "#observability/syncs?table=billing.invoices%20%26%20co&range=7d", "over the week: a table's copy is rarely in Now's 15 minutes");
   assert.ok(!/href="#observability\/syncs\?table=public\.(audit|event_log)"/.test(html), "no View syncs for a table not added");
   assert.match(html, /<button type="button" class="primary small" data-add-table="public\.audit">Add<\/button>/);
   assert.ok(!/data-add-table="public\.(event_log|customers)"/.test(html), "no Add for a table that cannot be added as it is, nor for one added");
@@ -340,7 +341,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.equal(textOf(withoutPops(asking)), textOf(html), "the rows say what they said: nothing is inserted between them");
   assert.equal(textOf(popOf(asking, "act-tables-public.customers")), "Remove customers? Mason stops copying it and drops its copy. Remove customers Cancel");
   // its Remove where it was, held down; the question a dialog anchored to the row's actions, written after the table
-  assert.match(asking, /<td class="act" id="act-tables-public\.customers"><a class="btn small" href="#observability\/syncs\?table=public\.customers">View syncs<\/a> <button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync now<\/button> <button type="button" class="danger small" aria-expanded="true" disabled>Remove<\/button><\/td><\/tr>/);
+  assert.match(asking, /<td class="act" id="act-tables-public\.customers"><a class="btn small" href="#observability\/syncs\?table=public\.customers&amp;range=7d">View syncs<\/a> <button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync now<\/button> <button type="button" class="danger small" aria-expanded="true" disabled>Remove<\/button><\/td><\/tr>/);
   assert.match(asking, /<\/table><\/div><div class="pop ask" data-anchor="act-tables-public\.customers" role="dialog" aria-label="Remove customers\?"><p class="confirm">Remove customers\?/);
   assert.match(asking, /<button type="button" class="danger small" data-confirm-remove-table="public\.customers">Remove customers<\/button>/);
   assert.match(asking, /data-confirm-remove-table="public\.customers"/);
@@ -1615,7 +1616,7 @@ const UL_EVENTS = { keptDays: 7, events: [
 const LOG = { kept: 2000, lines: [{ at: "2026-10-28T09:00:00.000Z", text: "mason started" }, { at: null, text: "copy: public.orders\n  chunk 3 of 20 <read>" }] };
 const withUsageAnswers = (run: ReturnType<typeof fakeRun>) => {
   run.answers.set("GET /api/queries", answer(UL_QUERIES));
-  for (const [since, step] of [["15m", 60], ["1h", 60], ["24h", 3600]] as const) {
+  for (const [since, step] of [["15m", 60], ["1h", 60], ["24h", 3600], ["7d", 21_600]] as const) {
     run.answers.set(`GET /api/usage?since=${since}&step=${step}`, answer(UL_USAGE));
     run.answers.set(`GET /api/activity?since=${since}`, answer(activityOf()));
     run.answers.set(`GET /api/events?limit=500&since=${since}`, answer(UL_EVENTS));
@@ -2368,6 +2369,10 @@ test("Usage: the cards under Now say who is connected and what runs, then the ra
   assert.deepEqual(hrefs(live), ["#observability/queries", "#observability/queries?status=failed", "#observability/queries?slow=1"], "each statement card leads to the statements it counts");
   assert.match(kpis({ activity: activityOf(), sessions, running: [], range: "now" }), /Running now<\/p><p class="card-value">0<\/p><p class="card-sub">no statement is running<\/p>/);
   assert.match(live, /<a class="card warn link" href="[^"]*"><p class="card-label">Failed, last 15 min/, "a failure colours the one to act on");
+  // the Clients card says the totals over EVERY client, never the 50 the endpoint lists (a card once said 50 of 200)
+  assert.match(kpis({ activity: activityOf({ clientsTotal: { clients: 200, sessions: 410 } }), range: "24h" }), /Clients, last 24 hours<\/p><p class="card-value">200<\/p><p class="card-sub">410 sessions<\/p>/);
+  const renderClients = fnOf<[unknown[], Record<string, unknown>], string>(usagePage, "renderClients");
+  assert.match(textOf(renderClients(CLIENTS, { range: "24h", total: 200 })), new RegExp(`200 clients \\(the ${CLIENTS.length} with the most statements are listed\\) sent statements in the last 24 hours`));
   // A PAST RANGE: five cards — its clients, then its statements; its links keep the range
   const past = kpis({ activity: activityOf(), sessions, running: RUNNING_NOW, range: "24h" });
   assert.deepEqual(labels(past), ["Clients, last 24 hours", "Statements, last 24 hours", "Failed, last 24 hours", "p95, last 24 hours", "Sent, last 24 hours"], "what is connected now is Now's alone");
@@ -2599,11 +2604,12 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
   assert.match(textOf(app.view()["request-log"]!), /No request that passes the filters/);
   // the Overview's cards are links into the views that list what they count
   const html2 = renderStatusOf(FAILED);
-  for (const [label, href] of [["Tables synced", "#tables?show=failed"], ["Rows", "#tables"], ["The copy&#39;s file", "#observability/usage"], ["Statements, last day", "#observability/queries"], ["p95, last day", "#observability/queries?slow=1"]]) {
+  for (const [label, href] of [["Tables synced", "#tables?show=failed"], ["Rows", "#tables"], ["The copy&#39;s file", "#observability/usage?range=24h"], ["Statements, last day", "#observability/queries?range=24h"], ["p95, last day", "#observability/queries?slow=1&amp;range=24h"]]) {
+    // each at the range of what it counts (the last day), never the views' default, Now
     assert.match(html2, new RegExp(`<a class="card[^"]*" href="${href!.replace(/[?]/g, "\\?")}"><p class="card-label">${label!.replace(/[()]/g, "\\$&")}</p>`), `${label} → ${href}`);
   }
-  assert.match(html2, /Sync errors .*<a class="see" href="#observability\/syncs\?failures=1">See all<\/a>/);
-  assert.match(html2, /Query errors .*<a class="see" href="#observability\/queries\?status=failed">See all<\/a>/);
+  assert.match(html2, /Sync errors .*<a class="see" href="#observability\/syncs\?failures=1&amp;range=7d">See all<\/a>/);
+  assert.match(html2, /Query errors .*<a class="see" href="#observability\/queries\?status=failed&amp;range=24h">See all<\/a>/);
 });
 const renderStatusOf = (s: RunState) => fn<[unknown, Record<string, unknown>], string>("renderStatus")(s, { queries: QUERIES, events: EVENTS, requests: FAILED_REQUESTS, now: NOW });
 
@@ -2870,7 +2876,7 @@ test("the Overview: the last day's unsupported SQL is one line of the recent err
   const line = of<[unknown], string>(statusPage, "status.js", "renderUnsupportedLine");
   const html = line(UNSUPPORTED);
   assert.equal(textOf(html), "Unsupported SQL, the last day: a window frame in GROUPS mode: 12 statements as ana, metabase from Metabase (and 1 other) See all");
-  assert.match(html, /<a class="see" href="#observability\/queries">See all<\/a>/);
+  assert.match(html, /<a class="see" href="#observability\/queries\?range=24h">See all<\/a>/);
   assert.equal(line({ ...UNSUPPORTED, unsupported: [] }), "", "none: no line");
   assert.equal(line(undefined), "", "not read yet: nothing");
   assert.equal(textOf(line({ failure: { code: "failed", message: "no ledger\nmore" } })), "Unsupported SQL: could not read it (no ledger; mason logs has the detail)", "as mason status says it");
@@ -3280,7 +3286,7 @@ test("layout guard: a click moves no row and no column — a question, a form an
   for (const label of ["Sync now", "Syncing…", "Synced ✓"]) assert.ok([...label].length <= [...ROOMS.sync!].length, `${label} fits Sync's room`);
   const syncing = renderTables(CATALOG_STATE, { syncing: ["public.customers"] });
   const sync = renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced, at: 0 }, now: 1 });
-  for (const h of [html, syncing, sync]) assert.match(h, /<a class="btn small" href="#observability\/syncs\?table=public\.customers">View syncs<\/a> <button type="button" class="small"[^>]* data-room="Syncing…"[^>]*>(Sync now|Syncing…|Synced ✓)<\/button> <button type="button" class="danger small"/,
+  for (const h of [html, syncing, sync]) assert.match(h, /<a class="btn small" href="#observability\/syncs\?table=public\.customers&amp;range=7d">View syncs<\/a> <button type="button" class="small"[^>]* data-room="Syncing…"[^>]*>(Sync now|Syncing…|Synced ✓)<\/button> <button type="button" class="danger small"/,
     "View syncs, a link that never changes, before the sync's room");
   // a user's Disable → Enable once disabled: one room, the longer, and no cell or row added
   for (const label of ["Disable", "Enable"]) assert.ok([...label].length <= [...ROOMS.disable!].length, `${label} fits Disable's room`);
@@ -3421,8 +3427,8 @@ test("Syncs: #observability/syncs?table= (a table's View syncs) narrows the even
   assert.deepEqual([m.table, m.failuresOnly], ["public.events", false]);
   assert.match(app.view()["syncs-filters"]!, /<option value="public\.events" selected>public\.events<\/option>/, "the Table filter shows it");
   assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ copy_failed public\.events /, "its events alone");
-  // the Overview's sync errors: the failures of every table, the box ticked
-  app.show("#observability/syncs?failures=1", { doc });
+  // the Overview's sync errors: the failures of every table over the week, the box ticked
+  app.show("#observability/syncs?failures=1&range=7d", { doc });
   assert.deepEqual([m.table, m.failuresOnly, box.checked], ["", true, true]);
   assert.match(textOf(app.view()["syncs-events"]!), /^2 of the 3 events read\./);
   // a change of range (the nav's links carry no filter) keeps the filters chosen
@@ -3431,4 +3437,33 @@ test("Syncs: #observability/syncs?table= (a table's View syncs) narrows the even
   // the old addresses land here too, with their parameters
   app.show("#logs?table=public.orders", { doc });
   assert.equal(m.table, "public.orders");
+});
+
+test("a past range's 'as of' is its own read's, never another page's; a Refresh asked while a poll is in flight runs when it ends", async () => {
+  // the as-of: cleared by a page or range shown, set once that page's own once-only reads are answered
+  const run = fakeRun(); withUsageAnswers(run);
+  const at = new Date("2026-10-28T09:10:00.000Z");
+  const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => at);
+  app.show("observability/usage?range=1h");
+  await app.poll();
+  assert.match(app.view()["range-usage"]!, /as of 09:10:00 UTC/);
+  app.show("observability/queries?range=1h");
+  assert.ok(!/as of/.test(app.view()["range-queries"]!), "Queries not read yet: no as-of (Usage's was 09:10:00)");
+  await app.poll();
+  assert.match(app.view()["range-queries"]!, /as of 09:10:00 UTC/);
+  // Refresh while a poll is in flight: held, then run — never dropped (the poll in flight read the state alone)
+  const run2 = fakeRun(); withUsageAnswers(run2);
+  let release: () => void = () => undefined;
+  let hold: Promise<void> | null = null;
+  const plain = run2.fetch;
+  run2.fetch = async (p, init) => { if (hold !== null && p === "/api/state") await hold; return plain(p, init); };
+  const { on, settle, tick } = fakeBrowser(run2, "#observability/usage?range=1h");
+  await settle();
+  hold = new Promise<void>((r) => { release = r; });
+  tick();                                   // a poll in flight: the shell's state, held
+  run2.asked.length = 0;
+  const clicked = on.get("click")!({ target: { closest: () => ({ dataset: { refreshRange: "" } }) } });
+  release(); hold = null;
+  await clicked; await settle();
+  assert.ok((run2.asked as string[]).includes("GET /api/activity?since=1h"), `the Refresh ran once the poll ended: ${run2.asked.join(", ")}`);
 });

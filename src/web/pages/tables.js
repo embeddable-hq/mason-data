@@ -18,8 +18,9 @@ const SIZES_PATH = "/api/usage?since=1m";
 
 /** Where one table's columns are read, when its form opens (src/cli/run-server.ts tableColumns): never with the state,
  *  which is polled every 2 s and would carry every table's (3.4 MB at 800 tables of 50 columns). */
-/** A table's sync events: Observability › Syncs narrowed to it (src/web/pages/syncs.js `route`). */
-export const syncsHref = (table) => `#observability/syncs?table=${encodeURIComponent(table)}`;
+/** A table's sync events: Observability › Syncs narrowed to it (src/web/pages/syncs.js `route`), over the week (its
+ *  copy and failures are rarely in the last 15 minutes, Now's). */
+export const syncsHref = (table) => `#observability/syncs?table=${encodeURIComponent(table)}&range=7d`;
 export const columnsPath = (table) => `/api/tables/${encodeURIComponent(table)}/columns`;
 
 /** A table's sync in one word (`/api/state` `tables[].sync.state`, src/cli/readiness.ts `syncStateOf`). */
