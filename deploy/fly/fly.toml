@@ -3,6 +3,7 @@
 #   fly launch --no-deploy --copy-config --name <app> --region <region>   # the app, from this file
 #   fly secrets set DATABASE_URL=postgres://… MASON_API_KEY=$(openssl rand -hex 24)
 #   fly deploy --ha=false                                                 # makes the volume, starts the Machine
+#   fly ips allocate-v4                                                   # IPv4 clients need a dedicated address (README)
 #   fly ssh console -u node -C "mason add public.orders"
 #
 # ONE Machine, always: the copy is one file with one writer. A Machine with a volume is updated in place (stopped,

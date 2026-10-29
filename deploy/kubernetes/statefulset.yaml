@@ -106,16 +106,20 @@ spec:
                 path: sources/app.yml
               - key: mason.yml
                 path: mason.yml
-  # THE VOLUME: a block device (ReadWriteOnce from a block StorageClass: gp3 on EKS, pd-ssd / premium-rwo on GKE,
-  # managed-csi on AKS), never NFS, EFS or Azure Files: the copy needs a block device's file locking and random reads.
-  # The PVC outlives the StatefulSet ("Deleting and/or scaling a StatefulSet down will not delete the volumes"): delete
-  # it by hand to start over, and the next start copies the tables again.
+  # THE VOLUME: a disk (ReadWriteOnce from a block StorageClass), never a file share or NFS (EFS, Azure Files): the copy
+  # is one file written in place and read at random, and a network filesystem is not supported. No storageClassName
+  # here means the cluster's DEFAULT class, which is a disk on GKE (balanced persistent disk) and AKS (`default` is
+  # `managed-csi`, a managed disk); EKS Auto Mode creates none ("You must create a StorageClass", type gp3), and a
+  # cluster whose default is a file class needs one named: `kubectl get storageclass`, then set it (README.md "The
+  # volume"). A missing class leaves the PVC Pending and the pod never starts. Decided once: a volumeClaimTemplate
+  # cannot be changed after creation. The PVC outlives the StatefulSet ("Deleting and/or scaling a StatefulSet down will
+  # not delete the volumes"): delete it by hand to start over, and the next start copies the tables again.
   volumeClaimTemplates:
     - metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: gp3
+        # storageClassName: gp3
         resources:
           requests:
             storage: 20Gi

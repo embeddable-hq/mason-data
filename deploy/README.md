@@ -7,8 +7,9 @@ gives those three things; this folder has a guide for each that does, and says w
 
 - **One container, ever.** The copy is one file with one writer: one replica, no autoscaling, and the old container
   stopped before the new one starts (a recreate, never a rolling or blue-green deploy).
-- **A persistent block volume** at `/mason/data`: a disk (EBS, NVMe, a cloud's block StorageClass), not NFS or EFS,
-  whose file locking and random-read latency the copy cannot work on. Losing it costs a new copy of the tables, not data.
+- **A persistent block volume** at `/mason/data`: a disk (EBS, NVMe, a cloud's block StorageClass). The copy is one
+  file written in place and read at random, and Mason was measured on a block device only; a network filesystem (NFS,
+  EFS, Azure Files) is not supported. Losing the volume costs a new copy of the tables, not data.
 - **Two ports**: raw TCP 5433 for the Postgres API, public, with Mason's own TLS (`MASON_PG_SELF_SIGNED_TLS=1`, or a
   certificate a CA signed); HTTP 4140 for `GET /healthz`, 503 while it starts (~15 s; the first start can take minutes
   on a loaded machine) and 200 once it serves. A platform that routes only HTTP cannot carry the Postgres protocol.
@@ -19,8 +20,8 @@ gives those three things; this folder has a guide for each that does, and says w
 |---|---|---|
 | [Docker Compose on one machine](mason-data/README.md) | **yes, the measured one** | an m7g.xlarge with EBS gp3 is what the numbers in `docs/MEASUREMENTS.md` were taken on; one compose file |
 | [AWS: EC2 with Compose, or ECS on EC2](aws-ecs/README.md) | **yes** | an EBS volume the instance mounts, bind-mounted into the task; `minimumHealthyPercent: 0, maximumPercent: 100` stops the old task first. **Fargate: no** — ECS-managed EBS volumes are new at each task and deleted when it stops, EFS is NFS |
-| [Fly.io](fly/README.md) | **yes** | a Fly Volume is NVMe on the Machine's host, one Machine per volume; a raw TCP service with no handler; `rolling` on one Machine is stop, update, start |
-| [Kubernetes](kubernetes/README.md) ([Helm chart](helm/mason-data/README.md)) | **yes, with a block StorageClass** | a StatefulSet of one replica recreates the pod on its PVC; a TCP LoadBalancer for 5433; never an NFS or EFS class |
+| [Fly.io](fly/README.md) | **yes** | a Fly Volume is NVMe on the Machine's host, one Machine per volume; a raw TCP service with no handler, which needs a dedicated IPv4 (paid) for IPv4 clients; `rolling` on one Machine is stop, update, start |
+| [Kubernetes](kubernetes/README.md) ([Helm chart](helm/mason-data/README.md)) | **yes, with a block StorageClass** | a StatefulSet of one replica recreates the pod on its PVC; a TCP LoadBalancer for 5433; a disk class (`kubectl get storageclass`), never a file-share or NFS class |
 | [Railway](railway/README.md) | **yes** | one volume per service, replicas refused with a volume, the old deployment stopped before the new one; a TCP proxy to 5433; `PORT=4140` for its health check |
 | Render | **no** (public) | public traffic reaches "only one HTTP port per web service"; a private service may listen on any protocol but is "not reachable via the public internet", so its TCP serves only tools inside Render's private network; a persistent disk exists (and forbids multiple instances and zero-downtime deploys, which Mason wants anyway) |
 | Google Cloud Run | **no** | a service's ingress is HTTP (HTTP/1 or gRPC at the container); the file system is in memory and the volumes it mounts are Cloud Storage FUSE, NFS or in-memory, none a block device |

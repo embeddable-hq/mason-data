@@ -8,6 +8,7 @@ cd deploy/fly
 fly launch --no-deploy --copy-config --name <app> --region <region>   # the app from fly.toml, nothing started yet
 fly secrets set DATABASE_URL=postgres://mason_reader:…@db.example.com:5432/app MASON_API_KEY=$(openssl rand -hex 24)
 fly deploy --ha=false                     # creates the volume (20 GB, [[mounts]]) and the one Machine
+fly ips allocate-v4                       # a dedicated IPv4 (paid, monthly): the only way IPv4 clients reach a raw TCP port
 fly checks list                           # /healthz passing once it serves (~15 s; minutes on a loaded host); 4140 is not published
 fly ssh console -u node -C "mason tables"
 fly ssh console -u node -C "mason add public.orders"
@@ -15,6 +16,12 @@ fly ssh console -u node -C "mason user add metabase"   # the BI tool's user: URL
 ```
 
 A tool connects to `<app>.fly.dev:5433` with `sslmode=require`, as the user `mason user add` printed.
+
+- **A dedicated IPv4 is required, and paid.** The free shared IPv4 every app gets carries HTTP on 80 and 443, and other
+  TCP ports only "by using the TLS handler"; a port with no handler, which this one must be (the TLS is Mason's), is
+  Fly's listed case for a dedicated address: "Your app uses a non-HTTP protocol that doesn't use TLS". Without
+  `fly ips allocate-v4` only IPv6 clients connect, and most hosted BI tools are IPv4-only. The IPv6 address is free and
+  automatic.
 
 - **One Machine, one volume, never two.** The copy is one file with one writer. `fly deploy` "creates and starts only
   one Machine if the process group has volumes mounted", and `--ha=false` says so twice; `fly scale count 1` is the
@@ -68,8 +75,10 @@ has the measurements. `fly ssh console -u node -C "mason doctor"` says what the 
 ## Your database
 
 What polling and replication each need, and the network: [`deploy/mason-data/README.md`](../mason-data/README.md#your-database).
-A Machine reaches the internet; a database that allows only known addresses needs the app's dedicated IPv4
-(`fly ips allocate-v4`, which you pay for), or a database inside your Fly private network (6PN) by its `.internal` name.
+A Machine reaches the internet, but "outbound (egress) IPs from Fly Machines are unstable and may change": a database
+that allows only known addresses needs a static egress address, `fly ips allocate-egress --app <app> -r <region>`
+(one per region, $3.60 a month for the IPv4), or a database inside your Fly private network (6PN) by its `.internal`
+name. The dedicated IPv4 above is inbound and is not it.
 
 ## Where each claim is from
 
@@ -78,6 +87,10 @@ A Machine reaches the internet; a database that allows only known addresses need
 - one Machine for a process group with volumes, `--ha=false`: https://docs.fly.io/reference/app-availability
 - a volume is NVMe on the Machine's host, one Machine per volume, downtime on deploy with one Machine, snapshots:
   https://docs.fly.io/volumes/overview
+- shared IPv4 carries non-HTTP ports only through the TLS handler, a dedicated IPv4 for "a non-HTTP protocol that
+  doesn't use TLS", billed monthly: https://docs.fly.io/networking/services; `fly ips allocate-v4`:
+  https://docs.fly.io/flyctl/ips-allocate-v4
+- egress IPs unstable by default, `fly ips allocate-egress` per region, $3.60/mo: https://docs.fly.io/networking/egress-ips
 - `fly deploy --ha --strategy --image`: https://docs.fly.io/flyctl/deploy; `fly ssh console -u -C`:
   https://docs.fly.io/flyctl/ssh-console; `fly scale count --max-per-region`: https://docs.fly.io/flyctl/scale-count
 - memory steps and limits per CPU kind: https://docs.fly.io/machines/guides-examples/machine-sizing

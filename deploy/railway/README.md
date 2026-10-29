@@ -17,9 +17,12 @@ is none here.
    that is the address a tool connects to, with `sslmode=require`. Do not generate an HTTP domain: the Postgres API is
    not HTTP.
 5. **Settings → Health check**: path `/healthz`, timeout 300 s.
-6. **Deploy** the staged changes. Then, in the service's shell (`railway ssh`, or the dashboard's):
+6. **Deploy** the staged changes. Then, in the service's shell (`railway ssh`, or the dashboard's), first `cd` to the
+   data folder: every `mason` command means the project of the folder it runs in, and the shell documents no working
+   directory.
 
 ```bash
+cd /mason/data
 mason tables
 mason add public.orders
 mason user add metabase      # the BI tool's user: URL and password, printed once (replace the host and port with the proxy's)
@@ -36,18 +39,22 @@ mason user add metabase      # the BI tool's user: URL and password, printed onc
 - **`PORT=4140`.** Railway's health check is sent to the port `PORT` names, and the default `PORT` is not 4140. Setting
   it points the check at `/healthz` while the TCP proxy forwards to 5433; Mason itself does not read `PORT`.
 - **`RAILWAY_RUN_UID=0`.** "Volumes are mounted as the root user"; the image runs as `node`, which could not write the
-  volume. With it the container runs as root, which is what Railway documents for a non-root image.
+  volume. With it the container runs as root, which is what Railway documents for a non-root image. Everything in the
+  container is then root, the server and the shell alike, so a file `mason user add` writes in the shell is one the
+  server can read (on a platform whose shell is root and whose server is not, it would not be: `deploy/aws-ecs/README.md`).
 - **The TCP proxy forwards the bytes to 5433**; Railway's page does not say it ends TLS, and Mason's own TLS
   (`MASON_PG_SELF_SIGNED_TLS=1`) is what the client sees. The CLI makes the same proxy: `railway tcp-proxy create --port 5433`.
 - **The volume holds the copy, Mason's state and the project folder** (`MASON_PROJECT=/mason/data/project`), so a table
-  `mason add` adds beside the server survives a redeploy. Default sizes: 5 GB on Hobby, 50 GB on Pro, extendable (live),
+  `mason add` adds beside the server survives a redeploy. Its region is the service's, chosen once (a volume does not
+  move): the region nearest your database. Default sizes: 5 GB on Hobby, 50 GB on Pro, extendable (live),
   never shrunk; 3,000 read and 3,000 write IOPS whatever the size. To ship your committed `mason/` folder instead, build
   an image that carries it ([`deploy/fly/README.md`](../fly/README.md#the-project-folder) has the two-line Dockerfile)
   and remove `MASON_PROJECT`.
-- **Memory**: `MASON_DUCKDB_MEMORY` is said explicitly (4 GB; the copy would otherwise read a cgroup limit, and Railway's
-  limit is the plan's). Pro allows up to 24 GB a replica; raise the copy's share with the plan, keeping about half for the
-  page cache ([`deploy/mason-data/README.md`](../mason-data/README.md#memory)). `mason doctor` in the service's shell says
-  what the copy may use.
+- **Memory**: `MASON_DUCKDB_MEMORY` is said explicitly (4 GB). Left unset, the copy takes half of the limit it reads
+  from the container, and what Railway's container shows there is not documented: `mason doctor` in the service's shell
+  says what the copy may use; if it shows the machine's RAM rather than the plan's limit, set it to half the plan's
+  limit yourself. Pro allows up to 24 GB a replica; raise the copy's share with the plan, keeping about half for the
+  page cache ([`deploy/mason-data/README.md`](../mason-data/README.md#memory)).
 - **Your database**: what polling and replication each need: [`deploy/mason-data/README.md`](../mason-data/README.md#your-database).
   A Railway service's egress address is shared; a database that allows only known addresses needs Railway's static
   outbound IPs (a plan feature) or a database on Railway's private network.

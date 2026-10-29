@@ -21,8 +21,8 @@ project:
   # an image tagged `main` holds no project to a version). Empty: no mason.yml.
   masonYml: ""
 
-storage:
-  className: gp3            # a BLOCK StorageClass (gp3, pd-ssd, premium-rwo, managed-csi); never NFS, EFS or Azure Files
+storage:                    # DECIDED ONCE, at install: a StatefulSet's volumeClaimTemplates cannot change, and a `helm upgrade` that changes them fails
+  className: ""             # a disk (block) StorageClass; "" is the cluster's default class, right on GKE and AKS, wrong where the default is a file share or there is none (EKS Auto Mode): `kubectl get storageclass`
   size: 20Gi                # the copy is about a fifth of the tables in Postgres; `mason status` says its size
 
 memory:
