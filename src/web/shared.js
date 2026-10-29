@@ -27,11 +27,14 @@ export const icon = (name, cls = "") => Object.hasOwn(ICONS, name)
 export const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 /**
- * THE TIME RANGES the Observability pages share (`?range=` of their hash; 24 hours unless it says): each its label, the
+ * THE TIME RANGES the Observability pages share (`?range=` of their hash; Now unless it says): each its label, the
  * age every endpoint's `since` takes (src/cli/request-filter.ts `timeOf`), and the usage samples' step — a minute a
  * point for the hour, an hour for the day, six for the week (60, 24 and 28 points: a chart readable at each).
  */
 export const RANGES = {
+  // NOW is the one that follows what happens (`live`): its reads every few seconds, the last 15 minutes a minute a
+  // point; every other range is read once when chosen and stays as it was then (Refresh reads it again)
+  now: { label: "Now", span: "the last 15 minutes", since: "15m", stepSeconds: 60, days: 0, live: true },
   "1h": { label: "Last hour", span: "the last hour", since: "1h", stepSeconds: 60, days: 0 },
   "24h": { label: "24 hours", span: "the last 24 hours", since: "24h", stepSeconds: 3600, days: 1 },
   "7d": { label: "7 days", span: "the last 7 days", since: "7d", stepSeconds: 21_600, days: 7 },
@@ -53,15 +56,22 @@ export function rangeOffered(key, keptDays) {
   if (keptDays >= r.days) return { offered: true, shown: true };
   return { offered: false, shown: true, why: `Mason keeps ${keptDays} day${keptDays === 1 ? "" : "s"} of history: MASON_REQUEST_LOG_DAYS=${r.days} keeps ${r.days}` };
 }
-export const DEFAULT_RANGE = "24h";
+export const DEFAULT_RANGE = "now";
+/** Whether a range follows what happens (Now) or is read once when chosen (every other). */
+export const isLive = (range) => RANGES[rangeOf(range)].live === true;
+/** How often a read of a range is asked: `everyMs` while it is live, once (when chosen, or on Refresh) when it is not. */
+export const rangeEvery = (range, everyMs) => isLive(range) ? everyMs : Infinity;
 /** A range's key as the hash gave it: one of RANGES, else the default. */
 export const rangeOf = (text) => Object.hasOwn(RANGES, String(text ?? "")) ? String(text) : DEFAULT_RANGE;
 /** The usage samples of a range, its step a point (src/cli/run-server.ts `usage`): Usage's read, and the Overview's
- *  sparklines (the 24 hours'). */
+ *  sparklines (the 24 hours', by name). */
 export const usagePath = (range = DEFAULT_RANGE) => { const r = RANGES[rangeOf(range)]; return `/api/usage?since=${r.since}&step=${r.stepSeconds}`; };
 
 /** How often the shown page is asked while the tab is seen (src/web/app.js polls; a page's every-poll reads use it). */
 export const POLL_MS = 2000;
+
+/** A statement as a cell: one line, truncated by the page's stylesheet as well, the whole of it (up to TITLE_MAX) its title. */
+export const statementCell = (query) => query === "" ? `<span class="dim">(no statement)</span>` : `<code class="stmt" title="${esc(clip(query, TITLE_MAX))}">${esc(oneLine(query))}</code>`;
 
 /** A count as the commands print it: `1,234`. */
 export const n = (x) => x.toLocaleString("en-US");

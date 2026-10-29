@@ -36,7 +36,7 @@ import { catalogTable, shownPath, type CatalogColumn, type ProjectSource, type S
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamStatus } from "../duck/sync.ts";
 import type { LogBuffer } from "../lib/log-buffer.ts";
-import type { RequestLedger, UnsupportedSql } from "../duck/requests.ts";
+import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, UnsupportedSql } from "../duck/requests.ts";
 import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -98,7 +98,7 @@ export interface RunContext {
     /** the disk the copy's file is on: free, and what the copies running are projected to add (src/duck/sync.ts diskStatus) */
     disk: () => DiskStatus;
     /** the Postgres listener's requests (src/duck/requests.ts, `_mason.requests`): mason status and mason logs --requests */
-    requests: Pick<RequestLedger, "page" | "slow" | "refused" | "unsupported" | "summary" | "days" | "lastUsed">;
+    requests: Pick<RequestLedger, "page" | "slow" | "refused" | "unsupported" | "summary" | "window" | "clients" | "slowest" | "days" | "lastUsed">;
     /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
     events: Pick<SyncEvents, "recent" | "days">;
     /** usage over time (src/duck/usage.ts, `_mason.usage`): mason usage */
@@ -263,6 +263,21 @@ export async function usage(ctx: RunContext, q: URLSearchParams, now = Date.now(
   return { since, until, stepSeconds: step, sampleSeconds: u.sampleSeconds, keptDays: u.days, samples, copySizes: await u.copySizes() };
 }
 
+/**
+ * `GET /api/activity?since=`: what the Postgres API answered from `since` on (default an hour ago; the one time grammar,
+ * src/cli/request-filter.ts `timeOf`), for the Usage page's time range — the window's statements (src/duck/requests.ts
+ * `window`), who sent them (`clients`: a row per user and client) and the slowest that completed (`slowest`); and the
+ * days the request log keeps. Read once per range chosen, every 5 s while the range is Now.
+ */
+export async function activity(ctx: RunContext, q: URLSearchParams, now = Date.now()): Promise<{ since: string; window: QueryWindow; clients: ClientActivity[];
+  slowest: LedgerRequest[]; keptDays: number }> {
+  const sinceText = q.get("since");
+  const since = sinceText === null ? new Date(now - 3_600_000).toISOString() : timeParam("since", sinceText, now);
+  const r = ctx.duck.requests;
+  const [window, clients, slowest] = await Promise.all([r.window(since, now), r.clients(since), r.slowest(since)]);
+  return { since, window, clients, slowest, keptDays: r.days };
+}
+
 /** how many registry entries `/api/unsupported` answers unless `limit` says, and at most */
 export const DEFAULT_UNSUPPORTED_LIMIT = 10;
 export const MAX_UNSUPPORTED_LIMIT = 100;
@@ -362,7 +377,7 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/pages/queries.js": ["pages/queries.js", "text/javascript; charset=utf-8"],
   "/pages/users.js": ["pages/users.js", "text/javascript; charset=utf-8"],
   "/pages/usage.js": ["pages/usage.js", "text/javascript; charset=utf-8"],
-  "/pages/logs.js": ["pages/logs.js", "text/javascript; charset=utf-8"],
+  "/pages/syncs.js": ["pages/syncs.js", "text/javascript; charset=utf-8"],
   // the charts (src/web/charts.js over uPlot) and what the page vendors whole, pinned, with its licence
   // (src/web/vendor/README.md): served from here, never fetched from elsewhere — a box without internet reads it all
   "/charts.js": ["charts.js", "text/javascript; charset=utf-8"],
@@ -473,6 +488,9 @@ export function createRunServer(ctx: RunContext): http.Server {
           // with /api/state, which the page asks every 2 s
           // (cached SUMMARY_TTL_MS: up to 30 s old)
           sendJson(res, 200, { queries: await summary() });
+        } else if (req.method === "GET" && url.pathname === "/api/activity") {
+          // one time range's statements, clients and slowest (the Usage page's), from the request log
+          sendJson(res, 200, await activity(ctx, url.searchParams));
         } else if (req.method === "GET" && url.pathname === "/api/running") {
           sendJson(res, 200, { running: ctx.listener.running() });
         } else if (req.method === "POST" && url.pathname === "/api/cancel") {

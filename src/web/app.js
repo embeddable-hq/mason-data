@@ -49,14 +49,14 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, createAsk, renderFailure, updatedText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, POLL_MS } from "./shared.js";
+import { esc, badge, icon, createAsk, renderFailure, updatedText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
 import { page as queriesPage } from "./pages/queries.js";
 import { page as usersPage } from "./pages/users.js";
 import { page as usagePage } from "./pages/usage.js";
-import { page as logsPage } from "./pages/logs.js";
+import { page as syncsPage } from "./pages/syncs.js";
 
 /** What the shell itself reads when the page shown does not: the state (the sidebar's project, badge and version). */
 const SHELL_STATE = { path: "/api/state", everyMs: 60_000 };
@@ -69,19 +69,20 @@ export * from "./shared.js";
 export { copyingText, tableLine, sourceRows, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
 export { renderUsers, renderAdded } from "./pages/users.js";
-export { renderRunning, renderRequests, renderSessions } from "./pages/queries.js";
+export { renderRequests } from "./pages/queries.js";
+export { renderRunning, renderSessions, renderClients, renderSlowest, queriesHref } from "./pages/usage.js";
 
 /** The pages, in the nav's order: a page with a `parent` is in its parent's group. */
-export const PAGES = [statusPage, tablesPage, usersPage, queriesPage, usagePage, logsPage];
+export const PAGES = [statusPage, tablesPage, usersPage, queriesPage, usagePage, syncsPage];
 
 /** The groups a parent stands for: its title, the heading of its pages in the nav. */
 const GROUPS = { observability: { title: "Observability" } };
 
 /** Each page's icon in the nav (Lucide's names, src/web/shared.js ICONS): the shell's, so a page module stays its own. */
-export const NAV_ICONS = { status: "layout-dashboard", tables: "table", users: "users", queries: "square-terminal", usage: "chart-column", logs: "logs" };
+export const NAV_ICONS = { status: "layout-dashboard", tables: "table", users: "users", queries: "square-terminal", usage: "chart-column", syncs: "logs" };
 
 /** The hashes of before the Observability group, and the group's own: each lands on the view it was (`#status` the Overview). */
-const ALIASES = { status: "status", queries: "queries", usage: "usage", logs: "logs", observability: "queries" };
+const ALIASES = { status: "status", queries: "queries", usage: "usage", logs: "syncs", syncs: "syncs", "observability/logs": "syncs", observability: "queries" };
 
 const hashOfPage = (p) => p.hash ?? p.id;
 
@@ -99,7 +100,7 @@ export function parseHash(hash) {
 }
 
 /** A page's address with its parameters (`hashOf("queries", { range: "7d" })` → `#observability/queries?range=7d`); the
- *  default range is left out, so the plain address is the 24 hours. */
+ *  default range is left out, so the plain address is Now. */
 export function hashOf(id, params = {}) {
   const p = PAGES.find((x) => x.id === id) ?? PAGES[0];
   const q = new URLSearchParams(Object.entries(params).filter(([k, v]) => v !== undefined && v !== "" && !(k === "range" && v === DEFAULT_RANGE)));
@@ -138,9 +139,11 @@ export const renderNav = (shown, range = DEFAULT_RANGE) => `<ul>${tabs().map((t)
 /**
  * THE TIME RANGE OF A GROUP'S PAGE (the Observability views'), written beside the view's title in ONE header row (its
  * section's `range-<id>`; the group's name is the sidebar's heading): a segmented control — each a link to the same view
- * at that range, so the hash is the state and Back goes to the range before. "" for a page of its own.
+ * at that range, so the hash is the state and Back goes to the range before — Now first, the one that follows what
+ * happens (said "Live" beside it); any other is read once when chosen, so beside it are when it was read (`asOf`, a
+ * Date) and Refresh, which reads it again. "" for a page of its own.
  */
-export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined) {
+export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined, asOf = null) {
   const p = PAGES.find((x) => x.id === shown);
   if (!p?.parent) return "";
   const r = rangeOf(range);
@@ -149,8 +152,9 @@ export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined)
     const o = rangeOffered(k, keptDays);
     if (!o.shown && k !== r) return "";
     if (!o.offered && k !== r) return `<span class="off" aria-disabled="true" title="${esc(o.why)}">${esc(v.label)}<span class="sr"> (${esc(o.why)})</span></span>`;
-    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}>${esc(v.label)}</a>`;
-  }).join("")}</div>`;
+    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}${v.live ? ` title="follows what happens: read every few seconds"` : ""}>${esc(v.label)}</a>`;
+  }).join("")}</div>` + (isLive(r) ? `<span class="live" title="read every few seconds"><span class="live-dot" aria-hidden="true"></span>Live</span>`
+    : `<span class="as-of">${asOf ? `<span class="dim" title="read once when chosen; Now follows what happens">as of ${esc(asOf.toISOString().slice(11, 19))} UTC</span> ` : ""}<button type="button" class="small" data-refresh-range>Refresh</button></span>`);
 }
 
 /** The heading's line: the database the run copies, and its sources file's name when that is another. */
@@ -168,10 +172,10 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
   // what was read, by path: the last body, this read's failure (null when it answered), when it was asked
   const store = new Map();
   const first = parseHash(shown);
-  const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null };
+  const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null, rangeReadAt: null };
   const put = (path, at, r) => {
     const was = store.get(path);
-    store.set(path, { at, body: "body" in r ? r.body : was?.body, failure: "failure" in r ? r.failure : null });
+    store.set(path, { at, body: "body" in r ? r.body : was?.body, failure: "failure" in r ? r.failure : null, stale: false });
     if ("body" in r) m.updatedAt = now();
   };
   const pages = new Map();
@@ -192,9 +196,13 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     show(hash, env = {}) {
       const r = parseHash(hash);
       m.shown = r.id;
+      // what is shown is read again now, whatever its rate: a range that is not Now is read once, when it is chosen
+      app.markStale();
       if (PAGES.find((p) => p.id === r.id)?.parent) m.range = rangeOf(r.params.range);
       pages.get(r.id).route?.(r.params, env);
     },
+    /** Every read due at the next poll (a range chosen again, Refresh): what it has stays shown until it is answered. */
+    markStale() { for (const e of store.values()) e.stale = true; },
     /** Read the shown page's reads that are due: those at the poll's rate every time, the slower ones once their time is up. */
     async poll() {
       const page = pages.get(m.shown);
@@ -203,9 +211,11 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       const pageReads = page.reads();
       const reads = pageReads.some((r) => r.path === SHELL_STATE.path) ? pageReads : [...pageReads, SHELL_STATE];
       const at = now().getTime();
-      const due = reads.filter((r) => r.everyMs <= POLL_MS || !store.has(r.path) || at - store.get(r.path).at >= r.everyMs - POLL_MS / 2);
+      const due = reads.filter((r) => r.everyMs <= POLL_MS || !store.has(r.path) || store.get(r.path).stale || at - store.get(r.path).at >= r.everyMs - POLL_MS / 2);
       const rs = await Promise.all(due.map((r) => ask(r.path)));
       due.forEach((r, i) => put(r.path, at, rs[i]));
+      // a range that is not Now says when it was read: its reads are the once-only ones
+      if (due.some((r) => r.everyMs === Infinity)) m.rangeReadAt = now();
       const own = reads[0] === undefined ? undefined : store.get(reads[0].path);
       m.pollFailure = own?.failure ?? null;
       afterRead();
@@ -215,7 +225,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       return {
         nav: renderNav(m.shown, m.range),
         // the range control in the shown view's header row (each group page's own slot; the others empty)
-        ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays) : ""])),
+        ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays, m.rangeReadAt) : ""])),
         where: st ? renderWhere(st) : "",
         // the demo database is said beside its name, so a person never takes it for their own
         badge: st?.source?.demo ? badge("demo", "accent") : "",
@@ -327,6 +337,8 @@ export function start(doc, win) {
     if (b?.dataset.menu !== undefined) { setMenu(!menuOpen, true); return; }
     if (menuOpen && !inMenu(e.target)) { setMenu(false, true); return; }
     if (!b) return;
+    // Refresh beside a range that is not Now: everything shown read again
+    if (b.dataset.refreshRange !== undefined) { app.markStale(); await poll(); return; }
     const r = shownPage().click?.(b.dataset, b, { doc, win }) ?? null;
     if (r === null) return;
     paint();

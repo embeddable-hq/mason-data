@@ -22,7 +22,7 @@
   </div>
   <div id="side-body" class="side-body">
     <!-- the pages: one section each, the one shown chosen by the URL's hash; the links work before the script runs, which adds their icons -->
-    <nav id="nav" class="nav" aria-label="Pages"><ul><li><a href="#overview"><span class="label">Overview</span></a></li><li><a href="#tables"><span class="label">Tables</span></a></li><li><a href="#users"><span class="label">Users</span></a></li><li class="group"><p class="group-title" id="nav-observability">Observability</p><ul aria-labelledby="nav-observability"><li><a href="#observability/queries"><span class="label">Queries</span></a></li><li><a href="#observability/usage"><span class="label">Usage</span></a></li><li><a href="#observability/logs"><span class="label">Logs</span></a></li></ul></li></ul></nav>
+    <nav id="nav" class="nav" aria-label="Pages"><ul><li><a href="#overview"><span class="label">Overview</span></a></li><li><a href="#tables"><span class="label">Tables</span></a></li><li><a href="#users"><span class="label">Users</span></a></li><li class="group"><p class="group-title" id="nav-observability">Observability</p><ul aria-labelledby="nav-observability"><li><a href="#observability/queries"><span class="label">Queries</span></a></li><li><a href="#observability/usage"><span class="label">Usage</span></a></li><li><a href="#observability/syncs"><span class="label">Syncs</span></a></li></ul></li></ul></nav>
     <div class="side-foot"><p id="updated" class="updated" aria-live="polite"></p><p id="version" class="version"></p></div>
   </div>
 </aside>
@@ -48,17 +48,8 @@
   </section>
   <section id="page-queries" aria-labelledby="queries-h" hidden>
     <!-- an Observability view's head is ONE row: its title left, the time range the three share right (src/web/app.js renderSubnav) -->
-    <div class="page-head"><div class="head-row"><h2 id="queries-h">Queries</h2><div id="range-queries" class="head-range"></div></div><p class="desc">The statements the Postgres API answers: who is connected, what runs now, the SQL it refused as unsupported, and every statement that ran, as <code>mason status</code> and <code>mason logs</code> list them.</p></div>
-    <div id="queries-kpis"></div>
-    <h3>Connected now</h3>
-    <div id="connected-now"></div>
-    <h3>Running now</h3>
-    <p class="lead">As <code>mason logs --running</code> lists them. Cancel stops one, as <code>mason cancel</code> does.</p>
-    <div id="running-now"></div>
-    <h3>Unsupported SQL</h3>
-    <div id="unsupported"></div>
-    <h3>Request log</h3>
-    <p class="lead">The statements answered, refused or cancelled, as <code>mason logs --requests</code> lists them, newest first, over the time range above. Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone. A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed.</p>
+    <div class="page-head"><div class="head-row"><h2 id="queries-h">Queries</h2><div id="range-queries" class="head-range"></div></div><p class="desc">Every statement the Postgres API answered, refused or cancelled, as <code>mason logs --requests</code> lists them, newest first, over the time range. Who is connected, what runs now and the range's numbers are on <a href="#observability/usage">Usage</a>.</p></div>
+    <p class="lead">Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone. A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed.</p>
     <form id="request-filters" class="toolbar" autocomplete="off">
       <div class="field"><label for="rq-status">Status</label>
         <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
@@ -88,21 +79,26 @@
     <div id="users"></div>
   </section>
   <section id="page-usage" aria-labelledby="usage-h" hidden>
-    <div class="page-head"><div class="head-row"><h2 id="usage-h">Usage</h2><div id="range-usage" class="head-range"></div></div><p class="desc">What the Postgres API answered over the time range and each copy's size, as <code>mason usage</code> prints them.</p></div>
+    <div class="page-head"><div class="head-row"><h2 id="usage-h">Usage</h2><div id="range-usage" class="head-range"></div></div><p class="desc">What the Postgres API answered over the time range — who connected, what ran, the SQL it refused as unsupported — and each copy's size, as <code>mason status</code>, <code>mason logs</code> and <code>mason usage</code> say them. A client or a card leads to its statements on <a href="#observability/queries">Queries</a>.</p></div>
     <div id="usage-kpis"></div>
     <div id="usage-charts"></div>
-    <h3>The last day and the last week</h3>
-    <div id="usage-queries"></div>
+    <h3 id="usage-connected-h">Connected now</h3>
+    <div id="usage-connected"></div>
+    <h3 id="usage-running-h">Running now</h3>
+    <p class="lead" id="usage-running-lead"></p>
+    <div id="usage-running"></div>
+    <h3>Unsupported SQL</h3>
+    <div id="unsupported"></div>
     <h3>Over time</h3>
     <div id="usage-hourly"></div>
     <h3>Each copy's own size</h3>
     <div id="usage-sizes"></div>
   </section>
-  <section id="page-logs" aria-labelledby="logs-h" hidden>
-    <div class="page-head"><div class="head-row"><h2 id="logs-h">Logs</h2><div id="range-logs" class="head-range"></div></div><p class="desc">The sync's events, as <code>mason logs --events</code> lists them, and the run's own log behind a details.</p></div>
-    <div class="toolbar"><div id="logs-filters" class="fields"></div><label class="check" for="logs-failures-only"><input type="checkbox" id="logs-failures-only"> Failures only</label></div>
-    <div id="logs-events"></div>
-    <div id="logs-run"></div>
+  <section id="page-syncs" aria-labelledby="syncs-h" hidden>
+    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Syncs</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">The sync's events — each copy made, each failure and recovery — as <code>mason logs --events</code> lists them, and the run's own log behind a details.</p></div>
+    <div class="toolbar"><div id="syncs-filters" class="fields"></div><label class="check" for="syncs-failures-only"><input type="checkbox" id="syncs-failures-only"> Failures only</label></div>
+    <div id="syncs-events"></div>
+    <div id="syncs-run"></div>
   </section>
 </main>
 </div>

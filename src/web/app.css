@@ -375,7 +375,7 @@ details[open] > summary::before { content: "−" / ""; }
 details > summary:hover { color: var(--fg); }
 details[open] { margin-bottom: var(--space-2); }
 details pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-xs); margin: var(--space-1) 0; }
-details.memory, details#logs-raw { margin: var(--space-4) 0; }
+details.memory, details#syncs-raw { margin: var(--space-4) 0; }
 
 /* ---------------------------------------------------------------- what the commands say: a Failure, an outcome */
 .failure { border: 1px solid var(--frame); border-left: 4px solid var(--bad); border-radius: var(--radius); box-shadow: var(--drop); padding: var(--space-3) var(--space-4);
@@ -437,7 +437,7 @@ table.catalog th.rows { width: 116px; }
 table.catalog th.key { width: 104px; }
 table.catalog th.last { width: 104px; }
 table.catalog th.size { width: 100px; }
-table.catalog th.act { width: 172px; }
+table.catalog th.act { width: 268px; }
 table.catalog th, table.catalog td { overflow: hidden; text-overflow: ellipsis; }
 table.catalog code.name { display: block; max-width: 100%; }
 table.catalog td.state { white-space: nowrap; }
@@ -617,7 +617,13 @@ details.hours > summary { margin-bottom: var(--space-2); }
 .head-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); margin: 0 0 var(--space-2); }
 .head-row h2 { margin: 0; }
 .head-range:empty { display: none; }
-.head-range { min-width: 0; max-width: 100%; }
+.head-range { min-width: 0; max-width: 100%; display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; justify-content: flex-end; }
+/* beside the range: Now's "Live" (a dot that breathes), or when a past range was read and its Refresh */
+.head-range .live { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 500; color: var(--ok); }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 var(--ok); animation: live 2s ease-out infinite; }
+@keyframes live { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 50%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+.head-range .as-of { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); white-space: nowrap; }
 /* the time range: square segments in one hairline frame, the one chosen a pale stone with a patina underline */
 .range { display: inline-flex; padding: 0; margin: 0; background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius); box-shadow: var(--bevel); }
 .range a { display: inline-flex; align-items: center; min-height: 30px; padding: 0 var(--space-3); border-radius: 0; color: var(--fg);

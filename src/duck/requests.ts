@@ -194,7 +194,7 @@ export function parseRequestCursor(text: string): { at: string; seq: number } | 
 
 /** One window of the query summary (RequestLedger.summary). */
 export interface QueryWindow {
-  /** the window asked: 1 (the last day) or 7 (the last week) */
+  /** the window asked, in days: 1 (the last day) or 7 (the last week) in the summary; a time range's length (a fraction under a day) in `window` */
   days: number;
   /** the days of it the log keeps (MASON_REQUEST_LOG_DAYS): fewer than `days` when the log keeps fewer */
   covered: number;
@@ -235,6 +235,39 @@ export interface LedgerOptions {
   flushMs?: number;
   /** a test's: write each batch with this instead of the ledger's own connection (a failure to say) */
   insert?: (sql: string, values: DuckDBValue[]) => Promise<void>;
+}
+
+/** A user and client's statements in a time range (RequestLedger.clients). */
+export interface ClientActivity {
+  /** the mason user ('' for a token's session) and the token's name ('' for a user's) */
+  user: string; tokenName: string;
+  /** the client's application_name ('' when it sent none) */
+  client: string;
+  statements: number; failed: number; sessions: number;
+  /** when the latest started, ISO 8601 UTC */
+  last: string;
+}
+
+/**
+ * A WINDOW FOLDED FROM THE GROUPS of a scan by SQLSTATE and a completed one's duration (`summary`, `window`): each
+ * outcome by `outcomeOf` (the one rule), the average from the durations' sum, the p50 / p95 from the durations'
+ * histogram as quantile_cont interpolates them (`quantileContOf`). ONE place adds a window up.
+ */
+function foldWindow(groups: ReadonlyArray<Record<string, unknown>>, days: number, keptDays: number): QueryWindow {
+  const w: QueryWindow = { days, covered: Math.min(days, keptDays), statements: 0, completed: 0, refused: 0, failed: 0, cancelled: 0, rows: 0, bytesSent: 0, durationMs: null };
+  const histogram: Array<[number, number]> = [];
+  let duration = 0;
+  for (const g of groups) {
+    const n = Number(g.n);
+    w.statements += n; w.rows += Number(g.sent_rows); w.bytesSent += Number(g.sent_bytes);
+    const outcome = outcomeOf(g.sqlstate === null ? null : String(g.sqlstate));
+    if (outcome === "ok") { w.completed += n; duration += Number(g.duration); histogram.push([Number(g.ms), n]); }
+    else w[outcome] += n;
+  }
+  histogram.sort((a, b) => a[0] - b[0]);
+  const p50 = quantileContOf(histogram, 0.5), p95 = quantileContOf(histogram, 0.95);
+  if (w.completed > 0 && p50 !== null && p95 !== null) w.durationMs = { avg: Math.round(duration / w.completed), p50, p95 };
+  return w;
 }
 
 export class RequestLedger {
@@ -369,24 +402,44 @@ export class RequestLedger {
       `CASE WHEN ${outcomeSql("sqlstate")} = 'ok' THEN duration_ms END AS ms, count(*) AS n, sum(duration_ms) AS duration, ` +
       `coalesce(sum("rows"), 0) AS sent_rows, coalesce(sum(bytes_sent), 0) AS sent_bytes ` +
       `FROM ${REQUESTS_TABLE} WHERE started_at > now() - INTERVAL 7 DAY AND method <> 'CONNECT' GROUP BY ALL`)).getRowObjectsJson() as Array<Record<string, unknown>>;
-    const windowOf = (days: 1 | 7): QueryWindow => {
-      const w: QueryWindow = { days, covered: Math.min(days, this.days), statements: 0, completed: 0, refused: 0, failed: 0, cancelled: 0, rows: 0, bytesSent: 0, durationMs: null };
-      const histogram: Array<[number, number]> = [];
-      let duration = 0;
-      for (const g of groups) {
-        if (days === 1 && g.in_day !== true) continue;
-        const n = Number(g.n);
-        w.statements += n; w.rows += Number(g.sent_rows); w.bytesSent += Number(g.sent_bytes);
-        const outcome = outcomeOf(g.sqlstate === null ? null : String(g.sqlstate));
-        if (outcome === "ok") { w.completed += n; duration += Number(g.duration); histogram.push([Number(g.ms), n]); }
-        else w[outcome] += n;
-      }
-      histogram.sort((a, b) => a[0] - b[0]);
-      const p50 = quantileContOf(histogram, 0.5), p95 = quantileContOf(histogram, 0.95);
-      if (w.completed > 0 && p50 !== null && p95 !== null) w.durationMs = { avg: Math.round(duration / w.completed), p50, p95 };
-      return w;
-    };
+    const windowOf = (days: 1 | 7): QueryWindow => foldWindow(days === 1 ? groups.filter((g) => g.in_day === true) : groups, days, this.days);
     return { keptDays: this.days, day: windowOf(1), week: windowOf(7) };
+  }
+
+  /**
+   * ONE WINDOW OF THE REQUEST LOG from `since` (ISO 8601) to now — what the Usage page's cards say for its time range:
+   * the statements, each outcome, the rows and bytes sent and the completed ones' durations, as `summary` folds a day,
+   * by the same GROUP BY (`foldWindow`). `days` is the window's length in days (a fraction under one), `covered` as far
+   * as the log keeps it.
+   */
+  async window(since: string, now = Date.now()): Promise<QueryWindow> {
+    const groups = (await this.history.reader.runAndReadAll(`SELECT sqlstate, CASE WHEN ${outcomeSql("sqlstate")} = 'ok' THEN duration_ms END AS ms, count(*) AS n, ` +
+      `sum(duration_ms) AS duration, coalesce(sum("rows"), 0) AS sent_rows, coalesce(sum(bytes_sent), 0) AS sent_bytes ` +
+      `FROM ${REQUESTS_TABLE} WHERE started_at >= $1::TIMESTAMPTZ AND method <> 'CONNECT' GROUP BY ALL`, [since])).getRowObjectsJson() as Array<Record<string, unknown>>;
+    return foldWindow(groups, Math.max(0, (now - Date.parse(since)) / 86_400_000), this.days);
+  }
+
+  /**
+   * WHO CONNECTED from `since` on, by the statements they sent: a row per user and client (application_name) — its
+   * statements, the failed ones (refused, failed or cancelled), the sessions they came from and when the latest started —
+   * the most statements first, `limit` of them. A session that sent only what the log does not list (select 1, SET, a
+   * catalog query) is not here; the live sessions are `/api/state`'s. Committed rows only.
+   */
+  async clients(since: string, limit = 50): Promise<ClientActivity[]> {
+    const rows = (await this.history.reader.runAndReadAll(`SELECT user_name, token_name, application_name, count(*) AS statements, ` +
+      `count(*) FILTER (WHERE sqlstate IS NOT NULL) AS failed, count(DISTINCT session) AS sessions, max(started_at) AS last ` +
+      `FROM ${REQUESTS_TABLE} WHERE started_at >= $1::TIMESTAMPTZ AND method <> 'CONNECT' GROUP BY ALL ORDER BY statements DESC, last DESC LIMIT $2`,
+    [since, limit])).getRowObjectsJson();
+    return rows.map((r) => ({ user: String(r.user_name ?? ""), tokenName: String(r.token_name ?? ""), client: String(r.application_name ?? ""),
+      statements: Number(r.statements), failed: Number(r.failed), sessions: Number(r.sessions), last: new Date(String(r.last)).toISOString() }));
+  }
+
+  /** The slowest `limit` completed statements started from `since` on, slowest first: what ran longest in a time range
+   *  that is past (the Usage page's analogue of what runs now). Committed rows only. */
+  async slowest(since: string, limit = 10): Promise<LedgerRequest[]> {
+    const rows = (await this.history.reader.runAndReadAll(`SELECT * FROM ${REQUESTS_TABLE} WHERE started_at >= $1::TIMESTAMPTZ AND sqlstate IS NULL AND method <> 'CONNECT' ` +
+      `ORDER BY duration_ms DESC, started_at DESC LIMIT $2`, [since, limit])).getRowObjectsJson();
+    return (rows as Array<Record<string, unknown>>).map((r) => requestOf(r));
   }
 
   /**

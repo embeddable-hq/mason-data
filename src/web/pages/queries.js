@@ -1,159 +1,27 @@
 /**
- * THE QUERIES VIEW (#observability/queries, a view of the Observability group; `#queries`, its old address, lands here): KPI cards (the sessions open, the statements running, the last day's statements, failed ones
- * and p95), then who is connected now (`/api/state` `sessions`), the statements running now (`mason logs --running`, GET /api/running) with a Cancel that
- * asks first (`mason cancel`, POST /api/cancel), the unsupported SQL of the range (mason status's, GET /api/unsupported,
- * read once a minute), and the request log (`mason logs --requests`, GET /api/requests) as a
- * table (a status dot and word, each row expanding in place and staying open across polls), newest first, filtered by
- * status, slow (SLOW_MS or more), a piece of the statement's text, since, user and client — since is the shared time
- * range unless the filter names its own — and paged back by Older; Started, Duration and Rows sort the page shown (the
- * pages follow the log's order by start: a sort of the whole log would need a cursor per order). A statement is one or
- * two lines in its cell, its title at most TITLE_MAX characters, and its expanded row the first STATEMENT_MAX of it. The words are the commands': a running
- * statement's "N rows sent" and its client, a request's duration in ms, its error, the empty log's sentence — and,
- * while the log is empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away.
+ * THE QUERIES VIEW (#observability/queries, a view of the Observability group; `#queries`, its old address, lands here):
+ * the request log (`mason logs --requests`, GET /api/requests) and nothing else — who is connected, what runs and the
+ * range's numbers are Usage's (src/web/pages/usage.js). A table (a status dot and word, each row expanding in place and
+ * staying open across polls), newest first, filtered by status, slow (SLOW_MS or more), a piece of the statement's text,
+ * since, user and client — since is the shared time range unless the filter names its own — and paged back by Older;
+ * Started, Duration and Rows sort the page shown (the pages follow the log's order by start: a sort of the whole log
+ * would need a cursor per order). Read every 5 s while the range is Now, once when another is chosen. A statement is one
+ * or two lines in its cell, its title at most TITLE_MAX characters, and its expanded row the first STATEMENT_MAX of it.
+ * The words are the commands': a request's duration in ms, its error, the empty log's sentence — and, while the log is
+ * empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away. Usage's rows lead here
+ * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`).
  */
-import { msText, agoText, bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText, details, createOpenSet, card, cards, empty, panel, status, skeleton,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText, unsupportedEntry, rangeOf, readPart, renderConnect, copyClick, UNLISTED_STATEMENTS, pop, fresh, actId } from "../shared.js";
+import { msText, agoText, bytesText, esc, firstLine, n, renderFailure, rowsHtml, utcText, details, createOpenSet, status,
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery } from "../shared.js";
 
-const RUNNING = "/api/running";
 const STATE = "/api/state";
-/** The request log's summary (the Overview's read too): the range's window of it, for the cards. */
-const QUERIES = "/api/queries";
-const QUERIES_EVERY_MS = 30_000;
-/** The unsupported SQL of a range (`/api/unsupported`: its 10 entries the most refused first), read once a minute: it
- *  moves as statements are refused, and says what to rewrite, not what runs now. */
-const unsupportedPath = (range = DEFAULT_RANGE) => `/api/unsupported?since=${RANGES[rangeOf(range)].since}`;
-const UNSUPPORTED_EVERY_MS = 60_000;
 const NEWEST_EVERY_MS = 5000;
 /** The newest page while a search is set: a search reads every statement's text of the range (7 days of a busy log,
  *  ~0.6 s a read), so it is read every 30 s, not 5 — said under the log (SEARCH_NOTE). */
 const SEARCH_EVERY_MS = 30_000;
 export const SEARCH_NOTE = `Refreshed every ${SEARCH_EVERY_MS / 1000} s while searching: a search reads the text of every statement in the range.`;
-/** Who is connected: the clients with the most sessions open, this many; the rest in one row. */
-const SESSIONS_TOP = 10;
 /** The most of a statement (or an error) an expanded row writes, in characters. */
 const STATEMENT_MAX = 16 * 1024;
-
-/** A statement as a cell: one line, truncated by the page's stylesheet as well, the whole of it as its title. */
-const statementCell = (query) => query === "" ? `<span class="dim">(no statement)</span>` : `<code class="stmt" title="${esc(clip(query, TITLE_MAX))}">${esc(oneLine(query))}</code>`;
-const plural = (count, word) => `${n(count)} ${word}${count === 1 ? "" : "s"}`;
-/** The key a running statement is asked about by: its session and its statement's number. */
-const keyOf = (session, statement) => `${session}:${statement}`;
-
-/** What a cancel answered, as `mason cancel` says it: its headline, or the refusal as the Failure. */
-function outcomeHtml(o) {
-  if (o.failure) return `${renderFailure(o.failure)}<p class="pop-actions"><button type="button" class="small" data-dismiss-cancelled data-pop-close>Dismiss</button></p>`;
-  return `<p class="done"><span class="headline" title="SQLSTATE 57014">Cancelled session ${o.cancelled.session}'s statement: it ends now, and its client gets a "canceling statement" error.</span></p>`;
-}
-
-/**
- * WHO IS CONNECTED NOW (`/api/state` `sessions`: { open, byClient: [{ user, client, open, running }] } or { error }): a row
- * per user and client — the sessions it has open and the statements it is running. "" when the run did not say.
- */
-export function renderSessions(sessions, top = SESSIONS_TOP) {
-  if (!sessions) return "";
-  if ("error" in sessions) return `<p class="count">Who is connected could not be read (${esc(firstLine(String(sessions.error)))})</p>`;
-  if (!sessions.byClient.length) return empty("No client is connected now.");
-  // the clients with the most sessions first; past `top`, the others in one row (200 clients are not 200 rows)
-  const byOpen = sortedBy(sessions.byClient, (c) => c.open * 1e6 + c.running, "desc");
-  const shown = byOpen.slice(0, top), rest = byOpen.slice(top);
-  const sum = (list, k) => list.reduce((a, c) => a + c[k], 0);
-  const others = rest.length ? `<tr class="others"><td colspan="2">${esc(n(rest.length))} other client${rest.length === 1 ? "" : "s"}</td><td class="num">${esc(n(sum(rest, "open")))}</td><td class="num">${esc(n(sum(rest, "running")))}</td></tr>` : "";
-  const cell = (v) => `<td><span class="clip" title="${esc(v)}">${esc(v)}</span></td>`;
-  return panel(`<table class="sessions"><thead><tr><th scope="col">User</th><th scope="col">Client</th><th scope="col" class="num">Open</th><th scope="col" class="num">Running</th></tr></thead><tbody>` +
-    shown.map((c) => `<tr>${cell(c.user || "(no user)")}${cell(clientText(c.client))}<td class="num">${esc(n(c.open))}</td><td class="num">${esc(n(c.running))}</td></tr>`).join("") + others +
-    `</tbody></table>`) + `<p class="dim">${esc(n(sessions.open))} session${sessions.open === 1 ? "" : "s"} open${rest.length ? `, from ${esc(n(byOpen.length))} clients` : ""}.</p>`;
-}
-
-/**
- * THE KPI CARDS over the page: who is connected (`/api/state` `sessions`), the statements running now, and the last day's
- * statements, the failed ones and the p95 from the request log (`statementCards`). `queries` is `/api/queries`' body or
- * `{ failure }`; an argument the run did not say draws no card, one it could not read is `unknown` with its reason.
- */
-export function renderQueryKpis(sessions, running, queries, range = DEFAULT_RANGE) {
-  const list = [];
-  if (sessions) {
-    if ("error" in sessions) list.push(card("Connected sessions", "unknown", firstLine(String(sessions.error))));
-    else list.push(card("Connected sessions", n(sessions.open), plural(sessions.byClient.length, "client")));
-  }
-  if (running) list.push(card("Running now", n(running.length), running.length ? `the longest for ${spanText(Math.max(...running.map((r) => r.runningMs)) / 1000)}` : "no statement is running"));
-  if (queries) {
-    const w = summaryWindow(range);
-    if ("failure" in queries) list.push(card(`Statements, ${w.label}`, "unknown", `could not read them: ${firstLine(queries.failure.message)}`));
-    else list.push(...statementCards(queries.queries[w.key], () => "", w.label));
-  }
-  return cards(list);
-}
-
-/** The window of the request log's summary a range's cards say: the week for 7 days and longer, else the day (the
- *  summary has a day and a week: the cards of the last hour say the last 24 hours, of 30 and 90 days the last 7, by name). */
-export const summaryWindow = (range) => (RANGES[range]?.days ?? 0) >= 7 ? { key: "week", label: "last 7 days" } : { key: "day", label: "last 24 hours" };
-
-/**
- * THE THREE CARDS of a window of the request log's summary (`day`: `/api/queries`' `day` or `week`, `label` its name): the
- * statements, the failed ones (the log's Failed: refused or failed; its sub-line names each and the cancelled) and the
- * completed ones' p95. `line(key)` is a card's sparkline holder (the Usage page draws them; "" for none): ONE place
- * derives these facts.
- */
-export function statementCards(day, line = () => "", label = "last 24 hours") {
-  const failed = day.refused + day.failed;
-  return [
-    card(`Statements, ${label}`, n(day.statements), `${n(day.completed)} completed`, line("statements")),
-    card(`Failed, ${label}`, n(failed), `${n(day.refused)} refused, ${n(day.failed)} failed${day.cancelled ? `, ${n(day.cancelled)} cancelled` : ""}`, line("failed"), failed ? "warn" : ""),
-    card(`p95, ${label}`, day.durationMs === null ? "–" : msText(day.durationMs.p95),
-      day.durationMs === null ? "no statement completed" : `average ${msText(day.durationMs.avg)} · p50 ${msText(day.durationMs.p50)}`, line("p95")),
-  ];
-}
-
-/**
- * THE STATEMENTS RUNNING NOW (`mason logs --running --json`'s `running`): a row each — session, statement, user, client,
- * how long it has run (a relative time that moves with each poll; when it started, in UTC, its title), the rows sent so
- * far, the statement — and Cancel. The one being cancelled (`asking`, `session:statement`) asks first, its question a
- * popover beside its Cancel (`pop`: no row is inserted, so none below moves; its Cancel stays, held down); `outcome` is
- * what the last cancel answered (a Failure, or `{ cancelled, at }`), a popover beside the row it was for — or beside the
- * part when that statement has ended since — gone by itself after OUTCOME_MS at `now` (a refusal stays until dismissed).
- */
-export function renderRunning(running, asking = null, outcome = null, now = Date.now()) {
-  const pops = [];
-  const said = fresh(outcome, now) ? outcome : null;
-  let shown = false;
-  const rows = running.map((r) => {
-    const key = keyOf(r.session, r.statement);
-    const anchor = actId("running", key);
-    if (asking === key) {
-      pops.push(pop(anchor, `<p class="confirm" title="SQLSTATE 57014">Cancel session ${r.session}'s statement ${r.statement}? Its client gets a "canceling statement" error.</p>` +
-        `<p class="pop-actions"><button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel statement ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel data-pop-close>Keep it running</button></p>`,
-        { kind: "dialog", label: `Cancel session ${r.session}'s statement ${r.statement}?` }));
-    }
-    if (said !== null && said.key === key) { shown = true; pops.push(pop(anchor, outcomeHtml(said))); }
-    return `<tr><td>${r.session}</td><td>${r.statement}</td><td><span class="clip" title="${esc(r.user)}">${esc(r.user)}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
-      `<td class="num"><time datetime="${esc(r.startedAt)}" title="started ${esc(utcText(r.startedAt))} UTC">${esc(spanText(r.runningMs / 1000))}</time></td><td class="num">${esc(plural(r.rows, "row"))} sent</td>` +
-      `<td>${statementCell(r.query)}</td><td class="act" id="${esc(anchor)}">${asking === key ? `<button type="button" class="danger small" aria-expanded="true" disabled>Cancel</button>` : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td></tr>`;
-  }).join("");
-  const table = running.length
-    ? `<div class="scroll"><table class="running"><thead><tr><th scope="col">Session</th><th scope="col" title="the statement's number in its session, as mason cancel --statement takes it">No.</th><th scope="col">User</th><th scope="col">Client</th>` +
-      `<th scope="col" class="num">Running for</th><th scope="col">Rows</th><th scope="col">Statement</th><th scope="col"></th></tr></thead><tbody>${rows}</tbody></table></div>`
-    : empty("No statement is running now.");
-  // the statement ended since: said beside the part, which is there whatever it lists
-  if (said !== null && !shown) pops.push(pop("running-now", outcomeHtml(said)));
-  return table + pops.join("");
-}
-
-/**
- * THE UNSUPPORTED SQL of the range (`/api/unsupported`'s body: { since, unsupported, keptDays }): the statements Mason
- * refused because they used SQL it does not support, grouped by its entry of docs/SQL-SUPPORT.md, the most refused first
- * — each in mason status's two lines (`unsupportedEntry`): how many used what and the entry's name, then when the latest
- * was, who sent them, and the latest statement on a line (its whole, up to TITLE_MAX, is the title). `span` is the range's
- * words. None: the empty sentence, with how long the log keeps them.
- */
-export function renderUnsupported(b, span = RANGES[DEFAULT_RANGE].span) {
-  const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
-  if (!b.unsupported.length) return empty(`No statement refused for unsupported SQL in ${span} (the request log keeps ${days}: MASON_REQUEST_LOG_DAYS).`);
-  return `<p class="lead">The statements refused in ${esc(span)} by the SQL they used that Mason does not support, the most first.</p>` +
-    panel(`<ul class="unsupported">${b.unsupported.map((g) => {
-      const e = unsupportedEntry(g);
-      return `<li><p class="headline" title="docs/SQL-SUPPORT.md entry ${esc(e.id)}">${esc(e.headline)}</p><p class="dim">${esc(e.last)} — <code class="clip" title="${esc(clip(g.example, TITLE_MAX))}">${esc(e.example)}</code></p><p class="dim">${esc(e.how)}</p></li>`;
-    }).join("")}</ul>`);
-}
 
 /** The status column's word: the ledger's `status` (completed, failed, cancelled), capitalised; its dot says the same (ok, bad, warn). */
 const STATUS = { completed: "Completed", failed: "Failed", cancelled: "Cancelled" };
@@ -242,22 +110,17 @@ export const page = {
   create(ctx) {
     // the request rows' details open, by request id (createOpenSet): they stay open across a poll
     const opened = createOpenSet();
-    const m = { filters: { ...NO_FILTERS }, before: null, asking: null, outcome: null, open: opened.open, sort: NEWEST_FIRST };
+    const m = { filters: { ...NO_FILTERS }, before: null, open: opened.open, sort: NEWEST_FIRST };
     const path = () => requestsPath(m.filters, m.before, ctx.range());
     const filtered = () => Object.values(m.filters).some((v) => v !== "" && v !== false);
+    /** The form's controls showing the filters (a route sets them, not a person). */
+    const showFilters = (doc) => {
+      const form = doc?.getElementById?.("request-filters");
+      if (!form?.elements) return;
+      for (const k of ["status", "since", "user", "client", "search"]) if (form.elements[k]) form.elements[k].value = m.filters[k];
+      if (form.elements.slow) form.elements.slow.checked = m.filters.slow;
+    };
     const actions = {
-      askCancelStatement(session, statement) { m.asking = keyOf(session, statement); m.outcome = null; },
-      dismissCancelStatement() { m.asking = null; },
-      dismissCancelled() { m.outcome = null; },
-      /** POST /api/cancel { session, statement }: the statement listed, never the one the session runs next (409). */
-      async confirmCancelStatement(session, statement) {
-        const r = await ctx.ask("/api/cancel", json("POST", { session, statement }));
-        m.asking = null;
-        m.outcome = "failure" in r ? { key: keyOf(session, statement), failure: r.failure } : { key: keyOf(session, statement), cancelled: r.body.cancelled, at: ctx.now().getTime() };
-        // who is connected says its running statements too: both read again, so neither says the cancelled one runs
-        await ctx.refresh([RUNNING, STATE]);
-        return !("failure" in r);
-      },
       /** Show the requests that pass these filters, from the newest. */
       async filterRequests(filters) {
         m.filters = { ...NO_FILTERS, ...filters };
@@ -280,28 +143,16 @@ export const page = {
     };
     return {
       model: m,
-      // the running statements every poll; the newest page of the log every 5 s (30 s while a search is set), an older
-      // one only when first asked (and who is connected, from the state, every 5 s; the last day's summary every 30 s)
-      reads: () => [{ path: RUNNING, everyMs: POLL_MS }, { path: path(), everyMs: m.before !== null ? Infinity : m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS }, { path: STATE, everyMs: NEWEST_EVERY_MS },
-        { path: QUERIES, everyMs: QUERIES_EVERY_MS }, { path: unsupportedPath(ctx.range()), everyMs: UNSUPPORTED_EVERY_MS }],
-      afterRead() {
-        // a statement that ended since it was asked about has nothing left to cancel
-        const r = ctx.read(RUNNING)?.body?.running;
-        if (m.asking !== null && r && !r.some((x) => keyOf(x.session, x.statement) === m.asking)) m.asking = null;
-      },
+      // the newest page of the log every 5 s while the range is Now (30 s while a search is set), once when another
+      // range is chosen; an older page only when first asked. The state (how to connect, when the log is empty) every 30 s
+      reads: () => [{ path: path(), everyMs: m.before !== null ? Infinity : rangeEvery(ctx.range(), m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS) }, { path: STATE, everyMs: 30_000 }],
       actions,
       view() {
-        const running = ctx.read(RUNNING)?.body;
         const log = ctx.read(path());
-        const q = ctx.read(QUERIES);
-        const sessions = ctx.read(STATE)?.body?.sessions;
+        const s = ctx.read(STATE)?.body;
         return {
-          "queries-kpis": !running && !sessions && !q ? skeleton(2) : renderQueryKpis(sessions, running?.running, q === undefined ? undefined : q.body ? q.body : { failure: q.failure }, ctx.range()),
-          "connected-now": renderSessions(ctx.read(STATE)?.body?.sessions),
-          "running-now": running ? renderRunning(running.running, m.asking, m.outcome, ctx.now().getTime()) : "",
-          unsupported: readPart(ctx, unsupportedPath(ctx.range()), (b) => renderUnsupported(b, (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span), true),
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
-            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(ctx.read(STATE)?.body?.postgres, { first: true, table: ctx.read(STATE)?.body?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) }) : "") +
+            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(s?.postgres, { first: true, table: s?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) }) : "") +
             (log?.body && m.filters.search && m.before === null ? `<p class="dim refresh-note">${esc(SEARCH_NOTE)}</p>` : ""),
         };
       },
@@ -311,28 +162,21 @@ export const page = {
         const value = (k) => form.elements[k]?.value?.trim() ?? "";
         return actions.filterRequests({ status: value("status"), since: value("since"), user: value("user"), client: value("client"), slow: form.elements.slow?.checked === true, search: value("search") });
       },
-      /** `#observability/queries?slow=1`, `?status=failed` (where the Overview's cards lead): those filters, from the newest,
-       *  and the form's controls showing them. Nothing to do for a hash without them (a change of range keeps the filters). */
+      /** `#observability/queries?slow=1`, `?status=failed`, `?user=metabase&client=Metabase` (where the Overview's cards
+       *  and Usage's rows lead): those filters, from the newest, and the form's controls showing them. Nothing to do for a
+       *  hash without them (a change of range keeps the filters). */
       route(params, { doc } = {}) {
-        if (params.slow === undefined && params.status === undefined) return null;
-        m.filters = { ...NO_FILTERS, slow: params.slow === "1", status: Object.hasOwn(STATUS_OUTCOMES, params.status ?? "") ? params.status : "" };
+        if (!["slow", "status", "user", "client"].some((k) => params[k] !== undefined)) return null;
+        m.filters = { ...NO_FILTERS, slow: params.slow === "1", status: Object.hasOwn(STATUS_OUTCOMES, params.status ?? "") ? params.status : "",
+          user: params.user ?? "", client: params.client ?? "" };
         m.before = null;
-        const form = doc?.getElementById?.("request-filters");
-        if (form?.elements) {
-          if (form.elements.status) form.elements.status.value = m.filters.status;
-          if (form.elements.slow) form.elements.slow.checked = m.filters.slow;
-        }
+        showFilters(doc);
         return true;
       },
       click(d, button, env) {
         const { doc } = env;
         // Connect's Copy buttons, in the request log's empty state
         if (d.copy !== undefined) return copyClick(d, button, env);
-        const pair = (v) => v.split(":").map(Number);
-        if (d.askCancel !== undefined) return actions.askCancelStatement(...pair(d.askCancel)) ?? true;
-        if (d.dismissCancel !== undefined) return actions.dismissCancelStatement() ?? true;
-        if (d.dismissCancelled !== undefined) return actions.dismissCancelled() ?? true;
-        if (d.confirmCancel !== undefined) return actions.confirmCancelStatement(...pair(d.confirmCancel));
         if (d.sortTable === "requests") return actions.sortRequests(d.sortKey) ?? true;
         if (d.older !== undefined) return actions.olderRequests();
         if (d.newest !== undefined) return actions.newestRequests();

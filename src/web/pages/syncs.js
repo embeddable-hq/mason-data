@@ -1,14 +1,15 @@
 /**
- * THE LOGS VIEW (#observability/logs, a view of the Observability group; `#logs`, its old address, lands here;
+ * THE SYNCS VIEW (#observability/syncs, a view of the Observability group; `#observability/logs`, `#logs` and `#syncs`
+ * land here;
  * docs/OBSERVABILITY.md "Pages"): the sync's events (`mason logs --events`) over the time range the Observability views
  * share, as a timeline table NEWEST FIRST (When sorts it the other way) — narrowed in the page alone by "Failures only",
  * a kind and a table (every kind, and every added table from `/api/state`, events or not), at most EVENTS_SHOWN rows written with
  * "Show more" — and, behind a closed details "The run's raw log (for debugging)", the run's last log entries, newest
  * first (`mason logs`: they carry internal tags and absolute paths, so they are not the page's content). Reads
- * `/api/events` every 10 s, and `/api/logs` every 5 s ONLY WHILE the details is open (the page's own state: nothing is
- * read when it is closed). A page module (src/web/app.js has the contract). Never the engine's name.
+ * `/api/events` every 10 s while the range is Now, and `/api/logs` every 5 s ONLY WHILE the details is open (the page's own state: nothing is
+ * read when it is closed); the events once when a range other than Now is chosen. A page module (src/web/app.js has the contract). Never the engine's name.
  */
-import { esc, agoText, utcText, badge, empty, panel, n, sortTh, nextSort, moreRows, readPart, eventCells, RANGES, DEFAULT_RANGE, rangeOf } from "../shared.js";
+import { esc, agoText, utcText, badge, empty, panel, n, sortTh, nextSort, moreRows, readPart, eventCells, RANGES, DEFAULT_RANGE, rangeOf, rangeEvery } from "../shared.js";
 
 /** How many of the range's events are read (the newest), and how many of those the page writes at once. */
 const EVENTS_LIMIT = 500;
@@ -72,7 +73,7 @@ export function renderEventFilters(b, { kind = "", table = "" } = {}, s = null) 
   const kinds = [...EVENT_KINDS, ...[...new Set([...events.map((e) => e.kind), ...(kind ? [kind] : [])])].filter((k) => !EVENT_KINDS.includes(k)).sort()];
   const select = (id, label, all, values, chosen) => `<div class="field"><label for="${id}">${esc(label)}</label><select id="${id}">` +
     `<option value="">${esc(all)}</option>${values.map((v) => `<option value="${esc(v)}"${v === chosen ? " selected" : ""}>${esc(v)}</option>`).join("")}</select></div>`;
-  return select("logs-kind", "Kind", "Every kind", kinds, kind) + select("logs-table", "Table", "Every table", tables, table);
+  return select("syncs-kind", "Kind", "Every kind", kinds, kind) + select("syncs-table", "Table", "Every table", tables, table);
 }
 
 /** The run's last log entries as a terminal's lines, NEWEST FIRST (the debugging reader wants what just happened); an entry of several lines is one, as written. */
@@ -85,14 +86,14 @@ export function renderLogs(b) {
 
 /** The raw log's details: its summary closed or open, and, open, the entries (or that they are being asked). */
 export function renderRawLog(open, inner) {
-  return `<details id="logs-raw"${open ? " open" : ""}><summary>The run's raw log (for debugging)</summary>${open ? inner : ""}</details>`;
+  return `<details id="syncs-raw"${open ? " open" : ""}><summary>The run's raw log (for debugging)</summary>${open ? inner : ""}</details>`;
 }
 
 export const page = {
-  id: "logs",
-  hash: "observability/logs",
+  id: "syncs",
+  hash: "observability/syncs",
   parent: "observability",
-  title: "Logs",
+  title: "Syncs",
   create(ctx) {
     const m = { rawOpen: false, failuresOnly: false, kind: "", table: "", sort: { key: "time", dir: "desc" }, limit: EVENTS_SHOWN };
     const events = () => eventsPath(ctx.range());
@@ -110,26 +111,29 @@ export const page = {
     return {
       model: m,
       // the state for the Table filter's choices (every added table), as often as tables are added
-      reads: () => [{ path: events(), everyMs: 10_000 }, { path: STATE, everyMs: 30_000 }, ...(m.rawOpen ? [{ path: LOGS, everyMs: 5000 }] : [])],
+      reads: () => [{ path: events(), everyMs: rangeEvery(ctx.range(), 10_000) }, { path: STATE, everyMs: 30_000 }, ...(m.rawOpen ? [{ path: LOGS, everyMs: 5000 }] : [])],
       actions,
       view: () => ({
-        "logs-filters": renderEventFilters(ctx.read(events())?.body, m, ctx.read(STATE)?.body ?? null),
-        "logs-events": part(events(), (b) => renderEvents(b, { failuresOnly: m.failuresOnly, kind: m.kind, table: m.table, now: ctx.now().getTime(), sort: m.sort, limit: m.limit,
+        "syncs-filters": renderEventFilters(ctx.read(events())?.body, m, ctx.read(STATE)?.body ?? null),
+        "syncs-events": part(events(), (b) => renderEvents(b, { failuresOnly: m.failuresOnly, kind: m.kind, table: m.table, now: ctx.now().getTime(), sort: m.sort, limit: m.limit,
           span: RANGES[ctx.range()]?.span ?? "" }), false),
-        "logs-run": renderRawLog(m.rawOpen, m.rawOpen ? part(LOGS, renderLogs, true) : ""),
+        "syncs-run": renderRawLog(m.rawOpen, m.rawOpen ? part(LOGS, renderLogs, true) : ""),
       }),
       /** The "Failures only" box, the kind or the table chosen: the events read are filtered in the page alone. */
       input(target) {
-        if (target?.id === "logs-failures-only") { m.failuresOnly = target.checked === true; m.limit = EVENTS_SHOWN; return true; }
-        if (target?.id === "logs-kind") { m.kind = target.value ?? ""; m.limit = EVENTS_SHOWN; return true; }
-        if (target?.id === "logs-table") { m.table = target.value ?? ""; m.limit = EVENTS_SHOWN; return true; }
+        if (target?.id === "syncs-failures-only") { m.failuresOnly = target.checked === true; m.limit = EVENTS_SHOWN; return true; }
+        if (target?.id === "syncs-kind") { m.kind = target.value ?? ""; m.limit = EVENTS_SHOWN; return true; }
+        if (target?.id === "syncs-table") { m.table = target.value ?? ""; m.limit = EVENTS_SHOWN; return true; }
         return null;
       },
-      /** `#observability/logs?failures=1` (where the Overview's sync errors lead): the failures only, the box ticked. */
+      /** `#observability/syncs?failures=1` (where the Overview's sync errors lead): the failures only, the box ticked;
+       *  `?table=<name>` (a table's View syncs) its events only, the Table filter showing it. */
       route(params, { doc } = {}) {
-        if (params.failures === undefined) return null;
+        if (params.failures === undefined && params.table === undefined) return null;
         m.failuresOnly = params.failures === "1";
-        const box = doc?.getElementById?.("logs-failures-only");
+        m.table = params.table ?? "";
+        m.limit = EVENTS_SHOWN;
+        const box = doc?.getElementById?.("syncs-failures-only");
         if (box) box.checked = m.failuresOnly;
         return true;
       },
@@ -141,7 +145,7 @@ export const page = {
       },
       /** A details of this section opened or closed (the shell listens to `toggle`): null when it is not the raw log's. */
       toggle(target) {
-        if (target.id !== "logs-raw") return null;
+        if (target.id !== "syncs-raw") return null;
         const open = target.open === true;
         if (open === m.rawOpen) return null;
         return actions.showRawLog(open);
