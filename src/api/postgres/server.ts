@@ -1058,7 +1058,9 @@ class Session {
    * reads on from that result, never runs it again. A plan made again over a schema moved since the Parse, whose
    * result or parameters are not the ones the Parse described, is not run: the Parse's plan is (what a client was told
    * of the result stands). Planning again is the statement's own time: a CancelRequest landing meanwhile aborts its
-   * controller (`running`, answered 57014 as the statement begins), and a session closed meanwhile runs nothing.
+   * controller (`running`, answered 57014 as the statement begins), and a session closed meanwhile runs nothing. A
+   * plan made again that Postgres or the rewrite refuses (a StatementError, never a cancel's or a timeout's 57014) is
+   * logged and the Parse's plan runs, kept: the Parse answered, and a row count must not make it fail.
    */
   private async boundOnWire(statement: Statement, plan: DuckPlan, controller: AbortController): Promise<DuckPlan> {
     if (plan.sql.unboundedLateral !== true || statement.raw === null) return plan;
@@ -1066,12 +1068,20 @@ class Session {
       this.running = controller;
       let bounded: DuckPlan;
       try { bounded = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.vars, true); }
+      catch (e) {
+        if (!(e instanceof StatementError) || e.fields.code === "57014") throw e;
+        this.server.log(`session ${this.id}: a statement planned again for an Execute's row count was refused (${e.fields.code}: ${e.fields.message}): its Parse's plan runs`);
+        bounded = plan;
+      }
       finally { this.settled(); }
       const shape = (p: DuckPlan): string => JSON.stringify([p.params, p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null]);
       statement.duckOnWire = shape(bounded) === shape(plan) ? bounded : plan;
-      if (statement.duckOnWire === plan) this.server.log(`session ${this.id}: a statement planned again for an Execute's row count answers other columns than its Parse said (the schema moved): its Parse's plan runs`);
+      if (statement.duckOnWire === plan && bounded !== plan) this.server.log(`session ${this.id}: a statement planned again for an Execute's row count answers other columns than its Parse said (the schema moved): its Parse's plan runs`);
     }
-    if (this.phase === "closed") throw new PgError({ code: "08006", message: "the session closed while its statement was planned" });
+    if (this.phase === "closed") {
+      this.server.log(`session ${this.id}: closed while its statement was planned again for an Execute's row count: it runs nothing`);
+      throw new PgError({ code: "08006", message: "the session closed while its statement was planned" });
+    }
     return statement.duckOnWire;
   }
 
@@ -1694,8 +1704,17 @@ class Server {
     return out;
   }
 
+  /**
+   * EVERY PLAN IS MADE OVER THE CATALOG OF THE SCHEMA IT IS KEPT UNDER: the catalog is replaced here (`schema`), not
+   * only at a statement's classify, because a plan is also made at an Execute (Session.boundOnWire) — a re-plan that
+   * read the schema raw analysed against the old catalog and was kept under the new one (a review finding of #23).
+   * The ordering relied on: `schema()` calls `catalog.replace` synchronously, which queues the old instance's close on
+   * the catalog's one chain (src/api/postgres/catalog.ts "SERIALISED") before `make` queues its analysis, so the
+   * analysis starts the instance with the new DDL. A plan whose schema or generation moved while it was made is
+   * returned to its caller and not kept.
+   */
   async duckPlan(text: string, paramOids: readonly number[], searchPath: string, timeZone: string, wireBound: boolean, make: () => Promise<DuckPlan>): Promise<DuckPlan> {
-    const schema = this.options.schema();
+    const schema = this.schema();
     const generation = this.options.duck?.generation?.() ?? 0;
     if (schema !== this.duckPlansOf || generation !== this.duckPlansAt) { this.duckPlans.clear(); this.duckPlansOf = schema; this.duckPlansAt = generation; }
     // the zone too: a plan holds the values Postgres parsed its literals to, under the session's zone
@@ -1704,6 +1723,7 @@ class Server {
     const hit = this.duckPlans.get(key);
     if (hit !== undefined) return hit;
     const plan = await make();
+    if (this.duckPlansOf !== schema || this.duckPlansAt !== generation) return plan;
     // bounded: a tool that inlines its values sends a new text per value
     if (this.duckPlans.size >= 2000) this.duckPlans.delete(this.duckPlans.keys().next().value!);
     this.duckPlans.set(key, plan);

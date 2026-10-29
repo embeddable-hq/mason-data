@@ -646,7 +646,11 @@ aggregate), and one where every row is read whatever the client reads — an agg
 a set operation other than UNION ALL — and an ORDER BY: a row count on the wire is no LIMIT DuckDB sees, so no top N
 pushes it into the scan and DuckDB sorts every row first whichever plan it is given (where the delimiter join is the
 cheaper). A plan made again over a schema moved since the Parse whose parameters or result columns are not the Parse's
-is not run (the Parse's is: the client was told that result; the log says so). Planning again is the statement's own
+is not run (the Parse's is: the client was told that result; the log says so), and so is one Postgres or the rewrite
+refuses (the Parse answered; a row count must not fail it). A plan is made over the catalog of the schema it is kept
+under wherever it is made — the catalog is replaced in `Server.duckPlan`, not only at a statement's classify: a
+re-plan at an Execute that was the first statement after the copied tables moved analysed against the old catalog and
+was kept under the new schema, for every session to read (a review finding). Planning again is the statement's own
 time: a CancelRequest or the statement_timeout landing meanwhile is answered 57014 as for any statement (until the
 review it was lost there: the controller was not yet the session's `running`). EXPLAIN explains the statement's own plan, the one an
 Execute with no row count runs. (`tests/duck-wire.test.ts` "an Execute's row count over a LEFT lateral"; the oracle has
