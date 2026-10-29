@@ -283,16 +283,26 @@ faster at point lookups, and Mason is read-only.
 
 ### Why it's fast
 
-- **A columnar copy.** DuckDB stores each column separately and compresses it. A query reads only the columns it
-  uses, and it processes them in batches on every CPU core. Postgres, by contrast, reads each whole row. In the
-  benchmark, the copy was about a fifth of the tables' size in Postgres (10.1 GiB → 1.8 GiB). So more of what a
-  dashboard reads fits in memory.
-- **No index, rows in insertion order.** Mason stores rows in the order Postgres's scan returns them, which is roughly
-  the order they were inserted. It keeps no index in memory. So a query over a time window on a column like
-  `created_at` can skip most of the data outside that window. This is also why a lookup by primary key is slower in
-  Mason: Mason has to scan, while Postgres uses its index.
-- **The work moves off your database.** Dashboard queries run on Mason's machine, not on your database's CPU, memory
-  and disk. Your database only serves the first copy (a few ranges at a time) and then the syncs you turn on.
+Postgres is built to find a few rows quickly. Mason is built to read millions of rows quickly. On a large table, four
+things make the difference:
+
+- **It reads only the columns a query uses.** Postgres stores a table row by row, so a query that sums one column
+  still reads every row in full. Mason stores each column separately, and compressed. A `SUM(amount)` reads the
+  `amount` column and nothing else. In the benchmark, the whole copy was about a fifth of the tables' size in Postgres
+  (10.1 GiB → 1.8 GiB), so much more of it stays in memory.
+- **It processes values in batches, not one row at a time.** Postgres's executor handles one row at a time, and each
+  row passes through every step of the plan. DuckDB handles 2,048 values at a time, in tight loops that a modern CPU
+  runs very efficiently. Over millions of rows, a `SUM` or a `GROUP BY` costs far less CPU this way.
+- **It uses every core for one query.** By default, Postgres gives one query at most 2 extra workers
+  (`max_parallel_workers_per_gather`). DuckDB splits a query's scan, aggregation and joins across all the machine's
+  cores.
+- **It skips blocks that can't match.** For every block of about 122,880 rows, DuckDB keeps each column's smallest and
+  largest value. A filter like `created_at > now() - interval '7 days'` skips every block whose dates are all older.
+  This works best on columns that grow as rows are inserted, such as `created_at` or an increasing `id`, because Mason
+  keeps rows in the order they were inserted.
+
+The trade-off is the index. Mason keeps none, so fetching one row by its primary key means a scan, and Postgres is
+faster for that. And because analytical queries run on Mason's machine, they no longer slow down your database.
 
 [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every measurement and how it was taken.
 [docs/BENCHMARK.md](docs/BENCHMARK.md) shows how to run the benchmark on your own machine.
