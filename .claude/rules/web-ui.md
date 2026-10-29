@@ -107,18 +107,23 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
 
 ## The presentation (docs/WEB-UI.md "Presentation")
 
-- **The look is Mason's own — a mason's: stone, brick and mortar, laid course by course — from tokens**: charcoal ink
-  on warm limestone paper, mortar greys for every hairline, ONE brick red (`--accent`, `--brick`, `--cta`) for the accent
-  and the primary action; dark is basalt and slate with the brick glowing (`--glow`). Mono first (Geist Mono for the
+- **The look is Mason's own — a mason's: stone, brick and mortar, laid course by course — from tokens**: warm graphite
+  words (`--fg`, never near-black) on a stone white, quiet low-contrast surfaces and mortar-grey hairlines, ONE patina —
+  a desaturated verdigris (`--accent`, `--brick`, `--cta`) — for the accent and the primary action, used sparingly; dark
+  is charcoal slate (never black) with the patina lifted. No big inverted bands: the sidebar's head, the current nav
+  row, a table's header and the raw log are tinted surfaces. Mono first (Geist Mono for the
   chrome, labels, numbers and tables; Geist Sans for a sentence of prose) under a slab display face, Zilla Slab 700,
   for a page's title, the run's word, a card's number and a box's title — so the page reads as a tool's printout with a
   name of its own, not another developer site's. Every colour, space, radius, font and size is a custom property on
   `:root` in src/web/app.css, redefined for dark under `prefers-color-scheme`, so a page restyles by tokens and both
   themes come with it. Never a literal colour in a rule: a literal is the one place the dark theme forgets. A text
-  colour meets 4.5:1 on every surface it sits on, in both themes (the failed red is a wine, never read as the brick).
-- **Boxes are square, framed in ink, set on two stepped stones** (`--drop`: a near and a far offset, never a blur; a
-  link card's hover steps further): the depth reads as stacked stone, not a single block shadow. A table's header row
-  is a carved lintel (stone, small capitals, an ink course under it); the sidebar's head is basalt over a brick course.
+  colour meets 4.5:1 on every surface it sits on, in both themes (the failed red is a rose, never read as the accent);
+  the brick tints of a copy's states (`--brick-ok/-warn/-bad` beside `--brick`) are validated together by the dataviz
+  skill's `validate_palette.js --pairs all` in both themes, and always beside the copy's word.
+- **Boxes are square, framed in a hairline, lifted by a quiet stone step** (`--drop`: a 1 px hairline-tone offset and
+  a soft low-opacity shadow, never a hard block; a link card's hover lifts a little further): a hint of stacked stone,
+  never a heavy stepped shadow. A table's header row is a carved lintel (pale stone, small capitals, a mortar course
+  under it); the sidebar's head is the sidebar's own stone over a hairline.
 - **The motif is in the chrome, never on a number**: a copy's bar is a wall of 21 bricks in running bond (`copyBar`,
   `BRICKS` in src/web/pages/status.js: a `role="progressbar"` span with its value, label and the line's words, its
   bricks `aria-hidden`), laid left to right within a brick (5%) of the share and never past it, its % beside it as the
@@ -138,7 +143,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
 - **Colour says a state or is the accent, nothing else**: green ok (ready, synced), amber warn (syncing, waiting),
   red bad (failed, error), gray unknown — always a dot AND the CLI's word (`status(kind, word)`, src/web/shared.js),
   never colour alone; the one accent, the brick, is focus, a link's hover, a laid brick, the primary action and a
-  chart's mark (`--chart-mark`, checked against both themes' surfaces). The shadow is the stepped stone alone:
+  chart's mark (`--chart-mark`, checked against both themes' surfaces). The shadow is the quiet stone step alone:
   the reader's eye goes to what changed state, not to decoration.
 - **A component is a helper of src/web/shared.js, not markup copied into a page** (`status`, `card`/`cards`, `badge`,
   `button`, `panel`, `empty`, `skeleton`, `details`): one place to change how a thing looks, and the tests
