@@ -282,8 +282,8 @@ test("mason status --json says how each table is kept current as the sync derive
   assert.deepEqual(withoutNext(by("a").kept), { by: "poll", sync: every("30s", 30), syncedAt: asOf });
   assert.deepEqual(by("big").kept, { by: "poll", sync: OFF, syncedAt: asOf, nextAt: null });
   const lines = tableLines(poll.json, Date.parse("2026-10-30T20:58:39.000Z"));
-  assert.match(lines.find((l) => l.startsWith("public.big"))!, /copied · sync: off, last synced 3 days ago — mason sync big syncs it now; sync: poll 5m on its entry polls it$/);
-  assert.match(lines.find((l) => l.startsWith("public.a "))!, /copied · polled every 30s, last 3 days ago$/);
+  assert.match(lines.find((l) => l.startsWith("public.big"))!, /synced · sync: off, last synced 3 days ago — mason sync big syncs it now; sync: poll 5m on its entry polls it$/);
+  assert.match(lines.find((l) => l.startsWith("public.a "))!, /synced · polled every 30s, last 3 days ago$/);
 
   // REPLICATION MODE: streamed, and caught up by one poll first — the stream section's state and why are kept's
   const replTables = [table("a"), table("caught")];

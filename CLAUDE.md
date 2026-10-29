@@ -13,11 +13,11 @@ Mason is a drop-in replacement for a Postgres read replica, built for analytical
 syncs the tables a project names out of a Postgres, keeps them in sync as rows change, and serves them over the
 Postgres wire protocol, so a BI tool, an AI agent or an application's analytics code queries Mason with the SQL it
 sends Postgres and reads the same answer. It is for scans and aggregates, never an application's own reads and writes
-(a point lookup is faster on Postgres, and Mason is read-only). In the code and the commands a synced table is *the
-copy* ("Vocabulary"):
+(a point lookup is faster on Postgres, and Mason is read-only). In the code a synced table is *the copy*; in what
+a user reads it is *the synced table*, its rows *the synced data* ("Vocabulary"):
 
 ```
-a Postgres  ──SELECTs (the poll) or its change log (the stream)──▶  the copy (DuckDB, in-process)  ──▶  the Postgres API
+a Postgres  ──SELECTs (the poll) or its change log (the stream)──▶  the synced data (DuckDB, in-process)  ──▶  the Postgres API
 ```
 
 **One process** (`mason start`, `src/cli/dev.ts`; on a server `mason serve`, `src/cli/serve.ts`, the `mason-data` image):
@@ -52,7 +52,7 @@ and customer-facing analytics they point at it. Everything a person or a coding 
 wire too — serves both, and each is owed something different: a person wants feedback and short, scannable output; an
 agent wants complete context and a machine-readable form (`--json`, a declared shape, a stable code, an exit code).
 `.claude/rules/cli.md` has the mechanics. **Nothing a user sees is named for DuckDB**: the image is `mason-data`, a
-command's words say "the copy", never the engine; the engine's name belongs in the code and the docs.
+command's words say "the synced data", never the engine; the engine's name belongs in the code and the docs.
 
 ## Scope of work
 
@@ -220,7 +220,10 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   and says so in its commit.
 - **A rule is not done until it has a DETECTOR (a test, a line of `mason status`, a ledger row a reader checks) and a
   RESPONSE (what Mason does when it fires)**; a rule that stays prose is one the next change forgets.
-- **Vocabulary**: the *sources file* names what is copied, one *entry* per table; a copied table is *the copy*; changes
+- **Vocabulary**: the *sources file* names what is synced, one *entry* per table; what Mason does to a table's data is
+  *sync*: a user reads *the first sync* (the chunked copy, in the code), *the synced table* and *the synced data*, never
+  "copy" (`tests/conventions.test.ts` holds src/cli/ and src/web/ to it; identifiers, `--json` keys and
+  `MASON_COPY_PARALLEL` keep the code's word); changes
   arrive by *the poll* (SELECTs on xmin) or *the stream* (logical replication); a *user* is what `mason user` makes (never "token" or "credentials" in what it
   prints); the *request log* is `_mason.requests`. Name the engine only in code and docs.
 - **The sources file is named for a software engineer**: someone who writes SQL against Postgres must recognise every

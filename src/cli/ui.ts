@@ -22,7 +22,7 @@ export const UI: CommandSpec & { needs: "run" } = {
   summary: "the status page and the users, in your browser",
   usage: `usage: mason ui [--no-open] [--json]
 
-  Opens the running Mason's web page in your browser: what mason status says (the database, each table's copy and
+  Opens the running Mason's web page in your browser: what mason status says (the database, each synced table and
   its progress, the slow and refused statements, whether it is ready), refreshed every 2 s while the tab is open, and
   the users of mason user — add one (its password shown once, with the URL to paste) or remove one.
 

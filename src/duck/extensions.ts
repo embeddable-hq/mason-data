@@ -83,7 +83,7 @@ export function findExtensions(o: { host?: Host; engine?: string; resolve?: (id:
   const engine = o.engine ?? `v${version().replace(/^v/, "")}`;
   const key = hostKey(host);
   if (!(key in EXTENSION_PLATFORMS)) {
-    return { shipped: false, package: null, why: `no package of the copy's extensions is built for ${key} (only ${Object.keys(EXTENSION_PLATFORMS).join(", ")})` };
+    return { shipped: false, package: null, why: `no package of the extensions Mason syncs with is built for ${key} (only ${Object.keys(EXTENSION_PLATFORMS).join(", ")})` };
   }
   const platform = key as ExtensionPlatform;
   const name = packageName(platform);
@@ -123,9 +123,9 @@ export const loadPostgresSql = (x: Extensions): string => x.shipped ? "LOAD post
 /** What a copy that could not load the postgres extension says (src/duck/sync.ts attach), with the way out. */
 export function extensionFailure(x: Extensions, error: string): string {
   return x.shipped
-    ? `Mason could not load the copy's postgres extension from ${x.package} ${x.version} (${x.directory}): ${error}. Install @mason-data/cli again; mason doctor checks it`
-    : `Mason could not load the copy's postgres extension: ${error}. ${x.why}, so the first copy on a machine downloads it ` +
-      "(then ~/.duckdb/extensions): connect to the internet once, and the copy is tried again at the next pass";
+    ? `Mason could not load the postgres extension it syncs with from ${x.package} ${x.version} (${x.directory}): ${error}. Install @mason-data/cli again; mason doctor checks it`
+    : `Mason could not load the postgres extension it syncs with: ${error}. ${x.why}, so the first sync on a machine downloads it ` +
+      "(then ~/.duckdb/extensions): connect to the internet once, and the sync is tried again at the next pass";
 }
 
 /** What `probeExtensions` found: `ok` null when it could not tell. */
@@ -155,7 +155,7 @@ export async function probeExtensions(x: Extensions = findExtensions()): Promise
       const absent = EXTENSION_NAMES.filter((n) => !rows.some((r) => r.extension_name === n && r.installed === true)).map((n) => n.replace("_scanner", ""));
       if (absent.length === 0) return { ok: true, detail: `postgres and inet were downloaded on this machine before (~/.duckdb/extensions), not shipped: ${x.why}` };
       // not a failure: online, the first copy downloads them; whether this machine will be online then, no probe can tell
-      return { ok: null, detail: `${absent.join(" and ")} not on this machine yet, so the first copy downloads them and needs the internet once: ${x.why}` };
+      return { ok: null, detail: `${absent.join(" and ")} not on this machine yet, so the first sync downloads them and needs the internet once: ${x.why}` };
     } finally { c.closeSync(); }
   } finally { instance.closeSync(); }
 }

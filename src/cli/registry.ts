@@ -31,22 +31,22 @@ export const DEV: CommandSpec & { needs: "project" } = {
   summary: "start Mason for this folder's project, in the background (mason init makes the project)",
   usage: `usage: mason start [--attach] [--replication [--publication <name>] | --poll] [--self-signed-tls] [--port <n>] [--json]
 
-  Starts Mason for the project of this folder (mason init made it): one process, which copies the tables you add
+  Starts Mason for the project of this folder (mason init made it): one process, which syncs the tables you add
   (mason add) from the project's database into its own file, keeps them current as the sources file says, and answers
   the Postgres protocol for BI tools and your app. It only reads the database (SELECT): no wal_level, replication slot
   or publication is needed or made. It returns once Mason is up; run it again any time (it says so when Mason is
-  already running). The copy and Mason's state stay between runs: the next start resumes.
+  already running). The synced data and Mason's state stay between runs: the next start resumes.
 
-  After its first copy, each table is kept current as the sources file's sync: says — at the top for every table, or
+  After its first sync, each table is kept current as the sources file's sync: says — at the top for every table, or
   on a table's entry: off (the default, which mason init writes) reads it again only when you run mason sync <table>;
   poll <interval> (poll 5s, poll 5m, poll 1h) polls it with SELECTs at that interval. Each poll scans its table whole
   on your database, and the next waits at least four times as long as that poll took, so the polls never take more
   than a fifth of your database's time. The start says the file's default once; mason status says how each table is
-  kept current and when it was last synced. A table whose sync: changed keeps its copy and is caught up by one poll.
+  kept current and when it was last synced. A table whose sync: changed keeps its synced data and is caught up by one poll.
 
   With --replication it reads the database's change log instead: it needs wal_level = logical and a user that may
   replicate, and makes its own publication and replication slot on the database (mason destroy, or mason start --poll,
-  drops them). The project keeps the mode until --poll; a switch keeps the copies and catches each table up by one
+  drops them). The project keeps the mode until --poll; a switch keeps the synced data and catches each table up by one
   poll. --publication <name> (else PG_PUBLICATION) names a publication that is the database owner's: it is read as it
   is, verified to carry every added table and column, and never created, altered or dropped — Mason makes only its
   slot. A read replica needs one (it takes no CREATE PUBLICATION). The name is kept with the project, so the next
@@ -172,7 +172,7 @@ export async function orientation(cwd: string, s: Style = styleOut()): Promise<s
       ["mason doctor", "what this machine needs for Mason, and whether it has it"]]
     : !run ? [["mason start", "start Mason for this project, in the background"], ["mason status", "the project and its tables"]]
     : [["mason status", "what Mason is doing: its tables, and the last day's slow and refused statements"], ["mason user add <name>", "a user for a BI tool or your app: its password and URL, printed once"]];
-  return `${reportText({ headline: "Mason: your Postgres tables, copied and served to BI tools and your app.", details: rows,
+  return `${reportText({ headline: "Mason: your Postgres tables, synced and served to BI tools and your app.", details: rows,
     next: [...next, ["mason help", "every command, and the guides"]] }, s)}\n`;
 }
 
@@ -200,7 +200,7 @@ export function topUsage(s: Style = styleOut()): string {
   return [
     `${s.bold("usage:")} mason <command> [options]`,
     "",
-    para("Mason: your Postgres tables, copied and served to BI tools and your app. Make your app's folder a project (mason init), " +
+    para("Mason: your Postgres tables, synced and served to BI tools and your app. Make your app's folder a project (mason init), " +
       `add tables (mason add, before or after the start), start Mason (mason start), connect a tool (mason user add). It needs Node ${NODE_MIN} or later; mason doctor checks.`),
     para(PROJECT_LINE),
     "",

@@ -67,7 +67,7 @@ test("the config: new on an empty volume, resumed over what the runs recorded; a
     assert.equal(fresh.config.remote, true, "a server's database is on another machine, on purpose");
     assert.deepEqual([fresh.config.name, fresh.config.apiKey, fresh.config.folder], ["mason", KEY, "/mason/project"]);
     assert.equal("source" in fresh.config, false, "the database's URL is the sources file's, never the config's");
-    assert.match(fresh.said[0]!, /a new copy in .*\.mason$/);
+    assert.match(fresh.said[0]!, /new synced data in .*\.mason$/);
 
     // what a run recorded stays; the environment's settings are written again
     // (a config an older serve wrote carries the URL: it goes)
@@ -81,7 +81,7 @@ test("the config: new on an empty volume, resumed over what the runs recorded; a
 
     const renamed = serveConfig({ ...s, name: "shop" }, readProject(dir));
     assert.ok("message" in renamed);
-    assert.match(renamed.message, /the copy in .* is the project mason, and MASON_NAME says shop/);
+    assert.match(renamed.message, /the synced data in .* is the project mason, and MASON_NAME says shop/);
     assert.match(renamed.fix!, /set MASON_NAME=mason again, or give the new name a new MASON_DATA/);
 
     // a project mason init made: the developer's, never overwritten from the environment
@@ -116,7 +116,7 @@ test("the sources file: one a folder lacks is written from DATABASE_URL, without
     assert.match(gone.message, /: url: \$\{DATABASE_URL\} is not set — not in the environment, \.env\.local or \.env$/);
     // the settings say it too, with the variable the file names: the platform sets it before the first deploy
     assert.match((serveSettings({ MASON_API_KEY: KEY, MASON_DATA: dir, MASON_PROJECT: path.join(dir, "project") }, "/") as { message: string }).message,
-      /^a setting is missing or wrong: DATABASE_URL is not set: the database to copy from, as the sources file's url: \$\{DATABASE_URL\} names it$/);
+      /^a setting is missing or wrong: DATABASE_URL is not set: the database to sync from, as the sources file's url: \$\{DATABASE_URL\} names it$/);
     // a server is configured by its environment: a .env in its data folder never overrides the platform's DATABASE_URL
     fs.writeFileSync(path.join(dir, ".env"), "DATABASE_URL=postgres://someone@elsewhere:5432/other\n");
     const r = readSource(path.join(dir, "project"), dir, { DATABASE_URL: URL_ }, { shellFirst: true });

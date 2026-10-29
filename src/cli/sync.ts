@@ -20,9 +20,9 @@ const n = (x: number): string => x.toLocaleString("en-US");
 
 export const SYNC_USAGE = `usage: mason sync <table>… [--json]
 
-  Makes Mason's copy of these tables current now: it reads what changed in your database since Mason last read them —
+  Brings these synced tables up to date now: it reads what changed in your database since Mason last read them —
   the rows inserted or updated, and the ones deleted — in one transaction, as a poll does (each one scans its table
-  whole on your database). After its first copy, a table is read again as its sync: in the sources file says: off
+  whole on your database). After its first sync, a table is read again as its sync: in the sources file says: off
   (the default) only when you run this — before a report, from cron, at the end of a deploy — and poll <interval> by
   itself every interval, which this does now too, whatever the interval says. mason status says how each table is
   kept current and when it was last synced. With mason start --replication, nothing is polled: it answers where the
@@ -38,7 +38,7 @@ export const SYNC_USAGE = `usage: mason sync <table>… [--json]
 export const SYNC: CommandSpec & { needs: "run" } = {
   needs: "run",
   name: "sync",
-  summary: "make the copy of these tables current now: mason sync orders (a table whose sync is off is read again only so)",
+  summary: "bring these synced tables up to date now: mason sync orders (a table whose sync is off is read again only so)",
   usage: SYNC_USAGE,
   options: { json: { type: "boolean" } },
   json: ["syncedAt", "tables", "streamed", "next"],
@@ -64,7 +64,7 @@ export async function sync(argv: string[]): Promise<number> {
       const db = findTable(s.tables, name);
       if ("message" in db && db.code === "usage") return failed("sync", db, { json });
       if (!("message" in db)) {
-        return failed("sync", { message: `${db.table} is not added, so Mason has no copy of it to sync`, code: "not_found", fix: `mason add ${tableArg(db.table)}`,
+        return failed("sync", { message: `${db.table} is not added, so Mason has not synced it`, code: "not_found", fix: `mason add ${tableArg(db.table)}`,
           next: [["mason status", "the added tables"]] }, { json });
       }
       return failed("sync", { message: `there is no added table ${JSON.stringify(name)}${didYouMean(name, added.flatMap((x) => [x.table, tableArg(x.table)]))}`, code: "not_found",
@@ -75,7 +75,7 @@ export async function sync(argv: string[]): Promise<number> {
     if (r.status !== 200) {
       const code = typeof r.body.code === "string" ? r.body.code : r.status === 404 ? "not_found" : "failed";
       return failed("sync", { message: `${picked.join(", ")} ${picked.length === 1 ? "was" : "were"} not synced`, code, why: String(r.body.error),
-        next: [["mason status", "each table's copy"], ["mason logs", "the run's log"]] }, { json });
+        next: [["mason status", "each synced table"], ["mason logs", "the run's log"]] }, { json });
     }
     const b = r.body as unknown as { at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] };
     const next: NextStep[] = [[`mason sync ${names.join(" ")}`, "sync again, whenever you need it current"], ["mason status", "how each table is kept current, and when it was last synced"]];

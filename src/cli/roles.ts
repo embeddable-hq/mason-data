@@ -144,7 +144,7 @@ export function readRoles(folder: string, root: string): RolesFile | null | Fail
   try { text = fs.readFileSync(file, "utf8"); }
   catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    return { message: `${shownPath(root, file)} cannot be read: ${(e as Error).message}`, code: "bad_roles", fix: "make it readable, or move it aside (no roles file: every user reads every copied table)" };
+    return { message: `${shownPath(root, file)} cannot be read: ${(e as Error).message}`, code: "bad_roles", fix: "make it readable, or move it aside (no roles file: every user reads every synced table)" };
   }
   const parsed = parseRolesText(text, file);
   return "problems" in parsed ? rolesFailure(file, root, parsed.problems) : parsed;
@@ -165,13 +165,13 @@ export function roleProblems(roles: RolesFile, copied: readonly CopiedTable[]): 
       const at = `roles.${r.name}.tables.${t.name}`;
       const c = copied.find((x) => x.source === t.table);
       if (c === undefined) {
-        problems.push(`${at}: ${t.table} is not a table the sources file copies${nearestEntry(t.name, names)} — a role reads copied tables only (${names.length ? `copied: ${names.join(", ")}` : "none is copied yet"}; mason add ${t.name} copies it)`);
+        problems.push(`${at}: ${t.table} is not a table the sources file syncs${nearestEntry(t.name, names)} — a role reads synced tables only (${names.length ? `synced: ${names.join(", ")}` : "none is synced yet"}; mason add ${t.name} syncs it)`);
         continue;
       }
       if (c.columns === null) continue;
       const have = c.columns.map((x) => x.name);
       for (const [key, list] of [["columns", t.columns ?? []], ["exclude", t.exclude]] as const) {
-        for (const col of list.filter((x) => !have.includes(x))) problems.push(`${at}.${key}: the copy of ${t.table} has no column ${col}${didYouMean(col, have)} (its columns: ${have.join(", ")})`);
+        for (const col of list.filter((x) => !have.includes(x))) problems.push(`${at}.${key}: the synced ${t.table} has no column ${col}${didYouMean(col, have)} (its columns: ${have.join(", ")})`);
       }
       if (t.exclude.length && t.exclude.length >= have.length && have.every((h) => t.exclude.includes(h))) problems.push(`${at}.exclude: leaves no column of ${t.table} to read — remove the table from the role instead`);
     }

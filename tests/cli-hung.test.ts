@@ -44,7 +44,7 @@ test("mason status says hung, and mason stop ends the run and records the stop f
     const stop = await runMason(root, ["stop"], env);
     assert.equal(stop.code, 0, stop.stderr);
     assert.match(stop.stderr, new RegExp(`Mason for shop \\(pid ${run.pid}\\) does not answer: stopping it \\(SIGKILL after 15 s\\)`));
-    assert.match(stop.stdout, /^Stopped shop\n {2}how +it did not answer its commands and left on SIGTERM\n {2}kept +its copy of the data/);
+    assert.match(stop.stdout, /^Stopped shop\n {2}how +it did not answer its commands and left on SIGTERM\n {2}kept +its synced data/);
     assert.equal(alive(run.pid!), false);
     const after = readProject(root);
     assert.ok(after !== null && "config" in after);

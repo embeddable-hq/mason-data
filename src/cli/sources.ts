@@ -213,8 +213,8 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
       const stray = Object.keys(e).filter((k) => !(ENTRY_KEYS as readonly string[]).includes(k));
       for (const k of stray) problems.push(`${at}: unexpected key ${k}${didYouMean(k, ENTRY_KEYS)} — a table takes columns, exclude, key and sync`);
       const both = e.columns !== undefined && e.exclude !== undefined;
-      if (both) problems.push(`${at}: columns and exclude together — columns names what is copied, exclude what is left out of every column; keep one`);
-      const columns = e.columns === undefined ? null : nameList(e.columns, `${at}.columns`, "the columns copied");
+      if (both) problems.push(`${at}: columns and exclude together — columns names what is synced, exclude what is left out of every column; keep one`);
+      const columns = e.columns === undefined ? null : nameList(e.columns, `${at}.columns`, "the columns synced");
       const exclude = e.exclude === undefined ? [] : nameList(e.exclude, `${at}.exclude`, "the columns left out");
       const ownKey = e.key === undefined ? null : nameList(e.key, `${at}.key`, "the columns that tell its rows apart");
       for (const x of [columns, exclude, ownKey]) if (typeof x === "string") problems.push(x);
@@ -242,13 +242,13 @@ export function sourceFileNames(folder: string): string[] {
  *  `poll 5s`, so it shows a copy keeping up), then its tables — none yet, but for `mason init demo`'s, which names the
  *  demo database's tables (`tables`, each copied whole: `{}`), so its first start copies them and shows something. */
 export function newSourceText(url = "${DATABASE_URL}", tables: readonly string[] = [], sync: TableSync = DEFAULT_SYNC): string {
-  return "# The database this project copies from, and which of its tables. Yours to commit; the URL stays out of it.\n" +
+  return "# The database this project syncs from, and which of its tables. Yours to commit; the URL stays out of it.\n" +
     "kind: postgres\n" +
     `url: ${url}${ENV_REF.test(url) ? "   # from .env.local, .env or the shell; a literal postgres:// URL works too" : ""}\n` +
-    `sync: ${syncText(sync)}${sync.mode === "off" ? "   # after its first copy, a table is read again only by mason sync <table> (poll 5m: every 5 minutes)"
-      : `   # each table polled every ${sync.every} after its first copy (off: read again only by mason sync <table>)`}\n` +
+    `sync: ${syncText(sync)}${sync.mode === "off" ? "   # after its first sync, a table is read again only by mason sync <table> (poll 5m: every 5 minutes)"
+      : `   # each table polled every ${sync.every} after its first sync (off: read again only by mason sync <table>)`}\n` +
     "\n" +
-    "# One entry per table, a bare name in public, else schema.table: {} copies every column, columns: [id, status]\n" +
+    "# One entry per table, a bare name in public, else schema.table: {} syncs every column, columns: [id, status]\n" +
     "# those, exclude: [payload] every column but those; key: [a, b] names the columns that tell its rows apart, for a\n" +
     "# table with no primary key; sync: poll 30s (or off) keeps that table current its own way. mason add and mason remove\n" +
     "# edit this list; so can you.\n" +
@@ -287,7 +287,7 @@ export function readSource(folder: string, root: string, env: NodeJS.ProcessEnv 
   }
   if (names.length > 1) {
     return { message: `${shownPath(root, dir)}/ has ${names.length} source files (${names.join(", ")}): one source per project for now`, code: "bad_source",
-      fix: `keep the one this project copies from, and move the others out of ${shownPath(root, dir)}/` };
+      fix: `keep the one this project syncs from, and move the others out of ${shownPath(root, dir)}/` };
   }
   const file = path.join(dir, names[0]!);
   const parsed = parseSourceText(fs.readFileSync(file, "utf8"), names[0]!.replace(/\.ya?ml$/, ""), file);
@@ -321,19 +321,19 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
     `${at}.${key}: ${t.source} has no column ${c}${didYouMean(c, have)} (its columns: ${have.join(", ")})`);
   const out = [...missing(e.columns ?? [], "columns"), ...missing(e.exclude, "exclude")];
   if (e.key !== null) {
-    if (t.key.length) out.push(`${at}.key: ${t.source} has a primary key (${t.key.join(", ")}), which Mason copies it by — remove key`);
+    if (t.key.length) out.push(`${at}.key: ${t.source} has a primary key (${t.key.join(", ")}), which Mason keys it by — remove key`);
     else {
       out.push(...missing(e.key, "key"));
       out.push(...keyProblems(t, e.key, at));
       // its rows have no identity on the database, so logical replication carries no key to apply a change by
-      if (o.replication) out.push(`${at}: ${t.source} has no primary key, and logical replication cannot apply its changes by key: — copy it by polling (mason start --poll), or remove it`);
+      if (o.replication) out.push(`${at}: ${t.source} has no primary key, and logical replication cannot apply its changes by key: — sync it by polling (mason start --poll), or remove it`);
     }
   } else if (!t.key.length) {
     const unique = (t.uniqueKeys ?? []).find((u) => u.columns.every((c) => t.columns.find((x) => x.name === c)?.notNull === true));
     out.push(`${at}: ${t.source} has no primary key, so Mason cannot tell its rows apart — name the columns that do: key: [${unique ? unique.columns.join(", ") : "…"}]` +
       `${unique ? ` (its unique index ${unique.name})` : ""}`);
   }
-  for (const k of (e.key ?? t.key).filter((k) => e.exclude.includes(k))) out.push(`${at}.exclude: ${k} is ${t.source}'s key, which is always copied — take it out of exclude`);
+  for (const k of (e.key ?? t.key).filter((k) => e.exclude.includes(k))) out.push(`${at}.exclude: ${k} is ${t.source}'s key, which is always synced — take it out of exclude`);
   return out;
 }
 
@@ -354,7 +354,7 @@ function keyProblems(t: SourceTable, key: readonly string[], at: string): string
   if (!(t.uniqueKeys ?? []).some((u) => u.columns.every((c) => key.includes(c)))) {
     out.push(`${at}.key: no unique index of ${t.source} is over (${key.join(", ")}), so two of its rows may share them and Mason could not tell them apart — ` +
       (usable.length ? `name the columns of one: ${usable.map((u) => `key: [${u.columns.join(", ")}] (its unique index ${u.name})`).join(", or ")}`
-        : `it has no unique index over NOT NULL columns, so Mason cannot copy it until its owner adds one (or a primary key)`));
+        : `it has no unique index over NOT NULL columns, so Mason cannot sync it until its owner adds one (or a primary key)`));
   }
   return out;
 }
@@ -394,7 +394,7 @@ export function rereadSources(prev: RunSources, read: ProjectSource | Failure, r
   let next: AddedTable[] | null = null;
   if ("message" in read) problem = `${read.message}${read.why ? `: ${read.why.replace(/\n/g, "; ")}` : ""}`;
   else if (read.resolved !== runUrl) {
-    problem = `${shownPath(root, read.file)}: url: now names ${maskedUrl(read.resolved)} (${read.from}), and this run copies ${maskedUrl(runUrl)}: mason stop && mason start copies from the new one`;
+    problem = `${shownPath(root, read.file)}: url: now names ${maskedUrl(read.resolved)} (${read.from}), and this run syncs ${maskedUrl(runUrl)}: mason stop && mason start syncs from the new one`;
   } else {
     const t = addedTables(read, catalog, database, root, o);
     if (Array.isArray(t)) next = t;

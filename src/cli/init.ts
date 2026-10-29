@@ -38,15 +38,15 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
 
   Makes this folder a Mason project — run it in your app's folder. It checks it can read the database (and writes
   nothing when it cannot), then creates:
-    .mason/                   this machine's: Mason's key and, once Mason runs, its copy and state (gitignored)
-    mason/sources/<db>.yml    the database and the tables to copy (mason add adds them) — commit it
+    .mason/                   this machine's: Mason's key and, once Mason runs, its synced data and state (gitignored)
+    mason/sources/<db>.yml    the database and the tables to sync (mason add adds them) — commit it
     mason/mason.yml           the Mason version the project is written for — commit it: production runs that version
   The source file says url: \${DATABASE_URL}: the URL itself is in .env (written there when you give it here or it is
   only in the shell), never in a committed file. .mason/ and that .env go into .gitignore. Every other mason command
   then works anywhere in this folder. In a project with no source file (an older Mason's), it writes that file alone.
   mason init demo, in a new folder, makes a project on a demo database Mason hosts itself (a shop: customers, products,
   orders, order_items): mason start makes it in .mason/demo/ and changes it every few seconds. Three of its tables are
-  added; the fourth is yours to add after mason start (mason add ${DEMO_TABLE_TO_ADD}), to watch its copy begin.
+  added; the fourth is yours to add after mason start (mason add ${DEMO_TABLE_TO_ADD}), to watch its first sync begin.
 
     mason init                                          DATABASE_URL from .env.local, .env or the shell
     mason init postgres://me:secret@localhost:5432/shop
@@ -88,7 +88,7 @@ export function withIgnored(gitignore: string | null, files: string[] = []): { t
   const text = gitignore ?? "";
   const added: string[] = [];
   let tail = "";
-  if (!ignoresStateDir(text)) { added.push(`${STATE_DIR}/`); tail += `# Mason: this machine's key, copy and state (mason init)\n${STATE_DIR}/\n`; }
+  if (!ignoresStateDir(text)) { added.push(`${STATE_DIR}/`); tail += `# Mason: this machine's key, synced data and state (mason init)\n${STATE_DIR}/\n`; }
   for (const f of files) if (!ignoresFile(text, f)) { added.push(f); tail += `# the database URL mason/sources/ names (mason init)\n${f}\n`; }
   if (added.length === 0) return null;
   const head = text === "" ? "" : text.endsWith("\n") ? text : `${text}\n`;
@@ -128,11 +128,11 @@ export function urlVariable(root: string, url: string): { variable: string; line
     if (inFiles === null) return { variable, line: `${variable}=${url}` };
     if (inFiles.value === url) return { variable, line: null };
   }
-  return { problem: "this folder's .env names DATABASE_URL and MASON_DATABASE_URL for other databases: set one of them to the database Mason copies from, then mason init again" };
+  return { problem: "this folder's .env names DATABASE_URL and MASON_DATABASE_URL for other databases: set one of them to the database Mason syncs from, then mason init again" };
 }
 
 /** `.env` with `line` added (made when there is none). */
-const addEnvLine = (root: string, line: string): void => appendEnvLine(root, line, "the database Mason copies from (mason/sources/ names it; never commit this file)");
+const addEnvLine = (root: string, line: string): void => appendEnvLine(root, line, "the database Mason syncs from (mason/sources/ names it; never commit this file)");
 
 /** A `.env` line as it is said: its value's password masked. */
 const maskedLine = (line: string): string => { const eq = line.indexOf("="); return `${line.slice(0, eq)}=${maskedUrl(line.slice(eq + 1))}`; };
@@ -230,7 +230,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const db = maskedUrl(parsed.source.url);
   line(st.bold(`Making ${name} a Mason project in ${root}`));
   const notes: string[] = [];
-  if (keptValue !== null && keptValue.value !== url) notes.push(`${kept} reads ${keptVar} from ${keptValue.from}, which is ${maskedUrl(keptValue.value)}: mason start copies from that one, not ${db}`);
+  if (keptValue !== null && keptValue.value !== url) notes.push(`${kept} reads ${keptVar} from ${keptValue.from}, which is ${maskedUrl(keptValue.value)}: mason start syncs from that one, not ${db}`);
   let database: { url: string; from: string | null; version: string | null; tables: number | null } = { url: db, from: from ? from.slice(2, -1) : null, version: null, tables: null };
   const rel = (p: string): string => path.relative(root, p) || ".";
   const sourceFile = kept !== null ? path.join(sourcesDir(folder), kept) : path.join(sourcesDir(folder), `${sourceNameFor(parsed.source.database)}.yml`);
@@ -240,7 +240,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   // A DATABASE ON ANOTHER MACHINE, NOT CONFIRMED: not a failed step (the check passed, or was skipped) but a stop before
   // anything is written, said as one failure (remoteConfirmation) — the same words whether the check ran or not
   const confirmRemote = (): number => failed("init", remoteConfirmation(parsed.source.host, { cmd: "mason init",
-    wayOut: "run the same mason init again with --remote: that says yes, copy from that machine",
+    wayOut: "run the same mason init again with --remote: that says yes, sync from that machine",
     next: [["mason init --remote <url>", "the same command, confirmed"]] }), { json, io });
   try {
     if (demo) {
@@ -268,21 +268,21 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
       notes.push(...checked.warnings);
       database = { ...database, version: checked.facts.versionText, tables: checked.facts.tables.length };
     }
-    if (sourceless) await steps.step(`Keeping ${STATE_DIR}/config.json`, () => undefined, () => `Kept ${STATE_DIR}/config.json: the project ${name}, its key and its copy`);
+    if (sourceless) await steps.step(`Keeping ${STATE_DIR}/config.json`, () => undefined, () => `Kept ${STATE_DIR}/config.json: the project ${name}, its key and its synced data`);
     else {
       await steps.step(`Writing ${STATE_DIR}/config.json`, () => {
         writeConfig(path.join(root, STATE_DIR), newConfig(name, path.relative(root, folder) || ".", remote, { demo }));
       }, () => `Wrote ${STATE_DIR}/config.json: Mason's key (this machine's)`);
     }
     if (kept !== null) {
-      await steps.step(`Keeping ${rel(sourceFile)}`, () => undefined, () => `Kept ${rel(sourceFile)}: the database and the tables this project copies`);
+      await steps.step(`Keeping ${rel(sourceFile)}`, () => undefined, () => `Kept ${rel(sourceFile)}: the database and the tables this project syncs`);
       if (keptFile !== null && "problems" in keptFile) notes.push(`${rel(sourceFile)} has ${keptFile.problems.length === 1 ? "a mistake" : "mistakes"}, which mason start refuses: ${keptFile.problems.join("; ")}`);
     } else {
       await steps.step(`Writing ${rel(sourceFile)}`, () => {
         fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
         fs.writeFileSync(sourceFile, newSourceText(`\${${where.variable}}`, demo ? DEMO_ADDED_TABLES : [], demo ? DEMO_SYNC : DEFAULT_SYNC));
       }, () => `Wrote ${rel(sourceFile)}: the database (url: \${${where.variable}}), sync: ${syncText(demo ? DEMO_SYNC : DEFAULT_SYNC)} ` +
-        `(${demo ? "every table polled every 5 s" : "each table read once, then again only by mason sync <table>"}) and the tables to copy, ` +
+        `(${demo ? "every table polled every 5 s" : "each table read once, then again only by mason sync <table>"}) and the tables to sync, ` +
         `${demo ? `the demo's ${DEMO_ADDED_TABLES.length} added — mason add ${DEMO_TABLE_TO_ADD} adds the fourth` : "none yet (mason add)"} — commit it`);
     }
     if (where.line !== null) {
@@ -319,14 +319,14 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
       why: parsed.source.remote ? undefined : `the database's URL is ${db}${from}` }, { json, io });
   }
   const next: NextStep[] = demo ? [
-    ["mason start", "the demo database and Mason, in the background: its tables copied, then kept current"],
-    [`mason add ${DEMO_TABLE_TO_ADD}`, "the demo's fourth table, once Mason is up: watch its copy begin"],
-    ["mason status", "the copy keeping up with the demo's changes"],
+    ["mason start", "the demo database and Mason, in the background: its tables synced, then kept current"],
+    [`mason add ${DEMO_TABLE_TO_ADD}`, "the demo's fourth table, once Mason is up: watch its first sync begin"],
+    ["mason status", "the synced data keeping up with the demo's changes"],
     ["mason user add <name>", "a user for psql or a BI tool: its password and URL, printed once"],
   ] : [
     ["mason start", "Mason in the background, for this folder"],
     ["mason tables", "the database's tables and their columns"],
-    ["mason add <table>", "copy a table into Mason"],
+    ["mason add <table>", "sync a table into Mason"],
   ];
   if (json) {
     say(jsonText(INIT, { name, root, folder: path.relative(root, folder) || ".", config: path.join(root, STATE_DIR, "config.json"), demo,
@@ -336,7 +336,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     return 0;
   }
   for (const n of notes) say(`  ! ${n}`);
-  say(endText({ tips: [demo ? `The demo database runs inside mason start, read by polling: a new order every few seconds; ${DEMO_TABLE_TO_ADD} is left for you to add; mason destroy removes it with the copy`
+  say(endText({ tips: [demo ? `The demo database runs inside mason start, read by polling: a new order every few seconds; ${DEMO_TABLE_TO_ADD} is left for you to add; mason destroy removes it with the synced data`
     : "Mason only reads your database: no setting, slot or publication is needed or made"], next }, st));
   return 0;
 }

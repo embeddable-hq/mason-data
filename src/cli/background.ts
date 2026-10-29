@@ -37,10 +37,10 @@ const SUPERVISE = path.join(path.dirname(fileURLToPath(import.meta.url)), "super
  *  (not `mason status | mason logs | mason stop` on one line). */
 export const NEXT_STEPS: NextStep[] = [
   ["mason tables", "the database's tables, and what you can add"],
-  ["mason add <table>", "copy a table into Mason"],
+  ["mason add <table>", "sync a table into Mason"],
   ["mason user add <name>", "a user for a BI tool or your app: its password and URL, printed once"],
   ["mason status", "what Mason is doing"],
-  ["mason logs", "its log: every copy, poll and statement"],
+  ["mason logs", "its log: every sync, poll and statement"],
   ["mason stop", "stop Mason; the next mason start resumes where it stopped"],
 ];
 

@@ -288,7 +288,7 @@ test("FAIL CLOSED: a role the file no longer names refuses the user by name, a f
     fs.writeFileSync(rolesFile, `${ROLES}  typo:\n    tables:\n      orders:\n        columns: [id, statuss]\n`);
     const typo = await refused(c, "SELECT count(*) FROM orders");
     assert.equal(typo.code, "57P03");
-    assert.match(typo.message, /roles\.typo\.tables\.orders\.columns: the copy of public\.orders has no column statuss — did you mean `status`\? \(its columns: id, status, amount, notes, meta\)/);
+    assert.match(typo.message, /roles\.typo\.tables\.orders\.columns: the synced public\.orders has no column statuss — did you mean `status`\? \(its columns: id, status, amount, notes, meta\)/);
     // repaired: the same session answers again, with its role
     fs.writeFileSync(rolesFile, ROLES);
     assert.deepEqual((await c.query("SELECT count(*)::int AS n FROM orders")).rows, [{ n: 3 }]);

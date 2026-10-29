@@ -138,7 +138,7 @@ export const tableArg = entryName;
 /** What to run once every added table is copied: a user for the tool that will query it (src/cli/user.ts). */
 export const READY_STEPS: readonly NextStep[] = [
   ["mason user add <name>", "a user for your BI tool or psql: it prints the password and the URL to paste"],
-  ["mason status", "each table's copy, and the statements the Postgres API answered slowly or refused"],
+  ["mason status", "each synced table, and the statements the Postgres API answered slowly or refused"],
 ];
 
 /** What to run next over a database's tables: a table's columns, then adding it — named after a real table not yet added.
@@ -151,7 +151,7 @@ export function addSteps(tables: readonly CatalogTable[], from: "tables" | null 
   return [
     ...(from === "tables" ? [] : [["mason tables", "the database's tables: rows, key, whether added"] as NextStep]),
     [`mason tables ${name}`, "one table's columns"],
-    [`mason add ${name}`, "copy it into Mason: it is added to the sources file (--columns a,b,c: those only)"],
+    [`mason add ${name}`, "sync it into Mason: it is added to the sources file (--columns a,b,c: those only)"],
   ];
 }
 
@@ -162,7 +162,7 @@ export { copyingText, copyProgress, duration, readiness, type Readiness };
 /** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work
  *  (a table whose sync is off is copied as it asked: green). */
 export function paintBar(line: string, s: Style): string {
-  const colour = / its copy failed: /.test(line) ? s.red : / NOT kept current /.test(line) ? s.yellow : / 100%  [\d,]+ rows · copied( · |$)/.test(line) ? s.green : s.cyan;
+  const colour = / its first sync failed: /.test(line) ? s.red : / NOT kept current /.test(line) ? s.yellow : / 100%  [\d,]+ rows · synced( · |$)/.test(line) ? s.green : s.cyan;
   return line.replace(/(█+)(░*)|(░+)/, (_m, full: string | undefined, empty: string | undefined, none: string | undefined) =>
     full !== undefined ? `${colour(full)}${s.dim(empty ?? "")}` : s.dim(none ?? ""));
 }
@@ -189,15 +189,15 @@ export function tableLines(s: RunState, now: number = Date.now()): string[] {
     if (r === 0) {
       fraction = 1;
       const age = keptAge(t, now);
-      what = `${n(t.copy?.rowsCopied ?? 0)} rows · copied${t.copy?.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
+      what = `${n(t.copy?.rowsCopied ?? 0)} rows · synced${t.copy?.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
     }
-    else if (r === 1) { fraction = 1; what = `its copy failed: ${firstLine(t.error!)}`; }
+    else if (r === 1) { fraction = 1; what = `its first sync failed: ${firstLine(t.error!)}`; }
     else if (r === 2) {
       const c = copyingText(t.copy!.rowsCopied, t.rows, t.copy!.progress);
       fraction = c.fraction ?? 0;
       // a count says it is copying; "reading the first chunk" says so itself
-      what = /^\d/.test(c.text) ? `copying ${c.text}` : c.text;
-    } else { fraction = 0; what = "waiting for its copy to start"; }
+      what = /^\d/.test(c.text) ? `syncing ${c.text}` : c.text;
+    } else { fraction = 0; what = "waiting for its first sync to start"; }
     return { t, r, at: t.copy?.updatedAt ?? "", line: `${bar(fraction)} ${`${Math.floor(fraction * 100)}%`.padStart(4)}  ${what}` };
   });
   rows.sort((a, b) => a.r - b.r || a.at.localeCompare(b.at) || a.t.table.localeCompare(b.t.table));
@@ -264,8 +264,8 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
 const STATUS_USAGE = `usage: mason status [--json]
 
   Status: running, not running, or hung — then this project's facts, one a line: its folder, its database and how
-  its changes are read, the run and its copy's file, the Postgres API and how it listens. Then each added table as
-  mason wait shows it, with how it is kept current and how old its copy is (sync: off, last synced 3 days ago;
+  its changes are read, the run and the synced data's file, the Postgres API and how it listens. Then each added table as
+  mason wait shows it, with how it is kept current and when it was last synced (sync: off, last synced 3 days ago;
   polled every 30s, last 4 s ago); the statements the Postgres API answered slowly in the last day; and the ones it refused or
   failed, each with the reason (mason logs --requests lists every one). With Mason stopped, the same rows say "not
   running", how the last run ended, and the tables are the ones the sources file names. Hung is a run that is alive and does
@@ -282,11 +282,11 @@ const STATUS_USAGE = `usage: mason status [--json]
            bytes, key, added, addedColumns, copy, error, kept, … }], engine: { file, bytes, restarts (each time its supervisor
            started the run again: { at, reason, upSeconds }) }, slowQueries, refusedQueries, refusedTotal (how many in
            all), readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }.
-           Each table's kept is how its copy is kept current now (absent for a table the sync does not hold):
+           Each table's kept is how it is kept current now (absent for a table the sync does not hold):
            { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
-           else off), syncedAt (its last copy or poll), nextAt (when its next poll is due; null: off, or not polled
-           now), pending (only when it applies: why the copy is not kept current now, its phase included: waiting for
-           its copy, being copied, its copy failed, to be copied again, caught up first) }
+           else off), syncedAt (its first sync or its last poll), nextAt (when its next poll is due; null: off, or not polled
+           now), pending (only when it applies: why it is not kept current now, its phase included: its first sync
+           waiting, running or failed, to be read again whole, caught up first) }
            or { by: recopy, copiedAt, pending (only when it applies, as the poll's) }
            or { by: replication, slot, state (streamed, catching-up, waiting, left-out), why, position, lastCommit,
            notRunning (why the stream is not running, null when it is) }; with Mason stopped: { running: false, project, source: { name,
@@ -310,7 +310,7 @@ const STATUS_USAGE = `usage: mason status [--json]
   with the changes applied this run; being caught up by one poll; not streamed yet; or left out — and why.
 
   Stored JSON paths: a JSON value statements keep reading (payload ->> 'customer_id' read by several statements, or by
-  one slow one) is stored as a column of the copy and read from there, computed once when its row is written instead
+  one slow one) is stored as a column of the synced table and read from there, computed once when its row is written instead
   of for every row of every statement; on a table whose fill would take a minute or more, only once the statements
   reading it took a tenth of the fill's estimate in all. The estimate is the rate the last fill of the same JSON
   column measured, once one has run, else modelled from the column's bytes on disk; the line says which. Each path is
@@ -322,7 +322,7 @@ const STATUS_USAGE = `usage: mason status [--json]
 export const STATUS: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "status",
-  summary: "what Mason is doing: the database, each table's copy, the Postgres API, the slow and refused statements",
+  summary: "what Mason is doing: the database, each synced table, the Postgres API, the slow and refused statements",
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "engine", "stream", "jsonPaths", "slowQueries", "refusedQueries", "refusedTotal", "readiness", "ui",
@@ -368,7 +368,7 @@ export async function status(argv: string[]): Promise<number> {
       ["Project", `${run.name}, files in ${s.folder ?? "(none chosen)"}`],
       ...sourceRows(s),
       ["Mason", `${version()}, pid ${run.pid} · one process`],
-      ["Copy", `${s.engine.file}${s.engine.bytes === null ? "" : ` · ${fileSize(s.engine.bytes)}`}`],
+      ["Synced data", `${s.engine.file}${s.engine.bytes === null ? "" : ` · ${fileSize(s.engine.bytes)}`}`],
       ...restartsRows(restarts),
       ["Postgres API", `${withPlaceholders(run.postgresUrl)}  (mason user add <name> makes a user)`],
       // what it serves: its address, TLS or plain (src/cli/pg-tls.ts)
@@ -397,7 +397,7 @@ export async function status(argv: string[]): Promise<number> {
     for (const l of slowLines(slowReply.status === 200 ? slow : { error: String(slowReply.body.error ?? slowReply.status) }, st)) out(l);
     for (const l of refusedLines(refusedReply.status === 200 ? { refused, total: refusedTotal } : { error: String(refusedReply.body.error ?? refusedReply.status) }, st)) out(l);
     out("");
-    if (r.ready) out(withEnd(st.green("Ready: every added table is copied and served."), { next }));
+    if (r.ready) out(withEnd(st.green("Ready: every added table is synced and served."), { next }));
     else if (r.failed.length) out(withEnd(`${st.red("Failed:")}\n${bullets(r.failed)}`, { next }));
     else out(withEnd(`Under way:\n${r.waiting.map((x) => `  - ${x}`).join("\n")}`, { next }));
     return 0;
@@ -434,7 +434,7 @@ export function jsonPathLines(paths: readonly KeptPathStatus[], st: Style): stri
   const live = paths.filter((p) => p.state !== "dropped").sort((a, b) => Number(a.state === "waiting") - Number(b.state === "waiting"));
   const dropped = paths.length - live.length;
   if (!live.length && !dropped) return [];
-  const lines = [`\n${st.bold("Stored JSON paths")} ${st.dim("(read from a column of the copy, computed once per row written; MASON_STORE_JSON_PATHS=off turns it off)")}:`];
+  const lines = [`\n${st.bold("Stored JSON paths")} ${st.dim("(read from a column of the synced table, computed once per row written; MASON_STORE_JSON_PATHS=off turns it off)")}:`];
   for (const p of live) {
     const pct = p.rowsTotal > 0 ? Math.min(99, Math.floor((p.rowsDone / p.rowsTotal) * 100)) : 0;
     // a path its fill's cost holds back says so: its why is the decision, with the estimate
@@ -509,7 +509,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const bytes = fs.existsSync(duckFile) ? fs.statSync(duckFile).size : null;
   const restarts = restartsOf(project.dir);
   const lastStop = project.config.lastStop ?? null;
-  const next: readonly NextStep[] = hung === null ? ("message" in src && src.next?.length ? src.next : [["mason start", "start Mason for this project: what it copied is kept, and polled again"]])
+  const next: readonly NextStep[] = hung === null ? ("message" in src && src.next?.length ? src.next : [["mason start", "start Mason for this project: what it synced is kept, and polled again"]])
     : hung.problem.next ?? [["mason stop", "end it"], ["mason logs", "what it was doing"]];
   const state = hung === null ? "not running" : "hung";
   if (json) {
@@ -527,7 +527,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
     ...(database === null ? [] : [["Database", `${database} (not checked: Mason ${hung === null ? "is not running" : "does not answer"})`] as [string, string]]),
     ["Mason", hung === null ? `${version()} · not running${project.config.lastRun ? ` (last started ${ago(project.config.lastRun)}${ended})` : ""}`
       : `${version()}, pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],
-    ["Copy", bytes === null ? "none yet (mason start makes it)" : `${duckFile} · ${fileSize(bytes)}`],
+    ["Synced data", bytes === null ? "none yet (mason start makes it)" : `${duckFile} · ${fileSize(bytes)}`],
     ...restartsRows(restarts),
     ["Postgres API", hung === null ? "not running" : `${withPlaceholders(hung.run.postgresUrl)}  (held by the hung run; it may not answer)`],
   ] }, st));
@@ -563,8 +563,8 @@ const TABLES_USAGE = `usage: mason tables [<table>…] [--all] [--json]
   --all       every table with its columns, not only the named ones
   --json      as data: { database, source: { name (the source's: its sources file's), file (the sources file) },
               tables: [{ table, rows, bytes, primaryKey, comment, addable,
-              reason, added, addedColumns (the columns its copy keeps: null when not added), copyKey (the key: the sources
-              file copies it by, null: its primary key), columns: [{ name, type, nullable, comment, references }] }], next }
+              reason, added, addedColumns (the columns it syncs: null when not added), copyKey (the key: the sources
+              file keys it by, null: its primary key), columns: [{ name, type, nullable, comment, references }] }], next }
 `;
 
 export const TABLES: CommandSpec & { needs: "project" } = {
@@ -599,7 +599,7 @@ export async function tables(argv: string[]): Promise<number> {
   // what to run next: the first table not yet added, as a whole list or as the named tables
   const one = shown.find((t) => !t.added && t.reason === null);
   const next: NextStep[] = f.positionals.length
-    ? (one ? [[`mason add ${tableArg(one.table)}`, `copy it into Mason (--columns ${one.columns.slice(0, 2).map((c) => c.name).join(",")}: those only)`]] : [])
+    ? (one ? [[`mason add ${tableArg(one.table)}`, `sync it into Mason (--columns ${one.columns.slice(0, 2).map((c) => c.name).join(",")}: those only)`]] : [])
     : addSteps(shown, "tables");
   if (json) {
     out(jsonText(TABLES, { database: s.database, source: { name: s.name, file: s.file }, tables: shown.map((t) => ({
@@ -623,7 +623,7 @@ export async function tables(argv: string[]): Promise<number> {
   }
   for (const t of shown) {
     const size = t.rows === null ? "rows unknown" : `~${n(t.rows)} rows`;
-    const added = t.added ? ` · added (${t.addedColumns!.length === t.columns.length ? "every column" : t.addedColumns!.join(", ")}${t.copyKey ? `; copied by ${t.copyKey.join(", ")}` : ""})` : "";
+    const added = t.added ? ` · added (${t.addedColumns!.length === t.columns.length ? "every column" : t.addedColumns!.join(", ")}${t.copyKey ? `; keyed by ${t.copyKey.join(", ")}` : ""})` : "";
     out(`${t.table} · ${size}${t.key.length ? ` · key ${t.key.join(", ")}` : ""}${added}`);
     if (t.comment) out(`  ${t.comment}`);
     if (t.reason) out(`  cannot be added as it is: ${t.reason}`);
@@ -705,7 +705,7 @@ async function withoutRun(cmd: string, p: Project, json: boolean): Promise<{ db:
   // a hung run is Mason running and not answering: FAILURE_CODES' unreachable
   if (st.kind === "hung") { failed(cmd, { ...asFailure(notAnswering(p, st.run)), code: "unreachable" }, { json }); return null; }
   if (st.kind === "up") {
-    failed(cmd, { message: `Mason started for ${p.config.name} while mason ${cmd} ran`, code: "refused", fix: `run mason ${cmd} again: it asks the run, which copies at once` }, { json });
+    failed(cmd, { message: `Mason started for ${p.config.name} while mason ${cmd} ran`, code: "refused", fix: `run mason ${cmd} again: it asks the run, which syncs at once` }, { json });
     return null;
   }
   const c = await readCatalog(p);
@@ -736,38 +736,38 @@ async function viaRun<T>(run: DevRun, route: "/api/pick" | "/api/remove", body: 
 
 const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--include <column>,…] [--key <column>,…] [--sync <sync>] [--json]
 
-  Copies tables into Mason: each one is added to the project's sources file (mason/sources/<name>.yml), under tables:
+  Syncs tables into Mason: each one is added to the project's sources file (mason/sources/<name>.yml), under tables:
     mason add orders                                    every column:            orders: {}
     mason add orders --columns id,status,total          those columns:           orders: { columns: [id, status, total] }
     mason add orders customers                          several tables, every column of each
     mason add users --include password_hash             every column, and one that looks like a secret
-    mason add event_log --key tenant_id,id              a table with no primary key, copied by those columns
+    mason add event_log --key tenant_id,id              a table with no primary key, keyed by those columns
     mason add orders --sync "poll 30s"                  polled every 30 seconds:  orders: { sync: poll 30s }
-  A table is its name (orders) or schema.table (billing.invoices). Its primary key is always copied. The rest of the
+  A table is its name (orders) or schema.table (billing.invoices). Its primary key is always synced. The rest of the
   file — your comments, other tables — stays as it was.
 
-  After its first copy, a table is kept current as the file's sync: says — at the top for every table (mason init
+  After its first sync, a table is kept current as the file's sync: says — at the top for every table (mason init
   writes sync: off: read again only by mason sync <table>), or on its own entry. --sync writes the table's own:
   off, or poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h). On a table already added, --sync alone changes
-  its sync: line and nothing else; its copy is kept and caught up by one poll. Without --sync a new entry follows the
+  its sync: line and nothing else; its synced data is kept and caught up by one poll. Without --sync a new entry follows the
   file's — but a table of more than ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows under a file that polls is written sync: off and said,
   since each poll scans a table whole on your database. A table of tens of millions of rows set to poll more often than
   every minute is warned of, with an estimate of what each poll costs your database.
 
   A column that looks like a secret (password, token, api_key, private_key, …) is left out unless named, and said:
-  it is written as exclude: [password_hash], since anyone with a user's password can read every copied column. Name
+  it is written as exclude: [password_hash], since anyone with a user's password can read every synced column. Name
   one with --columns or --include to have it.
 
-  With Mason running the copy starts at once; mason wait returns when it is done and the table is served. Before
+  With Mason running the first sync starts at once; mason wait returns when it is done and the table is served. Before
   mason start (mason init && mason add orders && mason start) the entry is written, checked against the database as
-  the run checks it, and the copy begins at mason start. Adding a table again with other columns changes its entry,
-  and the table is copied again with them.
+  the run checks it, and the first sync begins at mason start. Adding a table again with other columns changes its entry,
+  and the table is synced again whole with them.
 
   --columns <a,b,…>   only these columns (one table at a time: the list is that table's)
   --include <a,b,…>   these columns as well as every other one — a column that looks like a secret, named on purpose
-  --key <a,b,…>       for a table with no primary key: the columns that tell its rows apart, which it is copied by (one
+  --key <a,b,…>       for a table with no primary key: the columns that tell its rows apart, which it is keyed by (one
                       table at a time; polling only: logical replication cannot apply a change by them)
-  --sync <sync>       how it is kept current after its first copy, written on its entry: off, or "poll 30s"
+  --sync <sync>       how it is kept current after its first sync, written on its entry: off, or "poll 30s"
   --json              as data: { added: [{ table, entry, columns (null: every one), exclude, key, addedKey (key columns
                       added to --columns), skippedSecrets, already (the file said so already), sync: { value (off, poll
                       30s), from (entry: its own sync:, file: the file's, default: off, as the file writes none) },
@@ -781,7 +781,7 @@ export const ADD: CommandSpec & { needs: "project" } = {
   // the project, not the run: the sources file is the list, so a table is added before mason start as well as after
   needs: "project",
   name: "add",
-  summary: "copy tables into Mason, adding them to the sources file: mason add orders (--columns id,status: those only)",
+  summary: "sync tables into Mason, adding them to the sources file: mason add orders (--columns id,status: those only)",
   usage: ADD_USAGE,
   options: { json: { type: "boolean" }, columns: { type: "string" }, include: { type: "string" }, key: { type: "string" }, sync: { type: "string" } },
   json: ["added", "file", "error", "next"],
@@ -839,8 +839,8 @@ export async function add(argv: string[]): Promise<number> {
         pick: (table, columns, key) => viaRun<PickResult>(run, "/api/pick", { table, picked: true, columns, ...(key ? { key } : {}), ...(sync ? { sync: syncText(sync) } : {}), keep }),
         // --sync alone on tables already added: no copy starts (each is caught up by one poll), so wait has nothing to wait for
         next: (n, wereAdded) => keep && wereAdded === n
-          ? [["mason status", `${n === 1 ? "its sync and its copy's age: it is" : "their sync and their copies' age: each is"} caught up by one poll, never copied again`], READY_STEPS[0]!]
-          : [["mason wait", `until ${n === 1 ? "its copy finishes" : "their copies finish"} (the copy has started)`], READY_STEPS[0]!] }, specs, json);
+          ? [["mason status", `${n === 1 ? "its sync and when it was last synced: it is" : "their sync and when each was last synced: each is"} caught up by one poll, never synced again whole`], READY_STEPS[0]!]
+          : [["mason wait", `until ${n === 1 ? "its first sync finishes" : "their first syncs finish"} (the sync has started)`], READY_STEPS[0]!] }, specs, json);
     });
   }
   // Mason down: the command writes the entry itself, checked as the run checks it; the copy begins at mason start
@@ -848,8 +848,8 @@ export async function add(argv: string[]): Promise<number> {
   if (down === null) return 1;
   return addTables({ tables: down.tables, file: down.file,
     pick: async (table, columns, key) => edited(() => addEntry(down.edit(), down.db, table, columns, key, how)),
-    next: () => [["mason start", "Mason in the background, for this project: the copy of every added table begins"],
-      ["mason wait", "then, until every added table is copied and served"]] }, specs, json);
+    next: () => [["mason start", "Mason in the background, for this project: the first sync of every added table begins"],
+      ["mason wait", "then, until every added table is synced and served"]] }, specs, json);
 }
 
 /** Where `mason add` adds a table: the database's tables as it names them, the sources file, the one edit, and what to
@@ -927,13 +927,13 @@ export function addedLines(b: PickResult, file: string): { line: string; notes: 
   // is said, and the one line that changes it — a big table written off, with the alternatives
   const sync = b.bigOff ? `sync: off written on its entry: it has more than ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows, and each poll scans it whole on your database — ` +
       `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason start --replication keeps every table current from the change log`
-    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first copy it is read again only by mason sync ${name} — ` +
+    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first sync it is read again only by mason sync ${name} — ` +
       `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
-    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first copy — mason add ${name} --sync off stops that`;
-  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first sync — mason add ${name} --sync off stops that`;
+  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, keyed by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
     sync,
     ...(b.pollCost !== null ? [b.pollCost] : []),
-    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a copy always has its key)`] : []),
+    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a synced table always has its key)`] : []),
     // a secret is readable by anyone with a user's password: left out, and said, with the way to include one
     ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
       `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
@@ -945,8 +945,8 @@ export function addedLines(b: PickResult, file: string): { line: string; notes: 
 const REMOVE_USAGE = `usage: mason remove <table>… [--json]
 
   Takes tables out of the project: each one's entry in the sources file (mason/sources/<name>.yml) is removed, the
-  rest of the file as it was. With Mason running it stops copying the table and drops its copy at once; with Mason
-  stopped, a copy an earlier run made is dropped at the next mason start.
+  rest of the file as it was. With Mason running it stops syncing the table and drops its synced data at once; with Mason
+  stopped, what an earlier run synced is dropped at the next mason start.
 
     mason remove customers
     mason remove customers billing.invoices     several at once
@@ -958,7 +958,7 @@ export const REMOVE: CommandSpec & { needs: "project" } = {
   // the project, not the run, as mason add
   needs: "project",
   name: "remove",
-  summary: "take tables out of the sources file: mason remove customers (its copy is dropped)",
+  summary: "take tables out of the sources file: mason remove customers (its synced data is dropped)",
   usage: REMOVE_USAGE,
   options: { json: { type: "boolean" } },
   json: ["removed", "file", "next"],
@@ -992,7 +992,7 @@ function removedAnswer(r: Edited<RemoveResult>, names: readonly string[], runnin
   }
   const b = r.ok;
   const next: NextStep[] = running ? [["mason status", "the tables left"]]
-    : [["mason start", "Mason in the background, for this project: it copies the tables left"], ["mason status", "the tables left"]];
+    : [["mason start", "Mason in the background, for this project: it syncs the tables left"], ["mason status", "the tables left"]];
   if (json) { out(jsonText(REMOVE, { removed: b.removed, file: b.file }, next)); return 0; }
   const rel = path.relative(process.cwd(), b.file);
   out(reportText({ ...removedReport(b.removed, rel.startsWith("..") ? b.file : rel, { running }), next }, styleOut()));
@@ -1005,8 +1005,8 @@ export function removedReport(removed: readonly string[], file: string, o: { run
   const one = removed.length === 1;
   return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
     // Mason down (the web page always has a run): a copy an earlier run made is dropped by the next start's sync
-    tips: [o.running === false ? `a copy an earlier run made of ${one ? "it" : "them"} is dropped at the next mason start`
-      : `Mason stops copying ${one ? "it" : "them"} and drops ${one ? "its copy" : "their copies"}`] };
+    tips: [o.running === false ? `what an earlier run synced of ${one ? "it" : "them"} is dropped at the next mason start`
+      : `Mason stops syncing ${one ? "it" : "them"} and drops ${one ? "its synced data" : "theirs"}`] };
 }
 
 // ------------------------------------------------------------------ mason wait
@@ -1019,29 +1019,29 @@ export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "e
 
 const WAIT_USAGE = `usage: mason wait [--timeout <seconds>] [--json]
 
-  Waits until every added table is copied and served, showing every added table on a line of its own: 100% for the
-  finished (in the order they finished), a bar for the ones still copying, at the bottom. Run it after mason add.
+  Waits until every added table is synced and served, showing every added table on a line of its own: 100% for the
+  finished (in the order they finished), a bar for the ones still syncing, at the bottom. Run it after mason add.
 
     mason add orders && mason wait
     mason wait --timeout 3600     a large table: wait up to an hour
 
-  --timeout <seconds>   how long to wait (default 600); the copy goes on after, and mason wait again picks it up
+  --timeout <seconds>   how long to wait (default 600); the sync goes on after, and mason wait again picks it up
   --json                as data, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
                         kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how long, the
                         rate, the seconds left, while its chunks are read }; kept as mason status --json says it —
-                        { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its last copy or
-                        poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why the
-                        copy is not kept current now, its phase included),
+                        { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its first sync or
+                        its last poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why
+                        it is not kept current now, its phase included),
                         stream (replication mode: where the stream is, as mason status --json says it), error (on a
                         failure or a timeout: { code, message, next }), next }
 
-  Exit status: 0 ready; 1 a copy failed (printed, with what to do; Mason tries it again by itself); 124 timed out.
+  Exit status: 0 ready; 1 a first sync failed (printed, with what to do; Mason tries it again by itself); 124 timed out.
 `;
 
 export const WAIT: CommandSpec & { needs: "run" } = {
   needs: "run",
   name: "wait",
-  summary: "wait until every added table is copied and served (exit 0; 1 on a failure, with why)",
+  summary: "wait until every added table is synced and served (exit 0; 1 on a failure, with why)",
   usage: WAIT_USAGE,
   options: { json: { type: "boolean" }, timeout: { type: "string" } },
   json: ["ready", "failed", "waiting", "timedOut", "tables", "stream", "error", "next"],
@@ -1089,11 +1089,11 @@ export async function wait(argv: string[]): Promise<number> {
       // the outcome and what to run next, the same for a person and under --json
       const readyNext: NextStep[] = picked.length ? [...READY_STEPS] : addSteps(s.tables);
       const failure: Failure | null = r.failed.length
-        ? { message: r.failed.length === 1 ? r.failed[0]! : `${r.failed.length} copies failed`, code: "failed", why: r.failed.length === 1 ? undefined : r.failed.join("\n"),
-            fix: "Mason tries a failed copy again by itself; mason logs says why it failed and when it tries next",
+        ? { message: r.failed.length === 1 ? r.failed[0]! : `${r.failed.length} first syncs failed`, code: "failed", why: r.failed.length === 1 ? undefined : r.failed.join("\n"),
+            fix: "Mason tries a failed first sync again by itself; mason logs says why it failed and when it tries next",
             next: [["mason logs", "the detail of each failure"], ["mason status", "the rest of the project"]] }
         : !done && Date.now() >= until
-        ? { message: `not ready after ${timeout} s`, code: "timeout", why: r.waiting.join("\n"), fix: "nothing stopped: the copies go on",
+        ? { message: `not ready after ${timeout} s`, code: "timeout", why: r.waiting.join("\n"), fix: "nothing stopped: the syncs go on",
             next: [["mason wait", "keep waiting (--timeout <seconds> for longer)"], ["mason status", "what Mason is doing"]] }
         : null;
       if (json && (done || failure)) {
@@ -1103,10 +1103,10 @@ export async function wait(argv: string[]): Promise<number> {
       // the block as it ends, too: every table at 100% beside Ready (when the last change was not printed yet)
       // while at work: a table already copied can be queried now; the final Next is Ready's, printed once below
       const copied = picked.some((t) => t.copy?.phase === "done");
-      const meanwhile: NextStep[] = done ? [] : [...(copied ? [["mason user add <name>", "a user for your BI tool or psql: a copied table can be queried now"] as NextStep] : []), ["mason status", "what Mason is doing"]];
+      const meanwhile: NextStep[] = done ? [] : [...(copied ? [["mason user add <name>", "a user for your BI tool or psql: a synced table can be queried now"] as NextStep] : []), ["mason status", "what Mason is doing"]];
       show([...tableLines(s), ...(s.stream ? ["Stream:", ...streamLines(s.stream).map((l) => `  ${l}`)] : [])], meanwhile);   // done: the meanwhile Next is dropped
       if (r.ready) {
-        const head = !picked.length ? "Nothing to wait for: no table added yet." : "Ready: every added table is copied and served.";
+        const head = !picked.length ? "Nothing to wait for: no table added yet." : "Ready: every added table is synced and served.";
         if (!json) out(withEnd(picked.length ? styleOut().green(head) : head, { next: readyNext }));
         return 0;
       }
@@ -1120,11 +1120,11 @@ export async function wait(argv: string[]): Promise<number> {
 
 const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [--failed]] [--json]
 
-  The last lines of Mason's log: every copy, poll and statement it ran, warnings and errors with their reasons —
+  The last lines of Mason's log: every sync, poll and statement it ran, warnings and errors with their reasons —
   running or not. With --requests, the run's request log instead: every statement a tool sent the
   Postgres API that Mason answered, and every one it refused or failed, a line each, newest last — when, the outcome
   and SQLSTATE, how long, the rows sent, the client's application_name (and the mason user's name), the statement and
-  the error's first line. It is kept MASON_REQUEST_LOG_DAYS days (default 7) in the run's copy, and read through the
+  the error's first line. It is kept MASON_REQUEST_LOG_DAYS days (default 7) in the run's synced data, and read through the
   running Mason.
 
     mason logs
@@ -1145,7 +1145,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [-
 export const LOGS: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "logs",
-  summary: "Mason's log: every copy, poll and statement (-f to follow it; --requests, every statement the Postgres API met)",
+  summary: "Mason's log: every sync, poll and statement (-f to follow it; --requests, every statement the Postgres API met)",
   usage: LOGS_USAGE,
   options: { lines: { type: "string", short: "n" }, follow: { type: "boolean", short: "f" }, start: { type: "boolean" },
     requests: { type: "boolean" }, failed: { type: "boolean" }, json: { type: "boolean" } },
@@ -1234,12 +1234,12 @@ export async function logs(argv: string[]): Promise<number> {
 
 const STOP_USAGE = `usage: mason stop [--json]
 
-  Stops Mason for this folder's project. The copy of your data and Mason's state stay: the next mason start resumes
+  Stops Mason for this folder's project. The synced data and Mason's state stay: the next mason start resumes
   in seconds, reading only what changed.
 
     mason stop
 
-  mason destroy removes the copy and the state too (your files stay), to free the disk or begin again.
+  mason destroy removes the synced data and the state too (your files stay), to free the disk or begin again.
 
   --json    as data: { stopped: [name], killed (a run that did not answer and ignored SIGTERM), supervisor (its pid, when one was stopped), next }
 `;
@@ -1247,7 +1247,7 @@ const STOP_USAGE = `usage: mason stop [--json]
 export const STOP: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "stop",
-  summary: "stop Mason for this folder's project (the copy stays: the next mason start resumes)",
+  summary: "stop Mason for this folder's project (the synced data stays: the next mason start resumes)",
   usage: STOP_USAGE,
   options: { json: { type: "boolean" } },
   json: ["stopped", "killed", "supervisor", "next"],
@@ -1257,7 +1257,7 @@ export async function stop(argv: string[]): Promise<number> {
   const f = parseCommand(STOP, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
-  const next: NextStep[] = [["mason start", "resume, in seconds (in the project's folder)"], ["mason destroy", "remove its copy of the data and its state; your files stay"]];
+  const next: NextStep[] = [["mason start", "resume, in seconds (in the project's folder)"], ["mason destroy", "remove its synced data and its state; your files stay"]];
   const r = await theRun(process.cwd());
   if ("problem" in r && r.hung !== undefined) {
     // A RUN THAT DOES NOT ANSWER (src/cli/runs.ts "alive and silent"): its supervisor first, so it is not started again
@@ -1275,7 +1275,7 @@ export async function stop(argv: string[]): Promise<number> {
     if (isProject(recorded)) { recorded.config.running = null; recorded.config.lastStop = { at: new Date().toISOString(), how: `${killed ? "killed by mason stop (SIGKILL)" : "stopped by mason stop (SIGTERM)"}: ${how.replace(/, so it was killed$/, "")}` }; writeConfig(recorded.dir, recorded.config); }
     if (json) { out(jsonText(STOP, { stopped: [hung.name], killed, supervisor: sup }, next)); return 0; }
     out(reportText({ headline: `Stopped ${hung.name}`, details: [["how", `${how}${sup === null ? "" : `; its supervisor (pid ${sup}) will not start it again`}`],
-      ["kept", "its copy of the data and its state (DuckDB recovers from its write-ahead log at the next start)"], ["log", "mason logs shows what it was doing"]] }));
+      ["kept", "its synced data and its state (DuckDB recovers from its write-ahead log at the next start)"], ["log", "mason logs shows what it was doing"]] }));
     out(endText({ next }));
     return 0;
   }
@@ -1308,7 +1308,7 @@ export async function stop(argv: string[]): Promise<number> {
   // a demo project's database (src/cli/demo.ts) stays too, as the copy does: said where a person reads the stop
   const demo = isProject(recorded) && recorded.config.demo === true;
   if (json) { out(jsonText(STOP, { stopped: [run.name] }, next)); return 0; }
-  out(reportText({ headline: `Stopped ${run.name}`, details: [["kept", `its copy of the data and its state${demo ? ` and the demo database (${STATE_DIR}/${DEMO_DIR})` : ""}`],
+  out(reportText({ headline: `Stopped ${run.name}`, details: [["kept", `its synced data and its state${demo ? ` and the demo database (${STATE_DIR}/${DEMO_DIR})` : ""}`],
     ...(replicating ? [["slot", `its replication slot stays on the database, holding WAL until the next mason start (mason destroy drops it)`] as const,
       ["publication", named ? `${named}, its owner's: read as it is, never altered (mason destroy leaves it)` : "Mason's own (mason destroy drops it)"] as const] : [])] }));
   out(endText({ next }));

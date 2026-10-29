@@ -13,8 +13,8 @@ says), TABLES (what `mason tables`, `mason add` and `mason remove` do) and USERS
 foundation: the full UI is built on it, page by page, under these rules.
 
 - **One page per concern, rendered from the command server's JSON exactly as the CLI prints it** (one grammar at
-  every entrance): a page's words are the commands' words — "the copy", "added", "a user", the phase lines `mason
-  wait` prints — never a vocabulary of its own, and never the engine's name. Where the page re-says a CLI line (a copy's
+  every entrance): a page's words are the commands' words — "the synced data", "added", "a user", the phase lines `mason
+  wait` prints — never a vocabulary of its own, and never the engine's name. Where the page re-says a CLI line (a first sync's
   progress, the database's rows, a table's line, what an add or a remove did) it is held EQUAL to the CLI's function by
   a test (`tests/web-page.test.ts`: `copyingText`, `tableLines`, `duration`, `sourceRows`, `tableFacts`, `addedLines`,
   `removedReport`), so the two cannot drift.

@@ -152,7 +152,7 @@ test("an add writes its entry into the sources file and nowhere else; each refus
   const notUnique = await call("POST", "/api/pick", { body: { table: "public.events", picked: true, key: ["id"] } });
   assert.deepEqual([notUnique.status, JSON.parse(notUnique.text).error], [400, "tables.events.key: no unique index of public.events is over (id), so two of its rows may share them and Mason could not tell them apart — name the columns of one: key: [tenant_id, id] (its unique index events_tenant_id_id_key)"]);
   const keyOnPk = await call("POST", "/api/pick", { body: { table: "public.customers", picked: true, key: ["id"] } });
-  assert.deepEqual([keyOnPk.status, JSON.parse(keyOnPk.text).error], [400, "public.customers has a primary key (id), which Mason copies it by: leave --key out"]);
+  assert.deepEqual([keyOnPk.status, JSON.parse(keyOnPk.text).error], [400, "public.customers has a primary key (id), which Mason keys it by: leave --key out"]);
   // a name an older Mason refused (not lower case) is a table like any other now
   assert.equal((await pickIt("public.Shouty")).status, 200);
   assert.match(fs.readFileSync(sourceFile, "utf8"), /\n {2}Shouty: \{\}\n$/);
@@ -237,7 +237,7 @@ test("mason remove: the table's entry goes, every other byte of the file as it w
     fs.writeFileSync(sourceFile, "kind: postgres\nurl: postgres://me@elsewhere:5432/other\ntables:\n  customers: {}\n");
     for (const r of [await remove(["customers"]), await pickIt("public.orders")]) {
       assert.equal(r.status, 409);
-      assert.equal(JSON.parse(r.text).error, "mason/sources/app.yml: url: now names postgres://me@elsewhere:5432/other (mason/sources/app.yml), and this run copies postgres://me@localhost:5432/app: mason stop && mason start copies from the new one, then add or remove the table");
+      assert.equal(JSON.parse(r.text).error, "mason/sources/app.yml: url: now names postgres://me@elsewhere:5432/other (mason/sources/app.yml), and this run syncs postgres://me@localhost:5432/app: mason stop && mason start syncs from the new one, then add or remove the table");
     }
   } finally { fs.writeFileSync(sourceFile, was); }
 });
@@ -298,7 +298,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.deepEqual(by.get("public.orders")!.copy, { phase: "copying", rowsCopied: 2, updatedAt: "",
       progress: { chunksDone: 2, chunksTotal: 5, reading: 3, readingSeconds: 7.5, rowsReading: 3, rowsPerSecond: 0.4, bytesPerSecond: 900, secondsLeft: 12, share: 0.4 } },
       "rows so far, never 0 while it copies, and the chunks reading, for how long, the measured rate: so a copy moves between two commits");
-    assert.equal(by.get("public.logs")!.copy, null, "a table the sync has not reached is waiting, never copying 0 of N");
+    assert.equal(by.get("public.logs")!.copy, null, "a table the sync has not reached is waiting, never syncing 0 of N");
     assert.deepEqual(by.get("public.Shouty")!.copy, { phase: "failed", rowsCopied: 0, updatedAt: "" });
     assert.equal(by.get("public.Shouty")!.error, "it broke");
     // its sync off: served, and its state says so and when it was last synced (kept), never an unsynced of the run's own

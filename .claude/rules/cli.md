@@ -94,10 +94,10 @@ CLI lacks).
   machine".
 - **`mason init demo` is an ordinary project on a database Mason hosts** (src/cli/demo.ts; the database is
   src/demo/source.ts): the files init always writes — `url: ${DATABASE_URL}`, here with three of the demo's four tables
-  added (`DEMO_ADDED_TABLES`; `order_items` is left for the person's first `mason add`, so they see a copy begin — one
+  added (`DEMO_ADDED_TABLES`; `order_items` is left for the person's first `mason add`, so they see a first sync begin — one
   list, src/demo/seed.ts), its URL in `.env` — and `demo: true` in the config; `mason start` hosts it in `.mason/demo/`
   before it connects, reads it over the wire as any Postgres, and changes it every `MASON_DEMO_CHANGE_MS`; `mason
-  destroy` removes it with the copy.
+  destroy` removes it with the synced data.
   Why: a first try must need nothing installed, and must run the read path production runs. **Its port is in the URL
   alone** (chosen free at init, read back by `demoPort`): a second record would disagree with an edited `.env`, which the
   run refuses with the way out. **Poll only**: the demo database has no change log, so `--replication` is refused before
@@ -113,12 +113,12 @@ CLI lacks).
   `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`), so the page and the CLI cannot disagree.
 - **`mason wait` shows every added table and is exact** (after `mason add a b c` where `a` and `c` were quick, it showed
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
-  they finished, the ones still copying at the bottom — redrawn in place on a terminal, printed when it changes
-  elsewhere; ready only when every added table is copied and served (`readiness`, src/cli/readiness.ts); a copy that
-  failed is said with its error and that Mason tries it again; each copied table says its sync and its copy's age on
+  they finished, the ones still syncing at the bottom — redrawn in place on a terminal, printed when it changes
+  elsewhere; ready only when every added table is synced and served (`readiness`, src/cli/readiness.ts); a first sync that
+  failed is said with its error and that Mason tries it again; each synced table says its sync and when it was last synced on
   its line (`keptAge`: `sync: off, last synced 3 h ago — mason sync <table>`, `polled every 30s, last 4 s ago`), and a
-  copy in the old layout that it is being copied again.
-- **What a project copies is ONE sources file** (a `sources` folder, each file a source to sync, naming the tables and
+  table in the old layout that it is being read again whole.
+- **What a project syncs is ONE sources file** (a `sources` folder, each file a source to sync, naming the tables and
   columns to sync): `mason/sources/<name>.yml`, its name the
   source's — `kind: postgres` (any other kind refused by name, "not yet"), `url:` a literal URL or `${NAME}` (read by
   `appEnvValue`, src/lib/dotenv.ts: `.env.local`, `.env`, the shell; unset is refused with the way out), `tables:` a MAP
@@ -251,6 +251,8 @@ file and the key, says what is wrong in their words, and gives the way out, on O
   — never a guess at a different word, which is worse than none);
 - the choices when there are a few, and what can be read when a column is not there;
 - the exact line to add when something is missing (a join's other side);
-- the step in the developer's words ("the copy failed", not "failed at copy").
+- the step in the developer's words ("its first sync failed", not "failed at copy"), and what Mason does to a table's data
+  is *sync* — the first sync, the synced table, the synced data — never "copy" (CLAUDE.md "Vocabulary";
+  `tests/conventions.test.ts` reads every literal in src/cli/ and src/web/ for it).
 
 A new refusal a developer can meet gets a test asserted on its whole text (`tests/cli-project.test.ts`, `tests/cli-commands.test.ts`).

@@ -85,8 +85,8 @@ test("mason destroy on a demo project: the demo database goes with the copy, sai
     assert.ok(!fs.existsSync(path.join(shop.dir, "demo")), "the demo database is state, like the copy");
     assert.deepEqual(fs.readdirSync(shop.dir), ["config.json"]);
     assert.equal((project(shop.root).config as { demo?: boolean }).demo, true, "still the demo's project: the next mason start makes and seeds it");
-    assert.match(chunks.join(""), /^Removed shop\n {2}removed {3}.*\.mason\/ \(demo, duck\.db\)\n {2}kept {6}your files in .*\/shop\/mason, \.mason\/config\.json and the users — not the demo database, which went with the copy: the next mason start seeds it again\n/);
-    assert.match(DESTROY_USAGE, /A demo project's database \(mason init demo, in \.mason\/demo\/\)\n {2}goes with the copy: the next mason start makes and seeds it again\./);
+    assert.match(chunks.join(""), /^Removed shop\n {2}removed {3}.*\.mason\/ \(demo, duck\.db\)\n {2}kept {6}your files in .*\/shop\/mason, \.mason\/config\.json and the users — not the demo database, which went with the synced data: the next mason start seeds it again\n/);
+    assert.match(DESTROY_USAGE, /A demo project's database \(mason init demo, in \.mason\/demo\/\)\n {2}goes with the synced data: the next mason start makes and seeds it again\./);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -103,7 +103,7 @@ test("in replication mode the slot is dropped on the database the copy came from
     const asked: string[] = [];
     await assert.rejects(removeProject(project(shop.root), { state: async () => ({ kind: "none", run: null }), stopSupervisor: async () => null,
       dropReplication: async (source) => { asked.push(source.database); return ["replication slot mason_dev_shop_shop_dev"]; } }),
-    (e: Error) => /^removed .*; but not its publication and replication slot: the sources file names shop_dev now, and the copy came from shop_old, where the slot is: put that database's URL back in the sources file and run mason destroy again, or drop them on shop_old by hand\. They hold the database's WAL while they exist: drop them by hand — /.test(e.message));
+    (e: Error) => /^removed .*; but not its publication and replication slot: the sources file names shop_dev now, and the synced data came from shop_old, where the slot is: put that database's URL back in the sources file and run mason destroy again, or drop them on shop_old by hand\. They hold the database's WAL while they exist: drop them by hand — /.test(e.message));
     assert.equal(asked.length, 0, "nothing is dropped on the other database");
     // the database the copy came from: its slot dropped there
     cfg.sourceServer = { systemIdentifier: "7", database: "shop_dev" };

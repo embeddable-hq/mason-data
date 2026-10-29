@@ -55,7 +55,7 @@ export function copyingText(copied, rowsEstimate, p) {
   const chunks = (k) => `${k} chunk${k === 1 ? "" : "s"}`;
   if (p.rowsPerSecond === null) {
     const first = p.reading === 0 ? "about to read the first chunk" : `reading the first ${p.reading === 1 ? "chunk" : chunks(p.reading)}${since}`;
-    return { fraction, text: copied === 0 ? `${first}${estimate === null ? "" : ` · ~${n(estimate)} rows to copy`}` : `${rowsText(copied)} · resumed, ${first}` };
+    return { fraction, text: copied === 0 ? `${first}${estimate === null ? "" : ` · ~${n(estimate)} rows to sync`}` : `${rowsText(copied)} · resumed, ${first}` };
   }
   const parts = [rowsText(shown)];
   const allIn = p.reading === 0 && p.chunksDone >= p.chunksTotal;
@@ -72,18 +72,18 @@ export function copyingText(copied, rowsEstimate, p) {
  * current and how old its copy is (`keptAge`).
  */
 export function tableLine(t, now = Date.now()) {
-  if (t.error) return { state: "failed", fraction: 1, what: `its copy failed: ${firstLine(t.error)}` };
+  if (t.error) return { state: "failed", fraction: 1, what: `its first sync failed: ${firstLine(t.error)}` };
   if (t.copy?.phase === "copying") {
     const c = copyingText(t.copy.rowsCopied, t.rows, t.copy.progress);
-    return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `copying ${c.text}` : c.text };
+    return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `syncing ${c.text}` : c.text };
   }
-  if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its copy to start" };
+  if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its first sync to start" };
   const age = keptAge(t, now);
   // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
   if (t.kept?.by === "poll" && t.kept.pending !== undefined) {
-    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
+    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
   }
-  return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
+  return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
 }
 
 /** How long ago an instant was (src/lib/table-sync.ts `agoText`). */
@@ -121,13 +121,13 @@ export function addedLines(b, file) {
   const name = entryName(b.table);
   const sync = b.bigOff ? `sync: off written on its entry: it has more than 1,000,000 rows, and each poll scans it whole on your database — ` +
       `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason start --replication keeps every table current from the change log`
-    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first copy it is read again only by mason sync ${name} — ` +
+    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first sync it is read again only by mason sync ${name} — ` +
       `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
-    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first copy — mason add ${name} --sync off stops that`;
-  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first sync — mason add ${name} --sync off stops that`;
+  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, keyed by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
     sync,
     ...(b.pollCost !== null ? [b.pollCost] : []),
-    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a copy always has its key)`] : []),
+    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a synced table always has its key)`] : []),
     ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
       `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
   ] };
@@ -136,7 +136,7 @@ export function addedLines(b, file) {
 /** What `mason remove` prints for the tables removed (src/cli/commands.ts `removedReport`). */
 export function removedReport(removed, file) {
   return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
-    tips: [`Mason stops copying ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its copy" : "their copies"}`] };
+    tips: [`Mason stops syncing ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its synced data" : "theirs"}`] };
 }
 
 /**
@@ -192,7 +192,7 @@ export function renderStatus(s, requests = {}) {
   const picked = s.tables.filter((t) => t.added);
   if (!picked.length) {
     parts.push(`<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>`,
-      `<p class="dim">${code("mason tables")} lists them; ${code("mason add <table>")} copies one.</p>`);
+      `<p class="dim">${code("mason tables")} lists them; ${code("mason add <table>")} syncs one.</p>`);
     return parts.join("");
   }
   // as tableLines orders them: the finished first, in the order they finished, then the failed, the copying, the waiting
@@ -200,7 +200,7 @@ export function renderStatus(s, requests = {}) {
   const lines = picked.map((t) => ({ t, l: tableLine(t) }))
     .sort((a, b) => rank[a.l.state] - rank[b.l.state] || (a.t.copy?.updatedAt ?? "").localeCompare(b.t.copy?.updatedAt ?? "") || a.t.table.localeCompare(b.t.table));
   parts.push(`<h3>Tables (${picked.length} of ${s.tables.length} added)</h3>`,
-    `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Copy</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
+    `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Sync</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
       `<tr class="t-${l.state}"><th scope="row">${code(t.table)}</th>` +
       `<td class="bar"><progress max="100" value="${Math.floor(Math.max(0, Math.min(1, l.fraction)) * 100)}"></progress> <span class="pct">${percent(l.fraction)}</span></td>` +
       `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? `<details><summary>the whole error</summary><pre>${esc(t.error)}</pre></details>` : ""}</td></tr>`).join("")}</tbody></table>`);
@@ -209,7 +209,7 @@ export function renderStatus(s, requests = {}) {
   if (requests.slow || requests.refused) parts.push(`<p class="dim">${code("mason status")} lists them; ${code("mason logs --requests")} every one.</p>`);
   const r = s.readiness;
   if (r) {
-    if (r.ready) parts.push(`<p class="readiness ok">Ready: every added table is copied and served.</p>`);
+    if (r.ready) parts.push(`<p class="readiness ok">Ready: every added table is synced and served.</p>`);
     else if (r.failed.length) parts.push(`<p class="readiness bad">Failed:</p><ul class="bullets">${r.failed.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`);
     else parts.push(`<p class="readiness">Under way:</p><ul class="bullets">${r.waiting.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`);
   }

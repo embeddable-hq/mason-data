@@ -150,7 +150,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.ok(connected > step, `connected after the demo step: ${said(s)}`);
     // the run's lines in one column (src/cli/background.ts relays them)
     assert.match(s.stdout, new RegExp(`^ {2}Postgres API {2}postgres://<user>:<password>@127\\.0\\.0\\.1:${pgPort}/${config().name} {2}\\(mason user add <name> makes a user\\)$`, "m"));
-    assert.match(s.stdout, /^ {2}Demo {10}a new order lands every 0\.3 s: mason status shows the copy keeping up$/m);
+    assert.match(s.stdout, /^ {2}Demo {10}a new order lands every 0\.3 s: mason status shows the synced data keeping up$/m);
     assert.ok(fs.existsSync(demoDir), ".mason/demo/ is made");
     const again = await mason(["start", "--json"]);
     assert.equal(again.code, 0, said(again));
@@ -162,7 +162,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
   test("mason wait, then mason status: the three added tables copied, the demo database polled", async () => {
     const w = await mason(["wait", "--timeout", "60"]);
     assert.equal(w.code, 0, said(w));
-    assert.match(w.stdout, /^Ready: every added table is copied and served\.$/m);
+    assert.match(w.stdout, /^Ready: every added table is synced and served\.$/m);
     const j = await mason(["status", "--json"]);
     assert.equal(j.code, 0, said(j));
     const st = JSON.parse(j.stdout) as { source: { demo: boolean; changes: string }; tables: { table: string; added: boolean; copy: { phase: string } | null }[] };
@@ -176,7 +176,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.match(text.stdout, new RegExp(`the demo database Mason hosts \\(postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo · Postgres 18[.\\d]*\\)`));
     assert.match(text.stdout, /the demo database is read by polling only/);
     assert.match(text.stdout, /^Tables \(3 of 4 added\):$/m);
-    for (const t of ["customers", "products", "orders"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · copied · polled every 1s, (last \\d+ s ago|not polled yet)$`, "m"));
+    for (const t of ["customers", "products", "orders"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · synced · polled every 1s, (last \\d+ s ago|not polled yet)$`, "m"));
   });
 
   test("mason add order_items while the run is up, then mason wait: the fourth table lands in the sources file and is copied", async () => {
@@ -185,7 +185,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.match(fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8"), /^ {2}order_items: \{\}$/m);
     const w = await mason(["wait", "--timeout", "60"]);
     assert.equal(w.code, 0, said(w));
-    assert.match(w.stdout, /^Ready: every added table is copied and served\.$/m);
+    assert.match(w.stdout, /^Ready: every added table is synced and served\.$/m);
     const j = await mason(["status", "--json"]);
     assert.equal(j.code, 0, said(j));
     const st = JSON.parse(j.stdout) as { tables: { table: string; added: boolean; copy: { phase: string } | null; duck: { rows: number } | null }[] };
@@ -196,7 +196,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const text = await mason(["status"]);
     assert.equal(text.code, 0, said(text));
     assert.match(text.stdout, /^Tables \(4 of 4 added\):$/m);
-    assert.match(text.stdout, /^ {2}public\.order_items +█+ 100% +[\d,]+ rows · copied · polled every 1s, (last \d+ s ago|not polled yet)$/m);
+    assert.match(text.stdout, /^ {2}public\.order_items +█+ 100% +[\d,]+ rows · synced · polled every 1s, (last \d+ s ago|not polled yet)$/m);
   });
 
   test("the writer: its orders in the log, in the copy and through the Postgres API", async () => {
@@ -229,7 +229,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
   test("mason stop: exit 0, the demo database closed and kept in .mason/demo", async () => {
     const s = await mason(["stop"]);
     assert.equal(s.code, 0, said(s));
-    assert.match(s.stdout, new RegExp(`^Stopped ${config().name}\\n {2}kept +its copy of the data and its state and the demo database \\(\\.mason/demo\\)$`, "m"));
+    assert.match(s.stdout, new RegExp(`^Stopped ${config().name}\\n {2}kept +its synced data and its state and the demo database \\(\\.mason/demo\\)$`, "m"));
     assert.ok(fs.existsSync(demoDir), ".mason/demo/ stays");
     // the run's own words, at its stop (its terminal: mason logs --start)
     const l = await mason(["logs", "--start"]);
@@ -295,7 +295,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
   test("mason destroy removes the demo database with the copy, and the next mason start seeds it again", async () => {
     const d = await mason(["destroy"]);
     assert.equal(d.code, 0, said(d));
-    assert.match(d.stdout, /not the demo database, which went with the copy: the next mason start seeds it again/);
+    assert.match(d.stdout, /not the demo database, which went with the synced data: the next mason start seeds it again/);
     assert.ok(!fs.existsSync(demoDir), ".mason/demo/ is gone");
     assert.equal(config().demo, true);
     await thenStop(async () => {

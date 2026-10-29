@@ -145,7 +145,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       sync: { default: syncText(sources.file?.sync ?? DEFAULT_SYNC), written: sources.file?.sync != null },
       ...(ctx.publication ? { replication: { slot: ctx.slot, publication: ctx.publication.name, owned: ctx.publication.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
-    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason copies the tables it read before; mason start reads the file again)`] : [])],
+    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason syncs the tables it read before; mason start reads the file again)`] : [])],
     folder, project, tables,
     engine: { name: "duckdb", file: ctx.duck.file, bytes: fileBytes(ctx.duck.file) },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
@@ -174,8 +174,8 @@ async function state(ctx: RunContext): Promise<unknown> {
 function sourceOnDisk(ctx: RunContext): EditTarget {
   const at = sourceToEdit(ctx.folder(), ctx.root, ctx.readSource);
   if (at.read.resolved !== ctx.runUrl) {
-    throw new Refusal(409, `${shownPath(ctx.root, at.file)}: url: now names ${maskedUrl(at.read.resolved)} (${at.read.from}), and this run copies ${maskedUrl(ctx.runUrl)}: ` +
-      "mason stop && mason start copies from the new one, then add or remove the table");
+    throw new Refusal(409, `${shownPath(ctx.root, at.file)}: url: now names ${maskedUrl(at.read.resolved)} (${at.read.from}), and this run syncs ${maskedUrl(ctx.runUrl)}: ` +
+      "mason stop && mason start syncs from the new one, then add or remove the table");
   }
   return at;
 }

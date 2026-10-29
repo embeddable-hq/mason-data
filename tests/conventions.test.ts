@@ -795,3 +795,87 @@ test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through 
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
 });
+
+/**
+ * WHAT MASON DOES TO A TABLE'S DATA IS "SYNC", NEVER "COPY" (CLAUDE.md "Vocabulary"): the README says "the first sync",
+ * "the synced data", "each synced table", and a command that printed "the copy" beside it named one thing two ways. So
+ * every literal a person or an agent may read in src/cli/ and src/web/ is held to it; a lowercase identifier ("copying",
+ * a phase in a declared --json shape) is a value, not words, and what is a copy of something else (the clipboard's
+ * Copy button, the password Mason keeps none of) is listed below by its phrase.
+ */
+const COPY_WORD = /\bcop(?:y|ies|ied|ying)\b/i;
+const NOT_THE_DATA = [
+  /\bdata-copy\b/g, />Copy</g, /^Copied$/g, /Select and copy it/g, /I have copied it/g, // the web page's clipboard button
+  /no copy of the password/g,                                                            // mason user add / the Users page
+  /\{ table, copy, error/g, /\(copy: \{ phase/g, /addedColumns, copy, error/g,           // the --json field `copy`, by its name
+];
+
+/** Every string and template literal of a JS/TS source, as `{ line, text }`: a template's `${…}` read as code (its own
+ *  literals listed too) and left as "…" in its text; comments and regex literals skipped. */
+export function literals(src: string): Array<{ line: number; text: string }> {
+  const out: Array<{ line: number; text: string }> = [];
+  const starts = [0, ...[...src.matchAll(/\n/g)].map((m) => m.index + 1)];
+  const lineAt = (k: number): number => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid]! <= k) lo = mid; else hi = mid - 1; } return lo + 1; };
+  let i = 0;
+  const regexMayStart = (): boolean => {
+    const before = src.slice(Math.max(0, i - 12), i).trimEnd();
+    return before === "" || /[(,=:[!&|?{};+\-*%<>~^]$/.test(before) || /\b(?:return|typeof|case|in|of|void|throw|new|await|yield)$/.test(before);
+  };
+  const code = (inTemplate: boolean): void => {
+    let depth = 0;
+    while (i < src.length) {
+      const c = src[i]!;
+      if (c === "/" && src[i + 1] === "/") { const nl = src.indexOf("\n", i); i = nl < 0 ? src.length : nl; continue; }
+      if (c === "/" && src[i + 1] === "*") { const end = src.indexOf("*/", i + 2); i = end < 0 ? src.length : end + 2; continue; }
+      if (c === '"' || c === "'") { const at = i; let text = ""; for (i++; i < src.length && src[i] !== c && src[i] !== "\n"; i++) { if (src[i] === "\\") i++; text += src[i]; } i++; out.push({ line: lineAt(at), text }); continue; }
+      if (c === "`") {
+        const at = i; let text = "";
+        for (i++; i < src.length && src[i] !== "`";) {
+          if (src[i] === "\\") { text += src[i + 1]; i += 2; }
+          else if (src[i] === "$" && src[i + 1] === "{") { i += 2; text += "…"; code(true); }
+          else text += src[i++];
+        }
+        i++; out.push({ line: lineAt(at), text }); continue;
+      }
+      if (c === "/" && regexMayStart()) {
+        let inClass = false;
+        for (i++; i < src.length && src[i] !== "\n" && (inClass || src[i] !== "/"); i++) { if (src[i] === "\\") i++; else if (src[i] === "[") inClass = true; else if (src[i] === "]") inClass = false; }
+        i++; continue;
+      }
+      if (c === "{") depth++;
+      else if (c === "}") { if (inTemplate && depth === 0) { i++; return; } depth--; }
+      i++;
+    }
+  };
+  code(false);
+  return out;
+}
+
+/** The words of a file that say "copy" for what Mason does to a table's data, as `line: text`. An HTML file is read
+ *  whole, its comments left out. */
+export function copyWords(name: string, src: string): string[] {
+  const texts = name.endsWith(".html")
+    ? src.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, "")).split("\n").map((text, n) => ({ line: n + 1, text }))
+    : literals(src).filter((l) => !/^[a-z_]+$/.test(l.text));
+  return texts.filter((l) => COPY_WORD.test(NOT_THE_DATA.reduce((t, re) => t.replace(re, ""), l.text))).map((l) => `${name}:${l.line}: ${l.text}`);
+}
+
+test("what Mason does to a table's data is sync in every word the CLI and the web page say, never copy", () => {
+  const hits = scannedFiles(["src/cli", "src/web"]).flatMap((f) => copyWords(f.name, f.src));
+  assert.deepEqual(hits, [], "say sync, synced, the synced data or the synced table (CLAUDE.md \"Vocabulary\"); a copy of something else " +
+    "(the clipboard, a file) goes on NOT_THE_DATA by its phrase");
+});
+
+test("the copy-word guard catches the real thing", () => {
+  assert.deepEqual(copyWords("a.ts", 'next: [["mason add <table>", "copy a table into Mason"]]'), ['a.ts:1: copy a table into Mason']);
+  assert.deepEqual(copyWords("a.ts", 'details: [["Copy", file]]'), ["a.ts:1: Copy"], "a label is words");
+  assert.deepEqual(copyWords("a.ts", 'tips: [`Mason stops ${one ? "copying it" : `copying ${n}`}`]'), ["a.ts:1: copying it", "a.ts:1: copying …"],
+    "a literal inside a template's ${…} is read too");
+  assert.deepEqual(copyWords("a.html", '<p>Add one and Mason copies it</p>\n<!-- copy -->'), ["a.html:1: <p>Add one and Mason copies it</p>"]);
+  assert.deepEqual(copyWords("a.ts", [
+    'const c = t.copy?.phase === "copying" ? copyingText(t) : "";  // the copy, in a comment',
+    '/* the copy */ const re = /^copied |its copy failed/;',
+    'const b = `<button data-copy="${id}">Copy</button>`; const k = "MASON_COPY_PARALLEL, copyKey, rowsCopied";',
+    'const half = rows / 2, say = "a / b"; // a division is not a regex',
+  ].join("\n")), [], "an identifier, a phase value, a comment, a regex, the clipboard and a setting's name are not the data's words");
+});

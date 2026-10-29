@@ -59,12 +59,12 @@ test("the memory the run may use is the container's limit where one is set, else
 test("memory: the machine's and the share the copy may use, in one short line; under 2 GiB is a warning", () => {
   const big = memoryCheck(32 * 1024 ** 3, {});
   assert.equal(big.ok, true);
-  assert.equal(big.detail, "32.0 GiB; Mason's copy uses up to 16384MiB (half, the default; MASON_DUCKDB_MEMORY sets it)");
+  assert.equal(big.detail, "32.0 GiB; Mason's synced data uses up to 16384MiB (half, the default; MASON_DUCKDB_MEMORY sets it)");
   const set = memoryCheck(32 * 1024 ** 3, { MASON_DUCKDB_MEMORY: "12GiB" });
-  assert.equal(set.detail, "32.0 GiB; Mason's copy uses up to 12GiB (MASON_DUCKDB_MEMORY)");
+  assert.equal(set.detail, "32.0 GiB; Mason's synced data uses up to 12GiB (MASON_DUCKDB_MEMORY)");
   const small = memoryCheck(1.5 * 1024 ** 3, {});
   assert.equal(small.ok, false);
-  assert.equal(small.detail, "1.5 GiB; Mason's copy uses up to 768MiB (half, the default; MASON_DUCKDB_MEMORY sets it). Under 2 GiB, a large table's copy and a query starve each other: expect statements refused for memory");
+  assert.equal(small.detail, "1.5 GiB; Mason's synced data uses up to 768MiB (half, the default; MASON_DUCKDB_MEMORY sets it). Under 2 GiB, a large table's first sync and a query starve each other: expect statements refused for memory");
   const bad = memoryCheck(32 * 1024 ** 3, { MASON_DUCKDB_MEMORY: "lots" });
   assert.equal(bad.ok, false);
   assert.match(bad.detail, /^MASON_DUCKDB_MEMORY="lots" is not a size/);
@@ -122,7 +122,7 @@ test("the next command follows the first failing check, in the order a first ses
   assert.match(nextSteps([ok("node"), bad("database")], null, project)[0]![1]!, /the URL is in \/app\/\.mason\/config\.json/);
   // the demo database is down until its run is up: mason start is the way out, not a URL to fix
   const demoProject = { ...project, config: { ...project.config, demo: true } } as typeof project;
-  assert.deepEqual(nextSteps([ok("node"), bad("database")], null, demoProject), [["mason start", "hosts the demo database, then copies its tables"]]);
+  assert.deepEqual(nextSteps([ok("node"), bad("database")], null, demoProject), [["mason start", "hosts the demo database, then syncs its tables"]]);
   assert.equal(first([ok("node"), ok("memory")], null, null), "mason init | mason init postgres://user:password@localhost:5432/your_app");
   assert.equal(first([ok("node"), ok("database")], null, project), "mason start");
   assert.equal(first([ok("node"), bad("mason start")], run, project), "mason logs | mason stop");
@@ -138,11 +138,11 @@ test("extensions: the probe's verdict on its own line; not shipped and not downl
   assert.equal(typeof extensionsCheck, "function", "src/cli/doctor.ts exports extensionsCheck");
   const shipped = await extensionsCheck!(async () => ({ ok: true, detail: "postgres and inet ship with Mason (@mason-data/extensions-linux-x64 0.7.0): nothing is downloaded" }));
   assert.deepEqual(shipped, { name: "extensions", ok: true, detail: "postgres and inet ship with Mason (@mason-data/extensions-linux-x64 0.7.0): nothing is downloaded" });
-  const later = await extensionsCheck!(async () => ({ ok: null, detail: "postgres and inet not on this machine yet, so the first copy downloads them and needs the internet once: …" }));
+  const later = await extensionsCheck!(async () => ({ ok: null, detail: "postgres and inet not on this machine yet, so the first sync downloads them and needs the internet once: …" }));
   assert.equal(later.ok, null);
   const ok: Check[] = [nodeCheck("24.1.0"), later];
   assert.equal(verdictOf(ok, null, project).ready, true, "online, a first copy downloads them: still ready");
   const broken = await extensionsCheck!(async () => ({ ok: false, detail: "@mason-data/extensions-linux-x64 0.7.0 is installed, and its inet does not load: … Install @mason-data/cli again" }));
   assert.equal(verdictOf([nodeCheck("24.1.0"), broken], null, project).ready, false);
-  assert.match(DOCTOR_USAGE, /the copy's postgres and inet extensions/);
+  assert.match(DOCTOR_USAGE, /the postgres and inet extensions Mason syncs with/);
 });

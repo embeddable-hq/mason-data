@@ -111,7 +111,7 @@ test("a database elsewhere is warned about: the copy, a primary, a serverless co
   const facts = (standby: boolean): SourceFacts => ({ version: 160000, versionText: "16", standby, tables: [], systemIdentifier: null });
   assert.deepEqual(sourceWarnings(source("postgres://me@localhost/app"), facts(false)), []);
   const neon = sourceWarnings(source("postgres://me@ep-x.us-east-2.aws.neon.tech/app"), facts(false));
-  assert.ok(neon.some((w) => /copy the tables you pick/.test(w)));
+  assert.ok(neon.some((w) => /sync the tables you pick/.test(w)));
   assert.ok(neon.some((w) => /PRIMARY/.test(w)));
   assert.ok(neon.some((w) => /Neon suspends an idle compute/.test(w)));
   assert.ok(!sourceWarnings(source("postgres://me@replica.example.com/app"), facts(true)).some((w) => /PRIMARY/.test(w)));

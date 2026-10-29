@@ -48,12 +48,12 @@ export const USER: CommandSpec & { needs: "project" } = {
   the columns of each, it may read. A statement over anything else is refused as Postgres refuses it (42501,
   permission denied for table …), information_schema and mason mcp list the role only what it may read, and the
   role is read with the user at every statement, so an edit of the file applies at the next one. A user with no
-  role reads every copied table. The file:
+  role reads every synced table. The file:
 
     roles:
       agent:                         the role's name (${ROLE_NAME_RULE})
         tables:
-          orders: {}                 every column of a copied table
+          orders: {}                 every column of a synced table
           customers:
             columns: [id, country]   these columns only
           billing.invoices:
@@ -119,9 +119,9 @@ export function roleToAdd(role: string, live: RolesLive): Failure | null {
   roles:
     ${role}:
       tables:
-        <a copied table>: {}
+        <a synced table>: {}
 then mason user add <name> --role ${role}`,
-      next: [["mason tables", "the tables the sources file copies: what a role may name"]] };
+      next: [["mason tables", "the tables the sources file syncs: what a role may name"]] };
   }
   if (!live.grants.has(role)) {
     return { message: `there is no role ${role} in ${file}${didYouMean(role, names)}`, code: "not_found",
@@ -130,7 +130,7 @@ then mason user add <name> --role ${role}`,
   roles:
     ${role}:
       tables:
-        <a copied table>: {}
+        <a synced table>: {}
 or mason user add <name> --role ${names[0]}`,
       next: [["mason user list", "the users and their roles"]] };
   }

@@ -53,7 +53,7 @@ export function copyingText(copied: number, rowsEstimate: number | null, p?: Cop
   if (p.rowsPerSecond === null) {
     // nothing measured this attempt: its first chunks are being read (a copy resumed has rows from before)
     const first = p.reading === 0 ? "about to read the first chunk" : `reading the first ${p.reading === 1 ? "chunk" : chunks(p.reading)}${since}`;
-    return { fraction, text: copied === 0 ? `${first}${estimate === null ? "" : ` · ~${n(estimate)} rows to copy`}` : `${rowsText(copied)} · resumed, ${first}` };
+    return { fraction, text: copied === 0 ? `${first}${estimate === null ? "" : ` · ~${n(estimate)} rows to sync`}` : `${rowsText(copied)} · resumed, ${first}` };
   }
   const parts = [rowsText(shown)];
   const allIn = p.reading === 0 && p.chunksDone >= p.chunksTotal;
@@ -67,7 +67,7 @@ export function copyingText(copied: number, rowsEstimate: number | null, p?: Cop
 /** A copy's progress on one line, as `mason wait` lists what it waits for: `public.orders: copying 12% · …` (`copyingText`). */
 export function copyProgress(source: string, copied: number, rowsEstimate: number | null, p?: CopyProgressView): string {
   const c = copyingText(copied, rowsEstimate, p);
-  return `${source}: ${c.fraction !== null ? `copying ${Math.floor(c.fraction * 100)}% · ` : /^\d/.test(c.text) ? "copying " : ""}${c.text}`;
+  return `${source}: ${c.fraction !== null ? `syncing ${Math.floor(c.fraction * 100)}% · ` : /^\d/.test(c.text) ? "syncing " : ""}${c.text}`;
 }
 
 /**
@@ -80,7 +80,7 @@ export function readiness(s: Pick<RunState, "tables">): Readiness {
   for (const t of s.tables.filter((t) => t.added)) {
     if (t.error) { failed.push(`${t.table}: ${firstLine(t.error)}`); continue; }
     if (t.copy?.phase === "copying") { waiting.push(copyProgress(t.table, t.copy.rowsCopied, t.rows, t.copy.progress)); continue; }
-    if (!t.copy) waiting.push(`${t.table}: waiting for its copy to start`);
+    if (!t.copy) waiting.push(`${t.table}: waiting for its first sync to start`);
   }
   return { ready: failed.length === 0 && waiting.length === 0, failed, waiting };
 }

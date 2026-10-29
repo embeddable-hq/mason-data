@@ -85,8 +85,8 @@ tables:
   public.customers: {}
 `), [
     "tables.orders: unexpected key colums — did you mean `columns`? — a table takes columns, exclude, key and sync",
-    "tables.customers: columns and exclude together — columns names what is copied, exclude what is left out of every column; keep one",
-    "tables.events.columns: is the columns copied, a list of column names: [id, status]",
+    "tables.customers: columns and exclude together — columns names what is synced, exclude what is left out of every column; keep one",
+    "tables.events.columns: is the columns synced, a list of column names: [id, status]",
     "tables.sessions.key: is the columns that tell its rows apart, a list of column names: [id, status]",
     "tables.logs.exclude: names a twice",
     "tables.orders_two: is {} (every column), { columns: [...] }, { exclude: [...] }, { key: [...] } or { sync: poll 5m }",
@@ -130,15 +130,15 @@ tables:
   assert.equal(wrong.why, [
     "- tables.ordrs: shop has no table public.ordrs this user can read — did you mean `orders`?",
     "- tables.orders.columns: public.orders has no column statsu — did you mean `status`? (its columns: id, customer_id, status, amount, api_token, payload)",
-    "- tables.customers.key: public.customers has a primary key (id), which Mason copies it by — remove key",
-    "- tables.customers.exclude: id is public.customers's key, which is always copied — take it out of exclude",
+    "- tables.customers.key: public.customers has a primary key (id), which Mason keys it by — remove key",
+    "- tables.customers.exclude: id is public.customers's key, which is always synced — take it out of exclude",
     "- tables.events: public.events has no primary key, so Mason cannot tell its rows apart — name the columns that do: key: [tenant_id, id] (its unique index events_tenant_id_id_key)",
-    "- tables.billing.invoices.key: billing.invoices has a primary key (id), which Mason copies it by — remove key",
+    "- tables.billing.invoices.key: billing.invoices has a primary key (id), which Mason keys it by — remove key",
   ].join("\n"));
   assert.deepEqual(wrong.next, [["mason tables", "the database's tables and their columns"]]);
   // a key: table under logical replication: its rows have no identity there
   const repl = S.addedTables(parse("kind: postgres\nurl: x\ntables:\n  events: { key: [tenant_id, id] }\n") as Sources.SourceFile, CATALOG, "shop", "/app", { replication: true }) as Failure;
-  assert.equal(repl.message, "mason/sources/app.yml: tables.events: public.events has no primary key, and logical replication cannot apply its changes by key: — copy it by polling (mason start --poll), or remove it");
+  assert.equal(repl.message, "mason/sources/app.yml: tables.events: public.events has no primary key, and logical replication cannot apply its changes by key: — sync it by polling (mason start --poll), or remove it");
 });
 type Sources_AddedTable = import("../src/duck/sync.ts").AddedTable;
 
@@ -237,7 +237,7 @@ test("a key: must tell the rows apart as the database enforces it: NOT NULL colu
   const wrong = added("  logs: { key: [id] }\n  bare: { key: [a] }\n") as Failure;
   assert.equal(wrong.why, [
     "- tables.logs.key: no unique index of public.logs is over (id), so two of its rows may share them and Mason could not tell them apart — name the columns of one: key: [tenant_id, id] (its unique index logs_tenant_id_id_key)",
-    "- tables.bare.key: no unique index of public.bare is over (a), so two of its rows may share them and Mason could not tell them apart — it has no unique index over NOT NULL columns, so Mason cannot copy it until its owner adds one (or a primary key)",
+    "- tables.bare.key: no unique index of public.bare is over (a), so two of its rows may share them and Mason could not tell them apart — it has no unique index over NOT NULL columns, so Mason cannot sync it until its owner adds one (or a primary key)",
   ].join("\n"));
   const nullable = added("  logs: { key: [tenant_id, id, seq] }\n") as Failure;
   assert.equal(nullable.message, "mason/sources/app.yml: tables.logs.key: seq may be NULL in public.logs, and rows with NULL there cannot be told apart — a key's columns are NOT NULL");
@@ -261,7 +261,7 @@ test("the file read again while the run is up: a mistake keeps the tables read b
   // a url: that names another database (a .env edited): the run's catalog is the old one's — kept, and the way out said
   const moved = S.rereadSources(now, read("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n", "postgres://me:pw@elsewhere:5432/other"), RUN, CATALOG, "shop", "/app", { replication: false });
   assert.deepEqual(moved.tables, first);
-  assert.equal(moved.problem, "mason/sources/app.yml: url: now names postgres://me:****@elsewhere:5432/other (mason/sources/app.yml), and this run copies postgres://me@localhost:5432/shop: mason stop && mason start copies from the new one");
+  assert.equal(moved.problem, "mason/sources/app.yml: url: now names postgres://me:****@elsewhere:5432/other (mason/sources/app.yml), and this run syncs postgres://me@localhost:5432/shop: mason stop && mason start syncs from the new one");
   // fixed: the file's tables now, nothing wrong
   const fixed = S.rereadSources(moved, read("kind: postgres\nurl: x\ntables:\n  orders: {}\n"), RUN, CATALOG, "shop", "/app", { replication: false });
   assert.deepEqual([fixed.tables.map((t) => t.source), fixed.problem, fixed.said], [["public.orders"], null, null]);
@@ -393,10 +393,10 @@ test("sync: every mistake on one report, at its key, with the line to write — 
 
 test("mason init writes sync: off at the top with a one-line comment; mason init demo writes sync: poll 5s", () => {
   const plain = S.newSourceText();
-  assert.match(plain, /^sync: off {3}# after its first copy, a table is read again only by mason sync <table> \(poll 5m: every 5 minutes\)$/m);
+  assert.match(plain, /^sync: off {3}# after its first sync, a table is read again only by mason sync <table> \(poll 5m: every 5 minutes\)$/m);
   assert.deepEqual((parse(plain) as Sources.SourceFile).sync, OFF, "a file it reads, its sync written");
   const demo = S.newSourceText("${DATABASE_URL}", ["customers", "orders"], poll("5s", 5) as never);
-  assert.match(demo, /^sync: poll 5s {3}# each table polled every 5s after its first copy \(off: read again only by mason sync <table>\)$/m);
+  assert.match(demo, /^sync: poll 5s {3}# each table polled every 5s after its first sync \(off: read again only by mason sync <table>\)$/m);
   assert.deepEqual((parse(demo) as Sources.SourceFile).sync, poll("5s", 5));
   // the sync above the tables, the tables last, as before
   assert.ok(demo.indexOf("sync: poll 5s") < demo.indexOf("tables:"), demo);
@@ -472,7 +472,7 @@ test("mason add's sync: --sync writes the entry's sync: alone, comments kept; a 
       "your database busy 25 % of the time — a longer interval (--sync \"poll 1h\"), or mason start --replication, costs it less");
     // measured by the run: its last poll first, else its copy's read rate a reader
     assert.match(E.pollCost(huge, { mode: "poll", every: "10s", seconds: 10 }, { lastPollMs: 40_000, copyRowsPerSecond: 500_000 })!, /about 40 s a poll, from its last poll, measured\./);
-    assert.match(E.pollCost(huge, { mode: "poll", every: "10s", seconds: 10 }, { lastPollMs: null, copyRowsPerSecond: 500_000 })!, /about 2 min a poll, from its copy's read rate, 500,000 rows a second a reader/);
+    assert.match(E.pollCost(huge, { mode: "poll", every: "10s", seconds: 10 }, { lastPollMs: null, copyRowsPerSecond: 500_000 })!, /about 2 min a poll, from its first sync's read rate, 500,000 rows a second a reader/);
     assert.equal(E.pollCost(huge, { mode: "poll", every: "1m", seconds: 60 }, null), null, "every minute or slower: no warning");
     assert.equal(E.pollCost(table({ table: "mid", rows: 5_000_000 }), { mode: "poll", every: "5s", seconds: 5 }, null), null, "under ten million rows: none");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
