@@ -17,7 +17,7 @@
 /** Where each card leads: the views that list what it counts (src/web/app.js hashes). */
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
   slow: "#observability/queries?slow=1", failedQueries: "#observability/queries?status=failed", failedEvents: "#observability/logs?failures=1" };
-import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
+import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
@@ -182,8 +182,8 @@ export function renderKpis(s, o = {}) {
       const day = q.queries.day;
       const bad = day.refused + day.failed + day.cancelled;
       list.push(card("Statements, last day", n(day.statements), `${n(day.completed)} completed${bad ? `, ${n(bad)} refused, failed or cancelled` : ""}`, line("statements"), day.failed ? "warn" : "", LINKS.queries),
-        card("p95, last day", day.durationMs === null ? "–" : `${n(day.durationMs.p95)} ms`,
-          day.durationMs === null ? "no statement completed" : `average ${n(day.durationMs.avg)} ms · p50 ${n(day.durationMs.p50)} ms`, line("p95"), "", LINKS.slow));
+        card("p95, last day", day.durationMs === null ? "–" : msText(day.durationMs.p95),
+          day.durationMs === null ? "no statement completed" : `average ${msText(day.durationMs.avg)} · p50 ${msText(day.durationMs.p50)}`, line("p95"), "", LINKS.slow));
     }
   }
   return cards(list);
@@ -260,7 +260,7 @@ export function renderQueries(q) {
   if (q === undefined) return "";
   if ("failure" in q) return `<p class="count">Queries: could not read them (${esc(firstLine(q.failure.message))}; ${code("mason logs")} has the detail)</p>`;
   const w = q.queries;
-  const ms = (x) => `${n(x)} ms`;
+  const ms = msText;
   const row = (label, x) => `<tr><th scope="row">${esc(label)}</th>${[n(x.statements), n(x.completed), n(x.refused), n(x.failed), n(x.cancelled),
     x.durationMs === null ? "" : ms(x.durationMs.avg), x.durationMs === null ? "" : ms(x.durationMs.p50), x.durationMs === null ? "" : ms(x.durationMs.p95),
     n(x.rows), bytesText(x.bytesSent)].map((v) => `<td class="num">${esc(v)}</td>`).join("")}</tr>`;
@@ -275,7 +275,7 @@ export function renderQueries(q) {
 /** A failed statement's cells, as mason status's `Query errors` line says them (src/cli/commands.ts `requestLine`): when,
  *  the outcome and SQLSTATE, how long, the rows sent, who, the statement on one line and the error's first line. */
 export function requestCells(r) {
-  return [utcText(r.startedAt), r.outcome === "ok" ? "ok" : `${r.outcome} ${r.sqlstate ?? ""}`.trim(), `${n(r.durationMs)} ms`,
+  return [utcText(r.startedAt), r.outcome === "ok" ? "ok" : `${r.outcome} ${r.sqlstate ?? ""}`.trim(), msText(r.durationMs),
     r.rows === null ? "" : `${n(r.rows)} row${r.rows === 1 ? "" : "s"}`,
     `${clientText(r.applicationName)}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`,
     oneLine(r.query, 120) || "(no statement)", r.message ? firstLine(r.message) : ""];

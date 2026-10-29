@@ -9,7 +9,7 @@ import { failed, jsonText, parseCommand, reportText, type CommandSpec, type Next
 import { out as styleOut } from "./style.ts";
 import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
-import { findTable, guarded, readState, tableArg } from "./commands.ts";
+import { findTable, guarded, msText, readState, tableArg } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { POLL_ROW_LIMIT, type PolledTable } from "../duck/sync.ts";
 
@@ -49,7 +49,7 @@ export function syncedReport(b: { tables: readonly PolledTable[] }, picked: read
   const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
   return {
     headline: `Synced ${picked.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted.`,
-    details: b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${n(t.ms)} ms`] as const),
+    details: b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`] as const),
     tips: unsynced.filter((t) => t.unsynced !== undefined).map((t) => `${t.table} is ${t.unsynced!.reason}: it stays as of this sync until the next mason sync (mason start --replication keeps every table current)`),
   };
 }

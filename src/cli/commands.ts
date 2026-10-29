@@ -30,7 +30,7 @@ import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type 
 import { changesOf } from "./replication-mode.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import { reach } from "./state.ts";
-import { copyingText, copyProgress, duration, readiness, readinessWord, type Readiness, type SyncTotals, type TableSync } from "./readiness.ts";
+import { copyingText, copyProgress, duration, msText, readiness, readinessWord, type Readiness, type SyncTotals, type TableSync } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
 import type { CopyProgressView, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -174,7 +174,7 @@ export function addSteps(tables: readonly CatalogTable[], from: "tables" | null 
 
 // ------------------------------------------------------------------ readiness (mason wait, mason status): src/cli/readiness.ts
 
-export { copyingText, copyProgress, duration, readiness, readinessWord, type Readiness };
+export { copyingText, copyProgress, duration, msText, readiness, readinessWord, type Readiness };
 
 /** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work. */
 export function paintBar(line: string, s: Style): string {
@@ -548,7 +548,7 @@ export function queryLines(q: QuerySummary | { error: string }, st: Style): stri
   if ("error" in q) return [`\n${st.bold("Queries")}: could not read them (${firstLine(q.error)}; mason logs has the detail)`];
   const line = (label: string, w: QueryWindow): string => {
     const counts = `${n(w.statements)} statement${w.statements === 1 ? "" : "s"}: ${n(w.completed)} completed, ${n(w.refused)} refused, ${n(w.failed)} failed, ${n(w.cancelled)} cancelled`;
-    const times = w.durationMs === null ? "" : ` · ${n(w.durationMs.avg)} / ${n(w.durationMs.p50)} / ${n(w.durationMs.p95)} ms`;
+    const times = w.durationMs === null ? "" : ` · ${msText(w.durationMs.avg)} / ${msText(w.durationMs.p50)} / ${msText(w.durationMs.p95)}`;
     const short = w.covered < w.days ? st.dim(` (the request log keeps ${w.covered} day${w.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS)`) : "";
     return `  ${label.padEnd(10)}  ${counts}${times} · ${n(w.rows)} rows, ${bytesText(w.bytesSent)} sent${short}`;
   };
@@ -561,7 +561,7 @@ export function slowLines(slow: readonly SlowQuery[] | { error: string }, st: St
   if (!slow.length) return [];
   const lines = [`\n${st.bold("Slow queries")} ${st.dim(`(the last day, still ${(SLOW_MS / 1000).toLocaleString("en-US")} s or more; slowest first)`)}:`];
   for (const q of slow as readonly SlowQuery[]) {
-    const times = `${n(q.latestMs)} ms last time (${q.runs} run${q.runs === 1 ? "" : "s"}, median ${n(q.medianMs)} ms)`;
+    const times = `${msText(q.latestMs)} last time (${q.runs} run${q.runs === 1 ? "" : "s"}, median ${msText(q.medianMs)})`;
     lines.push(`  ${times}, last ${q.last.slice(0, 16).replace("T", " ")} UTC`, `    ${oneLine(q.payload)}`);
   }
   return lines;
@@ -1294,7 +1294,7 @@ export function requestLine(r: LedgerRequest, st: Style): string {
   const paint = r.outcome === "ok" ? st.green : r.outcome === "failed" ? st.red : st.yellow;
   const rows = r.rows === null ? "" : `${n(r.rows)} row${r.rows === 1 ? "" : "s"}`;
   const who = `${r.applicationName || "(no application_name)"}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`;
-  return `${r.startedAt.slice(0, 19).replace("T", " ")}  ${paint(word.padEnd(15))}  ${`${n(r.durationMs)} ms`.padStart(9)}  ${rows.padStart(11)}  ${who}  ` +
+  return `${r.startedAt.slice(0, 19).replace("T", " ")}  ${paint(word.padEnd(15))}  ${msText(r.durationMs).padStart(9)}  ${rows.padStart(11)}  ${who}  ` +
     `${oneLine(r.query, 120) || "(no statement)"}${r.message ? ` — ${firstLine(r.message)}` : ""}`;
 }
 

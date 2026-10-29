@@ -11,7 +11,7 @@
  * statement's "N rows sent" and its client, a request's duration in ms, its error, the empty log's sentence — and,
  * while the log is empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away.
  */
-import { agoText, bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText, details, createOpenSet, card, cards, empty, panel, status, skeleton,
+import { msText, agoText, bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText, details, createOpenSet, card, cards, empty, panel, status, skeleton,
   clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText, unsupportedEntry, rangeOf, readPart, renderConnect, copyClick } from "../shared.js";
 
 const RUNNING = "/api/running";
@@ -95,8 +95,8 @@ export function statementCards(day, line = () => "", label = "last 24 hours") {
   return [
     card(`Statements, ${label}`, n(day.statements), `${n(day.completed)} completed`, line("statements")),
     card(`Failed, ${label}`, n(failed), `${n(day.refused)} refused, ${n(day.failed)} failed${day.cancelled ? `, ${n(day.cancelled)} cancelled` : ""}`, line("failed"), failed ? "warn" : ""),
-    card(`p95, ${label}`, day.durationMs === null ? "–" : `${n(day.durationMs.p95)} ms`,
-      day.durationMs === null ? "no statement completed" : `average ${n(day.durationMs.avg)} ms · p50 ${n(day.durationMs.p50)} ms`, line("p95")),
+    card(`p95, ${label}`, day.durationMs === null ? "–" : msText(day.durationMs.p95),
+      day.durationMs === null ? "no statement completed" : `average ${msText(day.durationMs.avg)} · p50 ${msText(day.durationMs.p50)}`, line("p95")),
   ];
 }
 
@@ -186,7 +186,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const row = `<tr class="s-${esc(r.status)}"><td>${status(undefined, STATUS[r.status] ?? r.status)}</td>` +
       `<td class="id">${details(key, r.requestId.slice(0, 8), "", open)}</td>` +
       `<td class="when"><time datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td>` +
-      `<td class="num">${esc(n(r.durationMs))} ms</td><td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td>` +
+      `<td class="num">${esc(msText(r.durationMs))}</td><td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td>` +
       `<td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num">${r.rows === null ? "" : esc(n(r.rows))}</td><td class="stmt-cell">${statementCell(r.query)}${error}</td></tr>`;
     // the rest of a request is its expanded row: the whole id, when it started and ended, the bytes sent, the statement and error (each capped)

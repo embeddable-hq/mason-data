@@ -63,6 +63,19 @@ export function duration(seconds) {
   return m < 90 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
+/** A duration in milliseconds as a person reads it: `512 ms`, `13.7 s`, `2 min 5 s`, `1 h 4 min` (src/cli/readiness.ts
+ *  `msText`, held equal by the tests): every statement's, sync's and percentile's time on the page. */
+export function msText(ms) {
+  const v = Math.max(0, ms);
+  if (Math.round(v) < 1000) return `${Math.round(v)} ms`;
+  const tenths = Math.round(v / 100);
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)} s`;
+  const s = Math.round(v / 1000);
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
+  const m = Math.round(s / 60);
+  return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+
 /** A span of seconds as the stream's lines say it: `0.3 s` under ten seconds, then `duration` (src/cli/commands.ts `spanText`). */
 export const spanText = (seconds) => seconds < 10 ? `${Math.max(0, seconds).toFixed(1)} s` : duration(seconds);
 

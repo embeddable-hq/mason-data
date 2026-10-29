@@ -10,7 +10,7 @@ import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
 import { fileSize, guarded, runFailure } from "./commands.ts";
 import { timeOf } from "./request-filter.ts";
-import { duration } from "./readiness.ts";
+import { duration, msText } from "./readiness.ts";
 import { SIZE_EVERY_MS, type CopySize, type UsageSample } from "../duck/usage.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -63,7 +63,7 @@ export function spanSeconds(text: string): number | null {
 /** One sample on one line: the time, the statements, those refused, failed or cancelled, p95, rows sent, the copy, its rows, the stalest copy, the lag, the memory. */
 export function sampleLine(s: UsageSample, withLag: boolean): string {
   const time = s.at.slice(0, 16).replace("T", " ");
-  const p95 = s.durationP95Ms === null ? "–" : `${n(s.durationP95Ms)} ms`;
+  const p95 = s.durationP95Ms === null ? "–" : msText(s.durationP95Ms);
   const bad = s.statementsRefused + s.statementsFailed + s.statementsCancelled;
   const age = s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds);
   const lag = !withLag ? "" : `  ${(s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds)).padStart(9)}`;
