@@ -2,13 +2,38 @@
 
 A drop-in replacement for a Postgres read replica, built for exceptionally fast analytical queries.
 
-- **Lightweight:** Mason runs anywhere as a single Node.js process (`mason init && mason start`). [Learn more](#getting-started)
-- **Like a read replica:** Choose which tables and columns to sync from your Postgres database, and how each stays in sync: on demand, polling or replication. Mason makes them available to query. [Learn more](#syncing-from-postgres)
-- **Lightning fast:** Under the hood, Mason uses [DuckDB](https://github.com/duckdb/duckdb)'s columnar engine to accelerate analytical queries (`COUNT`, `SUM`, `GROUP BY`, etc.) over large tables. [Learn more](#performance-vs-postgres)
-- **Keep your existing SQL:** Mason is built from the ground up to match Postgres syntax and behaviour, so you can reuse existing SQL without risky rewrites or subtle changes to query semantics. [Learn more](#postgres-compatibility)
-- **Built for AI agents:** Give AI agents fast, secure access to your data: a user per agent, a role that limits the tables, columns and rows it can read, every query logged, and native MCP support. [Learn more](#for-ai-agents)
+- **Lightweight:** Mason runs anywhere as a single Node.js process (`mason init && mason start`).
+- **Like a read replica:** Choose which tables and columns to sync from your Postgres database, and how each stays in sync: on demand, polling or replication. Mason makes them available to query.
+- **Lightning fast:** Under the hood, Mason uses [DuckDB](https://github.com/duckdb/duckdb)'s columnar engine to accelerate analytical queries (`COUNT`, `SUM`, `GROUP BY`, etc.) over large tables.
+- **Keep your existing SQL:** Mason is built from the ground up to match Postgres syntax and behaviour, so you can reuse existing SQL without risky rewrites or subtle changes to query semantics.
+- **Built for AI agents:** Give AI agents fast, secure access to your data: a user per agent, a role that limits the tables, columns and rows it can read, every query logged, and native MCP support.
 
-[Documentation](#documentation) · [Website](https://masondata.ai) · [Issues](https://github.com/embeddable-hq/mason-data/issues)
+**Contents**
+
+- [Getting started](#getting-started)
+  - [Try the demo](#try-the-demo)
+  - [On your app's database](#on-your-apps-database)
+  - [Going to production](#going-to-production)
+- [Syncing from Postgres](#syncing-from-postgres)
+  - [Choosing what to sync](#choosing-what-to-sync)
+  - [The first copy](#the-first-copy)
+  - [Off, and `mason sync`](#off-and-mason-sync)
+  - [Polling](#polling)
+  - [Logical replication](#logical-replication)
+- [Performance vs Postgres](#performance-vs-postgres)
+  - [What Mason is for, and what stays on Postgres](#what-mason-is-for-and-what-stays-on-postgres)
+  - [How it is fast](#how-it-is-fast)
+- [Postgres compatibility](#postgres-compatibility)
+  - [Postgres decides, DuckDB computes](#postgres-decides-duckdb-computes)
+  - [The oracle](#the-oracle)
+- [For AI agents](#for-ai-agents)
+  - [Access control](#access-control)
+  - [The MCP server](#the-mcp-server)
+  - [Observability](#observability)
+  - [A CLI an agent can drive](#a-cli-an-agent-can-drive)
+- [Documentation](#documentation) · [Community](#community) · [Contributing](#contributing) · [License](#license)
+
+[Website](https://masondata.ai) · [Issues](https://github.com/embeddable-hq/mason-data/issues)
 
 [![npm](https://img.shields.io/npm/v/@mason-data/cli)](https://www.npmjs.com/package/@mason-data/cli)
 [![CI](https://img.shields.io/github/actions/workflow/status/embeddable-hq/mason-data/ci.yml?branch=main&label=CI)](https://github.com/embeddable-hq/mason-data/actions/workflows/ci.yml)
@@ -16,208 +41,226 @@ A drop-in replacement for a Postgres read replica, built for exceptionally fast 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/how-mason-works-dark.svg">
-  <img alt="How Mason works: the tables you name are copied from your Postgres and kept current on demand, by polling or by replication; every statement a BI tool, an AI agent or your app sends over the Postgres protocol is analysed by a real Postgres, run on the columnar copy, and answered exactly as Postgres would, or refused with an error saying why." src="docs/how-mason-works.svg" width="100%">
+  <img alt="How Mason works: Mason copies the tables you choose from your Postgres and keeps them up to date on demand, by polling or by replication. A BI tool, an AI agent or your app sends SQL over the Postgres protocol. A real Postgres analyses each query, Mason runs it on the columnar copy, and the answer is exactly what Postgres would send. If Mason can't answer exactly, it refuses with an error that says why." src="docs/how-mason-works.svg" width="100%">
 </picture>
 
 ## Getting started
 
-Mason is a single process, with nothing to install on your Postgres: the npm package on your machine, the
-`ghcr.io/embeddable-hq/mason-data` image on a server ([Going to production](#going-to-production)).
+Mason runs as a single process, and you install nothing on your Postgres. On your machine, you install Mason from
+npm. On a server, you run the `ghcr.io/embeddable-hq/mason-data` Docker image (see
+[Going to production](#going-to-production)).
 
 ### Try the demo
 
 ```bash
-npm i -g @mason-data/cli             # needs Node 22.13+ (`mason doctor` checks this machine)
+npm i -g @mason-data/cli             # needs Node 22.13+ (run mason doctor to check this machine)
 mkdir mason-demo && cd mason-demo
-mason init demo && mason start       # a small shop's Postgres, which Mason runs for you: nothing else to install
-mason add order_items                # the fourth table: watch its copy begin (or Add, on mason ui)
-mason user add me                    # prints the URL with its password, once: paste it below
-psql "<the URL it printed>" -c "select status, count(*) from orders group by 1"   # psql, or any Postgres client
-mason destroy                        # the copy and the demo database go; the next mason start seeds it again
+mason init demo && mason start       # starts a demo shop database for you: nothing else to install
+mason add order_items                # adds the fourth table, so you can watch its copy start
+mason user add me                    # prints a connection URL with a password (shown only once)
+psql "<the URL it printed>" -c "select status, count(*) from orders group by 1"   # or use any Postgres client
+mason destroy                        # deletes the copy and the demo database (the next mason start creates a new one)
 ```
 
-The demo shop (`customers`, `products`, `orders`, `order_items`) lives in `.mason/demo/` and takes a new order every
-few seconds. Its sources file polls every 5 seconds (`sync: poll 5s`), so `mason status` shows the copy keeping up.
-Mason reads it as it reads yours, over the Postgres protocol.
+The demo shop has four tables: `customers`, `products`, `orders` and `order_items`. Its data lives in
+`.mason/demo/`, and a new order arrives every few seconds. The demo's sources file polls every 5 seconds
+(`sync: poll 5s`), so `mason status` shows the copy keeping up. Mason reads the demo database the same way it reads
+yours: over the Postgres protocol.
 
 ### On your app's database
 
-**1. Add your tables and start.**
+**1. Add your tables and start Mason.**
 
 ```bash
-cd your-app                          # DATABASE_URL in .env.local, .env or the shell (or: mason init <url>)
-mason init                           # writes mason/sources/<database>.yml (commit it) and .mason/ (this machine's, gitignored)
-mason tables                         # what your database has: tables, rows, keys, what is added
-mason add orders customers           # add tables (--columns id,status,total for some columns only)
-mason start                          # Mason in the background: the copy begins
-mason wait                           # returns once every added table is copied and served
-mason sync orders                    # read the changes since: by default, Mason syncs only when you ask
-mason remove customers               # (later) take a table out again; its copy is dropped
+cd your-app                          # Mason reads DATABASE_URL from .env.local, .env or the shell
+mason init                           # creates mason/sources/<database>.yml (commit it) and .mason/ (local, gitignored)
+mason tables                         # lists the tables in your database, with their rows and keys
+mason add orders customers           # adds tables (use --columns id,status,total to copy only some columns)
+mason start                          # starts Mason in the background and begins the copy
+mason wait                           # waits until every added table is copied
+mason sync orders                    # reads the latest changes (by default, Mason syncs only when you ask)
+mason remove customers               # removes a table and deletes its copy
 ```
 
-`mason init <url>` writes the URL to `.env` for you (as `MASON_DATABASE_URL` when your app's `DATABASE_URL` names
-another database, which is never changed). The sources file is the list of what Mason copies, and
-says how each table stays current: copied once and synced when you ask, polled, or replicated
-([Choosing what to sync](#choosing-what-to-sync)).
+No `DATABASE_URL`? Run `mason init <url>` instead, and Mason writes the URL to `.env` for you. If your app's
+`DATABASE_URL` points to a different database, Mason writes `MASON_DATABASE_URL` instead and leaves yours alone.
+
+The sources file lists the tables Mason copies. It also says how each table stays up to date: synced when you ask,
+polled, or replicated (see [Choosing what to sync](#choosing-what-to-sync)).
 
 **2. Connect a tool.**
 
 ```bash
-mason user add metabase              # prints postgres://metabase:<password>@127.0.0.1:5433/your-app, once
+mason user add metabase              # prints postgres://metabase:<password>@127.0.0.1:5433/your-app (shown only once)
 ```
 
-Paste the URL into the tool's Postgres connection form. Each copied table is a table of the database named after your
-project, and the port stays the same at every start, so a saved connection keeps working.
-[`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) says how a tool connects and what SQL is answered.
+Paste this URL into your tool's Postgres connection form. Each copied table appears as a table in a database named
+after your project. The port stays the same every time Mason starts, so saved connections keep working.
+[`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) explains how tools connect and which SQL Mason answers.
 
 **3. Keep an eye on it.**
 
 ```bash
-mason status                         # your database, each table's copy, the Postgres API, slow and refused statements
-mason ui                             # the same, and the users, in your browser
-mason logs --requests --failed       # every statement refused or failed, with why
-mason stop                           # the copy stays; the next mason start resumes in seconds
-mason destroy                        # removes the copy and Mason's state, never your files or users
+mason status                         # shows your database, each table's copy, the Postgres API, and slow or refused queries
+mason ui                             # shows the same in your browser, plus the users
+mason logs --requests --failed       # lists every query that was refused or failed, and why
+mason stop                           # stops Mason; the copy stays, and the next mason start resumes in seconds
+mason destroy                        # deletes the copy and Mason's state (never your files or users)
 ```
 
-`mason --help` lists every command in the order you will need them, and `mason help <command>` explains one, with
-examples; [`cli/README.md`](cli/README.md) has every command and option.
+`mason --help` lists every command in the order you will need them. `mason help <command>` explains one command, with
+examples. [`cli/README.md`](cli/README.md) documents every command and option.
 
 ### Going to production
 
-The project folder is all you deploy: `mason/`, with the sources file and `mason.yml` (the Mason version it is written
-for). In production Mason runs as one container, `mason serve`, configured by environment variables, its copy on one
-volume, with `/healthz` for the platform. `mason help production` has this section offline.
+In production, you deploy only the project folder: `mason/`, which holds the sources file and `mason.yml`.
+(`mason.yml` records the Mason version the project was written for.) Mason runs as one container with `mason serve`.
+You configure it with environment variables, and it keeps its copy on one volume. Your platform can check its health
+at `/healthz`. Run `mason help production` to read this section offline.
 
 ```bash
-cd deploy/mason-data && mkdir -p mason   # from a checkout, or copy compose.yml and .env.example into a folder of yours
-cp .env.example .env                 # DATABASE_URL, MASON_API_KEY (openssl rand -hex 24)
-docker compose up -d                 # ghcr.io/embeddable-hq/mason-data
+cd deploy/mason-data && mkdir -p mason   # or copy compose.yml and .env.example into your own folder
+cp .env.example .env                 # set DATABASE_URL and MASON_API_KEY (openssl rand -hex 24)
+docker compose up -d                 # starts ghcr.io/embeddable-hq/mason-data
 docker compose exec mason mason add public.orders
 docker compose exec mason mason user add metabase
 ```
 
 | | |
 |---|---|
-| Image | `ghcr.io/embeddable-hq/mason-data`, amd64 and arm64: `main` is every merge, `<version>` a release. [`deploy/mason-data/README.md`](deploy/mason-data/README.md) is the walkthrough |
-| Replicas | one container per volume (DuckDB lets one process write its file), deployed stop-then-start (Kubernetes: `strategy: Recreate`). A deploy is a few seconds of downtime, not a fresh copy: the copy stays on the volume, a restarted Mason is healthy about half a second after it starts, and it picks up the changes made while it was down |
-| TLS | required off the container's loopback: `MASON_PG_SELF_SIGNED_TLS=1` makes a certificate on the volume (clients connect with `sslmode=require`), or mount a certificate from your CA |
-| Sync | the sources file you deploy says how each table stays current, so production runs exactly what is committed. Off and polling need a user that can `SELECT` the tables; replication needs more ([Logical replication](#logical-replication)) |
-| Settings | [`deploy/mason-data/README.md`](deploy/mason-data/README.md#settings) lists the ones to set and the ones worth deciding; `mason serve --help` has every one |
-| Upgrades | Mason is pre-1.0, so a release may still rename a command, a key or a setting. `mason.yml` pins the version your project is written for, the image refuses a project written for another release line, and the [release notes](release-notes/README.md) say what to do before each upgrade |
+| Image | `ghcr.io/embeddable-hq/mason-data`, for amd64 and arm64. The `main` tag is built from every merge, and `<version>` is a release. [`deploy/mason-data/README.md`](deploy/mason-data/README.md) walks you through it. |
+| Replicas | Run one container per volume, because DuckDB lets only one process write its file. Deploy with stop-then-start (in Kubernetes, `strategy: Recreate`). A deploy means a few seconds of downtime, not a new copy. The copy stays on the volume. A restarted Mason is healthy about half a second after it starts, and then it catches up on the changes it missed. |
+| TLS | Required when clients connect from outside the container. Set `MASON_PG_SELF_SIGNED_TLS=1` to create a certificate on the volume (clients then connect with `sslmode=require`), or mount a certificate from your CA. |
+| Sync | The sources file you deploy says how each table stays up to date, so production runs exactly what you committed. Off and polling need a user that can `SELECT` the tables. Replication needs more (see [Logical replication](#logical-replication)). |
+| Settings | [`deploy/mason-data/README.md`](deploy/mason-data/README.md#settings) lists the settings you must set and the ones worth deciding. `mason serve --help` lists all of them. |
+| Upgrades | Mason is pre-1.0, so a release may still rename a command, a key or a setting. `mason.yml` pins the version your project uses. The image refuses to run a project written for a different release line. The [release notes](release-notes/README.md) tell you what to do before each upgrade. |
 
 <details>
 <summary><b>Sizing: memory and CPU</b></summary>
 
-- **Memory**: the copy may use half the container's memory limit by default (else half the machine's RAM); the other
-  half is the page cache, Node and the catalog. The catalog takes ~820 MB only while it is in use: it starts on a
-  tool's first catalog query and stops after 10 minutes without one. Give the container enough that the page cache holds the
-  columns your dashboards read: a query over a column it does not hold runs at the disk's speed. The benchmark's copy
-  was about a fifth of its tables in Postgres (10.1 GiB → 1.8 GiB, on a 15 GiB machine); `mason status` says yours. To
-  set it, `MASON_DUCKDB_MEMORY=4GB` with the container's limit about twice that. A query that needs more fails on its
-  own (53200) and Mason keeps running; set it close to the container's limit and the container is killed for running
-  out of memory.
-- **CPU**: memory first, then cores. The benchmark's machine (4 vCPU Graviton3, 15 GiB) answered 32 clients at 10 M
-  rows, 12 statements a second at a p95 of 3.5 s, the same throughput as at 8 clients: the extra clients queued. A
-  copy's readers take about a core each while it runs (`MASON_COPY_PARALLEL`, default 3).
+- **Memory**: By default, the copy may use half of the container's memory limit (or half the machine's RAM if there
+  is no limit). The other half is for the page cache, Node and the catalog. The catalog uses about 820 MB, but only
+  while it is in use. It starts on a tool's first catalog query and stops after 10 minutes without one.
+
+  Give the container enough memory for the page cache to hold the columns your dashboards read. A query on a column
+  that is not in the cache runs at disk speed. In the benchmark, the copy was about a fifth of the tables' size in
+  Postgres (10.1 GiB → 1.8 GiB, on a 15 GiB machine). `mason status` shows the size of yours.
+
+  To set the limit yourself, use `MASON_DUCKDB_MEMORY=4GB`, and give the container about twice that. A query that needs
+  more memory fails on its own (53200), and Mason keeps running. If you set the limit close to the container's limit,
+  the container can be killed for running out of memory.
+- **CPU**: Memory matters first, then cores. The benchmark machine (4 vCPU Graviton3, 15 GiB) answered 12 queries a
+  second at a p95 of 3.5 s, with 32 clients on 10 M rows. That is the same throughput as with 8 clients: the extra
+  clients waited in a queue. While a copy runs, each of its readers uses about one core (`MASON_COPY_PARALLEL`,
+  default 3).
 
 </details>
 
 ## Syncing from Postgres
 
-Name the tables and columns you want; Mason copies them, and BI tools (Metabase, Grafana, Superset, Power BI, psql),
-AI agents and your own code connect as they would to any read replica. Mason only reads your Postgres: it writes
-nothing there. **By default it reads each table once, the first copy, and then only when you tell it to**: you choose,
-per table, how each copy stays current.
+Choose the tables and columns you want, and Mason copies them. BI tools (Metabase, Grafana, Superset, Power BI, psql),
+AI agents and your own code then connect to Mason as they would to any read replica. Mason only reads from your
+Postgres. It never writes to it.
+
+**By default, Mason reads each table once (the first copy). After that, it reads again only when you tell it to.**
+For each table, you choose how its copy stays up to date:
 
 | `sync:` | Off (the default) | Polling | Logical replication |
 |---|---|---|---|
-| after the first copy | nothing, until you run `mason sync <table>` | `SELECT`s, at the interval you choose | the database's change log, as a replica does |
-| needs on your Postgres | a user that can `SELECT` the tables | the same | `wal_level = logical`, a user with `REPLICATION`, a publication |
-| makes on your Postgres | nothing | nothing | a replication slot (and a publication, when you name none) |
-| a read replica as the source | yes | yes | Postgres 16+, with a publication you name |
-| good for | trying Mason, reports run on a schedule | most tables: every few seconds to every few hours | big, busy tables, and changes within seconds |
-| written as | `sync: off` | `sync: poll 5m` | `sync: replication` |
+| after the first copy | nothing, until you run `mason sync <table>` | `SELECT` queries, at an interval you choose | reads the database's change log, like a replica |
+| needs on your Postgres | a user that can `SELECT` the tables | the same | `wal_level = logical`, a user with `REPLICATION`, and a publication |
+| creates on your Postgres | nothing | nothing | a replication slot (and a publication, if you don't name one) |
+| works with a read replica as the source | yes | yes | yes, on Postgres 16+, with a publication you name |
+| good for | trying Mason, and reports that run on a schedule | most tables, every few seconds to every few hours | big, busy tables, and changes within seconds |
+| how to write it | `sync: off` | `sync: poll 5m` | `sync: replication` |
 
 ### Choosing what to sync
 
 ```yaml
-# mason/sources/app.yml — the database this project copies from. Yours to commit; the URL stays out of it.
+# mason/sources/app.yml: the database this project copies from. Commit this file. The URL is not stored in it.
 kind: postgres
-url: ${DATABASE_URL}          # a variable from .env.local, .env or the shell; a literal URL is allowed for local dev
-sync: off                     # how every table stays current, unless its entry says otherwise
+url: ${DATABASE_URL}          # a variable from .env.local, .env or the shell (a literal URL is fine for local dev)
+sync: off                     # the default for every table, unless a table says otherwise
 tables:
-  orders:                     # a bare name is in `public`; `billing.invoices` names its schema
+  orders:                     # a bare name means the `public` schema; write `billing.invoices` for another schema
     columns: [id, customer_id, status, amount, created_at, payload]
     sync: poll 30s            # this table is polled every 30 seconds
-  customers: {}               # every column, and the file's sync
+  customers: {}               # copies every column, with the default sync
   events:
-    exclude: [raw_body]       # every column but these
+    exclude: [raw_body]       # copies every column except these
   sessions:
-    key: [tenant_id, id]      # only for a table with no primary key: the unique columns to copy it by
+    key: [tenant_id, id]      # only for a table with no primary key: the columns that identify a row
 ```
 
-- `mason add` writes the entries for you (`mason add orders --sync "poll 30s"` writes that entry's `sync:`), and leaves
-  out a column that looks like a secret (`password`, `token`, `api_key`, …) unless you name it, as `exclude:`. A `{}`
-  you write by hand copies every column.
-- Column types are read from your database at every start, never written in the file.
-- With Mason running, `mason add` and `mason remove` apply at once and keep the rest of the file, comments included. A
-  hand edit applies at the next `mason start`, and a mistake is reported with the key and how to fix it.
-- Changing a table's `sync:` keeps its copy: it is caught up by one poll, never copied again.
-- `mason status`, the MCP tools and EXPLAIN say how each table stays current and when it was last synced, so a copy's
-  age is never hidden.
+- `mason add` writes these entries for you. To set a table's sync, run `mason add orders --sync "poll 30s"`.
+- `mason add` leaves out columns that look like secrets (`password`, `token`, `api_key`, …) unless you name them. It
+  lists them under `exclude:`. If you write `{}` by hand, every column is copied.
+- Mason reads column types from your database each time it starts. You never write them in the file.
+- While Mason runs, `mason add` and `mason remove` take effect at once. They keep the rest of the file as it was,
+  including comments. If you edit the file by hand, the change applies at the next `mason start`. If an entry has a
+  mistake, Mason tells you the key and how to fix it.
+- If you change a table's `sync:`, Mason keeps its copy. It catches the table up with one poll and never copies it
+  again.
+- `mason status`, the MCP tools and EXPLAIN show how each table stays up to date and when it was last synced. You
+  always know how old a copy is.
 
 ### The first copy
 
-- Each table is read a range of heap pages at a time, `MASON_COPY_PARALLEL` chunks at once (default 3), each on one
-  connection to your database, so a copy never asks more of it than that.
-- The smallest table goes first, and each is served the moment its copy lands; `mason wait` shows the progress.
-- A copy that stops (a crash, `mason stop`) resumes from the ranges it had not committed.
-- A copy runs beside the polls and the stream, so adding a big table never stops the others keeping up.
+- Mason reads each table in ranges of pages. It reads `MASON_COPY_PARALLEL` ranges at a time (3 by default), each on
+  its own connection. So a copy never uses more connections to your database than that.
+- The smallest table is copied first. Each table can be queried as soon as its copy is done. `mason wait` shows the
+  progress.
+- If a copy stops (after a crash, or `mason stop`), it resumes later. It reads only the ranges it had not finished.
+- A copy runs alongside the polls and the replication stream. Adding a big table never stops the other tables from
+  staying up to date.
 
 ### Off, and `mason sync`
 
-The default. After the first copy Mason reads nothing from your database until you run `mason sync orders`, which
-polls the tables it names once, now. Run it before a report, from cron, or at the end of
-a deploy. Nothing touches your database in between.
+This is the default. After the first copy, Mason reads nothing from your database until you run `mason sync orders`.
+That command polls the tables you name once, right away. You can run it before a report, from cron, or at the end of
+a deploy. Between syncs, Mason does not touch your database.
 
 ### Polling
 
-`sync: poll <interval>` (`5s`, `5m`, `1h`): nothing to set up on your Postgres.
+Write `sync: poll <interval>`, for example `5s`, `5m` or `1h`. You don't need to set up anything on your Postgres.
 
-- **How it works**: at each interval, a table is read in one transaction over one snapshot. The rows changed since the
-  last poll (by `xmin`, Postgres's row version) are written by key; deleted rows are found by comparing counts, and
-  keys only when the counts differ. Rows and position commit together, so a poll that dies is simply read again.
-- **What it costs your database**: Postgres has no index on `xmin`, so a poll reads the whole table. Choose the
-  interval for the table's size: a small table every few seconds, a 50 M-row one every hour. However short the interval,
-  Mason waits at least four times as long as the last poll took, so polls use at most a fifth of your database's time.
-  `mason status` shows what each table's polls cost your database.
+- **How it works**: At each interval, Mason reads the table in one transaction, from one snapshot. It finds the rows
+  that changed since the last poll by their `xmin` (Postgres's row version), and writes them by key. To find deleted
+  rows, it compares row counts first. It compares keys only when the counts differ. The rows and the poll's position
+  are saved together, so if a poll fails, the next one simply reads the same rows again.
+- **What it costs your database**: Postgres has no index on `xmin`, so each poll reads the whole table. Choose an
+  interval that suits the table's size: every few seconds for a small table, every hour for a table of 50 M rows.
+  Mason also limits the cost itself. After each poll, it waits at least four times as long as that poll took. So polls
+  never use more than a fifth of your database's time. `mason status` shows what each table's polls cost.
 
 ### Logical replication
 
-`sync: replication`, usually at the top of the file: for big, busy tables, and for changes that land within seconds.
+Write `sync: replication`, usually at the top of the file. Use it for big, busy tables, and when you want changes
+within seconds.
 
-- **How it works**: Mason reads the change log through one replication slot for the project, as a Postgres replica
-  does, and the replicated tables are kept current whatever their size. Tables set to `off` or `poll` beside them work
-  as before.
-- **What it needs**: `wal_level = logical`, a user with `REPLICATION`, and either a publication you name
-  (`publication:` at the top of the sources file; `${PG_PUBLICATION}` works there, as in `url:`), which Mason verifies
-  but never creates, alters or drops, or the right to create one. A read replica as the source needs Postgres 16+ and a
-  publication you name.
-- **What it can't replicate**: a table with no primary key (a `key:` entry), since the change log gives no key to match
-  its changes to rows, and one with `REPLICA IDENTITY NOTHING`, since publishing it would make your app's UPDATEs and
-  DELETEs fail. Give such a table `sync: poll <interval>`; `mason add` writes that for you.
+- **How it works**: Mason reads the database's change log through one replication slot per project, the way a
+  Postgres replica does. Replicated tables stay up to date whatever their size. Tables set to `off` or `poll` keep
+  working as before.
+- **What it needs**: `wal_level = logical` and a user with `REPLICATION`. It also needs a publication: either you name
+  one, or Mason needs permission to create its own. To name one, write `publication:` at the top of the sources file
+  (`${PG_PUBLICATION}` works there, as in `url:`). Mason checks a named publication, but never creates, changes or
+  drops it. If your source is a read replica, it needs Postgres 16+ and a publication you name.
+- **What it can't replicate**: two kinds of table.
+  - A table with no primary key (a `key:` entry). The change log has no key to match its changes to rows.
+  - A table with `REPLICA IDENTITY NOTHING`. Publishing it would make your app's UPDATEs and DELETEs fail.
+
+  Give such a table `sync: poll <interval>` instead. `mason add` writes this for you.
 - **One setting to make on your database**: `max_slot_wal_keep_size` (Postgres 13+). A replication slot keeps WAL
-  until its reader has it, Mason's too, even while Mason is stopped; the setting caps how much it may keep. `mason stop`
-  keeps the slot, so the next start resumes from it. It is dropped, and checked gone, when no table uses `replication`
-  any more, and at `mason destroy`.
+  until its reader has read it. That includes Mason's slot, even while Mason is stopped. This setting limits how much
+  WAL the slot may keep. `mason stop` keeps the slot, so the next start resumes where it stopped. Mason drops the slot
+  (and checks that it is gone) when no table uses `replication` any more, and on `mason destroy`.
 
-[docs/DESIGN.md](docs/DESIGN.md) "Keeping a copy current" has every decision behind them, and why.
+[docs/DESIGN.md](docs/DESIGN.md) "Keeping a copy current" explains every decision behind these, and why.
 
 ## Performance vs Postgres
 
 <!-- GENERATED by tests/bench-replica.test.ts from tests/fixtures/bench-replica.json (the headline; docs/MEASUREMENTS.md has the rest), to the END line: never edit by hand; UPDATE_FIXTURE=1 npm test rewrites it -->
-A sum by status over every order, a top-N joined to its customers, a group-by over a JSON field: each comes back 15× to 57× faster than on Postgres at p95, and keeps that lead as the tables grow and as more dashboards ask at once:
+The benchmark runs a dashboard's queries, such as a sum by status over every order, the top N orders joined to their customers, and a group-by over a JSON field. At p95, Mason answers them 15× to 57× faster than Postgres. Mason keeps that lead as the tables grow and as more dashboards query at once:
 
 | | Postgres p95 (s) | Mason p95 (s) | Mason is |
 |---|---:|---:|---|
@@ -226,163 +269,181 @@ A sum by status over every order, a top-N joined to its customers, a group-by ov
 | 10 M rows, 32 clients | 96.6 | 3.51 | 28× faster |
 | one order by its primary key, 30 M rows, 8 clients (p50) | 0.013 | 0.99 | 79× slower |
 
-Mason is for scans and aggregates; a lookup through an index is faster on Postgres ([docs/DESIGN.md](docs/DESIGN.md) "Heap order, no index"). Each p95 is of a dashboard's mix of 6 statements, measured on m7g.xlarge, 4 vCPU, 15 GiB RAM, EBS gp3, against PostgreSQL 18.6, Docker (postgres:18) on the same machine; [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every measurement and how it was taken.
+Mason is for scans and aggregates. A lookup through an index is faster on Postgres ([docs/DESIGN.md](docs/DESIGN.md) "Heap order, no index"). Each p95 is over a mix of 6 dashboard queries. It was measured on m7g.xlarge, 4 vCPU, 15 GiB RAM, EBS gp3, against PostgreSQL 18.6, Docker (postgres:18) on the same machine. [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every measurement and how it was taken.
 <!-- END GENERATED -->
 
 ### What Mason is for, and what stays on Postgres
 
-Use Mason for the scans and aggregates that slow down as data grows, and that on a replica compete with each other and
-with everything else: dashboards, reports, BI tools, AI agents, customer-facing analytics. Keep your application's own
-queries (a row by its primary key, an insert, an update) on Postgres: a point lookup is faster there, and Mason is
-read-only.
+Use Mason for scans and aggregates: the queries that get slower as your data grows. On a replica, these queries
+compete with each other and with everything else. Typical examples are dashboards, reports, BI tools, AI agents and
+customer-facing analytics.
+
+Keep your application's own queries on Postgres: fetching a row by its primary key, inserts and updates. Postgres is
+faster at point lookups, and Mason is read-only.
 
 ### How it is fast
 
-- **A columnar copy.** DuckDB stores each column apart, compressed, and a query reads only the columns it names, a
-  batch of values at a time over every core, where Postgres reads each row whole. The benchmark's tables took about a
-  fifth of their size in Postgres (10.1 GiB → 1.8 GiB), so more of what a dashboard reads stays in memory.
-- **No index, in the source's order.** A copy keeps its rows in the order Postgres's scan delivers them (about the
-  order they were inserted in), with no index to keep in memory: a query over a window of a column that grows as rows
-  are inserted (`created_at`) skips most of the row groups outside it. It is also why a lookup by primary key is slower:
-  Mason scans for it, where Postgres uses its index.
-- **Off your database.** A dashboard's scans run on Mason's machine, not your database's CPU, memory and disk; your
-  database's only work is the first copy, read a few chunks at a time, then only the syncs you turn on.
+- **A columnar copy.** DuckDB stores each column separately and compresses it. A query reads only the columns it
+  uses, and it processes them in batches on every CPU core. Postgres, by contrast, reads each whole row. In the
+  benchmark, the copy was about a fifth of the tables' size in Postgres (10.1 GiB → 1.8 GiB). So more of what a
+  dashboard reads fits in memory.
+- **No index, rows in insertion order.** Mason stores rows in the order Postgres's scan returns them, which is roughly
+  the order they were inserted. It keeps no index in memory. So a query over a time window on a column like
+  `created_at` can skip most of the data outside that window. This is also why a lookup by primary key is slower in
+  Mason: Mason has to scan, while Postgres uses its index.
+- **The work moves off your database.** Dashboard queries run on Mason's machine, not on your database's CPU, memory
+  and disk. Your database only serves the first copy (a few ranges at a time) and then the syncs you turn on.
 
-[docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) is every measurement and how it was taken;
-[docs/BENCHMARK.md](docs/BENCHMARK.md) runs the benchmark on your own machine.
+[docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every measurement and how it was taken.
+[docs/BENCHMARK.md](docs/BENCHMARK.md) shows how to run the benchmark on your own machine.
 
 ## Postgres compatibility
 
-Mason's goal is to answer every statement it accepts exactly as Postgres would: the same column names, type OIDs,
-text, order and SQLSTATE. You keep the SQL you already run. When Mason can't answer a statement exactly, it refuses it
-with an error that says what isn't supported and what to write instead. The few cases it answers differently are
-listed, each with its reason. Nothing differs silently.
+Mason's goal is to answer every query exactly as Postgres would. That means the same column names, the same type
+OIDs, the same text, the same row order and the same SQLSTATE error codes. So you can keep the SQL you already have.
+
+If Mason can't answer a query exactly, it refuses it. The error says what isn't supported and what to write instead.
+In a few cases, Mason answers differently from Postgres on purpose. Each of these cases is listed, with the reason.
+Mason never gives a different answer silently.
 
 ### Postgres decides, DuckDB computes
 
-1. **Postgres analyses the statement.** A real Postgres in the same process (PGlite) holds the copied tables'
-   definitions and no rows: it parses the statement, types every expression and names the result's columns. The
-   catalog a tool reads (`pg_catalog`, `information_schema`) is that Postgres too.
-2. **Mason rewrites it** wherever DuckDB's meaning differs: collation and case, `LIKE` and regex, JSON, `to_char`, date
-   arithmetic, casts to text.
-3. **An allowlist checks it**, piece by piece: anything not yet verified is refused with an error naming it.
-4. **DuckDB runs it** on the copy, and the answer comes back with the column names, type OIDs and text
-   Postgres would send. Exact `numeric` arithmetic stays exact, never rounded through a double.
+Each query goes through four steps:
+
+1. **Postgres analyses it.** Mason runs a real Postgres (PGlite) in the same process. This Postgres knows the copied
+   tables' definitions, but holds none of their rows. It parses the query, works out the type of every expression,
+   and names the result's columns. When a tool reads the catalog (`pg_catalog`, `information_schema`), this Postgres
+   answers too.
+2. **Mason rewrites it** wherever DuckDB would mean something different. Examples are collation and case, `LIKE` and
+   regular expressions, JSON, `to_char`, date arithmetic, and casts to text.
+3. **An allowlist checks it**, piece by piece. Anything that has not been verified is refused, and the error names it.
+4. **DuckDB runs it** on the copy. The answer comes back with the column names, type OIDs and text that Postgres would
+   send. Exact `numeric` arithmetic stays exact: it is never rounded through a floating-point number.
 
 ### The oracle
 
-The allowlist is not written by hand. An oracle runs tens of thousands of statements on a real Postgres and on Mason,
-compares each answer with Postgres's, and allows only what came back identical or differs by a listed decision. Every
-fix adds its statements to the oracle, and a difference you report becomes a permanent test case:
+The allowlist is not written by hand. An oracle runs tens of thousands of queries on a real Postgres and on Mason, and
+compares the answers. Only queries that come back identical, or that differ by a listed decision, are allowed. Every
+fix adds its queries to the oracle. A difference you report becomes a permanent test case.
 
 <!-- GENERATED by tests/duck-gaps.test.ts from src/duck/gaps.ts and src/duck/verified.ts, to the END line: never edit by hand; UPDATE_FIXTURE=1 npm test rewrites it -->
-Of the 2,998 statements the oracle also sends to a plain DuckDB connection, Mason answers 95% exactly as Postgres
-does, 1% differently by a decision it lists, and refuses 4% with an error saying what to write instead;
-none was answered with a wrong value. DuckDB alone, over the same tables, answers 31% of them exactly. [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md),
-rendered from the code, names the 992 pieces verified (types, functions, operators, aggregates, window functions,
-casts, constructs and their forms), the 46 shapes refused, the 14 answered differently and the 7 limits, each
-with what to write instead.
+The oracle also sends 2,998 of its queries to a plain DuckDB connection. Of those, Mason answers 95% exactly as
+Postgres does. It answers 1% differently, each by a decision it lists. It refuses 4% with an error that says what
+to write instead. None was answered with a wrong value. DuckDB alone, over the same tables, answers only 31% of them exactly.
+
+[docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the 992 verified pieces (types, functions,
+operators, aggregates, window functions, casts, constructs and their forms). It also lists the 46 refused shapes, the
+14 that are answered differently and the 7 limits, each with what to write instead.
 <!-- END GENERATED -->
 
-The statements BI tools send (psql, pgjdbc, node-postgres, Metabase, Grafana, DBeaver and Superset) were recorded
-from the tools themselves, and the tests replay every one. [docs/DESIGN.md](docs/DESIGN.md) "The statement path"
-explains it in full.
+The tests also replay the queries that BI tools send: psql, pgjdbc, node-postgres, Metabase, Grafana, DBeaver and
+Superset. These queries were recorded from the tools themselves. [docs/DESIGN.md](docs/DESIGN.md) "The statement path"
+explains the whole process.
 
 ## For AI agents
 
-An agent connects as any Postgres client does, or over MCP, and gets a dashboard's speed on the tables you chose. A
-statement Mason cannot answer exactly comes back refused with what to write instead, which an agent can act on.
+An agent connects like any Postgres client, or over MCP. It gets dashboard speed on the tables you chose. If Mason
+can't answer a query exactly, the agent gets an error that says what to write instead, so it can try again.
 
 ### Access control
 
-Give each agent and each tool a user of its own, and a role that says what it may read. Roles narrow what the sources
-file copies, by table, column and row:
+Give each agent and each tool its own user, and a role that says what it may read. A role narrows what the sources
+file copies, by table, by column and by row:
 
 ```yaml
-# mason/roles.yml — committed beside the sources file, and reviewed the same way
+# mason/roles.yml: commit it next to the sources file, and review it the same way
 roles:
   agent:
     tables:
       orders: { columns: [id, status, amount, created_at] }
-      customers: { exclude: [email, phone] }   # the sources file's shape
+      customers: { exclude: [email, phone] }   # the same shape as in the sources file
   tenant:
     attributes: [tenant]
     tables:
       orders: { where: "tenant_id = :tenant" }
-      order_items: { through: orders }         # filtered by its foreign key to orders
+      order_items: { through: orders }         # filtered through its foreign key to orders
 ```
 
 ```bash
-mason user add claude --role agent   # its password, printed once, in the URL to connect with
+mason user add claude --role agent   # prints its password once, inside the connection URL
 mason user add acme --role tenant --set tenant=42
-mason user list                      # the users, their roles, and when each was added
-mason user remove claude             # refuses its next connection and ends its sessions at their next statement
+mason user list                      # lists the users, their roles, and when each was added
+mason user remove claude             # blocks its next connection, and ends its open sessions at their next query
 ```
 
-- A statement that reads a table or column outside the user's role is refused with `42501`, naming it: the error
-  Postgres sends; a `SELECT *` over a table the role sees only part of is refused too, never silently narrowed.
-- A role's catalog reads and the MCP tools list only what it can read, so an agent never finds a table it may not query.
-- A user with no role reads every table and column the sources file copies. Every user is read-only, and exists in Mason
-  alone, never in your database; `mason user remove` takes effect without a restart.
-- Off this machine the Postgres API requires TLS, unless `MASON_PG_PLAIN=1` puts it behind a TLS proxy of your
-  own ([Going to production](#going-to-production)).
+- If a query reads a table or column outside the user's role, Mason refuses it with `42501`, the same error Postgres
+  sends. The error names the table or column. A `SELECT *` on a table where the role can see only some columns is
+  refused too. Mason never quietly returns fewer columns.
+- When a user reads the catalog or uses the MCP tools, it sees only what its role can read. So an agent never finds a
+  table it is not allowed to query.
+- A user with no role can read every table and column the sources file copies.
+- Every user is read-only. Users exist only in Mason, never in your database. `mason user remove` takes effect without
+  a restart.
+- When clients connect from another machine, the Postgres API requires TLS. The exception is `MASON_PG_PLAIN=1`, for
+  when your own TLS proxy sits in front (see [Going to production](#going-to-production)).
 
 ### The MCP server
 
-`mason mcp` is an MCP server on stdio for Claude Code, Claude Desktop and other agents, connected as a `mason user`
-(and so held to its role). Its tools list the tables and how current each is, describe one (its columns, Postgres types
-and keys), run a query and EXPLAIN it; a refused query comes back as Postgres's error, with a hint saying what to
-write instead. In Claude Code, in the project's folder with Mason running:
+`mason mcp` is an MCP server for Claude Code, Claude Desktop and other agents. It runs over stdio, and it connects to
+Mason as a `mason user`, so it follows that user's role. Its tools can:
+
+- list the tables, and how up to date each one is
+- describe a table: its columns, Postgres types and keys
+- run a query, or EXPLAIN it
+
+If a query is refused, the tool returns Postgres's error, with a hint that says what to write instead. To add the
+server to Claude Code, run this in the project's folder while Mason is running:
 
 ```bash
-mason user add claude --role agent   # the URL, printed once
+mason user add claude --role agent   # prints the URL (shown only once)
 claude mcp add mason --env MASON_URL="postgres://claude:<password>@127.0.0.1:5433/shop" -- mason mcp
 ```
 
-It talks to Mason only over the Postgres protocol, so it works against `mason start` on your machine as against `mason serve` elsewhere.
-[`cli/README.md`](cli/README.md#from-an-mcp-client-mason-mcp) has every tool and the setup for Claude Desktop.
+The MCP server talks to Mason only over the Postgres protocol. So it works the same with `mason start` on your
+machine and with `mason serve` on a server. [`cli/README.md`](cli/README.md#from-an-mcp-client-mason-mcp) lists every
+tool, and shows the setup for Claude Desktop.
 
 ### Observability
 
 | | |
 |---|---|
-| `mason logs --requests` | every statement, answered or refused: when, the outcome and SQLSTATE, how long, the rows sent, the tool's `application_name` (an MCP client's is `mason-mcp/<client>`), the user and its role, and for a refusal the grant or filter that refused it. `--failed` for the refused and failed only, `--json` for every column; kept 7 days (`MASON_REQUEST_LOG_DAYS`) |
-| `mason status` | each table's copy and how current it is, and the last day's slow and refused statements, each with its reason |
-| `mason ui` | the status, the slow and refused counts and the users, in your browser |
-| `EXPLAIN` | for each copy a statement reads, its rows and how current it is, beside the SQL it runs |
+| `mason logs --requests` | Every query, answered or refused. For each one: when it ran, the result and SQLSTATE, how long it took, the rows sent, the tool's `application_name`, and the user and its role. For a refused query, it also shows the grant or filter that refused it. An MCP client shows up as `mason-mcp/<client>`. Add `--failed` for refused and failed queries only, or `--json` for every column. Queries are kept for 7 days (`MASON_REQUEST_LOG_DAYS`). |
+| `mason status` | Each table's copy and how up to date it is, plus the last day's slow and refused queries, each with its reason. |
+| `mason ui` | The status, the slow and refused counts, and the users, in your browser. |
+| `EXPLAIN` | For each copy a query reads: its rows and how up to date it is, next to the SQL Mason runs. |
 
 ### A CLI an agent can drive
 
-The commands are the same for you and for a coding agent (Claude Code, Codex, …). Each prints for a person or, with
-`--json`, one object of a declared shape; its exit code says how it went, and it names what to run next.
-`mason help agent` is the page an agent reads first.
+You and a coding agent (Claude Code, Codex, …) use the same commands. Each command prints output for a person. With
+`--json`, it prints one JSON object with a documented shape instead. Its exit code says whether it worked, and it
+always tells you what to run next. `mason help agent` is the page an agent should read first.
 
 ## Documentation
 
 | | |
 |---|---|
-| [`cli/README.md`](cli/README.md) | every command and option of the `mason` command |
-| [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) | the Postgres API: connecting a tool, what SQL is answered, what is refused and why |
-| [`docs/WEB-UI.md`](docs/WEB-UI.md) | the web page of `mason start` (`mason ui`): what it shows, how it is opened and guarded, how to build it out |
-| [`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) | what is verified to answer exactly as Postgres does, and what is not (rendered from the code) |
-| [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) | when Mason is faster than a Postgres read replica: every measurement and how it was taken (rendered from the benchmark's result) |
-| [`docs/DESIGN.md`](docs/DESIGN.md) | the design: how a statement is answered, the copy, replication, the decisions and measurements behind them |
-| [`docs/BENCHMARK.md`](docs/BENCHMARK.md) | Mason against a Postgres read replica: running the benchmark and publishing its result |
-| [`deploy/mason-data/README.md`](deploy/mason-data/README.md) | running the image on a server |
+| [`cli/README.md`](cli/README.md) | every command and option of `mason` |
+| [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) | the Postgres API: how a tool connects, which SQL is answered, and what is refused |
+| [`docs/WEB-UI.md`](docs/WEB-UI.md) | the web page (`mason ui`): what it shows, how access to it is protected, and how to extend it |
+| [`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) | what is verified to answer exactly as Postgres does, and what is not (generated from the code) |
+| [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) | when Mason is faster than a Postgres read replica: every measurement and how it was taken (generated from the benchmark results) |
+| [`docs/DESIGN.md`](docs/DESIGN.md) | the design: how a query is answered, the copy, replication, and the decisions and measurements behind them |
+| [`docs/BENCHMARK.md`](docs/BENCHMARK.md) | how to run the benchmark against a Postgres read replica, and how to publish the results |
+| [`deploy/mason-data/README.md`](deploy/mason-data/README.md) | how to run the image on a server |
 | [`release-notes/`](release-notes/README.md) | what each release changes for you, and what to do before upgrading |
-| [`CLAUDE.md`](CLAUDE.md) | the rules of the codebase, for anyone changing it, human or not; each subsystem's own rules are in `.claude/rules/` |
+| [`CLAUDE.md`](CLAUDE.md) | the rules of the codebase, for anyone who changes it, human or AI. Each subsystem has its own rules in `.claude/rules/` |
 
 ## Community
 
-If Mason is slow, inaccurate, or answers anything differently from Postgres, we want to know:
-[open an issue](https://github.com/embeddable-hq/mason-data/issues/new/choose). The issue forms ask for what a report
-needs (the statement, the types, both answers or both timings), and a reported difference becomes a case the oracle
-holds Mason to from then on. [SECURITY.md](SECURITY.md) says how to report a vulnerability privately.
+If Mason is slow, gives a wrong answer, or answers anything differently from Postgres, we want to know. Please
+[open an issue](https://github.com/embeddable-hq/mason-data/issues/new/choose). The issue forms ask for what we need:
+the query, the types, and both answers or both timings. A difference you report becomes a test case that the oracle
+checks from then on. To report a security vulnerability privately, see [SECURITY.md](SECURITY.md).
 
 ## Contributing
 
-An issue is welcome; a pull request with a test is better. [CONTRIBUTING.md](CONTRIBUTING.md) has the checks, where
-the code lives, how to run the checkout's `mason` from any folder, and what a pull request needs.
+Issues are welcome, and a pull request with a test is even better. [CONTRIBUTING.md](CONTRIBUTING.md) covers the
+checks, where the code lives, how to run the checkout's `mason` from any folder, and what a pull request needs.
 [CLAUDE.md](CLAUDE.md) has the rules of the codebase, for people and coding agents alike.
 
 ## License
