@@ -156,7 +156,7 @@ polling (the default) and logical replication:
 | needs on your Postgres | a user that can `SELECT` the tables | `wal_level = logical`, a user with `REPLICATION`, a publication |
 | makes on your Postgres | nothing | a replication slot (and a publication, when you name none) |
 | a read replica as the source | yes | Postgres 16+, with a publication you name |
-| tables kept current | up to 1,000,000 rows each; a bigger one on `mason sync <table>` | every table, whatever its size |
+| tables kept current | up to 1,000,000 rows each; a bigger one on `mason sync <table>` | every table with a primary key, whatever its size |
 | turned on by | `mason start` (or `--poll` to go back) | `mason start --replication`; `MASON_CHANGES=replication` on a server |
 
 ### Choosing what to sync
@@ -178,8 +178,8 @@ tables:
     key: [tenant_id, id]      # only for a table with no primary key: the unique columns to copy it by
 ```
 
-A column that looks like a secret (`password`, `token`, `api_key`, …) is left out unless you name it, written as
-`exclude:`. Column types are read from the database at every start, never written in the file. With Mason running,
+`mason add` leaves out a column that looks like a secret (`password`, `token`, `api_key`, …) unless you name it, and
+writes it as `exclude:`; an entry you write by hand as `{}` copies every column. Column types are read from the database at every start, never written in the file. With Mason running,
 `mason add` starts the copy at once and the table is served the moment it lands (before `mason start`, the copy
 begins at the start); `mason add` and `mason remove` keep the rest of the file as it was, comments included. An entry
 you edit by hand is applied at the next `mason start`, and a mistake in it is refused with the key and the way out.
@@ -207,14 +207,16 @@ interval stretches to four times the last poll, so polls take at most a fifth of
 ### Logical replication
 
 `mason start --replication` (on a server, `MASON_CHANGES=replication`) reads the change log the way a Postgres replica
-does, through a replication slot of its own: every table is kept current whatever its size, a change typically lands
+does, through a replication slot of its own: every table with a primary key is kept current whatever its size, a change typically lands
 within seconds, and a poll's full scans are gone. A switch keeps the copies and catches each table up by one poll, never
 a fresh copy; `--poll` goes back.
 
 It needs `wal_level = logical`, a user with `REPLICATION`, and either a publication you name (`--publication`, or
 `PG_PUBLICATION`), which Mason reads and verifies but never creates, alters or drops, or the right to create one. On a
-read replica it needs Postgres 16+ and a publication you name. A table with no primary key (a `key:` entry) or with
-`REPLICA IDENTITY NOTHING` is refused by name: publishing its updates would fail your application's own UPDATEs.
+read replica it needs Postgres 16+ and a publication you name. Two kinds of table are
+refused by name: one with no primary key (a `key:` entry), which the change log gives no key to apply a change by (poll
+it instead), and one with `REPLICA IDENTITY NOTHING`, which a publication would make fail your application's own
+UPDATEs and DELETEs.
 
 **A replication slot outlives its reader**, and holds your database's WAL while nobody reads it. Cap it on the source
 with `max_slot_wal_keep_size` (Postgres 13+). `mason stop` leaves the slot (the next start resumes from it);
@@ -251,8 +253,8 @@ is built for them: a point lookup by primary key is faster there, and Mason answ
   values at a time over every core, where Postgres reads each row whole. The benchmark's tables took about a
   fifth of their size in Postgres (10.1 GiB → 1.8 GiB), so more of what a dashboard reads stays in memory.
 - **No index, in the source's order.** A copy keeps its rows in the order Postgres's scan delivers them (about the
-  order they were inserted in), with no index to maintain: a query over a time window skips most of the row groups outside it,
-  and a change is written without an index to update. That is also why a lookup by primary key is a scan, and
+  order they were inserted in), with no index to keep in memory: a query over a window of a column that grows as rows are inserted
+  (`created_at`) skips most of the row groups outside it. That is also why a lookup by primary key is a scan, and
   Postgres's.
 - **Off your database.** A dashboard's scans run on Mason's machine, so they no longer compete with your application
   for your database's CPU, memory and disk; what Mason costs your database is a copy read a few chunks at a time, then
@@ -265,7 +267,8 @@ is built for them: a point lookup by primary key is faster there, and Mason answ
 
 Mason's goal is to answer every statement it accepts exactly as Postgres would: the same column names, type OIDs and
 text, the same order, the same SQLSTATE. You keep the SQL you already run, without rewriting it for a warehouse. What
-Mason cannot answer exactly is refused by name, the error saying what to write instead, never answered differently.
+Mason cannot answer exactly is refused by name, the error saying what to write instead; the few it answers differently
+are decisions it lists, each with what to write instead. Nothing is answered differently in silence.
 
 ### Postgres decides, DuckDB computes
 
@@ -280,7 +283,7 @@ as DuckDB's double.
 ### The oracle
 
 The allowlist is not written by hand: an oracle runs tens of thousands of statements on a real Postgres and on Mason,
-holds each answer to Postgres's (names, OIDs, text, order, SQLSTATE), and allows only what came back identical. A fix
+holds each answer to Postgres's (names, OIDs, text, order, SQLSTATE), and allows only what came back identical or differs by a decision it lists. A fix
 for a class of statement adds a statement to it, and a difference you report becomes a case the oracle holds Mason to
 from then on:
 
@@ -301,7 +304,7 @@ how a statement is answered, and how the list stays true.
 
 An agent connects as any Postgres client does, or over MCP, and gets a dashboard's speed on the tables you chose. A
 statement Mason cannot answer exactly comes back refused with what to write instead, which an agent can act on, never
-with a different answer it would trust.
+with a silently different answer it would trust.
 
 ### Access control
 
@@ -314,9 +317,10 @@ mason user remove claude             # refuses its next connection, ends its ses
 ```
 
 A user is a login to Mason's Postgres API alone, never to your database. It reads only the tables and columns the
-sources file names (a column that looks like a secret is left out unless you name it), and Mason answers no writes.
-`mason user remove` takes effect without a restart. Off this machine the Postgres API is TLS or refused
-([Going to production](#going-to-production)).
+sources file names (`mason add` leaves out a column that looks like a secret unless you name it), and Mason answers no
+writes.
+`mason user remove` takes effect without a restart. Off this machine the Postgres API is TLS or refused, unless `MASON_PG_PLAIN=1` puts it behind a TLS proxy of
+your own ([Going to production](#going-to-production)).
 
 ### The MCP server
 
