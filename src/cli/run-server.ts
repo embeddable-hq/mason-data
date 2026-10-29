@@ -121,6 +121,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       error: c?.phase === "failed" ? c.error : null,
       // copied and served, but not kept current by the poll (src/duck/sync.ts POLL_ROW_LIMIT): mason status and wait say so
       ...(c?.unsynced ? { unsynced: c.unsynced } : {}),
+      // how the run keeps the copy current NOW, as the sync derives it once (src/duck/sync.ts KeptCurrent, `keptOf`):
+      // what `unsynced` and the stream's tables say for mason status, and EXPLAIN says over the wire, as data
+      ...(c?.kept ? { kept: c.kept } : {}),
       ...(c ? { duck: { rows: c.rows, bytes: c.bytes, seconds: c.seconds, copiedAt: c.copiedAt, error: c.error } } : {}),
     };
   });
