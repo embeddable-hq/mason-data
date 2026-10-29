@@ -112,8 +112,8 @@ const schema: PgSchema = {
  * Where a statement is planned (`on`): the shop with nothing stored, under C (absent: every statement above the jsonb
  * shapes), or a shop of its own whose orders' jsonb `meta` has its ORDER key stored as a hidden column by the keeper
  * (src/duck/kept.ts, `orderKeySql`; `storedKey` below) — under C, or under a libc order (`LIBC_COLLATION`, `libcOrder`), where a jsonb's
- * EQUALITY reads the C key, which nothing stores yet, and only its ORDER reads the stored libc key. `libc` alone is
- * the libc shop's listener without the keeper: the libc key computed per row.
+ * ORDER reads the stored libc key and its EQUALITY the C key, stored as a second hidden column (`EQUAL_STEPS`). `libc`
+ * alone is the libc shop's listener without the keeper: the libc key, and the C key, computed per row.
  */
 type On = "C, the key stored" | "libc" | "libc, the key stored";
 /** and where an invariant runs that no entry is planned in: the C shop of the stored key, through a listener with no
@@ -219,8 +219,8 @@ const HELD_BI = [
  * 0.13–0.31 s from the stored key). Each shape is held
  * with the key computed and with it stored: a change that stops a plan reading the stored column (back to the call
  * per row) changes the stored entry's `calls`, and one that computes the key where it was read changes the other's.
- * Under libc equality reads the C key, computed per row whether or not the order key is stored (a libc key refuses a
- * character equality never had to order): those entries say so, and a stored C key changes them (regenerate, and say so).
+ * Under libc equality reads the C key (a libc key refuses a character equality never had to order), stored as a second
+ * column beside the order's (`EQUAL_STEPS`) or computed per row without the keeper: an entry of each.
  */
 const WIDE = "o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta";
 const JSONB = {
@@ -259,11 +259,13 @@ const JSONB_SHAPES: Shape[] = [
   // strings (`list_transform(…, icu_sort_key(…))`: the 83 s of DESIGN's table); stored, the page reads the column
   { name: "jsonb under libc: ORDER BY a jsonb DESC LIMIT 100 OFFSET 0, the libc key computed per row", sql: JSONB.desc, on: "libc" },
   { name: "jsonb under libc: ORDER BY a jsonb DESC LIMIT 100 OFFSET 0, the libc key stored", sql: JSONB.desc, on: "libc, the key stored" },
-  // and its equality: the C key computed per row even with the libc ORDER key stored (no stored C key yet). A
-  // stored C key (a sibling change) turns these into reads of a column: regenerate them, and say so in its commit
-  { name: "jsonb under libc: GROUP BY a jsonb, the C key computed per row (the libc key stored)", sql: JSONB.grouped, on: "libc, the key stored" },
-  { name: "jsonb under libc: SELECT DISTINCT a jsonb, the C key computed per row (the libc key stored)", sql: JSONB.distinct, on: "libc, the key stored" },
-  { name: "jsonb under libc: WHERE jsonb = a document, the C key computed per row (the libc key stored)", sql: JSONB.equal, on: "libc, the key stored" },
+  // and its equality: the C key, computed per row without the keeper, or read from its own stored column beside the
+  // libc ORDER key's (src/duck/kept-route.ts EQUAL_STEPS) — never the order's key, which refuses what equality never orders
+  { name: "jsonb under libc: GROUP BY a jsonb, the C key computed per row", sql: JSONB.grouped, on: "libc" },
+  { name: "jsonb under libc: SELECT DISTINCT a jsonb, the C key computed per row", sql: JSONB.distinct, on: "libc" },
+  { name: "jsonb under libc: GROUP BY a jsonb, the C key stored", sql: JSONB.grouped, on: "libc, the key stored" },
+  { name: "jsonb under libc: SELECT DISTINCT a jsonb, the C key stored", sql: JSONB.distinct, on: "libc, the key stored" },
+  { name: "jsonb under libc: WHERE jsonb = a document, the C key stored", sql: JSONB.equal, on: "libc, the key stored" },
 ];
 
 const SHAPES: Shape[] = [...REWRITTEN, ...HELD_BI.map((name) => {
@@ -461,7 +463,8 @@ function libcOrder(): LibcOrder {
 }
 
 /**
- * THE ORDERS' JSONB ORDER KEY STORED, as a running Mason stores it once the request log is its evidence: the keeper
+ * THE ORDERS' JSONB ORDER KEY STORED (and under libc its equality's C key, `EQUAL_STEPS`, a second column), as a running
+ * Mason stores it once the request log is its evidence: the keeper
  * (src/duck/kept.ts) over `store`, told the collation by the listener (`orderBy`), then made to store `meta`'s key now
  * (`eager`, the oracle's: `keepNow`) — its column added and every row filled — and held READY and exact before a plan
  * is asked, so the entries hold what a plan over a stored key is, never whether the policy chose to store it. The
@@ -488,6 +491,18 @@ async function storedKey(store: DuckStore, logged: string[], libc: boolean): Pro
   await keeper.keepNow?.([read]);
   const ready = keeper.ready(read);
   assert.ok(ready !== null && ready.exact, `the orders' jsonb order key is not stored and exact (${JSON.stringify(ready)}): ${JSON.stringify(keeper.status())}\n${logged.join("\n")}`);
+  if (libc) {
+    // under libc a jsonb's equality reads the C key, stored as a column of its own
+    const { EQUAL_STEPS } = await import("../src/duck/kept-route.ts") as { EQUAL_STEPS?: string };
+    assert.ok(typeof EQUAL_STEPS === "string", "the keeper stores no jsonb's C key for equality here (src/duck/kept-route.ts has no EQUAL_STEPS)");
+    const equal = { ...read, steps: EQUAL_STEPS };
+    await keeper.keepNow?.([equal]);
+    const ok = keeper.ready(equal);
+    assert.ok(ok !== null && ok.exact, `the orders' jsonb C key is not stored and exact (${JSON.stringify(ok)}): ${JSON.stringify(keeper.status())}\n${logged.join("\n")}`);
+  }
+  // one hidden column under C (the order's key equates), two under libc (the order's, and the C key)
+  const hidden = (await store.writer.runAndReadAll("SELECT count(*) FROM duckdb_columns() WHERE table_name = 'orders' AND starts_with(column_name, '__mason_json_')")).getRowsJS()[0]![0];
+  assert.equal(Number(hidden), libc ? 2 : 1, "the stored keys' hidden columns");
   return listen(store, logged, duck);
 }
 

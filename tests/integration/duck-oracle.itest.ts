@@ -391,6 +391,12 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     assert.ok(paths.some((p) => p.state === "ready"), "IT_ORACLE_JSON_PATHS=eager stored no JSON path: the run did not exercise them");
     // a jsonb sorted, grouped or compared is read from its stored key (src/duck/kept-route.ts ORDER_STEPS)
     assert.ok(orders.some((p) => p.table === "public.jorder"), "IT_ORACLE_JSON_PATHS=eager stored no jsonb's order: the run did not exercise it");
+    // under a libc collation a jsonb's equality is read from its stored C key, a second column (EQUAL_STEPS); under C
+    // and ICU the order's key serves it, and no second column is ever made
+    const equals = paths.filter((p) => p.steps.startsWith("equal:"));
+    console.log(`duck oracle: ${equals.filter((p) => p.state === "ready").length} jsonb equality key(s) stored (${equals.map((p) => `${p.table}.${p.column} ${p.state}`).join(", ")})`);
+    if (libc !== undefined) assert.ok(equals.some((p) => p.table === "public.jorder" && p.state === "ready"), "IT_ORACLE_JSON_PATHS=eager under libc stored no jsonb's C key: the run did not exercise it");
+    else assert.deepEqual(equals.map((p) => `${p.table}.${p.column} ${p.steps} ${p.state}`), [], "under C or ICU no jsonb's C key is stored: the order's key equates");
     assert.deepEqual(paths.filter((p) => p.state !== "ready").map((p) => `${p.table} ${p.column} ${p.steps}: ${p.state} ${p.why}`), [], "every path stored is ready");
   }
   // a filtered run asks only some statements: a decision it did not meet is not stale
