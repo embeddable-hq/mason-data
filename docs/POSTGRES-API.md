@@ -202,6 +202,12 @@ answer). `statement_timeout` is honoured, and may only shorten the run's own lim
 (the embedded Postgres validates it, inside a transaction it rolls back: the value is the session's alone); one it
 does not know is 42704.
 
+`SHOW ALL` (Postico sends it on connect) answers Postgres's three text columns, `name`, `setting` and
+`description`, a row per setting the embedded Postgres has, ordered by name, with this session's own values laid over
+(`TimeZone`, `search_path`, `application_name`, `DateStyle`, `ssl`, what it SET): each row's `setting` is what
+`SHOW <name>` answers. They are Mason's settings, never the source database's (`show-all` in
+[docs/SQL-SUPPORT.md](SQL-SUPPORT.md)).
+
 `BEGIN`, `COMMIT` and `ROLLBACK` are accepted and write nothing — there is nothing to write. A failed statement inside
 a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it.
 `CancelRequest` cancels the statement running on that session's backend.

@@ -53,7 +53,7 @@ import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postg
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
-import { staleDecisions, type Decided } from "./oracle/known.ts";
+import { staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
@@ -149,11 +149,29 @@ export function verdict(want: Answer, got: Answer, inOrder: boolean): { kind: "v
 }
 
 /**
+ * SHOW ALL's part that is the session's, held alike while the rest is Mason's own (Mason gap show-all): Postgres's
+ * fields (name, setting, description: text), and the settings both sessions set alike — TimeZone (SET at their start),
+ * search_path, application_name (the startup's), DateStyle.
+ */
+const SESSION_SET = ["TimeZone", "search_path", "application_name", "DateStyle"];
+function showAllHolds(want: Answered, got: Answered): string | null {
+  if (JSON.stringify([want.names, want.oids]) !== JSON.stringify([got.names, got.oids])) return `fields ${JSON.stringify([got.names, got.oids])} where Postgres sends ${JSON.stringify([want.names, want.oids])}`;
+  const setting = (a: Answered, name: string): string | null | undefined => a.rows.find((r) => r[0] === name)?.[1];
+  const parted = SESSION_SET.filter((n) => setting(want, n) === undefined || setting(got, n) !== setting(want, n));
+  return parted.length === 0 ? null : parted.map((n) => `${n}: ${JSON.stringify(setting(got, n))} where Postgres has ${JSON.stringify(setting(want, n))}`).join(", ");
+}
+
+/**
  * DECIDED DIFFERENCES: what the endpoint answers differently from Postgres on purpose, or cannot answer alike, each
  * with why. Each must STILL differ (a fixed one is removed), but one whose truth depends on the machine's floating-point
- * arithmetic (`machineFloat`, oracle/known.ts) may agree on this machine; nothing else may differ.
+ * arithmetic (`machineFloat`, oracle/known.ts) may agree on this machine; nothing else may differ. One that `holds`
+ * part of the answer may differ in any kind but there.
  */
 const KNOWN: Decided[] = [
+  // SHOW ALL (Postico sends it at every connection): the listener's settings — its catalog Postgres's, the session's
+  // laid over — never the source's, so its values differ (and its rows, where the two servers list other settings); its
+  // fields and the rows the sessions set are held alike (`holds`)
+  { sql: /^SHOW ALL$/, kind: "value", gap: "show-all", why: "the catalog Postgres's settings with the session's laid over, never the source's", holds: showAllHolds },
   // A NUMERIC COLUMN OF VALUES OF SEVERAL SCALES: Postgres keeps each value's (`1` beside `1.5`), a DuckDB DECIMAL
   // column has one (`1.0`). Only where values of two scales meet in ONE column — a UNION of an integer and a numeric,
   // a window function's default — which the exact programs (src/duck/rewrite.ts ExactColumn) cannot reach
@@ -329,8 +347,12 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       if (v !== null || "code" in got) unproven.add(q.sql);
       const k = KNOWN.find((x) => x.sql.test(q.sql));
       if (k) decided.add(k);
+      // a decision that HOLDS part of the answer alike (SHOW ALL's fields and the rows the sessions set): that part
+      // differing, or a refusal on either side, is a difference like any other; the rest may differ in any kind
+      const broken = k?.holds === undefined ? null : "code" in got ? `refused: ${got.code} ${got.message}` : "code" in want ? `answered where Postgres refuses ${want.code} ${want.message}` : k.holds(want, got);
+      if (broken !== null) { if (first) tallies.mason.differs++; differences.push({ phase, group: q.group, kind: "held", name: q.name, detail: broken, sql: q.sql }); continue; }
       // a decided case differing in ANOTHER way than decided is a difference like any other
-      if (k && (v === null || v.kind === k.kind)) { unproven.add(q.sql); if (first) { if (v === null) tallies.mason.exact++; else tallies.mason.decided++; } if (v !== null) { known.add(k); meet(k.gap); } continue; }
+      if (k && (v === null || v.kind === k.kind || k.holds !== undefined)) { unproven.add(q.sql); if (first) { if (v === null) tallies.mason.exact++; else tallies.mason.decided++; } if (v !== null) { known.add(k); meet(k.gap); } continue; }
       const gap = v === null ? null : namedGap(got);
       if (gap !== null) { if (first) tallies.mason.refused++; meet(gap); continue; }
       if (v !== null) { if (first) tallies.mason.differs++; differences.push({ phase, group: q.group, kind: v.kind, name: q.name, detail: v.detail, sql: q.sql }); continue; }
