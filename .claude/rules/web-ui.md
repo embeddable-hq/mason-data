@@ -8,8 +8,8 @@ paths:
 
 # The web page (`src/web/`, `mason ui`, docs/WEB-UI.md)
 
-`mason start`'s run serves one web page, with six pages in it, from its command server (src/cli/run-server.ts): a SHELL (`src/web/app.js`: a nav
-of four tabs and one section per page, the one shown chosen by the URL's hash, `#overview` the default) over a module
+`mason start`'s run serves one web page, with six pages in it, from its command server (src/cli/run-server.ts): a SHELL (`src/web/app.js`: a left
+sidebar — the project, a nav of links with icons (`renderNav`, `NAV_ICONS`), when it was updated and the version — and one section per page, the one shown chosen by the URL's hash, `#overview` the default) over a module
 per page (`src/web/pages/<id>.js`): the OVERVIEW (`status.js`: what `mason status` says), TABLES (what `mason tables`,
 `mason add` and `mason remove` do), USERS (what `mason user` does), and OBSERVABILITY's three views, QUERIES, USAGE and
 LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on it, under these rules.
@@ -19,9 +19,11 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   `failures`) are read by ONE function (`parseHash`), written by one (`hashOf`), and a page takes the parameters it knows
   in its `route(params, { doc })`. The hashes of before (`#status`, `#queries`, `#usage`, `#logs`, `#observability`) are
   `ALIASES` of the view they were: a bookmark lands where it did (`tests/web-page.test.ts` holds each).
-- **A page with a `parent` is a sub-tab** (`observability`, `GROUPS`): its tab is the parent's, and its views share
+- **A page with a `parent` is in its group** (`observability`, `GROUPS`): its link is under the group's heading in the
+  sidebar (always shown, the current page the view itself, `aria-current`), and its views share
   `ctx.range()` — `RANGES` in src/web/shared.js (Last hour · 24 hours · 7 days, 24 hours by default), each its `since`
-  for every endpoint and its usage step — kept in the hash (`?range=`), never in storage. A view builds its paths from
+  for every endpoint and its usage step — kept in the hash (`?range=`), never in storage, and in the group's links;
+  the range control is at the top of the view (`renderSubnav`), never in the sidebar. A view builds its paths from
   it, so a change of range is a new read of the view shown alone.
 
 - **A page is a module of its own, registered in three places** (the contract is at the top of src/web/app.js): its
@@ -103,6 +105,14 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
 - **The look is Vercel's dashboard's, from tokens**: every colour, space, radius, font and size is a custom property
   on `:root` in src/web/app.css, redefined for dark under `prefers-color-scheme`, so a page restyles by tokens and both
   themes come with it. Never a literal colour in a rule: a literal is the one place the dark theme forgets.
+- **The sidebar is the nav at every width, never a second one**: 232 px with labels; below 1000 px an icon rail, each
+  label its icon's tooltip and still the link's name; below 640 px a top bar whose menu button (`aria-expanded`,
+  `aria-controls`) opens the nav as a sheet — focus to its first link; Escape, a click outside, the focus leaving or a link
+  followed close it (`start`, held by `tests/web-page.test.ts` over the fake document). index.html's nav is the one
+  `renderNav` writes but its icons, so nothing moves when the script writes it. **An icon is Lucide's, vendored whole**
+  (`src/web/vendor/lucide-<version>/`, one `.mjs` per icon, the only `.mjs` a module may import), inline through
+  `icon(name)` of src/web/shared.js, 16 px, `currentColor`, `aria-hidden` beside its label: a new icon is its file, its
+  route, its line in the README and `ICONS`.
 - **Colour says a state or is the accent, nothing else**: green ok (ready, synced), amber warn (syncing, waiting),
   red bad (failed, error), gray unknown — always a dot AND the CLI's word (`status(kind, word)`, src/web/shared.js),
   never colour alone; the one accent is focus, a link and a chart's mark. No gradient, no shadow beyond a hairline:

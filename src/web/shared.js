@@ -4,6 +4,25 @@
  * run (`createAsk`). DOM-free, so tests/web-page.test.ts runs them under node.
  */
 
+// the nav's icons: Lucide's, vendored whole, one module per icon, each its SVG as a string (src/web/vendor/README.md)
+import layoutDashboard from "./vendor/lucide-1.56.0/layout-dashboard.mjs";
+import tableIcon from "./vendor/lucide-1.56.0/table.mjs";
+import usersIcon from "./vendor/lucide-1.56.0/users.mjs";
+import squareTerminal from "./vendor/lucide-1.56.0/square-terminal.mjs";
+import chartColumn from "./vendor/lucide-1.56.0/chart-column.mjs";
+import logsIcon from "./vendor/lucide-1.56.0/logs.mjs";
+import menuIcon from "./vendor/lucide-1.56.0/menu.mjs";
+import xIcon from "./vendor/lucide-1.56.0/x.mjs";
+
+/** The icons the page draws, by Lucide's name: each an inline SVG in `currentColor` (its size and stroke the stylesheet's). */
+export const ICONS = { "layout-dashboard": layoutDashboard, table: tableIcon, users: usersIcon, "square-terminal": squareTerminal,
+  "chart-column": chartColumn, logs: logsIcon, menu: menuIcon, x: xIcon };
+
+/** An icon, inline and decorative (the label beside it, or its control's own label, is what a reader hears):
+ *  `icon("table")`. A name it does not know is no icon. */
+export const icon = (name, cls = "") => Object.hasOwn(ICONS, name)
+  ? `<span class="icon${cls ? ` ${cls}` : ""}" aria-hidden="true">${ICONS[name].trim()}</span>` : "";
+
 /** A value as HTML text: every character that means something in HTML escaped. */
 export const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 

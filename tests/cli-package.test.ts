@@ -55,6 +55,8 @@ test("the package ships the web page: every file the command server serves is un
   assert.deepEqual(files, ["app.css", "app.js", "charts.js", "index.html", "pages/logs.js", "pages/queries.js", "pages/status.js", "pages/tables.js", "pages/usage.js", "pages/users.js", "shared.js",
     // vendored whole, with its licence (src/web/vendor/README.md): shipped and served like the page's own files
     "vendor/README.md", "vendor/geist-1.7.2/Geist-Variable.woff2", "vendor/geist-1.7.2/GeistMono-Variable.woff2", "vendor/geist-1.7.2/LICENSE.txt",
+    "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/logs.mjs",
+    "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
     "vendor/uplot-1.6.32/LICENSE.txt", "vendor/uplot-1.6.32/uPlot.esm.js", "vendor/uplot-1.6.32/uPlot.min.css"]
     .map((f) => path.join("web", f)));
   for (const f of files) assert.ok(shipped.includes(f), `${f} is copied into dist/src/ (a page module in a subfolder too)`);

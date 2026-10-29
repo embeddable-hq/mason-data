@@ -1,9 +1,11 @@
 /**
  * THE WEB PAGE OF `mason start` (`mason ui`; docs/WEB-UI.md, and .claude/rules/web-ui.md for whoever builds it out):
- * the SHELL — a nav of four tabs (Overview · Tables · Users · Observability, the last with three sub-tabs: Queries ·
- * Usage · Logs) and one section per page, the one shown chosen by the URL's hash (`#overview`, the default; an unknown
- * hash is the Overview; `#observability/queries?range=24h`, the shared time range of the three) — over the pages, each an ES module of src/web/pages/ rendered from the run's command
- * server's JSON (src/cli/run-server.ts) in the words the commands print.
+ * the SHELL — a left sidebar (the project, then a nav of links with icons: Overview · Tables · Users, and the
+ * Observability group: Queries · Usage · Logs; at its foot when it was updated and the version; an icon rail on a narrow
+ * window, a menu on a phone) and one section per page, the one shown chosen by the URL's hash (`#overview`, the
+ * default; an unknown hash is the Overview; `#observability/queries?range=24h`, the shared time range of the three) —
+ * over the pages, each an ES module of src/web/pages/ rendered from the run's command server's JSON
+ * (src/cli/run-server.ts) in the words the commands print.
  *
  * Plain JavaScript, ES modules, no framework and no build step: the server serves each file as it is (PAGE_ROUTES),
  * under a `default-src 'self'` policy. The renderers are PURE FUNCTIONS OF THE JSON, returning HTML strings (every
@@ -16,8 +18,8 @@
  *   export const page = { id, title, hash?, parent?, create(ctx) }
  *     id      its section (<section id="page-<id>"> in index.html) and its route (/pages/<id>.js); its hash too, unless
  *     hash    says another (`overview`, `observability/queries`): the address it is shown at
- *     title   its link in the nav (a tab; a sub-tab under its `parent`'s tab, `observability`, whose pages share the
- *             time range: ctx.range())
+ *     title   its link in the nav (under its `parent`'s group, `observability`, whose pages share the time range:
+ *             ctx.range()); its icon is the shell's (NAV_ICONS)
  *     create(ctx) → {
  *       reads()        [{ path, everyMs }]: what it reads WHILE SHOWN, each at its own rate (everyMs ≤ POLL_MS: every
  *                      poll); a path is the store's key, so a path built from the page's own state (a filter, a page
@@ -47,7 +49,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf, POLL_MS } from "./shared.js";
+import { esc, badge, icon, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -66,13 +68,16 @@ export { tableFacts, addedLines, removedReport, pickBody, renderTableAdded, rend
 export { renderUsers, renderAdded } from "./pages/users.js";
 export { renderRunning, renderRequests, renderSessions } from "./pages/queries.js";
 
-/** The pages, in the nav's order: a page with a `parent` is a sub-tab of its parent's tab. */
+/** The pages, in the nav's order: a page with a `parent` is in its parent's group. */
 export const PAGES = [statusPage, tablesPage, usersPage, queriesPage, usagePage, logsPage];
 
-/** The tabs a parent stands for: its title, and the first of its pages is where its tab goes. */
+/** The groups a parent stands for: its title, the heading of its pages in the nav. */
 const GROUPS = { observability: { title: "Observability" } };
 
-/** The hashes of before the Observability tab, and the tab's own: each lands on the view it was (`#status` the Overview). */
+/** Each page's icon in the nav (Lucide's names, src/web/shared.js ICONS): the shell's, so a page module stays its own. */
+export const NAV_ICONS = { status: "layout-dashboard", tables: "table", users: "users", queries: "square-terminal", usage: "chart-column", logs: "logs" };
+
+/** The hashes of before the Observability group, and the group's own: each lands on the view it was (`#status` the Overview). */
 const ALIASES = { status: "status", queries: "queries", usage: "usage", logs: "logs", observability: "queries" };
 
 const hashOfPage = (p) => p.hash ?? p.id;
@@ -99,7 +104,7 @@ export function hashOf(id, params = {}) {
   return `#${hashOfPage(p)}${qs ? `?${qs}` : ""}`;
 }
 
-/** The tabs, in order: a page of its own, or a group standing for its pages (`pages`), at the place of its first. */
+/** The nav's entries, in order: a page of its own, or a group holding its pages (`pages`), at the place of its first. */
 export function tabs() {
   const list = [];
   for (const p of PAGES) {
@@ -110,24 +115,33 @@ export function tabs() {
   return list;
 }
 
-/** The nav: a link per tab, the one holding the page shown marked as the current page; a group's link keeps the range. */
+/** One link of the nav: its icon and its label (the label is the link's name; on the icon rail, its tooltip). */
+const navLink = (p, shown, href) =>
+  `<a href="${esc(href)}"${p.id === shown ? ` aria-current="page"` : ""}>${icon(NAV_ICONS[p.id] ?? "")}<span class="label">${esc(p.title)}</span></a>`;
+
+/**
+ * THE SIDEBAR'S NAV: a link per page, each with its icon, the page shown marked as the current page; a group (the
+ * Observability views) is a heading over its pages' links, always shown, each keeping the range they share — so the
+ * hash is the state, and a link followed keeps the time range chosen.
+ */
 export const renderNav = (shown, range = DEFAULT_RANGE) => `<ul>${tabs().map((t) => {
-  const to = t.id !== t.pages[0] ? hashOf(t.pages[0], { range }) : hashOf(t.id);
-  return `<li><a href="${esc(to)}"${t.pages.includes(shown) ? ` aria-current="page"` : ""}>${esc(t.title)}</a></li>`;
+  const own = PAGES.find((p) => p.id === t.id);
+  if (own) return `<li>${navLink(own, shown, hashOf(own.id))}</li>`;
+  const pages = t.pages.map((id) => PAGES.find((p) => p.id === id));
+  return `<li class="group"><p class="group-title" id="nav-${esc(t.id)}">${esc(t.title)}</p><ul aria-labelledby="nav-${esc(t.id)}">` +
+    pages.map((p) => `<li>${navLink(p, shown, hashOf(p.id, { range }))}</li>`).join("") + `</ul></li>`;
 }).join("")}</ul>`;
 
 /**
- * THE SUB-NAV of a group's page (the Observability tab's): its pages as a secondary underline nav, then the time range
- * they share as a segmented control — each a link to the same view at that range, so the hash is the state and Back
- * goes to the range before. "" for a page of its own.
+ * THE HEAD OF A GROUP'S PAGE (the Observability views'): the group's name and the time range they share as a segmented
+ * control — each a link to the same view at that range, so the hash is the state and Back goes to the range before.
+ * The views themselves are the sidebar's links. "" for a page of its own.
  */
 export function renderSubnav(shown, range = DEFAULT_RANGE) {
   const p = PAGES.find((x) => x.id === shown);
   if (!p?.parent) return "";
-  const siblings = PAGES.filter((x) => x.parent === p.parent);
   const r = rangeOf(range);
-  return `<nav class="subtabs" aria-label="${esc(GROUPS[p.parent]?.title ?? p.parent)}"><ul>${siblings.map((x) =>
-    `<li><a href="${esc(hashOf(x.id, { range: r }))}"${x.id === shown ? ` aria-current="page"` : ""}>${esc(x.title)}</a></li>`).join("")}</ul></nav>` +
+  return `<p class="crumb">${esc(GROUPS[p.parent]?.title ?? p.parent)}</p>` +
     `<div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) =>
       `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}>${esc(v.label)}</a>`).join("")}</div>`;
 }
@@ -195,6 +209,10 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
         // the demo database is said beside its name, so a person never takes it for their own
         badge: st?.source?.demo ? badge("demo", "accent") : "",
         updated: m.updatedAt ? esc(updatedText(m.updatedAt, now())) : "",
+        // the run's version, as mason status's Mason line says it (engine.version)
+        version: typeof st?.engine?.version === "string" ? `Mason ${esc(st.engine.version)}` : "",
+        // the phone's menu button: both icons, the stylesheet shows the one its aria-expanded says
+        "menu-icon": icon("menu", "when-closed") + icon("x", "when-open"),
         poll: m.pollFailure ? renderFailure(m.pollFailure) : "",
         ...Object.assign({}, ...[...pages.values()].map((p) => p.view())),
       };
@@ -248,6 +266,21 @@ export function start(doc, win) {
     try { await app.poll(); } finally { busy = false; paint(); }
   };
   const shownPage = () => app.pages.get(app.model.shown);
+  // THE PHONE'S MENU: the sidebar's nav as a sheet, opened by its button (shown below 640 px only). Open, the focus is
+  // on its first link; Escape, a click outside it, the focus leaving it or a link followed close it, the focus back on
+  // the button (but when the focus left by itself, to where it went)
+  const sidebar = doc.getElementById("sidebar");
+  const menuButton = doc.getElementById("menu-button");
+  let menuOpen = false;
+  const setMenu = (open, focus) => {
+    menuOpen = open;
+    if (open) sidebar?.setAttribute?.("data-open", ""); else sidebar?.removeAttribute?.("data-open");
+    menuButton?.setAttribute?.("aria-expanded", String(open));
+    if (focus) (open ? doc.getElementById("nav")?.querySelector?.("a") : menuButton)?.focus?.();
+  };
+  const inMenu = (t) => Boolean(t) && (sidebar?.contains?.(t) ?? false);
+  doc.addEventListener("keydown", (e) => { if (e.key === "Escape" && menuOpen) { e.preventDefault?.(); setMenu(false, true); } });
+  doc.addEventListener("focusin", (e) => { if (menuOpen && !inMenu(e.target)) setMenu(false, false); });
   doc.addEventListener("submit", async (e) => {
     const r = shownPage().submit?.(e.target, win.FormData) ?? null;
     if (r === null) return;
@@ -259,6 +292,8 @@ export function start(doc, win) {
   });
   doc.addEventListener("click", async (e) => {
     const b = e.target.closest?.("button");
+    if (b?.dataset.menu !== undefined) { setMenu(!menuOpen, true); return; }
+    if (menuOpen && !inMenu(e.target)) { setMenu(false, true); return; }
     if (!b) return;
     const r = shownPage().click?.(b.dataset, b, { doc, win }) ?? null;
     if (r === null) return;
@@ -279,7 +314,7 @@ export function start(doc, win) {
   }, true);
   doc.addEventListener("pointerdown", () => { pressedAt = Date.now(); });
   for (const type of ["pointerup", "pointercancel"]) doc.addEventListener(type, () => { pressedAt = null; win.setTimeout(paint, 0); });
-  win.addEventListener?.("hashchange", () => { app.show(win.location.hash, { doc }); paint(); void poll(); });
+  win.addEventListener?.("hashchange", () => { if (menuOpen) setMenu(false, true); app.show(win.location.hash, { doc }); paint(); void poll(); });
   if (charts !== null) {
     win.addEventListener?.("resize", () => charts.resize());
     win.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", () => charts.retheme());
