@@ -88,8 +88,8 @@ first, and `mason start` copies what the file names:
 
 ```bash
 cd your-app
-mason init
-mason init postgres://me:secret@localhost:5432/your_app   # no DATABASE_URL in .env? give the URL: it is written there for you
+mason init                           # reads DATABASE_URL from .env.local, .env or the shell; with none, instead:
+# mason init postgres://me:secret@localhost:5432/your_app   # the URL is written to .env for you
 mason tables                         # what this database has: rows, keys, what is added
 mason add orders customers           # add them (--columns id,status,total: those only, one table at a time)
 mason start                          # Mason in the background, for this folder: the copy begins; returns once it is up
