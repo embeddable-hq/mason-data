@@ -103,11 +103,28 @@ export const ORDER_STEPS = "order";
 export const KEY_NULL_HEX = "00";
 export const KEY_RECOMPUTE_HEX = "0021";
 export const isOrderRead = (r: { steps: string }): boolean => r.steps === ORDER_STEPS || r.steps.startsWith(`${ORDER_STEPS}:`);
+/**
+ * A JSONB'S EQUALITY, AS A READ, under a LIBC collation alone (src/duck/rewrite.ts `equalKey`): `GROUP BY j`, `DISTINCT
+ * j`, `j = k`, `j IN (…)`, a join on `=`, `count(DISTINCT j)` compare the C key — a libc order's key refuses a string
+ * its measured order does not cover, where equality never needed an order (docs/DESIGN.md "jsonb's order"), so the
+ * order's stored key cannot serve them, and over 20 M rows a GROUP BY computed the C key per row for ~20 s. So the C key
+ * is a read of its own, stored beside the order's as `EQUAL_STEPS:<id>` (src/duck/kept.ts `equalId`). Under C and ICU
+ * the order's key equates exactly and never refuses, so equality reads IT and this read is never recorded nor stored
+ * (src/duck/kept.ts `own` folds one into the order's).
+ */
+export const EQUAL_STEPS = "equal";
+export const isEqualRead = (r: { steps: string }): boolean => r.steps === EQUAL_STEPS || r.steps.startsWith(`${EQUAL_STEPS}:`);
+/** a jsonb's key, the order's or the equality's: a BLOB column of the key's bytes, its marks `KEY_NULL_HEX` and
+ *  `KEY_RECOMPUTE_HEX`, stored under an id of what its bytes depend on */
+export const isKeyRead = (r: { steps: string }): boolean => isOrderRead(r) || isEqualRead(r);
 
 /** a read as a developer writes it: `payload ->> 'customer_id'`, `payload #> '{a,0}'`; a stored path (no `asText`) as
- *  its `->` read; a jsonb's order as what reads it */
+ *  its `->` read; a jsonb's order and equality as what reads each (under libc the order's key sorts and the C key
+ *  equates, two columns: `mason status` names each by its own) */
 export function pathText(r: Omit<JsonRead, "asText" | "source"> & { asText?: boolean }): string {
-  if (isOrderRead(r)) return `ORDER BY ${r.column} (its jsonb order: sorted, grouped and compared)`;
+  if (isEqualRead(r)) return `GROUP BY ${r.column} (its jsonb equality: grouped, DISTINCT, = and IN)`;
+  if (isOrderRead(r)) return r.steps.startsWith(`${ORDER_STEPS}:libc:`) ? `ORDER BY ${r.column} (its jsonb order: sorted, and compared by < and >)`
+    : `ORDER BY ${r.column} (its jsonb order: sorted, grouped and compared)`;
   const steps = JSON.parse(r.steps) as Array<string | number>;
   const op = (one: boolean): string => one ? (r.asText ? "->>" : "->") : (r.asText ? "#>>" : "#>");
   if (steps.length === 1 && !r.either) {
