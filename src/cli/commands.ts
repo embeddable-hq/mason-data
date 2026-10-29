@@ -1348,7 +1348,7 @@ async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
     const st = styleOut();
     if (!requests.length) out(`No ${filtered ? "request that passes the filters" : "request"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS).`);
     for (const r of requests) out(requestLine(r, st));
-    out(endText({ next, ...(!requests.length && !filtered ? { tips: [UNLISTED_STATEMENTS] } : {}) }, st));
+    out(endText({ next, ...(!requests.length && !filtered ? { tips: [`${UNLISTED_STATEMENTS}.`] } : {}) }, st));
     return 0;
   });
 }

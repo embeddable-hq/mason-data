@@ -339,7 +339,7 @@ export function renderChecklist(s, queries, users) {
   ];
   const done = steps.filter(([, ok]) => ok).length;
   return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title">Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
-    steps.map(([what, ok, action]) => `<li class="${ok ? "done" : "todo"}"><span class="mark" aria-hidden="true">${ok ? "✓" : "○"}</span><span class="what">${esc(what)}<span class="sr">${ok ? " (done)" : " (to do)"}</span></span>${ok ? "" : action}</li>`).join("") +
+    steps.map(([what, ok, action]) => `<li class="${ok ? "step-done" : "step-todo"}"><span class="mark" aria-hidden="true">${ok ? "✓" : "○"}</span><span class="what">${esc(what)}<span class="sr">${ok ? " (done)" : " (to do)"}</span></span>${ok ? "" : action}</li>`).join("") +
     `</ol></div>`;
 }
 

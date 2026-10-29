@@ -58,6 +58,9 @@ import { page as usersPage } from "./pages/users.js";
 import { page as usagePage } from "./pages/usage.js";
 import { page as logsPage } from "./pages/logs.js";
 
+/** What the shell itself reads when the page shown does not: the state (the sidebar's project, badge and version). */
+const SHELL_STATE = { path: "/api/state", everyMs: 60_000 };
+
 /** The longest a pointer's press holds the page's writes (a click is well under it): see `pressedAt`. */
 export const PRESS_HOLD_MS = 2000;
 
@@ -190,7 +193,10 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
     /** Read the shown page's reads that are due: those at the poll's rate every time, the slower ones once their time is up. */
     async poll() {
       const page = pages.get(m.shown);
-      const reads = page.reads();
+      // the sidebar's project, demo badge and version are the state's: a page that does not read it (Users) has it read
+      // once a minute beside its own, so a page opened at its own address never shows an empty sidebar
+      const pageReads = page.reads();
+      const reads = pageReads.some((r) => r.path === SHELL_STATE.path) ? pageReads : [...pageReads, SHELL_STATE];
       const at = now().getTime();
       const due = reads.filter((r) => r.everyMs <= POLL_MS || !store.has(r.path) || at - store.get(r.path).at >= r.everyMs - POLL_MS / 2);
       const rs = await Promise.all(due.map((r) => ask(r.path)));

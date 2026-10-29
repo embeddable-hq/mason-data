@@ -1371,7 +1371,7 @@ test("the users: read with their last use, every 30 s; Copy puts the URL without
   const app = fn<[unknown, () => Date], App & { pages: Map<string, { click(d: unknown, b: unknown, w: unknown): Promise<void> | null }> }>("createApp")(run.fetch, () => new Date(t));
   app.show("users");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), [U], "on opening");
+  assert.deepEqual(await asked(), [U, "GET /api/state"], "on opening: its own, and the state for the sidebar (once a minute)");
   t += 2000;
   assert.deepEqual(await asked(), [], "not at the 2 s poll");
   t += 28_000;
@@ -1474,13 +1474,13 @@ test("Usage: reads the day and week, and the 24 hours an hour a line, every 60 s
   const app = fn<[unknown, () => Date], App>("createApp")(run.fetch, () => new Date(t));
   app.show("usage");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), ["GET /api/queries", "GET /api/usage?since=24h&step=3600"]);
+  assert.deepEqual(await asked(), ["GET /api/queries", "GET /api/usage?since=24h&step=3600", "GET /api/state"], "its own, and the sidebar's state");
   const v = app.view();
   assert.match(textOf(v["usage-queries"]!), /Statements 1,204/);
   assert.match(textOf(v["usage-hourly"]!), /2026-10-28 09:05 1,204 3/);
   assert.match(textOf(v["usage-sizes"]!), /public\.orders 3\.0 GiB/);
   t += 2000; assert.deepEqual(await asked(), [], "2 s on: nothing is due");
-  t += 58_000; assert.deepEqual(await asked(), ["GET /api/queries", "GET /api/usage?since=24h&step=3600"], "60 s on: both again");
+  t += 58_000; assert.deepEqual(await asked(), ["GET /api/queries", "GET /api/usage?since=24h&step=3600", "GET /api/state"], "60 s on: both again (and the sidebar's state, a minute old)");
   app.show("status"); assert.deepEqual((await asked()).includes("GET /api/queries"), false, "not while another page is shown");
   // the hours refused (a step the run does not take): the server's Failure, said once under the hours; the first read's is the banner
   app.show("usage");
@@ -1543,7 +1543,7 @@ test("Logs: the events every 10 s; the run's raw log sits behind a closed detail
   const app = fn<[unknown, () => Date], App & { showRawLog(open: boolean): Promise<void> }>("createApp")(run.fetch, () => new Date(t));
   app.show("logs");
   const asked = async () => { run.asked.length = 0; await app.poll(); return [...run.asked]; };
-  assert.deepEqual(await asked(), ["GET /api/events?limit=500&since=24h"], "closed: the log is not read");
+  assert.deepEqual(await asked(), ["GET /api/events?limit=500&since=24h", "GET /api/state"], "closed: the log is not read (the state is the sidebar's)");
   assert.match(textOf(app.view()["logs-events"]!), /✗ copy_failed/);
   const closed = app.view()["logs-run"]!;
   assert.equal(closed, `<details id="logs-raw"><summary>The run's raw log (for debugging)</summary></details>`);
@@ -2199,7 +2199,7 @@ test("the shared range: each Observability view reads its span — the request l
   const asked = async (hash: string) => { app.show(hash); t += 120_000; run.asked.length = 0; await app.poll(); return [...run.asked]; };
   assert.ok((await asked("#observability/queries?range=1h")).includes("GET /api/requests?since=1h"), "Queries: the last hour's requests");
   assert.ok((await asked("#observability/usage?range=1h")).includes("GET /api/usage?since=1h&step=60"), "Usage: the hour, a minute a point");
-  assert.deepEqual(await asked("#observability/logs?range=1h"), ["GET /api/events?limit=500&since=1h"], "Logs: the hour's events, and nothing of the other views");
+  assert.deepEqual(await asked("#observability/logs?range=1h"), ["GET /api/events?limit=500&since=1h", "GET /api/state"], "Logs: the hour's events, and nothing of the other views (the state is the sidebar's, once a minute)");
   assert.ok((await asked("#observability/usage?range=7d")).includes("GET /api/usage?since=7d&step=21600"), "the week, six hours a point");
   assert.ok((await asked("#observability/usage")).includes("GET /api/usage?since=24h&step=3600"), "no range: the 24 hours");
   // a page of its own keeps the range it does not use; going back to a sub-tab with no range is the default again
@@ -2724,7 +2724,7 @@ test("the Overview's first-run checklist: running, a table copied, a user create
   // a fresh install: a table added and copied, no user, nothing asked
   const fresh = renderChecklist(RUNNING, NO_QUERIES, noUser);
   assert.equal(textOf(fresh), "Getting started 2 of 4 done ✓ Mason is running (done) ✓ A table copied (done) ○ A user created (to do) Create a user ○ A first statement answered (to do) Copy the psql line then run a select on a copied table");
-  assert.match(fresh, /<li class="todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">A user created<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user<\/a><\/li>/, "the next step is the primary action");
+  assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">A user created<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user<\/a><\/li>/, "the next step is the primary action");
   assert.match(fresh, /<button type="button" class="small" data-copy="connect-psql">Copy the psql line<\/button>/, "Connect's psql line, copied by its own Copy's handler");
   // nothing added: Add a table leads to Tables; nothing to copy the psql line for yet
   const none = renderChecklist(NONE, NO_QUERIES, noUser);
@@ -2751,4 +2751,17 @@ test("the Overview's first-run checklist: running, a table copied, a user create
   assert.match(text, /^Ready Getting started 2 of 4 done /);
   assert.ok(text.indexOf("Getting started") < text.indexOf("Tables synced"), "above the cards");
   assert.match(text, /psql psql 'postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop' Copy/, "the psql line it copies is on the page, Connect's");
+});
+
+test("a page opened at its own address that reads no state (Users) still has the sidebar's project, badge and version: the shell reads the state once a minute beside it", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(RUNNING));
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  const app = fn<[unknown, () => Date, string], App>("createApp")(run.fetch, () => new Date(t), "#users");
+  await app.poll();
+  assert.deepEqual(run.asked, ["GET /api/users?lastUsed=1", "GET /api/state"], "the page's own read first: its failure is the banner");
+  assert.notEqual(app.view().where, "", "the sidebar names the database");
+  assert.match(app.view().version!, /^Mason /);
+  run.asked.length = 0; t += 30_000; await app.poll();
+  assert.deepEqual(run.asked, ["GET /api/users?lastUsed=1"], "the state is the sidebar's: once a minute, not at the page's rate");
 });
