@@ -56,7 +56,13 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
     Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's
     (findTargetlistEntrySQL92), the same tree inside an expression the input's (`bareKeyIsInput`);
-  A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`.
+  A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
+  **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
+  independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the
+  nulls idiom with a bare name an output alias shadows, and with an integer constant; a prepared statement executed
+  after a later `SET`; `SELECT *` beside the named columns; each collation kind (C, ICU, a libc order) where a string
+  is compared, and equality apart from order (equality needs no collation); a NULL or a row-held argument where
+  Postgres is strict.
 - **A new rewrite for speed is held by the PLAN fixture too** (`tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`):
   its statement in the tool's own spelling, over the shop's million orders, its plan's skeleton in the fixture (the
   operators, each scan's table and top-N / zone-map filter, the Mason functions, a delimiter join, a full sort), and
@@ -143,6 +149,20 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     with `->` or a number, never a string's `->>`;
   - **the JSON paths statements keep reading are stored as columns** (below), which answers a number's digits and
     the rest from a plain column. ("The executor worker", "A `->>` is DuckDB's own read")
+- **A jsonb is sorted, grouped and compared by ONE key, `jsonbKey` (src/duck/jsonb-order.ts), never by its text**:
+  Postgres orders jsonb by its own rules (`[] < 1 < [1]`, objects by size first) and equates `1.0` with `1.00`, so
+  every form that compares two jsonb — ORDER BY, GROUP BY, DISTINCT [ON], PARTITION BY, =, <, IN, BETWEEN, IS DISTINCT
+  FROM, NULLIF, CASE x WHEN, count(DISTINCT) — is rewritten to compare `__mason_jsonb_key*` (`jsonbKey` in
+  src/duck/rewrite.ts), and every other form refuses with `jsonb-compare`. A rule that compares values (a new
+  construct, a sort) asks `comparable`, which refuses a jsonb, or keys it; the allowlist does not see a sort's or a
+  group's operator, so nothing else stops DuckDB's text equality. **Equality reads the C key, an order the
+  collation's**: the database's collation is deterministic (equal strings are equal bytes), so =, IN, GROUP BY,
+  DISTINCT, PARTITION BY … read `equalKey`, and only ORDER BY, <, >, BETWEEN must read the collation's key of each
+  string (ICU's, or the measured libc order's, which refuses a character it does not cover: equality must never
+  refuse what it never had to order). Under C and ICU the order's key equates exactly and never refuses, so
+  `equalKey` is it (and may be stored); under libc it is the C key, computed. A node the rewrite typed as another (`typedLike`) keeps
+  that type through `clone`. `tests/duck-jsonb-order.test.ts` holds the key to
+  Postgres's order under C, ICU and libc, and the oracle's `jorder` every form. ("jsonb's order")
 
 ## Stored JSON paths (src/duck/kept.ts, src/duck/kept-route.ts; docs/DESIGN.md "Stored JSON paths")
 
@@ -200,6 +220,20 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   `t.*`, a NATURAL JOIN, a whole row) reads the copy's view of its visible columns (`__mason_visible`, `hideKept`), and
   every copy served has that view. PGlite's catalog never has the column (`schemaBuilt` reads the copy's recorded
   columns), and nothing else may `SELECT *` a copy into an answer.
+- **A jsonb's order is stored as a read like a path's** (`ORDER_STEPS`, src/duck/kept-route.ts; the PR's measurement:
+  `ORDER BY j LIMIT 100` over 20 M rows, 19 s by the key's function under C and 83 s under libc, 0.14 s from the
+  stored key): the rewrite records `ORDER BY` / `GROUP BY` / `=` of a copied jsonb column as a read (`keptKey`), the
+  policy weighs it as any path, and the column (BLOB) holds the key by the functions the statement's key calls
+  (`JSONB_KEY_FUNCTIONS`, their `_stored` twins answering NULL where the key raises: the row is marked, its read
+  raises). **A key is its bytes' inputs'**: stored as `ORDER_STEPS:<id>` (`orderId`: the collation, a libc order's
+  content hashed, `KEY_VERSION` and `DUCKDB_VERSION` — bump `KEY_VERSION` with any change of the key's bytes); until
+  the listener tells the collation (`orderBy`) a write leaves it unset and no plan reads it, then the unset rows are
+  swept, a chunk a writer's turn, and it is ready; another id's is dropped. **A mark is never read as a value**: a
+  stream or a poll may write a marked row after the count (a libc string the order does not cover), so the exact read
+  raises at a mark by the column alone (`markedError`: the gap for a libc key, else a Mason bug) until the detector
+  counts it and turns the reads to the CASE. A statement that lists the columns (`*`) reads none, so
+  its sort computes the key per row. `tests/duck-json-columns.test.ts` holds the key to the function under C, ICU and
+  libc and every write path to it; `IT_ORACLE_JSON_PATHS=eager` reads every jsonb sort from it.
 ## What is not supported, and how the list stays true
 
 - **An allowlist, not a blocklist**: DuckDB answers only a statement whose every resolved piece is in

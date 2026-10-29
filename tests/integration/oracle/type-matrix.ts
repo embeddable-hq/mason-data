@@ -78,6 +78,24 @@ const CASTABLE: Array<[number, string]> = [
   [99, "not a value"],
 ];
 
+/**
+ * JSONB IN POSTGRES'S ORDER (src/duck/jsonb-order.ts): each type at the top and inside, sizes, an object's keys in
+ * storage order (`{"b", "aa"}` against `{"a", "bb"}`), numbers equal at other scales and in other spellings (`1.0`,
+ * `1.00`, `1e2`, `-0`), the raw scalar's place between `[]` and `[x]`, nested empty containers, a key held twice, and
+ * strings that differ in case, accent, punctuation or script — compared under the database's collation, which the
+ * oracle is run under (C, ICU and glibc's en_US.utf8 each sort these differently). No combining mark: a libc
+ * collation refuses one (libc-uncovered).
+ */
+export const JORDER: Array<string | null> = [
+  null, "null", "true", "false", "0", "-0", "0.0", "1", "1.0", "1.00", "10", "9.5", "-1", "-10", "-9.5", "-0.5", "-0.50", "1e2", "100", "1E+2",
+  "0.001", "1e-3", "123456789012345678901234567890.5", "-123456789012345678901234567890", "2.5e-30",
+  '""', '"a"', '"A"', '"b"', '"B"', '"ab"', '"Ab"', '"aB"', '"a b"', '"a-b"', '"ab-"', '"é"', '"e"', '"\\u00e9"', '"E"', '"z"', '"\\n"', '"\\"q\\""', '"\\ud83d\\ude00"',
+  '"日本"', '"ß"', '"ss"', '"Zürich"', '"zulu"', '"10"', '"9"', '"$x"', '"@x"',
+  "[]", "[null]", "[1]", "[1.0]", "[2]", "[1, 2]", "[2, 1]", "[[]]", "[{}]", '["a"]', '["B"]', '["b"]', "[1, [2]]", "[[1], 1]", "[true, false]", "[[], []]", "[[[]]]",
+  "{}", '{"a": 1}', '{"a": 1.0}', '{"a": 2}', '{"b": 1}', '{"B": 1}', '{"A": 1}', '{"a": null}', '{"a": []}', '{"a": {}}', '{"a": "1"}', '{"a": "B"}', '{"a": "b"}',
+  '{"a": 1, "b": 2}', '{"b": 1, "aa": 1}', '{"a": 1, "bb": 1}', '{"aa": 1}', '{"Ab": 1}', '{"a": {"b": [1, "x"]}}', '{"a": 1, "a": 2}', '{"é": 1}', '{"e": 1}', '{"a": 1, "B": 2}',
+];
+
 export const COLL: Array<[number, string | null]> = [
   [1, "대지"], [2, "Animal"], [3, "zebra"], [4, "Dob"], [5, "Do\uFFFDa"], [6, "$x"], [7, "€x"], [8, "@x"], [9, "~x"], [10, "ab"],
   [11, "a-b"], [12, "a b"], [13, "가나"], [14, "나"], [15, "가가"], [16, "-"], [17, "--"], [18, "-@"], [19, "@"], [20, "三"],
@@ -141,6 +159,8 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   "CREATE TABLE public.late (id int PRIMARY KEY, j jsonb, k int, c int); " +
   "INSERT INTO public.late SELECT g, jsonb_build_object('n', CASE WHEN g = 2000 THEN 'x' ELSE g::text END, 'd', jsonb_build_object('os', 'ios' || g % 7)), 2000 - g, g % 50 FROM generate_series(1, 2000) g; " +
   "CREATE TABLE public.late_c (id int PRIMARY KEY, name text); INSERT INTO public.late_c SELECT g, 'c' || g FROM generate_series(0, 49) g;" +
+  // JSONB IN POSTGRES'S ORDER (JORDER above), beside a json of the same text, which has no order at all
+  `CREATE TABLE public.jorder (id int PRIMARY KEY, j jsonb, js json); INSERT INTO public.jorder VALUES ${JORDER.map((v, i) => `(${i + 1}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};` +
   // INSTANTS AT A TRUNCATION'S EDGES (date_trunc of a timestamptz, in the session's zone or a zone of its own): each side
   // of Europe/Berlin's and America/New_York's changes of 2026, a repeated hour's two halves, before 1970, a zone's local
   // mean time (1880), the first instant of a week, a century and a millennium, a microsecond, ±infinity and NULL
@@ -181,6 +201,8 @@ const LITERALS: Partial<Record<Col, string[]>> = {
   d: ["'2026-01-01'", "'2024-02-29 12:00'", "now()"], ts: ["'2026-01-01'", "'2024-02-29 12:30:00.5'", "now()"], tz: ["'2026-01-01'", "'2024-02-29 23:30:00-05'", "now()"],
   iv: ["'1 day'", "'24 hours'", "'1 mon'"], tm: ["'12:00'", "'00:00:00'", "'23:59:59.999999'"], u: ["'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'"],
   ci: ["'finalized'", "'DRAFT'", "'é'"], ip: ["'10.3.6.45'", "'10.0.0.0/8'", "'::1'"],
+  // a jsonb by its own order: an object equal to two of typed's at another scale, a raw scalar, an empty array
+  jb: ["'{\"a\": 1.00}'", "'1.5'", "'[]'"],
 };
 
 function* matrix(): Generator<Matrixed> {
@@ -339,6 +361,62 @@ function* matrix(): Generator<Matrixed> {
     .flatMap((e) => [`"JB" #>> '${e}'`, `"J" #>> '${e}'`]).join(", ") + ", jsonb_extract_path_text(\"JB\", '+1'), json_extract_path_text(\"J\", ' 1'), \"JB\" #>> '{o,b,+1}' FROM jcased ORDER BY id");
   yield q("jsonb operators", "SELECT id, jb @> '{\"a\": 1}', jb <@ '{\"a\": 1, \"b\": 2}', jb ? 'a', jb ?| ARRAY['a', 'z'], jb ?& ARRAY['a', 'b'], jb || '{\"z\": 0}', jb - 'a' FROM typed ORDER BY id");
   yield q("jsonb sorted", "SELECT id, jb FROM typed ORDER BY jb, id");
+  // ---- jsonb's order and equality (src/duck/jsonb-order.ts), over JORDER: every pair compared, sorted every way ----
+  yield q("jsonb: every pair compared", "SELECT a.id, string_agg(CASE WHEN a.j < b.j THEN '<' WHEN a.j = b.j THEN '=' WHEN a.j > b.j THEN '>' ELSE 'n' END, '' ORDER BY b.id) FROM jorder a, jorder b GROUP BY a.id ORDER BY 1");
+  yield q("jsonb: every pair by <=, >=, <>", "SELECT a.id, count(*) FILTER (WHERE a.j <= b.j), count(*) FILTER (WHERE a.j >= b.j), count(*) FILTER (WHERE a.j <> b.j) FROM jorder a, jorder b GROUP BY a.id ORDER BY 1");
+  yield q("jsonb: sorted", "SELECT id, j FROM jorder ORDER BY j, id");
+  yield q("jsonb: sorted DESC NULLS FIRST", "SELECT id FROM jorder ORDER BY j DESC NULLS FIRST, id");
+  // the BI tool's click on a column (Trevor.io): its NULLs first, then the values in descending order
+  yield q("jsonb: a BI tool's sort of a clicked column", `SELECT "e"."id", "e"."j" FROM "public"."jorder" AS "e" ORDER BY ("e"."j") IS NULL ASC, "e"."j" DESC, "e"."id" LIMIT 100`);
+  yield q("jsonb: sorted by a member, in a window, in an aggregate", "SELECT id, rank() OVER (ORDER BY j), row_number() OVER (ORDER BY j -> 'a', id), count(*) OVER (PARTITION BY j) FROM jorder ORDER BY id");
+  yield q("jsonb: an aggregate's ORDER BY", "SELECT string_agg(id::text, ',' ORDER BY j DESC, id), jsonb_agg(j ORDER BY j, id) FROM jorder");
+  yield q("jsonb: grouped, counted", "SELECT count(*), min(id), max(id) FROM jorder GROUP BY j ORDER BY 2");
+  yield q("jsonb: grouped by a member", "SELECT count(*), min(id) FROM jorder GROUP BY j -> 'a' ORDER BY 2");
+  yield q("jsonb: count(DISTINCT)", "SELECT count(DISTINCT j), count(DISTINCT j -> 'a') FROM jorder");
+  yield q("jsonb: DISTINCT ON", "SELECT DISTINCT ON (j) id, j FROM jorder ORDER BY j, id");
+  yield q("jsonb: DISTINCT, counted", "SELECT count(*) FROM (SELECT DISTINCT j FROM jorder) s");
+  yield q("jsonb: IN, BETWEEN, = ANY", "SELECT id FROM jorder WHERE j IN ('1', '[]', '{\"a\": 1.0}', '\"E\"') OR j BETWEEN '\"b\"' AND '\"z\"' OR j = ANY (ARRAY['[1]'::jsonb, '{}']) ORDER BY id");
+  yield q("jsonb: IS DISTINCT FROM, NULLIF, CASE", "SELECT id, j IS DISTINCT FROM '1.00', j IS NOT DISTINCT FROM '[]', nullif(j, '[]'), CASE j WHEN '{}' THEN 'empty' WHEN '1' THEN 'one' ELSE 'other' END FROM jorder ORDER BY id");
+  yield q("jsonb: joined on =", "SELECT a.id, b.id FROM jorder a JOIN jorder b ON a.j = b.j AND a.id < b.id ORDER BY 1, 2");
+  yield q("jsonb: HAVING", "SELECT min(id), count(*) FROM jorder GROUP BY j HAVING j > '[]' AND count(*) > 1 ORDER BY 1");
+  // A GROUPED VIEW, as a BI tool sends it: the ORDER BY over the output name, the ordinal or the nulls idiom is keyed
+  // over the group's value. Over one text of each value (twice for some, so the counts differ): a group of values
+  // written apart writes one of them (jsonb-equal-text), here there is one
+  const once = "SELECT j FROM public.jorder WHERE id IN (SELECT min(id) FROM public.jorder GROUP BY j)";
+  const g = `(${once} UNION ALL ${once} AND id % 4 = 0)`;
+  yield q("jsonb: grouped view, ORDER BY the column DESC", `SELECT j, count(*) FROM ${g} AS e GROUP BY j ORDER BY j DESC, 2`);
+  yield q("jsonb: grouped view, ORDER BY its output name", `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM ${g} AS "e" GROUP BY 1 ORDER BY "e.j" DESC, "count" DESC LIMIT 100 OFFSET 0`);
+  yield q("jsonb: grouped view, its NULLs first", `SELECT "e"."j" AS "e.j", count(*) AS "count" FROM ${g} AS "e" GROUP BY 1 ORDER BY ("e"."j") IS NULL ASC, "e"."j" DESC LIMIT 100 OFFSET 0`);
+  yield q("jsonb: grouped view, ORDER BY 1", `SELECT j, count(*) FROM ${g} AS e GROUP BY j ORDER BY 1`);
+  // the group's own tree, qualified, sorted: under libc the group is the equality key and the sort the collation's, so
+  // the sort reads the group's value (any_value), never the column
+  yield q("jsonb: grouped view, qualified, ORDER BY the column", `SELECT e.j, count(*) FROM ${g} AS e GROUP BY e.j ORDER BY e.j`);
+  yield q("jsonb: grouped view, qualified, ORDER BY the column DESC", `SELECT e.j, count(*) FROM ${g} AS e GROUP BY e.j ORDER BY e.j DESC, 2`);
+  yield q("jsonb: grouped view, qualified, its NULLs last", `SELECT e.j, count(*) FROM ${g} AS e GROUP BY e.j ORDER BY e.j IS NULL, e.j DESC`);
+  yield q("jsonb: grouped view, HAVING",`SELECT "e"."j" AS "e.j", count(*) AS "count" FROM ${g} AS "e" GROUP BY "e.j" HAVING "e"."j" IS NOT NULL AND count(*) >= 1 ORDER BY "e.j" DESC`);
+  // the same class over text: a column the GROUP BY's key decides is read through any_value, and an ORDER BY of its
+  // ordinal or output name sorts a copy of that under the database's collation (it sorted by bytes before)
+  yield q("text decided by the key, ORDER BY its ordinal and its name", "SELECT t AS name, id FROM typed GROUP BY id ORDER BY 1, 2 LIMIT 40");
+  yield q("jsonb: grouped view of the copy, counted", `SELECT count(*) AS "count", min("e"."id") FROM "public"."jorder" AS "e" GROUP BY "e"."j" ORDER BY ("e"."j") IS NULL ASC, "e"."j" DESC LIMIT 100`);
+  // the review's: a jsonb the GROUP BY's key decides, sorted by its ordinal; a set operation sorted by a jsonb; a * sorted
+  // by another column's number; containment with ANY, and a raw scalar's containment of an array
+  yield q("jsonb: decided by the key, ORDER BY its ordinal", "SELECT id, j FROM jorder GROUP BY id ORDER BY 2, 1");
+  yield q("jsonb: decided by the key, DISTINCT", "SELECT count(*) FROM (SELECT DISTINCT j FROM jorder GROUP BY id) s");
+  yield q("jsonb: UNION ALL sorted by its ordinal", "SELECT id, j FROM jorder WHERE id < 40 UNION ALL SELECT id, j FROM jorder WHERE id >= 40 ORDER BY 2, 1");
+  yield q("jsonb: UNION ALL sorted by its name", "SELECT id, j FROM jorder WHERE id < 40 UNION ALL SELECT id, j FROM jorder WHERE id >= 40 ORDER BY j DESC, id");
+  yield q("jsonb: a * sorted by another column's number", "SELECT * FROM (SELECT id, j FROM jorder) s ORDER BY 1");
+  yield q("jsonb: contained, with ANY", `SELECT id FROM jorder WHERE j @> ANY (ARRAY['{"a": 1}'::jsonb, '[1]', '"a"']) OR j <@ ALL (ARRAY['[1, 2, "b"]'::jsonb, '[1, "b"]']) ORDER BY id`);
+  yield q("jsonb: a raw scalar's containment", `SELECT id, j @> '[1]', '[1, "a"]' @> j FROM jorder ORDER BY id`);
+  yield q("jsonb: equality beside a value only a sort refuses", `SELECT count(*), min(n) FROM (SELECT j, id AS n FROM jorder UNION ALL SELECT '{"t": "❤️"}', 0 FROM public.one) s WHERE j = '{"a": 1.00}' OR j = '{"t": "❤️"}' GROUP BY j ORDER BY 2`);
+  yield q("jsonb[]: contained, searched (refused)", "SELECT id FROM typed_arrays WHERE jba @> ARRAY['{\"a\": 1.0}'::jsonb] OR array_position(jba, '1'::jsonb) IS NOT NULL ORDER BY id");
+  yield q("jsonb: a row holding one, compared (refused)", "SELECT id FROM jorder WHERE (id, j) = (2, '\"a\"') ORDER BY id");
+  yield q("jsonb: an empty string, as a key, a member and the value", `SELECT id FROM jorder, (VALUES ('{"": 1}'::jsonb), ('[""]'), ('""'), ('{"": ""}')) v(x) WHERE id < 3 ORDER BY x, id`);
+  yield q("jsonb: a 1,000-string array's last string", `SELECT id FROM jorder WHERE j::text LIKE '"%' ORDER BY ('[' || repeat('"x", ', 999) || (j::text) || ']')::jsonb, id`);
+  // json has no ordering and no equality: Postgres refuses each (42883), and so does Mason, in Postgres's words
+  yield q("json: sorted", "SELECT id FROM jorder ORDER BY js");
+  yield q("json: grouped", "SELECT js, count(*) FROM jorder GROUP BY js");
+  yield q("json: DISTINCT", "SELECT DISTINCT js FROM jorder");
+  yield q("json: compared", "SELECT id FROM jorder WHERE js = js");
   yield q("jsonb_strip_nulls / jsonb_pretty / jsonb_set", "SELECT id, jsonb_strip_nulls(jb), jsonb_set(jb, '{a}', '9') FROM typed WHERE jsonb_typeof(jb) = 'object' ORDER BY id");
 
   // ---- arrays -----------------------------------------------------------------------------------------------------

@@ -569,18 +569,31 @@ test("a copy closed past its grace under a function-calling statement, or a proc
 // it waits. Told apart by ORDER, which the copy's thread's one port keeps: the statement is answered (its start), then
 // released — never released before it was even answered, nor never released. Each in a process of its own: the old
 // code may abort or hang.
+// THE CLOSE LANDS IN THE WINDOW BY AN EVENT, NEVER A TIMER (this test failed under load, CI and two local full checks:
+// told "refused 57014" where "answered" was expected). It once said "starting" BEFORE DuckDB's own start and then held
+// the start 300 ms; under load the close's interrupt could land inside DuckDB's start itself, which DuckDB then fails
+// (`INTERRUPT Error: Interrupted!`, 3 to 4 runs in 24 of the child alone, 12 at once): a start that FAILED, which the
+// code releases after its failure through `cleanUp` — correct, but another case than the one this test names. Now
+// DuckDB's start is whole before "starting" is said, and it is handed back to Mason only once the close's interrupt
+// landed, which the worker says ("handed back after the close"), so every run meets the close inside the start.
 test("a session closed while its function-calling statement starts releases the answer DuckDB hands back, after it, never before or never", { timeout: 180_000 }, () => {
   const at = (p: string): string => JSON.stringify(fileURLToPath(new URL(p, import.meta.url)));
-  // the copy's own worker, its starts handed back 300 ms late (a loaded machine's, made certain), said in the log
+  // the copy's own worker, its starts handed back only once the session's close interrupted them (a loaded machine's
+  // late start, made certain): DuckDB's start done first, so the interrupt cannot fail it; each step said in the log
   const slow = path.join(dir, "slow-start-worker.mjs");
   fs.writeFileSync(slow, `import { parentPort } from "node:worker_threads";
 import { createRequire } from "node:module";
 const duck = createRequire(${at("../package.json")})("@duckdb/node-api");
+let interrupted = () => undefined;
+const interrupt = duck.DuckDBConnection.prototype.interrupt;
+duck.DuckDBConnection.prototype.interrupt = function () { interrupted(); return interrupt.call(this); };
 const stream = duck.DuckDBPreparedStatement.prototype.stream;
 duck.DuckDBPreparedStatement.prototype.stream = async function () {
-  parentPort.postMessage({ log: "starting" });
   const r = await stream.call(this);
-  await new Promise((res) => setTimeout(res, 300));
+  const closed = new Promise((res) => { interrupted = () => res("after the close"); });
+  parentPort.postMessage({ log: "starting" });
+  // never a hang: a close that did not come is said, and fails the order the test asserts
+  parentPort.postMessage({ log: "handed back " + await Promise.race([closed, new Promise((res) => setTimeout(() => res("with no close within 20 s"), 20_000))]) });
   return r;
 };
 await import(${at("../src/duck/executor-worker.ts")});
@@ -591,7 +604,7 @@ await import(${at("../src/duck/executor-worker.ts")});
       import { setTimeout as sleep } from "node:timers/promises";
       const { DuckStore } = await import(${at("../src/duck/store.ts")});
       const order = [];
-      const store = await DuckStore.open(${JSON.stringify(path.join(dir, `${name}.db`))}, (l) => { if (/^statement: /.test(l)) order.push("released"); if (l === "starting") order.push("starting"); },
+      const store = await DuckStore.open(${JSON.stringify(path.join(dir, `${name}.db`))}, (l) => { if (/^statement: /.test(l)) order.push("released"); if (l === "starting") order.push("starting"); if (/^handed back /.test(l)) order.push(l); },
         ${workerFile === null ? "{}" : `{ workerFile: ${JSON.stringify(workerFile)} }`});
       await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(2000000)");
       const r = await store.runner();
@@ -614,7 +627,7 @@ await import(${at("../src/duck/executor-worker.ts")});
   };
   // the close while DuckDB's start is pending: its answer opened, not yet handed back
   assert.deepEqual(run("closed-in-start", slow, `for (const t = Date.now(); !order.includes("starting"); await sleep(5)) if (Date.now() - t > 20_000) throw new Error("no start within 20 s");`),
-    ["answered", "released"], "closed while DuckDB started it: answered, then released — never released before its start was handed back");
+    ["handed back after the close", "answered", "released"], "closed while DuckDB started it: answered, then released — never released before its start was handed back");
   // the close asked right after the statement, before its start began (its session's zone is set first)
   assert.deepEqual(run("closed-before-start", null, ""),
     ["answered", "released"], "closed before its start: the answer opened after the close is released too, never left open under the closing connection");
@@ -622,5 +635,5 @@ await import(${at("../src/duck/executor-worker.ts")});
   // its release comes first, and told the cancel — never an XX000 "report it" read off the released result's 0 columns
   // (its Postgres columns given, as the listener gives them: the check that read them)
   assert.deepEqual(run("call-free-closed-in-start", slow, `for (const t = Date.now(); !order.includes("starting"); await sleep(5)) if (Date.now() - t > 20_000) throw new Error("no start within 20 s");`, false),
-    ["released", "refused 57014"], "a call-free statement closed while it started: released, and refused 57014 (the close), never XX000");
+    ["handed back after the close", "released", "refused 57014"], "a call-free statement closed while it started: released, and refused 57014 (the close), never XX000");
 });

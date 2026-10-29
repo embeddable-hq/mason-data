@@ -59,8 +59,14 @@ export const DUCKDB_VERSION = version();
  * disk at 125 GB, against 0.26 GB forced; a sample of its text columns 4.5× smaller, the integer, UUID and timestamp
  * columns keeping their own methods, BitPacking and RLE, since forcing only touches what ZSTD can store). The cost of
  * reading a ZSTD column is not measured. tests/duck-wire.test.ts holds a string column to ZSTD.
+ *
+ * `lambda_syntax: ENABLE_SINGLE_ARROW`: the rewrite is a Postgres parse tree, printed by Postgres's deparser, which
+ * can spell DuckDB's lambda only as `x -> f(x)` (Postgres's `->` operator), never as `lambda x: f(x)`; DuckDB 2.0
+ * refuses that spelling by default. One rewrite needs a lambda: a jsonb's order under ICU or a libc locale, which maps
+ * DuckDB's `icu_sort_key` over the document's strings (src/duck/rewrite.ts `jsonbKey`). A `->` that is not a lambda
+ * function's argument is still the json operator. tests/duck-jsonb-order.test.ts holds the key under every collation.
  */
-const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd" };
+const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", lambda_syntax: "ENABLE_SINGLE_ARROW" };
 
 /**
  * DUCKDB'S MEMORY, BOUNDED FOR THIS PROCESS: DuckDB's default is 80% of the machine's RAM, in a process
@@ -207,6 +213,8 @@ export class DuckStore {
       if (libc === undefined) throw new Error(`the database orders text by the libc collation ${collation!.collate}, and its order was not read (Mason bug: report it)`);
       await this.executor.registerLibcOrder(libc);
     }
+    // a jsonb's stored key is this collation's (src/duck/kept.ts `orderBy`)
+    await kept?.orderBy(c, c.kind === "libc" ? libc : undefined);
     return {
       collation: c,
       open: () => this.runner(),

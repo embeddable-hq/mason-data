@@ -288,6 +288,27 @@ table (and the source password) through the attachment. Others, each fixed with 
 | a catalog portal closed by another session's Sync (every six-card Metabase dashboard) | a catalog statement's portal runs whole at its Bind |
 | one node placed in two arms of a CASE, the second left unqualified | a node is placed once (`nodesPlacedTwice`, held to none) |
 
+### The independent review (2026-10-28)
+
+**Decision.** Every PR is read for wrong answers by a reader in a fresh context before a person sees it, and its
+findings go back to the author in one message (CLAUDE.md "How work is done here").
+
+**Why.** Three PRs landed in one day — three rewrites for a BI tool's slow shapes (date_trunc of a timestamptz, a
+LEFT lateral of json rows, the nulls idiom), jsonb's order and equality, and that order stored as a column — each by an
+agent whose own oracle run showed zero differences over about 21,000 statements. Independent readers of the diffs,
+handed the code and not the authors' reports, found eleven wrong answers between them, every one a shape the authors'
+statements had not held: a grouped jsonb sorted by its ordinal or output name sorted by its text (a clone dropped the
+node's type); the nulls idiom folded a bare name an output alias shadowed, and an integer ordinal; a three-argument
+date_trunc never read a NULL or row-held zone for seconds and below; jsonb equality under glibc refused whole tables
+holding an emoji's variation selector, where equality needs no collation; a mark a write stored after a key was counted
+exact was read as a key. The authors fixed each with a test shown to fail without it, and the oracle gained the shapes.
+
+**What it cost.** Two implementations of 1 h 45 and 1 h 49 ran side by side; a review took 9 to 15 minutes; the fix
+rounds took 44 minutes and 1 h 28 (three batches of findings, three cycles); CI about 12 minutes a run, six runs,
+mostly overlapped. The batch landed in a little over three hours: the slowest implementation, one review cycle, and the
+CI runs that gated the merges — not the sum of the parts. Where time was spent on nothing new: each agent ran the full
+oracle several times while iterating, and one built a 20 M-row dataset twice.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
@@ -311,8 +332,8 @@ join, or the bare key back into an expression, passed every test. With `src/` at
 fixture fails 12 statements by name — the three LEFT lateral previews, the three nulls-idiom pages, two BI shapes with
 a LEFT lateral, three date_trunc histograms and the BI shape whose window orders by date_trunc (the SQL sent called
 `date_trunc` alone, where now it is the instant's arithmetic under a CASE on the zone; a day in a zone of its own is
-DuckDB's truncation of a local time before and after) — and the invariants measure what the plans cost: the idiom's page read 9 of 9 row groups (1,000,000
-rows) in its top N's scan, against 1 of 9 (16,960 rows) by created_at and 3 of 9 (262,720) by shipped_at with the
+DuckDB's truncation of a local time before and after) — and the invariants measure what the plans cost: the idiom's
+page read 9 of 9 row groups (1,000,000 rows) in its top N's scan, against 1 of 9 (16,960 rows) by created_at and 3 of 9 (262,720) by shipped_at with the
 rewrite; the lateral preview read all 1,000,000 rows of its base, against 18,432 on a laptop's nine threads (a
 2,048-row vector each; 2,048 on one thread).
 
@@ -348,6 +369,66 @@ of its copies", while a GROUP BY over the same copy answered its own. Now the pr
 profile must name it (`query.sql`), and a statement with none is said so, its plan DuckDB's EXPLAIN with the rows it
 answered and no times.
 **Where.** `src/api/postgres/explain.ts`, `src/duck/explain.ts`; `tests/duck-explain-options.test.ts`, `tests/duck-wire.test.ts`.
+
+### jsonb's order
+
+**Decision.** A jsonb is compared through a byte key (`src/duck/jsonb-order.ts`) that encodes Postgres's
+`compareJsonbContainers`: the type first (null < string < number < boolean < array < object), an array or object by its
+count then its members, an object's pairs in jsonb's storage order (shorter key first), a number by value with its scale
+dropped, a string by the collation's key of it. A top-level scalar is a one-element array marked raw, so `[] < 1 < [1]`
+and every scalar sorts before every object. Equality is the same key, so `'1.0' = '1.00'`; GROUP BY and DISTINCT write
+one group as one of its values (`jsonb-equal-text`). `json` has no order in Postgres (42883), and Mason answers it so.
+
+**Why.** A BI tool sorts by any column it shows (Trevor.io: `ORDER BY j IS NULL, j DESC LIMIT 100` over a jsonb), and
+the refusal broke a table view. The canonical text alone is not the order (`10 < 9` as text, objects by size first) nor
+the equality (`1.0` and `1.00` are one value), so the key is its own function, held to PGlite and to the oracle under
+each collation kind. Keying ORDER BY found that the allowlist never saw a sort's or a group's operator: IS DISTINCT
+FROM, NULLIF, CASE x WHEN, PARTITION BY, = ANY, INTERSECT, ROLLUP, BETWEEN and JOIN USING over jsonb had been answered
+by DuckDB's text equality. Each is now keyed or refused.
+
+**Where.** `src/duck/jsonb-order.ts`, `jsonbKey` in `src/duck/rewrite.ts`; `tests/duck-jsonb-order.test.ts`, the oracle's
+`jorder` (tests/integration/oracle/type-matrix.ts).
+
+#### The key stored (2026-10-28)
+
+**Decision.** The key is a stored read of the keeper ("Stored JSON paths"): a BLOB hidden column per jsonb column and
+collation, recorded, weighed, filled and kept current exactly as a path is, and read by the rewrite once ready.
+
+**Why.** Measured on a laptop (10 cores, NVMe, the file in the page cache) over 20 M synthetic rows of mixed shapes
+(objects of four keys with a nested array, arrays of strings, raw numbers and strings, nested arrays, NULLs), the
+Trevor.io shape `SELECT e.id … ORDER BY e.j IS NULL, e.j DESC LIMIT 100` through the listener:
+
+| | C | libc (en_US.utf8) |
+|---|---|---|
+| by the key's function, per row | 19.2–26.1 s wall, 20–27 s CPU | 83–126 s wall, 90–132 s CPU |
+| filling the stored key (the keeper's chunks) | 20.8 s | 93.1 s |
+| from the stored key | 0.13–0.31 s wall, ~1 s CPU | 0.13–0.14 s wall, ~1.2 s CPU |
+| `GROUP BY j` from the stored key | 0.40–0.68 s | 0.62–1.21 s |
+
+A sort by the function is a call per row, and a call per row holds the executor worker for the whole statement
+("The executor worker"); a fill costs what one or four such sorts cost, and every later one is free. A key is its
+collation's (a string's key is ICU's or the measured libc order's), so it is stored under the collation's id and
+dropped when the source's collation, or its glibc's measured order, changes — and with the key's encoding
+(`KEY_VERSION`) and the DuckDB whose ICU made its strings' keys (`DUCKDB_VERSION`) in the id, an upgrade that changes
+either stores it again rather than reading another release's bytes. The fill model (`FILL_US_PER_ROW`, made for
+paths) prices a key's fill at 13 µs a row where it measured 1.0 (C) to 4.7 (libc): a large table's key waits longer
+for its evidence than it must, the safe side, until the rate of a key's fill of that column is measured (a path's
+fill is another function's, and its rate is never read for a key's).
+
+**Equality under libc is the C key.** The `GROUP BY j` row above is C's and ICU's: under a libc collation an
+equality (GROUP BY, DISTINCT, =, PARTITION BY) reads the C key computed per row, because the stored key is the libc
+order's, which refuses a string holding a character the measured order does not cover where equality needs no order
+at all (the review found the first form keying equality by the collation, and refusing).
+
+**A mark written after the count (the review, 2026-10-28).** The stream and the poll write a libc-uncovered document
+(an NFD `café`, e + U+0301) at any time, and its key is the mark; the plans read the key alone until the detector
+counts the marks (a minute), so the mark sorted first as a key. Rather than every write path counting its marks before
+it commits, the exact read raises at a mark from the column alone (one comparison a row, no document read): the
+statement is refused by the gap's name, as the statement's own key refuses it, until the reads turn to the CASE.
+
+**What it does not cover.** A statement that lists a copy's columns without naming them (`SELECT * … ORDER BY j`)
+reads no stored column at all (`hideKept`), so its sort is the function's: 23.2 s (C) and 84.3 s (libc) on the same
+rows.
 
 ### What DuckDB is sent: the form it computes fastest, where that is Postgres's answer
 
@@ -532,7 +613,7 @@ checkpointed.
 | nothing is closed under a pending call; a statement in flight at a stop gets 57P01 | a stop during a drain aborted the process (exit 134, `Napi::Error`) |
 | a worker silent `SILENT_MS` (60 s) is given up on (57P02, the run exits for its supervisor); `close` settles in `CLOSE_GRACE_MS` (5 s) | a thread blocked in native code survives `worker.terminate()` and `process.exit`; one join (`a.id > b.id AND a.id - b.id = -7`, 1 M rows) takes ~10 s to honour an interrupt in DuckDB itself |
 | a worker given up on is asked to shut down and terminated only once it answered, referenced until then; an answer's close is a request (2026-10-28) | a test file under four suites' load aborted at exit (`libc++abi: terminating due to uncaught exception of type Napi::Error`): the after-hook's close outlasted 5 s and the executor terminated the worker under a Mason function call. A close with a 1 ms grace under a calling statement: 6 aborts in 6 before, 0 in 4 after; a script ending while a closed answer drained: 4 in 4 before, 0 in 4 after. Twenty CPU burners beside the file alone did not reproduce it (3 runs). A terminate under a call-free statement still aborts (2 in 12): nothing terminates a worker with a statement in flight |
-| a statement closed while it starts is released once DuckDB hands the start back; a session's close closes an answer opened while it waits (2026-10-28) | Linux CI then failed the new grace test (`FATAL ERROR: Error::Error napi_define_properties`, the worker's loop still turning): the shutdown answered with a result still open. In a Linux container (node 24, arm64) the test's "grace" child aborted 6 in 30, 7 in 30, 3 in 20 (0 in 30 on the Mac, where a start takes 1–8 ms); traced with synchronous writes, the abort's run met the statement with no answer yet (`stream()` pending), released it at once, and the start was handed back 1 ms later to nobody. After: 0 in 40, twice, and the test file 3 of 3. A start is short (a calling count: 1–8 ms start, 1.7–4.7 s first fetch), so the test makes it late on purpose (a worker whose `stream()` hands back 300 ms late) |
+| a statement closed while it starts is released once DuckDB hands the start back; a session's close closes an answer opened while it waits (2026-10-28) | Linux CI then failed the new grace test (`FATAL ERROR: Error::Error napi_define_properties`, the worker's loop still turning): the shutdown answered with a result still open. In a Linux container (node 24, arm64) the test's "grace" child aborted 6 in 30, 7 in 30, 3 in 20 (0 in 30 on the Mac, where a start takes 1–8 ms); traced with synchronous writes, the abort's run met the statement with no answer yet (`stream()` pending), released it at once, and the start was handed back 1 ms later to nobody. After: 0 in 40, twice, and the test file 3 of 3. A start is short (a calling count: 1–8 ms start, 1.7–4.7 s first fetch), so the test makes it late on purpose: a worker whose `stream()` hands DuckDB's start back only once the close's interrupt landed. It first held the start 300 ms after saying "starting" BEFORE DuckDB's own start, and under load the close's interrupt landed inside that start, which DuckDB failed (`INTERRUPT Error: Interrupted!`): told 57014 and released after its failure, correct, but not the case the test names (CI once, two local full checks; 3 – 4 runs in 24 of the child alone, 12 at once). The start is now whole before the close and the close an event, never a timer: 0 in 96 |
 
 **Still true.** A calling statement starves the worker for its run, and every other request to the copy (another
 session's statement: 8.2 s beside an 8.7 s calling one); the listener, logins, catalog, commands and cancels do not
