@@ -348,6 +348,16 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/vendor/uplot-1.6.32/uPlot.esm.js": ["vendor/uplot-1.6.32/uPlot.esm.js", "text/javascript; charset=utf-8"],
   "/vendor/uplot-1.6.32/uPlot.min.css": ["vendor/uplot-1.6.32/uPlot.min.css", "text/css; charset=utf-8"],
   "/vendor/uplot-1.6.32/LICENSE.txt": ["vendor/uplot-1.6.32/LICENSE.txt", "text/plain; charset=utf-8"],
+  // the nav's icons (src/web/shared.js ICONS): Lucide's, one ES module per icon, each its SVG as a string
+  "/vendor/lucide-1.56.0/chart-column.mjs": ["vendor/lucide-1.56.0/chart-column.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/layout-dashboard.mjs": ["vendor/lucide-1.56.0/layout-dashboard.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/logs.mjs": ["vendor/lucide-1.56.0/logs.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/menu.mjs": ["vendor/lucide-1.56.0/menu.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/square-terminal.mjs": ["vendor/lucide-1.56.0/square-terminal.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/table.mjs": ["vendor/lucide-1.56.0/table.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/users.mjs": ["vendor/lucide-1.56.0/users.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/x.mjs": ["vendor/lucide-1.56.0/x.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/lucide-1.56.0/LICENSE.txt": ["vendor/lucide-1.56.0/LICENSE.txt", "text/plain; charset=utf-8"],
 };
 
 /**

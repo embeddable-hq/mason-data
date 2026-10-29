@@ -613,7 +613,8 @@ test("the page's files fetch nothing from elsewhere and never touch the token: t
     assert.ok(!/\blocation\b(?!\.hash\b)|document\.cookie|localStorage|sessionStorage|indexedDB|[?&]token=|\.token\b/.test(code),
       `${f}: the cookie carries the token; the page's script never reads it, the address (but its hash) or storage`);
     // every module it imports is the page's own, a route of PAGE_ROUTES (tests/cli-run-server.test.ts serves each)
-    for (const m of code.matchAll(/\bfrom\s+"([^"]+)"|\bimport\s*\(\s*"([^"]+)"/g)) assert.match(m[1] ?? m[2]!, /^\.\.?\/[\w/.-]+\.js$/, `${f} imports ${m[1] ?? m[2]} by a relative path`);
+    // (a vendored module keeps its own name: Lucide's icons are .mjs, src/web/vendor/README.md)
+    for (const m of code.matchAll(/\bfrom\s+"([^"]+)"|\bimport\s*\(\s*"([^"]+)"/g)) assert.match(m[1] ?? m[2]!, /^\.\.?\/(?:[\w/.-]+\.js|vendor\/[\w.-]+\/[\w.-]+\.mjs)$/, `${f} imports ${m[1] ?? m[2]} by a relative path`);
   }
 });
 
@@ -621,12 +622,18 @@ test("the page's files fetch nothing from elsewhere and never touch the token: t
  *  as data-x="", an apostrophe in text as itself), the listeners `start` adds, the interval it sets, and a FormData
  *  that reads a form's ticked boxes from the fake form. */
 function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
-  const els = new Map<string, { writes: number; html: string; innerHTML: string; addEventListener: () => void }>();
-  const el = (id: string) => els.get(id) ?? (els.set(id, { writes: 0, html: "", addEventListener: () => undefined,
+  // an element's attributes, and what holds the focus: a target `{ in: "sidebar" }` is inside the element of that id
+  interface FakeEl { id: string; writes: number; html: string; innerHTML: string; attrs: Map<string, string>; addEventListener: () => void;
+    setAttribute(k: string, v: string): void; removeAttribute(k: string): void; contains(t: { in?: string } | null): boolean; focus(): void; querySelector(sel: string): FakeEl }
+  const els = new Map<string, FakeEl>();
+  const el = (id: string): FakeEl => els.get(id) ?? (els.set(id, { id, writes: 0, html: "", attrs: new Map(), addEventListener: () => undefined,
     get innerHTML() { return this.html.replace(/ (data-[a-z-]+)(?=[ >])/g, ' $1=""').replace(/&#39;/g, "'"); },
-    set innerHTML(v: string) { this.html = v; this.writes++; } }), els.get(id)!);
+    set innerHTML(v: string) { this.html = v; this.writes++; },
+    setAttribute(k: string, v: string) { this.attrs.set(k, v); }, removeAttribute(k: string) { this.attrs.delete(k); },
+    contains(t: { in?: string } | null) { return t?.in === this.id; }, focus() { doc.focused = this.id; },
+    querySelector(sel: string) { return el(`${this.id} ${sel}`); } }), els.get(id)!);
   const on = new Map<string, (e: unknown) => Promise<void> | void>();
-  const doc = { visibilityState: "visible", getElementById: el, addEventListener: (type: string, f: (e: unknown) => void) => { on.set(type, f); } };
+  const doc = { visibilityState: "visible", focused: "", getElementById: el, addEventListener: (type: string, f: (e: unknown) => void) => { on.set(type, f); } };
   const location = { hash };
   const onWin = new Map<string, () => void>();
   let tick: (() => void) | null = null;
@@ -637,6 +644,53 @@ function fakeBrowser(run: ReturnType<typeof fakeRun>, hash = "") {
   const go = (to: string) => { location.hash = to; onWin.get("hashchange")!(); };
   return { el, on, doc, go, tick: () => tick!(), settle: () => new Promise((r) => setTimeout(r, 20)) };
 }
+
+test("in the browser: the phone's menu — its button opens the nav as a sheet, focus on its first link; Escape, a click outside, the focus leaving or a link followed close it", async () => {
+  const run = fakeRun();
+  const { el, on, doc, go, settle } = fakeBrowser(run, "#users");
+  await settle();
+  const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
+  assert.match(html, /<button type="button" id="menu-button" class="menu-button" data-menu aria-controls="side-body" aria-expanded="false"><span id="menu-icon"><\/span><span class="sr">Menu<\/span><\/button>/,
+    "a button, its name Menu, saying what it opens and whether it is open");
+  assert.match(el("menu-icon").html, /^<span class="icon when-closed" aria-hidden="true"><svg\s+class="lucide lucide-menu".*<\/svg><\/span><span class="icon when-open" aria-hidden="true"><svg\s+class="lucide lucide-x".*<\/svg><\/span>$/s,
+    "its icons, the stylesheet showing the one aria-expanded says");
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.menu-button\[aria-expanded="true"\] \.when-closed, \.menu-button\[aria-expanded="false"\] \.when-open \{ display: none; \}/);
+  const open = () => el("sidebar").attrs.has("data-open");
+  const expanded = () => el("menu-button").attrs.get("aria-expanded");
+  const press = (key: string) => on.get("keydown")!({ key, preventDefault: () => undefined });
+  const click = (target: unknown) => on.get("click")!({ target });
+  const menuButton = { in: "sidebar", closest: () => ({ dataset: { menu: "" } }) };
+  // closed, Escape does nothing
+  press("Escape");
+  assert.equal(open(), false); assert.equal(doc.focused, "");
+  await click(menuButton);
+  assert.deepEqual([open(), expanded(), doc.focused], [true, "true", "nav a"], "open: the sheet, the button says so, the focus on the nav's first link");
+  await click({ in: "sidebar", closest: () => null });
+  assert.equal(open(), true, "a click inside the sheet leaves it open");
+  press("Escape");
+  assert.deepEqual([open(), expanded(), doc.focused], [false, "false", "menu-button"], "Escape closes it, the focus back on its button");
+  await click(menuButton);
+  await click(menuButton);
+  assert.deepEqual([open(), expanded()], [false, "false"], "the button again closes it");
+  // a click outside closes it, and is no click of the page under the scrim
+  await click(menuButton);
+  run.asked.length = 0;
+  await click({ closest: () => ({ dataset: { remove: "metabase" } }) });
+  assert.deepEqual([open(), expanded(), doc.focused], [false, "false", "menu-button"], "a click outside closes it");
+  assert.doesNotMatch(textOf(el("users").html), /Remove metabase\?/, "the click outside reached no button of the page");
+  // the focus leaving the sheet (Tab past its last link) closes it, the focus left where it went
+  await click(menuButton);
+  doc.focused = "elsewhere";
+  on.get("focusin")!({ target: { in: "sidebar" } });
+  assert.equal(open(), true, "the focus moving inside it keeps it open");
+  on.get("focusin")!({ target: { in: "main" } });
+  assert.deepEqual([open(), doc.focused], [false, "elsewhere"]);
+  // a link followed closes it
+  await click(menuButton);
+  go("#tables"); await settle();
+  assert.deepEqual([open(), expanded()], [false, "false"], "a link followed: the sheet closes on the page it shows");
+});
 
 test("in the browser: each part is written when what it shows changes, never at every poll (a click must find its button)", async () => {
   const run = fakeRun();
@@ -710,7 +764,7 @@ test("in the browser: the tables are written when they change, never at every po
 
 // ------------------------------------------------------------------ the shell: a page per hash, each polling its own
 
-test("the shell: four tabs — Overview · Tables · Users · Observability, its three sub-tabs — each page a module with a section and a route; every old hash lands on its view", async () => {
+test("the shell: a sidebar nav — Overview · Tables · Users, the Observability group's Queries · Usage · Logs — each page a module with a section and a route; every old hash lands on its view", async () => {
   const parseHash = fn<[string | undefined], { id: string; params: Record<string, string> }>("parseHash");
   const hashes = ["#overview", "#tables", "#users", "#observability/queries", "#observability/usage", "#observability/logs", "#observability",
     // the hashes of before the Observability tab: bookmarks keep working
@@ -735,22 +789,36 @@ test("the shell: four tabs — Overview · Tables · Users · Observability, its
     const mod = await import(path.join(WEB, "pages", `${p.id}.js`)) as { page: { id: string } };
     assert.equal(mod.page.id, p.id);
   }
+  // the sidebar's nav: every page a link with its icon and its label, the one shown the current page; the
+  // Observability views under the group's heading, each keeping the range they share
   const renderNav = fn<[string, string?], string>("renderNav");
-  const links = (nav: string) => [...nav.matchAll(/<a href="([^"]+)"( aria-current="page")?>([^<]*)<\/a>/g)].map((m) => [m[3], m[1], Boolean(m[2])]);
-  assert.deepEqual(links(renderNav("tables")), [["Overview", "#overview", false], ["Tables", "#tables", true], ["Users", "#users", false], ["Observability", "#observability/queries", false]]);
-  assert.deepEqual(links(renderNav("logs", "7d")).at(-1), ["Observability", "#observability/queries?range=7d", true], "a sub-tab shown: Observability is the current tab, its link keeps the range");
-  assert.match(html, /<nav id="nav" class="tabs" aria-label="Pages"><ul><li><a href="#overview">Overview<\/a><\/li><li><a href="#tables">Tables<\/a><\/li><li><a href="#users">Users<\/a><\/li><li><a href="#observability\/queries">Observability<\/a><\/li><\/ul><\/nav>/,
-    "the links work before the script runs");
-  // the sub-nav: Observability's three views as a secondary underline nav, then the range as a segmented control
+  const links = (nav: string) => [...nav.matchAll(/<a href="([^"]+)"( aria-current="page")?>(.*?)<\/a>/gs)].map((m) => [textOf(m[3]!), m[1], Boolean(m[2])]);
+  assert.deepEqual(links(renderNav("tables")), [["Overview", "#overview", false], ["Tables", "#tables", true], ["Users", "#users", false],
+    ["Queries", "#observability/queries", false], ["Usage", "#observability/usage", false], ["Logs", "#observability/logs", false]]);
+  assert.deepEqual(links(renderNav("logs", "7d")).slice(3), [["Queries", "#observability/queries?range=7d", false], ["Usage", "#observability/usage?range=7d", false],
+    ["Logs", "#observability/logs?range=7d", true]], "a view shown is the current page, and its siblings' links keep the range");
+  assert.equal([...renderNav("usage").matchAll(/aria-current/g)].length, 1, "one current page, never its group too");
+  assert.equal(textOf(renderNav("status")), "Overview Tables Users Observability Queries Usage Logs");
+  assert.match(renderNav("status"), /<li class="group"><p class="group-title" id="nav-observability">Observability<\/p><ul aria-labelledby="nav-observability"><li><a href="#observability\/queries">/,
+    "the group is a heading over its links' list, which it names");
+  // every link carries its icon inline: an SVG in currentColor, hidden from a reader (the label is the link's name)
+  const icons = { "#overview": "layout-dashboard", "#tables": "table", "#users": "users", "#observability/queries": "square-terminal", "#observability/usage": "chart-column", "#observability/logs": "logs" };
+  for (const m of renderNav("status").matchAll(/<a href="([^"]+)"[^>]*>(.*?)<\/a>/gs)) {
+    assert.match(m[2]!, new RegExp(`^<span class="icon" aria-hidden="true"><svg\\s+class="lucide lucide-${icons[m[1] as keyof typeof icons]}"[^>]*stroke="currentColor"[^>]*>.*</svg></span><span class="label">\\w+</span>$`, "s"), `${m[1]}: its icon inline, then its label`);
+  }
+  // the links work before the script runs (which adds their icons): the same links, in the same order, under the same heading
+  const staticNav = html.match(/<nav id="nav" class="nav" aria-label="Pages">(.*?)<\/nav>/s)?.[1] ?? assert.fail("index.html has the nav");
+  assert.deepEqual(links(staticNav), links(renderNav("none")), "index.html's nav is the nav the script writes, but its icons");
+  assert.equal(staticNav, renderNav("none").replace(/<span class="icon" aria-hidden="true">.*?<\/svg><\/span>/gs, ""), "the same markup, so nothing moves when it is written");
+  // the head of an Observability view: the group's name, then the range as a segmented control (the views are the sidebar's)
   const renderSubnav = fn<[string, string?], string>("renderSubnav");
   assert.equal(renderSubnav("tables"), "", "a page of its own has none");
   const sub = renderSubnav("usage", "1h");
-  assert.equal(textOf(sub), "Queries Usage Logs Last hour 24 hours 7 days");
-  assert.match(sub, /^<nav class="subtabs" aria-label="Observability"><ul><li><a href="#observability\/queries\?range=1h">Queries<\/a><\/li><li><a href="#observability\/usage\?range=1h" aria-current="page">Usage<\/a><\/li><li><a href="#observability\/logs\?range=1h">Logs<\/a><\/li><\/ul><\/nav>/);
-  assert.match(sub, /<div class="range" role="group" aria-label="Time range"><a href="#observability\/usage\?range=1h" aria-current="true">Last hour<\/a><a href="#observability\/usage">24 hours<\/a><a href="#observability\/usage\?range=7d">7 days<\/a><\/div>$/);
+  assert.equal(textOf(sub), "Observability Last hour 24 hours 7 days");
+  assert.equal(sub, `<p class="crumb">Observability</p><div class="range" role="group" aria-label="Time range"><a href="#observability/usage?range=1h" aria-current="true">Last hour</a><a href="#observability/usage">24 hours</a><a href="#observability/usage?range=7d">7 days</a></div>`);
   assert.match(html, /<div id="subnav" class="subnav"><\/div>/);
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.subtabs a\[aria-current="page"\]/, "the sub-tab shown is underlined");
+  assert.match(css, /\.nav a\[aria-current="page"\] \{[^}]*background: var\(--line\)/, "the page shown is a filled row of the nav");
   assert.match(css, /\.range a\[aria-current="true"\]/, "the range chosen is the raised segment");
   const app = fn<[unknown], App>("createApp")(fakeRun().fetch);
   assert.match(textOf(app.view()["usage-queries"]!), /Asking Mason/);
@@ -792,13 +860,14 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   await settle();
   const shown = () => ["status", "tables", "queries", "users", "usage", "logs"].filter((id) => (el(`page-${id}`) as unknown as { hidden: boolean }).hidden === false);
   assert.deepEqual(shown(), ["status"], "an unknown hash shows the Overview");
-  assert.match(el("nav").html, /<a href="#overview" aria-current="page">Overview<\/a>/);
+  const current = () => [...el("nav").html.matchAll(/<a href="([^"]+)" aria-current="page">/g)].map((m) => m[1]);
+  assert.deepEqual(current(), ["#overview"]);
   assert.equal(el("subnav").html, "");
   run.asked.length = 0;
   go("#users"); await settle();
   assert.deepEqual(shown(), ["users"]);
   assert.deepEqual(run.asked, ["GET /api/users?lastUsed=1"], "the users at once, not at the next tick");
-  assert.match(el("nav").html, /<a href="#users" aria-current="page">Users<\/a>/);
+  assert.deepEqual(current(), ["#users"]);
   run.asked.length = 0;
   tick(); await settle();
   assert.deepEqual(run.asked, [], "the users are read every 30 s, not at every tick");
@@ -806,8 +875,8 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   run.asked.length = 0;
   go("#usage"); await settle();
   assert.deepEqual(shown(), ["usage"]);
-  assert.match(el("nav").html, /<a href="#observability\/queries" aria-current="page">Observability<\/a>/);
-  assert.match(el("subnav").html, /<a href="#observability\/usage" aria-current="page">Usage<\/a>.*<a href="#observability\/usage" aria-current="true">24 hours<\/a>/);
+  assert.deepEqual(current(), ["#observability/usage"], "an old hash: the view it was is the current page of the nav");
+  assert.match(el("subnav").html, /<a href="#observability\/usage" aria-current="true">24 hours<\/a>/);
   // (its 24 hours are the Overview's read too, shared: read a minute ago, not due again)
   // the range followed: the same view, its samples of the week, six hours a point
   run.answers.set("GET /api/usage?since=7d&step=21600", run.answers.get("GET /api/usage?since=24h&step=3600")!);
@@ -815,6 +884,7 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   go("#observability/usage?range=7d"); await settle();
   assert.deepEqual((run.asked as string[]).filter((a) => a.includes("/api/usage")), ["GET /api/usage?since=7d&step=21600"]);
   assert.match(el("subnav").html, /<a href="#observability\/usage\?range=7d" aria-current="true">7 days<\/a>/);
+  assert.deepEqual(current(), ["#observability/usage?range=7d"], "the nav's links keep the range");
   // the sub-tab beside it keeps the range: Logs reads the week's events
   run.answers.set("GET /api/events?limit=500&since=7d", answer(EVENTS));
   run.asked.length = 0;
@@ -1774,18 +1844,27 @@ test("the components: a state is a dot AND its word, a card its label, value and
   assert.equal(details("k", "More", "", true, "memory"), `<details class="memory" data-open="k" open><summary>More</summary></details>`);
 });
 
-test("the shell: the top bar's project and a demo badge, the tab nav's current page, the Overview's header", async () => {
+test("the shell: the sidebar's project and a demo badge, its nav, its foot (updated, the version), the Overview's header", async () => {
   const run = fakeRun();
   run.answers.set("GET /api/state", answer(stateOf([], { demo: true })));
   const app = fn<[unknown], App>("createApp")(run.fetch);
   await app.poll();
   assert.equal(app.view().badge, `<span class="badge accent">demo</span>`, "the demo database is said, beside its name");
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
-  assert.match(html, /<header class="topbar">.*<p id="where" class="where"><\/p>\s*<span id="badge"><\/span>\s*<p id="updated" class="updated" aria-live="polite"><\/p>/s);
-  assert.match(html, /<nav id="nav" class="tabs" aria-label="Pages">/, "the tabs are links: Tab reaches each, Enter follows it");
+  assert.equal(app.view().version, "Mason 0.9.0", "the version, as mason status's Mason line says it");
+  assert.match(app.view().updated!, /^Updated .* ago$/);
+  assert.match(html, /<aside id="sidebar" class="sidebar">\s*<div class="side-head">.*<h1 class="brand">.*<p id="where" class="where"><\/p><span id="badge"><\/span>.*<\/div>\s*<div id="side-body" class="side-body">.*<nav id="nav" class="nav" aria-label="Pages">.*<\/nav>\s*<div class="side-foot"><p id="updated" class="updated" aria-live="polite"><\/p><p id="version" class="version"><\/p><\/div>\s*<\/div>\s*<\/aside>/s,
+    "the sidebar: the project at its head, the nav, when it was updated and the version at its foot");
+  assert.ok(!/class="topbar"|class="tabs"/.test(html), "no top nav beside it");
+  assert.match(html, /<nav id="nav" class="nav" aria-label="Pages"><ul><li><a href=/, "the nav is a list of links: Tab reaches each, Enter follows it");
+  assert.match(html, /<\/aside>\s*<div class="scrim" aria-hidden="true"><\/div>\s*<div class="content">\s*<div id="poll"><\/div>\s*<main>/, "the page beside the sidebar");
   assert.match(html, /<section id="page-status" aria-labelledby="status-h">\s*<div class="page-head"><h2 id="status-h">Overview<\/h2><p class="desc">What <code>mason status<\/code> says/, "the Overview, in mason status's words");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.tabs a\[aria-current="page"\]/, "the current page is underlined");
+  assert.match(css, /--sidebar-w: 232px/, "the sidebar's width, a token");
+  assert.match(css, /@media \(min-width: 641px\) and \(max-width: 999px\) \{\s*\.sidebar \{ width: var\(--rail-w\); \}/, "below 1000 px an icon rail");
+  assert.match(css, /\.nav a:hover \.label, \.nav a:focus-visible \.label \{ opacity: 1; \}/, "on the rail a label is its icon's tooltip, on hover and on focus");
+  assert.match(css, /@media \(max-width: 640px\) \{\s*\.sidebar \{ position: sticky;/, "a phone: a top bar");
+  assert.match(css, /\.sidebar\[data-open\] \.side-body \{ display: flex; \}/, "whose menu opens the nav as a sheet");
   assert.match(css, /@media \(prefers-color-scheme: dark\)/, "a dark theme from the system's");
   assert.equal([...css.matchAll(/@font-face/g)].length, 2, "Geist Sans and Geist Mono, each its own face");
   assert.doesNotMatch(css, /gradient\(/, "no gradient");
@@ -1795,8 +1874,10 @@ test("the vendored files: each a route, whole, pinned in its folder's name, with
   const { PAGE_ROUTES } = await import("../src/cli/run-server.ts") as { PAGE_ROUTES: Record<string, readonly [string, string]> };
   const vendor = webFiles().filter((f) => f.startsWith(`vendor${path.sep}`)).map((f) => f.split(path.sep).join("/")).sort();
   assert.deepEqual(vendor, ["vendor/README.md", "vendor/geist-1.7.2/Geist-Variable.woff2", "vendor/geist-1.7.2/GeistMono-Variable.woff2", "vendor/geist-1.7.2/LICENSE.txt",
+    "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/logs.mjs",
+    "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
     "vendor/uplot-1.6.32/LICENSE.txt", "vendor/uplot-1.6.32/uPlot.esm.js", "vendor/uplot-1.6.32/uPlot.min.css"]);
-  const types: Record<string, string> = { woff2: "font/woff2", js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", txt: "text/plain; charset=utf-8", md: "text/plain; charset=utf-8" };
+  const types: Record<string, string> = { woff2: "font/woff2", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", txt: "text/plain; charset=utf-8", md: "text/plain; charset=utf-8" };
   for (const f of vendor) assert.deepEqual(PAGE_ROUTES[`/${f}`], [f, types[f.split(".").pop()!]], `${f} is a route of its type`);
   const readme = fs.readFileSync(path.join(WEB, "vendor", "README.md"), "utf8");
   const folders = [...new Set(vendor.filter((f) => f.split("/").length === 3).map((f) => f.split("/")[1]!))];
@@ -1807,6 +1888,17 @@ test("the vendored files: each a route, whole, pinned in its folder's name, with
   }
   assert.match(fs.readFileSync(path.join(WEB, "vendor", "geist-1.7.2", "LICENSE.txt"), "utf8"), /SIL Open Font License, Version 1\.1/);
   assert.match(fs.readFileSync(path.join(WEB, "vendor", "uplot-1.6.32", "LICENSE.txt"), "utf8"), /The MIT License/);
+  assert.match(fs.readFileSync(path.join(WEB, "vendor", "lucide-1.56.0", "LICENSE.txt"), "utf8"), /^ISC License/);
+  // each icon, whole as the package built it: its version's licence header, and one SVG in currentColor as its default export
+  for (const f of vendor.filter((x) => x.endsWith(".mjs"))) {
+    const name = f.split("/").pop()!.replace(/\.mjs$/, "");
+    assert.match(fs.readFileSync(path.join(WEB, f), "utf8"), /^\/\*\*\n \* @license lucide-static v1\.56\.0 - ISC\n/, `${f}: the package's own file`);
+    const svg = (await import(path.join(WEB, f))).default as string;
+    assert.match(svg.trim(), new RegExp(`^<svg\\s+class="lucide lucide-${name}"[^>]*viewBox="0 0 24 24"[^>]*stroke="currentColor"[^>]*>[\\s\\S]*</svg>$`), `${f}: one SVG in currentColor`);
+    assert.doesNotMatch(svg, /<script|\son\w+=|href=/i, `${f}: nothing in it runs or links`);
+  }
+  assert.deepEqual(Object.keys((page as unknown as { ICONS: Record<string, string> }).ICONS).sort(),
+    vendor.filter((x) => x.endsWith(".mjs")).map((x) => x.split("/").pop()!.replace(/\.mjs$/, "")).sort(), "every icon vendored is drawn, and only those");
   // a woff2 is a woff2 (its signature), and the module loads under node without a document
   for (const f of ["Geist-Variable.woff2", "GeistMono-Variable.woff2"]) assert.equal(fs.readFileSync(path.join(WEB, "vendor", "geist-1.7.2", f)).subarray(0, 4).toString("latin1"), "wOF2");
   const uPlot = (await import(path.join(WEB, "vendor", "uplot-1.6.32", "uPlot.esm.js"))).default as { paths?: { bars?: unknown } };

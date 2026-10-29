@@ -12,20 +12,25 @@
 <script type="module" src="/app.js"></script>
 </head>
 <body>
-<header class="topbar">
-  <div class="topbar-in">
-    <h1 class="brand"><span class="logo" aria-hidden="true"></span>Mason</h1>
-    <span class="slash" aria-hidden="true">/</span>
-    <p id="where" class="where"></p>
-    <span id="badge"></span>
-    <p id="updated" class="updated" aria-live="polite"></p>
+<!-- the shell (src/web/app.js): the sidebar — the project, the nav, when it was updated and the version — and the page
+     beside it. Below 1000 px the sidebar is an icon rail; below 640 px a top bar whose menu button opens the nav as a sheet -->
+<aside id="sidebar" class="sidebar">
+  <div class="side-head">
+    <button type="button" id="menu-button" class="menu-button" data-menu aria-controls="side-body" aria-expanded="false"><span id="menu-icon"></span><span class="sr">Menu</span></button>
+    <h1 class="brand"><span class="logo" aria-hidden="true"></span><span class="brand-name">Mason</span></h1>
+    <div class="project"><p id="where" class="where"></p><span id="badge"></span></div>
   </div>
-  <!-- the pages: one section each, the one shown chosen by the URL's hash (src/web/app.js); the links work before the script runs -->
-  <nav id="nav" class="tabs" aria-label="Pages"><ul><li><a href="#overview">Overview</a></li><li><a href="#tables">Tables</a></li><li><a href="#users">Users</a></li><li><a href="#observability/queries">Observability</a></li></ul></nav>
-</header>
+  <div id="side-body" class="side-body">
+    <!-- the pages: one section each, the one shown chosen by the URL's hash; the links work before the script runs, which adds their icons -->
+    <nav id="nav" class="nav" aria-label="Pages"><ul><li><a href="#overview"><span class="label">Overview</span></a></li><li><a href="#tables"><span class="label">Tables</span></a></li><li><a href="#users"><span class="label">Users</span></a></li><li class="group"><p class="group-title" id="nav-observability">Observability</p><ul aria-labelledby="nav-observability"><li><a href="#observability/queries"><span class="label">Queries</span></a></li><li><a href="#observability/usage"><span class="label">Usage</span></a></li><li><a href="#observability/logs"><span class="label">Logs</span></a></li></ul></li></ul></nav>
+    <div class="side-foot"><p id="updated" class="updated" aria-live="polite"></p><p id="version" class="version"></p></div>
+  </div>
+</aside>
+<div class="scrim" aria-hidden="true"></div>
+<div class="content">
 <div id="poll"></div>
 <main>
-  <!-- Observability's sub-tabs and the time range its three views share (src/web/app.js renderSubnav): empty elsewhere -->
+  <!-- the Observability views' head: the group's name and the time range the three share (src/web/app.js renderSubnav); empty elsewhere -->
   <div id="subnav" class="subnav"></div>
   <section id="page-status" aria-labelledby="status-h">
     <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">What <code>mason status</code> says: whether the copy is ready, the database, the sync and the statements.</p></div>
@@ -101,6 +106,7 @@
     <div id="logs-run"></div>
   </section>
 </main>
+</div>
 <noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code>, <code>mason user list</code>, <code>mason logs</code> and <code>mason usage</code> say the same in a terminal.</p></noscript>
 </body>
 </html>

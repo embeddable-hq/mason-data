@@ -1,7 +1,7 @@
 # The web page (`mason ui`)
 
-`mason start` serves a web page beside the commands, in a browser tab: four tabs (Overview, Tables, Users and
-Observability, the last with three views: Queries, Usage and Logs) over the state `mason status`, `mason tables`,
+`mason start` serves a web page beside the commands, in a browser tab: a left sidebar of pages (Overview, Tables,
+Users, and the Observability group's three views: Queries, Usage and Logs) over the state `mason status`, `mason tables`,
 `mason user`, `mason usage` and `mason logs` read.
 
 ```bash
@@ -12,7 +12,10 @@ mason ui --json       # { url, port, next }
 
 ## What it shows
 
-The page has a nav of four tabs — **Overview · Tables · Users · Observability** — and shows one view at a time, chosen by
+The page has a sidebar on the left — the project (the database, a **demo** badge when it is the demo database), a nav of
+**Overview · Tables · Users** and, under the **Observability** heading, **Queries · Usage · Logs**, each a link with its
+icon, the one shown a filled row; at its foot how long ago Mason last answered and the version — and shows one view at a
+time beside it, chosen by
 the address's hash, so a view can be bookmarked and Back goes to the one before:
 
 | Hash | View |
@@ -24,13 +27,18 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | `#observability/usage` | Observability › Usage |
 | `#observability/logs` | Observability › Logs; `?failures=1` ticks Failures only |
 
-The hashes of before the Observability tab still land on their view: `#status` is the Overview, `#queries`, `#usage` and
-`#logs` the Observability views. Observability's three views sit under a secondary underline nav, beside **the time range
-they share**: a segmented control — Last hour · 24 hours · 7 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`)
-— kept in the hash, so a link carries it. Queries reads the request log since then, Usage the samples of that span (a
+The hashes of before the Observability group still land on their view: `#status` is the Overview, `#queries`, `#usage` and
+`#logs` the Observability views. At the top of each Observability view is **the time range the three share**: a segmented control — Last hour · 24 hours · 7 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`)
+— kept in the hash, so a link carries it (the sidebar's links to the three keep it too). Queries reads the request log since then, Usage the samples of that span (a
 minute a point for the hour, an hour for the day, six hours for the week), Logs the sync's events since then; each
 view's own filters compose with it. Only the view shown asks Mason anything, each read at the rate its data changes,
-and nothing while the tab is hidden. How long ago Mason last answered is in the top bar.
+and nothing while the tab is hidden. How long ago Mason last answered is at the sidebar's foot.
+
+Below 1000 px the sidebar is a rail of icons, each label its icon's tooltip (on hover and on focus) and still the link's
+name to a screen reader; below 640 px it is a top bar — a menu button, Mason, the project — whose button opens the nav as
+a sheet over the page: the focus goes to its first link, and Escape, a click outside it, the focus leaving it or a link
+followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/vendor/lucide-1.56.0/`, drawn inline at
+16 px in the text's colour.
 
 - **Overview** (`#overview`, read only): the run's word (Ready, Under way or Failed) beside a big dot, then cards for the
   tables synced, the rows, the last sync, the copy's file, and the last day's statements with their p95. Each card has a
@@ -89,9 +97,10 @@ out, and the commands to run next.
 ## Presentation
 
 The page looks like Vercel's dashboard: Geist Sans for text and Geist Mono for numbers and code, a near-monochrome gray
-scale with hairline borders and generous space, a top bar (Mason, the database's name, a **demo** badge when it is the
-demo database, and how long ago Mason last answered — `Updated 3 s ago`, which keeps counting when it stops answering),
-underlined tabs (and under Observability a secondary underline nav with the time range as a segmented control), and on
+scale with hairline borders and generous space, a left sidebar as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge
+when it is the demo database; the nav, each link an icon and its label, the one shown a filled row; at its foot how long
+ago Mason last answered — `Updated 3 s ago`, which keeps counting when it stops answering — and the version), the time
+range as a segmented control at the top of the Observability views, and on
 the Overview the run's word beside a big dot, a grid of KPI cards, then dense tables. Colour says a
 state and nothing else — a green, amber, red or gray dot always beside its word — besides the one blue accent for focus,
 links and a chart's mark. It follows the system's light or dark theme.

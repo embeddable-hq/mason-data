@@ -26,6 +26,8 @@
   --ok-soft: #e9f6ec; --warn-soft: #fff4e5; --bad-soft: #fdecec;
   /* a chart (src/web/charts.js reads these): its trend in the de-emphasis gray, its mark and latest point in the accent */
   --chart-trend: #a8a8a8; --chart-mark: #0070f3; --chart-grid: #ebebeb; --chart-text: #8f8f8f;
+  /* what dims the page under the phone's open menu */
+  --scrim: rgb(0 0 0 / 0.24);
 
   --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -33,7 +35,7 @@
 
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px; --space-7: 48px;
   --radius-sm: 6px; --radius: 8px; --radius-lg: 12px;
-  --width: 1200px; --gutter: 24px; --topbar-h: 56px;
+  --width: 1200px; --gutter: 24px; --topbar-h: 56px; --sidebar-w: 232px; --rail-w: 60px;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -45,6 +47,7 @@
     --ok: #3fb950; --warn: #f5a623; --bad: #ff6166; --unknown: #737373;
     --ok-soft: #0f2a17; --warn-soft: #2e2005; --bad-soft: #3a1213;
     --chart-trend: #5c5c5c; --chart-mark: #3b8eff; --chart-grid: #262626; --chart-text: #737373;
+    --scrim: rgb(0 0 0 / 0.6);
     color-scheme: dark;
   }
 }
@@ -67,22 +70,84 @@ pre { white-space: pre-wrap; margin: var(--space-2) 0 0; color: var(--muted); }
 .count { margin: var(--space-3) 0 0; }
 .warn { color: var(--warn); }
 
-/* ---------------------------------------------------------------- the top bar and the tabs */
-.topbar { background: var(--surface); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10; }
-.topbar-in, .tabs ul, main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutter); padding-right: var(--gutter); }
-.topbar-in { display: flex; align-items: center; gap: var(--space-3); min-height: var(--topbar-h); }
-.brand { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-md); font-weight: 600; margin: 0; color: var(--fg); }
+/* ---------------------------------------------------------------- the sidebar and the page beside it */
+/* after Vercel's and Supabase's dashboards: a fixed column on the left (the project, the nav, when it was updated), the
+   page to its right; below 1000 px an icon rail, its labels tooltips; below 640 px a top bar whose menu opens the nav */
+.sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-w); display: flex; flex-direction: column; z-index: 20;
+  background: var(--surface); border-right: 1px solid var(--line); }
+.content { margin-left: var(--sidebar-w); min-width: 0; }
+main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutter); padding-right: var(--gutter); }
+.side-head { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4) var(--space-3) var(--space-3); flex: none; }
+.brand { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-md); font-weight: 600; margin: 0; padding: 0 var(--space-2); color: var(--fg); min-height: 24px; }
 .brand .logo { width: 20px; height: 20px; border-radius: 5px; background: var(--fg); position: relative; flex: none; }
 .brand .logo::after { content: ""; position: absolute; inset: 6px 5px 5px; border: 2px solid var(--surface); border-top: 0; }
-.slash { color: var(--line-strong); font-size: 20px; font-weight: 300; }
-.where { margin: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.updated { margin: 0 0 0 auto; color: var(--muted); font-size: var(--text-sm); white-space: nowrap; }
-.tabs ul { list-style: none; display: flex; gap: var(--space-1); margin: 0 auto; overflow-x: auto; scrollbar-width: none; }
-.tabs a { display: block; padding: var(--space-3) var(--space-3) calc(var(--space-3) - 2px); color: var(--muted); font-size: var(--text-md);
-  border-bottom: 2px solid transparent; white-space: nowrap; text-decoration: none; border-radius: 0; }
-.tabs a:hover { color: var(--fg); text-decoration: none; }
-.tabs a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--fg); }
-.tabs a:focus-visible { outline-offset: -2px; border-radius: var(--radius-sm); }
+/* the project: its database and the demo badge, in a quiet box the height of its line before the first read (no shift) */
+.project { display: flex; align-items: center; gap: var(--space-2); min-height: 36px; padding: var(--space-1) var(--space-2); min-width: 0;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); }
+.where { margin: 0; font-size: var(--text-sm); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
+.where:empty::before { content: "…"; color: var(--subtle); }
+.side-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.nav { flex: 1 1 auto; overflow-y: auto; padding: var(--space-1) var(--space-3) var(--space-3); }
+.nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.nav a { position: relative; display: flex; align-items: center; gap: var(--space-2); min-height: 32px; padding: 0 var(--space-2);
+  border-radius: var(--radius-sm); color: var(--muted); font-size: var(--text-md); font-weight: 500; text-decoration: none; white-space: nowrap; }
+.nav a:hover { color: var(--fg); background: var(--hover); text-decoration: none; }
+.nav a[aria-current="page"] { color: var(--fg); background: var(--line); }
+.nav a:focus-visible { outline-offset: -2px; border-radius: var(--radius-sm); }
+.nav .group { margin-top: var(--space-4); }
+.nav .group-title { margin: 0 0 var(--space-1); padding: 0 var(--space-2); font-size: var(--text-xs); font-weight: 500; color: var(--subtle); }
+.nav .label { overflow: hidden; text-overflow: ellipsis; }
+/* an icon: Lucide's 24-unit drawing at 16 px, its stroke a little lighter than its 2, in the link's colour */
+.icon { display: inline-flex; flex: none; width: 16px; height: 16px; color: inherit; }
+.icon svg { width: 16px; height: 16px; stroke-width: 1.75; }
+.nav a .icon { color: var(--subtle); }
+.nav a:hover .icon, .nav a[aria-current="page"] .icon { color: var(--fg); }
+/* the static nav's links have no icon until the script writes it: the same room kept, so nothing moves */
+.nav a:not(:has(.icon))::before { content: ""; width: 16px; height: 16px; flex: none; }
+.side-foot { flex: none; padding: var(--space-3) var(--space-5) var(--space-4); border-top: 1px solid var(--line); font-size: var(--text-xs); color: var(--muted); }
+.side-foot p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 18px; }
+.updated { font-variant-numeric: tabular-nums; }
+.version { color: var(--subtle); font-family: var(--font-mono); }
+.menu-button { display: none; }
+.scrim { display: none; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* a narrow window: an icon rail, each label the tooltip of its icon (still the link's name to a screen reader) */
+@media (min-width: 641px) and (max-width: 999px) {
+  .sidebar { width: var(--rail-w); }
+  .content { margin-left: var(--rail-w); }
+  .side-head { align-items: center; padding: var(--space-4) 0 var(--space-3); }
+  .brand { padding: 0; }
+  .brand-name, .where { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .project { border: 0; background: none; padding: 0; min-height: 20px; justify-content: center; }
+  .project .badge { padding: 0 6px; font-size: 10px; height: 18px; }
+  .nav { padding: var(--space-1) var(--space-2) var(--space-3); overflow: visible; }
+  .nav a { justify-content: center; padding: 0; min-height: 36px; }
+  .nav .label { position: absolute; left: calc(100% + var(--space-2)); top: 50%; transform: translateY(-50%); padding: var(--space-1) var(--space-2);
+    background: var(--fg); color: var(--surface); border-radius: var(--radius-sm); font-size: var(--text-xs); pointer-events: none; opacity: 0; z-index: 30; }
+  .nav a:hover .label, .nav a:focus-visible .label { opacity: 1; }
+  .nav .group { margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--line); }
+  .nav .group-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .side-foot { display: none; }
+}
+
+/* a phone: a top bar (the menu button, the mark, the project); the nav and the foot a sheet under it, opened by the button */
+@media (max-width: 640px) {
+  .sidebar { position: sticky; inset: auto; top: 0; width: auto; height: var(--topbar-h); border-right: 0; border-bottom: 1px solid var(--line); }
+  .content { margin-left: 0; }
+  .side-head { flex-direction: row; align-items: center; gap: var(--space-2); height: 100%; padding: 0 var(--space-4) 0 var(--space-2); }
+  .brand { padding: 0; }
+  .project { flex: 1 1 auto; border: 0; background: none; padding: 0; min-height: 0; }
+  .where { flex: 0 1 auto; }
+  .menu-button { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; border: 0; background: none; color: var(--fg); flex: none; }
+  .menu-button .icon, .menu-button .icon svg { width: 20px; height: 20px; }
+  .menu-button[aria-expanded="true"] .when-closed, .menu-button[aria-expanded="false"] .when-open { display: none; }
+  .side-body { display: none; position: fixed; top: var(--topbar-h); left: 0; bottom: 0; width: min(288px, 85vw); background: var(--surface);
+    border-right: 1px solid var(--line); z-index: 20; overflow-y: auto; }
+  .sidebar[data-open] .side-body { display: flex; }
+  .sidebar[data-open] + .scrim { display: block; position: fixed; inset: var(--topbar-h) 0 0 0; background: var(--scrim); z-index: 15; }
+  .nav a { min-height: 40px; }
+}
 
 /* ---------------------------------------------------------------- the page and its header */
 main { padding-top: var(--space-6); padding-bottom: var(--space-7); }
@@ -260,14 +325,11 @@ details.memory, details#logs-raw { margin: var(--space-4) 0; }
 /* ---------------------------------------------------------------- a phone */
 @media (max-width: 640px) {
   :root { --gutter: 16px; }
-  .topbar-in { flex-wrap: wrap; gap: var(--space-2); padding-top: var(--space-2); padding-bottom: var(--space-2); }
-  .updated { flex-basis: 100%; margin: 0; }
   main { padding-top: var(--space-5); }
   .cards { grid-template-columns: 1fr 1fr; gap: var(--space-2); }
   .card { padding: var(--space-3); }
   .card-value { font-size: var(--text-lg); }
   .health { font-size: var(--text-lg); padding: var(--space-3) var(--space-4); }
-  .topbar { position: static; }
   /* a table scrolls inside its card, never the page (its caption then heads the card) */
   table { display: block; overflow-x: auto; }
   caption { display: block; padding: var(--space-3) var(--space-3) var(--space-1); }
@@ -339,16 +401,11 @@ details.hours > summary { margin-bottom: var(--space-2); }
 /* A chart's live legend reads the hovered hour: hidden at rest, where it would only say "-" (its space kept, so nothing moves). */
 .uplot:not(:hover) .u-legend { visibility: hidden; }
 
-/* ---------------------------------------------------------------- the Observability sub-nav and its time range */
+/* ---------------------------------------------------------------- the Observability views' head: the group, the time range */
 .subnav:empty { display: none; }
-.subnav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); margin: 0 0 var(--space-5);
-  border-bottom: 1px solid var(--line); }
-.subtabs ul { list-style: none; display: flex; gap: var(--space-4); margin: 0; padding: 0; overflow-x: auto; scrollbar-width: none; }
-.subtabs a { display: block; padding: var(--space-2) 0 calc(var(--space-2) - 1px); color: var(--muted); font-size: var(--text-sm); font-weight: 500;
-  border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; text-decoration: none; }
-.subtabs a:hover { color: var(--fg); text-decoration: none; }
-.subtabs a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--fg); }
-.range { display: inline-flex; padding: 2px; margin: 0 0 var(--space-2); background: var(--sunken); border: 1px solid var(--line); border-radius: var(--radius); }
+.subnav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); margin: 0 0 var(--space-4); }
+.crumb { margin: 0; font-size: var(--text-sm); font-weight: 500; color: var(--muted); }
+.range { display: inline-flex; padding: 2px; margin: 0; background: var(--sunken); border: 1px solid var(--line); border-radius: var(--radius); }
 .range a { display: inline-flex; align-items: center; min-height: 28px; padding: 0 var(--space-3); border-radius: var(--radius-sm); color: var(--muted);
   font-size: var(--text-sm); font-weight: 500; white-space: nowrap; text-decoration: none; }
 .range a:hover { color: var(--fg); text-decoration: none; }
@@ -389,8 +446,7 @@ table.sessions tr.others td { color: var(--muted); font-style: italic; }
 @media (max-width: 640px) {
   /* an odd card last spans the row: no orphan beside an empty cell */
   .cards > :last-child:nth-child(odd) { grid-column: 1 / -1; }
-  .subnav { flex-direction: column; align-items: stretch; }
-  .range { align-self: flex-start; }
+  .subnav { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
   .toolbar .field, .toolbar .field.grow { flex: 1 1 100%; }
   /* a field's control is its width, never its height (the phone's input { flex } is a row's, and a field is a column) */
   .toolbar .field input, .toolbar .field select { flex: none; width: 100%; min-width: 0; max-width: none; }
