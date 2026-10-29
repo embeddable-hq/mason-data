@@ -85,7 +85,9 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   Postgres is strict.
 - **A new rewrite for speed is held by the PLAN fixture too** (`tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`):
   its statement in the tool's own spelling, over the shop's million orders, its plan's skeleton in the fixture (the
-  operators, each scan's table and top-N / zone-map filter, the Mason functions, a delimiter join, a full sort), and
+  operators, a top N's count of sort keys, each scan's table and top-N / zone-map filter, the Mason functions, what it sorts by beyond a value —
+  ICU's key, a stored column —, a delimiter join, a full sort; a form that reads a stored column, held both stored
+  and not, over a copy of the shop whose keeper stored it), and
   where the skeleton cannot show the gain an invariant DuckDB's EXPLAIN ANALYZE measures (the row groups or rows a
   scan read). The oracle is blind to the plan: each of the three forms above was a BI tool's slow path with every
   answer right. A diff of the fixture is a plan changed: a regression is fixed, a better plan regenerated
@@ -253,7 +255,11 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   raises at a mark by the column alone (`markedError`: the gap for a libc key, else a Mason bug) until the detector
   counts it and turns the reads to the CASE. A statement that lists the columns (`*`) reads none, so
   its sort computes the key per row. `tests/duck-json-columns.test.ts` holds the key to the function under C, ICU and
-  libc and every write path to it; `IT_ORACLE_JSON_PATHS=eager` reads every jsonb sort from it.
+  libc and every write path to it; `IT_ORACLE_JSON_PATHS=eager` reads every jsonb sort from it; `tests/duck-plans.test.ts`
+  holds the plans, computed and stored (no row handed a function from the stored key). **A stored key saves the calls,
+  not the scan**: DuckDB 2.0 pushes no top N's filter into the stored key's scan through the mark's CASE (the fixture
+  holds it), nor into the bare BLOB column's (measured once, DuckDB 2.0, 2026-10-29; no test holds it), so a page by a
+  jsonb still reads every row's key (cheap) — never count on its pruning. ("The plan fixture")
 ## What is not supported, and how the list stays true
 
 - **An allowlist, not a blocklist**: DuckDB answers only a statement whose every resolved piece is in

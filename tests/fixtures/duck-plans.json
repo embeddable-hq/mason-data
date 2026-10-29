@@ -4,7 +4,7 @@
       "name": "date_trunc histogram: a month in UTC",
       "sql": "SELECT DATE_TRUNC('month', o.created_at) AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1 DESC LIMIT 100",
       "plan": [
-        "TOP_N",
+        "TOP_N (1 key)",
         "  HASH_GROUP_BY",
         "    PROJECTION",
         "      TABLE_SCAN public.orders"
@@ -25,7 +25,7 @@
       "sql": "SELECT DATE_TRUNC('month', o.created_at) AS m, count(*) FROM orders o GROUP BY 1 ORDER BY 1 DESC LIMIT 100",
       "zone": "Europe/Berlin",
       "plan": [
-        "TOP_N",
+        "TOP_N (1 key)",
         "  HASH_GROUP_BY",
         "    PROJECTION",
         "      TABLE_SCAN public.orders"
@@ -132,7 +132,7 @@
       "name": "LEFT lateral sorted by a table column, LIMIT 100",
       "sql": "SELECT q.id, d.key, d.value FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY q.id DESC LIMIT 100",
       "plan": [
-        "TOP_N",
+        "TOP_N (1 key)",
         "  PROJECTION",
         "    UNNEST",
         "      TABLE_SCAN public.orders [top-N filter: id]"
@@ -225,7 +225,7 @@
       "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY (q.created_at) IS NULL, q.created_at DESC LIMIT 100",
       "plan": [
         "PROJECTION",
-        "  TOP_N",
+        "  TOP_N (1 key)",
         "    PROJECTION",
         "      PROJECTION",
         "        UNNEST",
@@ -244,7 +244,7 @@
       "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY q.meta, q.id LIMIT 100",
       "plan": [
         "PROJECTION",
-        "  TOP_N",
+        "  TOP_N (2 keys)",
         "    PROJECTION calls __mason_jsonb_key",
         "      CTE",
         "        TABLE_SCAN public.orders",
@@ -331,7 +331,7 @@
       "name": "LEFT lateral sorted by its own key, LIMIT 100 (not rewritten)",
       "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY d.key, q.id LIMIT 100",
       "plan": [
-        "TOP_N",
+        "TOP_N (2 keys)",
         "  CTE",
         "    TABLE_SCAN public.orders",
         "    HASH_JOIN",
@@ -385,7 +385,7 @@
         "    PROJECTION",
         "      HASH_JOIN",
         "        TABLE_SCAN public.orders",
-        "        TOP_N",
+        "        TOP_N (1 key)",
         "          TABLE_SCAN public.orders [top-N filter: shipped_at]"
       ],
       "calls": [],
@@ -402,7 +402,7 @@
         "    PROJECTION",
         "      HASH_JOIN",
         "        TABLE_SCAN public.orders",
-        "        TOP_N",
+        "        TOP_N (1 key)",
         "          TABLE_SCAN public.orders [top-N filter: notes]"
       ],
       "calls": [],
@@ -419,7 +419,7 @@
         "    PROJECTION",
         "      HASH_JOIN",
         "        TABLE_SCAN public.orders",
-        "        TOP_N",
+        "        TOP_N (1 key)",
         "          TABLE_SCAN public.orders [top-N filter: created_at]"
       ],
       "calls": [],
@@ -436,7 +436,7 @@
         "    PROJECTION",
         "      HASH_JOIN",
         "        TABLE_SCAN public.orders",
-        "        TOP_N",
+        "        TOP_N (1 key)",
         "          TABLE_SCAN public.orders [top-N filter: shipped_at]"
       ],
       "calls": [],
@@ -449,7 +449,7 @@
       "sql": "SELECT o.id FROM orders o ORDER BY o.shipped_at IS NULL, o.id LIMIT 100",
       "plan": [
         "PROJECTION",
-        "  TOP_N",
+        "  TOP_N (2 keys)",
         "    PROJECTION",
         "      TABLE_SCAN public.orders"
       ],
@@ -462,7 +462,7 @@
       "name": "count by a column: GROUP BY 1 ORDER BY \"count\" DESC LIMIT 100",
       "sql": "SELECT \"status\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY \"count\" DESC LIMIT 100",
       "plan": [
-        "TOP_N",
+        "TOP_N (1 key)",
         "  PROJECTION",
         "    HASH_GROUP_BY",
         "      PROJECTION",
@@ -478,7 +478,7 @@
       "name": "count by a wide text column: GROUP BY 1 ORDER BY \"count\" DESC LIMIT 100",
       "sql": "SELECT \"notes\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY \"count\" DESC LIMIT 100",
       "plan": [
-        "TOP_N",
+        "TOP_N (1 key)",
         "  PROJECTION",
         "    HASH_GROUP_BY",
         "      PROJECTION",
@@ -511,7 +511,7 @@
         "    PROJECTION",
         "      HASH_JOIN",
         "        TABLE_SCAN public.orders",
-        "        TOP_N",
+        "        TOP_N (1 key)",
         "          TABLE_SCAN public.orders [top-N filter: id]"
       ],
       "calls": [],
@@ -527,7 +527,7 @@
         "  ORDER_BY",
         "    PROJECTION",
         "      PROJECTION",
-        "        TOP_N",
+        "        TOP_N (1 key)",
         "          PROJECTION",
         "            HASH_JOIN",
         "              TABLE_SCAN public.orders [top-N filter: id]",
@@ -560,7 +560,7 @@
         "  ORDER_BY",
         "    PROJECTION",
         "      PROJECTION",
-        "        TOP_N",
+        "        TOP_N (1 key)",
         "          PROJECTION",
         "            HASH_JOIN",
         "              TABLE_SCAN public.orders [top-N filter: id]",
@@ -586,7 +586,7 @@
         "                PROJECTION",
         "                  HASH_JOIN",
         "                    TABLE_SCAN public.orders",
-        "                    TOP_N",
+        "                    TOP_N (1 key)",
         "                      TABLE_SCAN public.orders [top-N filter: id]"
       ],
       "calls": [
@@ -655,7 +655,7 @@
         "PROJECTION",
         "  ORDER_BY",
         "    PROJECTION",
-        "      TOP_N",
+        "      TOP_N (1 key)",
         "        PROJECTION",
         "          PROJECTION",
         "            WINDOW",
@@ -670,7 +670,7 @@
       "name": "BI shape: collation: ORDER BY text + LIMIT (outer) / min/max of text",
       "sql": "SELECT c.name FROM customers c WHERE c.name IS NOT NULL ORDER BY c.name LIMIT 5",
       "plan": [
-        "TOP_N",
+        "TOP_N (1 key)",
         "  TABLE_SCAN public.customers [top-N filter: name] [zone-map filter: name IS NOT NULL]"
       ],
       "calls": [],
@@ -801,7 +801,7 @@
       "name": "BI shape: window frame: ROWS BETWEEN n PRECEDING / UNBOUNDED PRECEDING AND CURRENT ROW",
       "sql": "SELECT o.id, sum(o.amount) OVER (PARTITION BY o.tenant_id ORDER BY o.created_at, o.id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS last3, sum(o.amount) OVER (PARTITION BY o.tenant_id ORDER BY o.created_at, o.id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running FROM orders o ORDER BY o.id LIMIT 30",
       "plan": [
-        "TOP_N",
+        "TOP_N (1 key)",
         "  PROJECTION",
         "    PROJECTION",
         "      WINDOW",
@@ -839,7 +839,7 @@
       "name": "BI shape: ntile / percent_rank / lead with 2 arguments",
       "sql": "SELECT o.id, ntile(4) OVER (ORDER BY o.amount, o.id) AS q, percent_rank() OVER (ORDER BY o.amount) AS pr, lead(o.amount, 2) OVER (ORDER BY o.id) AS l2 FROM orders o ORDER BY o.id LIMIT 30",
       "plan": [
-        "TOP_N",
+        "TOP_N (1 key)",
         "  PROJECTION",
         "    PROJECTION",
         "      WINDOW",
@@ -969,7 +969,7 @@
         "  ORDER_BY",
         "    PROJECTION",
         "      PROJECTION",
-        "        TOP_N",
+        "        TOP_N (1 key)",
         "          PROJECTION",
         "            TABLE_SCAN public.orders [top-N filter: id] [zone-map filter: notes IS NOT NULL]"
       ],
@@ -990,7 +990,7 @@
         "  ORDER_BY",
         "    PROJECTION",
         "      PROJECTION",
-        "        TOP_N",
+        "        TOP_N (1 key)",
         "          PROJECTION",
         "            HASH_JOIN",
         "              TABLE_SCAN public.orders [top-N filter: id]",
@@ -1018,7 +1018,7 @@
         "                PROJECTION",
         "                  HASH_JOIN",
         "                    TABLE_SCAN public.orders",
-        "                    TOP_N",
+        "                    TOP_N (1 key)",
         "                      TABLE_SCAN public.orders [top-N filter: id]"
       ],
       "calls": [
@@ -1043,7 +1043,7 @@
         "              PROJECTION",
         "                HASH_JOIN",
         "                  TABLE_SCAN public.orders",
-        "                  TOP_N",
+        "                  TOP_N (1 key)",
         "                    TABLE_SCAN public.orders [top-N filter: id]"
       ],
       "calls": [
@@ -1180,7 +1180,7 @@
       "name": "BI shape: GROUP BY a primary key, selecting the columns it decides",
       "sql": "SELECT c.id, c.name, c.email, count(o.id) AS n, sum(o.amount) AS total FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY c.name, c.id LIMIT 20",
       "plan": [
-        "TOP_N",
+        "TOP_N (2 keys)",
         "  PROJECTION",
         "    PROJECTION",
         "      HASH_GROUP_BY",
@@ -1199,7 +1199,7 @@
       "name": "BI shape: GROUP BY a primary key: a decided numeric divided, computed exactly",
       "sql": "SELECT o.id, o.amount / 3 AS third, round(o.amount * 1.5, 1) AS r, count(i.id) AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY o.id LIMIT 20",
       "plan": [
-        "TOP_N",
+        "TOP_N (1 key)",
         "  PROJECTION",
         "    PROJECTION",
         "      HASH_GROUP_BY",
@@ -1293,6 +1293,371 @@
         "    TABLE_SCAN public.orders [zone-map filter: created_at >= constant]"
       ],
       "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb page: ORDER BY a jsonb DESC LIMIT 100 OFFSET 0, the key computed per row",
+      "sql": "SELECT o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta FROM orders o ORDER BY o.meta DESC LIMIT 100 OFFSET 0",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    ORDER_BY",
+        "      PROJECTION",
+        "        PROJECTION calls __mason_jsonb_key",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            TOP_N (1 key)",
+        "              PROJECTION calls __mason_jsonb_key",
+        "                TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb page: ORDER BY a jsonb ASC LIMIT 100 OFFSET 0, the key computed per row",
+      "sql": "SELECT o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta FROM orders o ORDER BY o.meta ASC LIMIT 100 OFFSET 0",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    ORDER_BY",
+        "      PROJECTION",
+        "        PROJECTION calls __mason_jsonb_key",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            TOP_N (1 key)",
+        "              PROJECTION calls __mason_jsonb_key",
+        "                TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb page: ORDER BY a jsonb DESC LIMIT 100 OFFSET 0, the key stored",
+      "sql": "SELECT o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta FROM orders o ORDER BY o.meta DESC LIMIT 100 OFFSET 0",
+      "on": "C, the key stored",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    ORDER_BY",
+        "      PROJECTION",
+        "        PROJECTION calls __mason_marked_key",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            TOP_N (1 key)",
+        "              PROJECTION calls __mason_marked_key",
+        "                TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_marked_key"
+      ],
+      "sends": [],
+      "keys": [
+        "a stored column"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb page: ORDER BY a jsonb ASC LIMIT 100 OFFSET 0, the key stored",
+      "sql": "SELECT o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta FROM orders o ORDER BY o.meta ASC LIMIT 100 OFFSET 0",
+      "on": "C, the key stored",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    ORDER_BY",
+        "      PROJECTION",
+        "        PROJECTION calls __mason_marked_key",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            TOP_N (1 key)",
+        "              PROJECTION calls __mason_marked_key",
+        "                TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_marked_key"
+      ],
+      "sends": [],
+      "keys": [
+        "a stored column"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb page: the nulls idiom, ORDER BY (meta) IS NULL, meta DESC LIMIT 100 OFFSET 0, the key computed per row",
+      "sql": "SELECT o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta FROM orders o ORDER BY (o.meta) IS NULL ASC, o.meta DESC LIMIT 100 OFFSET 0",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    ORDER_BY",
+        "      PROJECTION",
+        "        PROJECTION calls __mason_jsonb_key",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            TOP_N (1 key)",
+        "              PROJECTION calls __mason_jsonb_key",
+        "                TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb page: the nulls idiom, ORDER BY (meta) IS NULL, meta DESC LIMIT 100 OFFSET 0, the key stored",
+      "sql": "SELECT o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta FROM orders o ORDER BY (o.meta) IS NULL ASC, o.meta DESC LIMIT 100 OFFSET 0",
+      "on": "C, the key stored",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    ORDER_BY",
+        "      PROJECTION",
+        "        PROJECTION calls __mason_marked_key",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            TOP_N (1 key)",
+        "              PROJECTION calls __mason_marked_key",
+        "                TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_marked_key"
+      ],
+      "sends": [],
+      "keys": [
+        "a stored column"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb grouped: GROUP BY a jsonb, count per document, the key computed per row",
+      "sql": "SELECT \"meta\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY \"count\" DESC LIMIT 100",
+      "plan": [
+        "TOP_N (1 key)",
+        "  PROJECTION",
+        "    HASH_GROUP_BY",
+        "      PROJECTION calls __mason_jsonb_key",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb grouped: GROUP BY a jsonb, count per document, the key stored",
+      "sql": "SELECT \"meta\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY \"count\" DESC LIMIT 100",
+      "on": "C, the key stored",
+      "plan": [
+        "TOP_N (1 key)",
+        "  PROJECTION",
+        "    HASH_GROUP_BY",
+        "      PROJECTION calls __mason_marked_key",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_marked_key"
+      ],
+      "sends": [],
+      "keys": [
+        "a stored column"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb distinct: SELECT DISTINCT a jsonb LIMIT 100, the key computed per row",
+      "sql": "SELECT DISTINCT o.meta FROM orders o LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  LIMIT",
+        "    PROJECTION",
+        "      HASH_GROUP_BY",
+        "        PROJECTION",
+        "          PROJECTION calls __mason_jsonb_key",
+        "            TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb distinct: SELECT DISTINCT a jsonb LIMIT 100, the key stored",
+      "sql": "SELECT DISTINCT o.meta FROM orders o LIMIT 100",
+      "on": "C, the key stored",
+      "plan": [
+        "PROJECTION",
+        "  LIMIT",
+        "    PROJECTION",
+        "      HASH_GROUP_BY",
+        "        PROJECTION",
+        "          PROJECTION calls __mason_marked_key",
+        "            TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_marked_key"
+      ],
+      "sends": [],
+      "keys": [
+        "a stored column"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb equal: WHERE jsonb = a document, the key computed per row",
+      "sql": "SELECT count(*) FROM orders o WHERE o.meta = '{\"status\": \"pending\", \"n\": 0.370, \"tags\": [\"a\", \"B\"]}'::jsonb",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  TABLE_SCAN public.orders [zone-map filter: an expression] calls __mason_jsonb_key"
+      ],
+      "calls": [
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb equal: WHERE jsonb = a document, the key stored",
+      "sql": "SELECT count(*) FROM orders o WHERE o.meta = '{\"status\": \"pending\", \"n\": 0.370, \"tags\": [\"a\", \"B\"]}'::jsonb",
+      "on": "C, the key stored",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  TABLE_SCAN public.orders [zone-map filter: an expression] calls __mason_marked_key"
+      ],
+      "calls": [
+        "__mason_jsonb_key",
+        "__mason_marked_key"
+      ],
+      "sends": [],
+      "keys": [
+        "a stored column"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb under libc: ORDER BY a jsonb DESC LIMIT 100 OFFSET 0, the libc key computed per row",
+      "sql": "SELECT o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta FROM orders o ORDER BY o.meta DESC LIMIT 100 OFFSET 0",
+      "on": "libc",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    ORDER_BY",
+        "      PROJECTION",
+        "        PROJECTION calls __mason_jsonb_key_libc, __mason_jsonb_libc_kept",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            TOP_N (1 key)",
+        "              PROJECTION calls __mason_jsonb_key_libc, __mason_jsonb_libc_kept",
+        "                PROJECTION",
+        "                  TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_jsonb_key_libc",
+        "__mason_jsonb_libc_kept"
+      ],
+      "sends": [],
+      "keys": [
+        "icu_sort_key",
+        "list_transform"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb under libc: ORDER BY a jsonb DESC LIMIT 100 OFFSET 0, the libc key stored",
+      "sql": "SELECT o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta FROM orders o ORDER BY o.meta DESC LIMIT 100 OFFSET 0",
+      "on": "libc, the key stored",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    ORDER_BY",
+        "      PROJECTION",
+        "        PROJECTION calls __mason_marked_key",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            TOP_N (1 key)",
+        "              PROJECTION calls __mason_marked_key",
+        "                TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_marked_key"
+      ],
+      "sends": [],
+      "keys": [
+        "a stored column"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb under libc: GROUP BY a jsonb, the C key computed per row (the libc key stored)",
+      "sql": "SELECT \"meta\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY \"count\" DESC LIMIT 100",
+      "on": "libc, the key stored",
+      "plan": [
+        "TOP_N (1 key)",
+        "  PROJECTION",
+        "    HASH_GROUP_BY",
+        "      PROJECTION calls __mason_jsonb_key",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb under libc: SELECT DISTINCT a jsonb, the C key computed per row (the libc key stored)",
+      "sql": "SELECT DISTINCT o.meta FROM orders o LIMIT 100",
+      "on": "libc, the key stored",
+      "plan": [
+        "PROJECTION",
+        "  LIMIT",
+        "    PROJECTION",
+        "      HASH_GROUP_BY",
+        "        PROJECTION",
+        "          PROJECTION calls __mason_jsonb_key",
+        "            TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb under libc: WHERE jsonb = a document, the C key computed per row (the libc key stored)",
+      "sql": "SELECT count(*) FROM orders o WHERE o.meta = '{\"status\": \"pending\", \"n\": 0.370, \"tags\": [\"a\", \"B\"]}'::jsonb",
+      "on": "libc, the key stored",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  TABLE_SCAN public.orders [zone-map filter: an expression] calls __mason_jsonb_key"
+      ],
+      "calls": [
+        "__mason_jsonb_key"
+      ],
       "sends": [],
       "delim_join": false,
       "full_sort": false
