@@ -379,6 +379,16 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb: IS DISTINCT FROM, NULLIF, CASE", "SELECT id, j IS DISTINCT FROM '1.00', j IS NOT DISTINCT FROM '[]', nullif(j, '[]'), CASE j WHEN '{}' THEN 'empty' WHEN '1' THEN 'one' ELSE 'other' END FROM jorder ORDER BY id");
   yield q("jsonb: joined on =", "SELECT a.id, b.id FROM jorder a JOIN jorder b ON a.j = b.j AND a.id < b.id ORDER BY 1, 2");
   yield q("jsonb: HAVING", "SELECT min(id), count(*) FROM jorder GROUP BY j HAVING j > '[]' AND count(*) > 1 ORDER BY 1");
+  // equality alone (under libc: the C key, stored as a column of its own where statements keep equating; src/duck/kept.ts
+  // EQUAL_STEPS): IN a list alone and NOT IN one beside the NULLs, count(DISTINCT) per group, grouped beside another key,
+  // DISTINCT beside another column, equal to a constant written another way
+  yield q("jsonb: IN a list alone", `SELECT id FROM jorder WHERE j IN ('1.00', '{"a": 1}', '[]', 'null', '"a"') ORDER BY id`);
+  yield q("jsonb: NOT IN a list", `SELECT id FROM jorder WHERE j NOT IN ('1', '{}') ORDER BY id`);
+  yield q("jsonb: count(DISTINCT) per group", "SELECT id % 3, count(DISTINCT j), count(j) FROM jorder GROUP BY 1 ORDER BY 1");
+  yield q("jsonb: grouped beside another key", "SELECT id % 2, count(*), min(id) FROM jorder GROUP BY j, id % 2 ORDER BY 3, 1");
+  yield q("jsonb: DISTINCT beside another column, counted", "SELECT count(*) FROM (SELECT DISTINCT j, id % 2 FROM jorder) s");
+  yield q("jsonb: = a constant written another way", `SELECT id FROM jorder WHERE j = '{"a": 1.000}' OR j = '1.0' ORDER BY id`);
+  yield q("jsonb: joined on =, counted per row", "SELECT a.id, count(*) FROM jorder a JOIN jorder b ON a.j = b.j GROUP BY a.id ORDER BY 1");
   // A GROUPED VIEW, as a BI tool sends it: the ORDER BY over the output name, the ordinal or the nulls idiom is keyed
   // over the group's value. Over one text of each value (twice for some, so the counts differ): a group of values
   // written apart writes one of them (jsonb-equal-text), here there is one

@@ -49,14 +49,18 @@
  *   (src/duck/kept-route.ts `hideKept`, `VISIBLE_CATALOG`); the catalog Postgres never knows the column.
  * - A JSONB'S ORDER (src/duck/kept-route.ts `ORDER_STEPS`): `ORDER BY j`, `GROUP BY j`, `j = k` compare a key of the
  *   whole document, stored as a read like a path's — a BLOB column of the key (`orderKeySql`), under the collation the
- *   listener tells (`orderBy`): `ORDER_STEPS:<id>`, so a key of another collation is another column, dropped.
+ *   listener tells (`orderBy`): `ORDER_STEPS:<id>`, so a key of another collation is another column, dropped. Under a
+ *   LIBC collation equality reads the C key instead (src/duck/rewrite.ts `equalKey`), a read of its own
+ *   (`EQUAL_STEPS:<equalId>`): a SECOND column beside the order's, stored, filled, swept, marked and dropped exactly as
+ *   it is; under C and ICU the order's key serves equality, and no second column is ever made (`own`, `orderBy`).
  * - OFF (`enabled: false`, `.mason/config.json` `storeJsonPaths: false`, `MASON_STORE_JSON_PATHS=off` for a serve): at
  *   open every stored column is dropped and its row marked dropped, and nothing is recorded, stored or routed.
  */
 import type { DuckConnection } from "./executor.ts";
 import { DUCKDB_VERSION, MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { createHash } from "node:crypto";
-import { canonicalRead, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isOrderRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, ORDER_STEPS, pathKey, pathText, readOfKey, VISIBLE_CATALOG,
+import { canonicalRead, EQUAL_STEPS, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isEqualRead, isKeyRead, isOrderRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, knownSteps, ORDER_STEPS, pathKey,
+  pathText, readOfKey, VISIBLE_CATALOG,
   type JsonRead, type KeptRoutes, type ReadyPath } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS, KEY_VERSION, libcUncovered, STORED_SUFFIX } from "./jsonb-order.ts";
 import { encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
@@ -246,14 +250,26 @@ export function orderId(c: DuckCollation, libc: LibcOrder | undefined, versions 
   return `libc:${c.icu}:${createHash("sha256").update(encodeLibcOrder(libc)).digest("hex").slice(0, 16)}:${versions}`;
 }
 
-/** a stored column's type, and its mark of a value computed at read time, as SQL */
-const columnType = (p: { steps: string }): string => isOrderRead(p) ? "BLOB" : "VARCHAR";
-const recomputeSql = (p: { steps: string }): string => isOrderRead(p) ? `unhex('${KEY_RECOMPUTE_HEX}')` : RECOMPUTE_SQL;
+/**
+ * THE C KEY'S ID, stored under a libc collation for equality (`EQUAL_STEPS:<id>`, src/duck/kept-route.ts): the C
+ * collation's order id (`orderId`), so with the key's encoding (`KEY_VERSION`) and the DuckDB (`DUCKDB_VERSION`) in it,
+ * as an order key's — a release that changes either stores it again. The libc order is not in it: the C key reads no
+ * collation, so a glibc whose order moved keeps it.
+ */
+export function equalId(versions?: string): string {
+  return versions === undefined ? orderId({ kind: "bytes" }, undefined) : orderId({ kind: "bytes" }, undefined, versions);
+}
 
-/** what a fill's measured rate is kept by (`estimate`, `lastRate`): the JSON column, and whether the fill computes a path
- *  or a jsonb's key — a key's function is not a path's (a list of strings, their ICU keys, the key's bytes), so one's
- *  rate is no evidence for the other's */
-const measuredKey = (r: { source: string; column: string; steps: string }): string => `${r.source}\u0000${r.column}\u0000${isOrderRead(r) ? "order" : "path"}`;
+/** a stored column's type, and its mark of a value computed at read time, as SQL */
+const columnType = (p: { steps: string }): string => isKeyRead(p) ? "BLOB" : "VARCHAR";
+const recomputeSql = (p: { steps: string }): string => isKeyRead(p) ? `unhex('${KEY_RECOMPUTE_HEX}')` : RECOMPUTE_SQL;
+
+/** what a fill's measured rate is kept by (`estimate`, `lastRate`): the JSON column, and whether the fill computes a path,
+ *  a jsonb's order key or its C key — a key's function is not a path's (a list of strings, their ICU keys, the key's
+ *  bytes), nor a libc order's key the C key's (4.7 µs a row against 1.4, docs/DESIGN.md "jsonb's order"), so one's
+ *  rate is no evidence for another's */
+const measuredKey = (r: { source: string; column: string; steps: string }): string =>
+  `${r.source}\u0000${r.column}\u0000${isOrderRead(r) ? "order" : isEqualRead(r) ? "equal" : "path"}`;
 
 /** a read as its stored path's `->` read (src/duck/kept-route.ts pathKey): what the ledger holds */
 export const pathOf = (r: JsonRead): JsonRead => ({ ...canonicalRead(r), asText: false });
@@ -361,13 +377,27 @@ export class KeptJsonPaths implements KeptRoutes {
   /** the collation a jsonb's key is stored under (`orderBy`), and its id (`orderId`); null until told */
   private order: { id: string; collation: DuckCollation; libc: LibcOrder | undefined } | null = null;
 
-  /** a read as this keeper stores it: a jsonb's order (`ORDER_STEPS`) under the collation it was told, any other as it is */
+  /**
+   * A READ AS THIS KEEPER STORES IT: a jsonb's order (`ORDER_STEPS`) under the collation it was told; its equality
+   * (`EQUAL_STEPS`) as the C key (`equalId`) under a libc collation, and under C or ICU as the ORDER's read — the order's
+   * key equates there, so one column serves both and no second is ever made; any other read as it is.
+   */
   private own(r: JsonRead): JsonRead {
+    if (isEqualRead(r) && this.order !== null && this.order.collation.kind !== "libc") return { ...r, steps: `${ORDER_STEPS}:${this.order.id}` };
+    if (isEqualRead(r)) return { ...r, steps: `${EQUAL_STEPS}:${this.order === null ? "?" : equalId()}` };
     return isOrderRead(r) ? { ...r, steps: `${ORDER_STEPS}:${this.order?.id ?? "?"}` } : r;
   }
 
-  /** a stored key of the collation statements sort by now (`orderBy`): computed by writes and read by plans */
-  private current(p: { steps: string }): boolean { return this.order !== null && p.steps === `${ORDER_STEPS}:${this.order.id}`; }
+  /** the steps a stored key would have now (`orderBy`): the order's under the collation told, the C key's under a libc
+   *  one (none under C or ICU: the order's key serves); null until told */
+  private nowSteps(p: { steps: string }): string | null {
+    if (this.order === null) return null;
+    if (isEqualRead(p)) return this.order.collation.kind === "libc" ? `${EQUAL_STEPS}:${equalId()}` : null;
+    return `${ORDER_STEPS}:${this.order.id}`;
+  }
+
+  /** a stored key of the collation statements sort and equate by now (`orderBy`): computed by writes and read by plans */
+  private current(p: { steps: string }): boolean { const now = this.nowSteps(p); return now !== null && p.steps === now; }
 
   /**
    * THE COLLATION, TOLD (src/duck/store.ts `listener`, once the source's is known): a jsonb's stored key is that
@@ -380,19 +410,24 @@ export class KeptJsonPaths implements KeptRoutes {
     const id = orderId(collation, libc);
     await this.host.onWriter(async () => {
       this.order = { id, collation, libc };
-      for (const p of [...this.paths.values()].filter((x) => isOrderRead(x) && !this.current(x) && (x.state === "backfilling" || x.state === "ready"))) {
-        await this.drop(this.store.writer, p, `stored under another collation or version (${p.steps.slice(ORDER_STEPS.length + 1)}, now ${id}); stored again when its reads ask for it`);
+      for (const p of [...this.paths.values()].filter((x) => isKeyRead(x) && !this.current(x) && (x.state === "backfilling" || x.state === "ready"))) {
+        const was = p.steps.slice(p.steps.indexOf(":") + 1), now = this.nowSteps(p);
+        await this.drop(this.store.writer, p, now === null
+          ? `the database's collation is no longer a libc one (now ${id}): its order's key equates jsonb, so equality reads that one`
+          : `stored under another collation or version (${was}, now ${now.slice(now.indexOf(":") + 1)}); stored again when its reads ask for it`);
         this.host.log(`${p.source}: ${pathText(p)} is no longer stored: ${p.why}`);
       }
     });
     void this.fills();
   }
 
-  /** what a stored column takes from its JSON column's `value`: a path's `->` answer (`keptValueSql`), or a jsonb's key
-   *  (`orderKeySql`) — unset (NULL) while its collation is not the one told (`orderBy`): the sweep fills it */
+  /** what a stored column takes from its JSON column's `value`: a path's `->` answer (`keptValueSql`), a jsonb's order
+   *  key (`orderKeySql` under the collation told), or its C key (`orderKeySql` under C) — unset (NULL) while the key is
+   *  not the one told (`orderBy`): the sweep fills it */
   private valueSql(p: KeptPath, value: string): string {
-    if (!isOrderRead(p)) return keptValueSql(p, value);
-    return this.current(p) ? orderKeySql(this.order!.collation, value) : "NULL";
+    if (!isKeyRead(p)) return keptValueSql(p, value);
+    if (!this.current(p)) return "NULL";
+    return orderKeySql(isEqualRead(p) ? { kind: "bytes" } : this.order!.collation, value);
   }
 
   /** every path with a row, for `mason status` */
@@ -443,6 +478,13 @@ export class KeptJsonPaths implements KeptRoutes {
           basis: isBasis(fillBasis) ? fillBasis : "text", rowsPerSecond: fillRate === null || fillRate === undefined ? null : Number(fillRate) },
         filled: filledRows === null || filledRows === undefined || filledSeconds === null || filledSeconds === undefined ? null : { rows: Number(filledRows), seconds: Number(filledSeconds) } });
     }
+    // a row of a kind this Mason does not know (another release's: `knownSteps`) is dropped, its column with it (no
+    // write here could compute it, and none names it once dropped), and said with its steps: inert, never fatal
+    for (const p of this.paths.values()) {
+      if (p.state === "dropped" || knownSteps(p.steps)) continue;
+      await this.drop(w, p, `stored by another release as ${p.steps}, a kind this Mason does not know`);
+      this.host.log(`${p.source}: dropped the stored ${p.column} of a kind this Mason does not know (${p.steps}); its column goes at this start`);
+    }
     // a path an earlier Mason stored in another form (a column per spelling or per `->>`, its rows' marks other): its
     // name is not its path's (`hiddenName`), so it is dropped with its column, and stored again as the policy says
     const earlier = "stored by an earlier Mason in another form; stored again when its reads ask for it";
@@ -475,7 +517,7 @@ export class KeptJsonPaths implements KeptRoutes {
     // a jsonb's stored key is its collation's, told after this (`orderBy`): until then a write leaves it unset and no
     // plan reads it, so a ready one is filled again where unset first — the backfill's sweep alone (its ranges are done)
     for (const p of this.paths.values()) {
-      if (!isOrderRead(p) || p.state !== "ready") continue;
+      if (!isKeyRead(p) || p.state !== "ready") continue;
       p.state = "backfilling";
       this.cursors.set(p.name, Number.MAX_SAFE_INTEGER);
     }
@@ -766,13 +808,14 @@ export class KeptJsonPaths implements KeptRoutes {
   private storable(read: JsonRead): boolean {
     const cols = this.host.served().get(read.source);
     if (cols === undefined || !this.views.has(read.source) || this.host.rebuilding(read.source)) return false;
-    // a jsonb's key waits for its collation (`orderBy`, at the listener's start): nothing to say
-    if (isOrderRead(read) && !this.current(read)) return false;
+    // a jsonb's key waits for its collation (`orderBy`, at the listener's start), and its C key is stored under a libc
+    // one alone (`own` folds it into the order's elsewhere): nothing to say
+    if (isKeyRead(read) && !this.current(read)) return false;
     const name = hiddenName(read);
     const col = cols.find((c) => c.name === read.column);
     const why = col === undefined ? `${read.column} is not a column of the copy`
       : !/^jsonb?$/.test(col.type) ? `${read.column} is a ${col.type}, not a json or jsonb`
-      : isOrderRead(read) && col.type !== "jsonb" ? `${read.column} is a ${col.type}, which has no order (a jsonb's is stored)`
+      : isKeyRead(read) && col.type !== "jsonb" ? `${read.column} is a ${col.type}, which has no order or equality (a jsonb's is stored)`
       : cols.some((c) => c.name.toLowerCase() === name) ? `the copy has a column named ${name} of its own` : null;
     if (why === null) return true;
     const key = pathKey(read);
@@ -852,7 +895,7 @@ export class KeptJsonPaths implements KeptRoutes {
    *  on), then the path made ready once no row of it is unset — and read by its column alone once none is marked */
   private async backfill(p: KeptPath): Promise<void> {
     // a jsonb's key waits for its collation (`orderBy`): its rows would be filled unset
-    if (isOrderRead(p) && !this.current(p)) return;
+    if (isKeyRead(p) && !this.current(p)) return;
     const target = tableOf(p.source);
     const end = await this.host.onWriter(async () => Number((await this.store.writer.runAndReadAll(`SELECT coalesce(max(rowid), -1) + 1 FROM ${target}`)).getRowsJS()[0]![0]));
     // what this fill measures: the rows its chunks filled and the time they held the writer (never the waits for its

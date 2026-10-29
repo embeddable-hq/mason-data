@@ -182,7 +182,8 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   DISTINCT, PARTITION BY … read `equalKey`, and only ORDER BY, <, >, BETWEEN must read the collation's key of each
   string (ICU's, or the measured libc order's, which refuses a character it does not cover: equality must never
   refuse what it never had to order). Under C and ICU the order's key equates exactly and never refuses, so
-  `equalKey` is it (and may be stored); under libc it is the C key, computed. A node the rewrite typed as another (`typedLike`) keeps
+  `equalKey` is it (and may be stored); under libc it is the C key, stored as a column of its own (`EQUAL_STEPS`, below)
+  or computed. A node the rewrite typed as another (`typedLike`) keeps
   that type through `clone`. `tests/duck-jsonb-order.test.ts` holds the key to
   Postgres's order under C, ICU and libc, and the oracle's `jorder` every form. ("jsonb's order")
 
@@ -260,6 +261,21 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   not the scan**: DuckDB 2.0 pushes no top N's filter into the stored key's scan through the mark's CASE (the fixture
   holds it), nor into the bare BLOB column's (measured once, DuckDB 2.0, 2026-10-29; no test holds it), so a page by a
   jsonb still reads every row's key (cheap) — never count on its pruning. ("The plan fixture")
+- **Under a libc collation a jsonb's equality is a SECOND stored key, the C key** (`EQUAL_STEPS`, src/duck/kept-route.ts;
+  `equalId`, src/duck/kept.ts: `equal:` and the C order's id, so `KEY_VERSION` and `DUCKDB_VERSION`, never the libc
+  order, which the C key does not read): GROUP BY / DISTINCT / count(DISTINCT) / PARTITION BY / = / IN / a join on `=`
+  record it as a read (`equalKey` → `keptKey(e, EQUAL_STEPS)`), weighed, filled, swept, marked, dropped and read exactly
+  as the order's key, by every write path (`valueSql`). It never marks a libc-uncovered string (the C key covers every
+  string), so a mark of it is a Mason bug (XX000), never the gap. **Under C and ICU no second column is ever made**: the
+  order's key equates there, so the keeper folds an equality read into the order's (`own`) and drops a C key at
+  `orderBy`. `mason status` names each: `GROUP BY j (its jsonb equality …)` beside `ORDER BY j (its jsonb order …)`.
+  `tests/duck-json-columns.test.ts` holds both kinds through every write path, every equality form to PGlite, and the
+  lifecycle; the eager oracle under libc reads `public.jorder`'s equality from it.
+- **A stored read of a kind this Mason does not know is inert, never fatal** (`knownSteps`, src/duck/kept-route.ts): a
+  request log's read of it is not counted (`readOfKey`), its ledger row is dropped at the start with its column and
+  said with its steps (`open`), and `pathText` says it raw. A new kind of stored read is added there (the release before
+  `equal:` broke its status and every write of the table on one). `tests/duck-json-columns.test.ts` holds it with a
+  made-up kind `future:x`. ("jsonb's order", "Rolling back past it")
 ## What is not supported, and how the list stays true
 
 - **An allowlist, not a blocklist**: DuckDB answers only a statement whose every resolved piece is in
