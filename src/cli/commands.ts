@@ -1325,7 +1325,7 @@ function olderPage(q: RequestQuery, before: string): string {
  * a BI tool sends hundreds as it connects — and is not recorded (src/api/postgres/server.ts `recordRequest`), so a
  * `select 1` typed to test the connection is answered and never appears.
  */
-export const UNLISTED_STATEMENTS = "A statement that reads no copied table (select 1, select now(), SET, SHOW, the catalog queries a BI tool sends as it connects) is answered without the copy and not listed: the request log keeps the statements that read your tables";
+export const UNLISTED_STATEMENTS = "A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed";
 
 /** mason logs --requests: the run's ledger through its command server (one process holds the copy's file) */
 async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {

@@ -368,7 +368,7 @@ export function copyClick(d, button, { doc, win }) {
 
 /** What the request log does not list (src/cli/commands.ts `UNLISTED_STATEMENTS`, held equal by the tests): a statement
  *  that reads no copied table is the catalog's to answer, and not recorded — so a `select 1` never shows on Queries. */
-export const UNLISTED_STATEMENTS = "A statement that reads no copied table (select 1, select now(), SET, SHOW, the catalog queries a BI tool sends as it connects) is answered without the copy and not listed: the request log keeps the statements that read your tables";
+export const UNLISTED_STATEMENTS = "A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed";
 
 /** The hash of the page that makes a user (src/web/app.js PAGES): where Connect's Create a user leads. */
 export const USERS_HASH = "#users";

@@ -283,7 +283,7 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   const html = renderTables(CATALOG_STATE);
   const text = textOf(html);
   // ONE table: an added table shows its sync columns, one not added its rows and key
-  assert.match(text, /^Table State Rows Key Last sync Took Size of the copy Note /);
+  assert.match(text, /^Table State Rows Key Last sync Took Size Note /);
   assert.equal([...html.matchAll(/<table /g)].length, 1, "the added tables are not listed twice");
   assert.match(text, /public\.customers Synced 1,200 key id Sync Remove public\.orders /);
   assert.equal([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`).join(", "),
@@ -1055,14 +1055,14 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   const html = renderTables(SYNCED, { sizes: USAGE });
   const text = textOf(html);
-  assert.match(text, /^Table State Rows Key Last sync Took Size of the copy Note /);
-  assert.match(text, /public\.customers Synced 1,200 key id 30 s ago 0\.4 s \(changes checked\) 512\.0 KiB Sync Remove /);
-  assert.match(text, /public\.orders Failed ~2,000,000 rows key id 65 min ago 63 s \(copied whole\) poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s Sync Remove /);
-  assert.match(text, /public\.events Synced 30,000,000 key id 2 min ago 13 min \(copied whole\) 3\.0 GiB Sync Remove /);
+  assert.match(text, /^Table State Rows Key Last sync Took Size Note /);
+  assert.match(text, /public\.customers Synced 1,200 key id 30 s ago 0\.4 s 512\.0 KiB Sync Remove /);
+  assert.match(text, /public\.orders Failed ~2,000,000 rows key id 65 min ago 63 s poll: connection reset the whole error poll: connection reset the sync tries it again in 5 s Sync Remove /);
+  assert.match(text, /public\.events Synced 30,000,000 key id 2 min ago 13 min 3\.0 GiB Sync Remove /);
   assert.match(text, /public\.audit Not added ~50 rows key id Add Columns… /, "a table not added has no sync, and is in the same table");
   assert.equal([...html.matchAll(/<table /g)].length, 1);
   // the last sync is an age, its UTC time in a title; rows, age, span and size are mono and right-aligned
-  assert.match(html, /<td class="num" title="2026-10-27 09:05:00 UTC">30 s ago<\/td><td class="num">0\.4 s \(changes checked\)<\/td><td class="num">512\.0 KiB<\/td>/);
+  assert.match(html, /<td class="num" title="2026-10-27 09:05:00 UTC">30 s ago<\/td><td class="num" title="changes checked">0\.4 s<\/td><td class="num">512\.0 KiB<\/td>/);
   assert.match(html, /<td class="num">1,200<\/td>/);
   // a failed copy's error is a red line, its whole error in a details
   assert.match(html, /<span class="err">poll: connection reset<\/span><details data-open="error:public\.orders"><summary>the whole error<\/summary><pre>poll: connection reset\nthe sync tries it again in 5 s<\/pre><\/details>/);
@@ -1075,8 +1075,10 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   assert.ok(text.includes(commands.fileSize(3_221_225_472)) && text.includes(commands.spanText(0.42)));
   // a sync under a tenth of a second is not worth a digit; one over keeps the commands' span
   const tookText = of<[unknown], string>(tablesPage, "tables.js", "tookText");
-  assert.deepEqual([{ syncSeconds: 0.04, syncedBy: "poll" }, { syncSeconds: 0.1, syncedBy: "poll" }, { syncSeconds: 63, syncedBy: "copy" }, { syncSeconds: 2, syncedBy: "catch-up" }, { syncSeconds: 1, syncedBy: "stream" }].map(tookText),
-    ["<0.1 s (changes checked)", "0.1 s (changes checked)", "63 s (copied whole)", "2.0 s (changes checked)", "1.0 s (streamed)"], "what synced a copy, in plain words");
+  const syncs = [{ syncSeconds: 0.04, syncedBy: "poll" }, { syncSeconds: 0.1, syncedBy: "poll" }, { syncSeconds: 63, syncedBy: "copy" }, { syncSeconds: 2, syncedBy: "catch-up" }, { syncSeconds: 1, syncedBy: "stream" }];
+  assert.deepEqual(syncs.map(tookText), ["<0.1 s", "0.1 s", "63 s", "2.0 s", "1.0 s"]);
+  const tookTitle = of<[unknown], string>(tablesPage, "tables.js", "tookTitle");
+  assert.deepEqual(syncs.map(tookTitle), ["changes checked", "changes checked", "copied whole", "changes checked", "streamed"], "what synced a copy, in plain words, the cell's title");
   // the states, as the run decides them: copying is Syncing, a table not reached Waiting
   assert.match(textOf(renderTables(COPYING, { sizes: USAGE })), /public\.orders Syncing 280,000 .* public\.events Waiting /);
   // the sizes could not be read: said once, the rest shown
@@ -1115,7 +1117,7 @@ test("Tables: what a sync did is said as mason sync says it, under its table; a 
 
 test("Tables: the search box and the state filter narrow the one list, their text kept across polls; a form open keeps its table and its list still", async () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Table State Rows Key Last sync Took Size of the copy Note public\.orders Synced 2,000,000 key id Sync Remove /);
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Table State Rows Key Last sync Took Size Note public\.orders Synced 2,000,000 key id Sync Remove /);
   assert.equal(renderTables(CATALOG_STATE, { filter: "" }), renderTables(CATALOG_STATE), "nothing typed: every table, as before");
   assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit" })), /^1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… Its columns/, "the table whose form is open stays");
   assert.match(textOf(renderTables(SYNCED, { filter: "nope" })), /No table's name has “nope”\./);
@@ -1766,7 +1768,7 @@ test("Tables: in replication mode each added table's stream state is a column, i
   const st = REPL(STREAM, {}) as unknown as { stream: typeof STREAM };
   const html = renderTables(st, { now: NOW });
   const text = textOf(html);
-  assert.match(text, /Took Size of the copy Stream Note /);
+  assert.match(text, /Took Size Stream Note /);
   const { tables } = fn<[unknown, number], { tables: Array<[string, string]> }>("streamRows")(STREAM, NOW);
   for (const [t, words] of tables.filter(([t]) => ["public.customers", "public.orders", "public.events"].includes(t))) assert.ok(text.includes(words), `${t}: ${words}`);
   assert.match(text, /public\.customers Synced .* streamed · 1,204 changes \(1,000 inserts, 200 updates, 4 deletes\) this run /);
@@ -2662,7 +2664,7 @@ test("Queries, an empty request log: how to connect under its sentence — never
   const renderRequests = fn<[unknown, Record<string, unknown>], string>("renderRequests");
   const connect = fn<[unknown, unknown], string>("renderConnect")(SHOP_PG, { first: true });
   const empty = { requests: [], keptDays: 7, before: null };
-  assert.match(textOf(renderRequests(empty, { span: "the last 24 hours", connect })), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_REQUEST_LOG_DAYS\)\. A statement that reads no copied table \(select 1, select now\(\), SET, SHOW, the catalog queries a BI tool sends as it connects\) is answered without the copy and not listed: the request log keeps the statements that read your tables\. Connect your first tool .* Create a user /);
+  assert.match(textOf(renderRequests(empty, { span: "the last 24 hours", connect })), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_REQUEST_LOG_DAYS\)\. A statement that reads no copied table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not listed\. Connect your first tool .* Create a user /);
   assert.equal((page as Record<string, unknown>).UNLISTED_STATEMENTS, commands.UNLISTED_STATEMENTS, "the page says what mason logs --requests says");
   assert.ok(fs.readFileSync(path.join(WEB, "index.html"), "utf8").includes(`${commands.UNLISTED_STATEMENTS}.`), "and the request log's lead says it over a log that has rows");
   assert.ok(!textOf(renderRequests(empty, { span: "the last 24 hours", connect, filtered: true })).includes("Connect"), "a filter that passes none is not a fresh install");

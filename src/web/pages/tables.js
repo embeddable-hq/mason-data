@@ -8,7 +8,7 @@
  * TABLE_ROWS that pass and "Show N more" / "Show all" (the search is over all of them, at once); a long name is cut with
  * an ellipsis, its whole the title. Reads `/api/state` every poll and `/api/usage`'s `copySizes` every minute.
  */
-import { msText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, POLL_MS } from "../shared.js";
+import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, POLL_MS } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
@@ -54,8 +54,9 @@ const failedTable = (t) => t.added && (t.sync?.state === "failed" || Boolean(t.e
  *  name for an operator: copy, poll, catch-up, stream). */
 export const SYNCED_BY = { copy: "copied whole", poll: "changes checked", "catch-up": "changes checked", stream: "streamed" };
 /** How long a sync took, as the commands say it (`spanText`) but for one under a tenth of a second, which is not worth a
- *  digit, and what did it: `<0.1 s (changes checked)`. */
-export const tookText = (y) => `${y.syncSeconds < 0.1 ? "<0.1 s" : spanText(y.syncSeconds)} (${SYNCED_BY[y.syncedBy] ?? y.syncedBy})`;
+ *  digit: `<0.1 s`; what did it is the cell's title (`tookTitle`: the column stays narrow enough for Sync and Remove). */
+export const tookText = (y) => y.syncSeconds < 0.1 ? "<0.1 s" : spanText(y.syncSeconds);
+export const tookTitle = (y) => SYNCED_BY[y.syncedBy] ?? String(y.syncedBy);
 
 /** A table's facts as `mason tables` says them on its line (src/cli/commands.ts `tableFacts`): its size, its key, and
  *  added or why it cannot be added as it is (null: neither). */
@@ -154,7 +155,7 @@ export function renderTables(s, ui = {}) {
   const { removing = null, choosing = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
   const stream = s.stream ? new Map(streamRows(s.stream, ui.now ?? Date.now()).tables) : null;
-  const head = [["Table", ""], ["State", ""], ["Rows", "num"], ["Key", ""], ["Last sync", "num"], ["Took", "num"], ["Size of the copy", "num"], ...(stream ? [["Stream", ""]] : []), ["Note", ""], ["", ""]];
+  const head = [["Table", ""], ["State", ""], ["Rows", "num"], ["Key", ""], ["Last sync", "num"], ["Took", "num"], ["Size", "num"], ...(stream ? [["Stream", ""]] : []), ["Note", ""], ["", ""]];
   const sizeOf = new Map(sizes && !("failure" in sizes) ? sizes.copySizes.map((c) => [c.table, c.bytes]) : []);
   const under = (html) => `<tr class="under"><td colspan="${head.length}">${html}</td></tr>`;
   const cell = (v, cls = "", title = "") => `<td${cls ? ` class="${cls}"` : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(v)}</td>`;
@@ -186,7 +187,7 @@ export function renderTables(s, ui = {}) {
       (synced?.table !== t.table ? "" : under("failure" in synced ? renderFailure(synced.failure) : renderSynced(synced.synced, t.table, s)));
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td>${state}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +
-      `${cell(t.added && y?.syncSeconds != null ? tookText(y) : "", "num")}${cell(t.added && sizeOf.has(t.table) ? fileSize(sizeOf.get(t.table)) : "", "num")}` +
+      `${t.added && y?.syncSeconds != null ? cell(tookText(y), "num", tookTitle(y)) : cell("", "num")}${cell(t.added && sizeOf.has(t.table) ? bytesText(sizeOf.get(t.table)) : "", "num")}` +
       `${stream ? cell(t.added ? stream.get(t.table) ?? "" : "", "stream") : ""}<td class="what">${note}</td><td class="act">${act}</td></tr>` +
       (choosing === t.table && !t.added ? under(pickForm(t, ticked)) : "") + said;
   };
