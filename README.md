@@ -17,7 +17,7 @@ A drop-in replacement for a Postgres read replica, built for exceptionally fast 
 - [Syncing from Postgres](#syncing-from-postgres)
   - [Choosing what to sync](#choosing-what-to-sync)
   - [The first copy](#the-first-copy)
-  - [Off, and `mason sync`](#off-and-mason-sync)
+  - [Syncing](#syncing)
   - [Polling](#polling)
   - [Logical replication](#logical-replication)
 - [Performance vs Postgres](#performance-vs-postgres)
@@ -214,9 +214,9 @@ tables:
 - A copy runs alongside the polls and the replication stream. Adding a big table never stops the other tables from
   staying up to date.
 
-### Off, and `mason sync`
+### Syncing
 
-This is the default. After the first copy, Mason reads nothing from your database until you run `mason sync orders`.
+After the first copy, Mason reads nothing from your database until you run `mason sync orders`.
 That command polls the tables you name once, right away. You can run it before a report, from cron, or at the end of
 a deploy. Between syncs, Mason does not touch your database.
 
