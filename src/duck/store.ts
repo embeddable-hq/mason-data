@@ -61,9 +61,11 @@ export const DUCKDB_VERSION = version();
  *
  * `lambda_syntax: ENABLE_SINGLE_ARROW`: the rewrite is a Postgres parse tree, printed by Postgres's deparser, which
  * can spell DuckDB's lambda only as `x -> f(x)` (Postgres's `->` operator), never as `lambda x: f(x)`; DuckDB 2.0
- * refuses that spelling by default. One rewrite needs a lambda: a jsonb's order under ICU or a libc locale, which maps
- * DuckDB's `icu_sort_key` over the document's strings (src/duck/rewrite.ts `jsonbKey`). A `->` that is not a lambda
- * function's argument is still the json operator. tests/duck-jsonb-order.test.ts holds the key under every collation.
+ * refuses that spelling by default. Two rewrites need a lambda: a jsonb's order under ICU or a libc locale, which maps
+ * DuckDB's `icu_sort_key` over the document's strings (src/duck/rewrite.ts `jsonbKey`; tests/duck-jsonb-order.test.ts
+ * holds the key under every collation), and a LEFT lateral's unnest of an expression, which computes the expression
+ * once with `list_transform(list_value(e), l -> CASE … l … END)[1]` (`rangeFunction`; tests/duck-wire.test.ts). A `->`
+ * that is not a lambda function's argument is still the json operator.
  */
 const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", lambda_syntax: "ENABLE_SINGLE_ARROW" };
 

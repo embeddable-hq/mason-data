@@ -129,6 +129,113 @@
       "full_sort": false
     },
     {
+      "name": "LEFT lateral of an unnest of an expression, LIMIT 100",
+      "sql": "SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id, o.id * 10]) x ON true LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  LIMIT",
+        "    UNNEST",
+        "      PROJECTION",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral of an unnest of string_to_array, LIMIT 100 OFFSET 1749950",
+      "sql": "SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.notes, ' ')) p ON TRUE LIMIT 100 OFFSET 1749950",
+      "plan": [
+        "PROJECTION",
+        "  LIMIT",
+        "    UNNEST",
+        "      PROJECTION",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_string_to_array"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral of an unnest of string_to_array read by a *, LIMIT 100 OFFSET 1749950",
+      "sql": "SELECT * FROM (SELECT t.id, t.notes FROM orders t) o LEFT JOIN unnest(string_to_array(o.notes, ' ')) p ON TRUE LIMIT 100 OFFSET 1749950",
+      "plan": [
+        "LIMIT",
+        "  UNNEST",
+        "    TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_string_to_array"
+      ],
+      "sends": [],
+      "keys": [
+        "list_transform"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral of an argument of two columns: jsonb_each, LIMIT 100",
+      "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN q.id % 3 <> 0 AND jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  LIMIT",
+        "    UNNEST",
+        "      PROJECTION",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral of an argument of two columns: unnest, LIMIT 100",
+      "sql": "SELECT o.id, x FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.customer_id]) x ON TRUE LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  LIMIT",
+        "    UNNEST",
+        "      PROJECTION",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral of an unnest of string_to_array counted, no LIMIT (not rewritten)",
+      "sql": "SELECT count(*), count(p) FROM orders o LEFT JOIN unnest(string_to_array(o.notes, ' ')) p ON TRUE",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  PROJECTION",
+        "    CTE",
+        "      TABLE_SCAN public.orders",
+        "      PROJECTION",
+        "        HASH_JOIN",
+        "          CTE_SCAN",
+        "          INOUT_FUNCTION",
+        "            PROJECTION calls __mason_string_to_array",
+        "              HASH_GROUP_BY",
+        "                PROJECTION",
+        "                  CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_string_to_array"
+      ],
+      "sends": [],
+      "delim_join": true,
+      "full_sort": false
+    },
+    {
       "name": "LEFT lateral sorted by a table column, LIMIT 100",
       "sql": "SELECT q.id, d.key, d.value FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY q.id DESC LIMIT 100",
       "plan": [
