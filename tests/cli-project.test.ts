@@ -487,6 +487,77 @@ test("mason init in a clone: the sources file already there is kept, and its var
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+// A CLONE'S SOURCES FILE DECIDES WHAT A BARE mason init READS (the independent review of PR 39): it once checked the
+// MASON_DATABASE_URL in the shell and kept a file that runs on the app's DATABASE_URL in .env, saying nothing
+const appUrl = "postgres://app:secret@localhost:5432/app_dev";
+const masonUrl = "postgres://mason:secret@localhost:5432/analytics";
+/** A clone: its sources file naming `url: ${variable}` with a table added, and `files` beside it. */
+function clone(root: string, name: string, variable: string, files: Record<string, string>): { dir: string; text: string } {
+  const dir = path.join(root, name);
+  fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
+  const text = `kind: postgres\nurl: \${${variable}}\ntables:\n  orders: {}   # ours\n`;
+  fs.writeFileSync(path.join(dir, "mason", "sources", "app.yml"), text);
+  for (const [file, t] of Object.entries(files)) fs.writeFileSync(path.join(dir, file), t);
+  return { dir, text };
+}
+
+test("mason init in a clone naming ${DATABASE_URL}: the app's DATABASE_URL in .env is checked, not a MASON_DATABASE_URL in the shell", async () => {
+  const root = tmp();
+  try {
+    const envText = `DATABASE_URL=${appUrl}\n`;
+    const { dir, text } = clone(root, "app", "DATABASE_URL", { ".env": envText });
+    const r = await quiet((io) => init(["--skip-check"], dir, { io, env: { MASON_DATABASE_URL: masonUrl } }));
+    assert.equal(r.value, 0, r.err);
+    assert.match(r.out, /\n✓ Not checking postgres:\/\/app:\*\*\*\*@localhost:5432\/app_dev \(DATABASE_URL in \.env\) \(--skip-check\): mason start checks it\n/);
+    assert.doesNotMatch(r.out, /analytics|MASON_DATABASE_URL/, "the shell's MASON_DATABASE_URL is not what the file runs on");
+    assert.equal(fs.readFileSync(path.join(dir, "mason", "sources", "app.yml"), "utf8"), text, "kept, byte for byte");
+    assert.equal(fs.readFileSync(path.join(dir, ".env"), "utf8"), envText, "nothing written to .env");
+    assert.doesNotMatch(r.out, /to \.env/);
+    // the same as data: where the URL was read, and no .env line
+    const j = await quiet((io) => init(["--skip-check", "--json"], clone(root, "app-json", "DATABASE_URL", { ".env": envText }).dir, { io, env: { MASON_DATABASE_URL: masonUrl } }));
+    assert.equal(j.value, 0, j.err);
+    const answer = JSON.parse(j.out) as { source: { url: string; env: string | null }; database: { url: string; from: string } };
+    assert.deepEqual([answer.source.url, answer.source.env, answer.database.url, answer.database.from],
+      ["${DATABASE_URL}", null, "postgres://app:****@localhost:5432/app_dev", "DATABASE_URL in .env"]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason init in a clone naming ${MASON_DATABASE_URL}: read from the shell and written down; set nowhere, which database? names that file's variable", async () => {
+  const root = tmp();
+  try {
+    // only in the shell: checked from there, and written to .env under the name the file reads
+    const shell = clone(root, "shell", "MASON_DATABASE_URL", {});
+    const s = await quiet((io) => init(["--skip-check"], shell.dir, { io, env: { MASON_DATABASE_URL: masonUrl } }));
+    assert.equal(s.value, 0, s.err);
+    assert.match(s.out, /\n✓ Not checking postgres:\/\/mason:\*\*\*\*@localhost:5432\/analytics \(MASON_DATABASE_URL in the shell\) \(--skip-check\)/);
+    assert.match(s.out, /\n✓ Wrote MASON_DATABASE_URL=postgres:\/\/mason:\*\*\*\*@localhost:5432\/analytics to \.env: the URL the source file names, kept out of git\n/);
+    assert.match(fs.readFileSync(path.join(shell.dir, ".env"), "utf8"), new RegExp(`^# the database Mason copies from .*\\nMASON_DATABASE_URL=${masonUrl}\\n$`));
+    assert.equal(fs.readFileSync(path.join(shell.dir, "mason", "sources", "app.yml"), "utf8"), shell.text);
+
+    // only the app's DATABASE_URL in .env, nothing in the shell: never checked against the app's database, which the
+    // file does not run on — which database?, naming the file and ITS variable, and nothing written
+    const envText = `DATABASE_URL=${appUrl}\n`;
+    const none = clone(root, "none", "MASON_DATABASE_URL", { ".env": envText });
+    const n = await quiet((io) => init(["--skip-check"], none.dir, { io, env: {} }));
+    assert.equal(n.value, 2, n.out + n.err);
+    assert.equal(n.err, "✗ mason init: which database? mason/sources/app.yml names url: ${MASON_DATABASE_URL}, and this folder has no MASON_DATABASE_URL\n" +
+      "  why   mason start reads the URL from MASON_DATABASE_URL, so mason init checks that one\n" +
+      "  fix   put it in this folder's .env as MASON_DATABASE_URL=postgres://… (the variable mason/sources/app.yml names), or give its URL on the command line: mason init writes it there\n" +
+      "\nNext:\n" +
+      "  mason init postgres://user:password@localhost:5432/your_app  its URL, given: written to .env as MASON_DATABASE_URL\n" +
+      "  mason init                                    again, once .env has MASON_DATABASE_URL\n");
+    assert.equal(n.out, "");
+    assert.ok(!fs.existsSync(path.join(none.dir, ".mason")), "no config written");
+    assert.equal(fs.readFileSync(path.join(none.dir, ".env"), "utf8"), envText);
+    const nj = await quiet((io) => init(["--json"], none.dir, { io, env: {} }));
+    assert.equal(nj.value, 2);
+    const answer = JSON.parse(nj.out) as { error: { code: string; message: string; why: string; fix: string }; next: Array<{ command: string; what: string }> };
+    assert.deepEqual([answer.error.code, answer.error.message], ["usage", "which database? mason/sources/app.yml names url: ${MASON_DATABASE_URL}, and this folder has no MASON_DATABASE_URL"]);
+    assert.match(answer.error.fix, /^put it in this folder's \.env as MASON_DATABASE_URL=postgres:\/\/… \(the variable mason\/sources\/app\.yml names\)/);
+    assert.deepEqual(answer.next.map((x) => [x.command, x.what]), [["mason init postgres://user:password@localhost:5432/your_app", "its URL, given: written to .env as MASON_DATABASE_URL"], ["mason init", "again, once .env has MASON_DATABASE_URL"]]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("mason init demo: the same project on a demo database Mason hosts — its URL in .env on a free port, three of its four tables added (order_items left to add), demo in the config", async () => {
   const root = tmp();
   try {
