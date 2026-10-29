@@ -348,6 +348,47 @@ by DuckDB's text equality. Each is now keyed or refused.
 **Where.** `src/duck/jsonb-order.ts`, `jsonbKey` in `src/duck/rewrite.ts`; `tests/duck-jsonb-order.test.ts`, the oracle's
 `jorder` (tests/integration/oracle/type-matrix.ts).
 
+#### The key stored (2026-10-28)
+
+**Decision.** The key is a stored read of the keeper ("Stored JSON paths"): a BLOB hidden column per jsonb column and
+collation, recorded, weighed, filled and kept current exactly as a path is, and read by the rewrite once ready.
+
+**Why.** Measured on a laptop (10 cores, NVMe, the file in the page cache) over 20 M synthetic rows of mixed shapes
+(objects of four keys with a nested array, arrays of strings, raw numbers and strings, nested arrays, NULLs), the
+Trevor.io shape `SELECT e.id … ORDER BY e.j IS NULL, e.j DESC LIMIT 100` through the listener:
+
+| | C | libc (en_US.utf8) |
+|---|---|---|
+| by the key's function, per row | 19.2–26.1 s wall, 20–27 s CPU | 83–126 s wall, 90–132 s CPU |
+| filling the stored key (the keeper's chunks) | 20.8 s | 93.1 s |
+| from the stored key | 0.13–0.31 s wall, ~1 s CPU | 0.13–0.14 s wall, ~1.2 s CPU |
+| `GROUP BY j` from the stored key | 0.40–0.68 s | 0.62–1.21 s |
+
+A sort by the function is a call per row, and a call per row holds the executor worker for the whole statement
+("The executor worker"); a fill costs what one or four such sorts cost, and every later one is free. A key is its
+collation's (a string's key is ICU's or the measured libc order's), so it is stored under the collation's id and
+dropped when the source's collation, or its glibc's measured order, changes — and with the key's encoding
+(`KEY_VERSION`) and the DuckDB whose ICU made its strings' keys (`DUCKDB_VERSION`) in the id, an upgrade that changes
+either stores it again rather than reading another release's bytes. The fill model (`FILL_US_PER_ROW`, made for
+paths) prices a key's fill at 13 µs a row where it measured 1.0 (C) to 4.7 (libc): a large table's key waits longer
+for its evidence than it must, the safe side, until the rate of a key's fill of that column is measured (a path's
+fill is another function's, and its rate is never read for a key's).
+
+**Equality under libc is the C key.** The `GROUP BY j` row above is C's and ICU's: under a libc collation an
+equality (GROUP BY, DISTINCT, =, PARTITION BY) reads the C key computed per row, because the stored key is the libc
+order's, which refuses a string holding a character the measured order does not cover where equality needs no order
+at all (the review found the first form keying equality by the collation, and refusing).
+
+**A mark written after the count (the review, 2026-10-28).** The stream and the poll write a libc-uncovered document
+(an NFD `café`, e + U+0301) at any time, and its key is the mark; the plans read the key alone until the detector
+counts the marks (a minute), so the mark sorted first as a key. Rather than every write path counting its marks before
+it commits, the exact read raises at a mark from the column alone (one comparison a row, no document read): the
+statement is refused by the gap's name, as the statement's own key refuses it, until the reads turn to the CASE.
+
+**What it does not cover.** A statement that lists a copy's columns without naming them (`SELECT * … ORDER BY j`)
+reads no stored column at all (`hideKept`), so its sort is the function's: 23.2 s (C) and 84.3 s (libc) on the same
+rows.
+
 ### What DuckDB is sent: the form it computes fastest, where that is Postgres's answer
 
 Three shapes BI tools send on every chart and preview were each the slow path of DuckDB's, and two of them were also

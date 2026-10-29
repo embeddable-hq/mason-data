@@ -31,7 +31,8 @@ import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type Typed } from "./pgtree.ts";
-import { canonicalRead, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
+import { canonicalRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
+import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
@@ -46,6 +47,10 @@ export type DuckCollation =
   | { kind: "icu"; name: string }
   /** a libc locale (glibc's en_US.UTF-8, RDS's default): ICU's order of the letters and digits, then the punctuation */
   | { kind: "libc"; icu: string };
+
+/** the DuckDB ICU collation a collation's strings are keyed by (`icu_sort_key`): ICU's own, or the one a libc order's
+ *  accent and case levels are read with */
+export const icuNameOf = (c: Exclude<DuckCollation, { kind: "bytes" }>): string => c.kind === "icu" ? c.name : c.icu;
 
 /** Whether pg_database's collation is a libc locale's (not C or POSIX), whose order is read from the database
  *  (src/duck/libc-order.ts) for `duckCollation`'s `libc` */
@@ -182,6 +187,8 @@ const arrayCast = (arg: AstNode, element: string): AstNode => ({ TypeCast: { arg
 const op = (name: string, l: AstNode | null, r: AstNode): AstNode => ({ A_Expr: { kind: "AEXPR_OP", name: [S(name)], ...(l === null ? {} : { lexpr: l }), rexpr: r } });
 const not = (n: AstNode): AstNode => ({ BoolExpr: { boolop: "NOT_EXPR", args: [n] } });
 const and = (args: AstNode[]): AstNode => ({ BoolExpr: { boolop: "AND_EXPR", args } });
+/** the call that raises a marked row's error (src/duck/kept-route.ts `markedError`), over the column read */
+const markedRaise = (name: string, column: AstNode, e: { code: string; message: string }): AstNode => fn(name, [column, strConst(e.code), strConst(e.message)]);
 const caseWhen = (arms: Array<[AstNode, AstNode]>, otherwise: AstNode | null): AstNode => ({
   CaseExpr: { args: arms.map(([expr, result]) => ({ CaseWhen: { expr, result } })), ...(otherwise === null ? {} : { defresult: otherwise }) },
 });
@@ -307,10 +314,12 @@ class Rewriter {
     const prefix = fields.length === 1 && t.qualifier !== null ? [S(t.qualifier)] : fields.slice(0, -1).map((f) => structuredClone(f));
     const column = (): AstNode => ({ ColumnRef: { fields: [...prefix.map((f) => structuredClone(f)), S(ready.name)] } });
     const nul = (): AstNode => fn("chr", [intConst(0)]);
+    const recompute = (): AstNode => op("||", nul(), strConst("!"));
     const value = asText ? keptText(column, canonical) : caseWhen([[op("=", column(), nul()), nullConst()]], column());
-    if (ready.exact) return value;
+    // a row marked since the path was counted exact is never read as its value: it raises (kept-route.ts markedError)
+    if (ready.exact) return caseWhen([[op("=", column(), recompute()), markedRaise(MARKED_FUNCTIONS.value, column(), markedError(read, false))]], value);
     // (a copied table's column, checked above: a jsonb's text is the copy's canonical one)
-    return caseWhen([[or([isNull(column()), op("=", column(), op("||", nul(), strConst("!")))]), jsonGet(this.cp, l, steps, either, canonical, asText, canonical)]], value);
+    return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), jsonGet(this.cp, l, steps, either, canonical, asText, canonical)]], value);
   }
 
   /**
@@ -1589,12 +1598,50 @@ class Rewriter {
    * function lists (`list_transform` with a lambda, src/duck/store.ts `lambda_syntax`) and hands them to the key.
    */
   private jsonbKey(e: AstNode): AstNode {
+    return this.keptKey(e) ?? this.jsonbKeyCall(e);
+  }
+
+  /** the key computed per row (`jsonbKey`): the functions src/duck/jsonb-order.ts `JSONB_KEY_FUNCTIONS` names */
+  private jsonbKeyCall(e: AstNode): AstNode {
     const c = this.collation;
-    if (c.kind === "bytes") return fn("__mason_jsonb_key", [e]);
+    if (c.kind === "bytes") return fn(JSONB_KEY_FUNCTIONS.bytes.key, [e]);
     const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_s")] } });
-    const strings = fn(c.kind === "icu" ? "__mason_jsonb_strings" : "__mason_jsonb_libc_kept", [this.clone(e)]);
-    const keys = fn("list_transform", [strings, op("->", each(), fn("icu_sort_key", [each(), strConst(c.kind === "icu" ? c.name : c.icu)]))]);
-    return fn(c.kind === "icu" ? "__mason_jsonb_key_icu" : "__mason_jsonb_key_libc", [e, keys]);
+    const f = JSONB_KEY_FUNCTIONS[c.kind];
+    const keys = fn("list_transform", [fn(f.strings, [this.clone(e)]), op("->", each(), fn("icu_sort_key", [each(), strConst(icuNameOf(c))]))]);
+    return fn(f.key, [e, keys]);
+  }
+
+  /**
+   * A JSONB'S STORED KEY (src/duck/kept-route.ts `ORDER_STEPS`): `e` a copied table's jsonb column — recorded as one of
+   * the statement's reads, the order's, so the keeper weighs storing its key as it weighs a path — read from the key's
+   * hidden column once every row of it is stored (READY). The column holds the key, `KEY_NULL` for a NULL document, or
+   * `KEY_RECOMPUTE` where the key raised; read alone while no row is marked, else through a CASE that computes the
+   * marked rows (and raises the key's own error). null: not such a column, or not stored — the caller computes the key.
+   */
+  private keptKey(e: AstNode): AstNode | null {
+    // a column of a derived table typed as the subquery's target (sortBy's `s.*` wrapper, `typedLike`) is the
+    // subquery's column, whose FROM item has no hidden column (the oracle's eager run: DuckDB's 42703)
+    if (this.kept === null || kindOf(e) !== "ColumnRef" || this.typedLike.has(bodyOf(e))) return null;
+    const fields = (bodyOf(e).fields ?? []) as AstNode[];
+    const last = fields.at(-1);
+    const t = this.typed(e);
+    if (last === undefined || kindOf(last) !== "String" || t === null || t.node !== "VAR" || t.relation === undefined || t.renamed !== null) return null;
+    const at = this.kept.at(t.relation.relid, t.relation.attno);
+    if (at === null) return null;
+    const read: JsonRead = { source: at.source, column: at.column, steps: ORDER_STEPS, either: false, canonical: true, asText: false };
+    this.jsonReads.set(readKey(read), read);
+    const ready = this.kept.ready(read);
+    if (ready === null) return null;
+    const prefix = fields.length === 1 && t.qualifier !== null ? [S(t.qualifier)] : fields.slice(0, -1).map((f) => structuredClone(f));
+    const column = (): AstNode => ({ ColumnRef: { fields: [...prefix.map((f) => structuredClone(f)), S(ready.name)] } });
+    const recompute = (): AstNode => fn("unhex", [strConst(KEY_RECOMPUTE_HEX)]);
+    const isNullKey = (): AstNode => op("=", column(), fn("unhex", [strConst(KEY_NULL_HEX)]));
+    // a row marked since the key was counted exact is never read as a key: it raises (kept-route.ts markedError)
+    if (ready.exact) {
+      const raise = markedRaise(MARKED_FUNCTIONS.key, fn("hex", [column()]), markedError(read, this.collation.kind === "libc"));
+      return caseWhen([[isNullKey(), nullConst()], [op("=", column(), recompute()), raise]], column());
+    }
+    return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), this.jsonbKeyCall(e)]], caseWhen([[isNullKey(), nullConst()]], column()));
   }
 
   /**
@@ -1606,7 +1653,11 @@ class Rewriter {
    * GROUP BY, DISTINCT [ON], count(DISTINCT), PARTITION BY) reads this one; ORDER BY, <, >, BETWEEN read `jsonbKey`.
    */
   private equalKey(e: AstNode): AstNode {
-    return fn("__mason_jsonb_key", [e]);
+    // under C and ICU the order's key is an equality key too (a string's collation key, then its bytes), which never
+    // refuses, so a stored one serves (keptKey) — both sides of an equality read the order's key; only a libc key
+    // refuses a string (libc-uncovered), so under libc equality reads the C key, computed
+    if (this.collation.kind !== "libc") return this.jsonbKey(e);
+    return fn(JSONB_KEY_FUNCTIONS.bytes.key, [e]);
   }
 
   /** a value compared for EQUALITY only (PARTITION BY, IS DISTINCT FROM, NULLIF, CASE x WHEN, = ANY, DISTINCT ON): a

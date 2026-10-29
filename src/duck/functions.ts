@@ -12,12 +12,13 @@
  */
 import { BIGINT, BLOB, BOOLEAN, DATE, DOUBLE, DuckDBBlobValue, DuckDBDateValue, DuckDBIntervalValue, DuckDBScalarFunction, DuckDBTimestampTZValue, DuckDBTimestampValue, INTEGER, INTERVAL, LIST, TIMESTAMP, TIMESTAMPTZ, VARCHAR, listValue, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
 import { pgEvalSync, PgEvalError } from "./pg-eval.ts";
+import { MARKED_FUNCTIONS } from "./kept-route.ts";
 import { libcKept, libcKey, type LibcOrder } from "./libc-order.ts";
 import { formatFloat } from "../api/postgres/encode.ts";
 import { floatAsNumeric } from "./types.ts";
 import { intervalText } from "./types.ts";
 import { jsonbText, parseJson, writeJson, quoteJson, type Json } from "./jsonb.ts";
-import { jsonbKey, jsonbLibcKept, jsonbStrings } from "./jsonb-order.ts";
+import { JSONB_KEY_FUNCTIONS, jsonbKey, jsonbLibcKept, jsonbStrings, STORED_SUFFIX } from "./jsonb-order.ts";
 import { compare, div, evaluateText, NumericError, numericText, parseNumeric, type NumericProgram } from "../lib/pg-numeric.ts";
 import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
@@ -571,9 +572,23 @@ export function registerLibcOrder(conn: DuckDBConnection, order: LibcOrder): voi
   scalar(conn, "__mason_libc_key", [VARCHAR, VARCHAR], VARCHAR, ([s, icu]) => libcKey(order, String(s), String(icu)));
   // jsonb's order under it (src/duck/jsonb-order.ts): the characters of each string ICU's levels read, then the key
   // from ICU's keys of them (src/duck/rewrite.ts jsonbKey hands them in)
-  scalar(conn, "__mason_jsonb_libc_kept", [VARCHAR], LIST(VARCHAR), ([j]) => listValue(jsonbLibcKept(order, String(j))));
-  scalar(conn, "__mason_jsonb_key_libc", [VARCHAR, LIST(VARCHAR)], BLOB,
+  keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.strings, [VARCHAR], LIST(VARCHAR), ([j]) => listValue(jsonbLibcKept(order, String(j))));
+  keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.key, [VARCHAR, LIST(VARCHAR)], BLOB,
     ([j, keys]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "libc", order, icuKeys: icuKeysOf(keys!) })));
+}
+
+/**
+ * A FUNCTION OF A JSONB'S KEY (src/duck/jsonb-order.ts `JSONB_KEY_FUNCTIONS`), and its stored twin (`STORED_SUFFIX`),
+ * which a write of the copy computes a stored key with (src/duck/kept.ts `orderKeySql`): the same body, answering NULL
+ * where it raises — a write of the copy (the stream's, the poll's) must not fail over one row's document. The stored
+ * key's SQL marks that row to be computed when read (src/duck/kept-route.ts `KEY_RECOMPUTE_HEX`), so the read raises its own error
+ * (a libc string the order does not cover: `libc-uncovered`), as the statement would without the stored key.
+ */
+function keyScalar(conn: DuckDBConnection, name: string, params: Parameters<typeof scalar>[2], returns: Parameters<typeof scalar>[3], body: (args: DuckDBValue[]) => unknown): void {
+  scalar(conn, name, params, returns, body);
+  scalar(conn, `${name}${STORED_SUFFIX}`, params, returns, (args) => {
+    try { return body(args); } catch { return null; }   // the row's mark: its read computes it, and raises (above)
+  });
 }
 
 /** the ICU keys DuckDB made of a jsonb's strings (a NULL among them is a Mason bug: every string has one) */
@@ -648,9 +663,14 @@ export function registerFunctions(conn: DuckDBConnection): void {
   scalar(conn, "__mason_jsonb_text", [VARCHAR], VARCHAR, ([j]) => jsonbText(String(j)));
   // jsonb's order and equality as bytes (src/duck/jsonb-order.ts): under C, and under ICU from ICU's keys of the
   // document's strings, which the rewrite has DuckDB make of `__mason_jsonb_strings` (src/duck/rewrite.ts jsonbKey)
-  scalar(conn, "__mason_jsonb_key", [VARCHAR], BLOB, ([j]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "bytes" })));
-  scalar(conn, "__mason_jsonb_strings", [VARCHAR], LIST(VARCHAR), ([j]) => listValue(jsonbStrings(String(j))));
-  scalar(conn, "__mason_jsonb_key_icu", [VARCHAR, LIST(VARCHAR)], BLOB, ([j, keys]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "icu", icuKeys: icuKeysOf(keys!) })));
+  keyScalar(conn, JSONB_KEY_FUNCTIONS.bytes.key, [VARCHAR], BLOB, ([j]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "bytes" })));
+  // a stored column's marked row read exact raises its error (src/duck/kept-route.ts markedError): never DuckDB's
+  // volatile error(), which a window's ORDER BY refuses
+  const marked = ([, code, message]: DuckDBValue[]): never => { throw new PgEvalError(String(code), String(message)); };
+  scalar(conn, MARKED_FUNCTIONS.key, [VARCHAR, VARCHAR, VARCHAR], BLOB, marked);
+  scalar(conn, MARKED_FUNCTIONS.value, [VARCHAR, VARCHAR, VARCHAR], VARCHAR, marked);
+  keyScalar(conn, JSONB_KEY_FUNCTIONS.icu.strings, [VARCHAR], LIST(VARCHAR), ([j]) => listValue(jsonbStrings(String(j))));
+  keyScalar(conn, JSONB_KEY_FUNCTIONS.icu.key, [VARCHAR, LIST(VARCHAR)], BLOB, ([j, keys]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "icu", icuKeys: icuKeysOf(keys!) })));
   // jsonb's @>, ?, ?| and ?& (DuckDB's json_contains and json_exists answer otherwise on arrays), json(b)_array_length
   scalar(conn, "__mason_jsonb_contains", [VARCHAR, VARCHAR], BOOLEAN, ([a, b]) => jsonbContains(String(a), String(b)));
   scalar(conn, "__mason_jsonb_exists", [VARCHAR, VARCHAR], BOOLEAN, ([j, k]) => jsonbExists(String(j), String(k)));

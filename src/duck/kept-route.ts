@@ -14,6 +14,8 @@
  */
 import { createHash } from "node:crypto";
 import { pathIndex } from "./functions.ts";
+import type { LibcOrder } from "./libc-order.ts";
+import type { DuckCollation } from "./rewrite.ts";
 
 /** A JSON read of a copied table's column, as the rewrite meets it: what `__mason_json_get` is called with. */
 export interface JsonRead {
@@ -86,9 +88,26 @@ export const hiddenName = (r: Omit<JsonRead, "asText">): string => `${HIDDEN_PRE
  */
 export const VISIBLE_CATALOG = "__mason_visible";
 
+/**
+ * A JSONB'S ORDER, AS A READ (src/duck/jsonb-order.ts; docs/DESIGN.md "jsonb's order"): `ORDER BY j`, `GROUP BY j`,
+ * `j = k` compare a key of the whole document, computed per row by a function — 19 s for `ORDER BY j LIMIT 100` over
+ * 20 M rows under C, 83 s under a libc locale, where the same sort from a stored key takes 0.1 s. So the key is a read
+ * like a path's, recorded, weighed and stored by the same keeper: its `steps` is `ORDER_STEPS` (never a path's, which
+ * is a JSON array). The rewrite records it as `ORDER_STEPS`; the keeper stores it as `ORDER_STEPS:<the collation's
+ * id>` (src/duck/kept.ts `own`), because a string's key is its collation's, so a key stored under another collation is
+ * another column, never read.
+ */
+export const ORDER_STEPS = "order";
+/** a stored key's marks (hex, DuckDB's `unhex`): a NULL document's, and a row whose key raised, computed when read. No
+ *  key begins with a 0x00 (src/duck/jsonb-order.ts: every key starts with an array's or an object's tag) */
+export const KEY_NULL_HEX = "00";
+export const KEY_RECOMPUTE_HEX = "0021";
+export const isOrderRead = (r: { steps: string }): boolean => r.steps === ORDER_STEPS || r.steps.startsWith(`${ORDER_STEPS}:`);
+
 /** a read as a developer writes it: `payload ->> 'customer_id'`, `payload #> '{a,0}'`; a stored path (no `asText`) as
- *  its `->` read */
+ *  its `->` read; a jsonb's order as what reads it */
 export function pathText(r: Omit<JsonRead, "asText" | "source"> & { asText?: boolean }): string {
+  if (isOrderRead(r)) return `ORDER BY ${r.column} (its jsonb order: sorted, grouped and compared)`;
   const steps = JSON.parse(r.steps) as Array<string | number>;
   const op = (one: boolean): string => one ? (r.asText ? "->>" : "->") : (r.asText ? "#>>" : "#>");
   if (steps.length === 1 && !r.either) {
@@ -106,6 +125,29 @@ export function pathText(r: Omit<JsonRead, "asText" | "source"> & { asText?: boo
  */
 export interface ReadyPath { name: string; exact: boolean }
 
+/**
+ * WHAT AN EXACT READ RAISES AT A MARK (src/duck/rewrite.ts `keptRead`, `keptKey`): a row marked to be computed
+ * (`KEPT_RECOMPUTE`, `KEY_RECOMPUTE_HEX`) written AFTER the path was counted exact — by the stream, the poll or a copy's
+ * side table, before the detector (src/duck/kept.ts `check`) counts it and turns the reads to the CASE — is never read
+ * as a value: the exact read raises at it, by the column alone. A jsonb's key under a libc collation is marked where
+ * its strings hold a character the measured order does not cover, the gap the statement's own key refuses by name
+ * (`libc-uncovered`); any other mark is a Mason bug. Once counted (a minute at most), the CASE computes the row from its
+ * document, and raises the function's own error (the character named) or answers. Raised by `MARKED_FUNCTIONS`, never
+ * DuckDB's `error()`, which is volatile (a window's ORDER BY refuses it: the eager oracle's `rank() OVER (ORDER BY j)`).
+ */
+export function markedError(r: Omit<JsonRead, "source">, libc: boolean): { code: string; message: string } {
+  if (isOrderRead(r) && libc) {
+    return { code: "0A000", message: "a jsonb compared or sorted here holds a string Mason cannot order as the database's collation does (a combining mark, a Thai or " +
+      "Lao vowel written before its consonant, a private-use or unassigned code point), in a row written since its stored keys were counted; asked again " +
+      "in a minute, the error names the character (Mason gap libc-uncovered)" };
+  }
+  return { code: "XX000", message: `a stored value of ${pathText(r)} could not be computed when its row was written (a Mason bug: report it, with mason logs); ` +
+    "asked again in a minute, it is computed from the row's document" };
+}
+/** the functions that raise `markedError` at a marked row (src/duck/functions.ts): of the column read (a key as its hex,
+ *  so neither is a constant DuckDB would fold), the code and the message; a key's answers a BLOB, a path's a VARCHAR */
+export const MARKED_FUNCTIONS = { key: "__mason_marked_key", value: "__mason_marked_value" } as const;
+
 /** What a statement's plan asks of the stored JSON paths (src/duck/kept.ts `KeptJsonPaths`). */
 export interface KeptRoutes {
   /** the hidden column of this read's path when every row of it is stored (READY), else null */
@@ -117,6 +159,9 @@ export interface KeptRoutes {
   /** the oracle's (`eager`): every read a plan meets stored before the plan is made, so every read is answered from its
    *  column; null when the policy decides (src/duck/kept.ts `review`) */
   keepNow: ((reads: readonly JsonRead[]) => Promise<void>) | null;
+  /** the collation the listener sorts text by, told once it is known (src/duck/store.ts `listener`): a jsonb's order
+   *  is stored under it alone (`ORDER_STEPS`), and one stored under another is dropped */
+  orderBy(collation: DuckCollation, libc: LibcOrder | undefined): Promise<void>;
 }
 
 /** what the rewrite consults (src/duck/rewrite.ts `keptRead`): a table's column by the catalog's OIDs, and its routes */
