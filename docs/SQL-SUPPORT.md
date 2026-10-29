@@ -23,7 +23,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
-| `unverified` | a function, operator, cast, type or construct the oracle has not held to Postgres | answers | refused, naming each piece | write the statement without it; report it to have it verified |
+| `unverified` | a function, operator, cast, type or construct Mason has not yet verified against Postgres | answers | refused, naming each piece | write the statement without it; report it to have it verified |
 | `explain-option` | EXPLAIN (FORMAT XML), (FORMAT YAML), (GENERIC_PLAN) | the plan in XML or YAML; a plan for unbound parameters | refused by name: EXPLAIN is DuckDB's plan, in Postgres's text or JSON (docs/DESIGN.md) | FORMAT TEXT or FORMAT JSON; bind the parameters' values and EXPLAIN that |
 | `setop-ordinal-star` | ORDER BY a column number of a UNION / INTERSECT / EXCEPT whose first SELECT lists * | sorts by that column | refused | ORDER BY the column's name |
 | `with-ties-distinct` | FETCH FIRST … WITH TIES over SELECT DISTINCT | answers | refused (DuckDB has no WITH TIES; Mason's rank over DISTINCT is not Postgres's) | select the DISTINCT rows in a subquery and FETCH … WITH TIES from it |
@@ -97,7 +97,7 @@ Not about one statement: what the prototype cannot do yet.
 | `one-token` | access | roles, grants, row-level security | every user (mason user) and token reads every copied table: no per-user or per-tenant scope | copy only the tables every user may read |
 | `poll-full-scan` | keeping current by the poll (mason start without --replication) | - | the xmin poll scans every added table whole, every poll (no index covers xmin): ~13–17 s for 13 GiB | logical replication: mason start --replication |
 | `writes` | INSERT, UPDATE, DELETE, DDL, a read-write transaction | answers | refused by name: the copy is read-only (a read-write transaction: 25006) | write to the source database; the copy follows |
-| `numeric-over-38-digits` | a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside DuckDB's arithmetic or a WHERE | exact | a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact | numeric(p, s) with p ≤ 38 |
+| `numeric-over-38-digits` | a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside Mason's arithmetic or a WHERE | exact | a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact | numeric(p, s) with p ≤ 38 |
 | `numeric-array` | an unconstrained numeric[] column | exact elements | double precision elements (15 digits), said in the log | numeric(p, s)[] |
 | `numeric-parameter` | a numeric parameter ($1) compared in a WHERE | exact | a double (exact to 15 digits) | a literal |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |

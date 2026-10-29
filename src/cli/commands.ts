@@ -21,7 +21,7 @@ import { version } from "./version.ts";
 import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
 import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
-import { withPlaceholders, postgresLink } from "./pg-url.ts";
+import { withPlaceholders, postgresFacts, postgresLink, type PostgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
 import type { RefusedQuery, SlowQuery } from "./run-server.ts";
 import { logEntries, logLineText } from "../lib/log-buffer.ts";
@@ -82,6 +82,9 @@ export interface RunState {
   /** the project folder's fingerprint (src/lib/project-files.ts projectFingerprint) */
   project: string | null;
   tables: TableState[];
+  /** where a tool connects (src/cli/pg-url.ts postgresFacts): the URL's parts, the URL with `<user>:<password>` in the
+   *  credentials' place, and its psql line; a run from before it has none */
+  postgres?: PostgresLink & { shown: string; psql: string };
   /** the copies in all (src/cli/readiness.ts syncTotals); a run from before it has none */
   totals?: SyncTotals;
   /** the run's copy: its file and how often it polls */
@@ -292,7 +295,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     mason status
     mason status --json
 
-  --json   as data: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), listener:
+  --json   as data: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), shown (the URL with
+           <user>:<password> in the credentials' place), psql (its psql line), listener:
            { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
            source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
            replication, demo (the demo database this run hosts) }, warnings, folder, project, tables: [{ table, rows,
@@ -403,8 +407,8 @@ export async function status(argv: string[]): Promise<number> {
       : r.failed.length ? [["mason logs", "the detail of each failure"], ["mason wait", "each failure, with the way out"]]
       : [["mason wait", "until it is done"]];
     if (json) {
-      out(jsonText(STATUS, { running: true, pid: run.pid, postgres: { ...postgresLink(run.postgresUrl), listener: run.postgresListener },
-        ...s, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, unsupported, recentErrors, readiness: r }, next));
+      out(jsonText(STATUS, { running: true, pid: run.pid,
+        ...s, postgres: { ...postgresFacts(run.postgresUrl), listener: run.postgresListener }, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, unsupported, recentErrors, readiness: r }, next));
       return 0;
     }
     const rows: Array<[string, string]> = [

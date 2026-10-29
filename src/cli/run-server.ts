@@ -31,7 +31,7 @@ import { readiness, syncTotals, tableSync, type SyncTotals, type TableSync } fro
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT, withLastUsed } from "./user.ts";
-import { postgresLink } from "./pg-url.ts";
+import { postgresFacts, postgresLink } from "./pg-url.ts";
 import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamStatus } from "../duck/sync.ts";
@@ -167,6 +167,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
     warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason copies the tables it read before; mason start reads the file again)`] : [])],
     folder, project, tables,
+    // where a tool connects (the Postgres API's URL, the credentials' place shown, and its psql line): the web page's
+    // Connect panel, as mason status --json says it (src/cli/pg-url.ts postgresFacts)
+    postgres: postgresFacts(ctx.users.postgresUrl),
     // the copies in all: tables added, copied, failed, their rows, the latest sync (the file's size is engine.bytes)
     totals: syncTotals(tables.filter((t) => t.added).length, copies),
     // the run itself: its version, since when it is up, and its supervisor's restarts (ONE reader, restartsFact, which

@@ -319,6 +319,41 @@ export function button(label, data = {}, variant = "") {
   return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}>${esc(label)}</button>`;
 }
 
+/** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
+export const copyable = (id, text) => `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small")}</span>`;
+
+/**
+ * A COPY BUTTON CLICKED (`data-copy`, a `copyable`'s), on whichever page: its code's text to the clipboard, the button
+ * then saying Copied; when the clipboard refuses (a browser setting), the text is selected for the reader's own copy and
+ * the button says why. null for a button that is no Copy, so a page's `click` asks it first.
+ */
+export function copyClick(d, button, { doc, win }) {
+  if (d.copy === undefined) return null;
+  const text = doc.getElementById(d.copy)?.textContent ?? "";
+  return Promise.resolve().then(() => win.navigator.clipboard.writeText(text)).then(() => { button.textContent = "Copied"; }, (err) => {
+    win.getSelection()?.selectAllChildren(doc.getElementById(d.copy));
+    button.textContent = `Select and copy it (${err?.message ?? err})`;
+  });
+}
+
+/** The hash of the page that makes a user (src/web/app.js PAGES): where Connect's Create a user leads. */
+export const USERS_HASH = "#users";
+
+/**
+ * HOW A TOOL CONNECTS (`/api/state` `postgres`, as `mason status --json` says it; src/cli/pg-url.ts postgresFacts): the
+ * Postgres API's URL with `<user>:<password>` in the credentials' place — the line `mason start` and `mason status`
+ * print — and its psql line, each with Copy, and Create a user (the Users page), whose name and password go in that
+ * place. `first` (nothing has asked Mason anything yet) leads with what the URL is for. Nothing from a run that does
+ * not say it.
+ */
+export function renderConnect(pg, { first = false } = {}) {
+  if (!pg || typeof pg.shown !== "string") return "";
+  return `<div class="connect${first ? " first" : ""}"><p class="connect-title">${first ? "Connect your first tool" : "Connect"}</p>` +
+    (first ? `<p class="lead">Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL.</p>` : "") +
+    `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd></dl>` +
+    `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p></div>`;
+}
+
 /** Nothing to show, quietly: a title and a line under it (`hintHtml`: HTML, a command in code()). */
 export const empty = (title, hintHtml = "") => `<div class="empty"><p class="empty-title">${esc(title)}</p>${hintHtml ? `<p>${hintHtml}</p>` : ""}</div>`;
 

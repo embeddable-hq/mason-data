@@ -1,5 +1,5 @@
 /**
- * THE QUERIES VIEW (#observability/queries, a sub-tab of Observability; `#queries`, its old address, lands here): KPI cards (the sessions open, the statements running, the last day's statements, failed ones
+ * THE QUERIES VIEW (#observability/queries, a view of the Observability group; `#queries`, its old address, lands here): KPI cards (the sessions open, the statements running, the last day's statements, failed ones
  * and p95), then who is connected now (`/api/state` `sessions`), the statements running now (`mason logs --running`, GET /api/running) with a Cancel that
  * asks first (`mason cancel`, POST /api/cancel), the unsupported SQL of the range (mason status's, GET /api/unsupported,
  * read once a minute), and the request log (`mason logs --requests`, GET /api/requests) as a
@@ -8,10 +8,11 @@
  * range unless the filter names its own — and paged back by Older; Started, Duration and Rows sort the page shown (the
  * pages follow the log's order by start: a sort of the whole log would need a cursor per order). A statement is one or
  * two lines in its cell, its title at most TITLE_MAX characters, and its expanded row the first STATEMENT_MAX of it. The words are the commands': a running
- * statement's "N rows sent" and its client, a request's duration in ms, its error, the empty log's sentence.
+ * statement's "N rows sent" and its client, a request's duration in ms, its error, the empty log's sentence — and,
+ * while the log is empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away.
  */
 import { agoText, bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText, details, createOpenSet, card, cards, empty, panel, status, skeleton,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText, unsupportedEntry, rangeOf, readPart } from "../shared.js";
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText, unsupportedEntry, rangeOf, readPart, renderConnect, copyClick } from "../shared.js";
 
 const RUNNING = "/api/running";
 const STATE = "/api/state";
@@ -122,8 +123,8 @@ export function renderRunning(running, asking = null, outcome = null) {
         : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td></tr>${answer(r)}`;
   }).join("");
   const table = running.length
-    ? `<p class="table-title">Running now (${running.length}):</p><div class="scroll"><table class="running"><thead><tr><th scope="col">Session</th><th scope="col">Statement</th><th scope="col">User</th><th scope="col">Client</th>` +
-      `<th scope="col">Started (UTC)</th><th scope="col">Running for</th><th scope="col">Rows</th><th scope="col">Statement text</th><th scope="col"></th></tr></thead><tbody>${rows}</tbody></table></div>`
+    ? `<div class="scroll"><table class="running"><thead><tr><th scope="col">Session</th><th scope="col" title="the statement's number in its session, as mason cancel --statement takes it">No.</th><th scope="col">User</th><th scope="col">Client</th>` +
+      `<th scope="col">Started (UTC)</th><th scope="col">Running for</th><th scope="col">Rows</th><th scope="col">Statement</th><th scope="col"></th></tr></thead><tbody>${rows}</tbody></table></div>`
     : empty("No statement is running now.");
   return table + (!shown && outcome !== null ? outcomeHtml(outcome) : "");
 }
@@ -167,12 +168,14 @@ const NEWEST_FIRST = { key: "started", dir: "desc" };
  * page has an older one (`before`), **Newest** when the page shown is not the newest. `filtered`: the empty sentence
  * names the filters, as the command's does; `span` the range's words (the empty log's). `now` is the page's clock.
  */
-export function renderRequests(page, { paged = false, filtered = false, isOpen = () => false, now = Date.now(), sort = NEWEST_FIRST, span = "" } = {}) {
+export function renderRequests(page, { paged = false, filtered = false, isOpen = () => false, now = Date.now(), sort = NEWEST_FIRST, span = "", connect = "" } = {}) {
   const older = page.before !== null && page.before !== undefined;
   const nav = paged || older ? `<div class="paging">${paged ? `<button type="button" data-newest>Newest</button>` : ""}${older ? `<button type="button" data-older>Older</button>` : ""}</div>` : "";
   if (!page.requests.length) {
     const days = `${page.keptDays} day${page.keptDays === 1 ? "" : "s"}`;
-    return empty(`No ${filtered ? "request that passes the filters" : "request"} ${span ? `in ${span} (the request log keeps ${days}: MASON_REQUEST_LOG_DAYS)` : `in the last ${days} (MASON_REQUEST_LOG_DAYS)`}.`) + nav;
+    // nothing asked yet (no filter, the newest page): how to connect, so the first statement is a paste away
+    return empty(`No ${filtered ? "request that passes the filters" : "request"} ${span ? `in ${span} (the request log keeps ${days}: MASON_REQUEST_LOG_DAYS)` : `in the last ${days} (MASON_REQUEST_LOG_DAYS)`}.`) +
+      (filtered || paged ? "" : connect) + nav;
   }
   const newest = [...page.requests].reverse();
   const list = sort.key === "started" && sort.dir === "desc" ? newest : sortedBy(newest, REQUEST_SORTS[sort.key] ?? REQUEST_SORTS.started, sort.dir);
@@ -285,7 +288,7 @@ export const page = {
           "running-now": running ? renderRunning(running.running, m.asking, m.outcome) : "",
           unsupported: readPart(ctx, unsupportedPath(ctx.range()), (b) => renderUnsupported(b, (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span), true),
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
-            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span }) : ""),
+            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(ctx.read(STATE)?.body?.postgres, { first: true }) }) : ""),
         };
       },
       toggle: (target) => opened.toggle(target),
@@ -307,7 +310,10 @@ export const page = {
         }
         return true;
       },
-      click(d, _button, { doc }) {
+      click(d, button, env) {
+        const { doc } = env;
+        // Connect's Copy buttons, in the request log's empty state
+        if (d.copy !== undefined) return copyClick(d, button, env);
         const pair = (v) => v.split(":").map(Number);
         if (d.askCancel !== undefined) return actions.askCancelStatement(...pair(d.askCancel)) ?? true;
         if (d.dismissCancel !== undefined) return actions.dismissCancelStatement() ?? true;

@@ -45,15 +45,15 @@ export const USER: CommandSpec & { needs: "project" } = {
     docker compose exec mason mason user add grafana   beside mason serve, in its data folder
 
   <name>    ${USER_NAME_RULE}
-  --json    as data: add { user (the name), id, addedAt, password, database, and once Mason runs url, host, port,
-            sslmode }; list { users: [{ name, id, addedAt, removedAt (null for a user not removed), live (connects now),
+  --json    as data: add { user (the name), id, addedAt, password, database, and once Mason runs url, psql (the
+            psql line for url), host, port, sslmode }; list { users: [{ name, id, addedAt, removedAt (null for a user not removed), live (connects now),
             lastUsedAt (its newest statement, null when none within requestLogDays), url (to paste, without the password;
             null for a removed user or when Mason is not running) }], lastUsedNote (why lastUsedAt is unknown, else null),
             urlNote (why url is null, else null), requestLogDays (null when unknown) }; remove { removed: { name, id,
             addedAt, removedAt } }; next
 `,
   options: { json: { type: "boolean", default: false } },
-  json: ["user", "id", "addedAt", "password", "url", "host", "port", "database", "sslmode", "users", "removed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
+  json: ["user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "users", "removed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
 };
 
 
@@ -90,7 +90,7 @@ export function lastUsedText(lastUsedAt: string | null, lastUsedNote: string | n
 /** A user just added, in `mason user add --json`'s shape (`replaced`: in place of one the API key's rotation had removed). */
 export interface AddedUser {
   user: string; id: string; addedAt: string; password: string; database: string;
-  url?: string; host?: string; port?: number; sslmode?: string;
+  url?: string; psql?: string; host?: string; port?: number; sslmode?: string;
   replaced: boolean;
 }
 
@@ -172,7 +172,7 @@ export function addUser(file: string, apiKey: string, name: string, o: { link: P
   const password = userPassword(apiKey, u.name, u.id);
   const { link } = o;
   return { user: u.name, id: u.id, addedAt: u.addedAt, password, database: link?.database ?? o.database,
-    ...(link !== null ? { url: connectionUrl(link, u.name, password), host: link.host, port: link.port, sslmode: link.sslmode ?? "disable" } : {}), replaced };
+    ...(link !== null ? { url: connectionUrl(link, u.name, password), psql: psqlLine(connectionUrl(link, u.name, password)), host: link.host, port: link.port, sslmode: link.sslmode ?? "disable" } : {}), replaced };
 }
 
 /** REMOVE A USER from `file` under its lock: it connects no more. A name the file lacks is refused with the closest it has. */
@@ -287,7 +287,7 @@ export async function user(argv: string[]): Promise<number> {
   out(reportText({
     headline: `The user ${r.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}: its password is printed this once`,
     details: [
-      ...(r.url !== undefined ? [["url", r.url] as const, ["psql", psqlLine(r.url)] as const] : []),
+      ...(r.url !== undefined && r.psql !== undefined ? [["url", r.url] as const, ["psql", r.psql] as const] : []),
       ["user", r.user], ["password", r.password], ["database", r.database],
       ...(link !== null ? [["host", link.host] as const, ["port", String(link.port)] as const, ...(link.sslmode ? [["ssl mode", link.sslmode] as const] : [])] : []),
     ],

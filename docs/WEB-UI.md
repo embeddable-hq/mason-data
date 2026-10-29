@@ -45,7 +45,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   24-hour sparkline once there are two hours to draw, and **each is a link** into the view that lists what it counts:
   the tables (the failed ones when a copy failed), Usage for the copy's file, Queries for the statements, the slow ones
   for the p95.
-- **Overview**, the copies not finished: a bar each with the line `mason wait` prints, and nothing once every copy is done.
+- **Overview**, Connect: the Postgres API's URL with `<user>:<password>` in the credentials' place and its psql line —
+  the lines `mason status` prints — each with **Copy**, and **Create a user** (the Users page). While nothing has asked
+  Mason anything (no statement in the last day or week) it is **Connect your first tool**, right under the cards, saying
+  what the URL is for; afterwards a quieter panel after the facts. It is `/api/state` `postgres` (`mason status --json`'s
+  `postgres`: `shown`, `psql`).
+- **Overview**, the copies not finished: a bar each with the line `mason wait` prints (a copy not begun shimmers, with
+  no % beside it), and nothing once every copy is done.
 - **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime
   and restarts, free disk, and sessions open. In replication mode, a Changes table shows the stream and the WAL its slot holds.
 - **Overview**, the statements and errors: the last day and week in one table, then the latest sync errors and the
@@ -60,8 +66,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** copies every column, as
   `mason add <table>` does; **Columns…** opens a form to tick the columns to copy; **Name its key…** does the same for a
   table with no primary key.
-- **Users** (`#users`): a form that adds a user by name. Its password and URL are shown once, in a card with Copy buttons;
-  Mason keeps no copy, so they are never shown again.
+- **Users** (`#users`): a form that adds a user by name. Its password, URL and psql line are shown once, in a card with
+  Copy buttons, with a link to Queries, where its statements will show; Mason keeps no copy, so they are never shown again.
 - **Users**, the list: each user's status (Active or Removed), when added, when last used, and its URL with **Copy**. A
   user that no longer connects is flagged with why. **Remove** asks first; a removed user stays listed, muted.
 - **Observability › Queries** (`#observability/queries`): cards for sessions open, statements running, and the
@@ -73,6 +79,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Queries**, unsupported SQL: the statements of the range Mason refused for SQL it does not support, grouped by their
   entry of `docs/SQL-SUPPORT.md` (named, as the page cannot link into the repository), the most refused first — how
   many, when the latest was, who sent them and the latest statement on a line, as `mason status` says them.
+- **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool (as the Overview's).
 - **Queries**, the request log: newest first, with a status dot per row. Filter by status, **Slow (1 s or more)**, a
   piece of the statement's text (**Statement has**), since (`2h`, `7d`, or a date: used instead of the range), user and
   client; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page

@@ -557,10 +557,12 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.equal(added.status, 200, added.text);
   const a = JSON.parse(added.text) as Record<string, unknown>;
   // mason user add --json's shape: the password, once, and the URL to paste
-  assert.deepEqual(Object.keys(a), ["user", "id", "addedAt", "password", "database", "url", "host", "port", "sslmode", "next"]);
+  assert.deepEqual(Object.keys(a), ["user", "id", "addedAt", "password", "database", "url", "psql", "host", "port", "sslmode", "next"]);
   assert.equal(a.user, "metabase");
   assert.equal(a.password, userPassword(API_KEY, "metabase", a.id as string), "the password the listener takes (src/duck/users.ts)");
   assert.equal(a.url, `postgres://metabase:${a.password as string}@127.0.0.1:5433/app`);
+  // the psql line mason user add prints, in the answer: the page shows it with a Copy, an agent runs it
+  assert.equal(a.psql, `psql postgres://metabase:${a.password as string}@127.0.0.1:5433/app`);
   assert.deepEqual([a.host, a.port, a.database, a.sslmode], ["127.0.0.1", 5433, "app", "disable"]);
   // the file mason user reads, with no password in it
   const file = readUsers(usersFile);
@@ -711,4 +713,11 @@ test("the query summary, the statements running now and a cancel: the ledger's a
   const badStatement = await cancel({ session: 4, statement: 0 });
   assert.deepEqual([badStatement.status, JSON.parse(badStatement.text).failure.message], [400, "statement is the statement's number, as mason logs --running lists it, or left out"]);
   assert.deepEqual(cancels, [4, 5, 77, [4, 9], [4, 8]]);
+});
+
+test("/api/state says where a tool connects: the Postgres API's URL with <user>:<password> in the credentials' place and its psql line, as mason status prints them", async () => {
+  const state = JSON.parse((await call("GET", "/api/state")).text) as { postgres?: unknown };
+  // the web page's Connect panel renders this; mason status --json says the same object (with the listener)
+  assert.deepEqual(state.postgres, { url: "postgresql://127.0.0.1:5433/app", host: "127.0.0.1", port: 5433, database: "app",
+    shown: "postgres://<user>:<password>@127.0.0.1:5433/app", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/app'" });
 });
