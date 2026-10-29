@@ -61,9 +61,9 @@ the same endpoints its own way.
 Built: the shell and every page (src/web/app.js, src/web/pages/).
 
 - **The shell**: `index.html` with a left sidebar — Overview · Tables · Users, then the Observability group's three
-  views, Queries · Usage · Syncs (modelled on Vercel's, Neon's and PlanetScale's) — and one section per page, chosen
+  views, Queries · Usage · Sync events (modelled on Vercel's, Neon's and PlanetScale's) — and one section per page, chosen
   by the URL's hash (`#overview`, the default; `#observability/queries`; the old `#status`, `#queries`, `#usage` and
-  `#logs` land on their view; `#observability/logs` is Syncs). Each page is an ES module of its own, a route of `PAGE_ROUTES`. ONLY THE PAGE SHOWN
+  `#logs` land on their view; `#observability/logs` is Sync events). Each page is an ES module of its own, a route of `PAGE_ROUTES`. ONLY THE PAGE SHOWN
   polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.
 - **Observability's time range**: Now · Last hour · 24 hours · 7 days · 30 days · 90 days (Now unless `?range=` says;
   Now is the last 15 minutes and LIVE — its reads every few seconds — and every other range is read once when chosen,
@@ -71,7 +71,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   and 90 days only where the run keeps them, `/api/state` `engine.keptDays`, MASON_HISTORY_DAYS — else shown
   disabled, saying so), shared by its three views and kept in the hash: Queries' request log `since`, Usage's samples
   (`since`, and a step of 60 s, 1 h, 6 h or a day — 90 days, 129,600 samples, re-bucket in ~15 ms),
-  Usage's `/api/activity`, Syncs' events `since`. Each view's filters compose with it.
+  Usage's `/api/activity`, Sync events' `since`. Each view's filters compose with it.
 - **Overview** (`#overview`): one word, `mason status`'s (Ready / Under way / Failed: `readinessWord` of `readiness`, said
   by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); cards that each link
   into the view that lists what they count (the failed tables, Queries — the slow ones from the p95 —, Usage); ONE table
@@ -86,7 +86,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   `/api/requests?failed=1`, `/api/unsupported` (30 s).
 - **Tables** (`#tables`, `#tables?show=failed`): ONE table of the database's tables. An added one shows its state
   (Synced / Syncing / Failed / Waiting), rows, last sync and its age, how long it took (`<0.1 s` under a tenth), the
-  copy's own size, in replication mode its stream state, its error, **View syncs** (Syncs narrowed to it), **Sync now**
+  copy's own size, in replication mode its stream state, its error, **View events** (Sync events narrowed to it), **Sync now**
   (`POST /api/sync`) and Remove; one not added
   its rows and key and why it cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
@@ -110,9 +110,9 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   range's samples (`/api/usage?since=<range>&step=<60|3600|21600|86400>`, newest first, the process's memory in a closed
   details), four charts of them, and each copy's own size. A client, a slow statement and a statement card lead to
   Queries filtered. Under Now `/api/activity` every 5 s and the rest every 60 s; any other range, each once.
-- **Observability › Syncs** (`#observability/syncs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s
+- **Observability › Sync events** (`#observability/syncs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s
   under Now, else once), newest first, narrowed by Failures only, a kind (every kind) and a table (every added table,
-  from `/api/state`, whether the range has an event of it or not; Tables' View syncs chooses it). The run's raw log
+  from `/api/state`, whether the range has an event of it or not; Tables' View events chooses it). The run's raw log
   (`/api/logs`, 5 s) is debugging output with internal tags and paths: it is behind a closed details, newest first, and
   read only while that is open.
 

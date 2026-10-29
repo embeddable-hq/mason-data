@@ -546,7 +546,9 @@ current as its `sync:` says — `off` (the default: read again only at `mason sy
 - **Every sync failure is a row of `_mason.sync_events`, kept as the request log is** (src/duck/events.ts: a failure
   was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
   says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy
-  finished, a table current again — the last detected in `record`, the one place an error is cleared), `SyncEvents`
+  finished, a table current again — the last detected in `record`, the one place an error is cleared — and a sync asked
+  by hand, `synced`, in the words mason sync answers: a scheduled poll that succeeds is no event, and without it a
+  person who synced read the list as a sync lost), `SyncEvents`
   writes them in batches on a connection of its own, never the writer's turn, a failed write said once and never
   failing the sync; a failure repeated word for word within an hour is one event unless it was over between — a
   table's when it is current again (`recovered`) or copied anew (`copied`), the whole sync's (`table: null`) when the

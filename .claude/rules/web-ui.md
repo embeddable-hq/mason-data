@@ -163,7 +163,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   window's resize), its title inside the card over it (never set into the frame, where a long title overflows the card).
 - **A `<details>` a poll rewrites stays open**: whether it is open is the page's state (`createOpenSet`), keyed by a
   stable id (a request's id, a table's name), written into the HTML by `details(key, …)` — never the element's own,
-  which a rewrite replaces. (The raw log's details is the Syncs page's own state, as before.)
+  which a rewrite replaces. (The raw log's details is the Sync events page's own state, as before.)
 - **A fact is in ONE place on the Overview**: the cards carry the copies in all, their rows, the last sync and the copy's file,
   and the facts table no longer does; the last day's statements and p95 cards are the request log's summary at a
   glance, its table the day and the week in full.

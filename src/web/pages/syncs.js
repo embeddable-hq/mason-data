@@ -22,7 +22,7 @@ const STATE = "/api/state";
 const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
 
 /** An event's kind as a badge: a failure red (with its ✗), a copy made or a failure recovered green, any other gray. */
-const kindBadge = (e) => badge(e.failed ? `✗ ${e.kind}` : e.kind, e.failed ? "bad" : /^(copied|recovered)$/.test(e.kind) ? "ok" : "");
+const kindBadge = (e) => badge(e.failed ? `✗ ${e.kind}` : e.kind, e.failed ? "bad" : /^(copied|recovered|synced)$/.test(e.kind) ? "ok" : "");
 
 /** The events read that pass the page's filters: failures only, a kind, a table ("" any; the sync's own is "(the sync)"). */
 const eventsShown = (events, { failuresOnly = false, kind = "", table = "" } = {}) =>
@@ -59,7 +59,7 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
 
 /** EVERY KIND OF SYNC EVENT, in its order (src/duck/events.ts `EVENT_KINDS`, held equal by the tests): the Kind filter
  *  offers each, whether the range has one or not. */
-export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "restart", "copied", "recovered"];
+export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "restart", "copied", "recovered", "synced"];
 
 /** The kind and table filters' controls: EVERY kind (EVENT_KINDS), and EVERY added table (`/api/state` `tables`, `s`) —
  *  the sync's own "(the sync)" first — whether the range has an event of it or not, so the choices never depend on what
@@ -93,7 +93,7 @@ export const page = {
   id: "syncs",
   hash: "observability/syncs",
   parent: "observability",
-  title: "Syncs",
+  title: "Sync events",
   create(ctx) {
     const m = { rawOpen: false, failuresOnly: false, kind: "", table: "", sort: { key: "time", dir: "desc" }, limit: EVENTS_SHOWN };
     const events = () => eventsPath(ctx.range());
@@ -127,7 +127,7 @@ export const page = {
         return null;
       },
       /** `#observability/syncs?failures=1` (where the Overview's sync errors lead): the failures only, the box ticked;
-       *  `?table=<name>` (a table's View syncs) its events only, the Table filter showing it. */
+       *  `?table=<name>` (a table's View events) its events only, the Table filter showing it. */
       route(params, { doc } = {}) {
         if (params.failures === undefined && params.table === undefined) return null;
         m.failuresOnly = params.failures === "1";

@@ -1315,6 +1315,10 @@ export async function wait(argv: string[]): Promise<number> {
 
 // ------------------------------------------------------------------ mason logs
 
+/** What the sync's events leave out, said where they are listed (mason logs --help, the page's Sync events, held equal
+ *  by tests/web-page.test.ts): a scheduled poll that succeeds is no event, so a person who synced reads where it is. */
+export const EVENTS_LEAVE_OUT = "A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).";
+
 const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>]] [--events [--failed]] [--running] [--json]
 
   The last lines of Mason's log: every copy, poll and statement it ran, warnings and errors with their reasons —
@@ -1323,8 +1327,10 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   outcome and SQLSTATE, how long, the rows sent, the client's application_name (and the mason user's name), the
   statement and the error's first line; the filters narrow it, and a page that has older rows ends with the line that
   reads them (--before). With --events, the sync's events: each copy that failed or finished, each poll, catch-up or
-  stream that failed, the database out of reach, a table current again, and each restart of the run — a line each,
-  newest last (a failure repeated word for word is said once an hour). Both are kept MASON_HISTORY_DAYS days
+  stream that failed, the database out of reach, a table current again, each sync asked by hand (mason sync, the
+  page's Sync now) and what it did, and each restart of the run — a line each, newest last (a failure repeated word for
+  word is said once an hour). A scheduled poll that succeeds is not listed: the last one's result is each table's last
+  sync (mason status, the Tables page's Last sync). Both are kept MASON_HISTORY_DAYS days
   (default 7) in the run's copy, and read through the running Mason. With --running, the statements running now
   instead, one per session, each with its number (mason cancel <session> --statement <n> stops one).
 
@@ -1361,7 +1367,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
                    (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
                    bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
                    or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
-                   catch_up_failed, stream_failed, source_unreachable, restart, copied, recovered), failed, table
+                   catch_up_failed, stream_failed, source_unreachable, restart, copied, recovered, synced (a sync asked by hand)), failed, table
                    (null: the whole sync), message }], keptDays }; with --running { running: [{ session, user,
                    applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;

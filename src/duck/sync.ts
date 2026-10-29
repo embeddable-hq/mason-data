@@ -68,7 +68,7 @@ import { didYouMean } from "../lib/did-you-mean.ts";
 import { namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import type { SyncEventInput } from "./events.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
-import { BIG_TABLE_ROWS, intervalOf, syncText, syncWords, type TableSync } from "../lib/table-sync.ts";
+import { BIG_TABLE_ROWS, intervalOf, syncedText, syncText, syncWords, type TableSync } from "../lib/table-sync.ts";
 
 /** how a copied table is kept current: Mason's xmin poll (step 1), a whole copy again (step 0), or the database's
  *  logical replication stream (`mason start --replication`, src/duck/stream.ts) */
@@ -1408,6 +1408,10 @@ export class Sync {
     // and a polled table's next poll moved past the timer set before
     this.running = poll.then(() => undefined, () => undefined).finally(() => { this.running = null; this.rearm(); });
     const found = await poll;
+    // A SYNC BY HAND IS AN EVENT (src/duck/events.ts `synced`), in the words mason sync and the page's Sync now say:
+    // a scheduled poll that succeeds records nothing (one every few seconds would bury the failures), so without it a
+    // person who synced and then read the events found only an older copy, and read it as a sync lost
+    for (const x of found) this.event({ kind: "synced", table: x.table, message: `synced by hand: ${syncedText(x)}` });
     const missing = tables.filter((t) => !found.some((f) => f.table === t.source));
     if (missing.length) throw new Error(`${missing.map((t) => t.source).join(", ")} has a numeric value wider than its copy's DECIMAL: it is copied again at the next pass, and current once copied`);
     return { at: new Date().toISOString(), tables: found };

@@ -18,7 +18,7 @@ const SIZES_PATH = "/api/usage?since=1m";
 
 /** Where one table's columns are read, when its form opens (src/cli/run-server.ts tableColumns): never with the state,
  *  which is polled every 2 s and would carry every table's (3.4 MB at 800 tables of 50 columns). */
-/** A table's sync events: Observability › Syncs narrowed to it (src/web/pages/syncs.js `route`), over the week (its
+/** A table's sync events: Observability › Sync events narrowed to it (src/web/pages/syncs.js `route`), over the week (its
  *  copy and failures are rarely in the last 15 minutes, Now's). */
 export const syncsHref = (table) => `#observability/syncs?table=${encodeURIComponent(table)}&range=7d`;
 export const columnsPath = (table) => `/api/tables/${encodeURIComponent(table)}/columns`;
@@ -211,8 +211,8 @@ export function renderTables(s, ui = {}) {
     const syncedNow = synced?.table === t.table && !("failure" in synced) && fresh(synced, now);
     const act = adding_ ? button("Adding…", {}, "primary small", { disabled: true }) : t.added
       // Sync now → Syncing… → Synced ✓ in the one room (ROOMS.sync), so the actions never move
-      // View syncs: its sync events, on Observability › Syncs (a link: it goes to another page)
-      ? `<a class="btn small" href="${esc(syncsHref(t.table))}">View syncs</a> ` +
+      // View events: its sync events, on Observability › Sync events (a link: it goes to another page)
+      ? `<a class="btn small" href="${esc(syncsHref(t.table))}">View events</a> ` +
         (syncing.includes(t.table) ? button("Syncing…", {}, "small", { room: ROOMS.sync, disabled: true }) : button(syncedNow ? "Synced ✓" : "Sync now", { syncTable: t.table }, "small", { room: ROOMS.sync })) + " " +
         // while it asks, Remove stays where it was, held down: the question beside it answers it
         (asking ? button("Remove", {}, "danger small", { disabled: true, expanded: true }) : button("Remove", { removeTable: t.table }, "danger small"))

@@ -10,10 +10,10 @@ import { failed, jsonText, parseCommand, reportText, type CommandSpec, type Next
 import { out as styleOut } from "./style.ts";
 import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
-import { findTable, guarded, msText, readState, tableArg } from "./commands.ts";
+import { findTable, guarded, readState, tableArg } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import type { KeptCurrent, PolledTable, StreamedAnswer } from "../duck/sync.ts";
-import { syncWords } from "../lib/table-sync.ts";
+import { syncedText, syncWords } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const n = (x: number): string => x.toLocaleString("en-US");
@@ -54,7 +54,7 @@ export function syncedReport(b: { tables: readonly PolledTable[] }, picked: read
   const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
   return {
     headline: `Synced ${picked.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted.`,
-    details: b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`] as const),
+    details: b.tables.map((t) => [t.table, syncedText(t)] as const),
     // what happens next to each: an `off` table stays as of now, a polled one is polled again after its interval
     tips: syncedTips(tables),
   };
