@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { COMMANDS } from "../src/cli/registry.ts";
 import { PROJECT_STATES, meets, type ProjectState } from "../src/cli/state.ts";
-import { MATRIX_ARGS, TRANSITIONS, answerProblems, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
+import { MATRIX_ARGS, MATRIX_MORE, TRANSITIONS, answerProblems, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
 import type { CopyState, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
@@ -312,6 +312,10 @@ test("every command, in every state without a run, as a person and with --json: 
           const argv = [c.name, ...argsIn(state, c.name), ...(json ? ["--json"] : [])];
           return { state, cmd: c.name, json, a: await runMason(root, argv, env, TRANSITIONS.has(c.name) ? 90_000 : 30_000) };
         });
+      }
+      // its other modes, --json each (MATRIX_MORE)
+      for (const line of MATRIX_MORE[c.name] ?? []) {
+        jobs.push(async () => ({ state, cmd: c.name, json: true, a: await runMason(folderIn(state), [c.name, ...line, "--json"], env, 30_000) }));
       }
     }
   }

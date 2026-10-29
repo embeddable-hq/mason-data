@@ -47,6 +47,16 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   serve: [],
 };
 
+/**
+ * MORE LINES of a command whose modes answer from different places (review: `user disable|enable` and `logs --events|
+ * --running|--requests` ran only against a fake run): each run in every state too, with --json alone (the person's
+ * form of each is its command's line above; a line a state runs is a process, and the matrix is the suite's slowest).
+ */
+export const MATRIX_MORE: Readonly<Record<string, ReadonlyArray<readonly string[]>>> = {
+  user: [["disable", "no_such_user"], ["enable", "no_such_user"]],
+  logs: [["--events"], ["--running"], ["--requests"]],
+};
+
 /** The commands a state may not run in the matrix because they CHANGE it: they are the session's transitions. */
 export const TRANSITIONS: ReadonlySet<string> = new Set(["start", "stop"]);
 

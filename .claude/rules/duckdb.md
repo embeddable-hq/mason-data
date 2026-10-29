@@ -551,13 +551,13 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   by tests/duck-usage.test.ts) — so a statement is in the interval it ENDED in, which a query by `started_at` would miss.
   An interval keeps at most `DURATIONS_KEPT` completed durations (a sample not taken carries its interval on, for as
   long as samples fail): exact up to it, a uniform reservoir past it.
-  The copy's memory is `duckdb_memory()` (under 1 ms); a copy's bytes are its distinct blocks from
-  `pragma_storage_info` (61–72 ms cold on 30 M rows × 14 columns, metadata only; it grows with rows × columns, so never
-  per request). `mason usage` and `GET /api/usage` read them.
+  The copy's memory is `duckdb_memory()`; a copy's bytes are its distinct blocks from `pragma_storage_info`
+  (metadata only, but it grows with rows × columns, so never per request; docs/DESIGN.md "Observability" has the
+  measurement). `mason usage` and `GET /api/usage` read them.
 - **A copy's `rows` is its count after every write that changes it** (`CopyState.rows`): the copy's own count at the
   swap, the poll's reconciled count at its commit, and after every stream batch the rows its writes inserted less the
-  rows they deleted (`rowsChanged`, `writeByKey`) — never a `count(*)` per batch (a write by key's deletes make it a scan:
-  12 ms on 20 M rows) — written to `copy_state` IN the batch's transaction. When it was last brought current, and how,
+  rows they deleted (`rowsChanged`, `writeByKey`) — never a `count(*)` per batch (a write by key's deletes make it a
+  scan) — written to `copy_state` IN the batch's transaction. When it was last brought current, and how,
   is `CopyState.synced` (`Synced`: the swap, a poll's commit, the stream's last batch); `/api/state` derives each
   table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked.
 

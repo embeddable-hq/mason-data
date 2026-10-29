@@ -1086,6 +1086,38 @@ clients that take a static header. The tool code would not change; the transport
 **Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`), `src/api/postgres/catalog.ts`
 (`sourceTypeNames`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
 
+## Observability (2026-10-27 – 2026-10-29)
+
+**Decision.** Every run keeps its history in its own file — the request log (below), the sync's events, a usage
+sample a minute and each copy's size every 10 minutes — and the commands (`mason status`, `mason logs`, `mason usage`)
+and `mason start`'s web page (`mason ui`) render the same JSON. The plan, the endpoints and the access options are
+docs/OBSERVABILITY.md; the page's rules are .claude/rules/web-ui.md; the numbers of its architecture review are
+docs/OBSERVABILITY.md "Architecture review".
+
+**The page's look, as it was decided.** A first palette of black bands and a dark orange read as dated, and its hard
+stepped shadows as heavy: the owner kept the type (Geist Mono, Geist Sans, Zilla Slab) and asked for other colours,
+so the page is a stone white with one patina accent and a hairline-and-soft-shadow step. A copy's bar was first a
+course of bricks; the owner found it read as noise, and it is a plain line with its % at the end. A first chart set
+its title into its frame, where "Statements an hour" overflowed the card; the title is the card's now. The owner's
+rule for clicks — "clicking buttons in a table should not shift it around" — is why every question, form and answer
+is a popover, every changing label keeps the room of its longest, and the Tables and Users lists have fixed columns
+(a disabled user's "Disabled <when>" once widened Users' Status column).
+
+**The ranges.** The views share one time range. Now (the last 15 minutes, read every few seconds) is the default,
+and every other range is read once and holds still, with when it was read and Refresh: a person comparing a past
+hour wants it to stay put. The Overview's links carry the range of what their card counts (24 hours; the sync's
+failures 7 days): with Now the default, a card of 12 failed statements once landed on an empty 15 minutes.
+
+**Measured.** A copy's size from `pragma_storage_info`: 61–72 ms cold on 30 M rows × 14 columns, metadata only but
+growing with rows × columns, so it is sampled every 10 minutes, never per request; `duckdb_memory()` under 1 ms. A
+`count(*)` after a stream batch that wrote by key was a scan, 12 ms on 20 M rows, so a copy's rows are kept by the
+batch's own inserts less its deletes. A copy with no persistent block yet (its rows still in the write-ahead log) was
+measured "0.0 KiB" for 5,000 rows, so it is not measured until it has one; and the file's block size read without
+`current_database()` was the in-memory catalog's 0, which made every copy 0 B.
+
+**Where.** `src/duck/{requests,events,usage,history}.ts`, `src/cli/{run-server,usage,commands}.ts`, `src/web/`;
+`tests/duck-{requests,events,usage,history}.test.ts`, `tests/cli-run-server.test.ts`, `tests/web-page.test.ts`.
+
 ## The request log
 
 **Decision.** Every statement DuckDB answered and every refusal or failure (a Parse, a Bind, a syntax error, a refused

@@ -134,7 +134,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   solid fill to the share (`copyBar`, src/web/pages/status.js: a `role="progressbar"` span with its value, label and
   the line's words, its track `aria-hidden`), its % as text at the bar's end as the CLI prints it, the fill the line's
   state (patina copying, green served, amber not kept current, rose failed), waiting a quiet shimmer of the track (never
-  under `prefers-reduced-motion`); the owner found the wall of bricks read as noise. A state's marker is a small stone block; a page's title
+  under `prefers-reduced-motion`): a patterned bar reads as noise. A state's marker is a small stone block; a page's title
   stands on a course of bricks; the Getting-started steps are courses of a wall; an empty state is a footing with
   nothing built on it. All of it is boxes and borders: **no gradient and no image** (`url(` only in an `@font-face`).
   **The mark is Mason's own**: an arch of bricks with its keystone, an inline SVG in index.html in `currentColor`.
@@ -160,7 +160,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   A chart is one series (no dual axis), from a zero baseline, made and destroyed by its holder's key (`createCharts`:
   no instance outlives its holder), themed from the `--chart-*` tokens. **A chart stays in its card**: as wide as its
   holder (the card's content) when drawn and whenever that width changes (a `ResizeObserver` per holder, not only the
-  window's resize), its title inside the card over it (never set into the frame: "Statements an hour" floated out).
+  window's resize), its title inside the card over it (never set into the frame, where a long title overflows the card).
 - **A `<details>` a poll rewrites stays open**: whether it is open is the page's state (`createOpenSet`), keyed by a
   stable id (a request's id, a table's name), written into the HTML by `details(key, …)` — never the element's own,
   which a rewrite replaces. (The raw log's details is the Syncs page's own state, as before.)
@@ -169,7 +169,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   glance, its table the day and the week in full.
 - **Numbers are mono and right-aligned in a column; a table scrolls inside its card on a phone, never the page**: the
   reader compares down a column, and a page that scrolls sideways hides the nav.
-- **A click moves no other row and no column** (the owner: "clicking buttons in a table should not shift it around"):
+- **A click moves no other row and no column** — a table that moves under the pointer loses the next click:
   a question (a Remove's, a Cancel's), a form (Columns…, Name its key…) and what an action answered are a POPOVER beside
   the button (`pop` and `placePops` of src/web/shared.js: written after the table, `position: fixed`, anchored to the
   row's actions cell by its id, `actId`), never a row inserted and never in the actions' cell; an answer goes by itself
