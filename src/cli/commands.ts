@@ -86,6 +86,9 @@ export interface RunState {
   readiness?: Readiness;
   /** the run serves the web page (`mason ui`): mason start's does, mason serve's never; a run from before it has none */
   ui?: boolean;
+  /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
+   *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
+  roles?: { file: string | null; roles: string[]; problem: string | null };
 }
 
 // ------------------------------------------------------------------ shared
@@ -281,7 +284,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            fill: { rows, bytesPerRow, seconds, basis (measured: from the last fill of its column; disk or text: modelled from
            the column's bytes a row on disk, or its text's before it is on disk), rowsPerSecond } (the fill's estimate it
            was decided on), filled: { rows, seconds } (what its own fill measured), queued (a backfill waiting for the fill
-           under way), keptAt, readyAt, why }]
+           under way), keptAt, readyAt, why }]. roles (a run with a roles file, mason/roles.yml: what a user added
+           with --role may read): { file, roles: [name], problem (what is wrong with the file now, every statement of a
+           user with a role refused while there is; null) }
 
   In replication mode a Stream section says where the stream is: its position against the database's (bytes behind),
   when the newest change applied was committed and how long after it was applied, and each added table — streamed,
@@ -304,7 +309,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "engine", "stream", "jsonPaths", "slowQueries", "refusedQueries", "refusedTotal", "readiness", "ui",
-    "lastRun", "lastStop", "hung", "next"],
+    "roles", "lastRun", "lastStop", "hung", "next"],
 };
 
 export async function status(argv: string[]): Promise<number> {
@@ -353,6 +358,9 @@ export async function status(argv: string[]): Promise<number> {
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
       ...(s.ui === true ? [["Web UI", `${run.control.url}/  (mason ui opens it)`] as [string, string]] : []),
+      // the roles file as the listener reads it now (mason user add --role): its roles, or what is wrong with it
+      ...(s.roles && (s.roles.roles.length || s.roles.problem !== null)
+        ? [["Roles", s.roles.problem !== null ? st.red(`${s.roles.problem} (every statement of a user with a role is refused until it is fixed)`) : `${s.roles.roles.join(", ")}  (${s.roles.file}; a user with none reads every table)`] as [string, string]] : []),
       ...s.warnings.map((w) => ["Warning", w] as [string, string]),
     ];
     out(reportText({ headline: `Status: ${st.green("running")}`, details: rows }, st));

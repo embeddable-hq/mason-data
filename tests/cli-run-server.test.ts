@@ -63,7 +63,7 @@ const pollNow = (sources: string[]): Promise<{ at: string; tables: PolledTable[]
 };
 // the request log's reads (src/duck/requests.ts), as the ledger answers them: the server passes them on, never a copy
 const asks: Array<{ limit: number; failed?: boolean }> = [];
-const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", session: 3, applicationName: "Metabase", tokenName: "", user: "", method: "QUERY",
+const request: LedgerRequest = { requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", session: 3, applicationName: "Metabase", tokenName: "", user: "", role: "", method: "QUERY",
   outcome: "refused", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, durationMs: 2, query: "SELECT * FROM nope", queryTruncated: false };
 const requests = {
   days: 7,

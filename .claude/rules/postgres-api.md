@@ -60,6 +60,20 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   TLS start** (`directTls`): a connection's first byte 0x16 is a ClientHello (`sslnegotiation=direct`, a
   TLS terminator in front) and is TLS at once, ALPN `postgresql`, the bytes read unshifted onto the socket whole —
   never a second read path; a plain listener closes it saying so in the log.
+- **A role is enforced on the ANALYSED tree, never on SQL text, and the catalog's roles mirror the roles file**
+  (`src/duck/grants.ts`, `src/cli/roles.ts`, `catalog.ts` `catalogRoles` / `asRole`; docs/POSTGRES-API.md "Roles"):
+  after Postgres's analysis (views expanded, names resolved) and before the rewrite, every `RTEPERMISSIONINFO` of a
+  copied table is held to the session's role — the table and every column in `selectedCols` — and refused with
+  Postgres's own message (`42501 permission denied for table …`, the role and column in the DETAIL); a text match would
+  miss a CTE, a USING join, a lateral, a `*`. The role is read with the user before every statement and at an Execute
+  (a plan carries its `reads`; the plan cache is keyed by role), and fails closed: a role the file lacks, or a file
+  that cannot be read, refuses by name, never widens. One Postgres role per Mason role lives in the catalog with the
+  same grants, rebuilt when the file or the tables move, and a session with a role runs each catalog request under
+  `SET ROLE … RESET ROLE` in ONE message (a Sync added before the RESET: after an error Postgres ignores everything
+  until one), so `information_schema` and `has_*_privilege` answer for the role and no other session's request meets
+  it. `pg_catalog` is not filtered (stage 1a). DETECTOR: `tests/duck-roles-wire.test.ts` (every shape),
+  `tests/postgres-api/catalog.test.ts` (the roles' DDL, `SET ROLE`, interleaving) and the oracle's role cases (a
+  Postgres role with the same grants, the same statements, refusals equal by SQLSTATE and message).
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
   `application_name`, a token's NAME (never the token) or the user's name. A refused statement is recorded in

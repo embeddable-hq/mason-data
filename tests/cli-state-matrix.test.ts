@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { COMMANDS } from "../src/cli/registry.ts";
 import { PROJECT_STATES, meets, type ProjectState } from "../src/cli/state.ts";
-import { MATRIX_ARGS, TRANSITIONS, answerProblems, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
+import { MATRIX_ARGS, MATRIX_EXTRA_ARGS, TRANSITIONS, answerProblems, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
 import type { CopyState, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
@@ -306,12 +306,14 @@ test("every command, in every state without a run, as a person and with --json: 
     for (const c of COMMANDS) {
       // start in a stopped project is the session's transition (it connects to the database): its refusal here is
       // the database not answering, which is checked; stop is harmless where nothing runs
-      for (const json of takesJson(c.name) ? [false, true] : [false]) {
-        jobs.push(async () => {
-          const root = folderIn(state);
-          const argv = [c.name, ...argsIn(state, c.name), ...(json ? ["--json"] : [])];
-          return { state, cmd: c.name, json, a: await runMason(root, argv, env, TRANSITIONS.has(c.name) ? 90_000 : 30_000) };
-        });
+      for (const args of [argsIn(state, c.name), ...(MATRIX_EXTRA_ARGS[c.name] ?? [])]) {
+        for (const json of takesJson(c.name) ? [false, true] : [false]) {
+          jobs.push(async () => {
+            const root = folderIn(state);
+            const argv = [c.name, ...args, ...(json ? ["--json"] : [])];
+            return { state, cmd: c.name, json, a: await runMason(root, argv, env, TRANSITIONS.has(c.name) ? 90_000 : 30_000) };
+          });
+        }
       }
     }
   }

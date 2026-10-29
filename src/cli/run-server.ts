@@ -28,7 +28,8 @@ import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure } from "./command.ts";
 import { readiness } from "./readiness.ts";
-import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT } from "./user.ts";
+import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
+import { addedNext, addUser, roleToAdd, listUsers, removeUser, REMOVED_NEXT } from "./user.ts";
 import { postgresLink } from "./pg-url.ts";
 import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
@@ -60,6 +61,9 @@ export interface RunContext {
    *  the list (.mason/users.json), the API key their passwords are made with, the database a user connects to, and
    *  where the Postgres API listens (the run's recorded URL), for the URL an added user is shown */
   users: { file: string; apiKey: string; database: string; postgresUrl: string };
+  /** the project's roles as the listener holds them now (src/cli/roles.ts LiveRoles): what `mason user add --role`
+   *  is checked against while the run is up, and what `/api/state` says of them; absent: a run with no roles file */
+  roles?: () => RolesLive;
   /** the project's folder (sources/, mason.yml) */
   folder: () => string | null;
   /** the project's root (where .mason/ is): what messages name files from */
@@ -141,6 +145,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     folder, project, tables,
     engine: { name: "duckdb", file: ctx.duck.file, bytes: fileBytes(ctx.duck.file), pollSeconds: ctx.duck.pollSeconds },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
+    // the roles file as the listener reads it now: its roles by name, and what is wrong with it (every statement of a
+    // session with a role is refused while there is)
+    ...(ctx.roles ? { roles: rolesState(ctx.roles()) } : {}),
     // replication mode: where the stream is, its lag and what it applied (mason status and wait render it, streamLines)
     ...(stream !== null ? { stream } : {}),
   };
@@ -150,6 +157,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
 function fileBytes(file: string): number | null {
   try { return fs.statSync(file).size; } catch { return null; }   // a size is a nicety of mason status: unknown, not an error
 }
+
+/** `RunState.roles` (src/cli/commands.ts): the file, the roles it names and what is wrong with it now */
+export const rolesState = (r: RolesLive): { file: string | null; roles: string[]; problem: string | null } => ({ file: r.file, roles: [...r.grants.keys()], problem: r.problem });
 
 async function state(ctx: RunContext): Promise<unknown> {
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream());
@@ -269,14 +279,18 @@ export function createRunServer(ctx: RunContext): http.Server {
           }
         } else if (req.method === "GET" && url.pathname === "/api/users") {
           // mason user list --json's shape: the users, and whether each connects
-          const r = listUsers(ctx.users.file, ctx.users.apiKey);
+          const r = listUsers(ctx.users.file, ctx.users.apiKey, ctx.roles?.() ?? NO_ROLES);
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           sendJson(res, 200, { ...r, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
         } else if (req.method === "POST" && url.pathname === "/api/users") {
-          const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown };
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown; role?: unknown };
           if (typeof body.name !== "string") throw new Refusal(400, "send { name }: the user's name");
+          if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "send { name, role }: the role's name, a string");
+          // the role must be one the roles file names NOW (src/cli/user.ts roleToAdd): refused before anything is written
+          const roleProblem = body.role === undefined ? null : roleToAdd(body.role, ctx.roles?.() ?? NO_ROLES);
+          if (roleProblem !== null) { sendFailure(res, statusOf(roleProblem), roleProblem); return; }
           // mason user add --json's shape: its password, once, and the URL to paste (this run is up, so it has one)
-          const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database });
+          const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database, ...(typeof body.role === "string" ? { role: body.role } : {}) });
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           const { replaced, ...added } = r;
           ctx.log(`user ${added.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}`);

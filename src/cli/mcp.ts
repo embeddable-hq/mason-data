@@ -292,7 +292,8 @@ interface Relation extends TableName { kind: "table" | "view" }
 /** The relations Mason serves, as the catalog lists them (a catalog read: no row of the request log). */
 async function relations(pg: PgConnection): Promise<Relation[]> {
   const r = await pg.query(`SELECT n.nspname, c.relname, c.relkind FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%' ORDER BY 1, 2`);
+    WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
+      AND (pg_catalog.has_table_privilege(c.oid, 'SELECT') OR pg_catalog.has_any_column_privilege(c.oid, 'SELECT')) ORDER BY 1, 2`);
   return r.rows.map(([schema, name, kind]) => ({ schema: schema!, name: name!, kind: kind === "v" || kind === "m" ? "view" : "table" }));
 }
 
@@ -532,7 +533,8 @@ class McpServer {
     const rel = `${pgLiteral(qualifiedName(found))}::regclass`;
     // pg_catalog.format_type, written out: these are the catalog's own OIDs (mason_wire_type names the wire's)
     const columns = await pg.query(`SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull, pg_catalog.col_description(a.attrelid, a.attnum)
-      FROM pg_catalog.pg_attribute a WHERE a.attrelid = ${rel} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`);
+      FROM pg_catalog.pg_attribute a WHERE a.attrelid = ${rel} AND a.attnum > 0 AND NOT a.attisdropped
+        AND pg_catalog.has_column_privilege(a.attrelid, a.attnum, 'SELECT') ORDER BY a.attnum`);
     const key = await pg.query(`SELECT a.attname FROM pg_catalog.pg_index i JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
       WHERE i.indrelid = ${rel} AND i.indisprimary ORDER BY array_position(i.indkey::int2[], a.attnum)`);
     const foreign = await pg.query(`SELECT pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE conrelid = ${rel} AND contype = 'f' ORDER BY conname`);

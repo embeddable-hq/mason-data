@@ -46,6 +46,61 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
   password; or add another name and remove the old one once the tool uses it). The password is never kept, so it
   cannot be printed again: a lost one is a remove and an add.
 
+### Roles
+
+**A role limits what a user reads to tables and columns**: `mason user add <name> --role <role>` names a role of the
+project's roles file, `mason/roles.yml` beside the sources file, written in the sources file's own words:
+
+```yaml
+roles:
+  agent:                         # the role's name
+    tables:
+      orders: {}                 # every column of a copied table
+      customers:
+        columns: [id, country]   # these columns only
+      billing.invoices:
+        exclude: [notes]         # every column but these
+```
+
+- **A role names copied tables only**: a table the sources file does not copy, a column the copy lacks, a role with
+  no table, a column both listed and excluded — each refuses `mason start` (and `mason user add --role`) by its key,
+  with the closest name and the way out, before anything opens. The file is read again whenever it changes, with no
+  restart; one edited into a mistake while Mason runs refuses every statement of a user with a role (57P03, the
+  mistake said) until it is repaired, never widens.
+- **It is enforced on the analysed tree, never on the statement's text**: after the catalog Postgres has analysed a
+  statement (views expanded, every name resolved) and before it is rewritten, every table it reads and every column
+  of each — in a WHERE, a CTE, a subquery, a USING or NATURAL join, a window, an ORDER BY, a GROUP BY, a CASE, a
+  lateral, a parameter, a prepared statement — is held to the role. A read past it is refused as Postgres refuses it:
+  `42501`, `permission denied for table orders` (Postgres's own message, which never names the column), the DETAIL
+  naming the role and the column (`the role agent may not read column notes of orders`), the HINT what the role may
+  read. `SELECT *` or `t.*` on a partly granted table is refused naming the first hidden column, never narrowed to the
+  granted ones; `count(*)` over a table of which the role reads any column is answered, as on Postgres; a system
+  column (`xmin`) needs the whole table, as on Postgres; a statement that reads no copied table is untouched.
+- **The role is read with the user before every statement** (the users file, `recheckMs: 0`): a role given, taken or
+  changed under a held session applies to its next statement — an EXECUTE of a statement prepared before included —
+  and a role the file no longer names refuses its users by name (42501, the way out: add it back, or remove and add
+  the user) rather than letting them read everything. `mason start` and `mason user list` say which users carry a
+  role the file lacks. A user with no role, and a token, read every copied table as before.
+- **The catalog answers for the role**: one Postgres role per Mason role, with the same `GRANT SELECT` and
+  `GRANT SELECT (columns)`, lives in the catalog Postgres, rebuilt when the file or the copied tables change, and a
+  session with a role runs each catalog statement under `SET ROLE … RESET ROLE` in one request. So
+  `information_schema.tables` and `.columns` list the role what it may read, `has_table_privilege` /
+  `has_column_privilege` / `has_any_column_privilege` answer as Postgres's would for its grants (`current_user` is the
+  role's name, as under Postgres's own `SET ROLE`), and `mason mcp`'s
+  `tables` and `describe` (which ask them) list an agent only what its user may read. **`pg_catalog` itself is not
+  filtered in this stage**: `pg_class` and `pg_attribute` still list every copied column to every role (as they do on
+  Postgres, which filters neither), while a read of a hidden one is refused. **Every role may see every view** of the
+  source: reading one is held to the tables it reads, so a view over a hidden column is refused when read — stricter
+  than Postgres, where a view's owner's grants apply. No row filter yet (the gap `roles` in docs/SQL-SUPPORT.md).
+- **A session is its user and becomes no one else**: `SET ROLE` and `SET SESSION AUTHORIZATION` to its own name,
+  `NONE` or `RESET` are no-ops, any other name is Postgres's refusal (`42501 permission denied to set role "…"`);
+  `session_user` is the session's user and `current_user` its role. **`set_config` is refused to a role's session**
+  (42501, `permission denied for function set_config`), where Postgres lets a role `set_config('role', 'none')` back
+  to its login: the catalog is one superuser connection with `SET ROLE` on top, and inside one statement that call
+  was a reset to the superuser (the hidden columns' NAMES, never rows, were listed by the rest of the statement). A
+  session with no role, and a token, keep `set_config`.
+- **Every refusal is a row of the request log with the user's role** (`role` in `_mason.requests`).
+
 `mason start` listens on 5433 when it is free on every address (127.0.0.1, 0.0.0.0, `::` and `::1`: a port another
 Postgres holds on any of them would send a container or a driver trying `::1` first to that server), else on the next
 free port, and says which address held 5433. **The port is then the project's** (`pgPort` in `.mason/config.json`):
@@ -132,7 +187,9 @@ of this API like any tool: it connects as a `mason user` by the URL `mason user 
 honours the URL's `sslmode`, and sets `application_name` to `mason-mcp/<the MCP client's name>`, so the request log
 names the agent. Its tools say over this wire what a bare SQL tool would leave a model to guess:
 
-- `tables` and `describe` read the catalog (`pg_class`, `pg_attribute`, `pg_index`, `pg_constraint`) and, for each
+- `tables` and `describe` read the catalog (`pg_class`, `pg_attribute`, `pg_index`, `pg_constraint`, filtered by
+  `has_table_privilege` / `has_any_column_privilege` and `has_column_privilege`, so a user with a role is shown what
+  it may read, "Roles" above) and, for each
   copy's rows and how it is kept current, `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` — one EXPLAIN a table, a few at
   once, so a remote `mason serve` answers as a local run does; a table is named as EXPLAIN names it, as a statement
   writes it (`public."Clients"`);
@@ -258,6 +315,9 @@ day's slow and refused statements (docs/DESIGN.md "The request log").
 - **The wire** (`tests/postgres-api/protocol.test.ts`, `encode.test.ts`, `server.test.ts`, `tests/duck-wire.test.ts`):
   the frames, the bytes of every type against Postgres's own, and sessions driven by node-postgres over a real DuckDB
   copy.
+- **Roles** (`tests/duck-roles-wire.test.ts`, `tests/postgres-api/catalog.test.ts`, the oracle's role cases): every
+  shape a hidden column can be read in, refused over a real listener; the catalog's roles and `SET ROLE`; and a
+  Postgres role with the same grants asked the same statements, the refusals equal by SQLSTATE and message.
 - **The tool corpus** (`tests/duck-corpus.test.ts`, `tests/postgres-api/corpus/`): the statements psql, pgjdbc 42.7.14,
   node-postgres 8.23, Metabase 0.64.2.8, Grafana 13.2.4, DBeaver 26.2.0 and Superset 6.1.0 were RECORDED sending
   (`MASON_PG_TRACE`) on connect, to list the catalog and to describe a table, replayed and held to an

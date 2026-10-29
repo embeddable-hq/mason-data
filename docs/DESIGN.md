@@ -1042,6 +1042,34 @@ statement (28000), no restart; an unreadable file refuses every user (57P03); ro
 user` runs beside the process holding DuckDB's lock. Named as Postgres names it (`CREATE USER … WITH PASSWORD`).
 **Where.** `src/duck/users.ts`, `src/cli/user.ts`; `tests/duck-users.test.ts`, `tests/duck-users-wire.test.ts`.
 
+### Roles: tables and columns per user (2026-10-29, GitHub issue 30, stage 1a)
+
+**Decision.** A roles file beside the sources file (`mason/roles.yml`, `src/cli/roles.ts`) names what each role may
+read: tables, and `columns:` or `exclude:` of each, in the sources file's own words; `mason user add <name> --role
+<role>` puts a role on a user (`role` in `.mason/users.json`). A role is enforced in `src/duck/plan.ts` on the tree
+Postgres analysed, after the views are expanded and before the rewrite (`src/duck/grants.ts`): every
+`RTEPERMISSIONINFO` of a copied table, its `selectedCols` mapped through `pg_attribute` (bit − 7 = attnum; bit 7 the
+whole row; a lower bit a system column, which needs the whole table; none, a `count(*)`, any column). The refusal is
+Postgres's: `42501 permission denied for table <name>` — measured on Postgres 18, which never names the column under
+column grants — with the role and the column in the DETAIL and what the role reads in the HINT. The catalog Postgres
+holds one role per Mason role with the same GRANTs and runs a role's session's catalog statements under `SET ROLE …
+RESET ROLE` in one request, so `information_schema`, `has_*_privilege` and `mason mcp` answer for the role;
+`pg_catalog` is left unfiltered (Postgres filters it no more than Mason does). Fail closed everywhere: a role the
+file lost refuses its users by name, a file that cannot be read refuses 57P03 and keeps the last good grants for the
+catalog. The role travels with the user's token, re-read before every statement, and a plan carries its reads so an
+Execute is held to the role of that moment; the plan cache is keyed by role.
+
+**Why on the tree.** A text match misses a CTE, a `USING` join, a lateral's argument and a `*`; Postgres has already
+resolved every one of them by the time the planner sees the tree, and its own permission check reads the same node.
+**Why the catalog has real roles.** `information_schema` is a view over `has_*_privilege`: filtering it by hand would
+be a second implementation of Postgres's rules; a real role makes PGlite answer as Postgres does, for every
+introspection a tool sends. Views are granted to every role (the grant rides in the view's own statement, since the
+view must exist first) and checked on their base tables: stricter than Postgres, said in the docs.
+**Not in this stage.** `pg_catalog` filtered by role; row filters (stage 2); limits (stage 3).
+**Where.** `src/duck/grants.ts`, `src/cli/roles.ts`, `src/api/postgres/catalog.ts` (`catalogRoles`, `asRole`),
+`src/api/postgres/server.ts` (`Session.grants`, `heldToRole`, `catalogAs`); `tests/duck-roles-wire.test.ts`,
+`tests/postgres-api/catalog.test.ts`, the oracle's `roleCases`.
+
 ### An MCP server (2026-10-29)
 
 **Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is

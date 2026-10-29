@@ -44,6 +44,12 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   serve: [],
 };
 
+/** Further lines a command is run with in every state, beside MATRIX_ARGS's (a flag of its own that must refuse
+ *  before it writes: `--role` names a role the roles file lacks, so no user is ever added). */
+export const MATRIX_EXTRA_ARGS: Readonly<Record<string, readonly (readonly string[])[]>> = {
+  user: [["add", "nobody", "--role", "no_such_role"]],
+};
+
 /** The commands a state may not run in the matrix because they CHANGE it: they are the session's transitions. */
 export const TRANSITIONS: ReadonlySet<string> = new Set(["start", "stop"]);
 

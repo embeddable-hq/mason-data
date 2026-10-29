@@ -45,6 +45,8 @@ let ledger: RequestLedger;
 let control: http.Server;
 /** the URL `mason user add claude` printed */
 let url = "";
+/** the URL `mason user add analyst --role analyst` printed: a user held to a role (src/duck/grants.ts) */
+let analystUrl = "";
 const env = matrixEnv({ HOME: dir, PATH: path.dirname(process.execPath) });
 
 /** the OIDs the SOURCE gave its enum and its array type: none of them the catalog's (src/api/postgres/catalog.ts sourceTypeNames) */
@@ -102,8 +104,15 @@ before(async () => {
   ledger = await RequestLedger.open(store, () => undefined, { days: 7, flushMs: 60_000 });
   const u = await import("../src/duck/users.ts");
   const logins: Pick<PgApiOptions, "authenticate" | "recheck" | "recheckMs"> = u.listenerLogins(new u.LiveUsers(path.join(home, u.USERS_FILE), API_KEY), API_KEY);
+  // the project's roles file (src/cli/roles.ts), read as mason start reads it: the analyst reads two columns of orders and customers whole
+  fs.writeFileSync(path.join(root, "mason", "roles.yml"), "roles:\n  analyst:\n    tables:\n      orders:\n        columns: [id, status]\n      customers: {}\n");
+  // the roles module may not exist where this file proves itself (scripts/fails-without.ts, src at an older commit): then
+  // no roles are wired and the role's test below fails by name, the others still run (as tests/duck-users-wire.test.ts does)
+  const r = await import("../src/cli/roles.ts").catch((e: unknown) => { if ((e as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw e; return null; });
+  const live = r === null ? null : new r.LiveRoles(path.join(root, "mason"), root, () => schema.tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, columns: t.columns.map((c) => ({ name: c.name })) })));
   api = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: "shop", masonVersion: "test", ...logins, recheckMs: 0,
+    roles: () => (live === null ? { file: null, grants: new Map(), problem: null } : live.now()) as never,
     schema: () => schema, record: (row) => ledger.record(row), log: () => undefined,
     duck: await store.listener(undefined, undefined, undefined, copies),
   });
@@ -111,6 +120,9 @@ before(async () => {
   const added = addUser(path.join(home, u.USERS_FILE), API_KEY, "claude", { link: { url: "", host: "127.0.0.1", port: api.port, database: "shop" }, database: "shop" });
   if ("message" in added || added.url === undefined) throw new Error(`mason user add claude: ${JSON.stringify(added)}`);
   url = added.url;
+  const analyst = addUser(path.join(home, u.USERS_FILE), API_KEY, "analyst", { link: { url: "", host: "127.0.0.1", port: api.port, database: "shop" }, database: "shop", role: "analyst" });
+  if ("message" in analyst || analyst.url === undefined) throw new Error(`mason user add analyst --role analyst: ${JSON.stringify(analyst)}`);
+  analystUrl = analyst.url;
   // the run's command server, as far as a command asks it whether the run is up (src/cli/runs.ts answers)
   control = http.createServer((req, res) => {
     if (req.url === "/api/ping" && req.headers.authorization === `Bearer ${RUN_TOKEN}`) { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ pid: process.pid })); return; }
@@ -330,6 +342,34 @@ test("tables and describe: the catalog's tables named as a statement writes them
   assert.deepEqual([...new Set(rows.filter((r) => r.outcome !== "ok").map((r) => r.query))], ['EXPLAIN (FORMAT JSON) SELECT 1 FROM "public"."ghost"']);
 });
 
+test("a user with a role: tables and describe list what the role may read and nothing else; a read past it is the refusal with the role in its detail", async () => {
+  const c = await started(analystUrl);
+  try {
+    const t = await c.call("tables");
+    assert.equal(t.isError, undefined, t.text);
+    assert.deepEqual((t.structured.tables as Array<{ table: string }>).map((x) => x.table), ["public.customers", "public.orders"], "the role's two tables, no other");
+    const d = await c.call("describe", { table: "orders" });
+    assert.equal(d.isError, undefined, d.text);
+    assert.deepEqual((d.structured.columns as Array<{ name: string }>).map((x) => x.name), ["id", "status"], "the role's columns of orders, no other");
+    assert.deepEqual(d.structured.key, ["id"]);
+    // a table the role lacks is no table to it, and the tables named are the role's
+    const hidden = await c.call("describe", { table: "events" });
+    assert.equal(hidden.isError, true);
+    assert.equal(hidden.text, "there is no table \"events\" Mason serves. The tables: public.customers, public.orders.");
+    // a read of a hidden column: Postgres's refusal, the role in its detail, the way out in its hint
+    const q = await c.call("query", { sql: "SELECT amount FROM orders" });
+    assert.equal(q.isError, true);
+    assert.match(q.text, /^ERROR 42501: permission denied for table orders\nDETAIL: /);
+    assert.match(q.text, /the role analyst may not read column amount of orders/);
+    assert.match(q.text, /the role analyst reads these columns of orders: id, status/);
+    const ok = await c.call("query", { sql: "SELECT status, count(*)::int AS n FROM orders GROUP BY status ORDER BY status" });
+    assert.equal(ok.isError, undefined, ok.text);
+    assert.deepEqual(ok.structured.rows, [["paid", "3"], ["pending", "2"]]);
+  } finally { await c.close(); }
+  const rows = await mcpRows();
+  assert.ok(rows.some((r) => r.user === "analyst" && r.role === "analyst" && r.sqlstate === "42501"), "the refusal is a row of the request log, with the role");
+});
+
 test("query: rows and Postgres's types for a GROUP BY, an enum by its name, truncated at max_rows and logged so, 57014 at timeout_ms, a refusal with its way out", async () => {
   const c = await started();
   try {
@@ -404,7 +444,9 @@ test("query: rows and Postgres's types for a GROUP BY, an enum by its name, trun
   assert.ok(rows.some((r) => r.query.startsWith("SELECT status, count(*)") && r.outcome === "ok"), "the GROUP BY");
   assert.deepEqual(rows.filter((r) => r.query === "SELECT id FROM orders ORDER BY id").map((r) => [r.outcome, r.rows]).sort(), [["ok", 2], ["ok", 5]], "the truncated query, with the rows it sent");
   assert.ok(rows.some((r) => r.sqlstate === "0A000"), "the refusal");
-  assert.ok(rows.every((r) => r.applicationName === "mason-mcp/mason-test" && r.user === "claude"), JSON.stringify(rows.map((r) => [r.applicationName, r.user])));
+  // every row is mason mcp's, as the user it connected as (claude here; analyst in the role's test, its role beside it)
+  assert.ok(rows.every((r) => r.applicationName === "mason-mcp/mason-test" && (r.user === "claude" ? r.role === "" : r.user === "analyst" && r.role === "analyst")),
+    JSON.stringify(rows.map((r) => [r.applicationName, r.user, r.role])));
   assert.ok(c.lines.every((l) => (JSON.parse(l) as { jsonrpc?: string }).jsonrpc === "2.0"), "stdout: JSON-RPC frames alone");
 });
 
@@ -512,7 +554,7 @@ test("no URL, a bad one, nothing listening, a refused password: the failure shap
   assert.equal(up.code, 1, up.stderr);
   assert.equal(up.stdout, "");
   assert.match(up.stderr, /^✗ mason mcp: mason mcp needs a mason user's URL: MASON_URL, or --url\n {2}why {3}Mason is running for shop \(postgres:\/\/<user>:<password>@127\.0\.0\.1:\d+\/shop\); an agent connects as a user of its own, and mason mcp makes none by itself\n {2}fix {3}mason user add claude prints the URL, once; then MASON_URL="<that URL>" in the client's config for mason mcp\n\nNext:\n {2}mason user add claude {2,}a user for the agent/);
-  assert.equal(fs.readFileSync(path.join(home, "users.json"), "utf8").match(/"name"/g)?.length, 1, "no user was added");
+  assert.equal(fs.readFileSync(path.join(home, "users.json"), "utf8").match(/"name"/g)?.length, 2, "no user was added (claude and analyst are the two the setup made)");
   // no project, no URL: the command line lacks it (exit 2)
   const none = await runMason(dir, ["mcp"], env);
   assert.equal(none.code, 2, none.stderr);
