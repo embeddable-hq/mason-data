@@ -305,9 +305,13 @@ other extension is off (src/duck/store.ts). From npm, `mason init` downloads it 
    asked. It is one read shared for 30 s now (`SUMMARY_TTL_MS`, src/cli/run-server.ts `timedCache`, by time only;
    asks at once share the read in flight, a failed read is not kept): at most one scan every 30 s, whoever asks, so
    **the summary is up to 30 s old** — on the Overview, Usage, Queries' cards and `mason status`.
-5. The three history tables (requests, sync events, usage) each repeat the same frame — two connections, the hourly
-   trim, a failure said once per streak, the close: one module for it. `src/duck/events.ts` adds a third type import
-   from src/cli/ (as requests.ts and sync.ts do): the shapes belong in src/duck/.
+5. **Done**: the three history tables (requests, sync events, usage) each repeated the same frame — two connections,
+   batched writes, the hourly trim, a failure said once per streak, the close. It is one module now,
+   `src/duck/history.ts` (`History`, `Batches`, `Streak`), behaviour and the tables' tests unchanged: the three went
+   from 1,151 lines to 1,099 (the frame's 99, its account included, said once). The shapes `src/duck/` imported
+   from `src/cli/` live in `src/duck/` (`Restart` in events.ts, `SlowQuery` / `RefusedQuery` in requests.ts, re-exported
+   where the commands import them); `src/duck/sync.ts`'s import of the source's shapes from `src/cli/preflight.ts`,
+   older than this review, is left.
 
 ## Decided
 

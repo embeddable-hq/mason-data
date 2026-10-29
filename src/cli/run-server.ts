@@ -110,15 +110,8 @@ export interface RunContext {
     jsonPaths?: () => KeptPathStatus[] };
 }
 
-/** A statement the Postgres API answered slowly in the last day, with how often and how slowly (src/duck/requests.ts slow). */
-export interface SlowQuery {
-  /** where it was asked: `postgres`, an SQL statement on the Postgres API */
-  route: "postgres"; payload: string; runs: number; medianMs: number; maxMs: number; latestMs: number; last: string }
-
-/** A statement the Postgres API refused or failed in the last day: the statement, how often, and the message (which says what to change). */
-export interface RefusedQuery {
-  /** as SlowQuery's: `postgres`, whose code is its SQLSTATE */
-  route: "postgres"; code: string; message: string; runs: number; last: string; payload: string }
+/** the request log's shapes (src/duck/requests.ts), as mason status reads them */
+export type { RefusedQuery, SlowQuery } from "../duck/requests.ts";
 
 /**
  * The run's state, in the shape mason status / wait read (`RunState`, src/cli/commands.ts): each table of the database,

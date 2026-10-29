@@ -36,7 +36,9 @@ export const RESTART_WINDOW_MS = 10 * 60_000;
 /** the wait before each restart, by how many came before it in the window */
 const BACKOFF_MS = [1_000, 2_000, 5_000, 15_000, 30_000];
 
-export interface Restart { at: string; reason: string; upSeconds: number }
+/** a restart as `.mason/restarts.json` records it: the shape is the events' (src/duck/events.ts), which merge them */
+export type { Restart } from "../duck/events.ts";
+import type { Restart } from "../duck/events.ts";
 
 /** The restarts recorded for a project's run, oldest first ([] when none; a file that cannot be read is said, not hidden). */
 export function readRestarts(home: string): Restart[] {

@@ -15,7 +15,7 @@
  * sampled (and one recorded in the second before the log's batch commits). Measured: that query is ~1 ms over a million
  * rows, so it was ruled out for exactness, not cost.
  *
- * Kept as the request log and the sync's events are (src/duck/requests.ts, src/duck/events.ts): written on a connection
+ * Kept as the request log and the sync's events are (src/duck/history.ts, the frame the three share): written on a connection
  * of the samples' own — never the sync's writer turn (`onWriter`), which a swap or a stream batch may hold for seconds;
  * read on another; a write that fails is said once and again when one succeeds after it, and it NEVER fails anything;
  * kept `MASON_REQUEST_LOG_DAYS` days. A sample is one row a minute, so it is written as it is taken (its batch is one).
@@ -34,8 +34,8 @@
  * The Postgres catalog never lists `_mason`, so a tool connected to the listener cannot read the samples.
  */
 import type { DuckDBValue } from "@duckdb/node-api";
-import type { DuckConnection } from "./executor.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
+import { History, Streak } from "./history.ts";
 import { outcomeOf, type ApiLogRow, type Outcome } from "../api/request-log.ts";
 
 export const USAGE_TABLE = `${MASON_SCHEMA}.usage`;
@@ -50,7 +50,6 @@ export const SIZES_TABLE = `${MASON_SCHEMA}.copy_sizes`;
 export const SAMPLE_SECONDS = 60;
 /** how often each copy's own bytes are measured (`copySizes`): its cost grows with the copy, see above */
 export const SIZE_EVERY_MS = 10 * 60_000;
-const TRIM_EVERY_MS = 60 * 60 * 1000;
 
 const COLUMNS = ["sampled_at", "seconds", "copy_bytes", "copy_rows", "tables_added", "tables_copied", "tables_failed", "oldest_sync_seconds",
   "statements", "statements_refused", "statements_failed", "statements_cancelled", "rows_sent", "bytes_sent", "duration_p50_ms", "duration_p95_ms",
@@ -212,25 +211,23 @@ export class UsageSampler {
   private interval: Interval = noInterval();
   private last: number;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private trimTimer: ReturnType<typeof setInterval> | null = null;
   private sampling: Promise<void> = Promise.resolve();
   private take: (() => Promise<UsageFacts>) | null = null;
   private lastSized = -Infinity;
   private sizedOnce = false;
   /** a streak of failures, said once: what failed (a sample taken, written, sized), and how many */
-  private readonly lost = new Map<string, number>();
+  private readonly lost = new Map<string, Streak>();
   private closed = false;
 
-  private readonly writer: DuckConnection;
-  private readonly reader: DuckConnection;
+  private readonly history: History;
   private readonly log: (line: string) => void;
   private readonly options: UsageOptions;
   readonly days: number;
   readonly memoryLimitBytes: number;
   readonly sampleSeconds: number;
 
-  private constructor(writer: DuckConnection, reader: DuckConnection, log: (line: string) => void, memoryLimitBytes: number, options: UsageOptions) {
-    this.writer = writer; this.reader = reader; this.log = log; this.options = options; this.days = options.days; this.memoryLimitBytes = memoryLimitBytes;
+  private constructor(history: History, log: (line: string) => void, memoryLimitBytes: number, options: UsageOptions) {
+    this.history = history; this.log = log; this.options = options; this.days = options.days; this.memoryLimitBytes = memoryLimitBytes;
     this.sampleSeconds = (options.sampleMs ?? SAMPLE_SECONDS * 1000) / 1000;
     this.last = this.now();
   }
@@ -238,18 +235,9 @@ export class UsageSampler {
   /** The samples of a store: their tables made, the rows past the retention deleted, and a trim every hour. Sampling
    *  begins with `start`, once the run's facts can be read. */
   static async open(store: DuckStore, log: (line: string) => void, options: UsageOptions): Promise<UsageSampler> {
-    const writer = await store.instance.connect();
-    await writer.run(`CREATE SCHEMA IF NOT EXISTS ${MASON_SCHEMA}`);
-    await writer.run(USAGE_DDL);
-    for (const c of USAGE_ADDED) await writer.run(`ALTER TABLE ${USAGE_TABLE} ADD COLUMN IF NOT EXISTS ${c}`);
-    await writer.run(SIZES_DDL);
-    const reader = await store.instance.connect();
-    const u = new UsageSampler(writer, reader, log, store.memoryLimitBytes, options);
-    await u.trim();
-    u.trimTimer = setInterval(() => {
-      u.trim().catch((e: unknown) => log(`usage: deleting the samples older than ${u.days} days failed: ${(e as Error).message}`));
-    }, TRIM_EVERY_MS);
-    u.trimTimer.unref();
+    const history = await History.open(store, [USAGE_DDL, ...USAGE_ADDED.map((c) => `ALTER TABLE ${USAGE_TABLE} ADD COLUMN IF NOT EXISTS ${c}`), SIZES_DDL]);
+    const u = new UsageSampler(history, log, store.memoryLimitBytes, options);
+    await history.keepTrimmed(() => u.trim(), (e) => log(`usage: deleting the samples older than ${u.days} days failed: ${e.message}`));
     return u;
   }
 
@@ -290,13 +278,12 @@ export class UsageSampler {
 
   /** a failure of `what`, said once per streak; `ok` ends the streak, said with what it cost */
   private failure(what: string, e: unknown): void {
-    const n = this.lost.get(what) ?? 0;
-    if (n === 0) this.log(`usage: ${what} failed: ${(e as Error).message}; said once until one succeeds`);
-    this.lost.set(what, n + 1);
+    const streak = this.lost.get(what) ?? new Streak();
+    this.lost.set(what, streak);
+    streak.failed(1, () => this.log(`usage: ${what} failed: ${(e as Error).message}; said once until one succeeds`));
   }
   private ok(what: string): void {
-    const n = this.lost.get(what) ?? 0;
-    if (n > 0) { this.log(`usage: ${what} again; ${n} time(s) it was not`); this.lost.delete(what); }
+    this.lost.get(what)?.succeeded((n) => this.log(`usage: ${what} again; ${n} time(s) it was not`));
   }
 
   /** One sample now: the run's facts, the interval's requests, the memory; written. Resolves whatever happens (a failure is said). */
@@ -327,7 +314,7 @@ export class UsageSampler {
     const sql = `INSERT INTO ${USAGE_TABLE} (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map((c, j) => `$${j + 1}${c === "sampled_at" ? "::TIMESTAMPTZ" : ""}`).join(", ")})`;
     try {
       if (this.options.insert !== undefined) await this.options.insert(sql, values);
-      else await this.writer.run(sql, values);
+      else await this.history.writer.run(sql, values);
       this.ok(`writing a sample to ${USAGE_TABLE}`);
     } catch (e) {
       // Tolerated, narrowly, as the request log's: a sample that cannot be written must not stop the run. SAID.
@@ -341,7 +328,7 @@ export class UsageSampler {
 
   /** the copy's memory in use: DuckDB's buffer manager's counters, summed */
   private async copyMemory(): Promise<number | null> {
-    const v = (await this.reader.runAndReadAll("SELECT sum(memory_usage_bytes) FROM duckdb_memory()")).getRowsJS()[0]?.[0];
+    const v = (await this.history.reader.runAndReadAll("SELECT sum(memory_usage_bytes) FROM duckdb_memory()")).getRowsJS()[0]?.[0];
     return v === null || v === undefined ? null : Number(v);
   }
 
@@ -351,18 +338,18 @@ export class UsageSampler {
     const rows: Array<[string, number]> = [];
     try {
       const want = new Set(copied);
-      const tables = (await this.reader.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE NOT internal AND database_name = current_database() AND schema_name <> '${MASON_SCHEMA}'`))
+      const tables = (await this.history.reader.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE NOT internal AND database_name = current_database() AND schema_name <> '${MASON_SCHEMA}'`))
         .getRowsJS() as Array<[string, string]>;
       // THE COPY'S OWN database: pragma_database_size() has a row for every attached one, and the in-memory catalog the
       // visible names live in (src/duck/kept.ts) has block_size 0 — read first, it made every copy "0 B"
-      const block = Number((await this.reader.runAndReadAll("SELECT block_size FROM pragma_database_size() WHERE database_name = current_database()")).getRowsJS()[0]![0]);
+      const block = Number((await this.history.reader.runAndReadAll("SELECT block_size FROM pragma_database_size() WHERE database_name = current_database()")).getRowsJS()[0]![0]);
       for (const [schema, table] of tables) {
         const name = `${schema}.${table}`;
         if (!want.has(name)) continue;
         const q = `${quote(schema)}.${quote(table)}`;
         let blocks: number;
         try {
-          blocks = Number((await this.reader.runAndReadAll(`WITH s AS (SELECT block_id, additional_block_ids FROM pragma_storage_info($1) WHERE persistent), ` +
+          blocks = Number((await this.history.reader.runAndReadAll(`WITH s AS (SELECT block_id, additional_block_ids FROM pragma_storage_info($1) WHERE persistent), ` +
             `b AS (SELECT block_id FROM s WHERE block_id >= 0 UNION SELECT unnest(additional_block_ids) FROM s) SELECT count(*) FROM b`, [q])).getRowsJS()[0]![0]);
         } catch (e) {
           // a copy dropped since the list was read (mason remove; a copy swapped in again): not sized this time, by design.
@@ -379,7 +366,7 @@ export class UsageSampler {
         const sql = `INSERT INTO ${SIZES_TABLE} (sampled_at, table_name, bytes) VALUES ` + rows.map((_, i) => `($1::TIMESTAMPTZ, $${i * 2 + 2}, $${i * 2 + 3})`).join(", ");
         const values: DuckDBValue[] = [new Date(now).toISOString(), ...rows.flat()];
         if (this.options.insert !== undefined) await this.options.insert(sql, values);
-        else await this.writer.run(sql, values);
+        else await this.history.writer.run(sql, values);
       }
     } catch (e) {
       this.failure("measuring each copy's size", e);
@@ -392,8 +379,8 @@ export class UsageSampler {
 
   /** Deletes the samples and sizes older than the retention. */
   async trim(): Promise<void> {
-    await this.writer.run(`DELETE FROM ${USAGE_TABLE} WHERE sampled_at < now() - INTERVAL (${this.days}) DAY`);
-    await this.writer.run(`DELETE FROM ${SIZES_TABLE} WHERE sampled_at < now() - INTERVAL (${this.days}) DAY`);
+    await this.history.writer.run(`DELETE FROM ${USAGE_TABLE} WHERE sampled_at < now() - INTERVAL (${this.days}) DAY`);
+    await this.history.writer.run(`DELETE FROM ${SIZES_TABLE} WHERE sampled_at < now() - INTERVAL (${this.days}) DAY`);
   }
 
   /**
@@ -413,13 +400,13 @@ export class UsageSampler {
         COLUMNS.slice(1).map((c) => `${sum.has(c) ? "sum" : c === "disk_free_bytes" ? "min" : "max"}(${c}) AS ${c}`).join(", ") +
         ` FROM ${USAGE_TABLE} WHERE ${range} GROUP BY 1 ORDER BY 1`;
     }
-    const rows = (await this.reader.runAndReadAll(sql, values)).getRowObjectsJson() as Array<Record<string, unknown>>;
+    const rows = (await this.history.reader.runAndReadAll(sql, values)).getRowObjectsJson() as Array<Record<string, unknown>>;
     return rows.map(sampleOf);
   }
 
   /** Each copy's own bytes as last measured within the retention, by table. */
   async copySizes(): Promise<CopySize[]> {
-    const rows = (await this.reader.runAndReadAll(`SELECT table_name, arg_max(bytes, sampled_at) AS bytes, epoch_ms(max(sampled_at)) AS at FROM ${SIZES_TABLE} WHERE bytes > 0 GROUP BY table_name ORDER BY table_name`))
+    const rows = (await this.history.reader.runAndReadAll(`SELECT table_name, arg_max(bytes, sampled_at) AS bytes, epoch_ms(max(sampled_at)) AS at FROM ${SIZES_TABLE} WHERE bytes > 0 GROUP BY table_name ORDER BY table_name`))
       .getRowsJS() as Array<[string, bigint | number, bigint | number]>;
     return rows.map(([table, bytes, at]) => ({ table, bytes: Number(bytes), at: new Date(Number(at)).toISOString() }));
   }
@@ -428,10 +415,9 @@ export class UsageSampler {
   async close(): Promise<void> {
     this.closed = true;
     if (this.timer !== null) { clearTimeout(this.timer); this.timer = null; }
-    if (this.trimTimer !== null) { clearInterval(this.trimTimer); this.trimTimer = null; }
+    this.history.stopTrimming();
     await this.sampling;
-    this.writer.closeSync();
-    this.reader.closeSync();
+    this.history.closeConnections();
   }
 }
 
