@@ -1143,8 +1143,9 @@ so the next start seeds it again. **Where.** `src/cli/demo.ts`, `src/demo/source
 **Decision.** `mason serve` is `mason start --attach`'s run configured by the environment alone (`DATABASE_URL`,
 `MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_CHANGES`, `MASON_PG_*`), every bad setting on one
 report, the log on stdout, SIGTERM its stop (tini PID 1). `GET /healthz` (`MASON_HEALTH_PORT`, 4140) is 503 until the run
-answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:24-slim with DuckDB's
-postgres extension installed at build (closed egress still copies); one replica, stop-then-start deploys;
+answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:24-slim with the
+copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress
+still copies); one replica, stop-then-start deploys;
 `deploy/mason-data/compose.yml` the quickstart. `version()` is `PostgreSQL 18.6 (mason-data <version>) …`, Postgres first
 since tools parse it. Item 1 of the server's plan was a login that does not expire: `mason user` ("Users").
 
@@ -1154,6 +1155,42 @@ the HEALTHCHECK start period is 2 minutes plus three checks 15 s apart. One repl
 process beside the writer. Not built: Let's Encrypt, an SSH tunnel, readers over shared
 storage, measuring where the catalog's ~820 MB goes. **Where.** `src/cli/serve.ts`; `tests/serve.test.ts`,
 `tests/integration/duck-serve.itest.ts`.
+
+### The copy's extensions ship with Mason (2026-10-29)
+
+**Decision.** DuckDB bundles neither extension Mason needs — `postgres` (the copy reads the source through it) nor
+`inet` (a text cast to inet, `s::inet`, reaches DuckDB's CAST and autoloads it) — and by default downloads each from
+its repository at the first statement that needs it: a laptop offline at its first copy could not copy, and a server
+fetched code at run time. Both now ship as ONE npm PACKAGE PER PLATFORM, `@mason-data/extensions-<platform>`
+(darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64), optional dependencies of `@mason-data/cli` with
+`os` / `cpu` / `libc`, as DuckDB's node bindings ship their binary (`src/duck/extensions.ts`). With the package found,
+the instance's `extension_directory` is the package's folder and autoinstall is off: `LOAD postgres` and the inet
+autoload read it, nothing is installed or downloaded, and the folder may be read-only. Without it (`--omit=optional`,
+musl, Windows on arm64, a checkout) DuckDB's own install runs, said with the reason; `mason doctor` probes which.
+
+**Why these choices.** `extension_directory` over `LOAD '<path>'`: a LOAD by path loads that file, and the inet cast's
+autoload still looked in `~/.duckdb` (measured: the cast then tried to download). The official extensions are signed,
+and DuckDB checks the signature at every LOAD with `allow_unsigned_extensions` off (measured, DuckDB 2.0: both load
+from a read-only folder with no `.info` file). The files are pinned by sha256 and size in `cli/extensions.json` (DuckDB
+publishes no checksum list: the pin is what was fetched once and read, and `node cli/extensions.ts --pin` makes the next
+for a new engine), and `@duckdb/node-api` is pinned exactly, since a range could install an engine the packages hold no
+files for. The image uses the same package rather than an INSTALL at build: one way for both, every file held to its
+pin, `inet` too (the INSTALL had only `postgres`), and found by path, never under `$HOME`, which a container run as
+another uid does not have. `cli/` has no lock of its own: `npm ci` there refuses a lock without the platform packages,
+and they are published in the same release run as the CLI.
+
+**Measured, DuckDB v2.0.0** (each package holds both files; a user downloads one):
+
+| platform | postgres | inet | packed | installed |
+|---|---|---|---|---|
+| darwin-arm64 | 45.9 MB | 11.3 MB | 17.0 MiB | 54.6 MiB |
+| darwin-x64 | 47.6 MB | 11.3 MB | 17.6 MiB | 56.3 MiB |
+| linux-arm64 | 56.5 MB | 14.6 MB | 21.1 MiB | 67.8 MiB |
+| linux-x64 | 59.2 MB | 14.9 MB | 22.4 MiB | 70.7 MiB |
+| win32-x64 | 52.1 MB | 46.4 MB | 31.0 MiB | 93.9 MiB |
+
+A machine's first copy downloaded the postgres extension anyway, so what an install adds is the inet extension (and
+the download moves from the first copy to `npm install`).
 
 ### Memory and the machine
 

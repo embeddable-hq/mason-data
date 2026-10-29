@@ -20,13 +20,17 @@ RUN npm ci --omit=dev
 # the mason command whole (src/cli/ and what it imports)
 COPY src/ src/
 COPY LICENSE ./
+# THE COPY'S EXTENSIONS IN THE IMAGE, as the npm CLI has them (src/duck/extensions.ts): this platform's package
+# @mason-data/extensions-<platform>, built by cli/extensions.ts from the checksums cli/extensions.json pins, into
+# node_modules, where the run finds it by path — never under $HOME, so a platform that runs the container as another
+# uid (HOME=/) has them too. The copy loads postgres from it and an inet cast autoloads inet from it; nothing is
+# downloaded at run time (a server whose egress is closed copies all the same). Only the build fetches them.
+COPY cli/extensions.ts cli/extensions.json cli/extensions-LICENSE cli/package.json cli/
+RUN node cli/extensions.ts --node-modules node_modules && rm -rf cli
 RUN printf '#!/bin/sh\nexec node /app/src/cli/main.ts "$@"\n' > /usr/local/bin/mason && chmod 755 /usr/local/bin/mason \
  && mkdir -p /mason/project /mason/data && chown node:node /mason/project /mason/data
 
 USER node
-# DuckDB's postgres extension IN THE IMAGE: the copy reads the source through it, and a server whose egress is
-# closed could never fetch it at its first copy (src/duck/sync.ts attach; ~/.duckdb/extensions)
-RUN node --input-type=module -e "import { DuckDBInstance } from '@duckdb/node-api'; const c = await (await DuckDBInstance.create(':memory:')).connect(); await c.run('INSTALL postgres'); await c.run('LOAD postgres');"
 
 # the release it is (images-publish.yml: `v<version>`, `main-<sha>` for a merge), which `mason --version`, /healthz and
 # `version()` on the Postgres API say (src/cli/version.ts); `dev` for a local build

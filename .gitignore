@@ -14,6 +14,9 @@ node_modules
 # must never be committed
 tests/.tmp-*/
 
-# the @mason-data/cli package build (cli/build.ts) and its packed tarball
+# the @mason-data/cli package build (cli/build.ts), its packed tarball, and the platform packages (cli/extensions.ts)
 /cli/dist/
 /cli/*.tgz
+/cli/platforms/
+# the CLI has no lock of its own: its optional platform packages are published in the same release run as it
+/cli/package-lock.json

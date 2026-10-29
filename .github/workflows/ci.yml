@@ -50,6 +50,48 @@ jobs:
           node cli/dist/src/cli/main.js --version
           node cli/dist/src/cli/main.js --help > /dev/null
 
+      # The CLI's platform packages (cli/extensions.ts): every platform's copy of the two extensions fetched and held
+      # to the checksums cli/extensions.json pins, each package packed as npm would publish it; and the CLI's own tarball
+      # holds none of them (they reach a user as its optional dependencies, one platform's alone).
+      - uses: actions/cache@v4
+        if: ${{ !cancelled() }}
+        with:
+          path: cli/platforms
+          key: extensions-${{ hashFiles('cli/extensions.json') }}
+      - name: platform packages build
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          node cli/extensions.ts
+          for dir in cli/platforms/*/; do (cd "$dir" && npm pack --dry-run --json | node -e '
+            const [p] = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const ext = p.files.filter((f) => f.path.endsWith(".duckdb_extension"));
+            if (ext.length !== 2) { console.error(`${p.name}: ${ext.length} extension file(s), not 2`); process.exit(1); }
+            console.log(`${p.name} ${p.version}: ${(p.size / 2 ** 20).toFixed(1)} MiB packed, ${(p.unpackedSize / 2 ** 20).toFixed(1)} MiB installed`);'); done
+          (cd cli && npm pack --dry-run --json --ignore-scripts | node -e '
+            const [p] = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const ext = p.files.filter((f) => /duckdb_extension|^platforms\//.test(f.path));
+            if (ext.length) { console.error(`@mason-data/cli would ship ${ext.map((f) => f.path).join(", ")}`); process.exit(1); }
+            console.log(`${p.name} ${p.version}: ${p.files.length} files, ${(p.size / 2 ** 20).toFixed(1)} MiB packed, no extension`);')
+
+      # What a user installs: the packed CLI and this runner's platform package, installed globally into a prefix of
+      # their own (npm skips the optional ones it cannot find, none being on npm at this version), and the installed
+      # `mason doctor`, with HOME an empty folder, finds the extensions in the package and downloads nothing.
+      - name: the installed CLI finds its platform package
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          t="$(mktemp -d)"; mkdir "$t/home"
+          (cd cli && npm pack --ignore-scripts --pack-destination "$t" > /dev/null)
+          (cd cli/platforms/linux-x64 && npm pack --pack-destination "$t" > /dev/null)
+          npm install -g --prefix "$t/prefix" "$t"/mason-data-cli-*.tgz "$t"/mason-data-extensions-linux-x64-*.tgz
+          # doctor's exit is every check's (a port the runner holds would fail it): the extensions line is read from its JSON
+          (cd "$t/home" && HOME="$t/home" "$t/prefix/bin/mason" doctor --json || true) | node -e '
+            const c = JSON.parse(require("fs").readFileSync(0, "utf8")).checks.find((x) => x.name === "extensions");
+            console.log(JSON.stringify(c));
+            if (c?.ok !== true || !/ship with Mason \(@mason-data\/extensions-linux-x64 /.test(c.detail)) process.exit(1);'
+          test -z "$(ls -A "$t/home")" || { echo "the installed CLI wrote to HOME: $(find "$t/home")" >&2; exit 1; }
+
       # shellcheck is preinstalled on the ubuntu-latest runner image; nothing to check when no script is bash.
       - name: shellcheck
         if: ${{ !cancelled() }}
@@ -103,6 +145,13 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      # this runner's platform package, for the integration test that copies with nothing downloaded
+      - uses: actions/cache@v4
+        with:
+          path: cli/platforms
+          key: extensions-${{ hashFiles('cli/extensions.json') }}
+      - run: node cli/extensions.ts linux-x64
 
       - name: logical replication on the service Postgres
         run: |

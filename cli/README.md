@@ -6,7 +6,10 @@ same for you and for a coding agent (Claude Code, Codex, …): it prints for a p
 exit code says how it went ([for coding agents](#for-coding-agents)).
 
 There is nothing to clone or build: install this package and run `mason`. It needs Node 22.13 or later and nothing
-else — no Docker, no database of its own; `mason doctor` checks this machine and says what is missing. On a terminal
+else — no Docker, no database of its own, and nothing downloaded after `npm install`: the copy's postgres and inet
+extensions come with it, as an optional dependency for your platform (`@mason-data/extensions-<platform>`, 17–31 MiB
+to download; installing with `--omit=optional` leaves them out, and the first copy then downloads them).
+`mason doctor` checks this machine and says what is missing. On a terminal
 its output is coloured and wrapped to the window, and a command that takes a moment shows a spinner; piped,
 redirected, with `--json` or with `NO_COLOR` set, it is plain text.
 

@@ -138,6 +138,7 @@ npm run test:integration              # the real copy, stream, listener, serve a
                                       #   (a throwaway Postgres; tests/integration/README.md)
 node src/cli/main.ts --help           # the mason command from the checkout (every command, by step)
 node cli/build.ts                     # the npm package: src/ compiled to cli/dist/
+node cli/extensions.ts                # its platform packages (the copy's extensions, checksums pinned) in cli/platforms/
 docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; deploy/mason-data/compose.yml runs it
 scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it must fail with src/ as it was at <commit>
 ```

@@ -400,6 +400,12 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   and at N=3 the copy took the attached scan's time (4 M wide rows: 32–40 s against 29–41 s; "Chunks read N at a time").
 - **The catalog serves a table the moment its copy commits**, on a DuckDB connection of its own that no copy's
   transaction holds (after a restart it was empty for hours behind a large copy).
+- **The run never downloads an extension** (src/duck/extensions.ts; docs/DESIGN.md "The copy's extensions ship with
+  Mason"): `postgres` and `inet` come from this platform's `@mason-data/extensions-<platform>` package, the instance's
+  `extension_directory` with autoinstall off; DuckDB's INSTALL runs only where no package is found, said with the
+  reason. A new extension the engine needs is added to `EXTENSION_NAMES` and pinned in `cli/extensions.json`, never
+  left to an autoinstall; a DuckDB upgrade is `node cli/extensions.ts --pin` and its diff read.
+  `tests/integration/extensions.itest.ts` holds a copy and an inet cast with HOME empty and the package read-only.
 - **Read-only on the source**: a scan through a `READ_ONLY` attachment, SELECTs only, never an `ORDER BY` there (a sort,
   or an index walk, of the source table).
 
