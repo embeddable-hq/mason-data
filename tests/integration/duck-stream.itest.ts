@@ -143,7 +143,7 @@ test("the copy and the stream keep DuckDB equal to the source through every kind
     psql(url, "INSERT INTO later VALUES (2, 'two'); UPDATE items SET v = 'beside it' WHERE id = 7");
     await same("a table added");
     assert.equal(await rowsOf(store, "SELECT id, v FROM public.later ORDER BY 1"), psql(url, "SELECT id, v FROM later ORDER BY 1"));
-    assert.ok(logged.slice(before).some((l) => /^re-pointed publication .* at public\.items, shop\.lines, public\.later$/.test(l)), logged.slice(before).join("\n"));
+    assert.ok(logged.slice(before).some((l) => /^re-pointed publication .* at public\.items, shop\.lines, public\.later: the tables whose sync is replication$/.test(l)), logged.slice(before).join("\n"));
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.items", "copied", null], ["shop.lines", "copied", null], ["public.later", "copied", null]]);
   } finally {
     await sync.stop();
@@ -556,7 +556,8 @@ async function pick(source: Source, folder: string, picks: ReadonlyArray<readonl
   if ("failure" in c) throw new Error(c.failure.message);
   let facts;
   try { facts = await readSourceFacts(c.pg); } finally { c.pg.close(); }
-  let text = newSourceText(source.url);
+  // every table this file streams is replicated: the file's top sync: says so (a polled or off table is written so)
+  let text = newSourceText(source.url, [], { mode: "replication" });
   for (const [n, cols] of picks) {
     const r = withTable(text, { name: entryName(n), table: n, columns: cols === null ? null : [...cols], exclude: [], key: null });
     if ("problem" in r) throw new Error(r.problem);
@@ -816,7 +817,9 @@ test("a switch in each direction keeps the copy, caught up by one poll; the slot
     psql(url, changed.map((t) => `UPDATE ${t} SET v = '${step}' WHERE id = 1; INSERT INTO ${t} VALUES ((SELECT max(id) + 1 FROM ${t}), '${step}'); DELETE FROM ${t} WHERE id = (SELECT min(id) + 1 FROM ${t});`).join(" "));
     const from = logged.length;
     await sync.setTables([tableOf("a", syncs.a), tableOf("b", syncs.b)]);
-    await until(async () => settled(sync, both)() && await same("a") && await same("b"), `${step}: both caught up and kept as their syncs say`, logged, 20_000);
+    // the stream may apply the step's changes before a table leaves it, so equal is not yet caught up: its poll is awaited
+    await until(async () => settled(sync, both)() && changed.every((t) => pollsOf(logged, from, `public.${t}`) > 0) && await same("a") && await same("b"),
+      `${step}: both caught up and kept as their syncs say`, logged, 20_000);
     for (const t of changed) assert.equal(pollsOf(logged, from, `public.${t}`), 1, `${step}: ${t} caught up by exactly one poll\n${logged.slice(from).join("\n")}`);
     assert.deepEqual([copiedAt("a"), copiedAt("b")], copies, `${step}: never copied again`);
     assert.equal(logged.slice(from).filter((l) => /^copied public\./.test(l)).length, 0, `${step}: nothing copied\n${logged.slice(from).join("\n")}`);
@@ -862,11 +865,13 @@ test("a switch in each direction keeps the copy, caught up by one poll; the slot
   sync = open();
   try {
     await sync.open();
-    const copies = [copiedAt("a"), copiedAt("b")];
     const from = logged.length;
     await sync.setTables([tableOf("a", POLL("1h", 3600)), tableOf("b", REPL)]);
+    const copies = [copiedAt("a"), copiedAt("b")];
+    assert.ok(copies.every((c) => c !== null), "both copies kept across the restart");
     sync.start();
-    await until(async () => settled(sync, both)() && await same("a") && await same("b"), "both caught up at the start", logged, 30_000);
+    await until(async () => settled(sync, both)() && both.every((t) => pollsOf(logged, from, t) > 0) && await same("a") && await same("b"), "both caught up at the start", logged, 30_000);
+    for (const t of both) assert.equal(pollsOf(logged, from, t), 1, `${t} caught up by exactly one poll at the start\n${logged.slice(from).join("\n")}`);
     assert.ok(logged.slice(from).includes("public.a: sync: replication → poll 1h: its copy is kept, and caught up by one poll now"), logged.slice(from).join("\n"));
     assert.ok(logged.slice(from).includes("public.b: sync: poll 1h → replication: its copy is kept, and caught up by one poll now, then streamed"), logged.slice(from).join("\n"));
     assert.deepEqual([copiedAt("a"), copiedAt("b")], copies, "never copied again");
@@ -923,7 +928,7 @@ test("REPLICA IDENTITY NOTHING under sync: replication is refused at the file's 
   if ("problems" in file) throw new Error(file.problems.join("; "));
   const refused = addedTables(file, [A!, N!] as unknown as Parameters<typeof addedTables>[1], db, "/p");
   assert.ok(!Array.isArray(refused));
-  assert.equal(refused.why, "- tables.n: public.n has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail (sync: replication) — " +
+  assert.equal(refused.message, "mason/sources/app.yml: tables.n: public.n has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail (sync: replication) — " +
     "give its entry sync: poll <interval> (poll 5m), or sync: off; or ALTER TABLE public.n REPLICA IDENTITY DEFAULT on the database");
   // by the run: an identity changed after the start refuses the replicated tables, by name, and the polled one goes on
   const logged: string[] = [];
