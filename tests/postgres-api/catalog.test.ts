@@ -432,7 +432,8 @@ test("a statement past the deadline is refused naming it, the instance is replac
   try {
     const started = Date.now();
     await assert.rejects(slow.run(simpleQuery("SELECT count(*) FROM generate_series(1, 4000000000)")), (e: Error) => {
-      assert.match(e.message, /^the catalog did not answer .* within 0\.3 s: PGlite was discarded \(the next statement starts a fresh one; MASON_PG_CATALOG_TIMEOUT_MS raises the deadline\)/);
+      assert.match(e.message, /^the catalog did not answer .* within 0\.3 s, so Mason started it again \(the next statement is answered as usual; MASON_PG_CATALOG_TIMEOUT_MS raises the deadline\)/);
+      assert.doesNotMatch(e.message, /pglite/i, "what a client reads names no engine");
       return true;
     });
     assert.ok(Date.now() - started < 5_000, "the deadline fired");

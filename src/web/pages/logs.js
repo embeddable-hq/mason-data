@@ -1,5 +1,5 @@
 /**
- * THE LOGS VIEW (#observability/logs, a sub-tab of Observability; `#logs`, its old address, lands here;
+ * THE LOGS VIEW (#observability/logs, a view of the Observability group; `#logs`, its old address, lands here;
  * docs/OBSERVABILITY.md "Pages"): the sync's events (`mason logs --events`) over the time range the Observability views
  * share, as a timeline table NEWEST FIRST (When sorts it the other way) — narrowed in the page alone by "Failures only",
  * a kind and a table (the choices are the kinds and tables of what was read), at most EVENTS_SHOWN rows written with

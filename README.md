@@ -464,7 +464,7 @@ Not about one statement: what Mason does not do yet.
 | access | roles, grants, row-level security | every user (mason user) and token reads every copied table: no per-user or per-tenant scope | copy only the tables every user may read |
 | keeping current by the poll (mason start without --replication) | - | the xmin poll scans every added table whole, every poll (no index covers xmin): ~13–17 s for 13 GiB | logical replication: mason start --replication |
 | INSERT, UPDATE, DELETE, DDL, a read-write transaction | answers | refused by name: the copy is read-only (a read-write transaction: 25006) | write to the source database; the copy follows |
-| a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside DuckDB's arithmetic or a WHERE | exact | a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact | numeric(p, s) with p ≤ 38 |
+| a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside Mason's arithmetic or a WHERE | exact | a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact | numeric(p, s) with p ≤ 38 |
 | an unconstrained numeric[] column | exact elements | double precision elements (15 digits), said in the log | numeric(p, s)[] |
 | a numeric parameter ($1) compared in a WHERE | exact | a double (exact to 15 digits) | a literal |
 | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |

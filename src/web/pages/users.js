@@ -3,7 +3,7 @@
  * /api/users/<name>. An added user's password lives in this page's memory until the person dismisses it, never in
  * storage, a URL or a log line.
  */
-import { badge, button, code, duration, empty, esc, json, panel, renderFailure, status, utcMinute } from "../shared.js";
+import { badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, renderFailure, status, utcMinute } from "../shared.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
 const USERS = "/api/users?lastUsed=1";
@@ -18,9 +18,6 @@ export function lastUsedText(u, lastUsedNote, requestLogDays) {
   return u.lastUsedAt != null ? `${stamp(u.lastUsedAt)} UTC` : lastUsedNote != null ? "unknown" : `not used in the last ${requestLogDays ?? "?"} days`;
 }
 
-/** A user's URL (or the password-less one) with its Copy: `<code id>` is what the button copies. */
-const copyable = (id, text) => `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small")}</span>`;
-
 /**
  * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape), in a table in a card: a row each — its name
  * in mono with its id muted, its status as a dot and the word (Active, or Removed and when), when it was added, when it
@@ -30,7 +27,7 @@ const copyable = (id, text) => `<span class="copyrow"><code id="${esc(id)}">${es
  */
 export function renderUsers(list, confirming = null, now = Date.now()) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
-  if (!users.length) return empty("No users yet", `Add one above, as ${code("mason user add <name>")} does.`);
+  if (!users.length) return empty("No users yet", `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
   return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col" class="num">Last used</th><th scope="col">URL</th><th scope="col"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
@@ -50,15 +47,17 @@ export function renderUsers(list, confirming = null, now = Date.now()) {
 
 /**
  * A USER JUST ADDED (`mason user add --json`'s shape): a prominent card with its password, shown this once, beside the
- * URL to paste, each with a Copy button — the rows `mason user add` prints. Mason keeps no copy, so it is never shown again.
+ * URL to paste and its psql line, each with a Copy button — the rows `mason user add` prints, their labels capitalised.
+ * Mason keeps no copy, so it is never shown again. Then where its statements will show: the Queries page.
  */
 export function renderAdded(a) {
-  const rows = [["url", a.url, "added-url"], ["user", a.user], ["password", a.password, "added-password"], ["database", a.database],
-    ...(a.host !== undefined ? [["host", a.host], ["port", String(a.port)]] : []), ...(a.sslmode && a.sslmode !== "disable" ? [["ssl mode", a.sslmode]] : [])]
+  const rows = [["URL", a.url, "added-url"], ["psql", a.psql, "added-psql"], ["User", a.user], ["Password", a.password, "added-password"], ["Database", a.database],
+    ...(a.host !== undefined ? [["Host", a.host], ["Port", String(a.port)]] : []), ...(a.sslmode && a.sslmode !== "disable" ? [["SSL mode", a.sslmode]] : [])]
     .filter(([, v]) => v !== undefined);
   return `<div class="added" role="status"><p class="headline">The user ${esc(a.user)} added: its password is shown this once ${badge("Shown once", "warn")}</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${id ? copyable(id, v) : esc(v)}</dd>`).join("")}</dl>` +
     `<p class="tip">Paste it into the tool now: Mason keeps no copy of the password, and this page will not show it again. Lost, remove the user and add it again.</p>` +
+    `<p class="tip">${a.psql ? "Run the psql line, or connect your tool: " : ""}each statement it sends shows on <a href="#observability/queries">Observability › Queries</a>.</p>` +
     `${button("I have copied it", { dismissAdded: "" }, "primary")}</div>`;
 }
 
@@ -115,15 +114,7 @@ export const page = {
         if (d.cancelRemove !== undefined) return actions.cancelRemove() ?? true;
         if (d.confirmRemove !== undefined) return actions.confirmRemove(d.confirmRemove);
         if (d.dismissAdded !== undefined) return actions.dismissAdded() ?? true;
-        if (d.copy !== undefined) {
-          const text = doc.getElementById(d.copy)?.textContent ?? "";
-          return Promise.resolve().then(() => win.navigator.clipboard.writeText(text)).then(() => { button.textContent = "Copied"; }, (err) => {
-            // the clipboard refused (a browser setting): the text is selected, for the reader's own copy
-            win.getSelection()?.selectAllChildren(doc.getElementById(d.copy));
-            button.textContent = `Select and copy it (${err?.message ?? err})`;
-          });
-        }
-        return null;
+        return copyClick(d, button, { doc, win });
       },
     };
   },

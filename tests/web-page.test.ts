@@ -13,6 +13,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runState, type RunContext } from "../src/cli/run-server.ts";
+import * as pgUrl from "../src/cli/pg-url.ts";
+const { psqlLine } = pgUrl;
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
 import { parseSourceText } from "../src/cli/sources.ts";
 import type { CopyProgressView, CopyState } from "../src/duck/sync.ts";
@@ -65,7 +67,8 @@ function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: bo
     facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: o.tables ?? TABLES, systemIdentifier: null }),
     warnings: o.warnings ?? [], slot: o.replication ? "mason_dev_shop" : "", changes: o.replication ? "replication" : "poll",
     ...(o.replication ? { publication: { name: "app_pub", owned: false } } : {}),
-    page: true, folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
+    page: true, users: { file: "/app/.mason/users.json", apiKey: "k".repeat(32), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
+    folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
     sources: () => ({ file: o.sources ?? sourceFile, problem: null }),
     listener: { openSessions: () => ({ open: 0, byClient: [] }) },
     duck: { file: "/app/.mason/duck.db", pollSeconds: 5, restarts: () => [], disk: () => ({ path: "/app/.mason", freeBytes: null, projectedBytes: null }) },
@@ -245,7 +248,9 @@ test("copying: the bar's share, the rows, the chunks, the rate and the time left
   const text = textOf(html);
   assert.match(html, /<tr class="t-copying"><th scope="row"><code>public\.orders<\/code><\/th><td class="bar"><progress class="copybar" max="100" value="15" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="15"/);
   assert.match(text, /public\.orders 15% copying 321,000 of ~2,000,000 rows · 2 chunks reading \(14 s\), 3 of ~20 in · 52,300 rows\/s · ~6 min left/);
-  assert.match(text, /public\.events 0% waiting for its copy to start/);
+  // a copy not begun: its shimmer and its words, never a "0%" beside them (it reads as stuck before it starts)
+  assert.match(text, /public\.orders 15% copying .* public\.events waiting for its copy to start/);
+  assert.match(html, /<tr class="t-waiting"><th scope="row"><code>public\.events<\/code><\/th><td class="bar"><progress class="copybar indeterminate" max="100" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.events: its copy" aria-valuetext="waiting for its copy to start"><\/progress><\/td>/);
   assert.match(text, /^Under way .* Copies not finished \(2 of 3 added\) Table Copy public\.orders 15% /);
   assert.ok(!/public\.customers/.test(text), "a copy that is done is not a bar");
 });
@@ -344,7 +349,8 @@ test("the users: a row each, active first then removed without Remove; Remove as
   assert.match(textOf(asking), /Remove metabase\? It connects no more, and the sessions it holds end at their next statement\. Remove metabase Cancel/);
   assert.match(asking, /data-confirm-remove="metabase"/);
   assert.ok(!/data-confirm-remove="grafana"/.test(asking), "only the one asked");
-  assert.equal(textOf(renderUsers({ users: [] }, null)), "No users yet Add one above, as mason user add <name> does.");
+  // none yet: what a user is for, in a web developer's words, and how one is made
+  assert.equal(textOf(renderUsers({ users: [] }, null)), "No users yet A user is the name and password psql, a BI tool or your app connects with. Add one above, as mason user add <name> does: its URL, password included, is shown once.");
   assert.match(renderUsers({ users: [] }, null), /^<div class="empty">/);
   // last use unknown, or the URL unknown: the note why, as mason user list says it
   const unknown = textOf(renderUsers({ ...list, lastUsedNote: "unknown: the request log could not be read (busy)", urlNote: "Mason is not running" }, null, NOW_U));
@@ -355,9 +361,15 @@ test("the users: a row each, active first then removed without Remove; Remove as
 
 test("a user just added: the password and the URL to paste, each with a copy button, and that it will not be shown again", () => {
   const html = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
-    database: "shop", url: `postgres://metabase:mason_0123456789abcdef_${"a".repeat(32)}@127.0.0.1:5433/shop`, host: "127.0.0.1", port: 5433, sslmode: "disable" });
+    database: "shop", url: `postgres://metabase:mason_0123456789abcdef_${"a".repeat(32)}@127.0.0.1:5433/shop`,
+    psql: psqlLine(`postgres://metabase:mason_0123456789abcdef_${"a".repeat(32)}@127.0.0.1:5433/shop`), host: "127.0.0.1", port: 5433, sslmode: "disable" });
   const text = textOf(html);
-  assert.match(text, /^The user metabase added: its password is shown this once Shown once url postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy user metabase password mason_0123456789abcdef_a{32} Copy database shop host 127\.0\.0\.1 port 5433 /);
+  // the rows mason user add prints, its psql line included, their labels capitalised; each to paste with a Copy
+  assert.match(text, /^The user metabase added: its password is shown this once Shown once URL postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy psql psql postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop Copy User metabase Password mason_0123456789abcdef_a{32} Copy Database shop Host 127\.0\.0\.1 Port 5433 /);
+  assert.match(html, /<code id="added-psql">psql postgres:\/\/metabase:mason_0123456789abcdef_a{32}@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="added-psql">Copy<\/button>/);
+  // and where its statements will show
+  assert.match(text, /Run the psql line, or connect your tool: each statement it sends shows on Observability › Queries \. I have copied it$/);
+  assert.match(html, /<a href="#observability\/queries">Observability › Queries<\/a>/);
   assert.match(text, /Paste it into the tool now: Mason keeps no copy of the password, and this page will not show it again\./);
   assert.match(html, /<code id="added-password">mason_0123456789abcdef_a{32}<\/code> <button type="button" class="small" data-copy="added-password">Copy<\/button>/);
   assert.match(html, /<span class="badge warn">Shown once<\/span>/, "a clear note that it is shown once");
@@ -482,7 +494,7 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE
   run.asked.length = 0;
   assert.equal(await app.confirmRemove("metabase"), true);
   assert.deepEqual(run.asked, ["DELETE /api/users/metabase", "GET /api/users?lastUsed=1"]);
-  assert.equal(textOf(app.view().users!), "No users yet Add one above, as mason user add <name> does.");
+  assert.equal(textOf(app.view().users!), "No users yet A user is the name and password psql, a BI tool or your app connects with. Add one above, as mason user add <name> does: its URL, password included, is shown once.");
   assert.equal(app.model.confirming, null);
 });
 
@@ -502,8 +514,8 @@ test("the app: Add sends POST /api/pick, says what was added under its table, an
   assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET /api/state"],
     "every column, as mason add accounts asks; then the state again (the page's own read: nothing else)");
   const v = app.view();
-  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id 0% waiting for its copy to start Sync Remove Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
-  assert.match(textOf(v.status!), /public\.accounts 0% waiting for its copy to start/, "the Overview shows the copy starting");
+  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id waiting for its copy to start Sync Remove Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
+  assert.match(textOf(v.status!), /public\.accounts waiting for its copy to start/, "the Overview shows the copy starting");
   app.dismissOutcome();
   assert.ok(!/Added public\.accounts/.test(app.view().tables!));
 });
@@ -1162,7 +1174,8 @@ test("running now: a row each in the commands' words — held equal to mason log
   const renderRunning = fn<[unknown[], string | null, unknown?], string>("renderRunning");
   const html = renderRunning(RUNNING_NOW, null);
   const text = textOf(html);
-  assert.match(text, /^Running now \(2\): Session Statement User Client Started \(UTC\) Running for Rows Statement text /);
+  // under the section's own heading (Running now): no second title; the statement's number is No., its text Statement
+  assert.match(text, /^Session No\. User Client Started \(UTC\) Running for Rows Statement /);
   assert.match(text, /12 45 metabase Metabase v0\.50 2026-10-28 09:04:00 2 min 1,200 rows sent SELECT customer_id, sum\(total\) FROM orders GROUP BY 1 Cancel/);
   assert.match(text, /13 7 \(no application_name\) 2026-10-28 09:05:50 1\.5 s 1 row sent SELECT 1 <b> Cancel/);
   assert.ok(!html.includes("<b>"), "the statement is escaped");
@@ -1190,7 +1203,7 @@ test("running now: the answer to a cancel is said under its row, a refusal as th
   assert.match(textOf(done), /Cancel Cancelled session 12's statement: it ends now, and its client is told so \(57014\)\. 13 7 /, "under the row it was for");
   const refused = { key: "12:45", failure: { code: "refused", message: "session 12 runs another statement now (statement 46), not statement 45: nothing cancelled", why: "statement 45 ended, and the session began another",
     fix: "mason cancel 12 --statement 46 stops the one it runs now", next: [{ command: "mason logs --running", what: "the statements running now, with their sessions" }] } };
-  assert.match(textOf(renderRunning(RUNNING_NOW.slice(0, 1), null, refused)), /^Running now \(1\):.* ✗ session 12 runs another statement now \(statement 46\), not statement 45: nothing cancelled why statement 45 ended, and the session began another fix mason cancel 12 --statement 46 stops the one it runs now Next: mason logs --running the statements running now, with their sessions$/);
+  assert.match(textOf(renderRunning(RUNNING_NOW.slice(0, 1), null, refused)), /^Session No\. .* ✗ session 12 runs another statement now \(statement 46\), not statement 45: nothing cancelled why statement 45 ended, and the session began another fix mason cancel 12 --statement 46 stops the one it runs now Next: mason logs --running the statements running now, with their sessions$/);
   assert.equal(textOf(renderRunning([], null, { key: "12:45", cancelled: RUNNING_NOW[0] })), "No statement is running now. Cancelled session 12's statement: it ends now, and its client is told so (57014).");
 });
 
@@ -1251,7 +1264,7 @@ test("the app: Cancel asks first; the confirm posts { session, statement } and r
   const app = fn<[unknown], QueriesApp>("createApp")(run.fetch);
   app.show("queries");
   await app.poll();
-  assert.match(textOf(app.view()["running-now"]!), /Running now \(2\)/);
+  assert.match(textOf(app.view()["running-now"]!), /^Session No\. .* 12 45 .* 13 7 /);
   app.askCancelStatement(12, 45);
   assert.match(textOf(app.view()["running-now"]!), /Cancel session 12's statement 45\? Its client is told so/);
   run.asked.length = 0;
@@ -1266,7 +1279,7 @@ test("the app: Cancel asks first; the confirm posts { session, statement } and r
   run.asked.length = 0;
   assert.equal(await app.confirmCancelStatement(12, 45), true);
   assert.deepEqual(run.asked, [`POST /api/cancel ${JSON.stringify({ session: 12, statement: 45 })}`, "GET /api/running"]);
-  assert.match(textOf(app.view()["running-now"]!), /^Running now \(1\):.* 13 7 .*Cancelled session 12's statement: it ends now/, "the statement ended: said under the table");
+  assert.match(textOf(app.view()["running-now"]!), /^Session No\. .* 13 7 .*Cancelled session 12's statement: it ends now/, "the statement ended: said under the table");
   // the session began another statement: the server refuses, and the page renders its Failure under the row
   const failure = { code: "refused", message: "session 13 runs another statement now (statement 8), not statement 7: nothing cancelled", why: "statement 7 ended, and the session began another",
     fix: "mason cancel 13 --statement 8 stops the one it runs now", next: [{ command: "mason logs --running", what: "the statements running now, with their sessions" }] };
@@ -1321,7 +1334,7 @@ test("in the browser: the filter form filters (blanks are no filter) and Cancel 
   run.answers.set("GET /api/requests?outcome=cancelled&since=24h&user=metabase", answer({ requests: [REQUESTS[1]], keptDays: 7, before: null }));
   const { el, on, settle } = fakeBrowser(run, "#queries");
   await settle();
-  assert.match(textOf(el("running-now").html), /Running now \(2\)/);
+  assert.match(textOf(el("running-now").html), /^Session No\. .* 12 45 .* 13 7 /);
   assert.match(textOf(el("request-log").html), /Older$/);
   const form = { id: "request-filters", elements: { status: { value: "cancelled" }, since: { value: " " }, user: { value: "metabase" }, client: { value: "" } } };
   let prevented = false;
@@ -1858,7 +1871,7 @@ test("the shell: the sidebar's project and a demo badge, its nav, its foot (upda
   assert.ok(!/class="topbar"|class="tabs"/.test(html), "no top nav beside it");
   assert.match(html, /<nav id="nav" class="nav" aria-label="Pages"><ul><li><a href=/, "the nav is a list of links: Tab reaches each, Enter follows it");
   assert.match(html, /<\/aside>\s*<div class="scrim" aria-hidden="true"><\/div>\s*<div class="content">\s*<div id="poll"><\/div>\s*<main>/, "the page beside the sidebar");
-  assert.match(html, /<section id="page-status" aria-labelledby="status-h">\s*<div class="page-head"><h2 id="status-h">Overview<\/h2><p class="desc">What <code>mason status<\/code> says/, "the Overview, in mason status's words");
+  assert.match(html, /<section id="page-status" aria-labelledby="status-h">\s*<div class="page-head"><h2 id="status-h">Overview<\/h2><p class="desc">Mason copies the tables you add from your Postgres, keeps them current, and answers analytics SQL at a Postgres URL of its own\. Here: whether the copy is ready, how to connect, and what it answered — what <code>mason status<\/code> says\.<\/p>/, "the Overview says what Mason is first, then that it is mason status's");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /--sidebar-w: 232px/, "the sidebar's width, a token");
   assert.match(css, /@media \(min-width: 641px\) and \(max-width: 999px\) \{\s*\.sidebar \{ width: var\(--rail-w\); \}/, "below 1000 px an icon rail");
@@ -2521,7 +2534,7 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   assert.equal(await adding, true);
   // answered: the state is read again and the row shows the copy waiting to start, an indeterminate bar
   row = accountsRow(app.view().tables!);
-  assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id 0% waiting for its copy to start/);
+  assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id waiting for its copy to start/);
   assert.match(row, /<progress class="copybar indeterminate" max="100" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.accounts: its copy" aria-valuetext="waiting for its copy to start"><\/progress>/);
   assert.ok(!/aria-valuenow/.test(row), "waiting: no value, an indeterminate bar");
   // copying 37%: the bar's value, the aria, and the words mason wait prints (copyingText, held equal)
@@ -2583,4 +2596,70 @@ test("Add: several tables in a row each show their own state; a refused add leav
   run.answers.set("POST /api/pick", answer({ error: "no", failure: { code: "refused", message: "no", next: [] } }, 409));
   assert.equal(await app.addTable("public.staging"), false);
   assert.ok(!/Adding…/.test(app.view().tables!));
+});
+
+// ------------------------------------------------------------------ Connect: how a first-time user gets to a first statement
+
+/** The request log's summary of a run nothing has asked anything yet. */
+const NO_QUERIES = { queries: { keptDays: 7, day: { ...QUERIES.queries.day, statements: 0, completed: 0, refused: 0, failed: 0, cancelled: 0, rows: 0, bytesSent: 0, durationMs: null },
+  week: { ...QUERIES.queries.week, covered: 7, statements: 0, completed: 0, refused: 0, failed: 0, cancelled: 0, rows: 0, bytesSent: 0, durationMs: null } } };
+/** Where this run's Postgres API listens, as mason status prints it (src/cli/pg-url.ts): the panel is held equal to it. */
+// read by name, so this file loads at a commit without it (scripts/fails-without.ts) and each test fails by name
+const SHOP_PG = (pgUrl as { postgresFacts?: (u: string) => { shown: string; psql: string } }).postgresFacts?.("postgresql://127.0.0.1:5433/shop")
+  ?? { shown: "postgres://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgres://<user>:<password>@127.0.0.1:5433/shop'" };
+
+test("the Overview, nothing asked yet: Connect your first tool under the cards — the URL and psql line mason status prints, each with Copy, and Create a user", () => {
+  const html = fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: NO_QUERIES, now: NOW });
+  const text = textOf(html);
+  assert.equal(SHOP_PG.shown, "postgres://<user>:<password>@127.0.0.1:5433/shop", "the line mason start and mason status print");
+  assert.match(text, new RegExp(`Connect your first tool Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL\\. ` +
+    `URL ${SHOP_PG.shown.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy psql ${SHOP_PG.psql.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy ` +
+    "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it\\. Mason Source "));
+  // first under the cards, before the facts: the most important thing on a fresh install is how to reach it
+  assert.ok(text.indexOf("Connect your first tool") > text.indexOf("p95, last day") && text.indexOf("Connect your first tool") < text.indexOf("Mason Source"));
+  assert.match(html, /<code id="connect-url">postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="connect-url">Copy<\/button>/);
+  assert.match(html, /<code id="connect-psql">psql &#39;postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop&#39;<\/code> <button type="button" class="small" data-copy="connect-psql">Copy<\/button>/);
+  assert.match(html, /<a class="btn primary" href="#users">Create a user<\/a>/, "a link to the page that makes one");
+});
+
+test("the Overview once statements ran: Connect after the facts, quieter; with no table added, none (adding one is the step)", () => {
+  const busy = textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: QUERIES, now: NOW }));
+  assert.ok(!busy.includes("Connect your first tool"));
+  assert.match(busy, /Sessions none open Connect URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy psql /, "after the facts table");
+  // the request log not read yet, or unreadable: not "first" (it may have answered thousands)
+  assert.ok(!textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { now: NOW })).includes("Connect your first tool"));
+  assert.ok(!textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: { failure: { code: "failed", message: "busy" } }, now: NOW })).includes("Connect your first tool"));
+  assert.ok(!/Connect/.test(textOf(fn<[unknown, unknown?], string>("renderStatus")(NONE, { queries: NO_QUERIES }))));
+  // a run from before it said where it listens: nothing, never a made-up URL
+  assert.equal(fn<[unknown], string>("renderConnect")(undefined), "");
+});
+
+test("Queries, an empty request log: how to connect under its sentence — never once a filter or an older page is shown", async () => {
+  const renderRequests = fn<[unknown, Record<string, unknown>], string>("renderRequests");
+  const connect = fn<[unknown, unknown], string>("renderConnect")(SHOP_PG, { first: true });
+  const empty = { requests: [], keptDays: 7, before: null };
+  assert.match(textOf(renderRequests(empty, { span: "the last 24 hours", connect })), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_REQUEST_LOG_DAYS\)\. Connect your first tool .* Create a user /);
+  assert.ok(!textOf(renderRequests(empty, { span: "the last 24 hours", connect, filtered: true })).includes("Connect"), "a filter that passes none is not a fresh install");
+  // the app: the Queries page renders it from /api/state's postgres
+  const run = fakeRun();
+  run.answers.set("GET /api/state", () => new Response(JSON.stringify(RUNNING), { status: 200 }));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("queries");
+  await app.poll();
+  assert.match(textOf(app.view()["request-log"]!), /^No request in the last 24 hours .* Connect your first tool .* URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy /);
+});
+
+test("a Copy button, on any page: its code's text to the clipboard and Copied; refused, the text selected and why", async () => {
+  const copyClick = fn<[Record<string, string>, { textContent: string }, unknown], Promise<void> | null>("copyClick");
+  const code = { textContent: SHOP_PG.psql };
+  const doc = { getElementById: (id: string) => id === "connect-psql" ? code : null };
+  const wrote: string[] = [];
+  const b = { textContent: "Copy" };
+  await copyClick({ copy: "connect-psql" }, b, { doc, win: { navigator: { clipboard: { writeText: async (t: string) => { wrote.push(t); } } } } });
+  assert.deepEqual([wrote, b.textContent], [[SHOP_PG.psql], "Copied"]);
+  const selected: unknown[] = [];
+  const r = { textContent: "Copy" };
+  await copyClick({ copy: "connect-psql" }, r, { doc, win: { navigator: { clipboard: { writeText: async () => { throw new Error("denied"); } } }, getSelection: () => ({ selectAllChildren: (n: unknown) => selected.push(n) }) } });
+  assert.deepEqual([selected, r.textContent], [[code], "Select and copy it (denied)"]);
+  assert.equal(copyClick({ sync: "x" }, b, { doc, win: {} }), null, "not a Copy: the page's own click goes on");
 });

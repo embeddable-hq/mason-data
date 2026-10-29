@@ -18,7 +18,7 @@
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage", queries: "#observability/queries",
   slow: "#observability/queries?slow=1", failedQueries: "#observability/queries?status=failed", failedEvents: "#observability/logs?failures=1" };
 import { bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
-  utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton } from "../shared.js";
+  utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`, held equal by the tests). */
@@ -75,14 +75,16 @@ export function tableLine(t) {
  * A COPY'S BAR, the one renderer of the Overview's "copies not finished" and the Tables page's rows: a native `<progress>`
  * with an explicit `role="progressbar"` and `aria-valuemin/max/now` (and a text label, `aria-valuetext`, the line's words).
  * `l` is `tableLine`'s, `fraction` the share to draw (`monotone`'s; the line's own by default). A table waiting for its
- * copy has no value: the bar is indeterminate (the stylesheet's shimmer), `aria-valuenow` left out. The % beside it is
- * `percent` of the same share. The bar moves only with the server's data: nothing is animated by the page.
+ * copy has no value: the bar is indeterminate (the stylesheet's shimmer), `aria-valuenow` and the % left out. The %
+ * beside any other is `percent` of the same share. The bar moves only with the server's data: nothing is animated by the page.
  */
 export function copyBar(table, l, fraction = l.fraction) {
   const waiting = l.state === "waiting";
   const value = Math.floor(Math.max(0, Math.min(1, fraction)) * 100);
   return `<progress class="copybar${waiting ? " indeterminate" : ""}" max="100"${waiting ? "" : ` value="${value}"`} role="progressbar" aria-valuemin="0" aria-valuemax="100"` +
-    `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: its copy`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}"></progress> <span class="pct">${percent(fraction)}</span>`;
+    `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: its copy`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}"></progress>` +
+    // a copy not begun has no share yet: no "0%" beside its shimmer (its line says it waits)
+    (waiting ? "" : ` <span class="pct">${percent(fraction)}</span>`);
 }
 
 /**
@@ -320,9 +322,16 @@ export function renderRecentErrors(events, requests, unsupported) {
 export function renderStatus(s, o = {}) {
   const now = o.now ?? Date.now();
   const added = s.tables.some((t) => t.added);
-  return renderHealth(s) + renderKpis(s, { ...o, now }) + renderProgress(s, o.open, o.shares) + renderFacts(s, now) + renderStream(s, now) +
+  // how to connect, once a table is added: first under the cards while nothing has asked Mason anything (the last
+  // day's and week's statements, read as none), else after the facts, for the next tool
+  const first = isFirstConnect(o.queries);
+  const connect = added ? renderConnect(s.postgres, { first }) : "";
+  return renderHealth(s) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }
+
+/** Nothing has asked Mason anything yet: the last day's statements were read (`/api/queries`' body), and are none. */
+export const isFirstConnect = (q) => q !== undefined && !("failure" in q) && q.queries.day.statements === 0 && q.queries.week.statements === 0;
 
 /** The most entries of the unsupported SQL `/api/unsupported` answers (src/cli/run-server.ts MAX_UNSUPPORTED_LIMIT, held
  *  equal by the tests): the Overview says the first and counts the others, so it reads them all. */
@@ -354,6 +363,8 @@ export const page = {
         return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body) }) };
       },
       toggle: (target) => opened.toggle(target),
+      // Connect's Copy buttons
+      click: (d, button, env) => copyClick(d, button, env),
       charts: () => sparkSpecs(ctx.read(HOURLY)?.body),
     };
   },

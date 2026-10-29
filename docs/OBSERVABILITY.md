@@ -57,8 +57,8 @@ the same endpoints its own way.
 
 Built: the shell and every page (src/web/app.js, src/web/pages/).
 
-- **The shell**: `index.html` with a nav of four tabs — Overview · Tables · Users · Observability, the last with three
-  sub-tabs, Queries · Usage · Logs (modelled on Vercel's, Neon's and PlanetScale's) — and one section per page, chosen
+- **The shell**: `index.html` with a left sidebar — Overview · Tables · Users, then the Observability group's three
+  views, Queries · Usage · Logs (modelled on Vercel's, Neon's and PlanetScale's) — and one section per page, chosen
   by the URL's hash (`#overview`, the default; `#observability/queries`; the old `#status`, `#queries`, `#usage` and
   `#logs` land on their view). Each page is an ES module of its own, a route of `PAGE_ROUTES`. ONLY THE PAGE SHOWN
   polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.

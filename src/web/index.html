@@ -33,7 +33,7 @@
   <!-- the Observability views' head: the group's name and the time range the three share (src/web/app.js renderSubnav); empty elsewhere -->
   <div id="subnav" class="subnav"></div>
   <section id="page-status" aria-labelledby="status-h">
-    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">What <code>mason status</code> says: whether the copy is ready, the database, the sync and the statements.</p></div>
+    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason copies the tables you add from your Postgres, keeps them current, and answers analytics SQL at a Postgres URL of its own. Here: whether the copy is ready, how to connect, and what it answered — what <code>mason status</code> says.</p></div>
     <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
   <section id="page-tables" aria-labelledby="tables-h" hidden>
@@ -78,7 +78,7 @@
     <div id="request-log"></div>
   </section>
   <section id="page-users" aria-labelledby="users-h" hidden>
-    <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">A user of the Postgres API: a name and a password that does not expire, for a BI tool or an app. The same users as <code>mason user</code>.</p></div>
+    <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">A user is the name and password psql, a BI tool or your app connects to Mason with; it does not expire. The same users as <code>mason user</code>.</p></div>
     <form id="add-user" class="formcard" autocomplete="off">
       <label for="user-name">Name</label>
       <input id="user-name" name="name" required placeholder="metabase" spellcheck="false" autocapitalize="off">

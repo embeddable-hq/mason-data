@@ -1,5 +1,5 @@
 /**
- * THE USAGE VIEW (#observability/usage, a sub-tab of Observability; `#usage`, its old address, lands here;
+ * THE USAGE VIEW (#observability/usage, a view of the Observability group; `#usage`, its old address, lands here;
  * docs/OBSERVABILITY.md "Pages"): what `mason status` says of the queries and what `mason usage` prints, over the time
  * range the Observability views share (RANGES: the hour a minute a point, the day an hour, the week six hours) — KPI
  * cards (statements, the failed ones, p95, rows and bytes sent, each with a sparkline; the request log's summary has a
