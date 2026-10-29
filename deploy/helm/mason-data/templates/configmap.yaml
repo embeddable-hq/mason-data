@@ -1,0 +1,14 @@
+# the project folder (deploy/kubernetes/configmap.yaml says why it is a read-only ConfigMap)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mason.name" . }}-project
+  labels:
+    {{- include "mason.labels" . | nindent 4 }}
+data:
+  sources.yml: |
+    {{- required "project.sources is required: the sources file naming the tables to copy" .Values.project.sources | nindent 4 }}
+  {{- if .Values.project.masonYml }}
+  mason.yml: |
+    {{- .Values.project.masonYml | nindent 4 }}
+  {{- end }}

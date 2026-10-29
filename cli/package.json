@@ -1,6 +1,6 @@
 {
   "name": "@mason-data/cli",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "mason start: point Mason at your Postgres and pick the tables to copy. Fast analytics for the database your app already has.",
   "keywords": ["mason", "analytics", "postgres", "duckdb", "cli"],
   "homepage": "https://masondata.ai",
