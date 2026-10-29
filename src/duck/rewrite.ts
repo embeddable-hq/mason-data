@@ -284,15 +284,56 @@ class Rewriter {
    *  `json_reads`, which the keeper's policy reads (src/duck/kept.ts `review`) */
   readonly jsonReads = new Map<string, JsonRead>();
   constructor(analysis: PgAnalysis, base: number, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC",
-    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null) {
+    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set()) {
     this.types = analysis.types; this.base = base; this.collation = collation; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone;
     this.enums = enums; this.kept = kept;
+    for (const at of keyCounts) this.keyCounts.add(at + base);
     this.caseMode = collation.kind === "icu" ? "icu" : collation.kind === "bytes" && collation.ascii === true ? "ascii" : "libc";
     this.twins = caseTwins(analysis.tree);
   }
 
   /** the subqueries and CTEs whose columns have twins in another case, by the name the query calls them (caseTwins) */
   private readonly twins: Map<string, string[]>;
+
+  /**
+   * THE count(DISTINCT x) WHOSE DISTINCT CHANGES NOTHING, by the raw node's offset: x a column unique on the source and
+   * its table's rows not repeated by the FROM, decided over Postgres's analysis (src/duck/distinct-key.ts), and the
+   * same call repeated in its own SELECT's ORDER BY (`repeatedKeyCounts`). Each is counted without its DISTINCT
+   * (`funcCall`): DuckDB's hash aggregate of every value, which finds no duplicate, is what that saves.
+   */
+  private readonly keyCounts = new Set<number>();
+
+  /**
+   * An ORDER BY (or a window's) that repeats a count(DISTINCT x) of its SELECT list is analysed as THAT target
+   * (findTargetlistEntrySQL99): its own offset is in no AGGREF, so the decision never saw it. It is the same call over
+   * the same FROM, so it drops its DISTINCT where its twin in the SAME SELECT did — never by a twin in another SELECT,
+   * whose `x` may be another table's column.
+   */
+  repeatedKeyCounts(root: AstNode): void {
+    if (this.keyCounts.size === 0) return;
+    const select = (b: Body): void => {
+      const own: Body[] = [];
+      const collect = (v: unknown): void => {
+        if (Array.isArray(v)) { for (const x of v) collect(x); return; }
+        if (v === null || typeof v !== "object") return;
+        if (isNode(v) && kindOf(v) === "SelectStmt") { select(bodyOf(v)); return; }
+        if (isNode(v) && kindOf(v) === "FuncCall" && bodyOf(v).agg_distinct === true && lastName(bodyOf(v).funcname) === "count") own.push(bodyOf(v));
+        for (const [k, x] of Object.entries(isNode(v) ? bodyOf(v) : v as Body)) { const arm = armOf(k, x); if (arm !== null) select(bodyOf(arm)); else collect(x); }
+      };
+      for (const [k, x] of Object.entries(b)) { const arm = armOf(k, x); if (arm !== null) select(bodyOf(arm)); else collect(x); }
+      const dropped = new Set(own.filter((f) => this.keyCounts.has(f.location)).map((f) => shapeOf({ FuncCall: f })));
+      for (const f of own) {
+        if (typeof f.location === "number" && !this.keyCounts.has(f.location) && this.at(f, ["AGGREF"]) === null && dropped.has(shapeOf({ FuncCall: f }))) this.keyCounts.add(f.location);
+      }
+    };
+    const visit = (v: unknown): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v) && kindOf(v) === "SelectStmt") { select(bodyOf(v)); return; }
+      for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) visit(x);
+    };
+    visit(root);
+  }
 
   /**
    * A STORED JSON PATH READ FROM ITS COLUMN (docs/DESIGN.md "Stored JSON paths"): `l` a copied table's
@@ -2143,6 +2184,9 @@ class Rewriter {
     }
     if ((name === "sum" || name === "avg") && argType(0) === INTERVAL) throw new Unrewritable(`${name}() of an interval is not supported by Mason`, "sum(extract(epoch FROM x)) for the seconds", "interval-aggregates");
     if (name === "sum" && this.typeOf(args[0] ?? { A_Const: {} }) === FLOAT4 && argType(0) === FLOAT4) throw new Unrewritable("sum() of a real is not supported by Mason (Postgres adds in single precision)", "sum(x::double precision)", "sum-real");
+    // count(DISTINCT x) of a column unique on the source, over a FROM that repeats none of its table's rows: no value is
+    // there twice, so it is count(x), its FILTER kept (src/duck/distinct-key.ts, `keyCounts`)
+    if (b.agg_distinct === true && name === "count" && typeof b.location === "number" && this.keyCounts.has(b.location)) delete b.agg_distinct;
     // count(DISTINCT j) counts jsonb's equal values once: their keys, counted (another aggregate's DISTINCT would hand
     // the key itself to the aggregate)
     if (b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 && this.typeOf(args[0]) === JSONB) args[0] = this.equalKey(args[0]);
@@ -3932,9 +3976,9 @@ function nameTargets(v: unknown): void {
 
 export function rewrite(stmt: AstNode, base: number, analysis: PgAnalysis, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(),
   rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null,
-  wireBound = false):
+  wireBound = false, keyCounts: ReadonlySet<number> = new Set()):
   { tree: AstNode; dropLast: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
-  const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, enums, kept);
+  const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, enums, kept, keyCounts);
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }
@@ -3943,6 +3987,7 @@ export function rewrite(stmt: AstNode, base: number, analysis: PgAnalysis, colla
   r.adopt(own);
   nameTargets(own);
   r.indexShapes(own);
+  r.repeatedKeyCounts(own);
   const exact = r.exactThrough(own, analysis.fields);
   r.markBounds(own, wireBound);
   const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;

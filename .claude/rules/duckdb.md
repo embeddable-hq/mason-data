@@ -76,6 +76,13 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
     Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's
     (findTargetlistEntrySQL92), the same tree inside an expression the input's (`bareKeyIsInput`);
+  - **a count(DISTINCT x) of a key is count(x)** (`src/duck/distinct-key.ts`): x a plain column ONE single-column
+    unique index covers in the CATALOG's pg_index (the source's primary key and unique indexes, never a sources file's
+    `key:`), and the FROM repeating no row of its table (its table alone, or joined only to base tables each on an
+    equality with THAT table's unique column) — all read from the analysed tree and pg_index, never a column's name;
+    when unsure the DISTINCT stays (DuckDB's count(DISTINCT) is a second hash aggregate: 120 s against 9 s over 197 M
+    rows). Only count; an ORDER BY repeating it drops it with its twin in the same SELECT only. `tests/duck-distinct-key.test.ts`,
+    the plan fixture's `KEY_COUNTS` and the oracle's `count of distinct keys` / `keyed` hold it ("A count of distinct keys");
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
   **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
   independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the
