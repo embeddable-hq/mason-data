@@ -1022,7 +1022,7 @@ class Session {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
         const e = await this.explaining(raw, whole, t, []);
-        if (e.plan === null) return catalogExplained(await this.forwardSimple(text), e.options);
+        if (e.plan === null) return catalogExplained(await this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user)), e.options);
         const controller = new AbortController();
         const disarm = this.armTimeout(controller);
         try {
@@ -1031,7 +1031,7 @@ class Session {
           return [rowDescription([field]), ...rows, commandComplete("EXPLAIN")];
         } finally { disarm(); }
       }
-      case "catalog": return this.forwardSimple(text);
+      case "catalog": return this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user));
       case "set": return this.setStatement(t);
       case "show": return this.showStatement(t.name);
       case "transaction": return [...this.transaction(t.tag)];
@@ -1362,6 +1362,14 @@ class Session {
   private async setStatement(t: Extract<Translation, { kind: "set" }>): Promise<Buffer[]> {
     if (t.name === "all") { this.vars = { ...defaultVars(), applicationName: this.vars.applicationName }; return [commandComplete("RESET")]; }
     const tag = t.value === null ? "RESET" : "SET";
+    // SET ROLE and SET SESSION AUTHORIZATION: a session is its user and becomes no one else — RESET, NONE and its own
+    // name are Postgres's no-ops, any other name Postgres's refusal. Never the catalog's to validate: that is one
+    // superuser connection, which accepted `SET ROLE postgres` silently (a review finding of #35)
+    if (t.name === "role" || t.name === "session_authorization") {
+      const own = t.value === null || t.value === this.user || (t.name === "role" && t.value.toLowerCase() === "none");
+      if (!own) throw new PgError({ code: "42501", message: `permission denied to set ${t.name === "role" ? "role" : "session authorization"} "${t.value}"` }, 403);
+      return [commandComplete(tag)];
+    }
     if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
     const status = this.setParameter(t.name, t.value);
     return [...status, commandComplete(tag)];
@@ -1493,7 +1501,8 @@ class Session {
         const own = this.statements.get(m.name);
         // the unnamed statement is replaced by a Parse; the sidecar's must be closed first
         const close = own?.catalogName !== null && own !== undefined ? [frame("C", Buffer.from("S"), cstr(own.catalogName))] : m.name === "" ? [frame("C", Buffer.from("S"), cstr(statement.catalogName))] : [];
-        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(m.sql), int16(m.paramTypes.length), ...m.paramTypes.map(int32)));
+        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(sessionUserSpliced(m.sql, raw.stmt, raw.stmt_location ?? 0, this.user)),
+          int16(m.paramTypes.length), ...m.paramTypes.map(int32)));
         this.statements.set(m.name, statement);
         // the CloseComplete of the close this server added is not the client's
         return reply.slice(close.length);
@@ -1734,6 +1743,40 @@ const isUtf8 = (encoding: string): boolean => /^(utf-?8|unicode)$/i.test(encodin
 
 const quoteIdent = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 const quoteLiteral = (text: string): string => `'${text.replaceAll("'", "''")}'`;
+
+/**
+ * `session_user` IN A STATEMENT THE CATALOG ANSWERS IS THIS SESSION'S USER, never the catalog's superuser (it answered
+ * `postgres` for every session while `SHOW session_authorization` said the user's name: a review finding of #35). The
+ * keyword cannot be overridden as `version()` and `current_setting` are, so each SESSION_USER of the parse tree is
+ * spliced in the text with a scalar subquery named as the keyword names its column, `(SELECT 'agent'::name AS
+ * session_user)`: the name, the type and every expression around it stay Postgres's. (`current_user` is the catalog's
+ * role: the session's role under SET ROLE, src/api/postgres/catalog.ts asRole.) `base`: the statement's offset in the
+ * text the parse tree's locations count from.
+ */
+function sessionUserSpliced(text: string, stmt: unknown, base: number, user: string): string {
+  const at: number[] = [];
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) { for (const x of n) walk(x); return; }
+    if (typeof n !== "object" || n === null) return;
+    const f = (n as { SQLValueFunction?: { op?: string; location?: number } }).SQLValueFunction;
+    if (f !== undefined && f.op === "SVFOP_SESSION_USER" && typeof f.location === "number") at.push(f.location);
+    for (const v of Object.values(n)) walk(v);
+  };
+  walk(stmt);
+  if (at.length === 0) return text;
+  const bytes = Buffer.from(text, "utf8");
+  const parts: Buffer[] = [];
+  let end = bytes.length;
+  for (const loc of [...new Set(at)].sort((a, b) => b - a)) {
+    const from = loc - base;
+    if (from < 0 || !/^session_user$/i.test(bytes.subarray(from, from + 12).toString("utf8"))) continue;
+    parts.unshift(bytes.subarray(from + 12, end));
+    parts.unshift(Buffer.from(`(SELECT ${quoteLiteral(user)}::name AS session_user)`, "utf8"));
+    end = from;
+  }
+  parts.unshift(bytes.subarray(0, end));
+  return Buffer.concat(parts).toString("utf8");
+}
 
 /** the text of one statement of a simple query, from the parser's byte offsets */
 function statementText(sql: string, raw: RawStmt): string {

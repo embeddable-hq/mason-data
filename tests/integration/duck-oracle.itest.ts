@@ -401,7 +401,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
    * role as Postgres's do. (A view is not asked: every role may see a view in Mason, docs/POSTGRES-API.md "Roles".)
    */
   async function roleCases(): Promise<void> {
-    const cases: Array<{ name: string; sql: string; values?: string[] }> = [
+    // `decided`: Mason refuses with this SQLSTATE where Postgres answers (the gap `roles`, docs/POSTGRES-API.md "Roles")
+    const cases: Array<{ name: string; sql: string; values?: string[]; decided?: string }> = [
       { name: "granted columns", sql: "SELECT id, status, amount FROM public.orders ORDER BY id" },
       { name: "count(*) over a partly granted table", sql: "SELECT count(*) FROM public.orders" },
       { name: "a GROUP BY of granted columns", sql: "SELECT status, count(*), sum(amount) FROM public.orders GROUP BY status ORDER BY status" },
@@ -430,7 +431,14 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       { name: "information_schema.tables for the role", sql: "SELECT table_name::text FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name IN ('orders', 'customers', 'products') ORDER BY 1" },
       { name: "the privilege functions for the role", sql: "SELECT has_table_privilege('public.orders', 'SELECT'), has_any_column_privilege('public.orders', 'SELECT'), has_column_privilege('public.orders', 'notes', 'SELECT'), " +
         "has_column_privilege('public.orders', 'status', 'SELECT'), has_table_privilege('public.customers', 'SELECT'), has_table_privilege('public.products', 'SELECT')" },
-      // current_user is the ROLE's name under SET ROLE on both (the Postgres login here is it_agent, the Mason role agent: asked of neither)
+      // current_user is the ROLE's name under SET ROLE on both (the Postgres login here is the login role, the Mason role agent: asked of neither)
+      { name: "session_user is the session's user", sql: "SELECT session_user::text, session_user::text || '!' AS t, (SELECT session_user::text) AS sub" },
+      { name: "SET ROLE to another role", sql: "SET ROLE postgres" },
+      { name: "SET SESSION AUTHORIZATION to another", sql: "SET SESSION AUTHORIZATION postgres" },
+      { name: "SET ROLE to itself", sql: `SET ROLE ${ROLE_LOGIN}` },
+      // set_config('role', 'none') is Postgres's permitted RESET ROLE to the login role; in Mason's catalog it was a way to
+      // the superuser inside one statement (the review of #35), so a role's session is refused it: a decided difference
+      { name: "set_config of the role, decided", sql: "SELECT set_config('role', 'none', false) AS a, (SELECT count(*) FROM information_schema.tables WHERE table_name = 'products') AS b", decided: "42501" },
     ].filter((q) => ONLY === null || ONLY.test(`role case: ${q.name}`));
     if (cases.length === 0) return;
     psql(dbUrl, `CREATE ROLE ${ROLE_LOGIN} LOGIN PASSWORD 'x'; GRANT CONNECT ON DATABASE ${tag} TO ${ROLE_LOGIN}; GRANT USAGE ON SCHEMA public TO ${ROLE_LOGIN}; ` +
@@ -442,6 +450,12 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     let refusedAlike = 0;
     for (const q of cases) {
       const [want, got] = [await ask(sourceAgent, q.sql, q.values), await ask(masonAgent, q.sql, q.values)];
+      if (q.decided !== undefined) {
+        // Postgres answers, Mason refuses by the decided SQLSTATE: anything else is a difference
+        const ok = !("code" in want) && "code" in got && got.code === q.decided;
+        if (!ok) differences.push({ phase: "roles", group: "role case", kind: "code" in got ? "sqlstate" : "answered", name: `role case: ${q.name}`, detail: `decided ${q.decided}: ${JSON.stringify(got)} where Postgres ${JSON.stringify(want)}`, sql: q.sql });
+        continue;
+      }
       const v = verdict(want, got, ordered(q.sql));
       if (v !== null) { differences.push({ phase: "roles", group: "role case", kind: v.kind, name: `role case: ${q.name}`, detail: v.detail, sql: q.sql }); continue; }
       if ("code" in want && "code" in got) {

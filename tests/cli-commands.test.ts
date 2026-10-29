@@ -469,7 +469,7 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
   fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
   fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
   fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
-  fs.writeFileSync(path.join(folder, "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n");
+  fs.writeFileSync(path.join(folder, "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n  billing.invoices: {}\n");
   const rolesFile = path.join(folder, "roles.yml");
   const run = (argv: string[]) => runMason(root, argv, matrixEnv());
   const failure = (a: Answer): Failure & { code: string } => (JSON.parse(a.stdout) as { error: Failure & { code: string } }).error;
@@ -482,7 +482,9 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
   for (const [text, want] of [
     ["role:\n  agent:\n    tables:\n      orders: {}\n", /unexpected key role — did you mean `roles`\? — a roles file takes roles alone/],
     ["roles:\n  agent: {}\n", /roles\.agent\.tables: missing — write tables: \{ orders: \{\} \}, the tables the role may read \(a role with no table reads nothing: remove it instead\)/],
-    ["roles:\n  agent:\n    tables:\n      products: {}\n", /roles\.agent\.tables\.products: public\.products is not a table the sources file copies — a role reads copied tables only \(copied: orders, customers; mason add products copies it\)/],
+    ["roles:\n  agent:\n    tables:\n      products: {}\n", /roles\.agent\.tables\.products: public\.products is not a table the sources file copies — a role reads copied tables only \(copied: orders, customers, billing\.invoices; mason add products copies it\)/],
+    // a bare name of a table copied under its schema: the qualified entry is suggested
+    ["roles:\n  agent:\n    tables:\n      invoices: {}\n", /roles\.agent\.tables\.invoices: public\.invoices is not a table the sources file copies — did you mean `billing\.invoices`\? — a role reads copied tables only/],
     ["roles:\n  agent:\n    tables:\n      orders:\n        columns: [id]\n        exclude: [notes]\n", /roles\.agent\.tables\.orders: columns and exclude together — columns names what the role reads, exclude what it may not read of every column; keep one/],
   ] as const) {
     fs.writeFileSync(rolesFile, text);

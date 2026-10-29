@@ -123,7 +123,9 @@ export async function resolveReads(catalog: (bytes: Uint8Array) => Promise<Uint8
   if (reads.length === 0) return [];
   const relids = [...new Set(reads.map((r) => Math.trunc(r.relid)))];
   const rows = await catalogRows(catalog, `SELECT c.oid::text, n.nspname, c.relname, a.attnum::text, a.attname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ` +
-    `LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped WHERE c.oid IN (${relids.join(", ")}) AND c.relkind = 'r' ORDER BY c.oid, a.attnum`);
+    `LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped WHERE c.oid IN (${relids.join(", ")}) AND c.relkind = 'r' ` +
+    // the copied tables alone: pg_class and the rest of pg_catalog are relkind 'r' too, and PUBLIC's on Postgres (a review finding of #35)
+    `AND n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY c.oid, a.attnum`);
   const tables = new Map<number, { table: string; columns: Map<number, string> }>();
   for (const [oid, schema, name, attnum, attname] of rows) {
     const t = tables.get(Number(oid)) ?? { table: `${schema}.${name}`, columns: new Map<number, string>() };

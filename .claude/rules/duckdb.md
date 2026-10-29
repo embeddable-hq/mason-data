@@ -503,7 +503,7 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   recorded in an ops schema in DuckDB, so a failed one can be debugged later — a BI tool met an error on the test server
   and nothing could be found afterwards; the run passed `record: () => undefined`). The listener builds the row
   (`recordRequest`, src/api/postgres/server.ts: SQLSTATE, message, DETAIL, HINT, rows, session, application_name, a
-  token's NAME, never the token, and a `mason user`'s name), `RequestLedger` (src/duck/requests.ts) writes it in batches on a connection of its
+  token's NAME, never the token, a `mason user`'s name and its ROLE), `RequestLedger` (src/duck/requests.ts) writes it in batches on a connection of its
   own — never the sync's writer turn — and keeps `MASON_REQUEST_LOG_DAYS` days (7). A failed write is said once and
   fails no statement. `mason logs --requests` and `mason status` read it through the run's command server, never the
   file. **Its order is `started_at`, then `seq`** (the row's number in arrival order, continuing across restarts):
@@ -517,6 +517,9 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   statement is attributed (`user_name` in `_mason.requests`); rotating the API key removes every user. A password of
   another shape is a token's, read as before (`listenerLogins`, the one wiring the run and the tests use).
   ("On a server")
+- **A user's `role` is a field of its row** (`MasonUser.role`, `mason user add --role`; the roles file is `src/cli/roles.ts`,
+  its enforcement `.claude/rules/postgres-api.md`), read with the user before every statement, so a role given or taken
+  applies at the next statement.
 - **The live users are a FILE, `.mason/users.json`, never DuckDB** (`mason user` runs beside the process holding
   DuckDB's file lock): no secret in it; changed under a lock file and renamed into place; the listener stats it at every
   connection and before EVERY statement of a user's session (`recheckMs: 0`), so a removal takes effect without a

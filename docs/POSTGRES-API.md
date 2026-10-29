@@ -92,6 +92,13 @@ roles:
   Postgres, which filters neither), while a read of a hidden one is refused. **Every role may see every view** of the
   source: reading one is held to the tables it reads, so a view over a hidden column is refused when read — stricter
   than Postgres, where a view's owner's grants apply. No row filter yet (the gap `roles` in docs/SQL-SUPPORT.md).
+- **A session is its user and becomes no one else**: `SET ROLE` and `SET SESSION AUTHORIZATION` to its own name,
+  `NONE` or `RESET` are no-ops, any other name is Postgres's refusal (`42501 permission denied to set role "…"`);
+  `session_user` is the session's user and `current_user` its role. **`set_config` is refused to a role's session**
+  (42501, `permission denied for function set_config`), where Postgres lets a role `set_config('role', 'none')` back
+  to its login: the catalog is one superuser connection with `SET ROLE` on top, and inside one statement that call
+  was a reset to the superuser (the hidden columns' NAMES, never rows, were listed by the rest of the statement). A
+  session with no role, and a token, keep `set_config`.
 - **Every refusal is a row of the request log with the user's role** (`role` in `_mason.requests`).
 
 `mason start` listens on 5433 when it is free on every address (127.0.0.1, 0.0.0.0, `::` and `::1`: a port another

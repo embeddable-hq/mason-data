@@ -506,6 +506,8 @@ const twoRoles = () => new Map([
 test("catalogRoles: one NOLOGIN role per Mason role, USAGE on every table schema, SELECT whole or by column; a table the schema lacks is skipped", () => {
   const m = catalogModule as unknown as { catalogRoles: (s: PgSchema, r: Map<string, unknown>) => string[] };
   assert.deepEqual(m.catalogRoles(schema, twoRoles()), [
+    // set_config revoked while roles exist: under SET ROLE it was a RESET ROLE inside one statement (the review of #35)
+    "REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC;",
     `CREATE ROLE "agent" NOLOGIN;`,
     `GRANT USAGE ON SCHEMA "public" TO "agent";`,
     `GRANT SELECT ("id", "amount", "paid") ON public."orders" TO "agent";`,
@@ -517,7 +519,7 @@ test("catalogRoles: one NOLOGIN role per Mason role, USAGE on every table schema
   assert.deepEqual(m.catalogRoles(schema, new Map()), []);
   // a role naming a table not in the schema yet (added, not copied) grants nothing on it; a column the copy lacks is left out
   const partial = new Map([["r", grants("r", [["public.shipments", "all"], ["public.orders", ["id", "nope"]]])]]);
-  assert.deepEqual(m.catalogRoles(schema, partial), [`CREATE ROLE "r" NOLOGIN;`, `GRANT USAGE ON SCHEMA "public" TO "r";`, `GRANT SELECT ("id") ON public."orders" TO "r";`]);
+  assert.deepEqual(m.catalogRoles(schema, partial).slice(1), [`CREATE ROLE "r" NOLOGIN;`, `GRANT USAGE ON SCHEMA "public" TO "r";`, `GRANT SELECT ("id") ON public."orders" TO "r";`]);
   // every role may see every view (the grant rides in the view's own statement: the view must exist first)
   const m2 = catalogModule as unknown as { catalogViews: (s: PgSchema, r: Map<string, unknown>) => string[] };
   const [v] = m2.catalogViews({ ...schema, views: [{ schema: "public", name: "paid_orders", definition: " SELECT id FROM public.orders WHERE paid;" }] }, twoRoles());
@@ -558,6 +560,10 @@ test("under SET ROLE the catalog answers FOR THE ROLE: information_schema and th
       "has_column_privilege('public.orders', 'tenant_id', 'SELECT')::text || ' ' || has_column_privilege('public.orders', 'paid', 'SELECT')::text || ' ' || current_user";
     assert.deepEqual(await asAgent(priv), ["false true false true agent"]);
     assert.deepEqual(await asOps(priv), ["false false false false ops"]);
+    // set_config is the superuser's alone: under SET ROLE it is refused, so no statement can reset the role midway
+    const esc = decode(await withRoles.run(m.asRole(simpleQuery("SELECT set_config('role', 'none', false), (SELECT count(*) FROM information_schema.columns WHERE table_name = 'orders')"), "agent")));
+    assert.equal(esc.find((f) => f.type === "E")?.error?.M, "permission denied for function set_config");
+    assert.deepEqual(await asNobody("SELECT set_config('application_name', 'x', false)"), ["x"]);
     // interleaved: each request is SET … RESET in one message, run whole by the chain
     for (let i = 0; i < 5; i++) {
       const [a, o, n] = await Promise.all([asAgent(columns), asOps(columns), asNobody(columns)]);

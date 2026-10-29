@@ -348,6 +348,44 @@ test("the catalog answers for the role: information_schema and the privilege fun
   } finally { await a.end(); await n.end(); }
 });
 
+test("the review of #35: no way around the role's catalog view (set_config revoked), SET ROLE / SESSION AUTHORIZATION refused as Postgres refuses them, session_user is the session's user, pg_catalog is no copied table", async () => {
+  await wire();
+  const a = await connect("agent", addUser("agent", "agent"));
+  const n = await connect("plain", addUser("plain"));
+  try {
+    // set_config('role', 'none') inside ONE catalog statement was a permitted RESET ROLE: the statement's later targets ran as the superuser
+    const escape = "SELECT set_config('role', 'none', false) AS a, (SELECT count(*) FROM information_schema.tables WHERE table_name = 'events') AS b, current_user AS u";
+    const e = await refused(a, escape);
+    assert.deepEqual([e.code, e.message], ["42501", "permission denied for function set_config"]);
+    for (const sql of ["SELECT set_config('session_authorization', 'postgres', false)", "SELECT set_config('role', 'wide', false)",
+      "WITH x AS (SELECT set_config('role', 'none', false)) SELECT count(*) FROM x, information_schema.columns WHERE table_name = 'orders'"]) {
+      assert.equal((await refused(a, sql)).code, "42501", sql);
+    }
+    assert.equal((await refused(a, { text: "SELECT set_config('role', $1, false)", values: ["none"] })).code, "42501", "the extended protocol too");
+    assert.equal((await a.query("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = 'events'")).rows[0].n, 0, "the next statement is the role's still");
+    assert.deepEqual((await n.query("SELECT set_config('application_name', 'x', false) AS s")).rows, [{ s: "x" }], "a session with no role is the superuser's: set_config kept");
+    // SET ROLE / SET SESSION AUTHORIZATION: its own name, NONE and RESET are no-ops; any other name is Postgres's refusal
+    for (const sql of ["SET ROLE agent", "SET ROLE NONE", "RESET ROLE", "SET SESSION AUTHORIZATION agent", "SET SESSION AUTHORIZATION DEFAULT", "SET LOCAL ROLE agent"]) await a.query(sql);
+    for (const [sql, message] of [["SET ROLE postgres", 'permission denied to set role "postgres"'], ["SET ROLE wide", 'permission denied to set role "wide"'], ["SET role = 'wide'", 'permission denied to set role "wide"'],
+      ["SET SESSION AUTHORIZATION postgres", 'permission denied to set session authorization "postgres"'], ["SET SESSION AUTHORIZATION plain", 'permission denied to set session authorization "plain"']] as const) {
+      const r = await refused(a, sql);
+      assert.deepEqual([r.code, r.message], ["42501", message], sql);
+    }
+    assert.equal((await refused(n, "SET ROLE agent")).code, "42501", "a session with no role is its user too");
+    assert.equal((await a.query("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = 'events'")).rows[0].n, 0, "still the role's view");
+    // session_user is the session's user; current_user the role (SET ROLE's), as on Postgres
+    assert.deepEqual((await a.query("SELECT session_user, current_user, session_user::text || '!' AS t, (SELECT session_user) AS sub")).rows, [{ session_user: "agent", current_user: "agent", t: "agent!", sub: "agent" }]);
+    assert.deepEqual((await n.query("SELECT session_user")).rows, [{ session_user: "plain" }]);
+    assert.deepEqual((await n.query({ text: "SELECT session_user, $1::text AS p", values: ["v"] })).rows, [{ session_user: "plain", p: "v" }], "the extended protocol too");
+    assert.deepEqual((await n.query("SELECT 'session_user' AS s, lower('SESSION_USER') AS l")).rows, [{ s: "session_user", l: "session_user" }], "a string is no keyword");
+    assert.deepEqual((await n.query("SHOW session_authorization")).rows, [{ session_authorization: "plain" }]);
+    // pg_class is no copied table: a join of it is never the role's refusal (main's honest 0A000 for a pg_catalog table beside a copy)
+    const pgc = await refused(a, "SELECT c.relname, o.id FROM pg_class c JOIN orders o ON o.id = c.oid");
+    assert.notEqual(pgc.code, "42501", pgc.message);
+    assert.equal(pgc.code, (await refused(n, "SELECT c.relname, o.id FROM pg_class c JOIN orders o ON o.id = c.oid")).code, "the same answer as a session with no role");
+  } finally { await a.end(); await n.end(); }
+});
+
 test("every statement of a user's session is a row of the request log with its role; a refusal is recorded as the refusal", async () => {
   await wire();
   await ledger.flush();

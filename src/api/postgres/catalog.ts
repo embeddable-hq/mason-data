@@ -250,11 +250,16 @@ export function catalogViews(schema: PgSchema, roles: ReadonlyMap<string, RoleGr
  * on Postgres either; it still lists every copied column, said in docs/POSTGRES-API.md. A table the role names that the
  * schema does not hold yet (added, not copied) is granted at the rebuild its copy brings; a column the copy lacks is
  * left out (the roles file was held to the copy already, src/cli/roles.ts). Rebuilt with the schema: the server
- * replaces the catalog when the roles move, as it does when the tables do.
+ * replaces the catalog when the roles move, as it does when the tables do. **`set_config` is revoked from PUBLIC
+ * while roles exist** (the review of #35): the catalog's one connection is the superuser's with `SET ROLE` on top, so
+ * inside one statement `set_config('role', 'none', false)` was a permitted RESET ROLE and the statement's later
+ * targets ran as the superuser (`information_schema` listed every hidden column's name); revoked, a role's session is
+ * refused it (42501 `permission denied for function set_config`) and the superuser keeps it.
  */
 export function catalogRoles(schema: PgSchema, roles: ReadonlyMap<string, RoleGrants>): string[] {
   const out: string[] = [];
   if (roles.size === 0) return out;
+  out.push("REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC;");
   const schemas = [...new Set(schema.tables.map((t) => t.schema ?? "public"))];
   const byName = new Map(schema.tables.map((t) => [`${t.schema ?? "public"}.${t.name}`, t]));
   for (const r of roles.values()) {

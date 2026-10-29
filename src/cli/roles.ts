@@ -27,7 +27,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseDocument } from "yaml";
-import { didYouMean } from "../lib/did-you-mean.ts";
+import { closest, didYouMean } from "../lib/did-you-mean.ts";
 import type { Failure } from "./command.ts";
 import { entryName, shownPath, sourceOf, tableNameProblem } from "./sources.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive, type TableGrant } from "../duck/grants.ts";
@@ -165,7 +165,7 @@ export function roleProblems(roles: RolesFile, copied: readonly CopiedTable[]): 
       const at = `roles.${r.name}.tables.${t.name}`;
       const c = copied.find((x) => x.source === t.table);
       if (c === undefined) {
-        problems.push(`${at}: ${t.table} is not a table the sources file copies${didYouMean(t.name, names)} — a role reads copied tables only (${names.length ? `copied: ${names.join(", ")}` : "none is copied yet"}; mason add ${t.name} copies it)`);
+        problems.push(`${at}: ${t.table} is not a table the sources file copies${nearestEntry(t.name, names)} — a role reads copied tables only (${names.length ? `copied: ${names.join(", ")}` : "none is copied yet"}; mason add ${t.name} copies it)`);
         continue;
       }
       if (c.columns === null) continue;
@@ -177,6 +177,16 @@ export function roleProblems(roles: RolesFile, copied: readonly CopiedTable[]): 
     }
   }
   return problems;
+}
+
+/** The closest copied entry to `name`: by the whole name, else — for a bare name — by a qualified entry's own table
+ *  part (`invoices` → `billing.invoices`, which the whole-name distance finds too far; a review nit of #35). */
+function nearestEntry(name: string, names: readonly string[]): string {
+  const whole = didYouMean(name, names);
+  if (whole !== "" || name.includes(".")) return whole;
+  const byTail = new Map(names.filter((n) => n.includes(".")).map((n) => [n.slice(n.lastIndexOf(".") + 1), n] as const));
+  const hit = byTail.has(name) ? name : closest(name, byTail.keys());
+  return hit === null ? "" : ` — did you mean \`${byTail.get(hit)!}\`?`;
 }
 
 /**
