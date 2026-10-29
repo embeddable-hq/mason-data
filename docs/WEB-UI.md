@@ -28,9 +28,9 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | `#observability/logs` | Observability › Logs; `?failures=1` ticks Failures only |
 
 The hashes of before the Observability group still land on their view: `#status` is the Overview, `#queries`, `#usage` and
-`#logs` the Observability views. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — Last hour · 24 hours · 7 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`)
+`#logs` the Observability views. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — Last hour · 24 hours · 7 days · 30 days · 90 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`, `?range=90d`); 30 and 90 days only where Mason keeps that much history (`MASON_REQUEST_LOG_DAYS`, 7 by default), else shown disabled with that setting as the reason
 — kept in the hash, so a link carries it (the sidebar's links to the three keep it too). Queries reads the request log since then, Usage the samples of that span (a
-minute a point for the hour, an hour for the day, six hours for the week), Logs the sync's events since then; each
+minute a point for the hour, an hour for the day, six hours for the week, a day for 30 and 90 days; the cards of 30 and 90 days say the last 7 days, by name, as the request log's summary has a day and a week), Logs the sync's events since then; each
 view's own filters compose with it. Only the view shown asks Mason anything, each read at the rate its data changes,
 and nothing while the tab is hidden. How long ago Mason last answered is at the sidebar's foot.
 
@@ -65,8 +65,12 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /
   Added / Failed / Not added filter. With hundreds of tables the first 100 that pass are written, then **Show 100 more**
   and **Show all**; the search is over every table, at once. A long name is cut with an ellipsis, its whole the tooltip.
-- **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting), rows, last sync, how long the sync took, the
-  copy's size and any error. **Sync** runs `mason sync` for it; **Remove** asks first, then runs `mason remove`.
+- **Tables**, an added table: its state (Synced, Syncing, Failed or Waiting) over its copy's bar — every added table has
+  one, as `mason status` draws one for each: full at 100% once copied, red when its copy failed, amber when it is not kept
+  current, moving while it copies, a shimmer while it waits — its rows, its last sync over how long it took, and the
+  copy's size. What is said at length (the words `mason wait` prints after a bar not yet full, an error, why a table
+  cannot be added, its stream state, a Remove's question) is a line of its own under the row, across every column, so
+  the list fits its card at a laptop's width and its buttons stay in it. **Sync** runs `mason sync` for it; **Remove** asks first, then runs `mason remove`.
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** copies every column, as
   `mason add <table>` does; **Columns…** opens a form to tick the columns to copy; **Name its key…** does the same for a
   table with no primary key.
@@ -101,7 +105,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   size, measured every 10 minutes. The samples, newest first (**Time** sorts them), sit behind a closed details, and
   the process's memory behind another.
 - **Observability › Logs** (`#observability/logs`): the sync's events of the range, newest first (**When** turns it
-  round), with when, kind, table and reason. **Failures only**, a **Kind** and a **Table** narrow the list; 100 are
+  round), with when, kind, table and reason. **Failures only**, a **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
   written at once, then **Show more**.
 - **Logs**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
   is asked for it only while the details is open.

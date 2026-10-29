@@ -165,40 +165,56 @@ export function renderTables(s, ui = {}) {
   const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
   const stream = s.stream ? new Map(streamRows(s.stream, ui.now ?? Date.now()).tables) : null;
-  const head = [["Table", ""], ["State", ""], ["Rows", "num"], ["Key", ""], ["Last sync", "num"], ["Took", "num"], ["Size", "num"], ...(stream ? [["Stream", ""]] : []), ["Note", ""], ["", ""]];
+  // SEVEN NARROW COLUMNS, NOTHING LONG IN A CELL: a table's state is its word over its copy's bar; its last sync an age
+  // over how long it took; and whatever is said at length — the words `mason wait` prints, an error, why it cannot be
+  // added, its stream state, a Remove's question — is a line of its own UNDER the row, across every column (`under`).
+  // So the table fits its card at a laptop's width, and a confirm never pushes Remove off the right edge.
+  const head = [["Table", "name"], ["State", ""], ["Rows", "num"], ["Key", ""], ["Last sync", "num"], ["Size", "num"], ["", "act"]];
   const sizeOf = new Map(sizes && !("failure" in sizes) ? sizes.copySizes.map((c) => [c.table, c.bytes]) : []);
-  const under = (html) => `<tr class="under"><td colspan="${head.length}">${html}</td></tr>`;
+  const under = (html, cls = "") => `<tr class="under${cls ? ` ${cls}` : ""}"><td colspan="${head.length}"><div class="under-body">${html}</div></td></tr>`;
   const cell = (v, cls = "", title = "") => `<td${cls ? ` class="${cls}"` : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(v)}</td>`;
   const line = (t) => {
     const f = tableFacts(t);
     const name = entryName(t.table);
     const y = t.sync;
     const adding_ = adding.includes(t.table);
+    const asking = removing === t.table;
     const act = adding_ ? `<button type="button" class="primary small" disabled>Adding…</button>` : t.added
       ? (syncing.includes(t.table) ? `<button type="button" class="small" disabled>Syncing…</button>` : button("Sync", { syncTable: t.table }, "small")) + " " +
-        (removing === t.table
-          ? `<span class="confirm">Remove ${esc(name)}? ${esc(removedReport([t.table], "").tips[0])}.</span> ` +
-            `${button(`Remove ${name}`, { confirmRemoveTable: t.table }, "danger small")} ${button("Cancel", { cancelRemoveTable: "" }, "small")}`
-          : button("Remove", { removeTable: t.table }, "danger small"))
+        // while it asks, Remove stays where it was (the row does not move), held down: the question under the row answers it
+        (asking ? `<button type="button" class="danger small" aria-expanded="true" disabled>Remove</button>` : button("Remove", { removeTable: t.table }, "danger small"))
       : t.reason === null
         ? `${button("Add", { addTable: t.table }, "primary small")} ${button("Columns…", { choose: t.table }, "small")}`
         : t.key.length ? "" : button("Name its key…", { choose: t.table }, "small");
     // a failed copy's rows so far are none: the copy it serves meanwhile is said by its error and mason status
     const rows = t.added && t.copy && t.copy.phase !== "failed" ? n(t.copy.rowsCopied) : f.size;
+    // EVERY ADDED TABLE HAS ITS BAR, as `mason status` and `mason wait` print one for each (src/cli/commands.ts
+    // `tableLines`): full at 100% once copied, red when its copy failed, amber when it is not kept current, moving while
+    // it copies, the indeterminate shimmer while it waits — the Overview's renderer (`copyBar`), its words the line's
+    const l = t.added && !adding_ ? tableLine(t) : null;
+    const bar = l ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction)}</span>` : "";
     const state = adding_ ? status("warn", "Adding…") : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
-    // a copy under way or waiting to start shows its bar and the words `mason wait` prints (the Overview's renderer), until it is served
-    const l = t.added ? tableLine(t) : null;
-    const bar = l && (l.state === "copying" || l.state === "waiting") ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction)} <span class="what-copy">${esc(l.what)}</span></span>` : "";
-    const last = t.added && y?.syncedAt && y?.ageSeconds != null ? cell(`${duration(y.ageSeconds)} ago`, "num", `${utcText(y.syncedAt)} UTC`) : cell("", "num");
-    const note = adding_ ? `<span class="dim">adding it to the sources file…</span>` : t.added
-      ? bar ? bar : t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : ""
-      : `<span class="dim">${esc(f.state ?? "")}</span>`;
+    const took = t.added && y?.syncSeconds != null ? `<span class="took" title="${esc(tookTitle(y))}">took ${esc(tookText(y))}</span>` : "";
+    const last = t.added && y?.syncedAt && y?.ageSeconds != null
+      ? `<td class="num"><span title="${esc(`${utcText(y.syncedAt)} UTC`)}">${esc(`${duration(y.ageSeconds)} ago`)}</span>${took}</td>` : `<td class="num">${took}</td>`;
+    // what is said at length, under the row: the words the CLI prints after a bar that is not full and current, an error
+    // (its first line; the whole in a details), why it cannot be added as it is, its stream state (replication mode)
+    const said_ = adding_ ? `<span class="dim">adding it to the sources file…</span>`
+      : t.added ? [
+        l && l.state !== "done" && !t.error ? `<span class="what-copy t-${l.state}">${esc(l.what)}</span>` : "",
+        t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : "",
+        stream && stream.get(t.table) ? `<span class="stream dim">Stream: ${esc(stream.get(t.table))}</span>` : "",
+      ].filter(Boolean).join("")
+      : f.state ? `<span class="dim">${esc(f.state)}</span>` : "";
+    const note = said_ ? under(said_, "note") : "";
+    const confirm = asking ? under(`<span class="confirm">Remove ${esc(name)}? ${esc(removedReport([t.table], "").tips[0])}.</span> ` +
+      `${button(`Remove ${name}`, { confirmRemoveTable: t.table }, "danger small")} ${button("Cancel", { cancelRemoveTable: "" }, "small")}`, "asking") : "";
     const said = (outcome?.table !== t.table ? "" : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added, shownFileOf(s, outcome.added.file)) : renderTablesRemoved(outcome.removed, shownFileOf(s, outcome.removed.file)))) +
       (synced?.table !== t.table ? "" : under("failure" in synced ? renderFailure(synced.failure) : renderSynced(synced.synced, t.table, s)));
-    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
-      `<td>${state}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +
-      `${t.added && y?.syncSeconds != null ? cell(tookText(y), "num", tookTitle(y)) : cell("", "num")}${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a copy's size is measured every 10 min")) : cell("", "num")}` +
-      `${stream ? cell(t.added ? stream.get(t.table) ?? "" : "", "stream") : ""}<td class="what">${note}</td><td class="act">${act}</td></tr>` +
+    return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${note ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
+      `<td class="state">${state}${bar}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +
+      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a copy's size is measured every 10 min")) : cell("", "num")}` +
+      `<td class="act">${act}</td></tr>` + note + confirm +
       (choosing === t.table && !t.added ? under(pickForm(t, columns, ticked)) : "") + said;
   };
   const added = s.tables.filter((t) => t.added).length;

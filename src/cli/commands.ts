@@ -92,6 +92,8 @@ export interface RunState {
   totals?: SyncTotals;
   /** the run's copy: its file and how often it polls */
   engine: { file: string; bytes: number | null; pollSeconds: number;
+    /** the days the request log, the events and the usage samples are kept (MASON_REQUEST_LOG_DAYS); a run from before it has none */
+    keptDays?: number;
     /** the run's version, when it started (ISO), and how long it has been up; a run from before them has none */
     version?: string; startedAt?: string; uptimeSeconds?: number;
     /** its supervisor's restarts (src/cli/supervise.ts restartsFact): how many, and the last one */
@@ -307,7 +309,7 @@ const STATUS_USAGE = `usage: mason status [--json]
            bytes, key, added, addedColumns, copy, error, sync: { state (synced, syncing, failed, waiting), syncedAt (when
            the copy was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
            ageSeconds (how old the copy is now) }, … }], totals: { added, copied, failed, rows (the copies' rows),
-           syncedAt (the latest sync of any) }, engine: { file, bytes, pollSeconds, version (the run's), startedAt,
+           syncedAt (the latest sync of any) }, engine: { file, bytes, pollSeconds, keptDays (MASON_REQUEST_LOG_DAYS), version (the run's), startedAt,
            uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
            or null }, or { error }) }, disk: { path (where the copy's file is), freeBytes, copyBytes (the file),
            projectedBytes (what the copies running are projected to add; null: none, or too early to say), error },

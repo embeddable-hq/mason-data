@@ -171,7 +171,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     totals: syncTotals(tables.filter((t) => t.added).length, copies),
     // the run itself: its version, since when it is up, and its supervisor's restarts (ONE reader, restartsFact, which
     // mason status reads with Mason stopped too)
-    engine: { file: ctx.duck.file, bytes, pollSeconds: ctx.duck.pollSeconds,
+    // keptDays: how long the request log, the events and the usage samples are kept (MASON_REQUEST_LOG_DAYS): the page
+    // offers a time range past the week only when it is kept
+    engine: { file: ctx.duck.file, bytes, pollSeconds: ctx.duck.pollSeconds, keptDays: ctx.duck.requests.days,
       version: ctx.version, startedAt: new Date(ctx.startedAt).toISOString(), uptimeSeconds: Math.max(0, Math.round((now - ctx.startedAt) / 1000)),
       restarts: restartsFact(ctx.home, ctx.duck.restarts) },
     // the disk under the copy: free where its file is (the sync's own measure, the one a copy is held to), the file

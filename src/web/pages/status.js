@@ -247,7 +247,7 @@ function renderProgress(s, isOpen = () => false, shares = new Map()) {
   if (!lines.length) return "";
   return `<h3>Copies not finished (${lines.length} of ${picked.length} added)</h3>` +
     `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Copy</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
-      `<tr class="t-${l.state}"><th scope="row">${code(t.table)}</th>` +
+      `<tr class="t-${l.state}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td class="bar">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction)}</td>` +
       `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, isOpen(`error:${t.table}`)) : ""}</td></tr>`).join("")}</tbody></table>`;
 }
@@ -266,9 +266,10 @@ export function renderQueries(q) {
     x.durationMs === null ? "" : ms(x.durationMs.avg), x.durationMs === null ? "" : ms(x.durationMs.p50), x.durationMs === null ? "" : ms(x.durationMs.p95),
     n(x.rows), bytesText(x.bytesSent)].map((v) => `<td class="num">${esc(v)}</td>`).join("")}</tr>`;
   const short = [w.day, w.week].find((x) => x.covered < x.days);
-  return `<table class="queries"><caption>Statements (the completed ones' time; ${code("mason logs --requests")} lists each)</caption><thead><tr><th scope="col"></th>` +
+  // eleven columns of numbers: wider than a laptop's page beside the sidebar, so the table scrolls inside its own box, never the page
+  return `<div class="table-wrap"><table class="queries"><caption>Statements (the completed ones' time; ${code("mason logs --requests")} lists each)</caption><thead><tr><th scope="col"></th>` +
     ["Statements", "Completed", "Refused", "Failed", "Cancelled", "Average", "p50", "p95", "Rows sent", "Sent"].map((h) => `<th scope="col">${h}</th>`).join("") +
-    `</tr></thead><tbody>${row("Last day", w.day)}${row("Last week", w.week)}</tbody></table>` +
+    `</tr></thead><tbody>${row("Last day", w.day)}${row("Last week", w.week)}</tbody></table></div>` +
     (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS.</p>` : "") +
     `<p class="dim">The slow and the refused statements, and every other, are on <a href="${LINKS.queries}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
 }

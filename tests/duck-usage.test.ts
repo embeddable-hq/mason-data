@@ -108,6 +108,25 @@ test("re-bucketed in one query: buckets of the step from since, each count summe
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
 });
 
+test("90 days of samples (129,600, one a minute) re-bucketed a day a point in one query: 90 points, each count summed, fast enough to ask every minute", async () => {
+  const { UsageSampler, USAGE_TABLE } = await usage();
+  const until = Date.parse("2026-10-29T00:00:00.000Z");
+  const u = await UsageSampler.open(store, () => undefined, { days: 90, now: () => until, sampleMs: NEVER, sizeEveryMs: NEVER });
+  // a sample a minute for 90 days, each with one statement and its rows: written in one statement, as a run's would be over the quarter
+  await store.writer.run(`INSERT INTO ${USAGE_TABLE} (sampled_at, seconds, copy_bytes, copy_rows, tables_added, tables_copied, tables_failed, statements, statements_refused, statements_failed, statements_cancelled, rows_sent, bytes_sent, duration_p95_ms, rss_bytes, heap_used_bytes, copy_memory_limit_bytes) ` +
+    `SELECT TIMESTAMPTZ '2026-07-31 00:00:00+00' + to_minutes(i), 60, 1000 + i, i, 1, 1, 0, 1, 0, 0, 0, 10, 100, 5, 1, 1, 1 FROM range(1, 129_601) t(i)`);
+  const since = new Date(until - 90 * 86_400_000).toISOString(), to = new Date(until).toISOString();
+  const t0 = performance.now();
+  const days = await u.samples({ since, until: to, stepSeconds: 86_400 });
+  const ms = performance.now() - t0;
+  assert.equal(days.length, 90, "a day a point");
+  assert.equal(days.reduce((a, d) => a + d.statements, 0), 129_599, "every sample's statements counted once (the last falls on until, which is left out)");
+  assert.equal(days[1]!.statements, 1_440, "a day of minutes (the first begins at since, a minute before the first sample)");
+  assert.ok(ms < 1_000, `90 days re-bucketed in ${ms.toFixed(0)} ms`);
+  await u.close();
+  await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
+});
+
 test("a copy with no block of its own yet (its rows still in the write-ahead log) is not measured, never said as 0 bytes", async () => {
   const { UsageSampler } = await usage();
   const clock = Date.parse("2026-10-28T12:00:00.000Z");
