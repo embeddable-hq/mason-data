@@ -1,6 +1,6 @@
 # Mason
 
-A **drop-in replacement** for **a Postgres read replica**, built for **exceptionally fast analytical queries.**
+A drop-in replacement for a Postgres read replica, built for exceptionally fast analytical queries.
 
 - **Lightweight:** Mason runs anywhere as a single Node.js process (`mason init && mason start`). [Learn more](#getting-started)
 - **Like a read replica:** Choose which tables and columns to sync from your Postgres database. Mason keeps them in sync and makes them available to query. [Learn more](#syncing-from-postgres)
