@@ -60,10 +60,11 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   (`mason add`, the run's `pick`), Remove is `POST /api/remove` `{ tables }` (`mason remove`), and after either the page
   reads the state again. The columns and the key are TICKED from the table's own columns, never typed: the page sends
   the list as it is, and an empty one as no list (every column; its primary key) — no second grammar of `--columns`.
-  Remove asks first, as a user's Remove does. The answer and a refusal are said under their table. While a form is
+  Remove asks first, as a user's Remove does. The answer and a refusal are said in a popover beside the row's actions
+  (`pop`, below). While a form is
   open or a Remove asks, the list is FROZEN at the state it opened over (`held`, src/web/pages/tables.js: no refresh, however
   long), so a poll never rewrites it under the person; it is written from the latest state again at Add, Cancel or confirm.
-  Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said under its copy as `mason sync` says it
+  Sync is `POST /api/sync` `{ tables: [name] }` (`mason sync`), said beside its Sync as `mason sync` says it
   (`syncedReport`, src/cli/sync.ts); the search box filters by name, and All / Added / Not added by state, in the page alone (the endpoint returns every table).
 - **No framework, no build step, no CDN, nothing fetched from elsewhere**: plain HTML, CSS and ES modules importing each
   other by relative paths, served as they are (cli/build.ts copies `src/**` that is not TypeScript, subfolders too,
@@ -118,17 +119,17 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   `:root` in src/web/app.css, redefined for dark under `prefers-color-scheme`, so a page restyles by tokens and both
   themes come with it. Never a literal colour in a rule: a literal is the one place the dark theme forgets. A text
   colour meets 4.5:1 on every surface it sits on, in both themes (the failed red is a rose, never read as the accent);
-  the brick tints of a copy's states (`--brick-ok/-warn/-bad` beside `--brick`) are validated together by the dataviz
+  the tints of a copy's bar (`--bar-ok/-warn/-bad` beside `--brick`, on `--bar-track`) are validated together by the dataviz
   skill's `validate_palette.js --pairs all` in both themes, and always beside the copy's word.
 - **Boxes are square, framed in a hairline, lifted by a quiet stone step** (`--drop`: a 1 px hairline-tone offset and
   a soft low-opacity shadow, never a hard block; a link card's hover lifts a little further): a hint of stacked stone,
   never a heavy stepped shadow. A table's header row is a carved lintel (pale stone, small capitals, a mortar course
   under it); the sidebar's head is the sidebar's own stone over a hairline.
-- **The motif is in the chrome, never on a number**: a copy's bar is a wall of 21 bricks in running bond (`copyBar`,
-  `BRICKS` in src/web/pages/status.js: a `role="progressbar"` span with its value, label and the line's words, its
-  bricks `aria-hidden`), laid left to right within a brick (5%) of the share and never past it, its % beside it as the
-  CLI prints it; the bricks laid since the page's last read (`monotone.before`) drop into place once and a copy just
-  finished lays its last, never under `prefers-reduced-motion`. A state's marker is a small stone block; a page's title
+- **The motif is in the chrome, never on a number — and a copy's bar is a plain line**: a thin rounded track and a
+  solid fill to the share (`copyBar`, src/web/pages/status.js: a `role="progressbar"` span with its value, label and
+  the line's words, its track `aria-hidden`), its % as text at the bar's end as the CLI prints it, the fill the line's
+  state (patina copying, green served, amber not kept current, rose failed), waiting a quiet shimmer of the track (never
+  under `prefers-reduced-motion`); the owner found the wall of bricks read as noise. A state's marker is a small stone block; a page's title
   stands on a course of bricks; the Getting-started steps are courses of a wall; an empty state is a footing with
   nothing built on it. All of it is boxes and borders: **no gradient and no image** (`url(` only in an `@font-face`).
   **The mark is Mason's own**: an arch of bricks with its keystone, an inline SVG in index.html in `currentColor`.
@@ -152,7 +153,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   draws is also in a card or a table, a holder is hidden until it is drawn, and when uPlot cannot load the page reads
   whole (said once in the console). So a test, a screen reader and a box where the module fails read the same page.
   A chart is one series (no dual axis), from a zero baseline, made and destroyed by its holder's key (`createCharts`:
-  no instance outlives its holder), themed from the `--chart-*` tokens.
+  no instance outlives its holder), themed from the `--chart-*` tokens. **A chart stays in its card**: as wide as its
+  holder (the card's content) when drawn and whenever that width changes (a `ResizeObserver` per holder, not only the
+  window's resize), its title inside the card over it (never set into the frame: "Statements an hour" floated out).
 - **A `<details>` a poll rewrites stays open**: whether it is open is the page's state (`createOpenSet`), keyed by a
   stable id (a request's id, a table's name), written into the HTML by `details(key, …)` — never the element's own,
   which a rewrite replaces. (The raw log's details is the Logs page's own state, as before.)
@@ -161,12 +164,20 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   glance, its table the day and the week in full.
 - **Numbers are mono and right-aligned in a column; a table scrolls inside its card on a phone, never the page**: the
   reader compares down a column, and a page that scrolls sideways hides the nav.
-- **A row is short cells and its actions; anything long is a line UNDER it, across every column** (a confirm, a copy's
-  words, an error, a reason, the stream state: `tr.under`, src/web/pages/tables.js): a question written into the
-  actions' cell pushed Remove and its row off the card's right edge. A row's actions never wrap (`td.act`), the Tables
-  list's name is the column that gives (cut, its whole the title), a bare table too wide scrolls in its own box
-  (`.table-wrap`), and on a phone a row's actions stay pinned at its card's right. The detector is
-  `tests/web-page.test.ts` "layout guard"; walk every page at 1280, 1024, 900 and 375 px after a change to a row.
+- **A click moves no other row and no column** (the owner: "clicking buttons in a table should not shift it around"):
+  a question (a Remove's, a Cancel's), a form (Columns…, Name its key…) and what an action answered are a POPOVER beside
+  the button (`pop` and `placePops` of src/web/shared.js: written after the table, `position: fixed`, anchored to the
+  row's actions cell by its id, `actId`), never a row inserted and never in the actions' cell; an answer goes by itself
+  after `OUTCOME_MS` (`fresh`), a refusal stays until dismissed, and a new question takes the last answer away. A
+  button whose label changes keeps the room of its longest (`ROOMS`: Sync → Syncing… → Synced ✓, Copy → Copied); one
+  held while it asks stays where it was, disabled. The Tables list's columns are FIXED widths (`table-layout: fixed`,
+  a width per header class, the name the column that gives), every row two lines (a table not added keeps its bar's
+  line) and its note under it written for every row, empty or not. Only an expander the reader opens (a request's
+  details, a copy's whole error) pushes rows down — and never widens a column (`.detail-body`). A row's actions never
+  wrap (`td.act`), a bare table too wide scrolls in its own box (`.table-wrap`), and where the table scrolls a row's
+  actions stay pinned at its card's right. The detector is `tests/web-page.test.ts` "layout guard" (no row, cell or
+  question inserted by any click); walk every page at 1280, 1024, 900 and 375 px measuring rows and columns before and
+  after each click (getBoundingClientRect) after a change to a row.
 - **Newest first wherever a list is time** (the request log, the sync's events, the raw log, Usage's samples); a chart
   alone reads oldest to newest, left to right. **A column sorts when sorting means something**, by a `sortTh` button
   with `aria-sort`: server-side only where the server pages by that order — the request log's pages follow its cursor

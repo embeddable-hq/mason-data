@@ -69,8 +69,13 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   one, as `mason status` draws one for each: full at 100% once copied, red when its copy failed, amber when it is not kept
   current, moving while it copies, a shimmer while it waits — its rows, its last sync over how long it took, and the
   copy's size. What is said at length (the words `mason wait` prints after a bar not yet full, an error, why a table
-  cannot be added, its stream state, a Remove's question) is a line of its own under the row, across every column, so
-  the list fits its card at a laptop's width and its buttons stay in it. **Sync** runs `mason sync` for it; **Remove** asks first, then runs `mason remove`.
+  cannot be added, its stream state) is its note, a line of its own under the row, across every column — written for
+  every row, empty when it says nothing, so a note that comes or goes moves no row. **Sync** runs `mason sync` for it
+  (its button says Syncing…, then Synced ✓, in one width); **Remove** asks first, then runs `mason remove`. **Nothing a
+  click does moves another row or a column**: the columns are fixed widths, a question (Remove's), a form (Columns…) and
+  what an action answered are popovers beside the button, over the rows and never between them — an answer goes by
+  itself after 8 s, a refusal stays until dismissed — and only an expander the reader opens (a request's details, a
+  copy's whole error) pushes the rows under it down.
 - **Tables**, a table not added: its rows, its key and why it cannot be added as it is. **Add** copies every column, as
   `mason add <table>` does; **Columns…** opens a form to tick the columns to copy; **Name its key…** does the same for a
   table with no primary key.
@@ -124,10 +129,9 @@ Geist Mono for the chrome, the labels, the numbers and the tables, Geist Sans fo
 display face (Zilla Slab) for a page's title, the run's word and a card's number, so the page has a voice of its own
 and the data still reads as a tool's printout. Boxes are square, framed in a hairline and lifted by a quiet stone step (a
 1 px hairline-tone offset and a soft, low-opacity shadow), a hint of stacked stone and no heavier; a table's header row
-is a carved lintel in small capitals on pale stone. The motif stays in the chrome, never on a number: a copy's bar is a wall of bricks in running bond,
-laid left to right as the copy goes (within one brick, 5%, of its share, the % beside it as the CLI prints it), the
-bricks laid since the last read dropping into place and a finished copy laying its last (still under
-`prefers-reduced-motion`); a state's marker is a small stone block, a page's title stands on a course of bricks, the
+is a carved lintel in small capitals on pale stone. The motif stays in the chrome, never on a number: a copy's bar is a
+plain line — a thin rounded track and a solid fill to its share, its % at the end as the CLI prints it, a quiet shimmer
+while it waits (still under `prefers-reduced-motion`); a state's marker is a small stone block, a page's title stands on a course of bricks, the
 Getting-started steps are courses of a wall, an empty state is a footing with nothing on it yet, and the mark is an
 arch of bricks with its keystone, drawn inline. All of it is borders and boxes: no gradient, no image. A left sidebar
 as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge when it is the demo database; the nav,
@@ -136,8 +140,8 @@ answered — `Updated 3 s ago`, which keeps counting when it stops answering —
 segmented control at the top of the Observability views, and on the Overview the run's word beside a big brick, a
 grid of KPI cards, then dense tables. Colour says a state and nothing else — a green, amber, red or gray marker always
 beside its word (the failed red a rose, never the accent) — besides the patina accent for focus, links, the current
-nav row, the brick being laid, the primary action and a chart's mark. A copy's bricks are laid in patina, then green
-once served, rose when it failed and amber when not kept current: tints validated together, in both themes, by the
+nav row, a laid brick of the motifs, the primary action and a chart's mark. A copy's bar fills in patina while it copies,
+green once served, rose when it failed and amber when not kept current (`--bar-ok/-warn/-bad` on `--bar-track`): tints validated together, in both themes, by the
 dataviz skill's `validate_palette.js --pairs all` (each mid-lightness, chroma ≥ 0.10, worst colour-blind ΔE 7.0 light
 and 8.5 dark, worst normal-vision ΔE ≥ 17), never colour alone (the copy's word is beside the bar). It follows the system's light or dark theme, and every text colour meets WCAG AA, 4.5:1, on every surface it sits
 on in both (the lowest pair 4.63:1 light, 4.64:1 dark; the body text 13.9:1 and 13.1:1).
@@ -161,7 +165,8 @@ Every colour, space, radius, font and size is a CSS custom property on `:root` i
 `--surface`, `--line`, `--fg`, `--muted`, `--accent`, `--brick`, `--ok`, `--warn`, `--bad`, `--unknown`, `--stone-1/2`,
 `--drop`, `--chart-*`, `--font-sans`, `--font-mono`, `--font-display`, `--space-1…7`, `--radius*`, `--text-*`), set again for dark mode, so a page is restyled
 by its tokens. The components are helpers of `src/web/shared.js` (`status`, `card`, `cards`, `badge`, `button`,
-`panel`, `empty`, `skeleton`, `details`, `sortTh`, `moreRows`); the charts, `src/web/charts.js`.
+`panel`, `empty`, `skeleton`, `details`, `sortTh`, `moreRows`, `pop`); the charts, `src/web/charts.js`, each as wide as
+its card's content (re-measured whenever that width changes) under its title, inside the card.
 
 **Buttons say what they do**: every button has a visible label (no icon alone); a primary action is filled brick, a
 destructive one red-lettered and its confirm filled red; each has hover, focus and disabled states and is at least 28 px

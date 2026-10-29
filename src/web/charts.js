@@ -164,7 +164,19 @@ export function createCharts({ doc, win, load = () => import(UPLOT).then((m) => 
   const live = new Map(); // key → { el, plot, sig }
   let lib = null, loading = null, failed = false, last = {};
   const holders = () => new Map([...doc.querySelectorAll("[data-chart]")].map((el) => [el.dataset.chart, el]));
-  const destroy = (key) => { live.get(key)?.plot.destroy(); live.delete(key); };
+  // EACH CHART AS WIDE AS ITS HOLDER, whenever the holder's width changes — a window resized, a grid that reflowed, the
+  // sidebar become a rail — not only on the window's resize: a chart sized once at a wider holder stood out of its card
+  const watched = new Map(); // holder → key
+  const observer = typeof win.ResizeObserver === "function" ? new win.ResizeObserver((entries) => {
+    for (const e of entries) {
+      const key = watched.get(e.target), c = key === undefined ? undefined : live.get(key);
+      if (c !== undefined && c.width !== size(c.el, last[key]?.kind).width) fit(key, c);
+    }
+  }) : null;
+  const watch = (key, el) => { if (observer !== null && watched.get(el) !== key) { observer.observe(el); watched.set(el, key); } };
+  const unwatch = (el) => { if (observer !== null && watched.has(el)) { observer.unobserve(el); watched.delete(el); } };
+  const fit = (key, c) => { const s = size(c.el, last[key]?.kind); c.plot.setSize(s); c.width = s.width; };
+  const destroy = (key) => { const c = live.get(key); if (c !== undefined) { unwatch(c.el); c.plot.destroy(); } live.delete(key); };
   // a holder is shown (`drawn`: app.css hides one not drawn, so it takes no room without uPlot) before it is measured;
   // a sparkline fills its holder, a series chart is its plot's height and its read-out under it
   const show = (el) => { el.classList?.add("drawn"); return el; };
@@ -180,11 +192,12 @@ export function createCharts({ doc, win, load = () => import(UPLOT).then((m) => 
       const c = live.get(key);
       if (c === undefined) {
         const { width, height } = size(show(el), spec.kind);
-        live.set(key, { el, plot: new lib(chartOptions(spec, theme, width, height, lib), [spec.x, spec.y], el), sig: signature(spec) });
+        live.set(key, { el, width, plot: new lib(chartOptions(spec, theme, width, height, lib), [spec.x, spec.y], el), sig: signature(spec) });
+        watch(key, el);
         continue;
       }
       // the part was written again: the same chart, moved into the new holder
-      if (c.el !== el) { show(el).appendChild(c.plot.root); c.el = el; c.plot.setSize(size(el, spec.kind)); }
+      if (c.el !== el) { unwatch(c.el); show(el).appendChild(c.plot.root); c.el = el; fit(key, c); watch(key, el); }
       const sig = signature(spec);
       if (sig !== c.sig) { c.plot.setData([spec.x, spec.y]); c.sig = sig; }
     }
@@ -209,7 +222,7 @@ export function createCharts({ doc, win, load = () => import(UPLOT).then((m) => 
     /** The theme changed (light ↔ dark): every chart made again in the new colours. */
     retheme() { for (const key of [...live.keys()]) destroy(key); if (lib !== null) draw(last); },
     /** The window was resized: each chart to its holder's size. */
-    resize() { for (const [key, c] of live) c.plot.setSize(size(c.el, last[key]?.kind)); },
+    resize() { for (const [key, c] of live) fit(key, c); },
     /** How many charts are alive (the tests: none leaks). */
     count: () => live.size,
   };
