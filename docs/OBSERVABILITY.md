@@ -284,7 +284,7 @@ parsed in 1 ms, and polled every 2 s by the Overview and Tables.
 
 **Nothing is fetched at run time**: no URL in src/ is fetched but DuckDB's extension repository; JSON, ICU and Parquet
 are built into DuckDB; the `postgres` extension is installed by the image at build, and DuckDB's autoinstall of any
-other extension is off (src/duck/store.ts). From npm, the first copy on a machine downloads it.
+other extension is off (src/duck/store.ts). From npm, `mason init` downloads it (else the first copy on a machine).
 
 **Left, most worth it first**:
 
@@ -292,8 +292,12 @@ other extension is off (src/duck/store.ts). From npm, the first copy on a machin
    columns 465 KB → **134 KB**, of 50 columns 3,414 KB → **134 KB** (built and serialised 4.6 → 1.2 ms); a form's
    columns are `GET /api/tables/<table>/columns`, read once as Columns… or Name its key… opens, and `?columns=1` keeps
    them for `mason status --json` (its shape unchanged).
-2. From npm, an offline machine's first copy fails (the extension download); `mason doctor` could say whether it is
-   installed, and `mason init` fetch it while online. Shipping it in the npm package is ~45 MB a platform.
+2. **Done**: from npm, an offline machine's first copy failed (the extension download), said only then. Now `mason
+   init` (and `init demo`) installs it as a checklist step before anything is written — 6–47 ms when it is there, 0.7 s
+   to download (44 MB, osx_arm64) on a fresh home — and, offline, fails in the Failure shape with the way out, writing
+   nothing; `mason doctor` has an `extension` line (read in 6–13 ms, never a download); a copy that cannot load it names
+   `mason doctor`. An air-gapped machine needs the image, `mason init` run once online, or the file copied from a
+   machine of its platform (README "How you use it"). Shipping it in the npm package (~45 MB a platform) was not done.
 3. Queries' `search` over 7 days is ~0.6 s every 5 s while it is shown: poll a search less often, or only on asking.
 4. The summary is still a 7-day scan per ask (0.15 s): cache it for the 30 s the Overview waits, or derive the week
    from the minute samples (whose p95s do not merge exactly).

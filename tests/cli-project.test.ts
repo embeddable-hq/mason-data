@@ -25,6 +25,18 @@ import type { Io } from "../src/cli/command.ts";
 import { appDatabaseUrl } from "../src/lib/dotenv.ts";
 import { answers, endRun, liveRun, runOf, runState } from "../src/cli/runs.ts";
 
+/** The copy's postgres extension as a test has it (src/duck/extension.ts ExtensionWay): installed already, or not,
+ *  with what an install did — never the machine's own, nor a download. */
+const AT = { path: "/home/me/.duckdb/extensions/v2.0.0/linux_amd64/postgres_scanner.duckdb_extension", platform: "linux_amd64" };
+function extensionWay(o: { installed: boolean; install?: () => void }): { way: { status: () => Promise<{ installed: boolean; path: string; platform: string }>; install: () => Promise<{ installed: boolean; path: string; platform: string }> }; installs: number } {
+  const r = { installs: 0, way: {
+    status: async () => ({ ...AT, installed: o.installed }),
+    install: async () => { r.installs++; o.install?.(); return { ...AT, installed: true }; },
+  } };
+  return r;
+}
+const INSTALLED = extensionWay({ installed: true }).way;
+
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "mason-project-"));
 
@@ -114,7 +126,7 @@ test("mason init writes the project — config, the sources file, the URL in .en
     fs.mkdirSync(path.join(root, "app"));
     fs.writeFileSync(path.join(root, "app", ".gitignore"), "node_modules\n");
     const app = path.join(root, "app");
-    const r = await quiet((io) => init(["postgres://me:secret@localhost:5432/shop", "--skip-check"], app, { io }));
+    const r = await quiet((io) => init(["postgres://me:secret@localhost:5432/shop", "--skip-check"], app, { io, extension: INSTALLED }));
     assert.equal(r.value, 0, r.err);
     const p = readProject(app) as Project;
     assert.equal(p.config.name, "app");
@@ -126,7 +138,7 @@ test("mason init writes the project — config, the sources file, the URL in .en
     assert.equal(fs.statSync(path.join(app, ".env")).mode & 0o777, 0o600);
     assert.match(fs.readFileSync(path.join(app, ".gitignore"), "utf8"), /^node_modules\n# Mason: .*\n\.mason\/\n# the database URL mason\/sources\/ names \(mason init\)\n\.env\n$/);
     // what it did, as a checklist, then what to run next
-    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\) and the tables to copy, none yet \(mason add\) — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
+    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ The copy's postgres extension is installed for linux_amd64\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\) and the tables to copy, none yet \(mason add\) — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
     assert.doesNotMatch(r.out, /secret/, "the password is never printed");
     // again here, or anywhere inside: refused, naming the project and how to point it elsewhere
     fs.mkdirSync(path.join(app, "src"));
@@ -391,7 +403,7 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
   try {
     const app = path.join(root, "try-mason");
     fs.mkdirSync(app);
-    const r = await quiet((io) => init(["demo"], app, { io }));
+    const r = await quiet((io) => init(["demo"], app, { io, extension: INSTALLED }));
     assert.equal(r.value, 0, r.err);
     const p = readProject(app) as Project;
     // the config says it is the demo's, and holds no URL: the port is in .env's URL alone
@@ -413,7 +425,7 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     assert.match(fs.readFileSync(path.join(app, ".gitignore"), "utf8"), /\.mason\/\n.*\n\.env\n$/);
     // the checklist: no connection, the database made by mason start; then what to run next
     assert.match(r.out, new RegExp(`^Making try-mason a Mason project in .*\\n✓ The demo database will be postgres://demo@127\\.0\\.0\\.1:${port}/demo: mason start makes it in \\.mason/demo/ and seeds it \\(nothing to connect to yet\\)\\n` +
-      "✓ Wrote \\.mason/config\\.json: Mason's key \\(this machine's\\)\\n✓ Wrote mason/sources/demo\\.yml: the database \\(url: \\$\\{DATABASE_URL\\}\\) and the tables to copy, the demo's 3 added — mason add order_items adds the fourth — commit it\\n" +
+      "✓ The copy's postgres extension is installed for linux_amd64\\n✓ Wrote \\.mason/config\\.json: Mason's key \\(this machine's\\)\\n✓ Wrote mason/sources/demo\\.yml: the database \\(url: \\$\\{DATABASE_URL\\}\\) and the tables to copy, the demo's 3 added — mason add order_items adds the fourth — commit it\\n" +
       `✓ Wrote DATABASE_URL=postgres://demo@127\\.0\\.0\\.1:${port}/demo to \\.env: the URL the source file names, kept out of git\\n✓ Made \\.gitignore, ignoring \\.mason/ and \\.env\\n\\n` +
       "Tip: The demo database runs inside mason start, read by polling: a new order every few seconds; order_items is left for you to add; mason destroy removes it with the copy\\n\\n" +
       "Next:\\n {2}mason start +the demo database and Mason, in the background: its tables copied, then kept current\\n" +
@@ -426,10 +438,10 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     // --json: the declared keys, demo true; a project on a database of its own says false
     const asData = path.join(root, "as-data");
     fs.mkdirSync(asData);
-    const j = await quiet((io) => init(["demo", "--json"], asData, { io }));
+    const j = await quiet((io) => init(["demo", "--json"], asData, { io, extension: INSTALLED }));
     assert.equal(j.value, 0, j.err);
     const answer = JSON.parse(j.out) as Record<string, unknown> & { source: { url: string; env: string }; database: { url: string; from: unknown; version: unknown; tables: unknown }; next: Array<{ command: string }> };
-    assert.deepEqual(Object.keys(answer), ["name", "root", "folder", "config", "demo", "source", "database", "warnings", "next"]);
+    assert.deepEqual(Object.keys(answer), ["name", "root", "folder", "config", "demo", "source", "database", "extension", "warnings", "next"]);
     assert.equal(answer.demo, true);
     assert.equal(answer.source.url, "${DATABASE_URL}");
     assert.match(answer.source.env, /^DATABASE_URL=postgres:\/\/demo@127\.0\.0\.1:\d+\/demo$/);
@@ -462,5 +474,47 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     assert.match(none.err, /\nNext:\n {2}mason init postgres:\/\/.*\n {2}mason init +again, once \.env has DATABASE_URL\n {2}mason init demo +a demo database Mason makes itself: nothing to install\n/);
     const nowhere = theProject(flags) as { fix: string };
     assert.match(nowhere.fix, /mason init demo: a demo database, nothing to install/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason init installs the copy's postgres extension while online, as a step before anything is written; offline it fails in the Failure shape with the way out, and writes nothing", async () => {
+  const root = tmp();
+  try {
+    // not installed: installed by init, said as a step of its checklist, and in --json
+    const one = path.join(root, "one");
+    fs.mkdirSync(one);
+    const fresh = extensionWay({ installed: false });
+    const r = await quiet((io) => init(["postgres://me@localhost:5432/shop", "--skip-check", "--json"], one, { io, extension: fresh.way }));
+    assert.equal(r.value, 0, r.err);
+    assert.equal(fresh.installs, 1);
+    assert.deepEqual(JSON.parse(r.out).extension, { ...AT, installed: true, installedNow: true });
+    const two = path.join(root, "two");
+    fs.mkdirSync(two);
+    const said = await quiet((io) => init(["demo"], two, { io, extension: extensionWay({ installed: false }).way }));
+    assert.match(said.out, /\n✓ Installed the copy's postgres extension for linux_amd64: a first copy needs no internet\n✓ Wrote \.mason\/config\.json/, "mason init demo installs it too");
+    // installed already: nothing downloaded
+    const three = path.join(root, "three");
+    fs.mkdirSync(three);
+    const have = extensionWay({ installed: true });
+    assert.equal((await quiet((io) => init(["postgres://me@localhost:5432/shop", "--skip-check"], three, { io, extension: have.way }))).value, 0);
+    assert.equal(have.installs, 0);
+    // offline: the install fails — the Failure shape, its way out for both kinds of machine, and nothing written
+    const four = path.join(root, "four");
+    fs.mkdirSync(four);
+    const offline = extensionWay({ installed: false, install: () => { throw new Error("IO Error: Failed to download extension \"postgres_scanner\" at URL \"http://extensions.duckdb.org/…\"\nCould not establish connection"); } });
+    const failed = await quiet((io) => init(["postgres://me@localhost:5432/shop", "--skip-check", "--json"], four, { io, extension: offline.way }));
+    assert.equal(failed.value, 1);
+    const e = JSON.parse(failed.out) as { error: { code: string; message: string; why: string; fix: string }; next: Array<{ command: string }> };
+    assert.equal(e.error.code, "failed");
+    assert.match(e.error.message, /^could not install the copy's postgres extension: IO Error: Failed to download extension "postgres_scanner"/);
+    assert.doesNotMatch(e.error.message, /\n/, "its first line");
+    assert.match(e.error.why, /without it, a first copy fails/);
+    assert.equal(e.error.fix, "connect to the internet and run the same mason init again (nothing was written): the extension is downloaded once a machine\n" +
+      `a machine with no internet: copy ${AT.path} from a linux_amd64 machine that ran mason init, or run the mason-data image, which has it`);
+    assert.deepEqual(e.next.map((n) => n.command), ["mason doctor"]);
+    assert.deepEqual(fs.readdirSync(four), [], "nothing written: the same mason init runs again once online");
+    const text = await quiet((io) => init(["postgres://me@localhost:5432/shop", "--skip-check"], four, { io, extension: offline.way }));
+    assert.match(text.out, /✗ Installing the copy's postgres extension/);
+    assert.match(text.err, /could not install the copy's postgres extension/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
