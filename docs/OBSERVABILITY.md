@@ -21,6 +21,7 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | `GET /api/running`, `POST /api/cancel { session }` | `mason logs --running`, `mason cancel <session>` | the statements running now; stop one as a client's cancel does |
 | `GET /api/usage?since=&until=&step=` | `mason usage` | a sample a minute, re-bucketed by `step`, and each copy's own size |
 | `GET /api/users[?lastUsed=1]` | `mason user list` | the users, removed ones kept; the last use only when asked (a scan of the request log) |
+| `POST /api/users/<name>/disable`, `POST /api/users/<name>/enable` | `mason user disable <name>`, `mason user enable <name>` | a user kept with its password, its logins refused (28000) until enabled; `{ disabled \| enabled, already, next }` |
 | `GET /api/logs?lines=&since=` | `mason logs --json` | the run's last log entries from memory (`mason serve` has no file) |
 | `POST /api/sync { tables }` | `mason sync` | sync now, per table |
 
@@ -87,7 +88,8 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
   (2 s, lean: no table's columns), `/api/usage` `copySizes` (60 s), and a table's columns once as its form opens
   (`/api/tables/<table>/columns`).
-- **Users** (`#users`): today's add form and Remove, and each user's status (Active / Removed), when it was added, its
+- **Users** (`#users`): today's add form, Disable (asks first) / Enable and Remove, and each user's status (Active /
+  Disabled / Removed), when it was added, its
   last use, and its URL without the password (**Copy**). Reads `/api/users?lastUsed=1` (on opening, then 30 s).
 - **Observability › Queries** (`#observability/queries`): who is connected now (`sessions` of `/api/state`: the 10
   clients with the most sessions, then one row for the others), the statements running now, each with **Cancel** (asks
@@ -172,6 +174,7 @@ Key: ✅ built · ⏸ deferred
 | Added at | ✅ | `addedAt` |
 | Last used | ✅ | `lastUsedAt`, the request log's latest row for the user (`?lastUsed=1`); older than the retention is said as such |
 | Active / Removed | ✅ | a removed user is kept with `removedAt` |
+| Disable / enable | ✅ | `mason user disable` / `enable`, `POST /api/users/<name>/disable` / `enable`; kept with `disabledAt`, its password unchanged |
 | Connection string | ✅ | with the password ONCE, when the user is added (kept nowhere); afterwards the URL without it |
 
 ## 5. Usage

@@ -10,7 +10,8 @@
  *
  * THE RULES THIS MODULE EMBODIES:
  *   - THE PASSWORD IS VERIFIED BY `authenticate` (a `mason user`'s password, or a token minted from the API key,
- *     src/duck/users.ts `listenerLogins`): a refused one is `28P01` as a wrong password is. The database a tool names
+ *     src/duck/users.ts `listenerLogins`): a refused one is `28P01` as a wrong password is; a DISABLED user's (its
+ *     password right) is `28000`, as Postgres refuses a role without LOGIN. The database a tool names
  *     must be the project's: a tool connecting to the wrong Mason learns so at once (`3D000`).
  *   - WHAT A TOOL SETS IS HONOURED OR REFUSED, never silently ignored: `TimeZone` moves every timestamptz the session
  *     sends; `extra_float_digits` below 1 would print a float with FEWER digits than this listener sends and is
@@ -51,7 +52,7 @@ import * as crypto from "node:crypto";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import type { RawStmt } from "libpg-query";
-import { ApiError } from "../error.ts";
+import { ApiError, USER_DISABLED } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
 import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
@@ -858,10 +859,15 @@ class Session {
       const message = err instanceof Error ? err.message : String(err);
       // a revocation record that could not be read is no wrong password: the server could not tell, said as such
       const unknown = err instanceof ApiError && err.status === 503;
-      const refused = new PgError({ code: unknown ? "57P03" : "28P01",
-        message: unknown ? `the password could not be checked for user "${this.user}": ${message}` : `password authentication failed for user "${this.user}": ${message}`,
-        hint: unknown ? "connect again once Mason can read its list of users"
-          : "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL" }, 401);
+      // a disabled user (`mason user disable`): its password was right, so it is no wrong password but a role that may
+      // not log in, which Postgres refuses 28000 "role … is not permitted to log in" (the message says it whole)
+      const disabled = err instanceof ApiError && err.code === USER_DISABLED;
+      const refused = disabled
+        ? new PgError({ code: "28000", message, detail: `Mason: ${USER_DISABLED}`, hint: `mason user enable ${this.user} lets it connect again, with the same password` }, 401)
+        : new PgError({ code: unknown ? "57P03" : "28P01",
+          message: unknown ? `the password could not be checked for user "${this.user}": ${message}` : `password authentication failed for user "${this.user}": ${message}`,
+          hint: unknown ? "connect again once Mason can read its list of users"
+            : "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL" }, 401);
       // a tool that cannot connect is the first thing to look for in the request log
       this.asked = { sql: "", method: "CONNECT", startedAt: Date.now(), sentAt: this.sentBytes };
       const response = errorResponse({ ...refused.fields, severity: "FATAL" });
@@ -1650,7 +1656,9 @@ class Session {
       // could not tell: this statement is refused, the session kept, and the next statement asks again
       if (err instanceof ApiError && err.status === 503) return new PgError({ code: "57P03", message, hint: "run the statement again once Mason can read its list of users" }, 503);
       if (err instanceof ApiError) this.recordRefusal(asked.toUpperCase(), err);
-      this.fatal("28000", `the session's user is no longer accepted: ${message}`, `a removed user's sessions end at their next statement; mason user add ${user} makes it again, with a new password`);
+      this.fatal("28000", `the session's user is no longer accepted: ${message}`, err instanceof ApiError && err.code === USER_DISABLED
+        ? `a disabled user's sessions end at their next statement; mason user enable ${user} lets it connect again, with the same password`
+        : `a removed user's sessions end at their next statement; mason user add ${user} makes it again, with a new password`);
       return null;
     }
     this.verifiedAt = now;

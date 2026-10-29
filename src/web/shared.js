@@ -355,9 +355,10 @@ export function button(label, data = {}, variant = "", { room = "", disabled = f
  * A BUTTON WHOSE LABEL CHANGES KEEPS ITS WIDTH: `room` is its longest label (Sync → Syncing… → Synced ✓, Copy → Copied),
  * written as `data-room` and laid by the stylesheet as an invisible line of no height under the label
  * (`button[data-room]::after`), so the button is as wide as its widest word whichever it says — and its row and its
- * column never move when it changes. The rooms of the buttons whose label changes, by what they do.
+ * column never move when it changes. The rooms of the buttons whose label changes, by what they do (a user's Disable
+ * becomes Enable once it is disabled: one room, the longer).
  */
-export const ROOMS = { sync: "Syncing…", add: "Adding…", copy: "Press ⌘C" };
+export const ROOMS = { sync: "Syncing…", add: "Adding…", copy: "Press ⌘C", disable: "Disable" };
 
 /**
  * A POPOVER ANCHORED TO WHAT ASKED FOR IT — a confirm, a form, what an action answered — so nothing is inserted into a
