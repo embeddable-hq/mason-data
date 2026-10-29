@@ -845,7 +845,7 @@ test("the shell: a sidebar nav — Overview · Tables · Users, the Observabilit
   }
   assert.ok(!html.includes('id="subnav"'), "no head above the view's title");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.nav a\[aria-current="page"\] \{[^}]*background: var\(--line\)/, "the page shown is a filled row of the nav");
+  assert.match(css, /\.nav a\[aria-current="page"\] \{[^}]*background: var\(--fg\)/, "the page shown is the nav's inverted (ink) row");
   assert.match(css, /\.range a\[aria-current="true"\]/, "the range chosen is the raised segment");
   const app = fn<[unknown], App>("createApp")(fakeRun().fetch);
   assert.match(textOf(app.view()["usage-queries"]!), /Asking Mason/);
@@ -2486,7 +2486,7 @@ test("the buttons: every one has a visible label; a primary, a destructive one a
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /button\.small \{ height: 28px;/);
   assert.match(css, /\.confirm ~ button\.danger \{ background: var\(--bad\); color: var\(--surface\)/, "the confirm of a destructive action is filled red");
-  assert.match(css, /button\.primary \{ background: var\(--fg\)/);
+  assert.match(css, /button\.primary \{ background: var\(--cta\)/, "the primary action is the one warm fill");
   assert.match(css, /button:focus-visible \{ outline: 2px solid var\(--accent\)/);
   assert.match(css, /button:disabled \{ opacity: 0\.5; cursor: not-allowed; \}/);
   assert.match(css, /td\.act \{ text-align: right; white-space: nowrap; \}/);
