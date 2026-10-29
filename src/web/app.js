@@ -66,7 +66,7 @@ export const PRESS_HOLD_MS = 2000;
 
 // every renderer the tests import from here, wherever it lives now
 export * from "./shared.js";
-export { copyingText, tableLine, sourceRows, renderStatus } from "./pages/status.js";
+export { copyingText, tableLine, keptAge, sourceRows, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
 export { renderUsers, renderAdded } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";

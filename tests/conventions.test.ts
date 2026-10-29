@@ -727,3 +727,108 @@ test("the link guard would catch the real thing", () => {
   ]);
   assert.deepEqual(brokenLinks("README.md", "```\n[x](nothing.md)\n```", read), [], "a link in a code fence is code");
 });
+
+/**
+ * EVERY REFUSAL ON THE WIRE NAMES ITS REGISTRY ENTRY (CLAUDE.md "Conventions"; src/duck/gaps.ts): the listener refused
+ * Postico's SHOW ALL, at every connection, with a bare `PgError` 0A000 that named no gap, so docs/SQL-SUPPORT.md never
+ * listed it and the oracle never met it. A `new PgError({ code: "0A000", … })` in src/api/ names its gap (`gapMark(…)`,
+ * or `Mason gap <id>` in its words); those that did not when this guard was written are listed by their FULL message
+ * text, a ratchet held as a multiset: none is added (a copy of a listed one included), and one fixed or gone is taken
+ * off the list.
+ *
+ * The fields object is read whole, whatever its keys' order or quoting: `new PgError({ … })`, or `new PgError(f)` of a
+ * `const f = { … }` before it; its braces matched past string and template literals (a `${f({})}` inside a message)
+ * and comments; its code `"0A000"` in any quotes, or a constant of the file whose value is it.
+ */
+/** the index just past the string or template literal that opens at `i` (a template's `${…}` matched as code) */
+function pastLiteral(src: string, i: number): number {
+  const q = src[i]!;
+  for (let j = i + 1; j < src.length; j++) {
+    if (src[j] === "\\") { j++; continue; }
+    if (src[j] === q) return j + 1;
+    if (q === "`" && src[j] === "$" && src[j + 1] === "{") j = pastBraces(src, j + 1) - 1;
+  }
+  return src.length;
+}
+/** the index just past the `}` that closes the `{` at `open`, skipping literals and comments */
+function pastBraces(src: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '"' || c === "'" || c === "`") { i = pastLiteral(src, i) - 1; continue; }
+    if (c === "/" && src[i + 1] === "/") { const nl = src.indexOf("\n", i); i = nl < 0 ? src.length : nl; continue; }
+    if (c === "/" && src[i + 1] === "*") { const end = src.indexOf("*/", i + 2); i = end < 0 ? src.length : end + 1; continue; }
+    if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i + 1;
+  }
+  return src.length;
+}
+export function bareRefusals(src: string): string[] {
+  const constants = [...src.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[\w.]+\s*)?=\s*(["'`])0A000\2/g)].map((m) => m[1]!);
+  const featureCode = new RegExp(`\\bcode\\s*:\\s*(?:(["'\`])0A000\\1${constants.map((c) => `|${c.replace(/\$/g, "\\$")}\\b`).join("")})`);
+  const objects: string[] = [];
+  for (const m of src.matchAll(/new PgError\(\s*/g)) {
+    const at = m.index + m[0].length;
+    if (src[at] === "{") { objects.push(src.slice(at, pastBraces(src, at))); continue; }
+    const name = /^[A-Za-z_$][\w$]*/.exec(src.slice(at))?.[0];
+    if (name === undefined) continue;
+    const made = [...src.slice(0, m.index).matchAll(new RegExp(`\\b(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\s*(?::[^=]+)?=\\s*\\{`, "g"))].at(-1);
+    if (made !== undefined) { const open = made.index + made[0].length - 1; objects.push(src.slice(open, pastBraces(src, open))); }
+  }
+  return objects.filter((o) => featureCode.test(o) && !/gapMark\(|Mason gap [a-z0-9-]/.test(o)).map((o) => {
+    const key = /\bmessage\s*:\s*/.exec(o);
+    if (key === null) return "(no message)";
+    const from = key.index + key[0].length;
+    return /["'`]/.test(o[from] ?? "") ? o.slice(from + 1, pastLiteral(o, from) - 1) : `(an expression) ${/^[^,}]*/.exec(o.slice(from))![0].trim()}`;
+  });
+}
+const BARE_REFUSALS_WHEN_GUARDED = [
+  "startup options ${JSON.stringify(options)}: only -c name=value is supported",
+  "DateStyle ${value} is not supported: this API writes every date and time in ISO 8601 (DateStyle ISO)",
+  "extra_float_digits ${n} is not supported: this API sends every float as the shortest text that reads back exactly (Postgres's extra_float_digits >= 1, the default since Postgres 12); fewer digits would be a different number",
+  "standard_conforming_strings off is not supported: a string literal is read as Postgres reads it by default",
+  "EXPLAIN of this statement is not supported: a SELECT is explained",
+  "Mason cannot find the statement this EXPLAIN explains in its text (a Mason gap: report it, with the statement)",
+];
+
+test("a statement refused 0A000 by the listener names its gap (src/duck/gaps.ts): no new bare refusal", () => {
+  const bare = scannedFiles(["src/api"]).flatMap((f) => bareRefusals(f.src));
+  assert.deepEqual([...bare].sort(), [...BARE_REFUSALS_WHEN_GUARDED].sort(), "a refusal that names no gap: register it in src/duck/gaps.ts and name " +
+    "it (gapMark), or answer the statement; a listed one that is gone is taken off BARE_REFUSALS_WHEN_GUARDED");
+});
+
+test("the bare-refusal guard catches the real thing", () => {
+  assert.deepEqual(bareRefusals('if (name === "all") throw new PgError({ code: "0A000", message: "SHOW ALL is not supported: SHOW one parameter" });'), ["SHOW ALL is not supported: SHOW one parameter"]);
+  // the spellings a textual pattern missed (the review of #38): each is a bare refusal
+  assert.deepEqual(bareRefusals('throw new PgError({ message: "fields in another order", code: "0A000" });'), ["fields in another order"]);
+  assert.deepEqual(bareRefusals("throw new PgError({ code: '0A000', message: 'a single-quoted message' });"), ["a single-quoted message"]);
+  assert.deepEqual(bareRefusals('const UNSUPPORTED = "0A000";\nthrow new PgError({ code: UNSUPPORTED, message: "a code by a constant" });'), ["a code by a constant"]);
+  assert.deepEqual(bareRefusals('const f = { code: "0A000", message: "the fields built first" };\nthrow new PgError(f);'), ["the fields built first"]);
+  assert.deepEqual(bareRefusals('throw new PgError({ code: "0A000", hint: "a hint first", message: "a hint between" });'), ["a hint between"]);
+  assert.deepEqual(bareRefusals('throw new PgError({\n  code: "0A000", // the user\'s word\n  message: `x ${n}`,\n});'), ["x ${n}"], "a comment and a template");
+  // named, or not a feature's refusal: none
+  assert.deepEqual(bareRefusals('throw new PgError({ code: "0A000", message: `x is not supported (${gapMark("show-all")})` });'), []);
+  assert.deepEqual(bareRefusals('throw new PgError({ code: "0A000", message: "x", detail: "Mason gap explain-option" });'), []);
+  assert.deepEqual(bareRefusals('throw new PgError({ code: "0A000", message: `x ${f({})} y`, detail: gapMark("show-all") });'), [], "a } inside the message is no end of the fields");
+  assert.deepEqual(bareRefusals('throw new PgError({ code: "22023", message: "a bad value" });'), [], "another SQLSTATE is Postgres's own refusal");
+});
+
+/**
+ * WHAT A SESSION SAYS A PARAMETER IS, ONE READER (src/api/postgres/server.ts `sessionSetting`; a fact derived in several
+ * places): `SHOW <name>`, SHOW ALL's row of that name and the ParameterStatus the startup reports each read it, so a tool
+ * reads one string however it asks. `fixedParameter` is called by that reader alone.
+ */
+test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through one reader (sessionSetting)", () => {
+  const server = "src/api/postgres/server.ts";
+  const src = fs.readFileSync(path.join(ROOT, server), "utf8");
+  for (const start of ["private async showStatement(", "private async showAll(", "private reportedParameters("]) {
+    const at = src.indexOf(start);
+    assert.ok(at >= 0, `${server} has no ${start}`);
+    const body = src.slice(at, src.indexOf("\n  }\n", at));
+    assert.match(body, /this\.sessionSetting\(/, `${start}…): read the value through sessionSetting`);
+    // and through it alone: no session variable, TLS table or fixed value read beside it
+    assert.deepEqual([...body.matchAll(/this\.vars\.\w+|\btlsParameters\(|\bfixedParameter\(/g)].map((m) => m[0]), [], `${start}…): a value read beside sessionSetting`);
+  }
+  const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
+  assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
+});

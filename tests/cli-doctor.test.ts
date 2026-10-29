@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DOCTOR_USAGE, memoryCheck, NODE_MIN, nextSteps, nodeCheck, portsCheck, PORTS, verdictOf, type Check } from "../src/cli/doctor.ts";
+import * as doctorModule from "../src/cli/doctor.ts";
 import { defaultMemoryLimit, machineMemoryBytes } from "../src/duck/store.ts";
 import type { DevRun } from "../src/cli/runs.ts";
 import { newConfig, type Project } from "../src/cli/project.ts";
@@ -131,39 +132,17 @@ test("the next command follows the first failing check, in the order a first ses
   assert.equal(first([ok("mason start"), ok("project", "applied: 2 table(s)"), ok("queries")], run, project), "mason user add <name>");
 });
 
-test("the copy's postgres extension: a line saying whether it is installed for this machine, with the way out for an online and an offline one; a read that fails is could-not-tell", async () => {
-  // read from the module when the test runs: at a commit without it, the file loads and this test fails by name
-  const doctorModule = await import("../src/cli/doctor.ts") as unknown as { extensionCheck?: (way: { status: () => Promise<{ installed: boolean; path: string; platform: string }> }) => Promise<Check> };
-  assert.equal(typeof doctorModule.extensionCheck, "function", "src/cli/doctor.ts exports extensionCheck");
-  const extensionCheck = doctorModule.extensionCheck!;
-  const at = { path: "/home/me/.duckdb/extensions/v2.0.0/linux_amd64/postgres_scanner.duckdb_extension", platform: "linux_amd64" };
-  assert.deepEqual(await extensionCheck({ status: async () => ({ ...at, installed: true }) }),
-    { name: "extension", ok: true, detail: `the copy's postgres extension is installed for linux_amd64 (${at.path})` });
-  const missing = await extensionCheck({ status: async () => ({ ...at, installed: false }) });
-  assert.equal(missing.ok, false);
-  assert.equal(missing.detail, "the copy's postgres extension is not installed for linux_amd64, so a first copy needs the internet. To install it, connect to the internet " +
-    "and run mason init, or mason start (its first copy installs it): the extension is downloaded once a machine; on a machine with no internet: copy " +
-    `${at.path} from a linux_amd64 machine that ran mason init, or run the mason-data image, which has it`);
-  assert.deepEqual(verdictOf([{ name: "node", ok: true, detail: "" }, missing], null, project),
-    { ready: false, verdict: "Not ready: the copy's postgres extension is not installed for linux_amd64, so a first copy needs the internet" });
-  const unread = await extensionCheck({ status: async () => { throw new Error("IO Error: Permission denied"); } });
-  assert.deepEqual([unread.ok, unread.detail], [null, "could not tell whether the copy's postgres extension is installed: IO Error: Permission denied"]);
-  // what to run next: with no project mason init (which installs it), with one mason start (its first copy), with Mason up mason wait
-  const ok = (name: string): Check => ({ name, ok: true, detail: "" });
-  assert.deepEqual(nextSteps([ok("node"), missing], null, null).map(([c]) => c), ["mason init", "mason init postgres://user:password@localhost:5432/your_app"]);
-  assert.deepEqual(nextSteps([ok("node"), ok("database"), missing], null, project), [["mason start", "online: its first copy installs the copy's postgres extension, once a machine"]]);
-  assert.deepEqual(nextSteps([ok("mason start"), ok("project"), missing], run, project).map(([c]) => c), ["mason wait"]);
-  // a copy that cannot load it names mason doctor (src/duck/sync.ts attach, the message mason status and wait show)
-  const extensionModule = await import("../src/duck/extension.ts" as string).catch(() => ({})) as { extensionFailure?: (e: string) => string };
-  assert.match(extensionModule.extensionFailure?.("IO Error: Failed to download extension") ?? "",
-    /^Mason could not load the copy's postgres extension: IO Error: Failed to download extension\. .*connect to the internet, and the copy is tried again at the next pass; mason doctor says whether it is installed/);
-});
-
-test("the extension is read for this machine without a download (src/duck/extension.ts): its platform and where it is or would be", async () => {
-  const extensionModule = await import("../src/duck/extension.ts" as string).catch(() => ({})) as { postgresExtension?: () => Promise<{ installed: boolean; path: string; platform: string }> };
-  assert.equal(typeof extensionModule.postgresExtension, "function");
-  const s = await extensionModule.postgresExtension!();
-  assert.equal(typeof s.installed, "boolean");
-  assert.match(s.platform, /^[a-z0-9]+_[a-z0-9_]+$/);
-  assert.match(s.path, new RegExp(`${s.platform}/postgres_scanner\\.duckdb_extension$`));
+test("extensions: the probe's verdict on its own line; not shipped and not downloaded yet is a question, never a failure", async () => {
+  // read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
+  const { extensionsCheck } = doctorModule as unknown as { extensionsCheck?: (probe: () => Promise<{ ok: boolean | null; detail: string }>) => Promise<Check> };
+  assert.equal(typeof extensionsCheck, "function", "src/cli/doctor.ts exports extensionsCheck");
+  const shipped = await extensionsCheck!(async () => ({ ok: true, detail: "postgres and inet ship with Mason (@mason-data/extensions-linux-x64 0.7.0): nothing is downloaded" }));
+  assert.deepEqual(shipped, { name: "extensions", ok: true, detail: "postgres and inet ship with Mason (@mason-data/extensions-linux-x64 0.7.0): nothing is downloaded" });
+  const later = await extensionsCheck!(async () => ({ ok: null, detail: "postgres and inet not on this machine yet, so the first copy downloads them and needs the internet once: …" }));
+  assert.equal(later.ok, null);
+  const ok: Check[] = [nodeCheck("24.1.0"), later];
+  assert.equal(verdictOf(ok, null, project).ready, true, "online, a first copy downloads them: still ready");
+  const broken = await extensionsCheck!(async () => ({ ok: false, detail: "@mason-data/extensions-linux-x64 0.7.0 is installed, and its inet does not load: … Install @mason-data/cli again" }));
+  assert.equal(verdictOf([nodeCheck("24.1.0"), broken], null, project).ready, false);
+  assert.match(DOCTOR_USAGE, /the copy's postgres and inet extensions/);
 });

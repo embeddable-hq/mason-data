@@ -39,6 +39,7 @@ import type { PlannedSql } from "./plan.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { DuckDBType } from "@duckdb/node-api";
+import { extensionSettings, findExtensions, type Extensions } from "./extensions.ts";
 
 export const MASON_SCHEMA = "_mason";
 
@@ -59,14 +60,6 @@ export const DUCKDB_VERSION = version();
  * columns keeping their own methods, BitPacking and RLE, since forcing only touches what ZSTD can store). The cost of
  * reading a ZSTD column is not measured. tests/duck-wire.test.ts holds a string column to ZSTD.
  *
- * `autoinstall_known_extensions: false`: NOTHING IS DOWNLOADED WHILE MASON RUNS. DuckDB's default fetches any known
- * extension a statement's function or type needs from its repository on the internet, at that statement: an answer
- * that hangs, or fails, on a box with no egress, and code fetched at run time. JSON, ICU and Parquet are built in; the
- * one extension Mason loads, `postgres`, is installed on purpose (src/duck/extension.ts) — in the image at build, from
- * npm by `mason init` (else at the first copy, src/duck/sync.ts attach), `mason doctor` saying whether it is — and an
- * installed one still loads by itself. Anything else is
- * DuckDB's "exists in the … extension" error, never a download. tests/duck-wire.test.ts holds it.
- *
  * `lambda_syntax: ENABLE_SINGLE_ARROW`: the rewrite is a Postgres parse tree, printed by Postgres's deparser, which
  * can spell DuckDB's lambda only as `x -> f(x)` (Postgres's `->` operator), never as `lambda x: f(x)`; DuckDB 2.0
  * refuses that spelling by default. Two rewrites need a lambda: a jsonb's order under ICU or a libc locale, which maps
@@ -74,8 +67,11 @@ export const DUCKDB_VERSION = version();
  * holds the key under every collation), and a LEFT lateral's unnest of an expression, which computes the expression
  * once with `list_transform(list_value(e), l -> CASE … l … END)[1]` (`rangeFunction`; tests/duck-wire.test.ts). A `->`
  * that is not a lambda function's argument is still the json operator.
+ *
+ * Beside them, the copy's extensions (src/duck/extensions.ts `extensionSettings`): with Mason's package for this
+ * platform, `extension_directory` is that package and nothing is ever downloaded; without one, DuckDB's defaults.
  */
-const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", autoinstall_known_extensions: "false", lambda_syntax: "ENABLE_SINGLE_ARROW" };
+const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", lambda_syntax: "ENABLE_SINGLE_ARROW" };
 
 /**
  * DUCKDB'S MEMORY, BOUNDED FOR THIS PROCESS: DuckDB's default is 80% of the machine's RAM, in a process
@@ -153,15 +149,19 @@ export class DuckStore {
   private readonly executor: Executor;
   private closed: Promise<void> | null = null;
   private readonly closeGraceMs: number | undefined;
-  private constructor(file: string, executor: Executor, memoryLimit: number, closeGraceMs?: number) {
-    this.file = file; this.executor = executor; this.memoryLimitBytes = memoryLimit; this.closeGraceMs = closeGraceMs;
+  /** where the copy's extensions come from: Mason's package for this platform, or DuckDB's install (src/duck/extensions.ts) */
+  readonly extensions: Extensions;
+  private constructor(file: string, executor: Executor, memoryLimit: number, extensions: Extensions, closeGraceMs?: number) {
+    this.file = file; this.executor = executor; this.memoryLimitBytes = memoryLimit; this.extensions = extensions; this.closeGraceMs = closeGraceMs;
     this.writer = executor.writer();
     this.instance = { connect: () => executor.connect() };
   }
 
   /** `silentMs` and `closeGraceMs`: the executor's bounds (src/duck/executor.ts SILENT_MS, CLOSE_GRACE_MS), shorter only
-   *  in a test; `workerFile`, the executor worker's module, another only in a test */
-  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; silentMs?: number; closeGraceMs?: number; workerFile?: string } = {}): Promise<DuckStore> {
+   *  in a test; `workerFile`, the executor worker's module, another only in a test; `extensions`, this machine's
+   *  (`findExtensions`) unless a test names a package */
+  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions } = {}): Promise<DuckStore> {
+    const extensions = options.extensions ?? findExtensions();
     const memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
     if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(`MASON_DUCKDB_MEMORY=${JSON.stringify(memoryLimit)} is not an amount of memory: write it as 8GB or 512MiB (unset, half the machine's RAM: ${DEFAULT_MEMORY_LIMIT})`);
     const where = path.resolve(file);
@@ -175,10 +175,10 @@ export class DuckStore {
     try {
       if (before !== undefined) await before.closed;
       // every connection's, the sync's and each session's
-      executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, memory_limit: memoryLimit, temp_directory: `${file}.tmp` }, log,
+      executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, ...extensionSettings(extensions), memory_limit: memoryLimit, temp_directory: `${file}.tmp` }, log,
         ...(options.silentMs !== undefined ? { silentMs: options.silentMs } : {}), ...(options.workerFile !== undefined ? { workerFile: options.workerFile } : {}) });
     } catch (e) { if (opened.get(where) === mine) opened.delete(where); throw e; }
-    const store = new DuckStore(file, executor, memoryLimitBytes(memoryLimit), options.closeGraceMs);
+    const store = new DuckStore(file, executor, memoryLimitBytes(memoryLimit), extensions, options.closeGraceMs);
     // closed: the file may be opened again — unless its thread was given up on (`abandoned`), which keeps it here
     store.closing = (p) => { mine.closed = p; void p.then(() => { if (executor.abandoned !== null) mine.abandoned = executor.abandoned; else if (opened.get(where) === mine) opened.delete(where); }); };
     return store;
@@ -229,7 +229,8 @@ export class DuckStore {
     return {
       collation: c,
       open: () => this.runner(),
-      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound) => planDuck(catalog, text, stmt, base, paramOids, searchPath, timeZone, c, verified, userTypes, copies, 0, kept ?? null, wireBound ?? false),
+      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound, grants) =>
+        planDuck(catalog, text, stmt, base, paramOids, searchPath, timeZone, c, verified, userTypes, copies, 0, kept ?? null, wireBound ?? false, grants),
       parameters: duckParameters,
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,

@@ -40,4 +40,4 @@ tls:
   selfSigned: true          # MASON_PG_SELF_SIGNED_TLS=1: a certificate made on the volume; clients use sslmode=require
   certSecret: ""            # or a kubernetes.io/tls Secret (tls.crt, tls.key) a CA signed; selfSigned is then ignored
 
-settings: {}                # more of `mason serve --help`, e.g. MASON_CHANGES: replication, PG_PUBLICATION: app_pub, MASON_POLL_MS: "10000"
+settings: {}                # more of `mason serve --help`, e.g. MASON_CHANGES: replication, PG_PUBLICATION: app_pub, MASON_STATEMENT_TIMEOUT: "10min"

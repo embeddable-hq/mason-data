@@ -296,8 +296,9 @@ imported only when a chart is drawn, which the Overview's sparklines do), every 
 parsed in 1 ms, and polled every 2 s by the Overview and Tables.
 
 **Nothing is fetched at run time**: no URL in src/ is fetched but DuckDB's extension repository; JSON, ICU and Parquet
-are built into DuckDB; the `postgres` extension is installed by the image at build, and DuckDB's autoinstall of any
-other extension is off (src/duck/store.ts). From npm, `mason init` downloads it (else the first copy on a machine).
+are built into DuckDB; the `postgres` and `inet` extensions ship with the CLI and the image, one npm package per
+platform (src/duck/extensions.ts), and with them DuckDB's autoinstall is off. Without a package for the platform, the
+first copy on a machine downloads them once.
 
 **Left, most worth it first**:
 
@@ -305,12 +306,10 @@ other extension is off (src/duck/store.ts). From npm, `mason init` downloads it 
    columns 465 KB → **134 KB**, of 50 columns 3,414 KB → **134 KB** (built and serialised 4.6 → 1.2 ms); a form's
    columns are `GET /api/tables/<table>/columns`, read once as Columns… or Name its key… opens, and `?columns=1` keeps
    them for `mason status --json` (its shape unchanged).
-2. **Done**: from npm, an offline machine's first copy failed (the extension download), said only then. Now `mason
-   init` (and `init demo`) installs it as a checklist step before anything is written — 6–47 ms when it is there, 0.7 s
-   to download (44 MB, osx_arm64) on a fresh home — and, offline, fails in the Failure shape with the way out, writing
-   nothing; `mason doctor` has an `extension` line (read in 6–13 ms, never a download); a copy that cannot load it names
-   `mason doctor`. An air-gapped machine needs the image, `mason init` run once online, or the file copied from a
-   machine of its platform (README "How you use it"). Shipping it in the npm package (~45 MB a platform) was not done.
+2. **Done, by PR 37**: from npm, an offline machine's first copy failed (the extension download), said only then. The
+   copy's `postgres` and `inet` extensions now ship with the CLI as one optional package per platform
+   (`@mason-data/extensions-<platform>`, src/duck/extensions.ts) and in the image; `mason doctor` has an `extensions`
+   line. This branch's own `mason init` install step was dropped for it when main was merged (2026-10-29).
 3. **Done**: Queries' `search` over 7 days was ~0.6 s every 5 s while shown (12 scans, ~7.2 s of a core a minute); a
    search is read every 30 s now (2, ~1.2 s a minute), and the log says "Refreshed every 30 s while searching".
 4. **Done**: the summary was a 7-day scan per ask (146–162 ms at 30 M rows), for each page and `mason status` that

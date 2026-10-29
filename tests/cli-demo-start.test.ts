@@ -58,8 +58,9 @@ const demoDir = path.join(home, "demo");
 // whatever else drew from that pool (another test file, the run's own command server): a port probed free and used
 // later is a race. A port outside the range the kernel assigns, claimed for this process, is handed to no one else
 const pgPort = await unassignedPort();
-// the writer quick (a round every 0.3 s) and the poll too, so the copy is seen keeping up within seconds
-const env = matrixEnv({ MASON_PG_PORT: String(pgPort), MASON_DEMO_CHANGE_MS: "300", MASON_POLL_MS: "1000" });
+// the writer quick (a round every 0.3 s), and the poll too (the sources file's sync: poll 1s, written below), so the copy
+// is seen keeping up within seconds
+const env = matrixEnv({ MASON_PG_PORT: String(pgPort), MASON_DEMO_CHANGE_MS: "300" });
 const mason = (argv: string[], timeoutMs = 120_000): Promise<Answer> => runMason(root, argv, env, timeoutMs);
 const config = (): { name: string; demo?: boolean; running?: { pid: number } | null } => JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
 const envUrl = (): string => /^DATABASE_URL=(.*)$/m.exec(fs.readFileSync(path.join(root, ".env"), "utf8"))?.[1] ?? "";
@@ -108,6 +109,10 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.match(sources, /^url: \$\{DATABASE_URL\}/m);
     for (const t of ["customers", "products", "orders"]) assert.match(sources, new RegExp(`^ {2}${t}: \\{\\}$`, "m"));
     assert.doesNotMatch(sources, /order_items/, "order_items is the person's to add");
+    // the demo's tables are polled every 5 s (its sync: at the file's top); here every second, as a person would edit it
+    assert.match(sources, /^sync: poll 5s {3}# /m, "mason init demo polls every table");
+    const sourcesFile = path.join(root, "mason", "sources", "demo.yml");
+    fs.writeFileSync(sourcesFile, sources.replace(/^sync: poll 5s /m, "sync: poll 1s "));
     assert.equal(config().demo, true);
     assert.ok(!fs.existsSync(demoDir), "nothing is hosted before mason start");
     // THE DEMO ON A PORT THE OS NEVER HANDS OUT (out of its ephemeral range, claimed: tests/test-ports.ts), never the 5434 init prefers (src/cli/demo.ts DEMO_PORT): init takes 5434
@@ -171,9 +176,9 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const text = await mason(["status"]);
     assert.equal(text.code, 0, said(text));
     assert.match(text.stdout, new RegExp(`the demo database Mason hosts \\(postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo · Postgres 18[.\\d]*\\)`));
-    assert.match(text.stdout, /^ {2}Changes +checked every \d+ s \(a SELECT of each table's changed rows\) · the demo database is checked this way only$/m);
+    assert.match(text.stdout, /^ {2}Changes +each table as its sync: says \(a SELECT of its changed rows\) · sync: poll 1s for every table without its own · the demo database is checked this way only$/m);
     assert.match(text.stdout, /^Tables \(3 of 4 added\):$/m);
-    for (const t of ["customers", "products", "orders"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · copied$`, "m"));
+    for (const t of ["customers", "products", "orders"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · copied · polled every 1s, (last \\d+ s ago|not polled yet)$`, "m"));
   });
 
   test("mason add order_items while the run is up, then mason wait: the fourth table lands in the sources file and is copied", async () => {
@@ -193,7 +198,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const text = await mason(["status"]);
     assert.equal(text.code, 0, said(text));
     assert.match(text.stdout, /^Tables \(4 of 4 added\):$/m);
-    assert.match(text.stdout, /^ {2}public\.order_items +█+ 100% +[\d,]+ rows · copied$/m);
+    assert.match(text.stdout, /^ {2}public\.order_items +█+ 100% +[\d,]+ rows · copied · polled every 1s, (last \d+ s ago|not polled yet)$/m);
   });
 
   test("the writer: its orders in the log, in the copy and through the Postgres API", async () => {

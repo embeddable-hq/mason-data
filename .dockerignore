@@ -14,3 +14,6 @@ examples
 deployments
 # the Postgres proxy is its own workspace and image (proxy/Dockerfile, its own build context); its target/ is GBs
 proxy
+# the CLI build and its platform packages (cli/extensions.ts builds the image's own inside it): hundreds of MB
+cli/dist
+cli/platforms

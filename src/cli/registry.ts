@@ -34,10 +34,17 @@ export const DEV: CommandSpec & { needs: "project" } = {
   usage: `usage: mason start [--attach] [--replication [--publication <name>] | --poll] [--self-signed-tls] [--port <n>] [--json]
 
   Starts Mason for the project of this folder (mason init made it): one process, which copies the tables you add
-  (mason add) from the project's database into its own file, keeps them current, and answers the Postgres protocol
-  for BI tools and your app. It only reads the database (SELECT): no wal_level, replication slot or publication is
-  needed or made. It returns once Mason is up; run it again any time (it says so when Mason is already running). The
-  copy and Mason's state stay between runs: the next start resumes.
+  (mason add) from the project's database into its own file, keeps them current as the sources file says, and answers
+  the Postgres protocol for BI tools and your app. It only reads the database (SELECT): no wal_level, replication slot
+  or publication is needed or made. It returns once Mason is up; run it again any time (it says so when Mason is
+  already running). The copy and Mason's state stay between runs: the next start resumes.
+
+  After its first copy, each table is kept current as the sources file's sync: says — at the top for every table, or
+  on a table's entry: off (the default, which mason init writes) reads it again only when you run mason sync <table>;
+  poll <interval> (poll 5s, poll 5m, poll 1h) polls it with SELECTs at that interval. Each poll scans its table whole
+  on your database, and the next waits at least four times as long as that poll took, so the polls never take more
+  than a fifth of your database's time. The start says the file's default once; mason status says how each table is
+  kept current and when it was last synced. A table whose sync: changed keeps its copy and is caught up by one poll.
 
   With --replication it reads the database's change log instead: it needs wal_level = logical and a user that may
   replicate, and makes its own publication and replication slot on the database (mason destroy, or mason start --poll,
@@ -70,7 +77,7 @@ export const DEV: CommandSpec & { needs: "project" } = {
   --replication       read the database's changes from its change log (logical replication), as production does
   --publication <name>  with --replication: the publication to read, the owner's, never altered (PG_PUBLICATION;
                       default: Mason's own, mason_dev_<project>_<source>)
-  --poll              read them with SELECTs (the default; takes back --replication)
+  --poll              read them with SELECTs, as each table's sync: says (the default; takes back --replication)
   --self-signed-tls   the Postgres API requires TLS, from a certificate made for this project in .mason/ (kept and
                       served again by every later start with the flag); not with MASON_PG_TLS_CERT / _KEY
   --port <n>          the port the mason commands reach it on (default 4039, or the next free one)

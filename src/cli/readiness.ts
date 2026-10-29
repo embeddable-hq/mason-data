@@ -106,8 +106,8 @@ export function syncStateOf(c: CopyState | undefined): TableSyncState {
 
 /** A table's sync as `/api/state` says it (`tables[].sync`): its state, when it was last brought current and how
  *  (src/duck/sync.ts `Synced`), and how old that is NOW — the one value here relative to the moment it is asked. */
-export interface TableSync { state: TableSyncState; syncedAt: string | null; syncSeconds: number | null; syncedBy: Synced["by"] | null; ageSeconds: number | null }
-export function tableSync(c: CopyState | undefined, now: number): TableSync {
+export interface SyncFacts { state: TableSyncState; syncedAt: string | null; syncSeconds: number | null; syncedBy: Synced["by"] | null; ageSeconds: number | null }
+export function tableSync(c: CopyState | undefined, now: number): SyncFacts {
   const s = c?.synced;
   return { state: syncStateOf(c), syncedAt: s?.at ?? null, syncSeconds: s?.seconds ?? null, syncedBy: s?.by ?? null,
     ageSeconds: s === undefined ? null : Math.max(0, Math.round((now - Date.parse(s.at)) / 100) / 10) };

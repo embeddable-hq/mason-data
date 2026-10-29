@@ -65,7 +65,7 @@ test("a table is named as the database names it: by its name alone in public, or
 const at = (s: number): string => new Date(Date.UTC(2026, 9, 7, 10, 0, s)).toISOString();
 const state = (o: { tables?: TableState[]; stream?: StreamStatus }): RunState => ({
   source: { url: "postgres://x", database: "shop", remote: false, version: "16", standby: false, changes: "poll", name: "shop", file: "/app/mason/sources/shop.yml" }, warnings: [], folder: "/app/mason",
-  project: "v1", tables: o.tables ?? [], engine: { file: "/app/.mason/duck.db", bytes: 10, pollSeconds: 5 },
+  project: "v1", tables: o.tables ?? [], engine: { file: "/app/.mason/duck.db", bytes: 10 },
   ...(o.stream ? { stream: o.stream } : {}),
 });
 
@@ -164,25 +164,32 @@ test("mason wait: every added table on its line — the finished first in the or
   assert.match(paintBar(lines[3]!, st), /<c>█{5}<\/c>/);
 });
 
-test("mason status and wait: a table over the poll's row limit says on its line that it is NOT kept current, and how to make it so", () => {
-  // the poll scans a table whole, so a table over 1,000,000 rows is copied and served, not polled
+test("mason status and wait: each copied table says how it is kept current and how old its copy is — its sync: off with the command that syncs it, or its poll's interval and last poll", () => {
+  // issue 33: a copy days old answers today's count(*) wrongly, and nothing but these lines tells a person so
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const off = { mode: "off" } as const, every30 = { mode: "poll", every: "30s", seconds: 30 } as const;
   const lines = tableLines(state({ tables: [
     t({ table: "public.orders", added: true, rows: 22_086_165, copy: { phase: "done", rowsCopied: 22_086_165, updatedAt: at(2) },
-      unsynced: { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-26T12:03:44.120Z" } }),
-    t({ table: "shop.events", added: true, copy: { phase: "done", rowsCopied: 3, updatedAt: at(3) }, unsynced: { reason: "over the 1,000,000-row sync limit", asOf: null } }),
-    t({ table: "public.small", added: true, copy: { phase: "done", rowsCopied: 7, updatedAt: at(4) } }),
-  ] }));
+      kept: { by: "poll", sync: off, syncedAt: "2026-10-26T11:00:00.000Z", nextAt: null } }),
+    t({ table: "shop.events", added: true, copy: { phase: "done", rowsCopied: 3, updatedAt: at(3) }, kept: { by: "poll", sync: every30, syncedAt: "2026-10-29T11:59:56.000Z", nextAt: "2026-10-29T12:00:26.000Z" } }),
+    t({ table: "public.fresh", added: true, copy: { phase: "done", rowsCopied: 5, updatedAt: at(4) }, kept: { by: "poll", sync: every30, syncedAt: null, nextAt: "2026-10-29T12:00:00.000Z" } }),
+    t({ table: "public.small", added: true, copy: { phase: "done", rowsCopied: 7, updatedAt: at(5) } }),
+  ] }), now);
   assert.deepEqual(lines, [
-    "public.orders  ████████████████████ 100%  22,086,165 rows · copied, NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-26 12:03 UTC) — mason sync orders, or mason start --replication",
-    "shop.events    ████████████████████ 100%  3 rows · copied, NOT kept current (over the 1,000,000-row sync limit) — mason sync shop.events, or mason start --replication",
+    "public.orders  ████████████████████ 100%  22,086,165 rows · copied · sync: off, last synced 3 days ago — mason sync orders syncs it now; sync: poll 5m on its entry polls it",
+    "shop.events    ████████████████████ 100%  3 rows · copied · polled every 30s, last 4 s ago",
+    "public.fresh   ████████████████████ 100%  5 rows · copied · polled every 30s, not polled yet",
     "public.small   ████████████████████ 100%  7 rows · copied",
   ]);
-  // on a terminal its bar is a warning's colour, never the green of a table kept current
+  // an `off` table is copied as its sync asks: its bar is green, never a warning's colour; one not kept current is yellow
   const st = { ...PLAIN, yellow: (x: string) => `<y>${x}</y>`, green: (x: string) => `<g>${x}</g>` };
-  assert.match(paintBar(lines[0]!, st), /<y>█{20}<\/y>/);
-  assert.match(paintBar(lines[2]!, st), /<g>█{20}<\/g>/);
+  assert.match(paintBar(lines[0]!, st), /<g>█{20}<\/g>/);
+  const behind = tableLines(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) },
+    kept: { by: "poll", sync: every30, syncedAt: "2026-10-29T11:00:00.000Z", nextAt: null, pending: "its columns changed: it is copied again, then caught up by one poll" } })] }), now);
+  assert.deepEqual(behind, ["public.orders  ████████████████████ 100%  1 rows · copied · NOT kept current (last synced 60 min ago): its columns changed: it is copied again, then caught up by one poll"]);
+  assert.match(paintBar(behind[0]!, st), /<y>█{20}<\/y>/);
   // ready all the same: it is copied and served
-  assert.equal(readiness(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) }, unsynced: { reason: "x", asOf: null } })] })).ready, true);
+  assert.equal(readiness(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) }, kept: { by: "poll", sync: off, syncedAt: null, nextAt: null } })] })).ready, true);
 });
 
 test("a copy in a layout an older Mason kept says it is copied again, and is still copied, served and ready (src/duck/sync.ts RETIRED_LAYOUT)", () => {
@@ -249,7 +256,8 @@ test("mason status and wait --json say how each table is kept current (kept, src
   // an agent reading --json could not tell how a table was kept current, or why it was not: the text said it, the JSON
   // mapped a copy's fields one by one and left kept out
   const kepts: KeptCurrent[] = [
-    { by: "poll", polledAt: at(1), unsynced: "over the 1,000,000-row sync limit", pending: "its columns changed: it is copied again, then caught up by one poll" },
+    { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: at(1), nextAt: at(31), pending: "its columns changed: it is copied again, then caught up by one poll" },
+    { by: "poll", sync: { mode: "off" }, syncedAt: at(1), nextAt: null },
     { by: "recopy", copiedAt: at(2) },
     { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C8", lastCommit: at(3), notRunning: "Mason is stopping" },
   ];
@@ -269,9 +277,9 @@ test("mason status and wait --json say how each table is kept current (kept, src
   // every field of each way a copy is kept current
   for (const spec of [STATUS, WAIT]) {
     const line = spec.usage.slice(spec.usage.indexOf("--json"));
-    // each table's unsynced is an object ({ reason, asOf }), kept's a string: the tables' list declares the object
     assert.match(line, /\bkept\b/, `mason ${spec.name}'s usage names kept`);
-    assert.match(line, /unsynced: \{ reason, asOf \}/, `mason ${spec.name}'s usage declares a table's unsynced`);
+    // each table's sync is an object: the declaration names its two shapes
+    assert.match(line.replace(/\s+/g, " "), /sync: \{ mode: off \} or \{ mode: poll, every/, `mason ${spec.name}'s usage declares a table's sync`);
   }
   // kept's own declaration, from where it starts to the stopped shape: none of its fields borrowed from the stream's or
   // the tables' declarations
@@ -283,8 +291,9 @@ test("mason status and wait --json say how each table is kept current (kept, src
   for (const k of [...new Set(kepts.flatMap((k) => Object.keys(k)))]) assert.match(decl, new RegExp(`\\b${k}\\b`), `kept's declaration names ${k}`);
   for (const by of ["poll", "recopy", "replication"]) assert.match(decl, new RegExp(`\\{ by: ${by}\\b`), `kept's declaration names by: ${by}`);
   for (const state of ["streamed", "catching-up", "waiting", "left-out"]) assert.match(decl, new RegExp(`\\b${state}\\b`));
-  // unsynced and pending are present only when they apply; pending says why the copy is not kept current, phase included
-  assert.match(decl, /unsynced \(only when it applies/);
+  // the sync, the age and the next poll: how old a copy is, declared; pending is present only when it applies, and says
+  // why the copy is not kept current, phase included
+  assert.match(decl, /syncedAt \(its last copy or poll\), nextAt \(when its next poll is due; null: off/);
   assert.match(decl, /pending \(only when it applies: why the copy is not kept current now, its phase included/);
   assert.match(decl, /by: recopy, copiedAt, pending \(only when it applies/);
   assert.match(WAIT.usage.replace(/\s+/g, " "), /pending, when it applies, says why the copy is not kept current now, its phase included/);
@@ -371,7 +380,7 @@ test("msText: a duration in ms as a person reads it — ms under a second, then 
 
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
-  const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
+  const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", role: "", endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", status: "completed", sqlstate: null, message: null,
     rows: 20, durationMs: 1234, query: "SELECT id\n FROM public.orders LIMIT 20" }, PLAIN),
     "2026-10-26 14:02:11  ok                   1.2 s      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
@@ -485,14 +494,15 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   const run = (argv: string[]) => runMason(app, argv, matrixEnv());
   const add = await run(["add", "orders", "--json"]);
   assert.equal(add.code, 0, add.stdout + add.stderr);
-  assert.deepEqual(JSON.parse(add.stdout), { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false }],
+  assert.deepEqual(JSON.parse(add.stdout), { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false,
+    sync: { value: "off", from: "default" }, bigOff: false, pollCost: null }],
     file: s.file, next: [{ command: "mason start", what: "Mason in the background, for this project: the copy of every added table begins" },
       { command: "mason wait", what: "then, until every added table is copied and served" }] });
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n`, "the entry, every other byte as it was");
   // as a person: the checklist's line, then Next: mason start
   const person = await run(["add", "customers", "--columns", "name"]);
   assert.equal(person.code, 0, person.stdout + person.stderr);
-  assert.match(person.stdout, /✓ Added public\.customers to mason\/sources\/shop\.yml: id, name\n {4}key added: id \(a copy always has its key\)\n/);
+  assert.match(person.stdout, /✓ Added public\.customers to mason\/sources\/shop\.yml: id, name\n {4}sync: off \(the default\): after its first copy it is read again only by mason sync customers — mason add customers --sync "poll 5m" polls it every 5 minutes\n {4}key added: id \(a copy always has its key\)\n/);
   assert.match(person.stdout, /Next:\n {2}mason start +Mason in the background, for this project: the copy of every added table begins\n/);
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n`);
   // remove: the entry cut; the copy an earlier run made goes at the next start
@@ -530,7 +540,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => [], file: path.join(s.root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map([[Date.parse(sample.at), { p50: sample.durationP50Ms, p95: sample.durationP95Ms }]]), 
         lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
       usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }] },
@@ -600,6 +610,25 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       assert.match(bad.stderr, /mason usage: --since "yesterday" is not a time/);
       assert.equal(usageAsks.length, asked, "refused before the run is asked");
     } finally { writeRunning(s.root, null); }
+    // WHAT TO RUN NEXT, Mason up (a review finding): --sync alone on a table already added starts no copy (it is caught up
+    // by one poll), so the next step is mason status, never mason wait's "the copy has started"; a new table's is mason wait
+    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n`);
+    writeRunning(s.root, { port: ctx.port, token: ctx.token });
+    try {
+      const resync = await runMason(app, ["add", "customers", "--sync", "poll 30s", "--json"], matrixEnv());
+      assert.equal(resync.code, 0, resync.stdout + resync.stderr);
+      assert.deepEqual((JSON.parse(resync.stdout) as { next: unknown }).next, [
+        { command: "mason status", what: "its sync and its copy's age: it is caught up by one poll, never copied again" },
+        { command: "mason user add <name>", what: "a user for your BI tool or psql: it prints the password and the URL to paste" }]);
+      assert.match(fs.readFileSync(s.file, "utf8"), /\n {2}customers:\n {4}sync: poll 30s\n$/);
+      const person = await runMason(app, ["add", "customers", "--sync", "off"], matrixEnv());
+      assert.match(person.stdout, /Next:\n {2}mason status +its sync and its copy's age: it is caught up by one poll, never copied again\n/);
+      const fresh = await runMason(app, ["add", "products", "--json"], matrixEnv());
+      assert.equal(fresh.code, 0, fresh.stdout + fresh.stderr);
+      assert.equal((JSON.parse(fresh.stdout) as { next: Array<{ command: string; what: string }> }).next[0]!.command, "mason wait", "a new table's copy begins");
+      const both2 = await runMason(app, ["add", "customers", "orders", "--sync", "poll 1m", "--json"], matrixEnv());
+      assert.equal((JSON.parse(both2.stdout) as { next: Array<{ command: string }> }).next[0]!.command, "mason wait", "one of them is new: its copy begins");
+    } finally { writeRunning(s.root, null); }
   } finally {
     server.close();
     fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables: {}\n`);
@@ -651,7 +680,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     listener: { openSessions: () => ({ open: 1, byClient: [{ user: "metabase", client: "Metabase", open: 1, running: 1 }] }), running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);
       return session === 4 && statement !== undefined && statement !== 9 ? { other: running, asked: statement } : session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session }; } },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => [], file: path.join(root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async (q) => { unsupportedAsks.push(q); return [unsupportedSql]; }, page: async (q) => { asked.push(q); return { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
         refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map(),  lastUsed: async (u) => u.map(() => null) },
       events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
@@ -776,4 +805,71 @@ test("mason status's Sessions line: how many are open and running a statement, a
     { user: "agent", client: "psql", open: 1, running: 1 }, { user: "grafana", client: "Grafana", open: 1, running: 0 }] }),
     [["Sessions", "7 open, 2 running a statement · 3 as metabase (Metabase), 2 by a token, 1 as agent (psql), and 1 other client (mason logs --running lists the statements)"]]);
   assert.deepEqual(sessionsRows!(undefined), [], "a run from before it: no line");
+});
+
+test("mason user add --role with Mason stopped: the role must be one the roles file names, checked against the sources file; list says each user's role, and one the file no longer names", async () => {
+  // src/cli/roles.ts and src/cli/user.ts roleToAdd: a stopped project with a sources file and no run (the role is read
+  // from the file here; with Mason up it is the listener's, tests/duck-roles-wire.test.ts and the state matrix)
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-user-role-")));
+  opened.push(async () => { fs.rmSync(root, { recursive: true, force: true }); });
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
+  fs.writeFileSync(path.join(folder, "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n  billing.invoices: {}\n");
+  const rolesFile = path.join(folder, "roles.yml");
+  const run = (argv: string[]) => runMason(root, argv, matrixEnv());
+  const failure = (a: Answer): Failure & { code: string } => (JSON.parse(a.stdout) as { error: Failure & { code: string } }).error;
+  // no roles file: refused before anything is written, with the lines to write
+  const none = await run(["user", "add", "bot", "--role", "agent", "--json"]);
+  assert.equal(none.code, 1, none.stdout + none.stderr);
+  assert.deepEqual([failure(none).code, failure(none).message], ["not_found", "there is no role agent: this project has no roles file"]);
+  assert.equal(failure(none).fix, "write mason/roles.yml:\n  roles:\n    agent:\n      tables:\n        <a copied table>: {}\nthen mason user add <name> --role agent");
+  // the file's mistakes, each at its key: a misspelt top key, a role with no table, a table the sources file does not copy, a column both listed and excluded
+  for (const [text, want] of [
+    ["role:\n  agent:\n    tables:\n      orders: {}\n", /unexpected key role — did you mean `roles`\? — a roles file takes roles alone/],
+    ["roles:\n  agent: {}\n", /roles\.agent\.tables: missing — write tables: \{ orders: \{\} \}, the tables the role may read \(a role with no table reads nothing: remove it instead\)/],
+    ["roles:\n  agent:\n    tables:\n      products: {}\n", /roles\.agent\.tables\.products: public\.products is not a table the sources file copies — a role reads copied tables only \(copied: orders, customers, billing\.invoices; mason add products copies it\)/],
+    // a bare name of a table copied under its schema: the qualified entry is suggested
+    ["roles:\n  agent:\n    tables:\n      invoices: {}\n", /roles\.agent\.tables\.invoices: public\.invoices is not a table the sources file copies — did you mean `billing\.invoices`\? — a role reads copied tables only/],
+    ["roles:\n  agent:\n    tables:\n      orders:\n        columns: [id]\n        exclude: [notes]\n", /roles\.agent\.tables\.orders: columns and exclude together — columns names what the role reads, exclude what it may not read of every column; keep one/],
+  ] as const) {
+    fs.writeFileSync(rolesFile, text);
+    const a = await run(["user", "add", "bot", "--role", "agent", "--json"]);
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    const f = failure(a);
+    assert.equal(f.code, "bad_roles", JSON.stringify(f));
+    assert.match(`${f.message}: ${f.why ?? ""}`, want, JSON.stringify(f));
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "users.json")), "nothing written");
+  }
+  // a good file: a role the file does not name is refused with the closest it does; the right one is written
+  fs.writeFileSync(rolesFile, "roles:\n  agent:\n    tables:\n      orders: {}\n      customers:\n        columns: [name]\n  ops:\n    tables:\n      customers: {}\n");
+  const typo = await run(["user", "add", "bot", "--role", "agnet", "--json"]);
+  assert.equal(typo.code, 1, typo.stdout + typo.stderr);
+  assert.deepEqual([failure(typo).code, failure(typo).message, failure(typo).why], ["not_found", "there is no role agnet in mason/roles.yml — did you mean `agent`?", "the roles: agent, ops"]);
+  const added = await run(["user", "add", "bot", "--role", "agent", "--json"]);
+  assert.equal(added.code, 0, added.stdout + added.stderr);
+  const a = JSON.parse(added.stdout) as { user: string; role: string; password: string; url?: string };
+  assert.deepEqual([a.user, a.role, a.url], ["bot", "agent", undefined]);
+  assert.match(a.password, /^mason_[0-9a-f]{16}_[0-9a-f]{32}$/);
+  const person = await run(["user", "add", "ops-bot", "--role", "ops"]);
+  assert.equal(person.code, 0, person.stdout + person.stderr);
+  assert.match(person.stdout, /^ {2}role +ops \(mason\/roles\.yml names what it reads\)$/m);
+  // a name of another shape, and --role on list: usage, exit 2
+  assert.equal((await run(["user", "add", "x", "--role", "Agent"])).code, 2);
+  assert.equal((await run(["user", "list", "--role", "agent"])).code, 2);
+  // list: each user's role; the file edited under one, said
+  const list = await run(["user", "list", "--json"]);
+  assert.equal(list.code, 0, list.stdout + list.stderr);
+  assert.deepEqual((JSON.parse(list.stdout) as { users: Array<{ name: string; role?: string; roleKnown?: boolean }> }).users.map((u) => [u.name, u.role, u.roleKnown]), [["bot", "agent", true], ["ops-bot", "ops", true]]);
+  fs.writeFileSync(rolesFile, "roles:\n  agent:\n    tables:\n      orders: {}\n");
+  const orphan = await run(["user", "list"]);
+  assert.equal(orphan.code, 0, orphan.stdout + orphan.stderr);
+  assert.match(orphan.stdout, /^ {2}bot +role agent +id [0-9a-f]{16}/m);
+  assert.match(orphan.stdout, /^ {2}ops-bot +role ops +id [0-9a-f]{16}.*its role ops is not in the roles file: its statements are refused$/m);
+  assert.match(orphan.stdout, /A role the roles file \(mason\/roles\.yml\) does not name reads nothing: add ops to it, or mason user remove ops-bot, then mason user add ops-bot --role <role>\./);
+  // a user with no role is listed as before
+  assert.equal((await run(["user", "add", "plain", "--json"])).code, 0);
+  const plain = (JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: Array<{ name: string; role?: string }> }).users.find((u) => u.name === "plain");
+  assert.ok(plain !== undefined && !("role" in plain) && !("roleKnown" in plain), JSON.stringify(plain));
 });

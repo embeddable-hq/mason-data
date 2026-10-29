@@ -80,7 +80,7 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
   const data = path.join(dir, "data"), project = path.join(dir, "project");
   fs.mkdirSync(data);
   const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? dir, DATABASE_URL: dbUrl, MASON_API_KEY: KEY, MASON_DATA: data, MASON_PROJECT: project,
-    MASON_NAME: "served", MASON_HEALTH_PORT: String(health), MASON_HEALTH_HOST: "127.0.0.1", MASON_PG_PORT: String(pgPort), MASON_POLL_MS: "500" };
+    MASON_NAME: "served", MASON_HEALTH_PORT: String(health), MASON_HEALTH_HOST: "127.0.0.1", MASON_PG_PORT: String(pgPort) };
 
   const first = startServe(env);
   try {

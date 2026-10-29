@@ -49,6 +49,9 @@ export const DEMO_TABLES = ["customers", "products", "orders", "order_items"] as
 export const DEMO_TABLE_TO_ADD = "order_items" satisfies (typeof DEMO_TABLES)[number];
 /** the tables `mason init demo` writes to the sources file: the database's, but the one left to add */
 export const DEMO_ADDED_TABLES: readonly string[] = DEMO_TABLES.filter((t) => t !== DEMO_TABLE_TO_ADD);
+/** how the demo's tables are kept current (the sources file's top `sync:`, src/lib/table-sync.ts): polled every 5 s,
+ *  so the demo shows a copy keeping up with its writer — where a project `mason init` makes is `off` */
+export const DEMO_SYNC = { mode: "poll", every: "5s", seconds: 5 } as const;
 /** an order's status moves along this path (`changeSql`); `cancelled` is a side exit */
 export const ORDER_STATUSES = ["pending", "paid", "shipped", "delivered"] as const;
 const ROWS_PER_INSERT = 1_000;

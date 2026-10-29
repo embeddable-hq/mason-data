@@ -75,7 +75,7 @@ test("a chunk keeps exactly the rows older than the watermark: the complement of
   assert.equal(xminBeforeSql(1n << 32n), xminBeforeSql((1n << 32n) | 3n));
 });
 
-test("a slow poll stretches the interval to four times its own length; MASON_POLL_MS is never shortened", () => {
+test("a slow poll stretches the interval to four times its own length; a table's interval is never shortened", () => {
   assert.equal(nextPollDelayMs(1000, 50), 1000);
   assert.equal(nextPollDelayMs(1000, 800), 3200);
   assert.equal(nextPollDelayMs(1000, 20_000), 80_000, "a 20 s poll is a fifth of the time, never a third");

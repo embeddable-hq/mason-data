@@ -43,4 +43,6 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "min-max-scale-tie", sql: "SELECT min(a / b), max(a / b) FROM public.one, (VALUES (0::numeric, 7::numeric), (0, 1000000)) AS v(a, b)" },
   { gap: "nested-exact-numeric", sql: "SELECT x * 2 FROM (SELECT 7 / 3.0 AS x FROM public.one) AS s" },
   { gap: "unicode-16-case", sql: "SELECT upper('\u{10D70}'), lower('\u{10D50}') FROM public.one" },
+  // the session's own statement (Postico's connect): its fields and the rows the sessions set are held alike (KNOWN's `holds`)
+  { gap: "show-all", sql: "SHOW ALL" },
 ];

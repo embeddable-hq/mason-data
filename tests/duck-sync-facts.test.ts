@@ -54,7 +54,7 @@ async function aRun(body: (r: Run) => Promise<void>): Promise<void> {
     await w("CREATE TABLE public.t (id BIGINT, v VARCHAR)");
     await w("INSERT INTO public.t SELECT i, 'v' || i FROM range(1, 11) r(i)");
     await w(`INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.t', 'copied', 10, 0, 3.5, now() - INTERVAL 2 HOUR, 'replication: the slot is in use', '${JSON.stringify(columns)}')`);
-    await w(`INSERT INTO ${MASON_SCHEMA}.poll_state VALUES ('public.t', '100:100:', now() - INTERVAL 1 HOUR)`);
+    await w(`INSERT INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at) VALUES ('public.t', '100:100:', now() - INTERVAL 1 HOUR)`);
     await w(`INSERT INTO ${MASON_SCHEMA}.stream_state VALUES ('mason_x', '0/10', now() - INTERVAL 30 MINUTE)`);
     const sync = await open();
     await sync.stop();

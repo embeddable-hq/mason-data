@@ -52,10 +52,10 @@ test("the format: kind, url as ${NAME} or a literal URL, and tables a map of ent
   const f = parse(EXAMPLE) as Sources.SourceFile;
   assert.deepEqual([f.name, f.kind, f.url], ["app", "postgres", { env: "DATABASE_URL" }]);
   assert.deepEqual(f.tables, [
-    { name: "orders", table: "public.orders", columns: ["id", "customer_id", "status", "amount"], exclude: [], key: null },
-    { name: "customers", table: "public.customers", columns: null, exclude: [], key: null },
-    { name: "events", table: "public.events", columns: null, exclude: [], key: ["tenant_id", "id"] },
-    { name: "billing.invoices", table: "billing.invoices", columns: null, exclude: ["name"], key: null },
+    { name: "orders", table: "public.orders", columns: ["id", "customer_id", "status", "amount"], exclude: [], key: null, sync: null },
+    { name: "customers", table: "public.customers", columns: null, exclude: [], key: null, sync: null },
+    { name: "events", table: "public.events", columns: null, exclude: [], key: ["tenant_id", "id"], sync: null },
+    { name: "billing.invoices", table: "billing.invoices", columns: null, exclude: ["name"], key: null, sync: null },
   ]);
   assert.deepEqual((parse("kind: postgres\nurl: postgres://me@localhost/shop\ntables:\n") as Sources.SourceFile).url, { literal: "postgres://me@localhost/shop" });
   assert.deepEqual((parse("kind: postgres\nurl: postgres://me@localhost/shop\ntables:\n  orders:\n") as Sources.SourceFile).tables[0]!.columns, null, "an entry with nothing is every column");
@@ -72,7 +72,7 @@ test("every mistake in the file is told its key, what is wrong and the way out �
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\n"), ["tables: missing — write tables: {} (mason add adds a table to it)"]);
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\ntables: [orders]\n"), ["tables: is one entry per table, like tables: { orders: {}, customers: { columns: [id, name] } }"]);
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\ntable: {}\n"), [
-    "unexpected key table — did you mean `tables`? — a source file takes kind, url, tables", "tables: missing — write tables: {} (mason add adds a table to it)"]);
+    "unexpected key table — did you mean `tables`? — a source file takes kind, url, sync, tables", "tables: missing — write tables: {} (mason add adds a table to it)"]);
   assert.deepEqual(problems(`kind: postgres
 url: \${DATABASE_URL}
 tables:
@@ -84,12 +84,12 @@ tables:
   orders_two: all
   public.customers: {}
 `), [
-    "tables.orders: unexpected key colums — did you mean `columns`? — a table takes columns, exclude and key",
+    "tables.orders: unexpected key colums — did you mean `columns`? — a table takes columns, exclude, key and sync",
     "tables.customers: columns and exclude together — columns names what is copied, exclude what is left out of every column; keep one",
     "tables.events.columns: is the columns copied, a list of column names: [id, status]",
     "tables.sessions.key: is the columns that tell its rows apart, a list of column names: [id, status]",
     "tables.logs.exclude: names a twice",
-    "tables.orders_two: is {} (every column), { columns: [...] }, { exclude: [...] } or { key: [...] }",
+    "tables.orders_two: is {} (every column), { columns: [...] }, { exclude: [...] }, { key: [...] } or { sync: poll 5m }",
     "tables.public.customers: public.customers is named twice (as customers too) — keep one",
   ]);
   assert.match(problems("kind: postgres\nurl: x\ntables:\n  a: {}\n  a: {}\n")[0]!, /^it is not YAML: Map keys must be unique/);
@@ -211,7 +211,7 @@ test("mason add's columns: a list with the key added, every one as {} or exclude
   assert.equal((S.chooseColumns(orders, ["statsu"]) as { problem: string }).problem, 'public.orders has no column "statsu" — did you mean `status`?; its columns: id, customer_id, status, amount, api_token, payload');
   assert.match((S.chooseColumns(orders, []) as { problem: string }).problem, /mason add orders --columns id,status,… — or leave --columns out for every one/);
   // what a table says in mason tables: the columns its copy keeps, the key it is copied by
-  assert.deepEqual(S.catalogTable(events, { name: "events", table: "public.events", columns: null, exclude: ["raw_body"], key: ["tenant_id", "id"] }),
+  assert.deepEqual(S.catalogTable(events, { name: "events", table: "public.events", columns: null, exclude: ["raw_body"], key: ["tenant_id", "id"], sync: null }),
     { ...S.catalogTable(events, undefined), reason: null, added: true, addedColumns: ["tenant_id", "id"], copyKey: ["tenant_id", "id"] });
   assert.equal(S.catalogTable(events, undefined).reason, "no primary key: name the columns that tell its rows apart, mason add events --key tenant_id,id (its unique index events_tenant_id_id_key)");
 });
@@ -274,7 +274,7 @@ test("the small mistakes: $NAME without braces, a name YAML reads as a boolean, 
     "tables: 1 is read by YAML as a number, not a name — quote it: \"1\"",
     "tables.orders.columns: null is read by YAML as nothing (null), not a name — quote it: \"null\"",
   ]);
-  assert.deepEqual((parse("kind: postgres\nurl: x\ntables:\n  \"true\": { columns: [id, \"null\"] }\n") as Sources.SourceFile).tables[0], { name: "true", table: "public.true", columns: ["id", "null"], exclude: [], key: null });
+  assert.deepEqual((parse("kind: postgres\nurl: x\ntables:\n  \"true\": { columns: [id, \"null\"] }\n") as Sources.SourceFile).tables[0], { name: "true", table: "public.true", columns: ["id", "null"], exclude: [], key: null, sync: null });
 });
 
 test("a table's name has at most two parts, said why: a third will name the source a table is in, once a project has several", () => {
@@ -325,4 +325,155 @@ test("an INVALID unique index (a failed CREATE UNIQUE INDEX CONCURRENTLY, its du
     assert.match((add("id") as Failure).why ?? (add("id") as Failure).message, /no unique index of public\.logs is over \(id\)/);
     assert.ok(Array.isArray(add("tenant_id, id")), JSON.stringify(add("tenant_id, id")));
   } finally { await db.close(); }
+});
+
+// ------------------------------------------------------------------ sync: how each table is kept current (GitHub issue 33)
+
+const OFF = { mode: "off" };
+const poll = (every: string, seconds: number) => ({ mode: "poll", every, seconds });
+const head = "kind: postgres\nurl: ${DATABASE_URL}\n";
+
+test("sync: one grammar — off, poll 5s, poll 5m, poll 1h — at the top as every table's default, on an entry for that table, and none at all meaning off", () => {
+  const read = (text: string) => { const f = parse(text) as Sources.SourceFile; return { top: f.sync, entries: f.tables.map((e) => [e.name, e.sync, S.effectiveSync(f, e)]) }; };
+  for (const [v, want] of [["off", OFF], ["poll 5s", poll("5s", 5)], ["poll 5m", poll("5m", 300)], ["poll 1h", poll("1h", 3600)], ["poll 90s", poll("90s", 90)], ["  poll 1s ", poll("1s", 1)]] as const) {
+    assert.deepEqual(read(`${head}sync: ${v}\ntables: {}\n`).top, want, v);
+  }
+  // at the top only: every entry follows it, said as the file's
+  assert.deepEqual(read(`${head}sync: poll 5m\ntables:\n  orders: {}\n`).entries, [["orders", null, { sync: poll("5m", 300), from: "file" }]]);
+  // on an entry: it overrides the top for that table alone
+  assert.deepEqual(read(`${head}sync: off\ntables:\n  orders:\n    sync: poll 30s\n  customers: {}\n  events: { sync: poll 1h }\n`).entries, [
+    ["orders", poll("30s", 30), { sync: poll("30s", 30), from: "entry" }],
+    ["customers", null, { sync: OFF, from: "file" }],
+    ["events", poll("1h", 3600), { sync: poll("1h", 3600), from: "entry" }],
+  ]);
+  // none anywhere: off, the default — the file means it, said as the default
+  assert.deepEqual(read(`${head}tables:\n  orders: {}\n`), { top: null, entries: [["orders", null, { sync: OFF, from: "default" }]] });
+  // and the tables the run copies carry each one's effective sync
+  const f = parse(`${head}sync: poll 5m\ntables:\n  orders: { sync: off }\n  customers: {}\n`) as Sources.SourceFile;
+  const added = S.addedTables(f, CATALOG, "shop", "/app", { replication: false }) as Array<{ source: string; sync?: unknown }>;
+  assert.deepEqual(added.map((t) => [t.source, t.sync]), [["public.orders", OFF], ["public.customers", poll("5m", 300)]]);
+});
+
+test("sync: every mistake on one report, at its key, with the line to write — a short interval, poll alone, a misspelt mode or key, replication not yet", () => {
+  const one = (v: string, at = "sync"): string => {
+    const p = at === "sync" ? problems(`${head}sync: ${v}\ntables: {}\n`) : problems(`${head}tables:\n  orders:\n    sync: ${v}\n`);
+    assert.equal(p.length, 1, JSON.stringify(p));
+    return p[0]!;
+  };
+  assert.equal(one("poll 500ms"), "sync: 500ms is under the shortest interval, 1s (a poll scans the table whole on your database): write poll 1s or longer");
+  assert.equal(one("poll 0s"), "sync: 0s is under the shortest interval, 1s: write poll 1s or longer");
+  assert.equal(one("poll"), "sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)");
+  assert.equal(one("polling 5s"), "sync: polling is not a sync — did you mean `poll 5s`? Write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
+  assert.equal(one("Off"), "sync: Off is not a sync — did you mean `off`? Write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
+  assert.equal(one("replication"), "sync: replication is not in this release yet: mason start --replication keeps every table current (write off or poll <interval> here)");
+  assert.equal(one("poll 5 minutes"), 'sync: "5 minutes": write poll 5m');
+  assert.equal(one("poll 1.5h"), "sync: 1.5h: an interval is a whole number — write poll 90m");
+  assert.equal(one("poll 2d"), "sync: 2d: d is not a unit of an interval — days are hours: write poll 48h");
+  assert.equal(one("poll soon"), 'sync: "soon" is not an interval: an interval is <n>s, <n>m or <n>h, a whole number, at least 1s (poll 5s, poll 5m or poll 1h)');
+  assert.equal(one("off 5m"), "sync: off takes no interval: write off, or poll 5m");
+  // at most a day (a longer one is off and mason sync from a scheduler; a huge one was an instant past a Date's range and
+  // broke every status line), and one spelling of each interval (05s and 5s would read as a change of sync)
+  assert.equal(one("poll 25h"), "sync: 25h is over the longest interval, 24h: write poll 24h, or off with mason sync <table> run by a scheduler");
+  assert.equal(one("poll 9999999999999s"), "sync: 9999999999999s is over the longest interval, 24h: write poll 24h, or off with mason sync <table> run by a scheduler");
+  assert.equal(one("poll 05s"), 'sync: "05s": write poll 5s');
+  assert.deepEqual((parse(`${head}sync: poll 24h\ntables: {}\n`) as Sources.SourceFile).sync, poll("24h", 86_400), "a day is the longest, and taken");
+  assert.equal(one("5"), "sync: is the number 5: write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
+  // on an entry, at the entry's key
+  assert.equal(one("poll", "entry"), "tables.orders.sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)");
+  // the key misspelt, at the top and on an entry: did you mean
+  assert.deepEqual(problems(`${head}synk: off\ntables: {}\n`), ["unexpected key synk — did you mean `sync`? — a source file takes kind, url, sync, tables"]);
+  assert.deepEqual(problems(`${head}tables:\n  orders:\n    Sync: off\n`), ["tables.orders: unexpected key Sync — did you mean `sync`? — a table takes columns, exclude, key and sync"]);
+  // all of a file's mistakes on ONE report
+  assert.deepEqual(problems(`${head}sync: poll\ntables:\n  orders: { sync: polling 5s }\n  customers: { sync: poll 500ms }\n`), [
+    "sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)",
+    "tables.orders.sync: polling is not a sync — did you mean `poll 5s`? Write off, or poll <interval> (poll 5s, poll 5m or poll 1h)",
+    "tables.customers.sync: 500ms is under the shortest interval, 1s (a poll scans the table whole on your database): write poll 1s or longer",
+  ]);
+});
+
+test("mason init writes sync: off at the top with a one-line comment; mason init demo writes sync: poll 5s", () => {
+  const plain = S.newSourceText();
+  assert.match(plain, /^sync: off {3}# after its first copy, a table is read again only by mason sync <table> \(poll 5m: every 5 minutes\)$/m);
+  assert.deepEqual((parse(plain) as Sources.SourceFile).sync, OFF, "a file it reads, its sync written");
+  const demo = S.newSourceText("${DATABASE_URL}", ["customers", "orders"], poll("5s", 5) as never);
+  assert.match(demo, /^sync: poll 5s {3}# each table polled every 5s after its first copy \(off: read again only by mason sync <table>\)$/m);
+  assert.deepEqual((parse(demo) as Sources.SourceFile).sync, poll("5s", 5));
+  // the sync above the tables, the tables last, as before
+  assert.ok(demo.indexOf("sync: poll 5s") < demo.indexOf("tables:"), demo);
+});
+
+test("mason add --sync's line: written on the entry alone, its columns, key and comments as they were — a block entry's line replaced or added, a flow entry written again", () => {
+  const set = (text: string, table: string, sync: ReturnType<typeof poll> | typeof OFF | null): string => {
+    const f = parse(text) as Sources.SourceFile;
+    const e = f.tables.find((x) => x.table === table)!;
+    const r = S.withEntrySync(text, e, sync as never);
+    assert.ok("text" in r, JSON.stringify(r));
+    return r.text;
+  };
+  const mine = `${head}sync: off   # the default\ntables:   # copied\n  customers: {}   # every column\n  orders:\n    columns: [id, status]   # not the payload\n# end\n`;
+  // a block entry: a line of its own under its last key, at its keys' indent; its comment kept
+  const polled = set(mine, "public.orders", poll("30s", 30));
+  assert.equal(polled, mine.replace("    columns: [id, status]   # not the payload\n", "    columns: [id, status]   # not the payload\n    sync: poll 30s\n"));
+  // its sync: replaced in place, the rest of the line too; and taken out (it follows the file's again)
+  assert.equal(set(polled, "public.orders", poll("1h", 3600)), polled.replace("sync: poll 30s", "sync: poll 1h"));
+  assert.equal(set(polled, "public.orders", null), mine);
+  // a flow entry ({}): written again a key a line, the comment after it on its key's line kept
+  assert.equal(set(mine, "public.customers", OFF), mine.replace("  customers: {}   # every column\n", "  customers:   # every column\n    sync: off\n"));
+  // an entry with no value: its comment kept on its key's line (a review finding: it was dropped)
+  const bare = `${head}tables:\n  orders:   # the shop's\n  customers: {}\n`;
+  assert.equal(set(bare, "public.orders", poll("30s", 30)), `${head}tables:\n  orders:   # the shop's\n    sync: poll 30s\n  customers: {}\n`);
+  // an entry whose only key is sync, taken out: {} again
+  const only = `${head}tables:\n  orders:\n    sync: poll 5s\n`;
+  assert.equal(set(only, "public.orders", null), `${head}tables:\n  orders: {}\n`);
+  // what it wrote reads back as the entry it meant, every other entry as it was
+  const back = parse(set(mine, "public.orders", poll("30s", 30))) as Sources.SourceFile;
+  assert.deepEqual(back.tables.map((e) => [e.name, e.columns, e.sync]), [["customers", null, null], ["orders", ["id", "status"], poll("30s", 30)]]);
+  // and withTable, a new entry with its own sync
+  const r = S.withTable(`${head}tables: {}\n`, { name: "orders", table: "public.orders", columns: null, exclude: [], key: null, sync: poll("5m", 300) as never });
+  assert.deepEqual(r, { text: `${head}tables:\n  orders:\n    sync: poll 5m\n` });
+});
+
+test("mason add's sync: --sync writes the entry's sync: alone, comments kept; a big table under a polling file is written off and said; a frequent poll of a huge one is estimated, its basis said", async () => {
+  const E = await import("../src/cli/source-edit.ts" as string) as typeof import("../src/cli/source-edit.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-add-sync-"));
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  const file = path.join(folder, "sources", "app.yml");
+  const big = table({ table: "events_big", rows: 22_000_000 });
+  const huge = table({ table: "huge", rows: 50_000_000 });
+  const db = { tables: [...CATALOG, big, huge], database: "shop", replication: false };
+  const edit = (text: string) => { fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
+  const top = "kind: postgres\nurl: postgres://me@localhost/shop\nsync: poll 5m   # every table\ntables:   # copied\n  customers: {}   # every column\n  orders:\n    columns: [id, status]   # not the payload\n";
+  try {
+    // --sync alone on a table already added: its sync: line, nothing else — its columns and its comment kept
+    const r = E.addEntry(edit(top), db, "public.orders", ["*"], null, { sync: { mode: "poll", every: "30s", seconds: 30 }, keep: true });
+    assert.equal(fs.readFileSync(file, "utf8"), top.replace("    columns: [id, status]   # not the payload\n", "    columns: [id, status]   # not the payload\n    sync: poll 30s\n"));
+    assert.deepEqual([r.columns, r.sync, r.bigOff, r.pollCost, r.already], [["id", "status"], { value: "poll 30s", from: "entry" }, false, null, false]);
+    // asked again, the same: nothing written
+    assert.equal(E.addEntry(edit(fs.readFileSync(file, "utf8")), db, "public.orders", ["*"], null, { sync: { mode: "poll", every: "30s", seconds: 30 }, keep: true }).already, true);
+    // a new entry without --sync follows the file's: no sync: of its own, said as the file's
+    const inv = E.addEntry(edit(top), db, "billing.invoices");
+    assert.deepEqual(inv.sync, { value: "poll 5m", from: "file" });
+    assert.ok(fs.readFileSync(file, "utf8").endsWith("  billing.invoices: {}\n"), "no sync: of its own");
+    // A BIG TABLE under a file that polls: written sync: off on its entry, and said with the alternatives
+    const b = E.addEntry(edit(top), db, "public.events_big");
+    assert.ok(fs.readFileSync(file, "utf8").endsWith("  events_big:\n    sync: off\n"), fs.readFileSync(file, "utf8"));
+    assert.deepEqual([b.sync, b.bigOff], [{ value: "off", from: "entry" }, true]);
+    const commands = await import("../src/cli/commands.ts");
+    assert.equal(commands.addedLines(b, "mason/sources/app.yml").notes[0], "sync: off written on its entry: it has more than 1,000,000 rows, and each poll scans it whole on your database — " +
+      "mason add events_big --sync \"poll 1h\" polls it hourly; mason sync events_big syncs it once, now; mason start --replication keeps every table current from the change log");
+    // under a file whose default is off, a big table follows it (nothing to write); with --sync it is what was asked
+    const offTop = top.replace("sync: poll 5m", "sync: off");
+    assert.deepEqual([E.addEntry(edit(offTop), db, "public.events_big").bigOff, fs.readFileSync(file, "utf8").endsWith("  events_big: {}\n")], [false, true]);
+    // a huge table set to poll under a minute: warned, the estimate's basis said — the catalog's rows, nothing measured
+    const h = E.addEntry(edit(top), db, "public.huge", ["*"], null, { sync: { mode: "poll", every: "30s", seconds: 30 } });
+    assert.equal(h.pollCost, "huge has about 50,000,000 rows, and each poll scans it whole on your database: about 28 s a poll, from the catalog's 50,000,000 rows at an assumed " +
+      "1,800,000 rows a second of scan (nothing of it measured yet). sync: poll 30s is stretched to a poll every 2 min at most (a poll waits four times its own time), one backend of " +
+      "your database busy 25 % of the time — a longer interval (--sync \"poll 1h\"), or mason start --replication, costs it less");
+    // measured by the run: its last poll first, else its copy's read rate a reader
+    assert.match(E.pollCost(huge, { mode: "poll", every: "10s", seconds: 10 }, { lastPollMs: 40_000, copyRowsPerSecond: 500_000 })!, /about 40 s a poll, from its last poll, measured\./);
+    assert.match(E.pollCost(huge, { mode: "poll", every: "10s", seconds: 10 }, { lastPollMs: null, copyRowsPerSecond: 500_000 })!, /about 2 min a poll, from its copy's read rate, 500,000 rows a second a reader/);
+    assert.equal(E.pollCost(huge, { mode: "poll", every: "1m", seconds: 60 }, null), null, "every minute or slower: no warning");
+    assert.equal(E.pollCost(table({ table: "mid", rows: 5_000_000 }), { mode: "poll", every: "5s", seconds: 5 }, null), null, "under ten million rows: none");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

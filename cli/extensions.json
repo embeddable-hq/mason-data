@@ -1,0 +1,26 @@
+{
+  "engine": "v2.0.0",
+  "repository": "https://extensions.duckdb.org",
+  "files": {
+    "darwin-arm64": {
+      "postgres_scanner": { "sha256": "679573480436252e527d8d3f3848aee74adebbe08918fb2c34d21d8fa252e765", "bytes": 45908758 },
+      "inet": { "sha256": "9bbb02e869f93042f784234806332bdeed99f80f176e45ddb67c3f9a8ca6a315", "bytes": 11300046 }
+    },
+    "darwin-x64": {
+      "postgres_scanner": { "sha256": "c49d3bf088cc4f0782a9b10d8914462e2246dda983de645b00e54e21561ed1d1", "bytes": 47640214 },
+      "inet": { "sha256": "59f38bb9c67b3dcb677e7d156a60f709a3619999dda36a29852733456c7bf9a0", "bytes": 11341670 }
+    },
+    "linux-arm64": {
+      "postgres_scanner": { "sha256": "822cb8a5d336416ff5705a309d2dc99b3fd20e98e019e8c60bd3d6507ea5ceec", "bytes": 56476438 },
+      "inet": { "sha256": "33bc81e01599926266940ff51593093b875c9f7a910fcfce3b4ae804e93838c7", "bytes": 14588030 }
+    },
+    "linux-x64": {
+      "postgres_scanner": { "sha256": "39e661c5cfb678c9472f5acd88235f84f3ef4126e7444c7c8a01214d9b291601", "bytes": 59211910 },
+      "inet": { "sha256": "b1e8776d27d351eceec714c958304eb9011b27a181a4f182e9370a12b939d2c6", "bytes": 14894310 }
+    },
+    "win32-x64": {
+      "postgres_scanner": { "sha256": "a2b5671f9ba8418667fe6baa94b8cff9a58722397275b029c4e687e029927ad5", "bytes": 52114454 },
+      "inet": { "sha256": "698e6118faf9612db8e031b781172c58aac68f7c56fcc21e9a97986e9a2f4eab", "bytes": 46380054 }
+    }
+  }
+}
