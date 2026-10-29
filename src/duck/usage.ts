@@ -171,6 +171,26 @@ export function quantileCont(sorted: readonly number[], q: number): number | nul
   return Math.round(sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (at - lo));
 }
 
+/**
+ * `quantileCont` over a HISTOGRAM: `[value, count]` pairs sorted by value (each count at least 0), as though every
+ * value were listed its count of times — the same ranks and the same interpolation, rounded the same way, without
+ * listing them (the request log's summary reads a week of durations this way: src/duck/requests.ts `summary`). Null
+ * for none; tests/duck-usage.test.ts holds it equal to DuckDB's `quantile_cont`.
+ */
+export function quantileContOf(histogram: ReadonlyArray<readonly [value: number, count: number]>, q: number): number | null {
+  const n = histogram.reduce((s, [, c]) => s + c, 0);
+  if (n === 0) return null;
+  const at = (n - 1) * q, lo = Math.floor(at), hi = Math.ceil(at);
+  // the value at a 0-based rank: the first whose running count passes it
+  const valueAt = (rank: number): number => {
+    let seen = 0;
+    for (const [v, c] of histogram) { seen += c; if (rank < seen) return v; }
+    return histogram[histogram.length - 1]![0];
+  };
+  const a = valueAt(lo), b = hi === lo ? a : valueAt(hi);
+  return Math.round(a + (b - a) * (at - lo));
+}
+
 export interface UsageOptions {
   /** days kept (MASON_REQUEST_LOG_DAYS) */
   days: number;

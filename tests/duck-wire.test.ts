@@ -803,6 +803,9 @@ test("DuckDB's memory is bounded: half the RAM unless MASON_DUCKDB_MEMORY says, 
     // column Uncompressed on the test server (a 194 M-row table: 0.66 GB a million rows, against 0.26 forced); forced
     // on the instance, the other types keep their own methods (BitPacking, RLE)
     assert.equal(await setting(own, "force_compression"), "zstd");
+    // NOTHING IS DOWNLOADED WHILE MASON RUNS: a statement needing a known extension that is not installed is DuckDB's
+    // error, never a fetch from the internet (src/duck/store.ts INSTANCE_SETTINGS); the postgres one is installed on purpose
+    assert.equal(await setting(own, "autoinstall_known_extensions"), "false");
     await own.writer.run("CREATE TABLE packed AS SELECT i, '{\"k\":' || i || ',\"payload\":\"' || repeat(chr(97 + (i % 26)::INTEGER), 200) || md5(i::VARCHAR) || '\"}' AS j FROM range(200000) r(i)");
     await own.writer.run("CHECKPOINT");
     const compression = (await own.writer.runAndReadAll("SELECT column_name, compression FROM pragma_storage_info('packed') WHERE segment_type IN ('VARCHAR', 'BIGINT') GROUP BY 1, 2 ORDER BY 1, 2")).getRowsJS();

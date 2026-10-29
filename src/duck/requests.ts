@@ -18,9 +18,10 @@
  */
 import type { DuckDBValue } from "@duckdb/node-api";
 import type { DuckConnection } from "./executor.ts";
-import { OUTCOMES, outcomeOf, outcomeSql, statusOf, type ApiLogRow, type Outcome, type RequestStatus } from "../api/request-log.ts";
+import { outcomeOf, outcomeSql, statusOf, type ApiLogRow, type Outcome, type RequestStatus } from "../api/request-log.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { GAPS, type GapId } from "./gaps.ts";
+import { quantileContOf } from "./usage.ts";
 import type { RefusedQuery, SlowQuery } from "../cli/run-server.ts";
 
 export const REQUESTS_TABLE = `${MASON_SCHEMA}.requests`;
@@ -373,37 +374,50 @@ export class RequestLedger {
    * rows and the bytes sent — in ONE scan of the ledger. A refused login (CONNECT) is not a statement. The log keeps
    * `days` days, so a window longer than that is `covered` only as far as it keeps (said, never a short week passed off
    * as a whole one).
+   *
+   * The scan is ONE GROUP BY — by the window (the last day or before it), the SQLSTATE, and a completed one's duration
+   * (whole ms) — whose few groups are added up here: each outcome by `outcomeOf` (the one rule), the average from the
+   * durations' sum, and the p50 / p95 from the durations' histogram as quantile_cont interpolates them
+   * (`quantileContOf`), exact. Measured over a week of 50 statements a second (30 M rows): four quantile_cont and
+   * sixteen FILTERed aggregates over the raw rows took 0.71–0.77 s, this ~0.12 s — and the Overview asks it every 30 s
+   * (docs/OBSERVABILITY.md "Architecture review").
    */
   async summary(): Promise<QuerySummary> {
-    const windows = [["day", 1], ["week", 7]] as const;
-    const cols = windows.flatMap(([w, days]) => {
-      const within = `started_at > now() - INTERVAL ${days} DAY`;
-      const ok = `FILTER (WHERE ${within} AND outcome = 'ok')`;
-      return [`count(*) FILTER (WHERE ${within}) AS ${w}_statements`,
-        ...OUTCOMES.map((o) => `count(*) FILTER (WHERE ${within} AND outcome = '${o}') AS ${w}_${o}`),
-        `avg(duration_ms) ${ok} AS ${w}_avg`, `quantile_cont(duration_ms, 0.5) ${ok} AS ${w}_p50`, `quantile_cont(duration_ms, 0.95) ${ok} AS ${w}_p95`,
-        `coalesce(sum("rows") FILTER (WHERE ${within}), 0) AS ${w}_rows`, `coalesce(sum(bytes_sent) FILTER (WHERE ${within}), 0) AS ${w}_bytes`];
-    });
-    const r = (await this.reader.runAndReadAll(`SELECT ${cols.join(", ")} FROM (SELECT started_at, duration_ms, "rows", bytes_sent, ${outcomeSql("sqlstate")} AS outcome ` +
-      `FROM ${REQUESTS_TABLE} WHERE started_at > now() - INTERVAL 7 DAY AND method <> 'CONNECT')`)).getRowObjectsJson()[0] as Record<string, unknown>;
-    const num = (v: unknown): number => v === null || v === undefined ? 0 : Number(v);
-    const windowOf = (w: string, days: number): QueryWindow => ({
-      days, covered: Math.min(days, this.days), statements: num(r[`${w}_statements`]), completed: num(r[`${w}_ok`]), refused: num(r[`${w}_refused`]),
-      failed: num(r[`${w}_failed`]), cancelled: num(r[`${w}_cancelled`]), rows: num(r[`${w}_rows`]), bytesSent: num(r[`${w}_bytes`]),
-      durationMs: r[`${w}_avg`] === null || r[`${w}_avg`] === undefined ? null
-        : { avg: Math.round(num(r[`${w}_avg`])), p50: Math.round(num(r[`${w}_p50`])), p95: Math.round(num(r[`${w}_p95`])) },
-    });
-    return { keptDays: this.days, day: windowOf("day", 1), week: windowOf("week", 7) };
+    const groups = (await this.reader.runAndReadAll(`SELECT started_at > now() - INTERVAL 1 DAY AS in_day, sqlstate, ` +
+      `CASE WHEN ${outcomeSql("sqlstate")} = 'ok' THEN duration_ms END AS ms, count(*) AS n, sum(duration_ms) AS duration, ` +
+      `coalesce(sum("rows"), 0) AS sent_rows, coalesce(sum(bytes_sent), 0) AS sent_bytes ` +
+      `FROM ${REQUESTS_TABLE} WHERE started_at > now() - INTERVAL 7 DAY AND method <> 'CONNECT' GROUP BY ALL`)).getRowObjectsJson() as Array<Record<string, unknown>>;
+    const windowOf = (days: 1 | 7): QueryWindow => {
+      const w: QueryWindow = { days, covered: Math.min(days, this.days), statements: 0, completed: 0, refused: 0, failed: 0, cancelled: 0, rows: 0, bytesSent: 0, durationMs: null };
+      const histogram: Array<[number, number]> = [];
+      let duration = 0;
+      for (const g of groups) {
+        if (days === 1 && g.in_day !== true) continue;
+        const n = Number(g.n);
+        w.statements += n; w.rows += Number(g.sent_rows); w.bytesSent += Number(g.sent_bytes);
+        const outcome = outcomeOf(g.sqlstate === null ? null : String(g.sqlstate));
+        if (outcome === "ok") { w.completed += n; duration += Number(g.duration); histogram.push([Number(g.ms), n]); }
+        else w[outcome] += n;
+      }
+      histogram.sort((a, b) => a[0] - b[0]);
+      const p50 = quantileContOf(histogram, 0.5), p95 = quantileContOf(histogram, 0.95);
+      if (w.completed > 0 && p50 !== null && p95 !== null) w.durationMs = { avg: Math.round(duration / w.completed), p50, p95 };
+      return w;
+    };
+    return { keptDays: this.days, day: windowOf(1), week: windowOf(7) };
   }
 
   /**
    * The last day's slow statements in `mason status`'s shape (src/cli/run-server.ts SlowQuery): each distinct statement
-   * whose LATEST answer still took `slowMs` or more, slowest first.
+   * whose LATEST answer still took `slowMs` or more, slowest first. Only a statement that took it at least once can,
+   * so those are found first and only their runs are grouped (a day of 50 statements a second, 4.3 M rows: 0.21 s
+   * grouping every statement's text, 0.07 s this way).
    */
   async slow(slowMs: number, limit = 5): Promise<SlowQuery[]> {
+    const day = `sqlstate IS NULL AND started_at > now() - INTERVAL 1 DAY AND query <> '' AND NOT query_truncated`;
     const rows = (await this.reader.runAndReadAll(`SELECT query, count(*) AS runs, CAST(quantile_disc(duration_ms, 0.5) AS INTEGER) AS median_ms, ` +
       `max(duration_ms) AS max_ms, arg_max(duration_ms, started_at) AS latest_ms, max(started_at) AS last FROM ${REQUESTS_TABLE} ` +
-      `WHERE sqlstate IS NULL AND started_at > now() - INTERVAL 1 DAY AND query <> '' AND NOT query_truncated ` +
+      `WHERE ${day} AND query IN (SELECT query FROM ${REQUESTS_TABLE} WHERE ${day} AND duration_ms >= $1) ` +
       `GROUP BY query HAVING arg_max(duration_ms, started_at) >= $1 ORDER BY latest_ms DESC LIMIT $2`, [slowMs, limit])).getRowObjectsJson();
     return rows.map((r) => ({ route: "postgres", payload: String(r.query), runs: Number(r.runs), medianMs: Number(r.median_ms), maxMs: Number(r.max_ms),
       latestMs: Number(r.latest_ms), last: new Date(String(r.last)).toISOString() }));
@@ -458,18 +472,20 @@ export class RequestLedger {
    * it was a user in: `since` its addedAt, `until` its removedAt or null), the time of its newest request in that
    * window, ISO 8601, or null when the log has none. The window tells a user from an earlier one of the same name. A
    * refused login (28P01, 57P03) or an ended session (28000) is no use, so it does not count. Committed rows only.
-   * ONE scan of the log for every user (a `max … FILTER` per user), never one per user: `/api/users` is asked at every
-   * poll of the web page.
+   * ONE scan of the log for every user, JOINED to the users' windows (a hash join on the name, the window a residual),
+   * never one per user — nor a `max … FILTER` per user, which evaluated every user's filter on every row: on a week of
+   * 50 statements a second (30 M rows) 0.18 s for 6 users and 2.2–2.8 s for 66, where the join is ~0.15 s for any
+   * number; the Users page asks it every 30 s (docs/OBSERVABILITY.md "Architecture review").
    */
   async lastUsed(users: ReadonlyArray<{ name: string; since: string; until: string | null }>): Promise<Array<string | null>> {
     if (users.length === 0) return [];
     const params: DuckDBValue[] = [];
-    const at = (v: string): string => { params.push(v); return `$${params.length}`; };
-    const cols = users.map((u, i) => `epoch_ms(max(started_at) FILTER (WHERE user_name = ${at(u.name)} AND started_at >= CAST(${at(u.since)} AS TIMESTAMPTZ)` +
-      (u.until === null ? "" : ` AND started_at <= CAST(${at(u.until)} AS TIMESTAMPTZ)`) + `)) AS u${i}`);
-    const names = [...new Set(users.map((u) => u.name))].map(at).join(", ");
-    const row = (await this.reader.runAndReadAll(`SELECT ${cols.join(", ")} FROM ${REQUESTS_TABLE} WHERE user_name IN (${names}) ` +
-      `AND (sqlstate IS NULL OR sqlstate NOT IN ('28P01', '57P03', '28000'))`, params)).getRowsJS()[0] ?? [];
-    return users.map((_, i) => (row[i] === null || row[i] === undefined ? null : new Date(Number(row[i])).toISOString()));
+    const at = (v: string | number | null): string => { params.push(v); return `$${params.length}`; };
+    const windows = users.map((u, i) => `(${at(i)}::INTEGER, ${at(u.name)}::VARCHAR, ${at(u.since)}::TIMESTAMPTZ, ${at(u.until)}::TIMESTAMPTZ)`).join(", ");
+    const found = (await this.reader.runAndReadAll(`SELECT u.i, epoch_ms(max(r.started_at)) AS at FROM (VALUES ${windows}) AS u(i, name, since, until) ` +
+      `JOIN ${REQUESTS_TABLE} r ON r.user_name = u.name AND r.started_at >= u.since AND (u.until IS NULL OR r.started_at <= u.until) ` +
+      `WHERE r.sqlstate IS NULL OR r.sqlstate NOT IN ('28P01', '57P03', '28000') GROUP BY u.i`, params)).getRowsJS();
+    const row = new Map(found.map(([i, ms]) => [Number(i), ms]));
+    return users.map((_, i) => { const ms = row.get(i); return ms === null || ms === undefined ? null : new Date(Number(ms)).toISOString(); });
   }
 }

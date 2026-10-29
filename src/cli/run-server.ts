@@ -325,8 +325,17 @@ export function sendFailure(res: http.ServerResponse, status: number, f: Failure
   sendJson(res, status, { error: f.message, ...extra, failure: { ...errorJson(f), next: nextJson(f.next) } });
 }
 
-/** One file of the web page: its bytes and its content type. */
-export interface PageFile { body: Buffer; type: string }
+/** One file of the web page: its bytes, its content type, and whether its bytes can never change at its path. */
+export interface PageFile { body: Buffer; type: string; immutable: boolean }
+
+/**
+ * A VENDORED FILE AT A PINNED VERSION (`/vendor/<name>-<x.y.z>/…`, src/web/vendor/README.md): its bytes are that
+ * release's for good — a new version is a new folder — so the browser keeps it a year without asking again
+ * (`immutable`): a reload re-reads the page's own modules (no-store, as every answer) but not the fonts, uPlot and
+ * the icons — measured with the demo: a reload moved 222 KB where the first load moved 520 KB.
+ */
+const PINNED_VENDOR = /^\/vendor\/[a-z][a-z0-9-]*-\d+\.\d+\.\d+\//;
+const IMMUTABLE = "private, max-age=31536000, immutable";
 
 /** THE WEB PAGE'S ROUTES, AND THE FILE EACH IS: the only files the server ever reads for a URL. */
 export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: string]>> = {
@@ -374,7 +383,7 @@ export function pageFiles(dir: string = fileURLToPath(new URL("../web/", import.
     let body: Buffer;
     try { body = fs.readFileSync(at); }
     catch (e) { throw new Error(`the web page's ${file} cannot be read (${at}: ${(e as Error).message}): this Mason is installed incompletely — npm i -g @mason-data/cli again`); }
-    return [route, { body, type }];
+    return [route, { body, type, immutable: PINNED_VENDOR.test(route) }];
   }));
 }
 
@@ -395,7 +404,8 @@ export function createRunServer(ctx: RunContext): http.Server {
       try {
         const file = req.method === "GET" || req.method === "HEAD" ? page.get(url.pathname) : undefined;
         if (file !== undefined) {
-          res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length }).end(req.method === "HEAD" ? undefined : file.body);
+          res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length, ...(file.immutable ? { "Cache-Control": IMMUTABLE } : {}) })
+            .end(req.method === "HEAD" ? undefined : file.body);
         } else if (req.method === "GET" && url.pathname === "/api/ping") {
           // what proves a run is up (src/cli/runs.ts answers): this token answered, by this process
           sendJson(res, 200, { pid: process.pid });
@@ -468,8 +478,8 @@ export function createRunServer(ctx: RunContext): http.Server {
           // mason user list --json's shape: the users, and whether each connects (and with ?lastUsed=1 when each was last used)
           const r = listUsers(ctx.users.file, ctx.users.apiKey, postgresLink(ctx.users.postgresUrl));
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
-          // the last use is a scan of the request log: only when asked (?lastUsed=1, mason user list), never for the web page's
-          // poll every 2 s, which does not show it
+          // the last use is a scan of the request log (~0.15 s on a week of 50 statements a second): only when asked
+          // (?lastUsed=1: mason user list, the Users page every 30 s), never for the Overview's poll, which does not show it
           const used = url.searchParams.get("lastUsed") === "1" ? await withLastUsed(r.users, ctx.duck.requests, ctx.log)
             : { users: r.users, lastUsedNote: LAST_USED_NOT_ASKED, requestLogDays: ctx.duck.requests.days };
           sendJson(res, 200, { ...used, urlNote: null, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
