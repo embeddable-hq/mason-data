@@ -12,7 +12,8 @@
  * The steps share one project and run in order (each `test` of the `describe` waits for the one before). The run is
  * ALWAYS ended: `after` runs `mason stop`, and a run that is still alive after it — found by its recorded pid, checked
  * by its command line as mason stop checks it — is killed with its supervisor, said on stderr. The Postgres API listens
- * on a port chosen free here (MASON_PG_PORT), never 5433; the demo's port is the one mason init demo picks. Needs
+ * on a port chosen here outside the kernel's ephemeral range (MASON_PG_PORT, tests/test-ports.ts), never 5433, and the
+ * demo's port is moved to another such port in .env's URL, so nothing else on the machine is handed either. Needs
  * DuckDB's `postgres` extension: installed on the first use (the network), then read from ~/.duckdb/extensions; where
  * it cannot load (offline, never installed) the suite is SKIPPED with the reason (`postgresExtension`).
  */
@@ -27,15 +28,7 @@ import { DuckDBInstance } from "@duckdb/node-api";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { alive, masonProcess } from "../src/cli/runs.ts";
 import { supervisorOf } from "../src/cli/supervise.ts";
-
-/** A port nothing listens on now, on 127.0.0.1 (the listener's MASON_PG_PORT). */
-async function freePort(): Promise<number> {
-  const s = net.createServer();
-  await new Promise<void>((res, rej) => { s.once("error", rej); s.listen(0, "127.0.0.1", () => res()); });
-  const port = (s.address() as net.AddressInfo).port;
-  await new Promise<void>((res) => s.close(() => res()));
-  return port;
-}
+import { unassignedPort } from "./test-ports.ts";
 
 /**
  * WHETHER THIS MACHINE CAN COPY AT ALL: the copy loads DuckDB's `postgres` extension (src/duck/sync.ts), which INSTALL
@@ -60,7 +53,11 @@ const said = (a: Answer): string => `exit ${a.code}\n--- stdout\n${a.stdout}\n--
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-demo-start-")));
 const home = path.join(root, ".mason");
 const demoDir = path.join(home, "demo");
-const pgPort = await freePort();
+// BOTH PORTS OUT OF THE KERNEL'S REACH (tests/test-ports.ts): each is bound by every mason start below, minutes after
+// it is picked, and a port probed free from the ephemeral range (a listen(0) let go) was taken in between in CI by
+// whatever else drew from that pool (another test file, the run's own command server): a port probed free and used
+// later is a race. A port outside the range the kernel assigns, claimed for this process, is handed to no one else
+const pgPort = await unassignedPort();
 // the writer quick (a round every 0.3 s) and the poll too, so the copy is seen keeping up within seconds
 const env = matrixEnv({ MASON_PG_PORT: String(pgPort), MASON_DEMO_CHANGE_MS: "300", MASON_POLL_MS: "1000" });
 const mason = (argv: string[], timeoutMs = 120_000): Promise<Answer> => runMason(root, argv, env, timeoutMs);
@@ -117,8 +114,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     // whenever it is free at that moment, and another run of this file (a second worktree's check), another test's demo
     // or the developer's own demo in another folder may hold it by the time this one starts or is asked "not
     // running". The port lives in .env's URL alone by design (demoPort), so the URL is the place to move it
-    let own = await freePort();
-    while (own === pgPort) own = await freePort();
+    // (never pgPort: one process is never handed a port twice)
+    const own = await unassignedPort();
     fs.writeFileSync(path.join(root, ".env"), fs.readFileSync(path.join(root, ".env"), "utf8").replace(demoUrl, `postgres://demo@127.0.0.1:${own}/demo`));
     demoUrl = envUrl();
     demoPort = own;

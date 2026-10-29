@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import * as serveModule from "../src/cli/serve.ts";
 import { newConfig, readProject, writeConfig } from "../src/cli/project.ts";
 import type { CopyState } from "../src/duck/sync.ts";
+import { unassignedPort } from "./test-ports.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 const { serveSettings, serveConfig, serveSource, healthBody } = serveModule as unknown as typeof import("../src/cli/serve.ts");
@@ -140,13 +141,6 @@ test("/healthz: 503 while it starts and stops, 200 once it answers whatever its 
   assert.doesNotMatch(JSON.stringify(ready.body), /orders|users|secret_ledger|boom/, "the endpoint takes no credential");
 });
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = net.createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as net.AddressInfo).port; s.close(() => resolve(p)); });
-    s.on("error", reject);
-  });
-}
-
 test("a serve answers /healthz before its database does: 503 starting while it connects; refused settings exit 1 in the failure shape", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-"));
   // a database that takes the connection and never answers: the run is still connecting while /healthz is asked
@@ -154,7 +148,8 @@ test("a serve answers /healthz before its database does: 503 starting while it c
   const db = net.createServer((sock) => { sockets.push(sock); }).listen(0, "127.0.0.1");
   await new Promise((r) => db.once("listening", r));
   const dbPort = (db.address() as net.AddressInfo).port;
-  const health = await freePort();
+  // the serve binds it later: a port out of the kernel's ephemeral range, so nothing is handed it meanwhile (tests/test-ports.ts)
+  const health = await unassignedPort();
   const env = { PATH: process.env.PATH ?? "", HOME: dir, DATABASE_URL: `postgres://mason:secret@127.0.0.1:${dbPort}/app`, MASON_API_KEY: KEY,
     MASON_DATA: path.join(dir, "data"), MASON_PROJECT: path.join(dir, "project"), MASON_HEALTH_PORT: String(health), MASON_HEALTH_HOST: "127.0.0.1" };
   fs.mkdirSync(env.MASON_DATA);
