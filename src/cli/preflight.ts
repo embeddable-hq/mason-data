@@ -28,7 +28,11 @@ export function maskedUrl(url: string): string {
     const u = new URL(url);
     if (u.password) u.password = "****";
     return u.toString();
-  } catch { return url.replace(/:\/\/([^:@/]*):[^@/]*@/, "://$1:****@"); }
+  } catch {
+    // not a URL: everything from the user's colon to the LAST @ is the password, whatever it holds (a / or an @ that
+    // was not encoded) — a host never holds an @
+    return url.replace(/:\/\/([^:@/]*):.*@/, "://$1:****@");
+  }
 }
 
 /**
@@ -38,7 +42,8 @@ export function maskedUrl(url: string): string {
 export function parseSource(url: string): { source: Source } | { problem: string } {
   let u: URL;
   try { u = new URL(url); } catch {
-    return { problem: `${JSON.stringify(url)} is not a URL. The form is postgres://user:password@localhost:5432/your_app — a password ` +
+    // its password masked: the problem is printed (and, under mason mcp, kept in the MCP client's log)
+    return { problem: `${JSON.stringify(maskedUrl(url))} is not a URL. The form is postgres://user:password@localhost:5432/your_app — a password ` +
       `containing @ : / # ? or % must be URL-encoded (encodeURIComponent; @ is %40).` };
   }
   if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") return { problem: `the URL's scheme is ${u.protocol.replace(/:$/, "")}; it must be postgres:// or postgresql://` };

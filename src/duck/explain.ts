@@ -71,15 +71,55 @@ export const UNPROFILED = "DuckDB's profiler recorded no operator of this statem
  *  profiler names it: DuckDB's EXPLAIN says SEQ_SCAN for the same operator, and Postgres's `Seq Scan` says otherwise */
 export const operatorName = (type: string): string => type.toLowerCase().split("_").map((w) => w === "n" ? "N" : w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 
-/** the copy a scan reads, as Postgres names a table (DuckDB's `<file>.<schema>.<table>`) */
-export const scannedTable = (n: PlanNode): string | null => {
+/** a table's schema and name, as the source has them (unquoted): the sync's `source` is `${schema}.${name}` */
+export interface TableName { schema: string; name: string }
+
+/** a name as Postgres writes one in a statement: bare when it is lower case letters, digits and `_`, else quoted */
+const quotedName = (s: string): string => /^[a-z_][a-z0-9_$]*$/.test(s) ? s : `"${s.replaceAll('"', '""')}"`;
+
+/**
+ * A TABLE AS POSTGRES WRITES IT, each part quoted where it must be (`public.orders`, `public."Clients"`,
+ * `public."x; y"`): the ONE way EXPLAIN names a copy (its line, FORMAT JSON's `Mason.Copies[].Table`), which a statement
+ * can read back as it is (`mason mcp`'s tables and describe name tables by it too).
+ */
+export const qualifiedName = (t: TableName): string => `${quotedName(t.schema)}.${quotedName(t.name)}`;
+
+/** DuckDB's `<file>.<schema>.<table>`, each part quoted where DuckDB quotes it (`memory.main."x; drop.t"`), as its last
+ *  two parts: a `.` inside a quoted part is the name's */
+export function duckTableName(text: string): TableName | null {
+  const parts: string[] = [];
+  let at = 0;
+  while (at <= text.length) {
+    if (text[at] === '"') {
+      let out = "", end = at + 1;
+      for (; end < text.length; end++) {
+        if (text[end] === '"') { if (text[end + 1] === '"') { out += '"'; end++; continue; } break; }
+        out += text[end];
+      }
+      parts.push(out);
+      at = end + 2;   // past the closing quote and the dot
+    } else {
+      const dot = text.indexOf(".", at);
+      parts.push(text.slice(at, dot < 0 ? undefined : dot));
+      at = dot < 0 ? text.length + 1 : dot + 1;
+    }
+  }
+  return parts.length >= 2 ? { schema: parts[parts.length - 2]!, name: parts[parts.length - 1]! } : null;
+}
+
+/** the copy a scan reads (DuckDB's `<file>.<schema>.<table>`) */
+export const scannedTable = (n: PlanNode): TableName | null => {
   const t = n.extra.Table;
-  return typeof t === "string" ? t.split(".").slice(-2).join(".") : null;
+  return typeof t === "string" ? duckTableName(t) : null;
 };
 
-export function scannedTables(nodes: readonly PlanNode[]): string[] {
-  const out: string[] = [];
-  const walk = (n: PlanNode): void => { const t = scannedTable(n); if (t !== null && !out.includes(t)) out.push(t); n.children.forEach(walk); };
+export function scannedTables(nodes: readonly PlanNode[]): TableName[] {
+  const out: TableName[] = [];
+  const walk = (n: PlanNode): void => {
+    const t = scannedTable(n);
+    if (t !== null && !out.some((o) => o.schema === t.schema && o.name === t.name)) out.push(t);
+    n.children.forEach(walk);
+  };
   nodes.forEach(walk);
   return out;
 }
@@ -198,7 +238,7 @@ export function explainText(e: Explained, o: ExplainOptions): string[] {
     const on = scannedTable(n);
     const est = o.costs && n.estimate !== null ? `  (rows=${n.estimate})` : "";
     const actual = n.actualRows === undefined ? "" : ` (actual rows=${n.actualRows}${o.timing && n.threadMs !== undefined ? `, thread time=${ms(n.threadMs)} ms` : ""})`;
-    lines.push(`${lead}${operatorName(n.type)}${on === null ? "" : ` on ${on}`}${est}${actual}`);
+    lines.push(`${lead}${operatorName(n.type)}${on === null ? "" : ` on ${qualifiedName(on)}`}${est}${actual}`);
     const pad = " ".repeat(depth === 0 ? 2 : 6 * depth + 2);
     for (const [k, v] of Object.entries(n.extra)) if (o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)) lines.push(`${pad}${k}: ${detail(v)}`);
     for (const c of n.children) walk(c, depth + 1);
@@ -220,7 +260,7 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
     const on = scannedTable(n);
     return {
       "Node Type": operatorName(n.type),
-      ...(on === null ? {} : { "Relation Name": on.split(".")[1], Schema: on.split(".")[0] }),
+      ...(on === null ? {} : { "Relation Name": on.name, Schema: on.schema }),
       ...(o.costs && n.estimate !== null ? { "Plan Rows": n.estimate } : {}),
       ...(n.actualRows === undefined ? {} : { "Actual Rows": n.actualRows, "Actual Loops": 1, ...(o.timing && n.threadMs !== undefined ? { "DuckDB Thread Time": Number(ms(n.threadMs)) } : {}) }),
       ...Object.fromEntries(Object.entries(n.extra).filter(([k]) => o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)).map(([k, v]) => [`DuckDB ${k}`, v])),

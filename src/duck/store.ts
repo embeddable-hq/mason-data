@@ -34,7 +34,7 @@ import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } fro
 import type { ExactColumn } from "./rewrite.ts";
 import { gapMark } from "./gaps.ts";
 import { cellsOf, evaluateText, NumericError } from "../lib/pg-numeric.ts";
-import { explainJson, explainText, planNodes, profiled, scannedTables, type Copy, type CopyFacts, type Explained, type PlanNode } from "./explain.ts";
+import { explainJson, explainText, planNodes, profiled, qualifiedName, scannedTables, type Copy, type CopyFacts, type Explained, type PlanNode, type TableName } from "./explain.ts";
 import type { PlannedSql } from "./plan.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -676,12 +676,12 @@ export class SessionRunner implements DuckRunner {
 
   /** each copy's rows, and the sync's facts of it (how it is kept current: src/duck/sync.ts `KeptCurrent`, never the
    *  poll's ledger read here — a project switched to logical replication still holds its last poll there) */
-  private async copies(tables: readonly string[], facts: readonly CopyFacts[]): Promise<Copy[]> {
+  private async copies(tables: readonly TableName[], facts: readonly CopyFacts[]): Promise<Copy[]> {
     const out: Copy[] = [];
-    for (const table of tables) {
-      const [schema, name] = table.split(".") as [string, string];
+    for (const { schema, name } of tables) {
       const rows = (await this.conn.runAndReadAll("SELECT estimated_size FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2", [schema, name])).getRowsJS()[0]?.[0];
-      out.push({ table, rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === table) ?? null });
+      // the sync's source is the two names as they are; EXPLAIN says the table as a statement writes it (qualifiedName)
+      out.push({ table: qualifiedName({ schema, name }), rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === `${schema}.${name}`) ?? null });
     }
     return out;
   }

@@ -72,7 +72,7 @@ test("mason --help lists the commands; a misspelt one is answered with the close
 
 test("mason --help lists the commands under the steps a first session takes, in that order", () => {
   assert.deepEqual(STEPS.map(([step]) => step), ["Learn", "Set up", "Add your tables", "Connect", "Run", "Go to production"]);
-  assert.deepEqual(COMMANDS.map((c) => c.name), ["help", "doctor", "init", "start", "tables", "add", "remove", "wait", "user", "status", "ui", "sync", "logs", "stop", "destroy", "serve"]);
+  assert.deepEqual(COMMANDS.map((c) => c.name), ["help", "doctor", "init", "start", "tables", "add", "remove", "wait", "user", "mcp", "status", "ui", "sync", "logs", "stop", "destroy", "serve"]);
   const help = topUsage();
   let at = -1;
   for (const [step, commands] of STEPS) {
@@ -136,7 +136,38 @@ test("every command that takes --json declares its answer's keys, ends them with
     assert.throws(() => jsonText(c, { nope: 1 }), new RegExp(`mason ${c.name} --json: nope is not in its spec's json keys`));
     assert.deepEqual(JSON.parse(jsonText(c, {}, [["mason x", "y"]])), { next: [{ command: "mason x", what: "y" }] });
   }
-  assert.deepEqual(COMMANDS.filter((c) => !("json" in c.options)).map((c) => c.name), ["help"], "the one that prints text alone (mason help agent says so); mason logs --json is its lines, or with --requests the request log");
+  assert.deepEqual(COMMANDS.filter((c) => !("json" in c.options)).map((c) => c.name), ["help", "mcp"], "the one that prints text alone (mason help agent says so), and the one whose stdout is a protocol's; mason logs --json is its lines, or with --requests the request log");
+  // a command takes no --json exactly when it prints text alone or its stdout is a protocol's
+  assert.deepEqual(COMMANDS.filter((c) => c.stdout === "protocol").map((c) => c.name), ["mcp"]);
+});
+
+test("a command whose stdout is a protocol's says every failure on stderr, --json on its line or not", () => {
+  // mason mcp: an MCP client reads its stdout as JSON-RPC frames, so a pretty { error, next } there is a frame it
+  // cannot read; the wrong option (--json itself) and a refusal are both said on stderr, nothing on stdout
+  for (const args of [["mcp", "--json"], ["mcp", "--url", "mysql://x@y/z", "--json"], ["mcp", "stray", "--json"]]) {
+    const r = mason(...args);
+    assert.equal(r.stdout, "", `mason ${args.join(" ")}: nothing on stdout`);
+    assert.equal(r.status, 2, `mason ${args.join(" ")}: ${r.stderr}`);
+    assert.match(r.stderr, /^✗ mason mcp: /, `mason ${args.join(" ")}`);
+  }
+});
+
+test("mason help mcp's Claude Code lines name the server BEFORE --env (claude mcp add's --env takes every value after it)", async () => {
+  const { MCP } = await import("../src/cli/mcp.ts");
+  const lines = MCP.usage.split("\n").filter((l) => /^\s+claude mcp add /.test(l));
+  assert.ok(lines.length >= 2 && lines.some((l) => l.includes("--env")), MCP.usage);
+  for (const l of lines) {
+    const words = l.trim().split(/\s+/);
+    const name = words.indexOf("mason");
+    const env = words.indexOf("--env");
+    assert.ok(name === 3, `the server's name follows claude mcp add: ${l}`);
+    if (env >= 0) assert.ok(env > name, `--env after the server's name: ${l}`);
+    assert.ok(words.indexOf("--") > name && words.indexOf("--") > env, `-- before the command: ${l}`);
+  }
+  // the URL in the environment is said first: on the command line ps shows it
+  assert.ok(lines[0]!.includes("--env MASON_URL="), lines[0]);
+  const { guideText } = await import("../src/cli/guides.ts");
+  assert.match(await guideText("agent"), /\n {4}claude mcp add mason --env MASON_URL="<url>" -- mason mcp\n/);
 });
 
 test("the --json shapes of the commands that change what is copied name the sources file and its tables, never a model", () => {

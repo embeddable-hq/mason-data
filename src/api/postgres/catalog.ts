@@ -159,7 +159,39 @@ export function catalogDdl(schema: PgSchema): string[] {
       if (parts.length > 0) statements.push(`COMMENT ON COLUMN ${qualified(table)}.${ident(c.name)} IS ${literal(parts.join("; "))};`);
     }
   }
-  return [...statements, ...constraints];
+  return [...statements, ...constraints, ...sourceTypeNames(schema)];
+}
+
+/**
+ * THE NAME OF A TYPE BY THE OID THE WIRE SENDS FOR IT. A column of a type the source made (an enum, a citext) is
+ * sent with the SOURCE's OID (src/duck/plan.ts `userTypes`: what the source's own clients cached), which in this
+ * catalog means another type or none (both count from 16384): `format_type(<that oid>, …)` answered `???`, or another
+ * table's row type. Two readers ask by two OID spaces, and one OID can be in both:
+ *   - `public.mason_wire_type(oid, integer)` names an OID the WIRE sent: a source OID as its type here, every other as
+ *     Postgres does. `mason mcp` names a RowDescription's columns by it; this map is the one place a wire OID is named;
+ *   - the catalog's `format_type(oid, integer)` — the `version()` override's way, search_path listing pg_catalog after
+ *     public — keeps the catalog's meaning for an OID the catalog has (a reader of pg_attribute.atttypid asks by those)
+ *     and names any other by the wire's map. `pg_catalog.format_type`, written out, is Postgres's own.
+ */
+export function sourceTypeNames(schema: PgSchema): string[] {
+  const names = new Map<number, string>();
+  for (const t of schema.tables) {
+    if (t.rowTypeOid !== undefined) names.set(t.rowTypeOid, qualified(t));
+    for (const c of t.columns) {
+      if (c.typeOid === undefined || c.spelled === undefined) continue;
+      // an array column's own OID is its array type's; an element's array type is the element's spelling with []
+      names.set(c.typeOid, c.spelled);
+      if (c.typeArrayOid !== undefined && !c.spelled.endsWith("[]")) names.set(c.typeArrayOid, `${c.spelled}[]`);
+    }
+  }
+  // with no type the source made, every OID the wire sends is Postgres's: the wire's name is format_type's
+  if (names.size === 0) return [`CREATE OR REPLACE FUNCTION public.mason_wire_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT pg_catalog.format_type($1, $2) $$;`];
+  const values = [...names].map(([oid, spelled]) => `(${oid}::oid, ${literal(spelled)})`).join(", ");
+  return [`CREATE OR REPLACE FUNCTION public.mason_wire_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$
+  SELECT coalesce((SELECT pg_catalog.format_type(pg_catalog.to_regtype(v.spelled), $2) FROM (VALUES ${values}) AS v(source, spelled) WHERE v.source = $1),
+    pg_catalog.format_type($1, $2)) $$;`,
+  `CREATE OR REPLACE FUNCTION public.format_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$
+  SELECT CASE WHEN EXISTS (SELECT FROM pg_catalog.pg_type t WHERE t.oid = $1) THEN pg_catalog.format_type($1, $2) ELSE public.mason_wire_type($1, $2) END $$;`];
 }
 
 /**

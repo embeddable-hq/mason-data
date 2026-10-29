@@ -497,7 +497,12 @@ type TxState = "none" | "open" | "failed";
  */
 interface DuckCursor { answer: DuckAnswer; formats: readonly number[]; controller: AbortController; pending: Buffer[]; sent: number; done: boolean; failed?: unknown;
   /** when its statement began (the request log's duration runs from it, however many Executes page the rows) */
-  startedAt: number }
+  startedAt: number;
+  /** its row of the request log is written: at its last row, by its refusal, or when it was dropped suspended */
+  recorded?: boolean;
+  /** an Execute's row count stopped it with rows left (PortalSuspended), and no Execute runs on it now: a portal
+   *  dropped so is recorded by the drop, one dropped mid-Execute by that Execute (its rows or its error) */
+  suspended?: boolean }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
@@ -961,8 +966,10 @@ class Session {
    * statement's ErrorResponse goes out), and for a refused password (CONNECT), through `options.record`. A catalog
    * read, a SET or a SHOW answered is the protocol's chatter, not recorded. Never throws: `record` buffers.
    */
-  private recordRequest(answer: PgError | { rows: number; startedAt?: number }, sql?: string, refusedUser?: string): void {
-    const asked = this.asked;
+  private recordRequest(answer: PgError | { rows: number; startedAt?: number }, sql?: string, refusedUser?: string,
+    of?: { method: string; jsonReads: readonly string[] | undefined }): void {
+    // `of`: a statement recorded after its own messages (a portal dropped suspended), not the one being asked now
+    const asked = of === undefined ? this.asked : { sql: sql ?? "", method: of.method, startedAt: Date.now(), ...(of.jsonReads !== undefined ? { jsonReads: of.jsonReads } : {}) };
     const startedAt = (!(answer instanceof PgError) ? answer.startedAt : undefined) ?? asked?.startedAt ?? Date.now();
     // a refusal's statement is the one refuse() names (a simple Query's own statement, an Execute's portal's)
     const stored = storedPayload(sql ?? asked?.sql ?? "");
@@ -1100,8 +1107,16 @@ class Session {
     const text = bytes.subarray(base, raw.stmt_len ? base + raw.stmt_len : bytes.length).toString("utf8");
     const found = await explainedText(text, t.query);
     if (found === null) throw new PgError({ code: "0A000", message: "Mason cannot find the statement this EXPLAIN explains in its text (a Mason gap: report it, with the statement)" });
-    const plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), found.text, t.query, base + Buffer.byteLength(text.slice(0, found.offset)), paramOids,
-      this.vars.searchPath, this.vars.timeZone, this.server.userTypes());
+    let plan: DuckPlan;
+    try {
+      plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), found.text, t.query, base + Buffer.byteLength(text.slice(0, found.offset)), paramOids,
+        this.vars.searchPath, this.vars.timeZone, this.server.userTypes());
+    } catch (e) {
+      // a refusal of the statement explained is placed as Postgres places it: in the whole text, past `EXPLAIN …`
+      if (!(e instanceof StatementError) || e.fields.position === undefined) throw e;
+      const before = bytes.subarray(0, base).toString("utf8").length + found.offset;
+      throw new StatementError({ ...e.fields, position: e.fields.position + before }, whole);
+    }
     return { options, plan };
   }
 
@@ -1242,9 +1257,20 @@ class Session {
     }
   }
 
-  /** a portal gone (Close, Sync, a Bind of its name, DISCARD, the session's end): its DuckDB result with it */
+  /**
+   * A portal gone (Close, Sync, a Bind of its name, DISCARD, the session's end): its DuckDB result with it. One the
+   * client stopped reading at a row count (an Execute's: JDBC's setMaxRows, `mason mcp`'s max_rows) was never read to
+   * its end, so its row of the request log is written here, with the rows it sent: a statement answered is in the log
+   * however far it was read.
+   */
   private dropPortal(name: string): void {
-    this.portals.get(name)?.cursor?.answer.close();
+    const portal = this.portals.get(name);
+    const c = portal?.cursor;
+    if (portal !== undefined && c !== undefined && c.suspended === true && c.recorded !== true && c.failed === undefined) {
+      c.recorded = true;
+      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, portal.statement.sql, undefined, { method: "EXECUTE", jsonReads: portal.statement.duck?.jsonReads });
+    }
+    c?.answer.close();
     this.portals.delete(name);
   }
 
@@ -1316,6 +1342,9 @@ class Session {
       return;
     }
     if (this.skipToSync || m.type === "Flush") return;
+    // its statement, read as the message arrives: a portal dropped while it runs (the session ended under a cancelled
+    // statement) leaves the refusal its statement, never ""
+    const sql = m.type === "Parse" ? m.sql : this.sqlOf(m);
     try {
       switch (m.type) {
         case "Parse": return this.sendAll(await this.parseMessage(m));
@@ -1325,7 +1354,6 @@ class Session {
         case "Close": return this.sendAll(await this.closeMessage(m));
       }
     } catch (err) {
-      const sql = m.type === "Parse" ? m.sql : this.sqlOf(m);
       const e = asPgError(err, sql);
       this.refuse(e, sql, m.type);
       this.skipToSync = true;
@@ -1542,20 +1570,30 @@ class Session {
     }
     const c = portal.cursor;
     if (c.failed !== undefined) throw c.failed;
-    // every row: streamed
-    if (m.maxRows <= 0) {
-      try { await this.streamRest(c); } finally { c.answer.close(); }
+    c.suspended = false;
+    try {
+      // every row: streamed
+      if (m.maxRows <= 0) {
+        try { await this.streamRest(c); } finally { c.answer.close(); }
+        c.recorded = true;
+        this.recordRequest({ rows: c.sent, startedAt: c.startedAt });
+        return [commandComplete(`SELECT ${c.sent}`)];
+      }
+      // at most maxRows (JDBC's fetch size, a cursor): suspended while a row is left, read one chunk ahead to know it
+      while (!c.done && c.pending.length <= m.maxRows) await this.fill(c);
+      const out = c.pending.splice(0, m.maxRows);
+      c.sent += out.length;
+      // suspended: its row is written at its last Execute, or when it is dropped (dropPortal)
+      if (c.pending.length > 0) { c.suspended = true; return [...out, portalSuspended()]; }
+      c.answer.close();
+      c.recorded = true;
       this.recordRequest({ rows: c.sent, startedAt: c.startedAt });
-      return [commandComplete(`SELECT ${c.sent}`)];
+      return [...out, commandComplete(`SELECT ${c.sent}`)];
+    } catch (e) {
+      // its refusal is its row (refuse)
+      c.recorded = true;
+      throw e;
     }
-    // at most maxRows (JDBC's fetch size, a cursor): suspended while a row is left, read one chunk ahead to know it
-    while (!c.done && c.pending.length <= m.maxRows) await this.fill(c);
-    const out = c.pending.splice(0, m.maxRows);
-    c.sent += out.length;
-    if (c.pending.length > 0) return [...out, portalSuspended()];
-    c.answer.close();
-    this.recordRequest({ rows: c.sent, startedAt: c.startedAt });
-    return [...out, commandComplete(`SELECT ${c.sent}`)];
   }
 
   private async closeMessage(m: Extract<FrontendMessage, { type: "Close" }>): Promise<Buffer[]> {

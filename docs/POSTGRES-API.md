@@ -125,6 +125,29 @@ the refusal's own line above. It is a log line and nothing else:
 nothing is stored, and the password is no statement. It is how the tool corpus was recorded ("How it is
 tested"), and how to see what a tool you are connecting sends.
 
+### From an MCP client
+
+`mason mcp` (`mason help mcp`) is an MCP server on stdio for Claude Code, Claude Desktop and other agents, and a client
+of this API like any tool: it connects as a `mason user` by the URL `mason user add` printed (`MASON_URL`, or `--url`),
+honours the URL's `sslmode`, and sets `application_name` to `mason-mcp/<the MCP client's name>`, so the request log
+names the agent. Its tools say over this wire what a bare SQL tool would leave a model to guess:
+
+- `tables` and `describe` read the catalog (`pg_class`, `pg_attribute`, `pg_index`, `pg_constraint`) and, for each
+  copy's rows and how it is kept current, `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` — one EXPLAIN a table, a few at
+  once, so a remote `mason serve` answers as a local run does; a table is named as EXPLAIN names it, as a statement
+  writes it (`public."Clients"`);
+- `query` sends ONE statement through the extended protocol (a second is Postgres's 42601), its `max_rows` the
+  Execute's row count (the server stops there and answers PortalSuspended: `truncated`), after `SET statement_timeout`
+  to its `timeout_ms` (57014 past it); the column types are the catalog's `mason_wire_type(oid, typmod)` of the
+  RowDescription's OID and modifier. The wire sends the SOURCE's OID for a type the source made (an enum, a citext),
+  which the catalog holds under another OID, and both count from 16384: `mason_wire_type` names an OID as the wire
+  sent it; `format_type` keeps the catalog's meaning for an OID the catalog has (pg_attribute's `atttypid`) and names
+  any other as the wire's; `pg_catalog.format_type`, written out, is the catalog's own;
+- a request the client cancels (`notifications/cancelled`) is a CancelRequest for its statement;
+- a refusal reaches the model whole, as an MCP tool error: SQLSTATE, message, DETAIL (the gap's id) and HINT (its way
+  out), the fields this listener's ErrorResponse carries;
+- `explain` is this API's EXPLAIN, as text.
+
 ## What a tool sees
 
 - **Each copied table**, in the schema it has in the source (`public.orders` stays `public.orders`), with the columns
@@ -193,7 +216,10 @@ every statement sees the instant the transaction began. DuckDB's own clock is ne
 Every statement DuckDB answered, every statement refused or failed (a Parse, a Bind, a syntax error, a catalog read
 Postgres refused) and every refused login is a row of the run's request log, `_mason.requests` in `.mason/duck.db`.
 The catalog never lists `_mason`, so a connected tool cannot read it. A catalog read, a `SET`, a `SHOW` or a `BEGIN`
-that was answered is the protocol's chatter and is not recorded (`MASON_PG_TRACE=1` logs every statement). A row has
+that was answered is the protocol's chatter and is not recorded (`MASON_PG_TRACE=1` logs every statement): a statement
+over the catalog alone (`pg_class`, `information_schema`, `SELECT version()`) is a row only when it is refused. A statement a client
+stopped reading at a row count (an Execute's: JDBC's `setMaxRows`, `mason mcp`'s `max_rows`) is a row when its portal
+closes (a Sync, a Close, the session's end), with the rows it sent. A row has
 the session, `application_name`, the `mason user`, the method (`QUERY`, `PARSE`, `BIND`, `DESCRIBE`, `EXECUTE`,
 `CONNECT`), the SQLSTATE, message, detail and hint sent, the rows sent, the duration and the statement (cut at 64 KiB,
 flagged when cut). It is kept `MASON_REQUEST_LOG_DAYS` days (default 7). `mason logs --requests` reads it, a request

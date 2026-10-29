@@ -24,7 +24,7 @@ async function main(argv: string[]): Promise<number> {
   if (command === "--help" || command === "-h") { process.stdout.write(topUsage()); return 0; }
   if (command === "--version" || command === "-v" || command === "version") { process.stdout.write(`${version()}\n`); return 0; }
   const cmd = COMMANDS.find((c) => c.name === command);
-  const json = wantsJson(args);
+  const json = wantsJson(args, cmd);
   // the commands' old names: said, never run as different ones
   const RENAMED: Record<string, { message: string; next: Array<[string, string]> }> = {
     dev: { message: "mason dev is now mason start", next: [["mason init <postgres url>", "once, in your app's folder"], ["mason start", "Mason in the background"]] },
@@ -60,7 +60,8 @@ main(process.argv.slice(2)).then(exitWhenWritten, (e: unknown) => {
   // MASON_DEBUG=1 prints where it happened, for the bug report it deserves. The same shape as every failure, JSON under --json.
   const message = e instanceof Error ? e.message : String(e);
   const [command, ...args] = process.argv.slice(2);
-  const code = failed(command ?? "", { message, code: "failed", fix: process.env.MASON_DEBUG ? undefined : "this is a bug in mason: MASON_DEBUG=1 prints where it happened, for the report" }, { json: wantsJson(args) });
+  const code = failed(command ?? "", { message, code: "failed", fix: process.env.MASON_DEBUG ? undefined : "this is a bug in mason: MASON_DEBUG=1 prints where it happened, for the report" },
+    { json: wantsJson(args, COMMANDS.find((c) => c.name === command)) });
   if (process.env.MASON_DEBUG) process.stderr.write(`${(e as Error).stack ?? ""}\n`);
   exitWhenWritten(code);
 });
