@@ -2177,7 +2177,7 @@ test("Logs: 'Failures only' narrows the events read, in the page alone; the even
 test("Queries, Usage and Logs: the index.html carries the parts the restyled pages write — a header each, the filter toolbar, the failures toggle", () => {
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   for (const id of ["queries-kpis", "usage-kpis", "usage-charts"]) assert.match(html, new RegExp(`<div id="${id}"></div>`), id);
-  for (const [id, title] of [["queries-h", "Queries"], ["usage-h", "Usage"], ["logs-h", "Logs"]]) assert.match(html, new RegExp(`<div class="page-head"><div class="head-row"><h2 id="${id}">${title}</h2><div id="range-${title.toLowerCase()}" class="head-range"></div></div><p class="desc">`), `${title}'s header`);
+  for (const [id, title] of [["queries-h", "Queries"], ["usage-h", "Usage"], ["logs-h", "Logs"]]) assert.match(html, new RegExp(`<div class="page-head"><div class="head-row"><h2 id="${id}">${title}</h2><div id="range-${title!.toLowerCase()}" class="head-range"></div></div><p class="desc">`), `${title}'s header`);
   assert.match(html, /<form id="request-filters" class="toolbar"[^>]*>[\s\S]*<button type="submit" class="primary">Filter<\/button>\s*<button type="button" data-clear-filters>Clear<\/button>/);
   assert.match(html, /<input type="checkbox" id="logs-failures-only"> Failures only/);
   const view = (ids: string[]) => ids.every((id) => html.includes(`id="${id}"`));
