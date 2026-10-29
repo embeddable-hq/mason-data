@@ -36,7 +36,7 @@ export const DEMO_PORT = 5434;
 /** The demo database's tables (the seed's own list), the ones `mason init demo` adds to the sources file and the one it
  *  leaves for the person to add, and its URL (src/demo/seed.ts: no PGlite is loaded by it, so `mason init demo` and
  *  `demoPort` never load the database). */
-export { DEMO_ADDED_TABLES, DEMO_TABLES, DEMO_TABLE_TO_ADD, demoUrl } from "../demo/seed.ts";
+export { DEMO_ADDED_TABLES, DEMO_SYNC, DEMO_TABLES, DEMO_TABLE_TO_ADD, demoUrl } from "../demo/seed.ts";
 
 /** How often the run changes the demo database by default (MASON_DEMO_CHANGE_MS). */
 export const DEMO_CHANGE_MS = 5000;

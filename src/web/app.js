@@ -68,19 +68,42 @@ export function copyingText(copied, rowsEstimate, p) {
 
 /**
  * AN ADDED TABLE'S LINE, as `mason status` and `mason wait` print it after its bar (src/cli/commands.ts `tableLines`):
- * its state (done, unsynced, failed, copying, waiting), how full its bar is, and what it says.
+ * its state (done, unsynced, failed, copying, waiting), how full its bar is, and what it says — a copied one with how it is kept
+ * current and how old its copy is (`keptAge`).
  */
-export function tableLine(t) {
+export function tableLine(t, now = Date.now()) {
   if (t.error) return { state: "failed", fraction: 1, what: `its copy failed: ${firstLine(t.error)}` };
   if (t.copy?.phase === "copying") {
     const c = copyingText(t.copy.rowsCopied, t.rows, t.copy.progress);
     return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `copying ${c.text}` : c.text };
   }
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its copy to start" };
-  if (t.unsynced) {
-    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied, NOT kept current (${t.unsynced.reason}${t.unsynced.asOf ? `; as of ${t.unsynced.asOf.slice(0, 16).replace("T", " ")} UTC` : ""}) — mason sync ${entryName(t.table)}, or mason start --replication` };
+  const age = keptAge(t, now);
+  // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
+  if (t.kept?.by === "poll" && t.kept.pending !== undefined) {
+    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
   }
-  return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}` };
+  return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
+}
+
+/** How long ago an instant was (src/lib/table-sync.ts `agoText`). */
+export function agoText(iso, now = Date.now()) {
+  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (s < 90) return `${s} s ago`;
+  if (s < 90 * 60) return `${Math.round(s / 60)} min ago`;
+  if (s < 36 * 3600) return `${Math.round(s / 3600)} h ago`;
+  const d = Math.round(s / 86_400);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+
+/** How a copied table is kept current and how old its copy is (src/cli/commands.ts `keptAge`). */
+export function keptAge(t, now = Date.now()) {
+  const k = t.kept;
+  if (k?.by !== "poll") return null;
+  const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`;
+  if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
+  if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${entryName(t.table)} syncs it now; sync: poll 5m on its entry polls it`;
+  return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)}`}`;
 }
 
 /** A table's facts as `mason tables` says them on its line (src/cli/commands.ts `tableFacts`): its size, its key, and
@@ -95,7 +118,15 @@ export function tableFacts(t) {
 export function addedLines(b, file) {
   const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
   const s = b.skippedSecrets;
+  const name = entryName(b.table);
+  const sync = b.bigOff ? `sync: off written on its entry: it has more than 1,000,000 rows, and each poll scans it whole on your database — ` +
+      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason start --replication keeps every table current from the change log`
+    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first copy it is read again only by mason sync ${name} — ` +
+      `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
+    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first copy — mason add ${name} --sync off stops that`;
   return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+    sync,
+    ...(b.pollCost !== null ? [b.pollCost] : []),
     ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a copy always has its key)`] : []),
     ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
       `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
@@ -123,7 +154,8 @@ export function sourceRows(s) {
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
         `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · ${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
+      : `each table as its sync: says, polled with SELECTs (xmin)${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
+        `${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
   ];
 }
 
@@ -164,7 +196,7 @@ export function renderStatus(s, requests = {}) {
     return parts.join("");
   }
   // as tableLines orders them: the finished first, in the order they finished, then the failed, the copying, the waiting
-  const rank = { done: 0, unsynced: 0, failed: 1, copying: 2, waiting: 3 };
+  const rank = { done: 0, failed: 1, copying: 2, waiting: 3 };
   const lines = picked.map((t) => ({ t, l: tableLine(t) }))
     .sort((a, b) => rank[a.l.state] - rank[b.l.state] || (a.t.copy?.updatedAt ?? "").localeCompare(b.t.copy?.updatedAt ?? "") || a.t.table.localeCompare(b.t.table));
   parts.push(`<h3>Tables (${picked.length} of ${s.tables.length} added)</h3>`,
@@ -260,8 +292,10 @@ export function renderWhere(s) {
  */
 export function renderUsers(list, confirming = null) {
   if (!list.users.length) return `<p class="dim">No users yet.</p>`;
-  return `<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Added</th><th scope="col"></th></tr></thead><tbody>${list.users.map((u) =>
+  return `<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Added</th><th scope="col"></th></tr></thead><tbody>${list.users.map((u) =>
     `<tr><th scope="row">${code(u.name)}${u.live ? "" : ` <span class="warn">does not connect: the API key was rotated since it was added</span>`}</th>` +
+    // the user's role (mason user add --role): what it may read; none, every copied table; one the roles file does not name, said
+    `<td>${u.role === undefined ? `<span class="dim">every table</span>` : `${code(u.role)}${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}`}</td>` +
     `<td class="dim">${esc(u.addedAt.slice(0, 16).replace("T", " "))} UTC · id ${esc(u.id)}</td>` +
     `<td class="act">${confirming === u.name
       ? `<span class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</span> ` +

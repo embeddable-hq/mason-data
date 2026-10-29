@@ -115,14 +115,16 @@ CLI lacks).
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still copying at the bottom — redrawn in place on a terminal, printed when it changes
   elsewhere; ready only when every added table is copied and served (`readiness`, src/cli/readiness.ts); a copy that
-  failed is said with its error and that Mason tries it again; a table over the sync's row limit says `NOT kept current`
-  on its line, and a copy in the old layout that it is being copied again.
+  failed is said with its error and that Mason tries it again; each copied table says its sync and its copy's age on
+  its line (`keptAge`: `sync: off, last synced 3 h ago — mason sync <table>`, `polled every 30s, last 4 s ago`), and a
+  copy in the old layout that it is being copied again.
 - **What a project copies is ONE sources file** (a `sources` folder, each file a source to sync, naming the tables and
   columns to sync): `mason/sources/<name>.yml`, its name the
   source's — `kind: postgres` (any other kind refused by name, "not yet"), `url:` a literal URL or `${NAME}` (read by
   `appEnvValue`, src/lib/dotenv.ts: `.env.local`, `.env`, the shell; unset is refused with the way out), `tables:` a MAP
   of entries: `{}` every column, `columns:` those (the key always copied), `exclude:` every column but those (never
-  both), `key:` only for a table with no primary key (refused on one that has one; refused under replication, where the
+  both), `sync:` how it is kept current (`off`, `poll <interval>`; the file's top `sync:` is every entry's default, and
+  none written is `off`, said at `mason start`), `key:` only for a table with no primary key (refused on one that has one; refused under replication, where the
   app's UPDATEs to it would fail in a publication). Types are never in the file: the run reads them at every start. A
   second file is refused ("one source per project for now"). ONE reader (`readSource`, `parseSourceText`, then
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every
@@ -188,6 +190,14 @@ CLI lacks).
   edits `.mason/users.json` beside it, `mason serve`'s data folder included). "User" is the word in everything it
   prints, never "token" or "credentials". `mason connect` (a token for a day) is gone: `mason user`
   is enough.
+- **A roles file is read by ONE module, in the sources file's words** (`src/cli/roles.ts`: `mason/roles.yml`,
+  `roles: { <role>: { tables: { <table>: {} | { columns: [...] } | { exclude: [...] } } } }`), validated at `mason
+  start` against the tables the sources file copies and by `mason user add --role` (the listener's roles while the
+  run is up, `/api/state`'s `roles`; the file with Mason stopped), every mistake at its key with a `did you mean`, code
+  `bad_roles`; a role the file does not name is `not_found` with the lines to add. `LiveRoles` re-reads it when it
+  changes, so an edit applies without a restart, and a file edited into a mistake keeps the last good grants for the
+  catalog and refuses every statement of a user with a role (`.claude/rules/postgres-api.md`). `mason user list`,
+  `mason start` and the web page say which users carry a role the file no longer names.
 - **`mason mcp` is an MCP server on stdio, a client of the Postgres API as a `mason user`** (src/cli/mcp.ts, docs/DESIGN.md
   "An MCP server"): stdout is the protocol's (JSON-RPC frames alone), every log line goes to stderr, and so does a
   failure to start — it takes no `--json` (`CommandSpec.stdout: "protocol"`; tests/cli-help.test.ts); a tool's failure is

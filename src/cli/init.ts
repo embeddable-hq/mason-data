@@ -31,8 +31,9 @@ import { version } from "./version.ts";
 import { parseVersion, PIN_FILE } from "../lib/project-version.ts";
 import { appDatabaseUrl, appEnvValue, appendEnvLine, ENV_FILE } from "../lib/dotenv.ts";
 import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateDir, nameFromFolder, newConfig, writeConfig } from "./project.ts";
-import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_PORT, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
+import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_PORT, DEMO_SYNC, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
 import { freePort } from "./ports.ts";
+import { DEFAULT_SYNC, syncText } from "../lib/table-sync.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 
 
@@ -309,8 +310,10 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     } else {
       await steps.step(`Writing ${rel(sourceFile)}`, () => {
         fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
-        fs.writeFileSync(sourceFile, newSourceText(`\${${where.variable}}`, demo ? DEMO_ADDED_TABLES : []));
-      }, () => `Wrote ${rel(sourceFile)}: the database (url: \${${where.variable}}) and the tables to copy, ${demo ? `the demo's ${DEMO_ADDED_TABLES.length} added — mason add ${DEMO_TABLE_TO_ADD} adds the fourth` : "none yet (mason add)"} — commit it`);
+        fs.writeFileSync(sourceFile, newSourceText(`\${${where.variable}}`, demo ? DEMO_ADDED_TABLES : [], demo ? DEMO_SYNC : DEFAULT_SYNC));
+      }, () => `Wrote ${rel(sourceFile)}: the database (url: \${${where.variable}}), sync: ${syncText(demo ? DEMO_SYNC : DEFAULT_SYNC)} ` +
+        `(${demo ? "every table polled every 5 s" : "each table read once, then again only by mason sync <table>"}) and the tables to copy, ` +
+        `${demo ? `the demo's ${DEMO_ADDED_TABLES.length} added — mason add ${DEMO_TABLE_TO_ADD} adds the fourth` : "none yet (mason add)"} — commit it`);
     }
     if (where.line !== null) {
       const envLine = where.line;
