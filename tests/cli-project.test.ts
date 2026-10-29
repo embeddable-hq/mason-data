@@ -21,6 +21,11 @@ const { urlVariable } = initModule as unknown as { urlVariable: (root: string, u
 // at a commit without it, the bare file it writes, so the file loads and its tests fail by name
 const newSourceText = (url?: string, sync?: unknown): string =>
   (sourcesModule.newSourceText as ((u?: string, t?: unknown, s?: unknown) => string) | undefined)?.(url, [], sync) ?? `kind: postgres\nurl: ${url ?? "$" + "{DATABASE_URL}"}\ntables: {}\n`;
+// the roles file mason init writes (src/cli/roles.ts newRolesText, stage 1b): read from the module when the test runs,
+// so the file loads at a commit without it and the tests that need it fail by name
+const rolesModule = await import("../src/cli/roles.ts" as string).catch(() => ({})) as Record<string, unknown>;
+const newRolesText = (): string => (rolesModule.newRolesText as (() => string) | undefined)?.() ?? "(no newRolesText at this commit)";
+const ROLES_WROTE = "✓ Wrote mason/roles.yml: every user reads every copied table (default: everything, tables: all) — narrow it with a second role — commit it";
 /** the demo's sync, as mason init demo writes it at the file's top (src/demo/seed.ts DEMO_SYNC) */
 const DEMO_SYNC = { mode: "poll", every: "5s", seconds: 5 };
 import type { Io } from "../src/cli/command.ts";
@@ -124,11 +129,13 @@ test("mason init writes the project — config, the sources file, the URL in .en
     // the source file is yours to commit, and the URL stays out of it — and out of .mason/config.json
     assert.equal(JSON.stringify(p.config).includes("secret"), false, "the config holds no URL");
     assert.equal(fs.readFileSync(path.join(app, "mason", "sources", "shop.yml"), "utf8"), newSourceText());
+    // the roles file: today's access (every user reads every copied table) said in a committed file, byte for byte its one writer's
+    assert.equal(fs.readFileSync(path.join(app, "mason", "roles.yml"), "utf8"), newRolesText());
     assert.match(fs.readFileSync(path.join(app, ".env"), "utf8"), /^# the database Mason copies from .*\nDATABASE_URL=postgres:\/\/me:secret@localhost:5432\/shop\n$/);
     assert.equal(fs.statSync(path.join(app, ".env")).mode & 0o777, 0o600);
     assert.match(fs.readFileSync(path.join(app, ".gitignore"), "utf8"), /^node_modules\n# Mason: .*\n\.mason\/\n# the database URL mason\/sources\/ names \(mason init\)\n\.env\n$/);
     // what it did, as a checklist, then what to run next
-    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to copy, none yet \(mason add\) — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
+    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to copy, none yet \(mason add\) — commit it\n✓ Wrote mason\/roles\.yml: every user reads every copied table \(default: everything, tables: all\) — narrow it with a second role — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
     assert.doesNotMatch(r.out, /secret/, "the password is never printed");
     // again here, or anywhere inside: refused, naming the project and how to point it elsewhere
     fs.mkdirSync(path.join(app, "src"));
@@ -367,6 +374,7 @@ test("a project an older Mason made: refused with the way out — mason init wri
     const r = await quiet((io) => init(["postgres://me:pw@localhost:5432/shop_dev", "--skip-check"], root, { io }));
     assert.equal(r.value, 0, r.err);
     assert.equal(fs.readFileSync(path.join(root, "mason", "sources", "shop_dev.yml"), "utf8"), newSourceText(), "no table: nothing migrated");
+    assert.equal(fs.readFileSync(path.join(root, "mason", "roles.yml"), "utf8"), newRolesText(), "the roles file it had none of");
     const kept = JSON.parse(fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8")) as { name: string; apiKey: string };
     assert.deepEqual([kept.name, kept.apiKey], [config.name, config.apiKey], "the config kept: its key, so its users");
     assert.match(r.out, /\n✓ Kept \.mason\/config\.json: the project shop, its key and its copy\n/);
@@ -381,10 +389,14 @@ test("mason init in a clone: the sources file already there is kept, and its var
     fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
     const text = `${newSourceText()}`.replace("tables: {}\n", "tables:\n  orders: {}   # ours\n");
     fs.writeFileSync(path.join(root, "mason", "sources", "app.yml"), text);
+    // the team's roles file, committed: kept as it is, whatever it says
+    const roles = "# ours\nroles:\n  agent:\n    tables:\n      orders: {}\n";
+    fs.writeFileSync(path.join(root, "mason", "roles.yml"), roles);
     const r = await quiet((io) => init(["postgres://me:pw@localhost:5432/shop", "--skip-check"], root, { io }));
     assert.equal(r.value, 0, r.err);
     assert.equal(fs.readFileSync(path.join(root, "mason", "sources", "app.yml"), "utf8"), text, "kept, byte for byte");
-    assert.match(r.out, /\n✓ Kept mason\/sources\/app\.yml: the database and the tables this project copies\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env/);
+    assert.equal(fs.readFileSync(path.join(root, "mason", "roles.yml"), "utf8"), roles, "the roles file kept, byte for byte");
+    assert.match(r.out, /\n✓ Kept mason\/sources\/app\.yml: the database and the tables this project copies\n✓ Kept mason\/roles\.yml: the roles and the default for a user added without --role\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -412,10 +424,12 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     assert.equal(file, newSourceText("${DATABASE_URL}", DEMO_SYNC).replace("tables: {}\n", "tables:\n  customers: {}\n  products: {}\n  orders: {}\n"));
     const parsed = (sourcesModule.parseSourceText as (t: string, n: string, f: string) => { tables: Array<{ table: string }> })(file, "demo", "demo.yml");
     assert.deepEqual(parsed.tables.map((t) => t.table), ["public.customers", "public.products", "public.orders"]);
+    assert.equal(fs.readFileSync(path.join(app, "mason", "roles.yml"), "utf8"), newRolesText(), "the demo's roles file is every project's");
     assert.match(fs.readFileSync(path.join(app, ".gitignore"), "utf8"), /\.mason\/\n.*\n\.env\n$/);
     // the checklist: no connection, the database made by mason start; then what to run next
     assert.match(r.out, new RegExp(`^Making try-mason a Mason project in .*\\n✓ The demo database will be postgres://demo@127\\.0\\.0\\.1:${port}/demo: mason start makes it in \\.mason/demo/ and seeds it \\(nothing to connect to yet\\)\\n` +
       "✓ Wrote \\.mason/config\\.json: Mason's key \\(this machine's\\)\\n✓ Wrote mason/sources/demo\\.yml: the database \\(url: \\$\\{DATABASE_URL\\}\\), sync: poll 5s \\(every table polled every 5 s\\) and the tables to copy, the demo's 3 added — mason add order_items adds the fourth — commit it\\n" +
+      `${ROLES_WROTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n` +
       `✓ Wrote DATABASE_URL=postgres://demo@127\\.0\\.0\\.1:${port}/demo to \\.env: the URL the source file names, kept out of git\\n✓ Made \\.gitignore, ignoring \\.mason/ and \\.env\\n\\n` +
       "Tip: The demo database runs inside mason start, read by polling: a new order every few seconds; order_items is left for you to add; mason destroy removes it with the copy\\n\\n" +
       "Next:\\n {2}mason start +the demo database and Mason, in the background: its tables copied, then kept current\\n" +
@@ -431,7 +445,8 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     const j = await quiet((io) => init(["demo", "--json"], asData, { io }));
     assert.equal(j.value, 0, j.err);
     const answer = JSON.parse(j.out) as Record<string, unknown> & { source: { url: string; env: string }; database: { url: string; from: unknown; version: unknown; tables: unknown }; next: Array<{ command: string }> };
-    assert.deepEqual(Object.keys(answer), ["name", "root", "folder", "config", "demo", "source", "database", "warnings", "next"]);
+    assert.deepEqual(Object.keys(answer), ["name", "root", "folder", "config", "demo", "source", "roles", "database", "warnings", "next"]);
+    assert.deepEqual(answer.roles, { file: path.join(asData, "mason", "roles.yml"), written: true }, "the roles file, with the files init writes");
     assert.equal(answer.demo, true);
     assert.equal(answer.source.url, "${DATABASE_URL}");
     assert.match(answer.source.env, /^DATABASE_URL=postgres:\/\/demo@127\.0\.0\.1:\d+\/demo$/);

@@ -177,7 +177,7 @@ test("the --json shapes of the commands that change what is copied name the sour
   assert.deepEqual(keys("tables"), ["database", "source", "tables", "next"], "the source file the tables are read against");
   assert.deepEqual(keys("add"), ["added", "file", "error", "next"], "the sources file it wrote");
   assert.deepEqual(keys("remove"), ["removed", "file", "next"], "the sources file it wrote");
-  assert.deepEqual(keys("init"), ["name", "root", "folder", "config", "demo", "source", "database", "warnings", "next"], "the source file it wrote");
+  assert.deepEqual(keys("init"), ["name", "root", "folder", "config", "demo", "source", "roles", "database", "warnings", "next"], "the source file and the roles file it wrote");
   assert.ok(keys("status")?.includes("source") && !keys("status")?.includes("sources"), "status names its source, the database, with the sources file in it");
   assert.deepEqual(COMMANDS.filter((c) => c.json?.some((k) => /model/i.test(k))).map((c) => c.name), [], "no command answers with a model");
   for (const name of ["add", "remove", "tables"]) {

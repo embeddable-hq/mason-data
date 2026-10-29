@@ -302,10 +302,14 @@ test("the users: a line each with when it was added, one rotated away said so; R
     { name: "grafana", id: "fedcba9876543210", addedAt: "2026-10-20T08:00:00.000Z", live: false },
     // a user with a role (mason user add --role), and one whose role the roles file no longer names
     { name: "agent", id: "0000000000000001", addedAt: "2026-10-29T08:00:00.000Z", live: true, role: "agent", roleKnown: true },
-    { name: "old", id: "0000000000000002", addedAt: "2026-10-29T08:00:00.000Z", live: true, role: "gone", roleKnown: false }] };
+    { name: "old", id: "0000000000000002", addedAt: "2026-10-29T08:00:00.000Z", live: true, role: "gone", roleKnown: false },
+    // stage 1b: one reading as the roles file's default, one the file holds to nothing (no default:)
+    { name: "dflt", id: "0000000000000003", addedAt: "2026-10-29T08:00:00.000Z", live: true, role: "everything", roleFrom: "default" },
+    { name: "bare", id: "0000000000000004", addedAt: "2026-10-29T08:00:00.000Z", live: true, roleFrom: "none", readsNothing: true }] };
   const html = renderUsers(list, null);
   assert.match(textOf(html), /^User Role Added metabase every table 2026-10-27 09:10 UTC · id 0123456789abcdef Remove grafana does not connect: the API key was rotated since it was added every table 2026-10-20 08:00 UTC/);
   assert.match(textOf(html), /agent agent 2026-10-29 08:00 UTC · id 0000000000000001 Remove old gone not in the roles file: its statements are refused 2026-10-29/);
+  assert.match(textOf(html), /dflt everything \(default\) 2026-10-29 08:00 UTC · id 0000000000000003 Remove bare no role, and the roles file names no default: its statements are refused 2026-10-29/);
   assert.match(html, /<button type="button" data-remove="metabase">Remove<\/button>/);
   const asking = renderUsers(list, "metabase");
   assert.match(textOf(asking), /Remove metabase\? It connects no more, and the sessions it holds end at their next statement\. Remove metabase Cancel/);

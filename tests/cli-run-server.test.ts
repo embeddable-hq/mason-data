@@ -391,7 +391,7 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.equal(added.status, 200, added.text);
   const a = JSON.parse(added.text) as Record<string, unknown>;
   // mason user add --json's shape: the password, once, and the URL to paste
-  assert.deepEqual(Object.keys(a), ["user", "id", "addedAt", "password", "database", "url", "host", "port", "sslmode", "next"]);
+  assert.deepEqual(Object.keys(a), ["user", "id", "addedAt", "password", "database", "url", "host", "port", "sslmode", "roleFrom", "next"]);
   assert.equal(a.user, "metabase");
   assert.equal(a.password, userPassword(API_KEY, "metabase", a.id as string), "the password the listener takes (src/duck/users.ts)");
   assert.equal(a.url, `postgres://metabase:${a.password as string}@127.0.0.1:5433/app`);
@@ -401,7 +401,7 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.ok("users" in file);
   assert.deepEqual(file.users.map((u) => [u.name, u.id]), [["metabase", a.id]]);
   assert.ok(!fs.readFileSync(usersFile, "utf8").includes(a.password as string), "users.json holds no password");
-  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, live: true }]);
+  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, live: true, roleFrom: "none" }]);
   assert.ok(logged.includes("user metabase added"), "the run's log says it, without the password");
   assert.ok(!logged.some((l) => l.includes(a.password as string)));
 

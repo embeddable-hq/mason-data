@@ -161,7 +161,8 @@ names the tables the server copies, and its url: names the variable that holds t
    The tool connects to the Postgres API (5433) as to a read replica, each added table a table. Changing
    MASON_API_KEY removes every user. mason/roles.yml ships with mason/ (mason help user shows the file): a user with
    a role is refused anything past it as Postgres refuses it (42501), and information_schema and mason mcp list it only
-   what it may read; a user with no role reads every copied table.
+   what it may read; a user added without --role reads as the file's default: (mason init writes default:
+   everything, tables: all — every copied table), and nothing when the file names no default.
 
 4. CHANGE IT: ship mason/ with your release and restart the container; a table added or removed is copied or dropped
    at the next start, or beside the server:

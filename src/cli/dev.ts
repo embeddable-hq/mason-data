@@ -48,7 +48,7 @@ import { storeJsonPathsOf } from "../duck/kept.ts";
 import { readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
 import { isLibcCollation } from "../duck/rewrite.ts";
 import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
-import { LiveRoles, readRoles, resolveRoles, usersWithoutRole } from "./roles.ts";
+import { exampleRole, LiveRoles, noRoleWayOut, readRoles, resolveRoles, rolesDefaultLine, rolesFile, usersWithNoRole, usersWithoutRole } from "./roles.ts";
 import { READY_LINE } from "./supervise.ts";
 import { changesOf, dropOwnReplication, dropStatements, madeReplication, namedPublication, projectReplication, replicationReadiness } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
@@ -467,7 +467,14 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     const roles = liveRoles.now();
     const list = readUsers(path.join(home, USERS_FILE));
     const orphans = "users" in list ? usersWithoutRole(list.users, new Set(roles.grants.keys())) : [];
-    if (roles.grants.size > 0) done(`${roles.grants.size} role${roles.grants.size === 1 ? "" : "s"} from ${roles.file} (${[...roles.grants.keys()].join(", ")}); a user with none reads every copied table`);
+    // WHAT A USER ADDED WITHOUT --role READS, SAID ONCE (stage 1b: the file decides it, never the code), and each user
+    // the file holds to nothing (no default:) by name, with the way out
+    const rolesLine = rolesDefaultLine(roles, shownPath(project.root, rolesFile(folder)));
+    say(`  ${rolesLine}`);
+    logLine(`[postgres] ${rolesLine}`);
+    for (const name of "users" in list ? usersWithNoRole(list.users, roles) : []) {
+      say(`  ! the user ${name} has no role, and ${roles.file ?? ""} names no default: its statements are refused — ${noRoleWayOut(name, roles.file ?? "", exampleRole(roles))}`);
+    }
     for (const u of orphans) {
       say(`  ! the user ${u.name} has the role ${u.role}, which ${roles.file ?? "no roles file (mason/roles.yml)"} ${roles.file === null ? "exists to name" : "does not name"}: ` +
         `its statements are refused until the role is in the file, or mason user remove ${u.name} and mason user add ${u.name}${roles.grants.size ? ` --role ${[...roles.grants.keys()][0]}` : ""}`);

@@ -49,10 +49,14 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
 ### Roles
 
 **A role limits what a user reads to tables and columns**: `mason user add <name> --role <role>` names a role of the
-project's roles file, `mason/roles.yml` beside the sources file, written in the sources file's own words:
+project's roles file, `mason/roles.yml` beside the sources file, written in the sources file's own words. `mason init`
+writes it, with today's access said in it — one role reading everything, the default:
 
 ```yaml
+default: everything              # the role of a user added without --role
 roles:
+  everything:
+    tables: all                  # every copied table and column, those added to the sources file later included
   agent:                         # the role's name
     tables:
       orders: {}                 # every column of a copied table
@@ -61,6 +65,23 @@ roles:
       billing.invoices:
         exclude: [notes]         # every column but these
 ```
+
+**The file decides what a user with no role reads, never the code**:
+
+- **no `mason/roles.yml`**: every user reads every copied table (`mason start` says so, and that `mason init` writes one);
+- **`default: <role>`**: a user added without `--role` reads as that role — its refusals, its catalog (`current_user`
+  is the role's name) and its request-log rows are the role's. Edit the line and the next statement of every such
+  session is held to the new default, with no restart;
+- **a file with no `default:`**: a user with no role reads NOTHING. Every statement that reads a copied table is
+  refused `42501 permission denied for table …`, the DETAIL `the user "<name>" has no role and mason/roles.yml names
+  no default`, the HINT the two ways out (`write default: <a role> at the top of mason/roles.yml, or mason user remove
+  <name> and mason user add <name> --role <a role>`); a statement that reads none (`SELECT 1`, a catalog read) is
+  answered. `mason start` and `mason user list` name such users; `mason user add` still writes one, saying so.
+
+A token (minted from the API key, no user) reads every copied table in every state. `tables: all` is Postgres's own word
+(`GRANT SELECT ON ALL TABLES IN SCHEMA`), resolved against the tables copied at every read: a table the sources file adds
+is the role's once its copy is served. A table key `all` under `tables:` is refused (`public.all` names a table called
+`all`).
 
 - **A role names copied tables only**: a table the sources file does not copy, a column the copy lacks, a role with
   no table, a column both listed and excluded — each refuses `mason start` (and `mason user add --role`) by its key,
@@ -80,7 +101,8 @@ roles:
   changed under a held session applies to its next statement — an EXECUTE of a statement prepared before included —
   and a role the file no longer names refuses its users by name (42501, the way out: add it back, or remove and add
   the user) rather than letting them read everything. `mason start` and `mason user list` say which users carry a
-  role the file lacks. A user with no role, and a token, read every copied table as before.
+  role the file lacks. A user with no role is held to the file's `default:` (above), read at every statement too; a
+  file that cannot be read refuses it as well (57P03): its default cannot be known.
 - **The catalog answers for the role**: one Postgres role per Mason role, with the same `GRANT SELECT` and
   `GRANT SELECT (columns)`, lives in the catalog Postgres, rebuilt when the file or the copied tables change, and a
   session with a role runs each catalog statement under `SET ROLE … RESET ROLE` in one request. So
@@ -98,8 +120,9 @@ roles:
   (42501, `permission denied for function set_config`), where Postgres lets a role `set_config('role', 'none')` back
   to its login: the catalog is one superuser connection with `SET ROLE` on top, and inside one statement that call
   was a reset to the superuser (the hidden columns' NAMES, never rows, were listed by the rest of the statement). A
-  session with no role, and a token, keep `set_config`.
-- **Every refusal is a row of the request log with the user's role** (`role` in `_mason.requests`).
+  token's session keeps `set_config`; a user under the file's default is that role's session.
+- **Every refusal is a row of the request log with the role it was held to** (`role` in `_mason.requests`: the user's
+  own, or the file's default; empty for a token and for a user held to nothing).
 
 `mason start` listens on 5433 when it is free on every address (127.0.0.1, 0.0.0.0, `::` and `::1`: a port another
 Postgres holds on any of them would send a container or a driver trying `::1` first to that server), else on the next

@@ -74,6 +74,12 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   it. `pg_catalog` is not filtered (stage 1a). DETECTOR: `tests/duck-roles-wire.test.ts` (every shape),
   `tests/postgres-api/catalog.test.ts` (the roles' DDL, `SET ROLE`, interleaving) and the oracle's role cases (a
   Postgres role with the same grants, the same statements, refusals equal by SQLSTATE and message).
+- **The roles file decides what a user with no role reads, never the code** (`Session.grants` / `roleName`; docs/DESIGN.md
+  "Roles: the file decides the default"): no file, every copied table; `default: <role>`, that role (its refusals,
+  its catalog under `SET ROLE`, its request-log `role`), read at every statement; a file with no `default:`, nothing —
+  every statement that reads a copied table refused 42501 with the two ways out, `SELECT 1` and a catalog read
+  answered. A token reads every copied table. Why: a default in the code is a grant nobody committed. DETECTOR:
+  `tests/duck-roles-wire.test.ts` (stage 1b's tests), `tests/cli-roles.test.ts`.
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
   `application_name`, a token's NAME (never the token) or the user's name. A refused statement is recorded in
