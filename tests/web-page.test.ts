@@ -62,7 +62,7 @@ function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: bo
     warnings: o.warnings ?? [], slot: o.replication ? "mason_dev_shop" : "", changes: o.replication ? "replication" : "poll",
     ...(o.replication ? { publication: { name: "app_pub", owned: false } } : {}),
     page: true, folder: () => "/app/mason", root: "/app", sources: () => ({ file: o.sources ?? sourceFile, problem: null }),
-    duck: { file: "/app/.mason/duck.db", pollSeconds: 5 },
+    duck: { file: "/app/.mason/duck.db" },
   } as unknown as RunContext;
   return JSON.parse(JSON.stringify(runState(ctx, copies, null))) as RunState;
 }
@@ -74,7 +74,7 @@ const COPYING = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.0
   { source: "public.events", phase: "waiting", rows: null, bytes: null, seconds: null, copiedAt: null, error: null }]);
 const FAILED = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.000Z"),
   { source: "public.orders", phase: "failed", rows: null, bytes: null, seconds: null, copiedAt: null, error: "could not read the next chunk: connection reset\nthe sync tries it again in 5 min" },
-  { ...copied("public.events", 30_000_000, "2026-10-27T09:04:00.000Z"), unsynced: { reason: "over the poll's row limit", asOf: "2026-10-27T09:04:00.000Z" } }],
+  { ...copied("public.events", 30_000_000, "2026-10-27T09:04:00.000Z"), kept: { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-27T09:04:00.000Z", nextAt: null } }],
   { warnings: ["mason/sources/shop.yml: tables.ordrs: no such table (Mason copies the tables it read before; mason start reads the file again)"], replication: true });
 const NONE = stateOf([]);
 for (const s of [NONE]) for (const t of s.tables) t.added = false;
@@ -95,11 +95,16 @@ const ACCOUNTS_ADDED = stateOf(THREE_COPIED(), { tables: CATALOG, sources: withA
 const FILE = "/app/mason/sources/shop.yml";
 /** `/api/pick`'s answers (src/cli/run-server.ts PickResult): every column with a secret left out, a --columns list
  *  the key was added to, a table with no primary key added by --key, one the file named so already. */
+/** each table's sync as /api/pick answers it (src/cli/source-edit.ts PickResult): the file's default, its own, a big one written off */
+const OFF = { sync: { value: "off", from: "default" }, bigOff: false, pollCost: null };
 const PICKED = {
-  secret: { table: "public.accounts", file: FILE, entry: "accounts", columns: null, exclude: ["password_hash"], key: null, addedKey: [], skippedSecrets: ["password_hash"], already: false },
-  columns: { table: "public.audit", file: FILE, entry: "audit", columns: ["id", "name"], exclude: [], key: null, addedKey: ["id"], skippedSecrets: [], already: false },
-  keyed: { table: "public.event_log", file: FILE, entry: "event_log", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false },
-  already: { table: "public.customers", file: FILE, entry: "customers", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: true },
+  secret: { table: "public.accounts", file: FILE, entry: "accounts", columns: null, exclude: ["password_hash"], key: null, addedKey: [], skippedSecrets: ["password_hash"], already: false, ...OFF },
+  columns: { table: "public.audit", file: FILE, entry: "audit", columns: ["id", "name"], exclude: [], key: null, addedKey: ["id"], skippedSecrets: [], already: false,
+    sync: { value: "poll 30s", from: "entry" }, bigOff: false, pollCost: null },
+  keyed: { table: "public.event_log", file: FILE, entry: "event_log", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,
+    sync: { value: "off", from: "entry" }, bigOff: true, pollCost: null },
+  already: { table: "public.customers", file: FILE, entry: "customers", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: true,
+    sync: { value: "poll 5s", from: "file" }, bigOff: false, pollCost: "customers has about 40,000,000 rows, and each poll scans it whole on your database: …" },
 };
 const answer = (v: unknown, status = 200) => () => new Response(JSON.stringify(v), { status });
 
@@ -166,22 +171,26 @@ test("a table added and tables removed are said as mason add and mason remove pr
   for (const r of [["public.orders"], ["public.orders", "billing.invoices"]]) assert.deepEqual(removedReport(r, FILE), cli.removedReport!(r, FILE));
   const added = (b: unknown) => textOf(fn<[unknown], string>("renderTableAdded")(b));
   assert.equal(added(PICKED.secret), "Added public.accounts to /app/mason/sources/shop.yml: every column but password_hash " +
+    "sync: off (the default): after its first copy it is read again only by mason sync accounts — mason add accounts --sync \"poll 5m\" polls it every 5 minutes " +
     "left out password_hash: it looks like a secret, which anyone with a user's password could read (--include password_hash adds it) Dismiss");
-  assert.equal(added(PICKED.columns), "Added public.audit to /app/mason/sources/shop.yml: id, name key added: id (a copy always has its key) Dismiss");
-  assert.equal(added(PICKED.keyed), "Added public.event_log to /app/mason/sources/shop.yml: every column, copied by tenant_id, id Dismiss");
-  assert.equal(added(PICKED.already), "Added public.customers to /app/mason/sources/shop.yml: every column (already so) Dismiss");
+  assert.equal(added(PICKED.columns), "Added public.audit to /app/mason/sources/shop.yml: id, name sync: poll 30s (its entry's): polled every 30s after its first copy — " +
+    "mason add audit --sync off stops that key added: id (a copy always has its key) Dismiss");
+  assert.match(added(PICKED.keyed), /^Added public\.event_log to \/app\/mason\/sources\/shop\.yml: every column, copied by tenant_id, id sync: off written on its entry: it has more than 1,000,000 rows/);
+  assert.match(added(PICKED.already), /^Added public\.customers to \/app\/mason\/sources\/shop\.yml: every column \(already so\) sync: poll 5s \(the file's\).* customers has about 40,000,000 rows/);
   assert.equal(textOf(fn<[unknown], string>("renderTablesRemoved")({ removed: ["public.orders"], file: FILE })),
     "Removed public.orders from /app/mason/sources/shop.yml Tip: Mason stops copying it and drops its copy Dismiss");
 });
 
 test("a demo project's database row says it is the demo database Mason hosts, polled only: the page and mason status alike", () => {
   const sourceRows = (commands as unknown as { sourceRows?: (s: RunState) => Array<[string, string]> }).sourceRows!;
-  const DEMO = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.000Z")], { demo: true });
+  const demoFile = parseSourceText("kind: postgres\nurl: x\nsync: poll 5s\ntables:\n  customers: {}\n", "shop", "/app/mason/sources/shop.yml");
+  assert.ok(!("problems" in demoFile));
+  const DEMO = stateOf([copied("public.customers", 1200, "2026-10-27T09:00:01.000Z")], { demo: true, sources: demoFile });
   assert.equal((DEMO.source as { demo?: boolean }).demo, true, "the run's state says it");
   assert.equal((RUNNING.source as { demo?: boolean }).demo, false);
   const rows = sourceRows(DEMO);
   assert.deepEqual(rows.find(([k]) => k === "Database"), ["Database", "the demo database Mason hosts (postgres://demo@127.0.0.1:5434/demo · Postgres 16.4)"]);
-  assert.deepEqual(rows.find(([k]) => k === "Changes"), ["Changes", "polling with SELECTs (xmin), every 5 s · the demo database is read by polling only"]);
+  assert.deepEqual(rows.find(([k]) => k === "Changes"), ["Changes", "each table as its sync: says, polled with SELECTs (xmin) · sync: poll 5s for every table without its own · the demo database is read by polling only"]);
   assert.deepEqual(fn<[unknown], unknown>("sourceRows")(DEMO), rows);
 });
 
@@ -192,7 +201,7 @@ test("running: the database masked, each table copied with its rows, the counts,
   const text = textOf(html);
   assert.match(text, /Database postgres:\/\/shop:\*\*\*\*@db\.example\.com:5432\/shop · Postgres 16\.4/);
   assert.ok(!text.includes("secret"), "the password is the run's to mask, and it did");
-  assert.match(text, /Changes polling with SELECTs \(xmin\), every 5 s/);
+  assert.match(text, /Changes each table as its sync: says, polled with SELECTs \(xmin\) · sync: off \(the default: the file writes none\)/);
   assert.match(text, /Tables \(3 of 4 added\)/);
   assert.match(text, /public\.customers 100% 1,200 rows · copied/);
   assert.match(text, /public\.events 100% 30,000,000 rows · copied/);
@@ -213,12 +222,25 @@ test("copying: the bar's share, the rows, the chunks, the rate and the time left
   assert.match(text, /Under way: public\.orders: copying 15% · 321,000 of ~2,000,000 rows .* public\.events: waiting for its copy to start/);
 });
 
-test("failed: its error on its line and in full, the warning, a table not kept current, Failed — and a request count that could not be read", () => {
+test("a copy the poll does not keep current is the page's warning, as mason status paints it: its line's words equal, its state unsynced", () => {
+  const BEHIND = stateOf([{ ...copied("public.orders", 2_000_000, "2026-10-27T09:00:09.000Z"),
+    kept: { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: "2026-10-27T09:00:09.000Z", nextAt: null, pending: "caught up by one poll first (after its copy)" } }]);
+  const t = BEHIND.tables.find((x) => x.table === "public.orders")!;
+  const line = fn<[unknown], { state: string; what: string }>("tableLine")(t);
+  assert.equal(line.state, "unsynced", "the page's warning colour (app.css .t-unsynced), never done's");
+  assert.match(line.what, /^2,000,000 rows · copied · NOT kept current \(last synced .* ago\): caught up by one poll first \(after its copy\)$/);
+  // the CLI paints the same words yellow (paintBar): the same text, the same warning
+  const cli = commands.tableLines(BEHIND).find((l) => l.startsWith("public.orders"))!;
+  assert.ok(cli.endsWith(line.what), `${cli}\n${line.what}`);
+  assert.match(fn<[unknown, unknown?], string>("renderStatus")(BEHIND, { slow: SLOW, refused: REFUSED }), /<tr class="t-unsynced"><th scope="row"><code>public\.orders<\/code>/);
+});
+
+test("failed: its error on its line and in full, the warning, a table whose sync is off with its age, Failed — and a request count that could not be read", () => {
   const html = fn<[unknown, unknown?], string>("renderStatus")(FAILED, { slow: { failure: { code: "failed", message: "the request log cannot be read\nmore" } }, refused: REFUSED });
   const text = textOf(html);
   assert.match(text, /public\.orders 100% its copy failed: could not read the next chunk: connection reset/);
   assert.match(html, /<details><summary>the whole error<\/summary><pre>could not read the next chunk: connection reset\nthe sync tries it again in 5 min<\/pre><\/details>/);
-  assert.match(text, /public\.events 100% 30,000,000 rows · copied, NOT kept current \(over the poll's row limit; as of 2026-10-27 09:04 UTC\) — mason sync events, or mason start --replication/);
+  assert.match(text, /public\.events 100% 30,000,000 rows · copied · sync: off, last synced \d+ days? ago — mason sync events syncs it now; sync: poll 5m on its entry polls it/);
   assert.match(text, /Warning mason\/sources\/shop\.yml: tables\.ordrs: no such table/);
   assert.match(text, /Changes logical replication: slot mason_dev_shop, publication app_pub \(named: read as it is, never altered\)/);
   assert.match(text, /Slow queries: could not read them \(the request log cannot be read; mason logs has the detail\)/);
@@ -418,7 +440,7 @@ test("the app: Add sends POST /api/pick, says what was added under its table, an
   assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET /api/state", "GET /api/slow", "GET /api/refused", "GET /api/users"],
     "every column, as mason add accounts asks; then the state again");
   const v = app.view();
-  assert.match(textOf(v.tables!), /public\.accounts ~300 rows key id added Remove Added public\.accounts to \/app\/mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
+  assert.match(textOf(v.tables!), /public\.accounts ~300 rows key id added Remove Added public\.accounts to \/app\/mason\/sources\/shop\.yml: every column but password_hash sync: off \(the default\): .* left out password_hash: it looks like a secret/);
   assert.match(textOf(v.status!), /public\.accounts 0% waiting for its copy to start/, "the Status shows the copy starting");
   app.dismissOutcome();
   assert.ok(!/Added public\.accounts/.test(app.view().tables!));
@@ -588,5 +610,5 @@ test("in the browser: the tables are written when they change, never at every po
   await on.get("submit")!({ target: { dataset: { pickForm: "public.audit" }, ticked: { columns: ["name"] } }, preventDefault: () => { prevented = true; } });
   assert.ok(prevented, "the page posts it, not the browser");
   assert.ok(run.asked.includes(`POST /api/pick ${JSON.stringify({ table: "public.audit", picked: true, columns: ["name"] })}`), run.asked.join("\n"));
-  assert.match(textOf(tables.html), /Added public\.audit to \/app\/mason\/sources\/shop\.yml: id, name key added: id/);
+  assert.match(textOf(tables.html), /Added public\.audit to \/app\/mason\/sources\/shop\.yml: id, name sync: poll 30s \(its entry's\): .* key added: id/);
 });

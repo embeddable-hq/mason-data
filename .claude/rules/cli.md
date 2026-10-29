@@ -115,14 +115,16 @@ CLI lacks).
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still copying at the bottom — redrawn in place on a terminal, printed when it changes
   elsewhere; ready only when every added table is copied and served (`readiness`, src/cli/readiness.ts); a copy that
-  failed is said with its error and that Mason tries it again; a table over the sync's row limit says `NOT kept current`
-  on its line, and a copy in the old layout that it is being copied again.
+  failed is said with its error and that Mason tries it again; each copied table says its sync and its copy's age on
+  its line (`keptAge`: `sync: off, last synced 3 h ago — mason sync <table>`, `polled every 30s, last 4 s ago`), and a
+  copy in the old layout that it is being copied again.
 - **What a project copies is ONE sources file** (a `sources` folder, each file a source to sync, naming the tables and
   columns to sync): `mason/sources/<name>.yml`, its name the
   source's — `kind: postgres` (any other kind refused by name, "not yet"), `url:` a literal URL or `${NAME}` (read by
   `appEnvValue`, src/lib/dotenv.ts: `.env.local`, `.env`, the shell; unset is refused with the way out), `tables:` a MAP
   of entries: `{}` every column, `columns:` those (the key always copied), `exclude:` every column but those (never
-  both), `key:` only for a table with no primary key (refused on one that has one; refused under replication, where the
+  both), `sync:` how it is kept current (`off`, `poll <interval>`; the file's top `sync:` is every entry's default, and
+  none written is `off`, said at `mason start`), `key:` only for a table with no primary key (refused on one that has one; refused under replication, where the
   app's UPDATEs to it would fail in a publication). Types are never in the file: the run reads them at every start. A
   second file is refused ("one source per project for now"). ONE reader (`readSource`, `parseSourceText`, then
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every

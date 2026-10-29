@@ -28,7 +28,8 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   init: [],
   start: [],
   tables: ["no_such_table"],
-  add: ["no_such_table"],
+  // with a sync, so the flag is read in every state too (a bad one is a usage error before any state is met)
+  add: ["no_such_table", "--sync", "poll 30s"],
   remove: ["no_such_table"],
   wait: ["--timeout", "1"],
   user: ["list"],

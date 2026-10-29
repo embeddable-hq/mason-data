@@ -17,7 +17,8 @@ DuckDB runs INSIDE the `mason start` process, on a worker thread of its own (`sr
 one instance. **Postgres decides, DuckDB
 computes**: the catalog Postgres (PGlite, the copied tables' definitions, no rows) analyses each statement, the rewrite
 makes it DuckDB's, and DuckDB runs it (`src/duck/plan.ts`). Each added table is copied whole from the source, then kept
-current by Mason's xmin poll (the default) or by logical replication (`mason start --replication`, `src/duck/stream.ts`).
+current as its `sync:` says — `off` (the default: read again only at `mason sync`) or Mason's xmin poll at its interval
+— or, for every table, by logical replication (`mason start --replication`, `src/duck/stream.ts`).
 
 ## A statement
 
@@ -25,7 +26,7 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   a statement's own text never reaches DuckDB, because an `EXPLAIN ANALYZE <write>` that did ran the write
   (docs/DESIGN.md "The review").
 - **How a copy is kept current is derived ONCE, by the sync** (`Sync.keptOf`, carried on `Sync.state` as `kept`):
-  `mason status` (`unsynced`, `streamStatus`'s tables) and EXPLAIN's first line (`keptText`, src/duck/explain.ts) both
+  `mason status` (`kept`: its sync, `syncedAt`, `nextAt`; `streamStatus`'s tables) and EXPLAIN's first line (`keptText`, src/duck/explain.ts) both
   read it, never the poll's ledger (a project switched to replication keeps its last poll there: EXPLAIN said "kept
   current by polling" of a streamed table). `tests/duck-sync-added.test.ts` and `tests/duck-wire.test.ts` hold it.
   ("EXPLAIN")
@@ -378,7 +379,7 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   `writeStaged`, `deleteKeys`), in the piece's one transaction; an unchanged-TOAST update is ONE `UPDATE … FROM` per set
   of carried columns (`updateCarried`). Never `INSERT OR REPLACE` (it needs a key constraint) and never a statement per
   row: each is a scan of the key column — 4 ms a 10,000-change piece on 1 M uuid rows, 0.35–1.8 s on 195 M, tens of
-  seconds on the test server's disk — so a stream batch that changes a table over `POLL_ROW_LIMIT` is applied by time as well
+  seconds on the test server's disk — so a stream batch that changes a table over `BIG_TABLE_ROWS` is applied by time as well
   (`applySize`: at most every 5 s, pieces of up to 50,000). A bigserial key prunes (heap order puts its zonemaps in order).
 - **What heap order gives up**, said as such: a wide uuid-keyed table's click takes seconds, a point lookup by a random
   uuid is a scan, and uniqueness is the write path's (the oracle holds every copy to the source), not the engine's. The
@@ -447,8 +448,8 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 - **A rebuilt table is caught up by ONE poll from its watermark before it is kept current again** (`_mason.catch_up`,
   written with the swap): skipped by the stream and the polls until then. In replication mode the stream HOLDS its
   changes from just before that poll and applies them after it — the stream acknowledges what it skips, so a table
-  joining late is missing exactly what that poll reads (src/duck/stream.ts "why replaying is safe"). A table over
-  `POLL_ROW_LIMIT` is caught up too: one scan per rebuild, said as such.
+  joining late is missing exactly what that poll reads (src/duck/stream.ts "why replaying is safe"). A table whose sync
+  is `off` is caught up too: one scan per rebuild, then served as of it.
 - **A stream change is written as the COPY's columns, never the publication's or the sources file's of the moment**
   (`Sync.asCopied`, the copy's own column list, set at its swap; `projectTuple` in src/duck/stream.ts): a column the
   publication sends and the copy lacks is dropped, and every write — a batch, the held changes, `updateCarried`, a delete
@@ -470,7 +471,22 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   production").
 - **The poll is ONE DuckDB transaction per table over ONE source snapshot**, its rows and new watermark committed
   together (`_mason.poll_state`), so a poll that dies is read again; it costs the source a full scan per table (no index
-  covers `xmin`), and its interval stretches to four times the last poll (`nextPollDelayMs`). ("The poll")
+  covers `xmin`). ("The poll")
+- **How often a table is polled is ITS `sync:`, never the run's** (src/lib/table-sync.ts; one 22 M-row table and a
+  776-row one shared one interval, and a row limit in the run left the big one never polled, said only on its line):
+  `off` (the default) is read again only at `mason sync`, `poll <interval>` at that interval, 1 s to 24 h. ONE pass loop
+  polls the tables due (`dueAt`), never a timer a table; a table's next poll is its interval after its last, stretched
+  to four times that poll's time (`nextPollAt`), and the passes to four times the last pass (`passDelayMs`). The sync a
+  table was last polled or copied under is `_mason.poll_state.sync`: a change (live or made while Mason was down) keeps
+  the copy and catches it up by ONE poll, logged, never a copy again. The engine never decides by size: the row count
+  is `mason add`'s (src/cli/source-edit.ts), which writes `sync: off` for a table over `BIG_TABLE_ROWS` under a file
+  that polls, and warns a poll of over `COSTLY_POLL_ROWS` under a minute with its estimate and basis. A setting that
+  sets an interval for every table (`MASON_POLL_MS`) refuses the start. DETECTOR: `kept` on every table's line
+  (`mason status`, `wait`, EXPLAIN, the MCP tools) says its sync and its copy's age; `tests/duck-sync-schedule.test.ts`
+  and `tests/integration/duck-poll.itest.ts` hold the schedule and the switch. ("Each table's sync") A pass is ONE
+  attachment of the source (`attach` / `detach`: a new connection on the database), so at `poll 1s`, the floor, a
+  table costs the source a connection a second beside its scan; holding the attachment across close passes is a later
+  step, measured first.
 - **Replication has no gap, by construction**: a table is copied only after the publication carries it and the slot
   exists, joins the stream only once caught up, and a key's changes replayed in commit order end at its state whatever
   they start from; a slot new to the copy is caught up the same way, by ONE poll from the watermarks, never a fresh

@@ -1765,31 +1765,35 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     copies = [copied({ ...streamed, state: "waiting", why: "its columns changed: it is copied again, then caught up by one poll" })];
     assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: its columns changed: it is copied again, then caught up by one poll)`);
     await jsonSays(null, { ...stream, "Stream State": "waiting" });
-    // a polled project keeps today's words, from the sync's last poll
-    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z" })];
-    assert.equal(await header(), `${head}kept current by polling, last poll 2026-10-27 19:58:39 UTC)`);
-    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Kept Current": "kept current by polling, last poll 2026-10-27 19:58:39 UTC", "Last Poll": "2026-10-27T19:58:39.000Z" });
-    copies = [copied({ by: "poll", polledAt: null })];
-    assert.equal(await header(), `${head}kept current by polling, no poll recorded yet)`);
-    // over the poll's row limit: NOT kept current, as status says it, with the command that polls it
-    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z", unsynced: "over the 1,000,000-row sync limit" })];
-    assert.equal(await header(), `${head}NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-27 19:58:39 UTC): mason sync public.orders polls it now)`);
-    await jsonSays(null, { "Last Poll": "2026-10-27T19:58:39.000Z" });
+    // a polled table: its interval and how long ago its last poll was, from the sync's (issue 33: the age is never hidden)
+    const minutesAgo = new Date(Date.now() - 12 * 60_000 - 5_000).toISOString(), daysAgo = new Date(Date.now() - 3 * 86_400_000 - 3_600_000).toISOString();
+    const utc = (iso: string): string => `${iso.slice(0, 19).replace("T", " ")} UTC`;
+    const every30 = { mode: "poll" as const, every: "30s", seconds: 30 };
+    copies = [copied({ by: "poll", sync: every30, syncedAt: minutesAgo, nextAt: "2026-10-27T19:59:09.000Z" })];
+    assert.equal(await header(), `${head}polled every 30s, last 12 min ago (${utc(minutesAgo)}))`);
+    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Kept Current": `polled every 30s, last 12 min ago (${utc(minutesAgo)})`,
+      Sync: "poll 30s", "Last Synced": minutesAgo, "Next Poll": "2026-10-27T19:59:09.000Z" });
+    copies = [copied({ by: "poll", sync: every30, syncedAt: null, nextAt: null })];
+    assert.equal(await header(), `${head}polled every 30s, not polled yet)`);
+    // sync: off: nothing keeps it current, and its age and the command that syncs it are said, as status says them
+    copies = [copied({ by: "poll", sync: { mode: "off" }, syncedAt: daysAgo, nextAt: null })];
+    assert.equal(await header(), `${head}off: last synced 3 days ago (${utc(daysAgo)}); mason sync public.orders syncs it now)`);
+    await jsonSays(null, { Sync: "off", "Last Synced": daysAgo, "Next Poll": null });
     // served as copied and skipped by the passes until copied again: NOT kept current, and why
-    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z", pending: "its columns changed: it is copied again, then caught up by one poll" })];
-    assert.equal(await header(), `${head}NOT kept current (as of 2026-10-27 19:58:39 UTC): its columns changed: it is copied again, then caught up by one poll)`);
-    await jsonSays(null, { "Last Poll": "2026-10-27T19:58:39.000Z" });
+    copies = [copied({ by: "poll", sync: every30, syncedAt: daysAgo, nextAt: null, pending: "its columns changed: it is copied again, then caught up by one poll" })];
+    assert.equal(await header(), `${head}NOT kept current (last synced 3 days ago (${utc(daysAgo)})): its columns changed: it is copied again, then caught up by one poll)`);
+    await jsonSays(null, { Sync: "poll 30s", "Last Synced": daysAgo, "Next Poll": null });
     // a copy under way or failed says so before how it would be kept current
     copies = [{ ...copied(streamed), phase: "copying", rowsSoFar: 1200 }];
     assert.equal(await header(), `${head}being copied (1,200 rows so far): kept current once copied)`);
     copies = [{ ...copied(streamed), phase: "failed", error: "permission denied for table orders\n(tried again after 14:05 UTC)" }];
     assert.equal(await header(), `${head}its last copy failed: permission denied for table orders)`);
     // a statement over two copies says each on a line of its own
-    copies = [copied(streamed), { ...copied({ by: "poll", polledAt: null }), source: "sales.invoices" }];
+    copies = [copied(streamed), { ...copied({ by: "poll", sync: every30, syncedAt: null, nextAt: null }), source: "sales.invoices" }];
     const two = (await c.query({ text: "EXPLAIN SELECT o.id FROM orders o JOIN sales.invoices i ON i.id = o.id", rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
     assert.equal(two[0], "Mason: answered by DuckDB from its copies of");
     assert.ok(two.includes("  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)"), two.join("\n"));
-    assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; kept current by polling, no poll recorded yet\)$/.test(l)), two.join("\n"));
+    assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; polled every 30s, not polled yet\)$/.test(l)), two.join("\n"));
   } finally {
     copies = [];
     await store.writer.run("DELETE FROM _mason.poll_state WHERE source = 'public.orders'");

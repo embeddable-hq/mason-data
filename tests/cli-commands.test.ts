@@ -63,7 +63,7 @@ test("a table is named as the database names it: by its name alone in public, or
 const at = (s: number): string => new Date(Date.UTC(2026, 9, 7, 10, 0, s)).toISOString();
 const state = (o: { tables?: TableState[]; stream?: StreamStatus }): RunState => ({
   source: { url: "postgres://x", database: "shop", remote: false, version: "16", standby: false, changes: "poll", name: "shop", file: "/app/mason/sources/shop.yml" }, warnings: [], folder: "/app/mason",
-  project: "v1", tables: o.tables ?? [], engine: { name: "duckdb", file: "/app/.mason/duck.db", bytes: 10, pollSeconds: 5 },
+  project: "v1", tables: o.tables ?? [], engine: { name: "duckdb", file: "/app/.mason/duck.db", bytes: 10 },
   ...(o.stream ? { stream: o.stream } : {}),
 });
 
@@ -162,25 +162,32 @@ test("mason wait: every added table on its line — the finished first in the or
   assert.match(paintBar(lines[3]!, st), /<c>█{5}<\/c>/);
 });
 
-test("mason status and wait: a table over the poll's row limit says on its line that it is NOT kept current, and how to make it so", () => {
-  // the poll scans a table whole, so a table over 1,000,000 rows is copied and served, not polled
+test("mason status and wait: each copied table says how it is kept current and how old its copy is — its sync: off with the command that syncs it, or its poll's interval and last poll", () => {
+  // issue 33: a copy days old answers today's count(*) wrongly, and nothing but these lines tells a person so
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const off = { mode: "off" } as const, every30 = { mode: "poll", every: "30s", seconds: 30 } as const;
   const lines = tableLines(state({ tables: [
     t({ table: "public.orders", added: true, rows: 22_086_165, copy: { phase: "done", rowsCopied: 22_086_165, updatedAt: at(2) },
-      unsynced: { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-26T12:03:44.120Z" } }),
-    t({ table: "shop.events", added: true, copy: { phase: "done", rowsCopied: 3, updatedAt: at(3) }, unsynced: { reason: "over the 1,000,000-row sync limit", asOf: null } }),
-    t({ table: "public.small", added: true, copy: { phase: "done", rowsCopied: 7, updatedAt: at(4) } }),
-  ] }));
+      kept: { by: "poll", sync: off, syncedAt: "2026-10-26T11:00:00.000Z", nextAt: null } }),
+    t({ table: "shop.events", added: true, copy: { phase: "done", rowsCopied: 3, updatedAt: at(3) }, kept: { by: "poll", sync: every30, syncedAt: "2026-10-29T11:59:56.000Z", nextAt: "2026-10-29T12:00:26.000Z" } }),
+    t({ table: "public.fresh", added: true, copy: { phase: "done", rowsCopied: 5, updatedAt: at(4) }, kept: { by: "poll", sync: every30, syncedAt: null, nextAt: "2026-10-29T12:00:00.000Z" } }),
+    t({ table: "public.small", added: true, copy: { phase: "done", rowsCopied: 7, updatedAt: at(5) } }),
+  ] }), now);
   assert.deepEqual(lines, [
-    "public.orders  ████████████████████ 100%  22,086,165 rows · copied, NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-26 12:03 UTC) — mason sync orders, or mason start --replication",
-    "shop.events    ████████████████████ 100%  3 rows · copied, NOT kept current (over the 1,000,000-row sync limit) — mason sync shop.events, or mason start --replication",
+    "public.orders  ████████████████████ 100%  22,086,165 rows · copied · sync: off, last synced 3 days ago — mason sync orders syncs it now; sync: poll 5m on its entry polls it",
+    "shop.events    ████████████████████ 100%  3 rows · copied · polled every 30s, last 4 s ago",
+    "public.fresh   ████████████████████ 100%  5 rows · copied · polled every 30s, not polled yet",
     "public.small   ████████████████████ 100%  7 rows · copied",
   ]);
-  // on a terminal its bar is a warning's colour, never the green of a table kept current
+  // an `off` table is copied as its sync asks: its bar is green, never a warning's colour; one not kept current is yellow
   const st = { ...PLAIN, yellow: (x: string) => `<y>${x}</y>`, green: (x: string) => `<g>${x}</g>` };
-  assert.match(paintBar(lines[0]!, st), /<y>█{20}<\/y>/);
-  assert.match(paintBar(lines[2]!, st), /<g>█{20}<\/g>/);
+  assert.match(paintBar(lines[0]!, st), /<g>█{20}<\/g>/);
+  const behind = tableLines(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) },
+    kept: { by: "poll", sync: every30, syncedAt: "2026-10-29T11:00:00.000Z", nextAt: null, pending: "its columns changed: it is copied again, then caught up by one poll" } })] }), now);
+  assert.deepEqual(behind, ["public.orders  ████████████████████ 100%  1 rows · copied · NOT kept current (last synced 60 min ago): its columns changed: it is copied again, then caught up by one poll"]);
+  assert.match(paintBar(behind[0]!, st), /<y>█{20}<\/y>/);
   // ready all the same: it is copied and served
-  assert.equal(readiness(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) }, unsynced: { reason: "x", asOf: null } })] })).ready, true);
+  assert.equal(readiness(state({ tables: [t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 1, updatedAt: at(1) }, kept: { by: "poll", sync: off, syncedAt: null, nextAt: null } })] })).ready, true);
 });
 
 test("a copy in a layout an older Mason kept says it is copied again, and is still copied, served and ready (src/duck/sync.ts RETIRED_LAYOUT)", () => {
@@ -237,7 +244,8 @@ test("mason status and wait --json say how each table is kept current (kept, src
   // an agent reading --json could not tell how a table was kept current, or why it was not: the text said it, the JSON
   // mapped a copy's fields one by one and left kept out
   const kepts: KeptCurrent[] = [
-    { by: "poll", polledAt: at(1), unsynced: "over the 1,000,000-row sync limit", pending: "its columns changed: it is copied again, then caught up by one poll" },
+    { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: at(1), nextAt: at(31), pending: "its columns changed: it is copied again, then caught up by one poll" },
+    { by: "poll", sync: { mode: "off" }, syncedAt: at(1), nextAt: null },
     { by: "recopy", copiedAt: at(2) },
     { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C8", lastCommit: at(3), notRunning: "Mason is stopping" },
   ];
@@ -257,9 +265,9 @@ test("mason status and wait --json say how each table is kept current (kept, src
   // every field of each way a copy is kept current
   for (const spec of [STATUS, WAIT]) {
     const line = spec.usage.slice(spec.usage.indexOf("--json"));
-    // each table's unsynced is an object ({ reason, asOf }), kept's a string: the tables' list declares the object
     assert.match(line, /\bkept\b/, `mason ${spec.name}'s usage names kept`);
-    assert.match(line, /unsynced: \{ reason, asOf \}/, `mason ${spec.name}'s usage declares a table's unsynced`);
+    // each table's sync is an object: the declaration names its two shapes
+    assert.match(line.replace(/\s+/g, " "), /sync: \{ mode: off \} or \{ mode: poll, every/, `mason ${spec.name}'s usage declares a table's sync`);
   }
   // kept's own declaration, from where it starts to the stopped shape: none of its fields borrowed from the stream's or
   // the tables' declarations
@@ -271,8 +279,9 @@ test("mason status and wait --json say how each table is kept current (kept, src
   for (const k of [...new Set(kepts.flatMap((k) => Object.keys(k)))]) assert.match(decl, new RegExp(`\\b${k}\\b`), `kept's declaration names ${k}`);
   for (const by of ["poll", "recopy", "replication"]) assert.match(decl, new RegExp(`\\{ by: ${by}\\b`), `kept's declaration names by: ${by}`);
   for (const state of ["streamed", "catching-up", "waiting", "left-out"]) assert.match(decl, new RegExp(`\\b${state}\\b`));
-  // unsynced and pending are present only when they apply; pending says why the copy is not kept current, phase included
-  assert.match(decl, /unsynced \(only when it applies/);
+  // the sync, the age and the next poll: how old a copy is, declared; pending is present only when it applies, and says
+  // why the copy is not kept current, phase included
+  assert.match(decl, /syncedAt \(its last copy or poll\), nextAt \(when its next poll is due; null: off/);
   assert.match(decl, /pending \(only when it applies: why the copy is not kept current now, its phase included/);
   assert.match(decl, /by: recopy, copiedAt, pending \(only when it applies/);
   assert.match(WAIT.usage.replace(/\s+/g, " "), /pending, when it applies, says why the copy is not kept current now, its phase included/);
@@ -373,14 +382,15 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   const run = (argv: string[]) => runMason(app, argv, matrixEnv());
   const add = await run(["add", "orders", "--json"]);
   assert.equal(add.code, 0, add.stdout + add.stderr);
-  assert.deepEqual(JSON.parse(add.stdout), { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false }],
+  assert.deepEqual(JSON.parse(add.stdout), { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false,
+    sync: { value: "off", from: "default" }, bigOff: false, pollCost: null }],
     file: s.file, next: [{ command: "mason start", what: "Mason in the background, for this project: the copy of every added table begins" },
       { command: "mason wait", what: "then, until every added table is copied and served" }] });
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n`, "the entry, every other byte as it was");
   // as a person: the checklist's line, then Next: mason start
   const person = await run(["add", "customers", "--columns", "name"]);
   assert.equal(person.code, 0, person.stdout + person.stderr);
-  assert.match(person.stdout, /✓ Added public\.customers to mason\/sources\/shop\.yml: id, name\n {4}key added: id \(a copy always has its key\)\n/);
+  assert.match(person.stdout, /✓ Added public\.customers to mason\/sources\/shop\.yml: id, name\n {4}sync: off \(the default\): after its first copy it is read again only by mason sync customers — mason add customers --sync "poll 5m" polls it every 5 minutes\n {4}key added: id \(a copy always has its key\)\n/);
   assert.match(person.stdout, /Next:\n {2}mason start +Mason in the background, for this project: the copy of every added table begins\n/);
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n`);
   // remove: the entry cut; the copy an earlier run made goes at the next start
@@ -415,7 +425,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     source: parsed.source, facts: () => facts, warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
     folder: () => s.folder, root: app, sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url,
-    duck: { copies: () => [], file: path.join(s.root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
+    duck: { copies: () => [], file: path.join(s.root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null,
       requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
   };
   const server = createRunServer(ctx);
@@ -454,6 +464,26 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then remove customers/);
     // a name the file does not have, with the closest it has
     await same(["remove", "customer"], /shop\.yml names no table customer — did you mean `customers`\?/);
+
+    // WHAT TO RUN NEXT, Mason up (a review finding): --sync alone on a table already added starts no copy (it is caught up
+    // by one poll), so the next step is mason status, never mason wait's "the copy has started"; a new table's is mason wait
+    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n`);
+    writeRunning(s.root, { port: ctx.port, token: ctx.token });
+    try {
+      const resync = await runMason(app, ["add", "customers", "--sync", "poll 30s", "--json"], matrixEnv());
+      assert.equal(resync.code, 0, resync.stdout + resync.stderr);
+      assert.deepEqual((JSON.parse(resync.stdout) as { next: unknown }).next, [
+        { command: "mason status", what: "its sync and its copy's age: it is caught up by one poll, never copied again" },
+        { command: "mason user add <name>", what: "a user for your BI tool or psql: it prints the password and the URL to paste" }]);
+      assert.match(fs.readFileSync(s.file, "utf8"), /\n {2}customers:\n {4}sync: poll 30s\n$/);
+      const person = await runMason(app, ["add", "customers", "--sync", "off"], matrixEnv());
+      assert.match(person.stdout, /Next:\n {2}mason status +its sync and its copy's age: it is caught up by one poll, never copied again\n/);
+      const fresh = await runMason(app, ["add", "products", "--json"], matrixEnv());
+      assert.equal(fresh.code, 0, fresh.stdout + fresh.stderr);
+      assert.equal((JSON.parse(fresh.stdout) as { next: Array<{ command: string; what: string }> }).next[0]!.command, "mason wait", "a new table's copy begins");
+      const both2 = await runMason(app, ["add", "customers", "orders", "--sync", "poll 1m", "--json"], matrixEnv());
+      assert.equal((JSON.parse(both2.stdout) as { next: Array<{ command: string }> }).next[0]!.command, "mason wait", "one of them is new: its copy begins");
+    } finally { writeRunning(s.root, null); }
   } finally {
     server.close();
     fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables: {}\n`);

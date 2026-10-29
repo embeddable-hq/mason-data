@@ -74,17 +74,22 @@ const schema: PgSchema = {
   ],
 };
 
-/** how the sync holds each copy: orders polled, customers over the poll's row limit, the quoted ones polled */
+/** how the sync holds each copy: orders polled every 5s (last two hours ago: the source away), customers sync: off and
+ *  last synced three days ago, the quoted ones polled. The ages are the tools' words at the moment they answer */
+const TWO_HOURS_AGO = new Date(Date.now() - 2 * 3_600_000 - 60_000).toISOString();
+const THREE_DAYS_AGO = new Date(Date.now() - 3 * 86_400_000 - 3_600_000).toISOString();
+const utc = (iso: string): string => `${iso.slice(0, 19).replace("T", " ")} UTC`;
 const polled = (source: string): CopyState => ({ source, phase: "copied", rows: 1, bytes: 8192, seconds: 1, copiedAt: "2026-10-29T09:00:00.000Z", error: null,
-  kept: { by: "poll", polledAt: "2026-10-29T09:30:00.000Z" } });
+  kept: { by: "poll", sync: { mode: "poll", every: "5s", seconds: 5 }, syncedAt: TWO_HOURS_AGO, nextAt: null } });
 const copies = (): CopyState[] => [
   { ...polled("public.orders"), rows: 5 },
   { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-29T09:00:00.000Z", error: null,
-    unsynced: { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-29T09:00:00.000Z" },
-    kept: { by: "poll", polledAt: "2026-10-29T09:00:00.000Z", unsynced: "over the 1,000,000-row sync limit" } },
+    kept: { by: "poll", sync: { mode: "off" }, syncedAt: THREE_DAYS_AGO, nextAt: null } },
   polled("sales.items"), polled("public.Clients"), polled("public.x; y"),
 ];
-const POLLED = "kept current by polling, last poll 2026-10-29 09:30:00 UTC";
+const POLLED = `polled every 5s, last 2 h ago (${utc(TWO_HOURS_AGO)})`;
+/** a polled copy's facts as the tools say them: its kept line, what keeps it current, its sync and when it was last synced */
+const POLLED_FACTS = { kept: POLLED, kept_current_by: "polling", sync: "poll 5s", last_synced: TWO_HOURS_AGO };
 
 before(async () => {
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
@@ -293,14 +298,16 @@ test("tables and describe: the catalog's tables named as a statement writes them
     assert.deepEqual([ghost.kind, ghost.rows_about], ["table", null]);
     assert.match(ghost.kept, /^how it is kept current could not be read: .*ghost/);
     assert.deepEqual(listed, {
-      "public.customers": { kind: "table", rows_about: 3, kept: "NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-29 09:00:00 UTC): mason sync public.customers polls it now", kept_current_by: null },
+      // sync: off — read again only by mason sync — and how old its copy is: an agent can say so with an answer
+      "public.customers": { kind: "table", rows_about: 3, kept: `off: last synced 3 days ago (${utc(THREE_DAYS_AGO)}); mason sync public.customers syncs it now`, kept_current_by: null,
+        sync: "off", last_synced: THREE_DAYS_AGO },
       "public.events": { kind: "table", rows_about: 150_000, kept: "how it is kept current is unknown: the sync has no record of it", kept_current_by: null },
-      "public.orders": { kind: "table", rows_about: 5, kept: POLLED, kept_current_by: "polling" },
+      "public.orders": { kind: "table", rows_about: 5, ...POLLED_FACTS },
       "public.moods": { kind: "table", rows_about: 3, kept: "how it is kept current is unknown: the sync has no record of it", kept_current_by: null },
       // a name that needs quotes is named with them, and its copy is found by it
-      'public."Clients"': { kind: "table", rows_about: 1, kept: POLLED, kept_current_by: "polling" },
-      'public."x; y"': { kind: "table", rows_about: 1, kept: POLLED, kept_current_by: "polling" },
-      "sales.items": { kind: "table", rows_about: 1, kept: POLLED, kept_current_by: "polling" },
+      'public."Clients"': { kind: "table", rows_about: 1, ...POLLED_FACTS },
+      'public."x; y"': { kind: "table", rows_about: 1, ...POLLED_FACTS },
+      "sales.items": { kind: "table", rows_about: 1, ...POLLED_FACTS },
     });
     assert.deepEqual(JSON.parse(t.text), t.structured, "the text is the same JSON");
     const d = await c.call("describe", { table: "orders" });
@@ -310,7 +317,7 @@ test("tables and describe: the catalog's tables named as a statement writes them
       columns: [{ name: "id", type: "bigint", not_null: true }, { name: "customer_id", type: "bigint", not_null: false },
         { name: "status", type: "text", not_null: false, comment: "paid or pending" }, { name: "amount", type: "numeric(12,2)", not_null: false }, { name: "meta", type: "jsonb", not_null: false }],
       key: ["id"], foreign_keys: ["FOREIGN KEY (customer_id) REFERENCES customers(id)"],
-      rows_about: 5, kept: POLLED, kept_current_by: "polling",
+      rows_about: 5, ...POLLED_FACTS,
     });
     assert.deepEqual((await c.call("describe", { table: "public.customers" })).structured.key, ["id"]);
     // every name tables printed is one describe takes, and the catalog's own spelling too
@@ -429,9 +436,9 @@ test("query: rows and Postgres's types for a GROUP BY, an enum by its name, trun
     }
     const ex = await c.call("explain", { sql: "SELECT status, count(*) FROM orders GROUP BY status" });
     assert.equal(ex.isError, undefined, ex.text);
-    assert.match(ex.structured.plan as string, /public\.orders \(about 5 rows; kept current by polling, last poll 2026-10-29 09:30:00 UTC\)/);
+    assert.ok((ex.structured.plan as string).includes(`public.orders (about 5 rows; ${POLLED})`), ex.structured.plan as string);
     assert.equal(ex.text, ex.structured.plan, "EXPLAIN's lines as text, as psql prints them");
-    assert.match((await c.call("explain", { sql: 'SELECT * FROM "x; y"' })).text, /from its copy of public\."x; y" \(about 1 rows?; kept current by polling/);
+    assert.match((await c.call("explain", { sql: 'SELECT * FROM "x; y"' })).text, /from its copy of public\."x; y" \(about 1 rows?; polled every 5s, last 2 h ago/);
     // a refusal's position is the statement's, not the EXPLAIN's this server put around it
     for (const analyze of [false, true]) {
       const pos = await c.call("explain", { sql: "SELECT nope FROM orders", analyze });

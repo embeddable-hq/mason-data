@@ -79,9 +79,12 @@ ${codes}
   THE SOURCES FILE, mason/sources/<name>.yml (mason init writes it; one per project for now), is what Mason copies:
     kind: postgres
     url: \${DATABASE_URL}          a variable from .env.local, .env or the shell; a literal URL is allowed for local dev
+    sync: off                     how each table is kept current after its first copy: off (the default; mason sync
+                                  <table> reads it again) or poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h)
     tables:
       orders:                     a bare name is in public; billing.invoices names its schema
         columns: [id, status]     these columns (the primary key is always copied)
+        sync: poll 30s            this table's own: polled every 30 seconds (mason add orders --sync "poll 30s")
       customers: {}               every column
       events:
         exclude: [raw_body]       every column but these
@@ -89,17 +92,20 @@ ${codes}
         key: [tenant_id, id]      only for a table with no primary key: the unique columns to copy it by (polling only)
   mason add and mason remove edit one entry of it and keep the rest as it was, Mason running or not: with it running
   they take effect at once, else at mason start. An edit by hand is read at the next mason start (or the next add or
-  remove). Column types are read from the database at every start.
+  remove). Column types are read from the database at every start. A change of a table's sync: keeps its copy and
+  catches it up by one poll. mason status --json says each table's kept: { sync, syncedAt, nextAt } — how old its
+  copy is; a copy synced days ago answers today's count(*) as of then.
 
   A FIRST SESSION, as a shell runs it:
     mason doctor --json && mason init --json
     mason tables --json                       choose the tables (rows, key, whether one can be added)
     mason add orders customers --json         added to the sources file, checked against the database
     mason start --json && mason wait --json   Mason in the background; until every added table is copied
+    mason sync orders --json                  read what changed in it since (a table whose sync is off: only so)
     mason user add my-tool --json             the URL and password a tool connects with
     mason status --json                       each table's copy, and the last day's slow and refused statements
   With no database to hand, in a new folder: mason init demo --json && mason start --json — a demo database Mason
-  hosts itself (${DEMO_TABLES.join(", ")}), changed every few seconds, read by polling only. Init adds
+  hosts itself (${DEMO_TABLES.join(", ")}), changed every few seconds, polled every 5 s (its sync: poll 5s). Init adds
   ${DEMO_ADDED_TABLES.join(", ")}; ${DEMO_TABLE_TO_ADD} is left to add: mason add ${DEMO_TABLE_TO_ADD} --json && mason wait --json, after mason start.
 `;
 }
@@ -114,8 +120,11 @@ export function productionGuide(): string {
   return `GOING TO PRODUCTION — the project folder (mason/sources/, mason/mason.yml) is all that travels: its sources file
 names the tables the server copies, and its url: names the variable that holds the database's URL. Nothing in .mason/ goes with it; the server makes its own copy and state on its volume.
 
-1. PREPARE THE DATABASE. Mason only reads it. Polling (the default) needs a user that can SELECT the tables, and costs
-   the database a scan of each table per poll; it works on a read replica. Logical replication (MASON_CHANGES=replication)
+1. PREPARE THE DATABASE. Mason only reads it. How each table is kept current after its first copy is the sources
+   file's sync: — off (the default: read again only by mason sync <table>, from cron or a deploy) or poll <interval>,
+   per table — and needs a user that can SELECT the tables; each poll costs the database a scan of its table (a poll
+   waits four times its own time, so the polls never take more than a fifth of it), and it works on a read replica.
+   Logical replication (MASON_CHANGES=replication)
    needs wal_level = logical, a user with REPLICATION, and either a publication you name (PG_PUBLICATION, read as it is,
    never altered) or the right to create one; the slot holds the database's WAL while Mason is down, so cap it with
    max_slot_wal_keep_size. Try it locally first:

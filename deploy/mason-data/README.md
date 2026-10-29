@@ -38,8 +38,9 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
 
 ## Your database
 
-- **Polling** (the default) needs a user that can SELECT the tables, and costs the database a scan of each table per
-  poll. It works on a read replica.
+- **Polling** (the default) needs a user that can SELECT the tables. Each table is read once, then as the sources
+  file's `sync:` says: `off` (the default) only at `mason sync <table>` (`docker compose exec mason mason sync orders`,
+  from cron), `poll 5m` every five minutes — each poll a scan of that table on the database. It works on a read replica.
 - **Replication** (`MASON_CHANGES=replication`) needs `wal_level=logical`, a user with REPLICATION, and either a
   publication you name (`PG_PUBLICATION`) or the right to create one. The slot holds the database's WAL while Mason is
   down: cap it with `max_slot_wal_keep_size`.
@@ -110,8 +111,7 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
 |---|---|---|
 | `MASON_DUCKDB_MEMORY` | half the container's memory limit | the container's limit is not what the copy should have half of ("Memory") |
 | `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a copy is slow |
-| `MASON_POLL_MS` | 5000 | the dashboards can wait longer for a change (each poll scans every polled table whole on the database), or need it sooner |
-| `MASON_CHANGES` | `poll` | a table is over a million rows (the poll keeps only smaller ones current), or the poll's scans cost the database too much: `replication`, with `PG_PUBLICATION` naming one, and `max_slot_wal_keep_size` set on the database ("Your database") |
+| `MASON_CHANGES` | `poll` | a big table must be current within seconds, or the polls' scans cost the database too much (how often each table is polled is its `sync:` in the sources file, never a setting): `replication`, with `PG_PUBLICATION` naming one, and `max_slot_wal_keep_size` set on the database ("Your database") |
 | `MASON_STATEMENT_TIMEOUT` | `5min` (0 for none) | a dashboard's statement may rightly take longer, or a runaway one should stop sooner |
 | `MASON_REQUEST_LOG_DAYS` | 7 | you want the request log (`mason logs --requests`, kept in the copy) longer or shorter |
 | `MASON_STORE_JSON_PATHS` | `on` | you want the copy to hold only the columns you named: `off` stores no JSON path as a column, and drops what was stored at the next start |

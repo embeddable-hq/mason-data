@@ -30,7 +30,7 @@ import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
 import { createRunServer } from "./run-server.ts";
-import { addedTables, rereadSources, type RunSources } from "./sources.ts";
+import { addedTables, effectiveSync, rereadSources, shownPath, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -52,6 +52,7 @@ import { LiveRoles, readRoles, resolveRoles, usersWithoutRole } from "./roles.ts
 import { READY_LINE } from "./supervise.ts";
 import { changesOf, dropOwnReplication, dropStatements, madeReplication, namedPublication, projectReplication, replicationReadiness } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
+import { pollMsRetired, syncText, type TableSync } from "../lib/table-sync.ts";
 
 export interface DevOptions {
   /** the port the commands reach the run on (src/cli/run-server.ts), or the next free one */
@@ -139,6 +140,43 @@ async function closeDemo(hosted: Hosted, closed: string | null): Promise<void> {
   else if (closed !== null) say(`  ${closed}`);
 }
 
+/** how soon a pass that failed (the database away) is tried again, and replication mode's pass when a table waits */
+const PASS_RETRY_MS = 5000;
+
+/** the tables by their sync, as the start line says them: ` (2 polled, every 5s and 30s; 1 off)` */
+function syncCounts(tables: ReadonlyArray<{ sync?: TableSync }>): string {
+  const polled = tables.flatMap((t) => t.sync?.mode === "poll" ? [t.sync.every] : []);
+  const off = tables.length - polled.length;
+  const parts = [...(polled.length ? [`${polled.length} polled, every ${[...new Set(polled)].join(" and ")}`] : []), ...(off ? [`${off} off`] : [])];
+  return parts.length ? ` (${parts.join("; ")})` : "";
+}
+
+/**
+ * THE SOURCES FILE'S DEFAULT SYNC, SAID ONCE AT THE START: what every table without its own `sync:` gets — `off` (the
+ * default, said as such when the file writes none) or the file's `poll <interval>` — and how to change it. In
+ * replication mode the stream keeps every table current, and the file's sync: is the poll's.
+ *
+ * AN UPGRADE THAT STOPS THE POLLS IS SAID LOUDLY (issue 33's review): a file an older Mason wrote has no `sync:`
+ * anywhere, and its tables were polled every 5 s; from this release they are `off`. When the copy already holds
+ * `copiedBefore` of its tables and no `sync:` is written at all, the line says how many are not polled, that an older
+ * Mason polled them, and the exact line that keeps them current as before — true too of a hand-written file on a
+ * project that never polled.
+ */
+export function syncDefaultLine(file: SourceFile, shown: string, replication: boolean, copiedBefore = 0): string {
+  const d = effectiveSync(file, undefined);
+  if (replication) return `sync: logical replication keeps every table current; ${shown}'s sync: (${syncText(d.sync)}${d.from === "default" ? ", the default" : ""}) is the poll's, read when mason start --poll goes back to it`;
+  const noneWritten = d.from === "default" && file.tables.every((e) => e.sync === null);
+  if (noneWritten && copiedBefore > 0) {
+    // true of a file an older Mason polled and of one written by hand that never was: "not polled", the old way said
+    return `sync: off (the default): ${copiedBefore === 1 ? "1 table is" : `${copiedBefore} tables are`} not polled (an older Mason polled every table every 5 s); ` +
+      `write \`sync: poll 5s\` at the top of ${shown} ` +
+      "to keep them current as before, or `mason sync <table>` when you need it";
+  }
+  if (d.from === "default") return `sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of ${shown} polls every table, or on an entry that one`;
+  return d.sync.mode === "off" ? `sync: off (${shown}): after its first copy, a table is read again only by mason sync <table>, unless its entry says sync: poll <interval>`
+    : `sync: ${syncText(d.sync)} (${shown}): every table without a sync: of its own is polled every ${d.sync.every}`;
+}
+
 async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const t = theProject(process.cwd());
   if ("problem" in t) { say(`mason start: ${t.problem}`); return 1; }
@@ -159,6 +197,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   }
   const pinned = cliPinProblem(folder, o.version);
   if (pinned) { say(`mason start: ${pinned}`); return 1; }
+  // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
+  const pollMs = pollMsRetired(process.env);
+  if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: false });
   // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
   // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
   // always was (after the listener's checks): a demo project's port is needed first
@@ -338,11 +379,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     else say(`  ! the copy's thread stopped: ${reason}`);
   });
   done(`the copy in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling to ${path.relative(project.root, duckFile)}.tmp`);
-  const pollMs = Number(process.env.MASON_POLL_MS || 5000);
   const syncMode = changes === "replication" ? "replication" : syncModeOf(process.env);
-  const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^copied |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, pollMs, syncMode,
+  // each table is polled at its own sync: (the sources file's); the sync's interval is how soon a failed pass is tried
+  // again (and replication mode's, and MASON_DUCK_SYNC=recopy's whole copies)
+  const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^copied |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
     syncMode === "replication" ? repl : null, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths } });
   await sync.open();
+  // the tables this copy already holds, before this start copies anything: an upgrade from a Mason that polled every
+  // table says how many are not polled (`syncDefaultLine`)
+  const copiedBefore = sync.state().filter((s) => s.phase === "copied" && sources.tables.some((t) => t.source === s.source)).length;
   // a database restored to another server: its transaction ids are not the watermarks', so every table is read again
   if (move.action === "reread") { await sync.rereadAll(); say(`  ${source.database} is on another server than the copy was taken from: reading its tables again`); }
   if (move.action !== "same") { cfg.sourceServer = { systemIdentifier: facts.systemIdentifier, database: source.database }; writeConfig(home, cfg); }
@@ -443,7 +488,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
     log: (m) => say(`  ${m}`),
-    duck: { copies: () => sync.state(), file: duckFile, pollSeconds: pollMs / 1000, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), requests,
+    duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), measured: (table) => sync.measured(table), requests,
       jsonPaths: () => sync.kept.status() },
   });
   await new Promise<void>((resolve) => server.listen(setupPort, "127.0.0.1", resolve));
@@ -459,7 +504,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   cfg.lastRun = new Date().toISOString();
   writeConfig(home, cfg);
   done(`Mason is up: ${sync.state().length} table(s) added, kept current ${syncMode === "replication" ? `by logical replication (slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})`
-    : `every ${pollMs / 1000} s ${syncMode === "poll" ? "by polling with SELECTs (xmin)" : "by copying each table again whole (MASON_DUCK_SYNC=recopy)"}`}`);
+    : syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)}` : `every ${PASS_RETRY_MS / 1000} s by copying each table again whole (MASON_DUCK_SYNC=recopy)`}`);
+  // THE FILE'S DEFAULT, SAID ONCE (issue 33: nothing Mason does to your database is a hidden default)
+  const defaultLine = syncDefaultLine(sources.file, shownPath(project.root, sources.file.file), syncMode === "replication", syncMode === "poll" ? copiedBefore : 0);
+  say(`  ${defaultLine}`);
+  logLine(`[sync] ${defaultLine}`);
   // THE DEMO'S WRITER: a round of changes every MASON_DEMO_CHANGE_MS, begun once the run is up, said in the log
   if (demo !== null && demoChangeMs !== null) hosted.stopChanges = demoChanges(demo, demoChangeMs, (l) => logLine(`[demo] ${l}`));
   // the stop is in place BEFORE the ready line: a supervisor or a test signals on reading it, and a SIGTERM that found
