@@ -332,7 +332,7 @@ Each query goes through four steps:
 
 ### How compatibility is tested
 
-The allowlist is not written by hand. An oracle runs tens of thousands of queries on a real Postgres and on Mason, and
+The allowlist is not written by hand. **An oracle runs tens of thousands of queries** on a real Postgres and on Mason, and
 compares the answers. Only queries that come back identical, or that differ by a listed decision, are allowed. Every
 fix adds its queries to the oracle. A difference you report becomes a permanent test case.
 
