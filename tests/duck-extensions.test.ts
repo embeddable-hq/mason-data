@@ -90,6 +90,12 @@ test("without the package the resolver says why, and the instance keeps DuckDB's
     const half = findExtensions({ host: hostOf("linux-arm64"), engine: ENGINE, resolve: m.resolve });
     assert.equal(half.shipped, false);
     assert.match(half.shipped ? "" : half.why, /holds no inet for the engine Mason runs/);
+    // a package.json that cannot be read: a broken install, said in Mason's words with the way out
+    const broken = m.add("darwin-x64");
+    fs.writeFileSync(path.join(broken, "package.json"), "{ not json");
+    const unreadable = findExtensions({ host: hostOf("darwin-x64"), engine: ENGINE, resolve: m.resolve });
+    assert.equal(unreadable.shipped, false);
+    assert.match(unreadable.shipped ? "" : unreadable.why, /^@mason-data\/extensions-darwin-x64's package\.json at .+ cannot be read \(.+\): install @mason-data\/cli again$/);
     // a resolve that fails otherwise is said as it is, never taken for "not installed"
     assert.throws(() => findExtensions({ host: hostOf("linux-x64"), engine: ENGINE, resolve: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } }), /EACCES/);
   } finally { fs.rmSync(m.dir, { recursive: true, force: true }); }
@@ -97,7 +103,10 @@ test("without the package the resolver says why, and the instance keeps DuckDB's
 
 test("this machine's key is npm's: Node's platform and arch, -musl on a musl Linux", () => {
   const { thisHost, hostKey } = mod();
+  const report = process.report as NodeJS.ProcessReport & { excludeNetwork: boolean };
+  const network = report.excludeNetwork;
   const h = thisHost();
+  assert.equal(report.excludeNetwork, network, "the report's network setting is left as it was");
   assert.equal(h.platform, process.platform);
   assert.equal(h.arch, process.arch);
   if (process.platform !== "linux") assert.equal(h.musl, false);

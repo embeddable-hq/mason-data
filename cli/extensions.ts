@@ -64,7 +64,7 @@ export function packageJson(m: Manifest, p: ExtensionPlatform, cliVersion: strin
   return {
     name: packageName(p),
     version: cliVersion,
-    description: `The copy's postgres and inet extensions for @mason-data/cli on ${p}: DuckDB's, for its engine ${m.engine}, so Mason downloads nothing after npm install`,
+    description: `The copy's postgres and inet extensions for @mason-data/cli on ${p} (engine ${m.engine}), so Mason downloads nothing after npm install`,
     homepage: "https://masondata.ai",
     repository: { type: "git", url: "git+https://github.com/embeddable-hq/mason-data.git", directory: "cli" },
     license: "MIT AND PostgreSQL",
@@ -77,10 +77,10 @@ export function packageJson(m: Manifest, p: ExtensionPlatform, cliVersion: strin
 }
 
 const readme = (m: Manifest, p: ExtensionPlatform): string =>
-  `# ${packageName(p)}\n\nThe copy's extensions for [@mason-data/cli](https://www.npmjs.com/package/@mason-data/cli) on ${p}: DuckDB's ` +
-  `\`postgres\` and \`inet\` extensions for its engine ${m.engine} (${EXTENSION_PLATFORMS[p]}), unchanged, as DuckDB's extension repository ` +
-  "publishes them. You do not install this package yourself: npm installs it with `@mason-data/cli` on this platform, and Mason loads the " +
-  "extensions from it, so nothing is downloaded after `npm install`. `mason doctor` says whether it found them.\n\nLICENSE has their licences.\n";
+  `# ${packageName(p)}\n\nThe copy's extensions for [@mason-data/cli](https://www.npmjs.com/package/@mason-data/cli) on ${p}: the ` +
+  `\`postgres\` and \`inet\` extensions of the engine Mason runs, ${m.engine} (${EXTENSION_PLATFORMS[p]}), unchanged, as their authors ` +
+  "publish them. You do not install this package yourself: npm installs it with `@mason-data/cli` on this platform, and Mason loads the " +
+  "extensions from it, so nothing is downloaded after `npm install`. `mason doctor` says whether it found them.\n\nLICENSE says whose they are, and their licences.\n";
 
 /**
  * ONE PLATFORM'S PACKAGE at `dir`, written whole or not at all: built in a folder beside it and renamed into place.

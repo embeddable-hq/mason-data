@@ -54,8 +54,17 @@ export type Extensions =
 export interface Host { platform: string; arch: string; musl: boolean }
 
 export function thisHost(): Host {
-  // Node's own report names glibc's version where glibc runs; musl (Alpine) has none (detect-libc's first check)
-  const header = process.platform === "linux" ? (process.report.getReport() as { header?: { glibcVersionRuntime?: string } }).header : undefined;
+  // Node's own report names glibc's version where glibc runs; musl (Alpine) has none (detect-libc's first check). Its
+  // network part is left out, as detect-libc leaves it: enumerating the interfaces has taken seconds in a container
+  let header: { glibcVersionRuntime?: string } | undefined;
+  if (process.platform === "linux") {
+    // `excludeNetwork` is Node's (20+), not yet in @types/node
+    const report = process.report as NodeJS.ProcessReport & { excludeNetwork: boolean };
+    const network = report.excludeNetwork;
+    report.excludeNetwork = true;
+    try { header = (report.getReport() as { header?: { glibcVersionRuntime?: string } }).header; }
+    finally { report.excludeNetwork = network; }
+  }
   return { platform: process.platform, arch: process.arch, musl: process.platform === "linux" && header?.glibcVersionRuntime === undefined };
 }
 
@@ -86,7 +95,12 @@ export function findExtensions(o: { host?: Host; engine?: string; resolve?: (id:
     return { shipped: false, package: name, why: `${name} is not installed beside Mason (npm installs it with @mason-data/cli unless optional dependencies are left out: --omit=optional)` };
   }
   const root = path.dirname(manifest);
-  const pkgVersion = String((JSON.parse(fs.readFileSync(manifest, "utf8")) as { version?: unknown }).version ?? "");
+  let pkgVersion: string;
+  try { pkgVersion = String((JSON.parse(fs.readFileSync(manifest, "utf8")) as { version?: unknown }).version ?? ""); }
+  catch (e) {
+    // a broken install: refused in Mason's words with the way out, never the parser's error
+    return { shipped: false, package: name, why: `${name}'s package.json at ${manifest} cannot be read (${(e as Error).message}): install @mason-data/cli again` };
+  }
   const missing = EXTENSION_NAMES.filter((n) => !fs.existsSync(extensionFile(root, engine, platform, n)));
   if (missing.length > 0) {
     const has = fs.existsSync(path.join(root, "extensions")) ? fs.readdirSync(path.join(root, "extensions")) : [];

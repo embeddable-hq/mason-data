@@ -43,6 +43,7 @@ jobs:
     outputs:
       version: ${{ steps.decide.outputs.version }}
       cli_publish: ${{ steps.decide.outputs.cli_publish }}
+      extensions_publish: ${{ steps.decide.outputs.extensions_publish }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,7 +62,7 @@ jobs:
           version="$(ls release-notes 2>/dev/null | sed -n 's/^v\([0-9][0-9.]*\)\.md$/\1/p' | sort -V | tail -1)"
           if [ -z "$version" ]; then
             echo "no release-notes/v<version>.md yet: nothing to release"
-            echo "version=" >> "$GITHUB_OUTPUT"; echo "cli_publish=false" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"; echo "cli_publish=false" >> "$GITHUB_OUTPUT"; echo "extensions_publish=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           cli="$(node -p 'require("./cli/package.json").version')"
@@ -74,6 +75,17 @@ jobs:
             echo "@mason-data/cli $cli is on npm already"; echo "cli_publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "@mason-data/cli $cli is not on npm: it is published"; echo "cli_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+          # its platform packages are judged on their own too: a CLI on npm whose packages are not (its first publish by
+          # hand, or a run stopped between them) installs without them, and its first copy downloads the extensions
+          missing=""
+          for name in $(node -p 'Object.keys(require("./cli/package.json").optionalDependencies ?? {}).join(" ")'); do
+            npm view "$name@$cli" version >/dev/null 2>&1 || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "not on npm at $cli, published:$missing"; echo "extensions_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "every platform package is on npm at $cli"; echo "extensions_publish=false" >> "$GITHUB_OUTPUT"
           fi
           if gh release view "v$version" --json tagName >/dev/null 2>&1; then
             echo "v$version is released already: nothing else to do"
@@ -117,7 +129,9 @@ jobs:
   # the CLI's platform packages, before it: one a platform, each at the CLI's version (cli/extensions.ts)
   extensions:
     needs: [decide, tag, image]
-    if: always() && needs.decide.result == 'success' && needs.decide.outputs.cli_publish == 'true' && needs.image.result != 'failure' && needs.tag.result != 'failure'
+    # whenever one of them is missing from npm at the CLI's version (`decide`), or the CLI is: alone when the release
+    # exists and only they are missing
+    if: always() && needs.decide.result == 'success' && (needs.decide.outputs.extensions_publish == 'true' || needs.decide.outputs.cli_publish == 'true') && needs.image.result != 'failure' && needs.tag.result != 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -170,9 +184,9 @@ jobs:
 
   release:
     needs: [decide, tag, image, extensions, cli]
-    # the release page comes last, once everything it names is published; a skipped cli job is not a failure, but one
-    # skipped because its platform packages failed is (the extensions job's failure says it)
-    if: always() && needs.decide.outputs.version != '' && needs.tag.result == 'success' && needs.image.result == 'success' && needs.extensions.result != 'failure' && needs.cli.result != 'failure'
+    # the release page comes last, once everything it names is published: a publish job that succeeded, or was skipped
+    # because npm has it already — never one that failed or was cancelled
+    if: always() && needs.decide.outputs.version != '' && needs.tag.result == 'success' && needs.image.result == 'success' && (needs.extensions.result == 'success' || needs.extensions.result == 'skipped') && (needs.cli.result == 'success' || needs.cli.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

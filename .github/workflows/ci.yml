@@ -76,7 +76,9 @@ jobs:
 
       # What a user installs: the packed CLI and this runner's platform package, installed globally into a prefix of
       # their own (npm skips the optional ones it cannot find, none being on npm at this version), and the installed
-      # `mason doctor`, with HOME an empty folder, finds the extensions in the package and downloads nothing.
+      # `mason doctor`, with HOME an empty folder, finds the extensions in the package and downloads nothing. Two
+      # tarballs install side by side (hoisted); a registry install nests the package under the CLI's node_modules,
+      # which the same walk up from dist/src/duck/ finds (checked by hand, not here).
       - name: the installed CLI finds its platform package
         if: ${{ !cancelled() }}
         run: |
