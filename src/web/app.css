@@ -1,14 +1,21 @@
-/* The web page of mason start (src/web/app.js; docs/WEB-UI.md "Presentation"). An EXPERIMENT in the feel of a
-   developer-tool site drawn like a terminal's printout: mono first (Geist Mono for the chrome, the labels, the numbers and
-   the tables; Geist Sans only for a sentence of prose), navy ink on cool paper, square boxes framed in ink with a hard
-   offset block shadow, an inverted (ink) header row and nav item, and one warm peach for the primary action. Colour
-   otherwise says a state (ok / warn / bad / unknown), always beside its word. No gradient. Every font is Mason's own file
-   (src/web/vendor/, served from the allowlist): nothing is fetched from elsewhere, under default-src 'self'. */
+/* The web page of mason start (src/web/app.js; docs/WEB-UI.md "Presentation"). MASON'S OWN LOOK: a mason lays stone and
+   brick course by course, and Mason builds a copy of a Postgres table by table and keeps it standing. Charcoal ink on
+   warm limestone paper (basalt and a glowing brick in the dark), mortar greys for every hairline, ONE brick red for the
+   accent and the primary action; mono first (Geist Mono for the chrome, the labels, the numbers and the tables; Geist
+   Sans for a sentence of prose) under a slab display face (Zilla Slab) for the titles and the big numbers; square boxes
+   framed in ink, set on a stepped two-stone offset; a copy's bar a wall of bricks in running bond. Colour otherwise says a
+   state (ok / warn / bad / unknown), always beside its word. No gradient, no image: every texture is a border or a box.
+   Every font is Mason's own file (src/web/vendor/, served from the allowlist): nothing is fetched from elsewhere. */
 
 @font-face {
   font-family: "Geist";
   src: url("vendor/geist-1.7.2/Geist-Variable.woff2") format("woff2");
   font-weight: 100 900; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "Zilla Slab";
+  src: url("vendor/zilla-slab-5.3.0/zilla-slab-latin-700-normal.woff2") format("woff2");
+  font-weight: 700; font-style: normal; font-display: swap;
 }
 @font-face {
   font-family: "Geist Mono";
@@ -18,60 +25,65 @@
 
 /* ---------------------------------------------------------------- tokens */
 :root {
-  /* paper and ink: the page, a box, a hover, a sunken strip, the sidebar; the hairline inside a box, a control's edge,
-     the ink frame of a box; the text in three steps */
-  --bg: #f8fafc; --surface: #ffffff; --hover: #eef2f7; --sunken: #f1f5f9; --side: #f1f5f9;
-  --line: #e2e8f0; --line-strong: #94a3b8; --frame: #0f172a;
-  --fg: #0f172a; --muted: #475569; --subtle: #5b6980;
-  /* the accent (focus, a link's hover), and the states (each beside a word, never colour alone) */
-  --accent: #c2410c; --accent-soft: #ffedd5;
-  --ok: #15803d; --warn: #a16207; --bad: #b91c1c; --unknown: #5b6980;
-  --ok-soft: #dcfce7; --warn-soft: #fef9c3; --bad-soft: #fee2e2;
-  /* the primary action: warm peach, dark brown words, a brown edge */
-  --cta: #fdba74; --cta-hover: #fca85a; --cta-fg: #431407; --cta-line: #7c2d12;
-  /* a secondary button, its bevel and hard drop (the page's one shadow: a block, never a blur) */
-  --btn: #e2e8f0; --btn-hover: #cbd5e1;
-  --bevel: inset 1px 1px 0 rgb(255 255 255 / 0.45), inset -1px -1px 0 rgb(0 0 0 / 0.22), 2px 2px 0 rgb(15 23 42 / 0.22);
-  --bevel-pressed: inset 1px 1px 0 rgb(0 0 0 / 0.18);
-  --shadow: #cbd5e1; --drop: 4px 4px 0 var(--shadow); --drop-hover: 6px 6px 0 var(--shadow);
-  /* the inverted parts: the sidebar's head (the phone's top bar), a table's header row, the raw log */
-  --chrome-bg: #0f172a; --chrome-fg: #f8fafc; --chrome-muted: #a5b4c8; --chrome-line: #334155;
-  --thead-bg: #0f172a; --thead-fg: #f8fafc; --thead-muted: #a5b4c8; --zebra: #f8fafc;
-  --code-bg: #0f172a; --code-fg: #e2e8f0; --code-muted: #94a3b8;
-  /* a copy's bar: ink in an ink-framed track */
-  --bar: #0f172a;
-  /* a chart (src/web/charts.js reads these): its trend in a slate, its mark and latest point in ink */
-  --chart-trend: #94a3b8; --chart-mark: #0f172a; --chart-grid: #e2e8f0; --chart-text: #5b6980;
+  /* limestone and charcoal: the page, a box, a hover, a sunken strip, the sidebar's sandstone; the mortar inside a box,
+     a control's edge, the ink frame of a box; the text in three steps */
+  --bg: #f3efe7; --surface: #fbf9f5; --hover: #ece6db; --sunken: #efe9df; --side: #ebe5d9;
+  --line: #ddd5c7; --line-strong: #a39a8b; --frame: #2b2723;
+  --fg: #24201c; --muted: #5a5148; --subtle: #675e53;
+  /* the brick: the accent (focus, a link's hover, a copy's laid bricks, a chart's mark), and the states (each beside a
+     word, never colour alone; the failed red a wine, so it is never read as the brick) */
+  --accent: #a8461f; --accent-soft: #f3dccf;
+  --ok: #2e7333; --warn: #8a5a00; --bad: #a1173f; --unknown: #675e53;
+  --ok-soft: #e0eedb; --warn-soft: #f6ead0; --bad-soft: #f6dbe2;
+  /* the primary action: a fired brick, paper words, a darker edge */
+  --cta: #a8461f; --cta-hover: #923b18; --cta-fg: #fffaf2; --cta-line: #6e2a0f;
+  /* a secondary button: a dressed stone, its bevel and a small drop */
+  --btn: #e9e2d5; --btn-hover: #ddd4c4;
+  --bevel: inset 1px 1px 0 rgb(255 255 255 / 0.55), inset -1px -1px 0 rgb(43 39 35 / 0.22), 2px 2px 0 var(--stone-1);
+  --bevel-pressed: inset 1px 1px 0 rgb(43 39 35 / 0.2);
+  /* the page's one shadow: two stones stepped behind a box (a course set back, then another), never a blur */
+  --stone-1: #cbc1af; --stone-2: #e1d9cb; --shadow: var(--stone-1);
+  --drop: 3px 3px 0 var(--stone-1), 6px 6px 0 var(--stone-2); --drop-hover: 4px 4px 0 var(--stone-1), 8px 8px 0 var(--stone-2);
+  /* the inverted parts: the sidebar's head (the phone's top bar), the raw log; a table's header row is carved stone */
+  --chrome-bg: #24201c; --chrome-fg: #f3efe7; --chrome-muted: #b8ad9c; --chrome-line: #4a433b;
+  --thead-bg: #e7e0d3; --thead-fg: #24201c; --thead-muted: #5a5148; --zebra: #f6f3ed;
+  --code-bg: #24201c; --code-fg: #ece5d8; --code-muted: #b0a593;
+  /* a copy's bar: brick laid on mortar, an unlaid brick a pale stone; the glow a laid brick has in the dark (none here) */
+  --brick: var(--accent); --brick-empty: #e4dccf; --mortar: var(--surface); --glow: 0 0 0 transparent;
+  /* a chart (src/web/charts.js reads these): its trend in mortar grey, its mark and latest point the brick */
+  --chart-trend: #b5ab9b; --chart-mark: #a8461f; --chart-grid: #e6dfd3; --chart-text: #675e53;
   /* what dims the page under the phone's open menu */
-  --scrim: rgb(15 23 42 / 0.35);
+  --scrim: rgb(36 32 28 / 0.38);
 
   --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --text-xs: 12px; --text-sm: 13px; --text-md: 14px; --text-lg: 16px; --text-xl: 24px; --text-2xl: 30px;
+  --font-display: "Zilla Slab", "Rockwell", "Roboto Slab", Georgia, serif;
+  --text-xs: 12px; --text-sm: 13px; --text-md: 14px; --text-lg: 16px; --text-xl: 26px; --text-2xl: 34px;
 
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px; --space-7: 48px;
-  --radius-sm: 3px; --radius: 0; --radius-lg: 0;
+  --radius-sm: 2px; --radius: 0; --radius-lg: 0;
   --width: 1200px; --gutter: 24px; --topbar-h: 56px; --sidebar-w: 232px; --rail-w: 60px;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0b1120; --surface: #0f172a; --hover: #1a2539; --sunken: #131c2f; --side: #0b1120;
-    --line: #233046; --line-strong: #52627a; --frame: #64748b;
-    --fg: #e2e8f0; --muted: #a5b4c8; --subtle: #8a99b0;
-    --accent: #fb923c; --accent-soft: #3b1d0b;
-    --ok: #4ade80; --warn: #facc15; --bad: #f87171; --unknown: #8a99b0;
-    --ok-soft: #0f2a1a; --warn-soft: #2c2508; --bad-soft: #3a1414;
-    --cta: #fdba74; --cta-hover: #fec89a; --cta-fg: #431407; --cta-line: #fdba74;
-    --btn: #1e293b; --btn-hover: #2a3850;
-    --bevel: inset 1px 1px 0 rgb(255 255 255 / 0.08), inset -1px -1px 0 rgb(0 0 0 / 0.4), 2px 2px 0 rgb(0 0 0 / 0.45);
-    --bevel-pressed: inset 1px 1px 0 rgb(0 0 0 / 0.4);
-    --shadow: #1f2b40;
-    --chrome-bg: #020617; --chrome-fg: #f1f5f9; --chrome-muted: #94a3b8; --chrome-line: #273449;
-    --thead-bg: #1e293b; --thead-fg: #f1f5f9; --thead-muted: #a5b4c8; --zebra: #111a2c;
-    --code-bg: #020617; --code-fg: #e2e8f0; --code-muted: #8a99b0;
-    --bar: #e2e8f0;
-    --chart-trend: #52627a; --chart-mark: #e2e8f0; --chart-grid: #233046; --chart-text: #8a99b0;
+    /* basalt and slate, limestone words, the brick glowing */
+    --bg: #121315; --surface: #1a1c1f; --hover: #24272b; --sunken: #16181a; --side: #101113;
+    --line: #2c2f34; --line-strong: #5b5f66; --frame: #6a6e75;
+    --fg: #ece5d8; --muted: #b3aa9c; --subtle: #968d80;
+    --accent: #f0814f; --accent-soft: #3a1d10;
+    --ok: #6fcf73; --warn: #f0b43c; --bad: #ff7096; --unknown: #968d80;
+    --ok-soft: #15291a; --warn-soft: #2d2410; --bad-soft: #3a1520;
+    --cta: #e0703e; --cta-hover: #f0814f; --cta-fg: #1a0b04; --cta-line: #f0814f;
+    --btn: #25282c; --btn-hover: #30343a;
+    --bevel: inset 1px 1px 0 rgb(255 255 255 / 0.07), inset -1px -1px 0 rgb(0 0 0 / 0.45), 2px 2px 0 var(--stone-1);
+    --bevel-pressed: inset 1px 1px 0 rgb(0 0 0 / 0.45);
+    --stone-1: #2b2e33; --stone-2: #1e2023;
+    --chrome-bg: #0b0c0d; --chrome-fg: #ece5d8; --chrome-muted: #a39a8c; --chrome-line: #2c2f34;
+    --thead-bg: #23262a; --thead-fg: #ece5d8; --thead-muted: #b3aa9c; --zebra: #1d1f22;
+    --code-bg: #0b0c0d; --code-fg: #ece5d8; --code-muted: #968d80;
+    --brick: #e0703e; --brick-empty: #2a2d31; --mortar: var(--surface); --glow: 0 0 5px rgb(240 129 79 / 0.55);
+    --chart-trend: #5b5f66; --chart-mark: #e06d40; --chart-grid: #2c2f34; --chart-text: #968d80;
     --scrim: rgb(0 0 0 / 0.6);
     color-scheme: dark;
   }
@@ -87,7 +99,9 @@ a { color: var(--fg); text-decoration: underline; text-decoration-color: var(--l
 a:hover { text-decoration-color: var(--accent); text-decoration-thickness: 2px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 0; }
 h1, h2, h3 { font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.01em; }
-h3 { font-size: var(--text-lg); margin: var(--space-6) 0 var(--space-3); }
+/* the slab: a title and a big number, cut like a mason's letters (one weight, 700) */
+h2, h3, .health, .card-value, .brand-name, .checklist-title, .connect.first .connect-title, .empty .empty-title { font-family: var(--font-display); font-weight: 700; letter-spacing: 0; }
+h3 { font-size: 20px; margin: var(--space-6) 0 var(--space-3); }
 code, pre, kbd, samp { font-family: var(--font-mono); font-size: 0.95em; }
 code { overflow-wrap: anywhere; }
 pre { white-space: pre-wrap; margin: var(--space-2) 0 0; color: var(--muted); }
@@ -106,10 +120,13 @@ pre { white-space: pre-wrap; margin: var(--space-2) 0 0; color: var(--muted); }
 main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutter); padding-right: var(--gutter); }
 /* the head is the one inverted band of the chrome: ink, the mark in peach, the project under it */
 .side-head { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4) var(--space-3) var(--space-3); flex: none;
-  background: var(--chrome-bg); color: var(--chrome-fg); border-bottom: 1px solid var(--frame); }
+  background: var(--chrome-bg); color: var(--chrome-fg); border-bottom: 3px solid var(--brick); }
 .brand { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-lg); font-weight: 800; letter-spacing: -0.02em; margin: 0; padding: 0 var(--space-2); color: var(--chrome-fg); min-height: 24px; }
-.brand .logo { width: 20px; height: 20px; border-radius: 0; background: var(--cta); border: 1px solid var(--cta-line); box-shadow: 2px 2px 0 var(--chrome-line); position: relative; flex: none; }
-.brand .logo::after { content: ""; position: absolute; inset: 5px 4px 4px; border: 2px solid var(--cta-fg); border-top: 0; }
+.brand-name { font-size: 22px; letter-spacing: 0.01em; line-height: 1; }
+/* the mark: Mason's own arch of bricks, its keystone in the middle (index.html, an inline SVG in currentColor), on a brick tile */
+.brand .logo { display: inline-flex; width: 24px; height: 24px; border-radius: 0; background: var(--cta); color: var(--cta-fg); border: 1px solid var(--cta-line);
+  box-shadow: 2px 2px 0 var(--chrome-line), 4px 4px 0 rgb(255 255 255 / 0.06); flex: none; }
+.brand .logo svg { width: 100%; height: 100%; display: block; }
 /* the project: its database and the demo badge, in a quiet box the height of its line before the first read (no shift) */
 .project { display: flex; align-items: center; gap: var(--space-2); min-height: 36px; padding: var(--space-1) var(--space-2); min-width: 0;
   border: 1px solid var(--chrome-line); border-radius: var(--radius); background: none; }
@@ -122,7 +139,7 @@ main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutte
 .nav a { position: relative; display: flex; align-items: center; gap: var(--space-2); min-height: 30px; padding: 0 var(--space-4);
   border-radius: 0; color: var(--fg); font-size: var(--text-sm); font-weight: 400; text-decoration: none; white-space: nowrap; }
 .nav a:hover { color: var(--fg); background: var(--hover); text-decoration: none; }
-.nav a[aria-current="page"] { color: var(--surface); background: var(--fg); font-weight: 600; }
+.nav a[aria-current="page"] { color: var(--surface); background: var(--fg); font-weight: 600; box-shadow: inset 4px 0 0 var(--brick); }
 .nav a:focus-visible { outline-offset: -2px; border-radius: 0; }
 .nav .group { margin-top: var(--space-4); }
 .nav .group-title { margin: 0 0 var(--space-1); padding: 0 var(--space-4); font-size: var(--text-xs); font-weight: 700; color: var(--fg); text-transform: uppercase; letter-spacing: 0.06em; }
@@ -184,7 +201,10 @@ main, #poll { max-width: var(--width); margin: 0 auto; padding-left: var(--gutte
 /* ---------------------------------------------------------------- the page and its header */
 main { padding-top: var(--space-6); padding-bottom: var(--space-7); }
 section { margin: 0; }
-.page-head h2 { font-size: var(--text-2xl); font-weight: 800; letter-spacing: -0.03em; line-height: 1.2; margin: 0 0 var(--space-2); }
+.page-head h2 { font-size: var(--text-2xl); font-weight: 700; letter-spacing: -0.01em; line-height: 1.15; margin: 0 0 var(--space-2); }
+/* under a page's title, a course being laid: three bricks set, two over them (one pseudo-element and its copies, no image) */
+.page-head h2::after { content: ""; display: block; width: 14px; height: 5px; margin: var(--space-3) 0 2px; background: var(--brick);
+  box-shadow: 16px 0 0 var(--brick), 32px 0 0 var(--line-strong), 8px -7px 0 var(--brick), 24px -7px 0 var(--line), var(--glow); }
 .page-head { margin: 0 0 var(--space-5); }
 .page-head .desc { margin: 0; max-width: 78ch; }
 #poll:empty { display: none; }
@@ -192,7 +212,8 @@ section { margin: 0; }
 
 /* ---------------------------------------------------------------- the state: a dot and a word */
 .indicator { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.indicator .dot { width: 8px; height: 8px; border-radius: 0; background: var(--unknown); flex: none; }
+/* a state's marker: a small stone block, a brick's proportions */
+.indicator .dot { width: 10px; height: 6px; border-radius: 0; background: var(--unknown); flex: none; box-shadow: 1px 1px 0 var(--stone-1); }
 .indicator.ok .dot { background: var(--ok); } .indicator.warn .dot { background: var(--warn); }
 .indicator.bad .dot { background: var(--bad); } .indicator.unknown .dot { background: var(--unknown); }
 .indicator.warn .dot { animation: pulse 1.6s ease-in-out infinite; }
@@ -202,9 +223,11 @@ section { margin: 0; }
 /* the run's word at the top of the Overview: a big dot and the CLI's word */
 .health { display: flex; align-items: center; gap: var(--space-3); margin: 0 0 var(--space-5); padding: var(--space-4) var(--space-5);
   background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); font-size: var(--text-xl); font-weight: 800; letter-spacing: -0.02em; }
-.health .dot { width: 14px; height: 14px; border-radius: 0; background: var(--warn); box-shadow: 0 0 0 4px var(--warn-soft); flex: none; }
-.health.ok .dot { background: var(--ok); box-shadow: 0 0 0 4px var(--ok-soft); }
-.health.bad .dot { background: var(--bad); box-shadow: 0 0 0 4px var(--bad-soft); }
+.health { font-size: 28px; font-weight: 700; letter-spacing: 0; }
+/* its marker: a brick in the run's colour, set in a course of mortar of the same */
+.health .dot { width: 22px; height: 12px; border-radius: 0; background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft), 4px 4px 0 3px var(--stone-1); flex: none; }
+.health.ok .dot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft), 4px 4px 0 3px var(--stone-1); }
+.health.bad .dot { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft), 4px 4px 0 3px var(--stone-1); }
 
 /* ---------------------------------------------------------------- badges and buttons */
 /* a badge: a square tag, mono, its edge in its own colour */
@@ -265,8 +288,8 @@ label.tick code { overflow-wrap: normal; }
 }
 .card { background: var(--surface); border: 1px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4); min-width: 0;
   display: flex; flex-direction: column; gap: var(--space-1); }
-.card-label { margin: 0; font-size: var(--text-xs); font-weight: 600; color: var(--muted); }
-.card-value { margin: 0; font-size: var(--text-xl); font-weight: 800; letter-spacing: -0.03em; line-height: 1.25; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.card-label { margin: 0; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.card-value { margin: 0; font-size: var(--text-xl); line-height: 1.2; font-variant-numeric: lining-nums tabular-nums; overflow-wrap: anywhere; }
 .card-sub { margin: 0; font-size: var(--text-xs); color: var(--muted); overflow-wrap: anywhere; }
 .card.warn .card-value { color: var(--warn); } .card.bad .card-value { color: var(--bad); }
 .card .chart { margin-top: auto; padding-top: var(--space-2); }
@@ -291,9 +314,10 @@ caption { text-align: left; font-size: var(--text-md); font-weight: 700; padding
 caption code { font-weight: 400; color: var(--muted); }
 th, td { text-align: left; vertical-align: top; padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line); font-weight: 400; }
 tbody tr:first-child > * { border-top: 0; }
-thead th { position: sticky; top: 0; background: var(--thead-bg); color: var(--thead-fg); font-size: var(--text-xs); font-weight: 700; border-top: 0;
-  border-bottom: 1px solid var(--frame); white-space: nowrap; padding-top: var(--space-2); padding-bottom: var(--space-2); }
-thead th + th { border-left: 1px solid var(--chrome-line); }
+/* a header row is a carved lintel: stone, its names cut in small capitals, an ink course under it */
+thead th { position: sticky; top: 0; background: var(--thead-bg); color: var(--thead-fg); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; border-top: 0;
+  border-bottom: 2px solid var(--frame); white-space: nowrap; padding-top: var(--space-2); padding-bottom: var(--space-2); }
+thead th + th { border-left: 1px solid var(--line); }
 tbody tr:nth-child(even) > * { background: var(--zebra); }
 thead tr:first-child th:first-child { border-top-left-radius: var(--radius-lg); }
 thead tr:first-child th:last-child { border-top-right-radius: var(--radius-lg); }
@@ -318,14 +342,28 @@ table.errors td { overflow-wrap: anywhere; }
 .facts dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); }
 tr.warn th, tr.warn td { color: var(--warn); }
 
-/* a copy's bar */
+/* A COPY'S BAR: a wall of two courses in running bond (copyBar, src/web/pages/status.js): the top course ten bricks, the
+   bottom a half, nine and a half; a laid brick is brick red, an unlaid one pale stone, the mortar the box's own colour.
+   Its colour follows the copy's state as the line's word does: laid in green once served, red when it failed, amber when
+   not kept current. Bricks laid since the last read drop into place, once (not under prefers-reduced-motion). */
 td.bar { white-space: nowrap; width: 1%; }
-progress { width: 120px; height: 10px; vertical-align: middle; appearance: none; border: 1px solid var(--frame); border-radius: 0; background: var(--surface); overflow: hidden; }
-progress::-webkit-progress-bar { background: var(--surface); border-radius: 0; }
-progress::-webkit-progress-value { background: var(--bar); border-radius: 0; }
-progress::-moz-progress-bar { background: var(--bar); border-radius: 0; }
-.t-failed progress::-webkit-progress-value { background: var(--bad); } .t-failed progress::-moz-progress-bar { background: var(--bad); }
-.t-unsynced progress::-webkit-progress-value { background: var(--warn); } .t-unsynced progress::-moz-progress-bar { background: var(--warn); }
+.copybar { display: inline-flex; vertical-align: middle; padding: 1px; background: var(--mortar); border: 1px solid var(--frame); }
+.copybar .wall { display: grid; grid-template-columns: repeat(20, 5px); grid-template-rows: 5px 5px; gap: 1px; }
+.copybar i { display: block; grid-column: span 2; background: var(--brick-empty); }
+.copybar i.h { grid-column: span 1; }
+.copybar i.on { background: var(--brick); box-shadow: var(--glow); }
+.t-done .copybar i.on { background: var(--ok); box-shadow: none; }
+.t-failed .copybar i.on { background: var(--bad); box-shadow: none; }
+.t-unsynced .copybar i.on { background: var(--warn); box-shadow: none; }
+/* the brick being laid: its outline in brick, breathing while the copy reads */
+.copybar i.next { background: var(--accent-soft); outline: 1px solid var(--brick); outline-offset: -1px; animation: brick-next 1.6s ease-in-out infinite; }
+@keyframes brick-next { 50% { opacity: 0.45; } }
+.copybar i.drop { animation: brick-drop 0.42s cubic-bezier(0.3, 1.5, 0.6, 1) both; }
+@keyframes brick-drop { from { transform: translateY(-9px); opacity: 0; } 70% { opacity: 1; } }
+/* a copy just finished: its wall settles once, as the last brick lands */
+.t-done .copybar:has(i.drop) { animation: wall-settle 0.6s ease-out 0.3s both; }
+@keyframes wall-settle { 40% { transform: translateY(1px); box-shadow: 0 0 0 3px var(--ok-soft); } }
+@media (prefers-reduced-motion: reduce) { .copybar i.next, .copybar i.drop, .t-done .copybar:has(i.drop) { animation: none; } }
 .pct { display: inline-block; min-width: 3.2em; text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--muted); }
 .t-failed .what, .s-failed .what { color: var(--bad); }
 .t-unsynced .what { color: var(--warn); }
@@ -360,7 +398,10 @@ details.memory, details#logs-raw { margin: var(--space-4) 0; }
 /* ---------------------------------------------------------------- empty and loading */
 .empty { text-align: center; padding: var(--space-7) var(--space-4); color: var(--muted); background: var(--surface);
   border: 1px dashed var(--frame); border-radius: var(--radius-lg); margin: 0 0 var(--space-5); }
-.empty .empty-title { margin: 0 0 var(--space-1); color: var(--fg); font-weight: 700; }
+/* over an empty state, a footing with nothing built on it yet: three stones laid, the courses above them only marked */
+.empty::before { content: ""; display: block; width: 18px; height: 7px; margin: 0 auto var(--space-4); transform: translateX(-20px); background: var(--line-strong);
+  box-shadow: 20px 0 0 var(--line-strong), 40px 0 0 var(--line-strong), 10px -9px 0 var(--line), 30px -9px 0 var(--line), 20px -18px 0 var(--line); margin-top: 18px; }
+.empty .empty-title { margin: 0 0 var(--space-1); color: var(--fg); font-size: 20px; }
 .empty p { margin: 0; }
 .skeleton { display: block; height: 14px; border-radius: 0; background: var(--sunken); animation: shimmer 1.4s ease-in-out infinite; }
 .skeleton + .skeleton { margin-top: var(--space-2); }
@@ -396,7 +437,7 @@ table.catalog code.name { display: block; max-width: 100%; min-width: 8ch; }
 table.catalog td.state { white-space: nowrap; }
 table.catalog td.state .copyline { display: flex; flex-wrap: nowrap; margin-top: var(--space-1); }
 table.catalog td.state .pct { min-width: 0; }
-table.catalog td.state progress { width: 72px; }
+table.catalog td.state .copybar .wall { grid-template-columns: repeat(20, 3px); grid-template-rows: 4px 4px; }
 table.catalog td.num .took { display: block; color: var(--muted); font-size: var(--text-xs); }
 table.catalog tr.has-note > * { padding-bottom: var(--space-1); }
 table.catalog tr.under > td { padding-top: 0; }
@@ -415,7 +456,6 @@ table.catalog td.act { background: var(--surface); }
 table.catalog tbody tr:hover > td.act { background: var(--hover); }
 .what-copy.t-unsynced { color: var(--warn); }
 .what-copy.t-copying, .what-copy.t-waiting { color: var(--muted); }
-.t-done progress::-webkit-progress-value { background: var(--ok); } .t-done progress::-moz-progress-bar { background: var(--ok); }
 /* a narrower window (the sidebar beside the page): every table's cells closer, so more fit their card */
 @media (max-width: 1100px) { th, td { padding-left: var(--space-2); padding-right: var(--space-2); } }
 /* a bare table too wide for the page (the Overview's statements: eleven numbers) scrolls inside its own box */
@@ -452,13 +492,22 @@ form.formcard input { width: 18em; }
 /* the first-run checklist (renderChecklist): a step a row, ✓ in green or ○ muted, a step to do with its one action */
 .checklist { background: var(--surface); border: 2px solid var(--frame); border-radius: var(--radius-lg); box-shadow: var(--drop); padding: var(--space-4) var(--space-5); margin: var(--space-6) 0 var(--space-6); }
 .checklist .checklist-title { margin-bottom: var(--space-3); font-size: var(--text-lg); display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }
-.checklist .checklist-title .dim { font-weight: 400; font-size: var(--text-sm); }
+.checklist .checklist-title .dim { font-weight: 400; font-size: var(--text-sm); font-family: var(--font-mono); }
+/* the steps as courses of a wall, built from the bottom: a step done is a brick laid, a step to do its place marked */
+.checklist { position: relative; }
+.checklist ol { padding-right: 64px; }
+.checklist .courses { position: absolute; right: var(--space-5); top: var(--space-4); display: flex; flex-direction: column-reverse; gap: 3px; }
+.checklist .courses i { display: block; width: 26px; height: 9px; border: 1px dashed var(--line-strong); }
+.checklist .courses i:nth-child(even) { margin-left: 13px; }
+.checklist .courses i.on { background: var(--brick); border-color: var(--brick); box-shadow: var(--glow); }
 .checklist ol { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
 .checklist li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); min-height: 32px; }
-.checklist .mark { display: inline-flex; justify-content: center; width: 1.25em; font-weight: 700; }
-.checklist li.step-done .mark { color: var(--ok); }
+/* a step's mark: a small stone, filled in green once done, its outline while to do */
+.checklist .mark { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 14px; font-size: 10px; font-weight: 700; line-height: 1;
+  border: 1px solid currentColor; }
+.checklist li.step-done .mark { background: var(--ok); border-color: var(--ok); color: var(--surface); }
 .checklist li.step-done .what { color: var(--muted); }
-.checklist li.step-todo .mark { color: var(--subtle); }
+.checklist li.step-todo .mark { color: var(--subtle); border-style: dashed; }
 .checklist li.step-todo .what { font-weight: 600; }
 /* a link that looks like a button (it goes to another page: a link, for the browser and a screen reader alike) */
 a.btn { display: inline-flex; align-items: center; height: 28px; padding: 0 var(--space-2); border-radius: var(--radius-sm); font-size: var(--text-xs); font-weight: 500;
@@ -623,13 +672,11 @@ ul.unsupported .clip { max-width: min(40em, 100%); }
 .unsupported-line a.see { margin-left: var(--space-2); font-size: var(--text-sm); }
 
 /* a table's copy on the Tables page: the Overview's bar (copyBar) and the words mason wait prints, in the Note cell;
-   a table waiting for its copy has an indeterminate bar that pulses quietly (the only motion: the % moves with the data) */
+   a table waiting for its copy has no brick laid, its first one breathing */
 .copyline { display: inline-flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .copyline .what-copy { color: var(--muted); }
-progress.copybar.indeterminate { background: var(--line-strong); animation: copybar-wait 1.6s ease-in-out infinite; }
-progress.copybar.indeterminate::-webkit-progress-bar { background: transparent; }
-@keyframes copybar-wait { 50% { opacity: .4; } }
-@media (prefers-reduced-motion: reduce) { progress.copybar.indeterminate { animation: none; } }
+/* a table waiting for its copy: no brick laid, the first one breathing (.copybar i.next) */
+.copybar.indeterminate { border-style: dashed; }
 
 /* a phone: the five ranges closer, so the control fits the page's width (it scrolls inside itself, never the page, if not) */
 @media (max-width: 640px) { .range a, .range .off { padding: 0 var(--space-2); } }

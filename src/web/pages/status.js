@@ -72,18 +72,40 @@ export function tableLine(t) {
 }
 
 /**
- * A COPY'S BAR, the one renderer of the Overview's "copies not finished" and the Tables page's rows: a native `<progress>`
- * with an explicit `role="progressbar"` and `aria-valuemin/max/now` (and a text label, `aria-valuetext`, the line's words).
- * `l` is `tableLine`'s, `fraction` the share to draw (`monotone`'s; the line's own by default). A table waiting for its
- * copy has no value: the bar is indeterminate (the stylesheet's shimmer), `aria-valuenow` and the % left out. The %
- * beside any other is `percent` of the same share. The bar moves only with the server's data: nothing is animated by the page.
+ * THE WALL OF A COPY'S BAR: two courses of bricks in running bond (docs/WEB-UI.md "Presentation"), the top course ten
+ * whole bricks, the bottom one a half, nine whole and a half — each brick's `at` the share (in %) where its right edge
+ * stands. A brick is laid once the share reaches its right edge, so the wall fills left to right, both courses at once,
+ * its leading edge stepped as a wall under construction is, and never further than the share: within a brick (5%) of it.
  */
-export function copyBar(table, l, fraction = l.fraction) {
+export const BRICKS = [
+  ...Array.from({ length: 10 }, (_, k) => ({ course: 0, half: false, at: (k + 1) * 10 })),
+  { course: 1, half: true, at: 5 }, ...Array.from({ length: 9 }, (_, j) => ({ course: 1, half: false, at: (2 * j + 3) * 5 })), { course: 1, half: true, at: 100 },
+];
+
+/**
+ * A COPY'S BAR, the one renderer of the Overview's "copies not finished" and the Tables page's rows: a wall of bricks
+ * (`BRICKS`) with an explicit `role="progressbar"` and `aria-valuemin/max/now` (and a text label, `aria-valuetext`, the
+ * line's words); its bricks are `aria-hidden` drawing. `l` is `tableLine`'s, `fraction` the share to draw (`monotone`'s;
+ * the line's own by default). A table waiting for its copy has no value: no brick is laid, the first one the stylesheet's
+ * quiet pulse, `aria-valuenow` and the % left out. The % beside any other is `percent` of the same share. While it copies,
+ * the next brick to lay is marked (`next`). `from` is the share this bar showed at the page's last read (`monotone.before`):
+ * the bricks laid since are `drop` — the stylesheet drops them into place, once, and not under prefers-reduced-motion —
+ * so a bar the page re-reads unchanged moves nothing, and one whose copy just finished lays its last bricks.
+ */
+export function copyBar(table, l, fraction = l.fraction, from) {
   const waiting = l.state === "waiting";
   const value = Math.floor(Math.max(0, Math.min(1, fraction)) * 100);
-  return `<progress class="copybar${waiting ? " indeterminate" : ""}" max="100"${waiting ? "" : ` value="${value}"`} role="progressbar" aria-valuemin="0" aria-valuemax="100"` +
-    `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: its copy`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}"></progress>` +
-    // a copy not begun has no share yet: no "0%" beside its shimmer (its line says it waits)
+  const was = from === undefined ? value : Math.floor(Math.max(0, Math.min(1, from)) * 100);
+  const laid = waiting ? 0 : value;
+  const next = l.state === "copying" || waiting ? BRICKS.filter((b) => b.at > laid).sort((x, y) => x.at - y.at)[0] : undefined;
+  const bricks = BRICKS.map((b) => {
+    const cls = [b.half ? "h" : "b", b.at <= laid ? "on" : "", b.at <= laid && b.at > was ? "drop" : "", b === next ? "next" : ""].filter(Boolean).join(" ");
+    return `<i class="${cls}"></i>`;
+  }).join("");
+  return `<span class="copybar${waiting ? " indeterminate" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100"` +
+    `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: its copy`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}">` +
+    `<span class="wall" aria-hidden="true">${bricks}</span></span>` +
+    // a copy not begun has no share yet: no "0%" beside its pulse (its line says it waits)
     (waiting ? "" : ` <span class="pct">${percent(fraction)}</span>`);
 }
 
@@ -95,8 +117,12 @@ export function copyBar(table, l, fraction = l.fraction) {
  */
 export function createMonotone() {
   const seen = new Map();
+  let before = new Map();
   return {
+    /** The shares of the read before the last `of`: each copying table's, so a bar lays only the bricks since (`copyBar`'s `from`). */
+    get before() { return before; },
     of(s) {
+      before = new Map(seen);
       const now = new Map();
       for (const t of s.tables) {
         if (!t.added) continue;
@@ -234,7 +260,7 @@ export function renderFacts(s, now = Date.now()) {
  * failed, or copied but not kept current — and nothing once every copy is done. With no table added, the commands'
  * sentence and what adds one.
  */
-function renderProgress(s, isOpen = () => false, shares = new Map()) {
+function renderProgress(s, isOpen = () => false, shares = new Map(), before = new Map()) {
   const picked = s.tables.filter((t) => t.added);
   if (!picked.length) {
     return `<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>` +
@@ -248,7 +274,7 @@ function renderProgress(s, isOpen = () => false, shares = new Map()) {
   return `<h3>Copies not finished (${lines.length} of ${picked.length} added)</h3>` +
     `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Copy</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
       `<tr class="t-${l.state}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
-      `<td class="bar">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction)}</td>` +
+      `<td class="bar">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</td>` +
       `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, isOpen(`error:${t.table}`)) : ""}</td></tr>`).join("")}</tbody></table>`;
 }
 
@@ -343,7 +369,7 @@ export function renderChecklist(s, queries, users) {
     ["A first statement answered", answered, copied ? `${`<button type="button" class="small${user ? " primary" : ""}" data-copy="connect-psql">Copy the psql line</button>`} <span class="dim">then run a select on a copied table</span>` : ""],
   ];
   const done = steps.filter(([, ok]) => ok).length;
-  return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title">Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
+  return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title"><span class="courses" aria-hidden="true">${steps.map(([, ok]) => `<i${ok ? ' class="on"' : ""}></i>`).join("")}</span>Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +
     steps.map(([what, ok, action]) => `<li class="${ok ? "step-done" : "step-todo"}"><span class="mark" aria-hidden="true">${ok ? "✓" : "○"}</span><span class="what">${esc(what)}<span class="sr">${ok ? " (done)" : " (to do)"}</span></span>${ok ? "" : action}</li>`).join("") +
     `</ol></div>`;
 }
@@ -360,7 +386,7 @@ export function renderStatus(s, o = {}) {
   // day's and week's statements, read as none), else after the facts, for the next tool
   const first = isFirstConnect(o.queries);
   const connect = added ? renderConnect(s.postgres, { first, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) : "";
-  return renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
+  return renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }
 
@@ -394,7 +420,7 @@ export const page = {
         const st = ctx.read("/api/state");
         if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
         const [queries, events, requests, unsupported, users] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body) }) };
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body), before: monotone.before }) };
       },
       toggle: (target) => opened.toggle(target),
       // Connect's Copy buttons

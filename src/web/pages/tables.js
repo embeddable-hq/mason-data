@@ -162,7 +162,7 @@ export function renderTablesCards(s) {
  * search box's text and `ui.show` the state filter (a key of SHOWS).
  */
 export function renderTables(s, ui = {}) {
-  const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
+  const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), before = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
   const stream = s.stream ? new Map(streamRows(s.stream, ui.now ?? Date.now()).tables) : null;
   // SEVEN NARROW COLUMNS, NOTHING LONG IN A CELL: a table's state is its word over its copy's bar; its last sync an age
@@ -192,7 +192,7 @@ export function renderTables(s, ui = {}) {
     // `tableLines`): full at 100% once copied, red when its copy failed, amber when it is not kept current, moving while
     // it copies, the indeterminate shimmer while it waits — the Overview's renderer (`copyBar`), its words the line's
     const l = t.added && !adding_ ? tableLine(t) : null;
-    const bar = l ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction)}</span>` : "";
+    const bar = l ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</span>` : "";
     const state = adding_ ? status("warn", "Adding…") : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
     const took = t.added && y?.syncSeconds != null ? `<span class="took" title="${esc(tookTitle(y))}">took ${esc(tookText(y))}</span>` : "";
     const last = t.added && y?.syncedAt && y?.ageSeconds != null
@@ -331,7 +331,7 @@ export const page = {
         return {
           "tables-cards": latest ? renderTablesCards(latest) : "",
           tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, columns: m.columns, outcome: m.outcome, ticked: m.ticked, now: ctx.now().getTime(),
-            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), synced: m.synced, open: opened.has, limit: m.limit,
+            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), before: monotone.before, synced: m.synced, open: opened.has, limit: m.limit,
             sizes: sizes === undefined ? undefined : sizes.failure ? { failure: sizes.failure } : sizes.body }) : "",
         };
       },

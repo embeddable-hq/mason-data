@@ -115,22 +115,34 @@ out, and the commands to run next.
 
 ## Presentation
 
-The page looks like Vercel's dashboard: Geist Sans for text and Geist Mono for numbers and code, a near-monochrome gray
-scale with hairline borders and generous space, a left sidebar as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge
-when it is the demo database; the nav, each link an icon and its label, the one shown a filled row; at its foot how long
-ago Mason last answered — `Updated 3 s ago`, which keeps counting when it stops answering — and the version), the time
-range as a segmented control at the top of the Observability views, and on
-the Overview the run's word beside a big dot, a grid of KPI cards, then dense tables. Colour says a
-state and nothing else — a green, amber, red or gray dot always beside its word — besides the one blue accent for focus,
-links and a chart's mark. It follows the system's light or dark theme.
+The page looks like Mason's own: a mason lays stone and brick course by course, and Mason builds a copy of a Postgres
+table by table and keeps it standing. Charcoal ink on warm limestone paper, mortar greys for every hairline and ONE
+brick red for the accent and the primary action; in the dark, basalt and slate with the brick glowing. Mono first —
+Geist Mono for the chrome, the labels, the numbers and the tables, Geist Sans for a sentence of prose — under a slab
+display face (Zilla Slab) for a page's title, the run's word and a card's number, so the page has a voice of its own
+and the data still reads as a tool's printout. Boxes are square, framed in ink and set on two stepped stones (a near
+and a far offset, never a blur), so their depth reads as stacked stone; a table's header row is a carved lintel in
+small capitals. The motif stays in the chrome, never on a number: a copy's bar is a wall of bricks in running bond,
+laid left to right as the copy goes (within one brick, 5%, of its share, the % beside it as the CLI prints it), the
+bricks laid since the last read dropping into place and a finished copy laying its last (still under
+`prefers-reduced-motion`); a state's marker is a small stone block, a page's title stands on a course of bricks, the
+Getting-started steps are courses of a wall, an empty state is a footing with nothing on it yet, and the mark is an
+arch of bricks with its keystone, drawn inline. All of it is borders and boxes: no gradient, no image. A left sidebar
+as Vercel's and Supabase's are (Mason, the database's name, a **demo** badge when it is the demo database; the nav,
+each link an icon and its label, the one shown an ink row with a brick at its edge; at its foot how long ago Mason last
+answered — `Updated 3 s ago`, which keeps counting when it stops answering — and the version), the time range as a
+segmented control at the top of the Observability views, and on the Overview the run's word beside a big brick, a
+grid of KPI cards, then dense tables. Colour says a state and nothing else — a green, amber, red or gray marker always
+beside its word (the failed red a wine, never the brick) — besides the brick accent for focus, links, laid bricks and
+a chart's mark. It follows the system's light or dark theme, and every text colour meets 4.5:1 on its surface in both.
 
 Every colour, space, radius, font and size is a CSS custom property on `:root` in `src/web/app.css` (`--bg`,
-`--surface`, `--line`, `--fg`, `--muted`, `--accent`, `--ok`, `--warn`, `--bad`, `--unknown`, `--chart-*`,
-`--font-sans`, `--font-mono`, `--space-1…7`, `--radius*`, `--text-*`), set again for dark mode, so a page is restyled
+`--surface`, `--line`, `--fg`, `--muted`, `--accent`, `--brick`, `--ok`, `--warn`, `--bad`, `--unknown`, `--stone-1/2`,
+`--drop`, `--chart-*`, `--font-sans`, `--font-mono`, `--font-display`, `--space-1…7`, `--radius*`, `--text-*`), set again for dark mode, so a page is restyled
 by its tokens. The components are helpers of `src/web/shared.js` (`status`, `card`, `cards`, `badge`, `button`,
 `panel`, `empty`, `skeleton`, `details`, `sortTh`, `moreRows`); the charts, `src/web/charts.js`.
 
-**Buttons say what they do**: every button has a visible label (no icon alone); a primary action is filled dark, a
+**Buttons say what they do**: every button has a visible label (no icon alone); a primary action is filled brick, a
 destructive one red-lettered and its confirm filled red; each has hover, focus and disabled states and is at least 28 px
 tall; a row's actions sit at its right. **Large data stays bounded**: a list of hundreds writes 100 rows and offers
 more, a by-client list shows its top 10 and one row for the rest, a long name is cut with its whole the tooltip, a
@@ -142,9 +154,10 @@ under the chart has every value.
 **The vendored files, and why.** People run Mason on machines without internet, so the page fetches nothing from
 elsewhere — the policy it is served under (`default-src 'self'`) would refuse it anyway. What it uses that Mason did not
 write is copied whole into `src/web/vendor/`, pinned to an exact version, with its licence, and served by Mason itself:
-the Geist variable fonts (`geist` 1.7.2, SIL Open Font License 1.1; two woff2 files, 138 KiB) and uPlot (`uplot`
-1.6.32, MIT; its ES module and stylesheet, 144 KiB) for the sparklines and small time-series charts — about 282 KiB in
-all. `src/web/vendor/README.md` lists them and how one is updated. A chart only adds to the page: every number it draws
+the Geist variable fonts (`geist` 1.7.2, SIL Open Font License 1.1; two woff2 files, 138 KiB), the display face
+Zilla Slab (`@fontsource/zilla-slab` 5.3.0, SIL Open Font License 1.1; its bold, Latin only, one woff2 file, 26 KiB), Lucide's
+nav icons and uPlot (`uplot` 1.6.32, MIT; its ES module and stylesheet, 144 KiB) for the sparklines and small
+time-series charts — about 313 KiB in all. `src/web/vendor/README.md` lists them and how one is updated. A chart only adds to the page: every number it draws
 is also written as text, and where uPlot does not load the page reads the same.
 
 ## How it is opened, and guarded
@@ -163,7 +176,7 @@ to the person at the machine; a page reached from other machines would need TLS 
 
 The page is plain HTML, CSS and JavaScript modules under `src/web/` — a shell (`app.js`), what the pages share
 (`shared.js`), the charts (`charts.js`) and one module per page (`pages/<id>.js`, so pages are built independently) —
-with no framework or build step, and its two dependencies vendored whole ("Presentation"),
+with no framework or build step, and its dependencies vendored whole ("Presentation"),
 and every page of the full UI renders a command's `--json` shape from an endpoint the server already has (the
 statements that ran, the slow and refused statements, a sync on demand).
 [`.claude/rules/web-ui.md`](../.claude/rules/web-ui.md) has the rules and the table of what each feature reads.
