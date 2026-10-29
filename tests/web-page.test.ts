@@ -1339,6 +1339,27 @@ test("the app: the newest page is read every 5 s; Older reads the page before wi
   assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests?since=24h", "GET /api/state"], "the newest page is polled again");
 });
 
+test("the app: a search is read every 30 s, not 5 (it reads every statement's text of the range), and the log says so; cleared, every 5 s again", async () => {
+  const run = fakeRun();
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  const page = { requests: [REQUESTS[1]], keptDays: 7, before: null };
+  run.answers.set("GET /api/requests?since=24h&search=orders", answer(page));
+  run.answers.set("GET /api/requests?since=24h", answer(page));
+  const app = fn<[unknown, () => Date], QueriesApp>("createApp")(run.fetch, () => new Date(t));
+  app.show("queries");
+  await app.poll();
+  await app.filterRequests({ search: "orders" });
+  const searches = async () => { run.asked.length = 0; await app.poll(); return run.asked.filter((a) => a.startsWith("GET /api/requests")); };
+  assert.match(textOf(app.view()["request-log"]!), /Refreshed every 30 s while searching: a search reads the text of every statement in the range\.$/);
+  for (const step of [5000, 5000, 5000, 5000, 5000]) { t += step; assert.deepEqual(await searches(), [], "not read again within 30 s"); }
+  t += 5000;
+  assert.deepEqual(await searches(), ["GET /api/requests?since=24h&search=orders"], "read again after 30 s");
+  await app.filterRequests({});
+  assert.doesNotMatch(app.view()["request-log"]!, /Refreshed every/);
+  t += 5000;
+  assert.deepEqual(await searches(), ["GET /api/requests?since=24h"], "no search: the newest page every 5 s");
+});
+
 test("the app: a filter the server refuses renders its Failure, not a table: the page validates nothing", async () => {
   const run = fakeRun();
   const failure = { code: "usage", message: "since \"yesterday\" is not a time", fix: "an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone (2026-10-28, 2026-10-28T09:00:00Z)" };

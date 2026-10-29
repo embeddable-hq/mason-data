@@ -88,7 +88,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   which are not designed; `mason ui` refuses a run that serves no page, by asking it.
 - **Polling, not server-sent events, until a page needs fresher than 2 s** (`POLL_MS`): a poll is a request the guard
   already judges. ONLY THE PAGE SHOWN is asked (and, beside a page that does not read it, the state the sidebar names the project from, once a minute: `SHELL_STATE`), each of its reads at its own rate (`reads()`: `{ path, everyMs }`, the
-  rate its data moves; `POLL_MS` or less, every poll), so a page nobody looks at costs the run nothing. It stops when
+  rate its data moves; `POLL_MS` or less, every poll), so a page nobody looks at costs the run nothing. A read that
+  costs the run a scan is asked as often as it is worth, and the page says so (Queries' `search`, ~0.6 s over 7 days:
+  every 30 s, "Refreshed every 30 s while searching", not the newest page's 5 s). It stops when
   the tab is hidden (`document.visibilityState`); no part is written while a pointer is pressed (a row rewritten between
   press and release loses the click); the page's FIRST read failing is the banner, another's is said where it shows;
   and a failed poll keeps the last state

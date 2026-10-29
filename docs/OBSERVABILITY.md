@@ -95,7 +95,8 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   (1 s or more), the statement's text, time (the range unless Since says), user and client, paged by **Older**, its page
   sorted by Started, Duration or Rows. Rows scanned is not a column: decide later, it may add cost to every statement.
   The unsupported SQL of the range, grouped by its entry of docs/SQL-SUPPORT.md (`/api/unsupported?since=`, 60 s), in
-  `mason status`'s lines. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, never on an older one),
+  `mason status`'s lines. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, 30 s while a search
+  is set — said under the log — never on an older one),
   `/api/state` (5 s).
 - **Observability › Usage** (`#observability/usage`): the statements of the range's window of `/api/queries` (the week
   for 7 days, else the day), the range's samples (`/api/usage?since=<range>&step=<60|3600|21600>`, newest first, the
@@ -298,7 +299,8 @@ other extension is off (src/duck/store.ts). From npm, `mason init` downloads it 
    nothing; `mason doctor` has an `extension` line (read in 6–13 ms, never a download); a copy that cannot load it names
    `mason doctor`. An air-gapped machine needs the image, `mason init` run once online, or the file copied from a
    machine of its platform (README "How you use it"). Shipping it in the npm package (~45 MB a platform) was not done.
-3. Queries' `search` over 7 days is ~0.6 s every 5 s while it is shown: poll a search less often, or only on asking.
+3. **Done**: Queries' `search` over 7 days was ~0.6 s every 5 s while shown (12 scans, ~7.2 s of a core a minute); a
+   search is read every 30 s now (2, ~1.2 s a minute), and the log says "Refreshed every 30 s while searching".
 4. The summary is still a 7-day scan per ask (0.15 s): cache it for the 30 s the Overview waits, or derive the week
    from the minute samples (whose p95s do not merge exactly).
 5. The three history tables (requests, sync events, usage) each repeat the same frame — two connections, the hourly
