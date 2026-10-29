@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
+import { unassignedPort } from "./test-ports.ts";
 // imported when the tests run: at a commit without the module the file still loads, and each test fails by name
 const demo = await import("../src/cli/demo.ts" as string).catch(() => ({})) as Record<string, unknown>;
 const fn = <A extends unknown[], R>(name: string): ((...a: A) => R) => {
@@ -75,8 +76,9 @@ test("the demo database opened in .mason/demo, its done line seeded or kept; an 
   assert.equal((seeded as { done: string }).done, "Demo database on 127.0.0.1:5434 (Postgres, hosted by this process in .mason/demo; seeded with the shop schema)");
   const kept = await openDemo({ home: "/p/.mason", port: 5434, from, log: () => undefined, open: async () => fake({ seeded: false }) });
   assert.equal((kept as { done: string }).done, "Demo database on 127.0.0.1:5434 (Postgres, hosted by this process in .mason/demo; kept from the last run)");
-  // a port nobody holds: the open's own message alone
-  const free = await new Promise<number>((resolve) => { const s = net.createServer(); s.listen(0, "127.0.0.1", () => { const p = (s.address() as net.AddressInfo).port; s.close(() => resolve(p)); }); });
+  // a port nobody holds: the open's own message alone (openDemo asks who holds it, so it must stay unheld until then:
+  // out of the kernel's ephemeral range, tests/test-ports.ts)
+  const free = await unassignedPort();
   const broken = await openDemo({ home: "/p/.mason", port: free, from, log: () => undefined, open: async () => { throw new Error("the folder is not a database"); } });
   assert.deepEqual(broken, { problem: "the demo database did not start: the folder is not a database" });
   // a held port: the open's own words (what failed), then the way out once — an earlier run (mason stop), what holds
