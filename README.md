@@ -3,7 +3,7 @@
 A drop-in replacement for a Postgres read replica, built for exceptionally fast analytical queries.
 
 - **Lightweight:** Mason runs anywhere as a single Node.js process (`mason init && mason start`). [Learn more](#getting-started)
-- **Like a read replica:** Choose which tables and columns to sync from your Postgres database. Mason keeps them in sync and makes them available to query. [Learn more](#syncing-from-postgres)
+- **Like a read replica:** Choose which tables and columns to sync from your Postgres database, and how each stays in sync: on demand, polling or replication. Mason makes them available to query. [Learn more](#syncing-from-postgres)
 - **Lightning fast:** Under the hood, Mason uses [DuckDB](https://github.com/duckdb/duckdb)'s columnar engine to accelerate analytical queries (`COUNT`, `SUM`, `GROUP BY`, etc.) over large tables. [Learn more](#performance-vs-postgres)
 - **Keep your existing SQL:** Mason is built from the ground up to match Postgres syntax and behaviour, so you can reuse existing SQL without risky rewrites or subtle changes to query semantics. [Learn more](#postgres-compatibility)
 - **Built for AI agents:** Give AI agents fast, secure access to your data: a user per agent, a role that limits the tables, columns and rows it can read, every query logged, and native MCP support. [Learn more](#for-ai-agents)
@@ -16,7 +16,7 @@ A drop-in replacement for a Postgres read replica, built for exceptionally fast 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/how-mason-works-dark.svg">
-  <img alt="How Mason works: the tables you name are copied from your Postgres and kept current by the poll or the stream; every statement a BI tool, an AI agent or your app sends over the Postgres protocol is analysed by a real Postgres, run on the columnar copy, and answered exactly as Postgres would, or refused with an error saying why." src="docs/how-mason-works.svg" width="100%">
+  <img alt="How Mason works: the tables you name are copied from your Postgres and kept current on demand, by polling or by replication; every statement a BI tool, an AI agent or your app sends over the Postgres protocol is analysed by a real Postgres, run on the columnar copy, and answered exactly as Postgres would, or refused with an error saying why." src="docs/how-mason-works.svg" width="100%">
 </picture>
 
 ## Getting started
@@ -37,7 +37,8 @@ mason destroy                        # the copy and the demo database go; the ne
 ```
 
 The demo shop (`customers`, `products`, `orders`, `order_items`) lives in `.mason/demo/` and takes a new order every
-few seconds, so `mason status` shows the copy keeping up. Mason reads it as it reads yours, over the Postgres protocol.
+few seconds. Its sources file polls every 5 seconds (`sync: poll 5s`), so `mason status` shows the copy keeping up.
+Mason reads it as it reads yours, over the Postgres protocol.
 
 ### On your app's database
 
@@ -50,11 +51,13 @@ mason tables                         # what your database has: tables, rows, key
 mason add orders customers           # add tables (--columns id,status,total for some columns only)
 mason start                          # Mason in the background: the copy begins
 mason wait                           # returns once every added table is copied and served
+mason sync orders                    # read the changes since: by default, Mason syncs only when you ask
 mason remove customers               # (later) take a table out again; its copy is dropped
 ```
 
 `mason init <url>` writes the URL to `.env` for you (as `MASON_DATABASE_URL` when your app's `DATABASE_URL` names
-another database, which is never changed). The sources file is the list of what Mason copies
+another database, which is never changed). The sources file is the list of what Mason copies, and
+says how each table stays current: copied once and synced when you ask, polled, or replicated
 ([Choosing what to sync](#choosing-what-to-sync)).
 
 **2. Connect a tool.**
@@ -99,7 +102,7 @@ docker compose exec mason mason user add metabase
 | Image | `ghcr.io/embeddable-hq/mason-data`, amd64 and arm64: `main` is every merge, `<version>` a release. [`deploy/mason-data/README.md`](deploy/mason-data/README.md) is the walkthrough |
 | Replicas | one container per volume (DuckDB lets one process write its file), deployed stop-then-start (Kubernetes: `strategy: Recreate`). A deploy is a few seconds of downtime, not a fresh copy: the copy stays on the volume, a restarted Mason is healthy about half a second after it starts, and it picks up the changes made while it was down |
 | TLS | required off the container's loopback: `MASON_PG_SELF_SIGNED_TLS=1` makes a certificate on the volume (clients connect with `sslmode=require`), or mount a certificate from your CA |
-| Changes | polling needs a user that can `SELECT` the tables; `MASON_CHANGES=replication` reads the change log instead ([Logical replication](#logical-replication)) |
+| Sync | the sources file you deploy says how each table stays current, so production runs exactly what is committed. Off and polling need a user that can `SELECT` the tables; replication needs more ([Logical replication](#logical-replication)) |
 | Settings | [`deploy/mason-data/README.md`](deploy/mason-data/README.md#settings) lists the ones to set and the ones worth deciding; `mason serve --help` has every one |
 | Upgrades | Mason is pre-1.0, so a release may still rename a command, a key or a setting. `mason.yml` pins the version your project is written for, the image refuses a project written for another release line, and the [release notes](release-notes/README.md) say what to do before each upgrade |
 
@@ -122,21 +125,19 @@ docker compose exec mason mason user add metabase
 
 ## Syncing from Postgres
 
-Name the tables and columns you want; Mason copies them and keeps them current, and BI tools (Metabase, Grafana,
-Superset, Power BI, psql), AI agents and your own code connect as they would to any read replica. Mason only reads
-your Postgres: it writes nothing there. It keeps a copy current in one of two ways:
+Name the tables and columns you want; Mason copies them, and BI tools (Metabase, Grafana, Superset, Power BI, psql),
+AI agents and your own code connect as they would to any read replica. Mason only reads your Postgres: it writes
+nothing there. **By default it reads each table once, the first copy, and then only when you tell it to**: you choose,
+per table, how each copy stays current.
 
-| | Polling (the default) | Logical replication |
-|---|---|---|
-| reads | `SELECT`s, every 5 s | the database's change log, as a replica does |
-| needs on your Postgres | a user that can `SELECT` the tables | `wal_level = logical`, a user with `REPLICATION`, a publication |
-| makes on your Postgres | nothing | a replication slot (and a publication, when you name none) |
-| a read replica as the source | yes | Postgres 16+, with a publication you name |
-| tables kept current | up to 1,000,000 rows each (a bigger one: replication, or `mason sync <table>`) | every table with a primary key, whatever its size |
-| turned on by | `mason start` (or `--poll` to go back) | `mason start --replication`; `MASON_CHANGES=replication` on a server |
-
-**Start with polling**: it needs nothing on your database. **Switch to logical replication** when a table passes a
-million rows or you want changes within seconds; the switch keeps every copy.
+| `sync:` | Off (the default) | Polling | Logical replication |
+|---|---|---|---|
+| after the first copy | nothing, until you run `mason sync <table>` | `SELECT`s, at the interval you choose | the database's change log, as a replica does |
+| needs on your Postgres | a user that can `SELECT` the tables | the same | `wal_level = logical`, a user with `REPLICATION`, a publication |
+| makes on your Postgres | nothing | nothing | a replication slot (and a publication, when you name none) |
+| a read replica as the source | yes | yes | Postgres 16+, with a publication you name |
+| good for | trying Mason, reports run on a schedule | most tables: every few seconds to every few hours | big, busy tables, and changes within seconds |
+| written as | `sync: off` | `sync: poll 5m` | `sync: replication` |
 
 ### Choosing what to sync
 
@@ -144,21 +145,27 @@ million rows or you want changes within seconds; the switch keeps every copy.
 # mason/sources/app.yml — the database this project copies from. Yours to commit; the URL stays out of it.
 kind: postgres
 url: ${DATABASE_URL}          # a variable from .env.local, .env or the shell; a literal URL is allowed for local dev
+sync: off                     # how every table stays current, unless its entry says otherwise
 tables:
   orders:                     # a bare name is in `public`; `billing.invoices` names its schema
     columns: [id, customer_id, status, amount, created_at, payload]
-  customers: {}               # every column
+    sync: poll 30s            # this table is polled every 30 seconds
+  customers: {}               # every column, and the file's sync
   events:
     exclude: [raw_body]       # every column but these
   sessions:
     key: [tenant_id, id]      # only for a table with no primary key: the unique columns to copy it by
 ```
 
-- `mason add` writes the entries for you, and leaves out a column that looks like a secret (`password`, `token`,
-  `api_key`, …) unless you name it, as `exclude:`. A `{}` you write by hand copies every column.
+- `mason add` writes the entries for you (`mason add orders --sync "poll 30s"` writes that entry's `sync:`), and leaves
+  out a column that looks like a secret (`password`, `token`, `api_key`, …) unless you name it, as `exclude:`. A `{}`
+  you write by hand copies every column.
 - Column types are read from your database at every start, never written in the file.
 - With Mason running, `mason add` and `mason remove` apply at once and keep the rest of the file, comments included. A
   hand edit applies at the next `mason start`, and a mistake is reported with the key and how to fix it.
+- Changing a table's `sync:` keeps its copy: it is caught up by one poll, never copied again.
+- `mason status`, the MCP tools and EXPLAIN say how each table stays current and when it was last synced, so a copy's
+  age is never hidden.
 
 ### The first copy
 
@@ -168,38 +175,44 @@ tables:
 - A copy that stops (a crash, `mason stop`) resumes from the ranges it had not committed.
 - A copy runs beside the polls and the stream, so adding a big table never stops the others keeping up.
 
+### Off, and `mason sync`
+
+The default. After the first copy Mason reads nothing from your database until you run `mason sync orders`, which
+polls the tables it names once, now. Run it before a report, from cron, or at the end of
+a deploy. Nothing touches your database in between.
+
 ### Polling
 
-The default, with nothing to set up on your Postgres.
+`sync: poll <interval>` (`5s`, `5m`, `1h`): nothing to set up on your Postgres.
 
-- **How it works**: every 5 s (`MASON_POLL_MS`), each table is read in one transaction over one snapshot. The rows
-  changed since the last poll (by `xmin`, Postgres's row version) are written by key; deleted rows are found by
-  comparing counts, and keys only when the counts differ. Rows and position commit together, so a poll that dies is
-  simply read again.
-- **What it costs your database**: Postgres has no index on `xmin`, so a poll reads the whole table. Mason keeps that
-  bounded: it waits at least four times as long as the last poll took, so polls use at most a fifth of your database's
-  time, and it polls only tables up to a million rows.
-- **Bigger tables** are still copied and queryable, and logical replication keeps them current. Under polling one
-  stays as of its copy until `mason sync <table>` brings it up to date, and `mason status` says so.
+- **How it works**: at each interval, a table is read in one transaction over one snapshot. The rows changed since the
+  last poll (by `xmin`, Postgres's row version) are written by key; deleted rows are found by comparing counts, and
+  keys only when the counts differ. Rows and position commit together, so a poll that dies is simply read again.
+- **What it costs your database**: Postgres has no index on `xmin`, so a poll reads the whole table. Choose the
+  interval for the table's size: a small table every few seconds, a 50 M-row one every hour. However short the interval,
+  Mason waits at least four times as long as the last poll took, so polls use at most a fifth of your database's time.
+  `mason status` shows what each table's polls cost your database.
 
 ### Logical replication
 
-For big tables, and for changes that land within seconds.
+`sync: replication`, usually at the top of the file: for big, busy tables, and for changes that land within seconds.
 
-- **How it works**: `mason start --replication` (on a server, `MASON_CHANGES=replication`) reads the change log
-  through a replication slot of its own, as a Postgres replica does. A switch keeps the copies and catches each table
-  up by one poll, never a fresh copy; `--poll` switches back.
+- **How it works**: Mason reads the change log through one replication slot for the project, as a Postgres replica
+  does, and the replicated tables are kept current whatever their size. Tables set to `off` or `poll` beside them work
+  as before.
 - **What it needs**: `wal_level = logical`, a user with `REPLICATION`, and either a publication you name
-  (`--publication`, or `PG_PUBLICATION`), which Mason verifies but never creates, alters or drops, or the right to
-  create one. A read replica as the source needs Postgres 16+ and a publication you name.
-- **What it refuses**: a table with no primary key (a `key:` entry), since the change log gives no key to match its
-  changes to rows (keep such a project on polling), and one with `REPLICA IDENTITY NOTHING`, since publishing it would
-  make your app's UPDATEs and DELETEs fail.
+  (`publication:` at the top of the sources file; `${PG_PUBLICATION}` works there, as in `url:`), which Mason verifies
+  but never creates, alters or drops, or the right to create one. A read replica as the source needs Postgres 16+ and a
+  publication you name.
+- **What it can't replicate**: a table with no primary key (a `key:` entry), since the change log gives no key to match
+  its changes to rows, and one with `REPLICA IDENTITY NOTHING`, since publishing it would make your app's UPDATEs and
+  DELETEs fail. Give such a table `sync: poll <interval>`; `mason add` writes that for you.
 - **One setting to make on your database**: `max_slot_wal_keep_size` (Postgres 13+). A replication slot keeps WAL
   until its reader has it, Mason's too, even while Mason is stopped; the setting caps how much it may keep. `mason stop`
-  keeps the slot, so the next start resumes from it; `mason destroy` and `--poll` drop it, and check it is gone.
+  keeps the slot, so the next start resumes from it. It is dropped, and checked gone, when no table uses `replication`
+  any more, and at `mason destroy`.
 
-[docs/DESIGN.md](docs/DESIGN.md) "Keeping a copy current" has every decision behind both, and why.
+[docs/DESIGN.md](docs/DESIGN.md) "Keeping a copy current" has every decision behind them, and why.
 
 ## Performance vs Postgres
 
@@ -233,7 +246,7 @@ read-only.
   are inserted (`created_at`) skips most of the row groups outside it. It is also why a lookup by primary key is slower:
   Mason scans for it, where Postgres uses its index.
 - **Off your database.** A dashboard's scans run on Mason's machine, not your database's CPU, memory and disk; your
-  database's only work is the first copy, read a few chunks at a time, then the polls or the change log.
+  database's only work is the first copy, read a few chunks at a time, then only the syncs you turn on.
 
 [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) is every measurement and how it was taken;
 [docs/BENCHMARK.md](docs/BENCHMARK.md) runs the benchmark on your own machine.
