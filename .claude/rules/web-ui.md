@@ -84,7 +84,8 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   a new route there, never a path joined from the URL; `tests/cli-run-server.test.ts` holds every other path, `..` and
   encoded ones included, to the 404 it was, and `tests/cli-package.test.ts` every file under src/web/ to a route.
 - **The guard is the auth, and the page never holds the token** (src/cli/security.ts): `mason ui` prints the URL with
-  the run's token once, the first request trades it for an HttpOnly, SameSite=Strict cookie and is redirected to a URL
+  the run's token once, the first request trades it for an HttpOnly, SameSite=Strict cookie named for the run's port (`mason_dev_<port>`: a
+  browser keeps cookies per host, so one name let a second run log the first out) and is redirected to a URL
   without it; every change is checked against the page's Origin. So no login page, no token in JavaScript (the scripts
   read neither `location` — but its hash, the page shown, which never carries the token —, `document.cookie` nor
   storage: `tests/web-page.test.ts`), and no change to the guard

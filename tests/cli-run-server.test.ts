@@ -137,11 +137,12 @@ await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 ctx.port = (server.address() as { port: number }).port;
 after(() => { server.close(); fs.rmSync(root, { recursive: true, force: true }); });
 
-const COOKIE = "mason_dev=t0ken-of-this-run";
+// the run's cookie is named for its port (src/cli/security.ts cookieName), known once the server listens
+const cookieNow = () => `mason_dev_${ctx.port}=t0ken-of-this-run`;
 function call(method: string, p: string, o: { host?: string; origin?: string | null; cookie?: string | null; body?: unknown; bearer?: string } = {}): Promise<{ status: number; headers: http.IncomingHttpHeaders; text: string }> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = { Host: o.host ?? `127.0.0.1:${ctx.port}` };
-    const cookie = o.cookie === undefined ? COOKIE : o.cookie;
+    const cookie = o.cookie === undefined ? cookieNow() : o.cookie;
     if (cookie) headers.Cookie = cookie;
     if (o.bearer !== undefined) headers.Authorization = `Bearer ${o.bearer}`;
     const origin = o.origin === undefined ? `http://127.0.0.1:${ctx.port}` : o.origin;
@@ -163,11 +164,11 @@ const filesUnder = (dir: string): string[] => fs.readdirSync(dir, { recursive: t
 
 test("the guard: no token, another Host, a write from another Origin are refused; the URL's token becomes the cookie", async () => {
   assert.equal((await call("GET", "/api/state", { cookie: null })).status, 403);
-  assert.equal((await call("GET", "/api/state", { cookie: "mason_dev=another" })).status, 403);
+  assert.equal((await call("GET", "/api/state", { cookie: `mason_dev_${ctx.port}=another` })).status, 403);
   assert.equal((await call("GET", "/api/state", { host: `evil.example:${ctx.port}` })).status, 421, "DNS rebinding: the Host is not this server");
   const handed = await call("GET", "/?token=t0ken-of-this-run", { cookie: null });
   assert.equal(handed.status, 303);
-  assert.match(String(handed.headers["set-cookie"]), /mason_dev=t0ken-of-this-run;.*HttpOnly.*SameSite=Strict/i);
+  assert.match(String(handed.headers["set-cookie"]), new RegExp(`mason_dev_${ctx.port}=t0ken-of-this-run;.*HttpOnly.*SameSite=Strict`, "i"));
   assert.equal((await call("GET", "/?token=wrong", { cookie: null })).status, 403);
   assert.equal((await call("GET", "/api/state")).status, 200);
   assert.equal((await call("POST", "/api/pick", { origin: null, body: { source: "public.customers", picked: true } })).status, 403, "a POST with no Origin");

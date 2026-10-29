@@ -197,8 +197,9 @@ is also written as text, and where uPlot does not load the page reads the same.
 ## How it is opened, and guarded
 
 The page is served by the run's command server, on 127.0.0.1 only. `mason ui` prints its URL with the run's token;
-the first visit trades the token for a cookie (HttpOnly, SameSite=Strict) and drops it from the address bar, so the
-page itself never holds it. Every request is checked for the server's own Host, every change for the page's own
+the first visit trades the token for a cookie (HttpOnly, SameSite=Strict, named for the run's port: two projects
+running on one machine each keep their own page signed in) and drops it from the address bar, so the page itself
+never holds it. Every request is checked for the server's own Host, every change for the page's own
 Origin. Each `mason start` makes a new token: after a restart the page says so, and `mason ui` opens it again.
 `mason start` prints `Web UI  mason ui` and `mason status` the page's URL without the token; the token is written
 nowhere else.
