@@ -46,6 +46,8 @@
  */
 import type { ExactColumn } from "../../duck/rewrite.ts";
 import type { PlannedSql } from "../../duck/plan.ts";
+import { copyFacts, type CopyFacts } from "../../duck/explain.ts";
+import type { CopyState } from "../../duck/sync.ts";
 import { explainedText, explainOptions, type ExplainOptions } from "./explain.ts";
 import * as crypto from "node:crypto";
 import * as net from "node:net";
@@ -147,9 +149,18 @@ export interface DuckRunner {
   /** EXPLAIN of a plan (src/duck/explain.ts): its QUERY PLAN rows, a line each (FORMAT JSON: one document). ANALYZE runs
    *  it as `run` does, under the same `signal`, converting every row and sending none */
   explain(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
-    how: { options: ExplainOptions; fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null; exact: readonly ExactColumn[]; planning: { analysisMs: number; rewriteMs: number } }): Promise<string[]>;
+    how: ExplainHow): Promise<string[]>;
   /** closes the connection once its answers are released: never under the executor (src/duck/store.ts) */
   close(): Promise<void>;
+}
+/** what an EXPLAIN is run with beside its plan: its options, the plan's columns and exact numerics, its planning times,
+ *  and the sync's facts of every copy (`DuckOptions.copies`), which say how each copy it reads is kept current */
+export interface ExplainHow {
+  options: ExplainOptions;
+  fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null;
+  exact: readonly ExactColumn[];
+  planning: { analysisMs: number; rewriteMs: number };
+  copies: readonly CopyFacts[];
 }
 /** A statement's DuckDB plan (src/duck/plan.ts): Postgres's analysis of it, and the DuckDB SQL that answers it alike. */
 export interface DuckPlan {
@@ -189,6 +200,9 @@ export interface DuckOptions {
   /** moves when what a plan is made from moves outside the schema (a stored JSON path ready or gone, src/duck/kept.ts):
    *  the plans kept are made again */
   generation?(): number;
+  /** the sync's state of every copy (src/duck/sync.ts `Sync.state`, what `mason status` reads): how EXPLAIN says each
+   *  copy it reads is kept current. Absent: no sync, and EXPLAIN says it does not know */
+  copies?(): readonly CopyState[];
 }
 
 /** a statement_timeout's value in ms, Postgres's units (a bare number is ms; `1.5s`, `5min`), 0 for none; null where
@@ -1053,7 +1067,9 @@ class Session {
     try {
       const values = await this.duckValues(e.plan, params, clock);
       const lines = await runner.explain(e.plan.sql, values, this.duckSession(), controller.signal,
-        { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 } });
+        { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
+          // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
+          copies: copyFacts(this.server.options.duck.copies?.() ?? []) });
       return { field: explainField(e.options, formatAt(resultFormats, 0)), rows: lines.map((l) => dataRow([Buffer.from(l)])) };
     } finally { this.settled(); }
   }

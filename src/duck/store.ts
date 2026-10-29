@@ -21,7 +21,7 @@ import { DuckDBInstance, version, type DuckDBConnection, type DuckDBPreparedStat
 import { Executor, type DuckConnection } from "./executor.ts";
 import { beginStatement, cancelStatement, slotName, statementCancelled } from "./cancel.ts";
 import type { PgSession } from "../api/postgres/encode.ts";
-import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner } from "../api/postgres/server.ts";
+import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner, type ExplainHow } from "../api/postgres/server.ts";
 import { duckParameters, missingRelationHint, planDuck, quoteDuckKeywords } from "./plan.ts";
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
@@ -34,8 +34,7 @@ import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } fro
 import type { ExactColumn } from "./rewrite.ts";
 import { gapMark } from "./gaps.ts";
 import { cellsOf, evaluateText, NumericError } from "../lib/pg-numeric.ts";
-import { explainJson, explainText, planNodes, profiled, scannedTables, type Copy, type Explained, type PlanNode } from "./explain.ts";
-import type { ExplainOptions } from "../api/postgres/explain.ts";
+import { explainJson, explainText, planNodes, profiled, scannedTables, type Copy, type CopyFacts, type Explained, type PlanNode } from "./explain.ts";
 import type { PlannedSql } from "./plan.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -220,6 +219,8 @@ export class DuckStore {
       open: () => this.runner(),
       plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes) => planDuck(catalog, text, stmt, base, paramOids, searchPath, timeZone, c, verified, userTypes, copies, 0, kept ?? null),
       parameters: duckParameters,
+      // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
+      copies,
       // a stored JSON path ready or gone (src/duck/kept.ts): the plans kept are made again
       ...(kept !== undefined ? { generation: () => kept.generation() } : {}),
     };
@@ -607,15 +608,15 @@ export class SessionRunner implements DuckRunner {
    * EXPLAIN of a plan (src/duck/explain.ts). Without ANALYZE: DuckDB's `EXPLAIN (FORMAT JSON)` of the planned SQL, its
    * parameters bound. With it: the statement RUN as `run` runs it — every chunk read, its exact numerics computed and
    * encoded, none sent — with DuckDB's profiler writing each operator's rows and time to a file of its own, read after.
-   * Then the copies its scans read: their rows, and their last poll (`_mason.poll_state`).
+   * Then the copies its scans read: their rows, and how each is kept current as the sync says it (`how.copies`).
    */
   explain(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
-    how: { options: ExplainOptions; fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null; exact: readonly ExactColumn[]; planning: { analysisMs: number; rewriteMs: number } }): Promise<string[]> {
+    how: ExplainHow): Promise<string[]> {
     return this.track(this.explained(sql, params, session, signal, how));
   }
 
   private async explained(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
-    how: { options: ExplainOptions; fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null; exact: readonly ExactColumn[]; planning: { analysisMs: number; rewriteMs: number } }): Promise<string[]> {
+    how: ExplainHow): Promise<string[]> {
     await Promise.all([...this.releasing]);
     const o = how.options;
     let plan: PlanNode[];
@@ -649,7 +650,7 @@ export class SessionRunner implements DuckRunner {
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }
     // what it calls is the plan's (src/duck/plan.ts PlannedSql), the list that decides how it is cancelled
-    const explained: Explained = { copies: await this.copies(scannedTables(plan)), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
+    const explained: Explained = { copies: await this.copies(scannedTables(plan), how.copies), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
       functions: [...sql.functions], plan, ...(analyzed === undefined ? {} : { analyzed }) };
     return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
   }
@@ -671,15 +672,14 @@ export class SessionRunner implements DuckRunner {
     } finally { signal.removeEventListener("abort", interrupt); p.destroySync(); }
   }
 
-  /** each copy's rows and last poll (none recorded: a copy made whole, not polled yet) */
-  private async copies(tables: readonly string[]): Promise<Copy[]> {
-    const polls = (await this.conn.runAndReadAll(`SELECT count(*) FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = '${MASON_SCHEMA}' AND table_name = 'poll_state'`)).getRowsJS()[0]![0] !== 0n;
+  /** each copy's rows, and the sync's facts of it (how it is kept current: src/duck/sync.ts `KeptCurrent`, never the
+   *  poll's ledger read here — a project switched to logical replication still holds its last poll there) */
+  private async copies(tables: readonly string[], facts: readonly CopyFacts[]): Promise<Copy[]> {
     const out: Copy[] = [];
     for (const table of tables) {
       const [schema, name] = table.split(".") as [string, string];
       const rows = (await this.conn.runAndReadAll("SELECT estimated_size FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2", [schema, name])).getRowsJS()[0]?.[0];
-      const polled = polls ? (await this.conn.runAndReadAll(`SELECT strftime(polled_at AT TIME ZONE 'UTC', '%Y-%m-%d %H:%M:%S') || ' UTC' FROM ${MASON_SCHEMA}.poll_state WHERE source = $1`, [table])).getRowsJS()[0]?.[0] : undefined;
-      out.push({ table, rows: rows === undefined || rows === null ? null : Number(rows), polledAt: typeof polled === "string" ? polled : null });
+      out.push({ table, rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === table) ?? null });
     }
     return out;
   }

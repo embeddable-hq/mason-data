@@ -2,7 +2,8 @@
  * EXPLAIN ON THE DUCKDB PATH (the proposal agreed on PR #517): Postgres's shape, the truth inside.
  * One text column `QUERY PLAN`, a line a row (or Postgres's JSON plan for FORMAT JSON, which pgAdmin, DBeaver and
  * DataGrip draw), in three parts:
- *   1. where the answer comes from: DuckDB's copy of each table it reads, its rows, its last poll;
+ *   1. where the answer comes from: DuckDB's copy of each table it reads, its rows, and how it is kept current — as
+ *      the sync says it to `mason status` (`keptText`; src/duck/sync.ts `KeptCurrent`), never the poll's ledger alone;
  *   2. what Mason changed: the DuckDB SQL sent, and what Mason computes after DuckDB (exact numerics) or inside it (its
  *      functions DuckDB calls);
  *   3. DuckDB's plan, its operators under DuckDB's own names (never `Seq Scan`: a Postgres reader would look for a
@@ -13,6 +14,7 @@
  * `duckTranslate`), planned by the same planner (src/duck/plan.ts), run by the same runner.
  */
 import type { ExplainOptions } from "../api/postgres/explain.ts";
+import type { CopyState, KeptCurrent } from "./sync.ts";
 
 type Body = Record<string, unknown>;
 
@@ -84,8 +86,71 @@ export function scannedTables(nodes: readonly PlanNode[]): string[] {
 
 // --------------------------------------------------------------------------------------------- the answer
 
-/** `rows`: DuckDB's estimate of the copy's rows (duckdb_tables().estimated_size), said as one */
-export interface Copy { table: string; rows: number | null; polledAt: string | null }
+/** what the sync says of a copy (src/duck/sync.ts `Sync.state`, what `mason status` reads): the facts EXPLAIN says of it */
+export type CopyFacts = Pick<CopyState, "source" | "phase" | "error" | "rowsSoFar" | "kept">;
+
+/** `rows`: DuckDB's estimate of the copy's rows (duckdb_tables().estimated_size), said as one; `facts`: the sync's
+ *  (null: the sync has no record of the table) */
+export interface Copy { table: string; rows: number | null; facts: CopyFacts | null }
+
+/** the sync's states as EXPLAIN takes them across to the executor's thread (src/api/postgres/server.ts `duckExplain`):
+ *  its facts alone, read at the EXPLAIN */
+export const copyFacts = (states: readonly CopyState[]): CopyFacts[] =>
+  states.map((s) => ({ source: s.source, phase: s.phase, error: s.error, ...(s.rowsSoFar !== undefined ? { rowsSoFar: s.rowsSoFar } : {}), ...(s.kept !== undefined ? { kept: s.kept } : {}) }));
+
+/** an ISO instant as EXPLAIN says one: `2026-10-27 19:58:39 UTC` */
+const utc = (iso: string): string => `${iso.slice(0, 19).replace("T", " ")} UTC`;
+const UNKNOWN = "how it is kept current is unknown: the sync has no record of it";
+
+/**
+ * HOW A COPY IS KEPT CURRENT, in EXPLAIN's words, from the sync's one derivation (src/duck/sync.ts `KeptCurrent`, which
+ * `mason status` renders too): a copy not yet copied or whose copy failed says so first; then polled with its last
+ * poll, served as copied and skipped by the passes (to be copied again, caught up first, over the poll's row limit),
+ * copied again whole, or, in replication mode, its part in the stream, how far the stream has applied and why it is
+ * not running. "kept current" is said only of a copy that is (`keptCurrentBy`).
+ */
+export function keptText(f: CopyFacts | null): string {
+  if (f === null) return UNKNOWN;
+  if (f.phase === "waiting") return "waiting for its copy to start";
+  if (f.phase === "copying") return `being copied (${count(f.rowsSoFar ?? 0)} rows so far): kept current once copied`;
+  if (f.phase === "failed") return `its last copy failed: ${(f.error ?? "mason logs says why").split("\n")[0]}`;
+  const k = f.kept;
+  if (k === undefined) return UNKNOWN;
+  if (k.by === "poll") {
+    const asOf = k.polledAt === null ? "no poll recorded yet" : `as of ${utc(k.polledAt)}`;
+    if (k.pending !== undefined) return `NOT kept current (${asOf}): ${k.pending}`;
+    if (k.unsynced !== undefined) return `NOT kept current (${k.unsynced}; ${asOf}): mason sync ${f.source} polls it now`;
+    return `kept current by polling, ${k.polledAt === null ? "no poll recorded yet" : `last poll ${utc(k.polledAt)}`}`;
+  }
+  if (k.by === "recopy") return `kept current by copying it again whole, ${k.copiedAt === null ? "no copy recorded yet" : `last copied ${utc(k.copiedAt)}`}`;
+  const stream = `logical replication (slot ${k.slot})`;
+  const where = `applied through ${k.position}, ${k.lastCommit === null ? "no change applied this run" : `last change committed ${utc(k.lastCommit)}`}`;
+  if (k.state === "streamed") return k.notRunning === null ? `kept current by ${stream}, ${where}`
+    : `streamed by ${stream}, ${where}; NOT kept current now, the stream is not running: ${k.notRunning}`;
+  return k.state === "left-out" ? `NOT kept current: left out of ${stream}: ${k.why ?? ""}`
+    : `${stream}, not streamed yet: ${k.why ?? ""}`;
+}
+
+/** what keeps a copy current NOW, as FORMAT JSON's `Kept Current By` says it: null for a copy nothing does (not copied
+ *  yet, skipped by the passes, over the poll's row limit, not streamed, the stream down), so a reader keying on it is
+ *  never told of a mode that is not at work on it */
+export function keptCurrentBy(f: CopyFacts | null): "polling" | "copying again" | "logical replication" | null {
+  const k: KeptCurrent | undefined = f?.phase === "copied" ? f.kept : undefined;
+  if (k === undefined) return null;
+  if (k.by === "poll") return k.pending === undefined && k.unsynced === undefined ? "polling" : null;
+  if (k.by === "recopy") return "copying again";
+  return k.state === "streamed" && k.notRunning === null ? "logical replication" : null;
+}
+
+/** how a copy is kept current, as FORMAT JSON's keys say it (`keptText`'s facts) */
+function keptJson(f: CopyFacts | null): Record<string, unknown> {
+  const k: KeptCurrent | undefined = f?.phase === "copied" ? f.kept : undefined;
+  return {
+    "Kept Current By": keptCurrentBy(f), "Kept Current": keptText(f),
+    ...(k?.by === "poll" ? { "Last Poll": k.polledAt } : {}),
+    ...(k?.by === "replication" ? { Slot: k.slot, "Stream State": k.state, "Applied Through": k.position, "Last Change Committed": k.lastCommit, "Stream Not Running": k.notRunning } : {}),
+  };
+}
 
 /** what EXPLAIN says: Mason's two sections, DuckDB's plan, ANALYZE's times */
 export interface Explained {
@@ -113,7 +178,7 @@ const VERBOSE_ONLY = new Set(["Projections", "Filters", "Table", "Type"]);
 
 function copyLine(c: Copy): string {
   const rows = c.rows === null ? "rows unknown" : `about ${count(c.rows)} rows`;
-  return `${c.table} (${rows}; kept current by polling, ${c.polledAt === null ? "no poll recorded yet" : `last poll ${c.polledAt}`})`;
+  return `${c.table} (${rows}; ${keptText(c.facts)})`;
 }
 
 /** EXPLAIN as Postgres's text format: one line a row */
@@ -168,7 +233,7 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
     Plan: roots.length === 1 ? roots[0] : { "Node Type": "DuckDB Plans", Plans: roots },
     Mason: {
       "Answered By": "DuckDB",
-      Copies: e.copies.map((c) => ({ Table: c.table, "Estimated Rows": c.rows, "Kept Current By": "polling", "Last Poll": c.polledAt })),
+      Copies: e.copies.map((c) => ({ Table: c.table, "Estimated Rows": c.rows, ...keptJson(c.facts) })),
       "Sent To DuckDB": e.sql,
       "Computed After DuckDB": e.computed,
       "Mason Functions DuckDB Calls": e.functions,

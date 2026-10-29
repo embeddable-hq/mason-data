@@ -36,8 +36,7 @@ import { fileURLToPath } from "node:url";
 import * as duck from "@duckdb/node-api";
 import type { DuckDBType, DuckDBValue, JS, Json } from "@duckdb/node-api";
 import { runnable } from "../lib/runnable.ts";
-import { StatementError, type DuckAnswer, type DuckRunner } from "../api/postgres/server.ts";
-import type { ExplainOptions } from "../api/postgres/explain.ts";
+import { StatementError, type DuckAnswer, type DuckRunner, type ExplainHow } from "../api/postgres/server.ts";
 import { EncodeError } from "../api/postgres/encode.ts";
 import { NumericError } from "../lib/pg-numeric.ts";
 import type { PlannedSql } from "./plan.ts";
@@ -539,7 +538,7 @@ class RemoteRunner implements DuckRunner {
   }
 
   async explain(sql: PlannedSql, params: readonly (string | null)[], session: Session, signal: AbortSignal,
-    how: { options: ExplainOptions; fields: Fields; exact: readonly ExactColumn[]; planning: { analysisMs: number; rewriteMs: number } }): Promise<string[]> {
+    how: ExplainHow): Promise<string[]> {
     const seq = ++this.seq;
     const unwatch = this.watch(seq, sql, signal);
     let lines: string[];

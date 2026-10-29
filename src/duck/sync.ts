@@ -133,7 +133,27 @@ export interface CopyState {
   /** the copy is in a layout this Mason no longer keeps (`RETIRED_LAYOUT`): it serves as it was until it is copied
    *  again, in heap order */
   retired?: string;
+  /** how the run keeps this copy current NOW (`Sync.keptOf`): present on every state a run's `state` answers */
+  kept?: KeptCurrent;
 }
+
+/**
+ * HOW A COPY IS KEPT CURRENT, NOW: the ONE derivation, by the sync (`Sync.keptOf`), that `mason status` (`state`'s
+ * `unsynced`, `streamStatus`'s tables) and EXPLAIN (src/duck/explain.ts `keptText`) read. EXPLAIN once derived it from
+ * the poll's ledger alone (`_mason.poll_state`), and a project switched to logical replication was said to be "kept
+ * current by polling, last poll" two days before, while status said streamed.
+ * - `poll`: polled every interval, `polledAt` its last copy or poll; `unsynced` (a table over POLL_ROW_LIMIT) is why the
+ *   passes leave it as copied, polled only when asked (`mason sync`); `pending` why the passes skip a copy that is
+ *   served as copied (to be copied again, or caught up by one poll first: `notStreamedWhy`'s words);
+ * - `recopy`: copied again whole every interval (every table, whatever its state: `pass`);
+ * - `replication`: its part in the stream (`StreamTableStatus`'s state and why), where the stream is (`position`, the
+ *   status's), the commit time of the newest change applied this run, and why the stream is not running (null: it is).
+ */
+export type KeptCurrent =
+  | { by: "poll"; polledAt: string | null; unsynced?: string; pending?: string }
+  | { by: "recopy"; copiedAt: string | null }
+  | { by: "replication"; slot: string; state: StreamTableStatus["state"]; why: string | null; position: string; lastCommit: string | null;
+    notRunning: string | null };
 
 /**
  * WHERE THE STREAM IS, for `mason status`, `mason wait` and their `--json` (`Sync.streamStatus`; the test server's
@@ -845,9 +865,11 @@ export class Sync {
       this.snapshots.set(source, snapshot);
     }
     await this.readPolledAt();
-    const r = await this.store.writer.runAndReadAll(`SELECT source, phase, "rows", bytes, seconds, copied_at::VARCHAR, error, columns::VARCHAR FROM ${MASON_SCHEMA}.copy_state`);
+    const r = await this.store.writer.runAndReadAll(`SELECT source, phase, "rows", bytes, seconds, epoch_ms(copied_at), error, columns::VARCHAR FROM ${MASON_SCHEMA}.copy_state`);
     for (const row of r.getRowsJS()) {
-      const [source, phase, rows, bytes, seconds, copiedAt, error, columns] = row as [string, CopyPhase, bigint | null, bigint | null, number | null, string | null, string | null, string | null];
+      const [source, phase, rows, bytes, seconds, copiedMs, error, columns] = row as [string, CopyPhase, bigint | null, bigint | null, number | null, number | bigint | null, string | null, string | null];
+      // an instant as a run writes it (ISO, UTC), never DuckDB's text of it in the connection's zone
+      const copiedAt = copiedMs === null ? null : new Date(Number(copiedMs)).toISOString();
       if (columns !== null) { const c = JSON.parse(columns) as SourceColumnInfo[]; this.copiedAs.set(source, columnsKey(c)); this.copiedColumns.set(source, c); }
       this.states.set(source, { source, phase: phase === "copying" ? "waiting" : phase, rows: rows === null ? null : Number(rows), bytes: bytes === null ? null : Number(bytes), seconds, copiedAt, error });
     }
@@ -926,12 +948,73 @@ export class Sync {
   }
 
   state(): CopyState[] {
+    const now = Date.now();
     // in the project's order, whatever order the copies ran and were recorded in (`copyOrder`)
     return [...this.tables.keys()].flatMap((source) => this.states.get(source) ?? [])
       .map((s) => this.retired.has(s.source) ? { ...s, retired: RETIRED_LAYOUT } : s)
       // a copy's chunks as they are NOW: the rows the ones in flight have read by now at the measured rate
       .map((s) => { const l = this.copyLive.get(s.source); return s.phase === "copying" && l !== undefined ? { ...s, progress: copyProgressNow(l, Date.now()) } : s; })
-      .map((s) => this.mode === "poll" && overPollLimit(this.tables.get(s.source)!) ? { ...s, unsynced: { reason: OVER_POLL_LIMIT, asOf: this.polledAt.get(s.source) ?? null } } : s);
+      // how it is kept current, and a table the passes leave as copied, from ONE derivation (`keptOf`)
+      .map((s) => {
+        const t = this.tables.get(s.source);
+        if (t === undefined) return s;
+        const kept = this.keptOf(t, now);
+        return { ...s, kept, ...(kept.by === "poll" && kept.unsynced !== undefined ? { unsynced: { reason: kept.unsynced, asOf: kept.polledAt } } : {}) };
+      });
+  }
+
+  /**
+   * HOW AN ADDED TABLE IS KEPT CURRENT, NOW (`KeptCurrent`): the run's mode, then in replication mode its part in the
+   * stream (`streamTable`, what `streamStatus` says of it) and where the stream is; in poll mode its last poll and
+   * whether the passes leave it as copied. The one place it is derived: `state` carries it to `mason status` and the
+   * listener's EXPLAIN alike.
+   */
+  private keptOf(t: AddedTable, now: number): KeptCurrent {
+    const st = this.states.get(t.source);
+    if (this.mode === "poll") {
+      const polledAt = this.polledAt.get(t.source) ?? null;
+      // a copy served as copied that the passes skip (`pass`'s `polled`, and a table not yet caught up on the writer's
+      // turn): to be copied again (its columns changed, a numeric outgrew it, a retired layout) or caught up first
+      const pending = st?.phase === "copied" && (this.needsCopy(t) || this.behind.has(t.source)) ? this.notStreamedWhy(t.source) : null;
+      return { by: "poll", polledAt, ...(overPollLimit(t) ? { unsynced: OVER_POLL_LIMIT } : {}), ...(pending !== null ? { pending } : {}) };
+    }
+    if (this.mode === "recopy") return { by: "recopy", copiedAt: st?.copiedAt ?? null };
+    const s = this.stream;
+    const part = this.streamTable(t, now, s);
+    return { by: "replication", slot: this.replication!.slot, state: part.state, why: part.why, position: formatLsn(s?.position() ?? this.appliedLsn),
+      lastCommit: this.lastBatch === null ? null : new Date(this.lastBatch.committedAt).toISOString(), notRunning: this.streamDownWhy(s, st) };
+  }
+
+  /** why the stream is not running, in the reader's words (null: it runs): its last failure and when it starts again; the
+   *  replication check a pass failed (`prepareReplication`, recorded on each copy's state); a slot not made yet; a sync
+   *  stopping; else it starts at the next pass */
+  private streamDownWhy(s: ReplicationStream | null, st: CopyState | undefined): string | null {
+    if (s !== null) return null;
+    const firstLine = (e: string): string => e.replace(/^replication: /, "").split("\n")[0]!;
+    if (this.streamFailure !== null) return `${firstLine(this.streamFailure.error)} · it starts again after ${clock(this.streamFailure.retryAt)} UTC`;
+    if (st?.error?.startsWith("replication: ")) return firstLine(st.error);
+    if (!this.slotKnown) return `slot ${this.replication!.slot} is not made yet: it starts once it is`;
+    if (this.stopped) return "Mason is stopping";
+    return "it has not started yet: it starts at the next pass";
+  }
+
+  /** an added table's part in the stream (`StreamTableStatus` but what it applied): streamed, being caught up, waiting
+   *  for its copy, or left out of the publication, and why — what `streamStatus` and `keptOf` both say, each of the
+   *  stream `s` it read once */
+  private streamTable(t: AddedTable, now: number, s: ReplicationStream | null): Omit<StreamTableStatus, "table" | "applied"> {
+    const iso = (ms: number): string => new Date(ms).toISOString();
+    if (this.unpublished.has(t.source)) return { state: "left-out", why: this.notStreamedWhy(t.source) };
+    const b = this.behind.get(t.source);
+    if (!this.needsCopy(t) && b !== undefined) {
+      const c = this.catchingUp?.source === t.source ? this.catchingUp : null;
+      const held = this.held.get(t.source)?.counts;
+      const at = this.retries.get(t.source)?.at ?? 0;
+      return { state: "catching-up", why: `caught up by one poll ${b.why}${at > now ? ` — its last catch-up failed, tried again after ${clock(at)} UTC` : ""}`,
+        catchUp: { phase: c?.phase ?? "queued", from: this.polledAt.get(t.source) ?? null, startedAt: c ? iso(c.startedAt) : null, held: held ? held.inserts + held.updates + held.deletes + held.truncates : 0,
+          retryAt: c === null && at > now ? iso(at) : null } };
+    }
+    if (this.joinedNow.has(t.source) || (s === null && !this.needsCopy(t))) return { state: "streamed", why: null };
+    return { state: "waiting", why: this.notStreamedWhy(t.source) };
   }
 
   /** each table's last copy or poll, from the ledger (a copy writes its watermark there too) */
@@ -1388,6 +1471,7 @@ export class Sync {
     const st = this.states.get(source);
     if (this.copiedAs.has(source) && this.copiedAs.get(source) !== columnsKey(t.columns)) return "its columns changed: it is copied again, then caught up by one poll";
     if (st?.phase === "copied" && !this.snapshots.has(source)) return "a numeric value outgrew its copy's DECIMAL: it is copied again, wider, then caught up by one poll";
+    if (st?.phase === "copied" && this.retired.has(source)) return "its copy is in an older Mason's layout, key order with an index: it is copied again, then caught up by one poll";
     if (st?.phase === "copying" || this.rebuildingNow?.source === source && this.rebuildingNow.kind === "copy") return "it is being copied: it joins once copied and caught up by one poll";
     if (st?.phase === "failed") return `its copy failed (${(st.error ?? "").split("\n")[0]}): it joins once copied and caught up by one poll`;
     const b = this.behind.get(source);
@@ -1408,21 +1492,9 @@ export class Sync {
     const db = await this.databasePosition();
     const now = Date.now();
     const iso = (ms: number): string => new Date(ms).toISOString();
-    const tables = [...this.tables.values()].map((t): StreamTableStatus => {
-      const applied = { ...(this.appliedCounts.get(t.source) ?? noCounts()) };
-      if (this.unpublished.has(t.source)) return { table: t.source, state: "left-out", why: this.notStreamedWhy(t.source), applied };
-      const b = this.behind.get(t.source);
-      if (!this.needsCopy(t) && b !== undefined) {
-        const c = this.catchingUp?.source === t.source ? this.catchingUp : null;
-        const held = this.held.get(t.source)?.counts;
-        const at = this.retries.get(t.source)?.at ?? 0;
-        return { table: t.source, state: "catching-up", why: `caught up by one poll ${b.why}${at > now ? ` — its last catch-up failed, tried again after ${clock(at)} UTC` : ""}`,
-          catchUp: { phase: c?.phase ?? "queued", from: this.polledAt.get(t.source) ?? null, startedAt: c ? iso(c.startedAt) : null, held: held ? held.inserts + held.updates + held.deletes + held.truncates : 0,
-            retryAt: c === null && at > now ? iso(at) : null }, applied };
-      }
-      if (this.joinedNow.has(t.source) || (s === null && !this.needsCopy(t))) return { table: t.source, state: "streamed", why: null, applied };
-      return { table: t.source, state: "waiting", why: this.notStreamedWhy(t.source), applied };
-    });
+    // each table's part, as `keptOf` says it for EXPLAIN (`streamTable`), with what it applied this run
+    const tables = [...this.tables.values()].map((t): StreamTableStatus =>
+      ({ table: t.source, ...this.streamTable(t, now, s), applied: { ...(this.appliedCounts.get(t.source) ?? noCounts()) } }));
     return {
       slot: r.slot, publication: r.publication, running: s !== null,
       failure: s === null && this.streamFailure !== null ? { error: this.streamFailure.error, retryAt: iso(this.streamFailure.retryAt) } : null,

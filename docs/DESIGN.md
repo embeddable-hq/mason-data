@@ -367,8 +367,13 @@ whole table writes no profile (DuckDB answers it from the table's row count whil
 so on a real deployment `EXPLAIN (ANALYZE) SELECT count(*)` of a 197 M-row copy answered the probe's plan, "reading none
 of its copies", while a GROUP BY over the same copy answered its own. Now the profiler is on for the statement alone, the
 profile must name it (`query.sql`), and a statement with none is said so, its plan DuckDB's EXPLAIN with the rows it
-answered and no times.
-**Where.** `src/api/postgres/explain.ts`, `src/duck/explain.ts`; `tests/duck-explain-options.test.ts`, `tests/duck-wire.test.ts`.
+answered and no times. How each copy is kept current is the sync's one fact (`KeptCurrent`, `Sync.state`), the one
+`mason status` reads (2026-10-29): EXPLAIN read the poll's ledger (`_mason.poll_state`) instead, and on a deployment
+streaming by logical replication since 2026-10-27 its first line said "kept current by polling, last poll" two days
+old, the poll before the switch, while status said streamed. Now the listener hands the sync's state to the EXPLAIN, and
+a table no sync knows is said unknown, never guessed.
+**Where.** `src/api/postgres/explain.ts`, `src/duck/explain.ts` (`keptText`), `src/duck/sync.ts` (`keptOf`);
+`tests/duck-explain-options.test.ts`, `tests/duck-wire.test.ts`, `tests/duck-sync-added.test.ts`.
 
 ### jsonb's order
 

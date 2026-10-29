@@ -24,6 +24,11 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 - **DuckDB runs only a `PlannedSql`, made in `src/duck/plan.ts` alone, after the read-back** (`tests/conventions.test.ts`):
   a statement's own text never reaches DuckDB, because an `EXPLAIN ANALYZE <write>` that did ran the write
   (docs/DESIGN.md "The review").
+- **How a copy is kept current is derived ONCE, by the sync** (`Sync.keptOf`, carried on `Sync.state` as `kept`):
+  `mason status` (`unsynced`, `streamStatus`'s tables) and EXPLAIN's first line (`keptText`, src/duck/explain.ts) both
+  read it, never the poll's ledger (a project switched to replication keeps its last poll there: EXPLAIN said "kept
+  current by polling" of a streamed table). `tests/duck-sync-added.test.ts` and `tests/duck-wire.test.ts` hold it.
+  ("EXPLAIN")
 - **EXPLAIN ANALYZE's profile is held to its statement, never assumed its** (src/duck/store.ts `explained`): DuckDB's
   profiler writes the LAST profiled statement's profile on the connection, so it is on for the statement alone (turned
   on in `streamed` after the settle, off before anything else runs), and the profile must name the planned SQL

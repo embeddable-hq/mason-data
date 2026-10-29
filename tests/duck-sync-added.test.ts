@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DuckStore, MASON_SCHEMA } from "../src/duck/store.ts";
 import * as syncModule from "../src/duck/sync.ts";
+import * as explainModule from "../src/duck/explain.ts";
 import type { AddedTable, Sync as SyncClass, SyncMode, SyncReplication } from "../src/duck/sync.ts";
 import type { Source } from "../src/cli/preflight.ts";
 
@@ -21,6 +22,8 @@ import type { Source } from "../src/cli/preflight.ts";
 type Status = { source: string } & ({ copy: string } | { behind: string } | { refused: string } | { unsynced: boolean });
 const { addedText } = syncModule as unknown as { addedText: (tables: readonly Status[], kept: string) => string };
 const { Sync } = syncModule;
+// EXPLAIN's words for how a copy is kept current (src/duck/explain.ts), read the same way
+const { keptText } = explainModule as unknown as { keptText: (f: unknown) => string };
 
 test("tables already copied and current are said as such, in one line, never as copied at the next pass", () => {
   const line = addedText(["public.a", "public.b", "public.c", "public.d"].map((source) => ({ source, unsynced: false })), "streamed from 0/16B3F28");
@@ -49,8 +52,15 @@ const table = (name: string, rows = 10, columns = [column("id")]): AddedTable =>
 // a source nothing listens on: never reached, the sync is stopped before anything would connect
 const source = { url: "postgresql://x@127.0.0.1:1/x", remote: false, host: "127.0.0.1", port: 1, database: "x", user: "x", password: "", sslmode: "disable" } as unknown as Source;
 
+type Started = { mode: SyncMode; replication?: SyncReplication; seed: (run: (sql: string) => Promise<unknown>) => Promise<void>; tables: AddedTable[] };
+
 /** the line a Sync over `file` logs when its tables are set, after `seed` wrote its ledger */
-async function startLine(t: { mode: SyncMode; replication?: SyncReplication; seed: (run: (sql: string) => Promise<unknown>) => Promise<void>; tables: AddedTable[] }): Promise<string[]> {
+function startLine(t: Started): Promise<string[]> {
+  return withSync(t, async (_sync, logged) => logged.filter((l) => !/^the catalog could not be rebuilt|: its copy is stored in key order/.test(l)));
+}
+
+/** a Sync over a fresh file whose ledger `seed` wrote, stopped, its tables set: `use` reads it before the file goes */
+async function withSync<T>(t: Started, use: (sync: SyncClass, logged: string[]) => Promise<T>): Promise<T> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-duck-added-"));
   const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined, { memoryLimit: "256MB" });
   try {
@@ -66,7 +76,7 @@ async function startLine(t: { mode: SyncMode; replication?: SyncReplication; see
     const sync = await open((l) => logged.push(l));
     await sync.stop();
     await sync.setTables(t.tables);
-    return logged.filter((l) => !/^the catalog could not be rebuilt|: its copy is stored in key order/.test(l));
+    return await use(sync, logged);
   } finally {
     store.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -123,3 +133,93 @@ test("in replication mode a current copy is streamed from the position the copy 
   assert.deepEqual(await startLine({ mode: "replication", replication, tables, seed: seed(false) }),
     ["2 tables already copied, caught up by one poll first (slot mason_x is new to this copy): public.a, public.b"]);
 });
+
+// HOW A COPY IS KEPT CURRENT (src/duck/sync.ts `keptOf`): the sync's one fact, which mason status (`state`'s `unsynced`,
+// `streamStatus`'s tables) and EXPLAIN (`keptText`) both read — a real Sync over a seeded ledger, stopped
+type Kept = { by: string; state?: string; why?: string | null; position?: string; polledAt?: string | null; unsynced?: string; pending?: string; copiedAt?: string | null; notRunning?: string | null };
+type KeptState = { source: string; phase: string; kept?: Kept; unsynced?: { reason: string; asOf: string | null } };
+const replicationX = { slot: "mason_x", publication: "mason_x", owned: true };
+/** each table's state, and what mason status's stream section says of each (replication mode) */
+const keptStates = (t: Started) => withSync(t, async (sync) => ({ states: sync.state() as KeptState[], stream: await sync.streamStatus() }));
+const at = (states: readonly KeptState[], name: string): KeptState => states.find((s) => s.source === `public.${name}`)!;
+// a project polled until 2026-10-27, its last polls still in the ledger
+const lastPoll = (n: string): string => `INSERT INTO ${MASON_SCHEMA}.poll_state VALUES ('public.${n}', '100:100:', '2026-10-27 19:58:39+00')`;
+const slotAt = `INSERT INTO ${MASON_SCHEMA}.stream_state VALUES ('mason_x', '0/16B3F28', now())`;
+
+test("a project switched to replication is said streamed by EXPLAIN and status alike, never by its last poll; the stream down is said with why", async () => {
+  const tables = [table("a"), table("big", 2_000_000), table("caught")];
+  const seed = (...more: string[]) => async (run: (sql: string) => Promise<unknown>): Promise<void> => {
+    for (const n of ["a", "big", "caught"]) { await run(copied(n)); await run(lastPoll(n)); }
+    await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its copy', now())`);
+    for (const sql of more) await run(sql);
+  };
+  const { states, stream } = await keptStates({ mode: "replication", replication: replicationX, tables, seed: seed(slotAt) });
+  assert.equal(states.length, 3);
+  for (const st of states) {
+    // mason status's stream section says the same of each table: one derivation
+    const said = stream?.tables.find((t) => t.table === st.source);
+    assert.deepEqual([said?.state, said?.why], [st.kept?.state, st.kept?.why], st.source);
+    assert.equal(st.unsynced, undefined, "the row limit is the polls', never the stream's");
+    assert.doesNotMatch(keptText(st), /polling|last poll/);
+  }
+  // stopped (as this sync is, before its first pass could start the stream): the reason, never "the slot is not made"
+  for (const name of ["a", "big"]) {
+    assert.deepEqual(at(states, name).kept, { by: "replication", slot: "mason_x", state: "streamed", why: null, position: "0/16B3F28", lastCommit: null, notRunning: "Mason is stopping" });
+    assert.equal(keptText(at(states, name)), "streamed by logical replication (slot mason_x), applied through 0/16B3F28, no change applied this run; NOT kept current now, the stream is not running: Mason is stopping");
+  }
+  // one owed its catch-up poll (`_mason.catch_up`): catching up, as status says it
+  assert.deepEqual([at(states, "caught").kept?.state, at(states, "caught").kept?.why], ["catching-up", "caught up by one poll after its copy"]);
+  assert.equal(keptText(at(states, "caught")), "logical replication (slot mason_x), not streamed yet: caught up by one poll after its copy");
+
+  // the replication check a pass failed (recorded on each copy's state): its words
+  const failed = await keptStates({ mode: "replication", replication: replicationX, tables: [table("a")], seed: async (run) => {
+    await run(copied("a", [column("id")], "copied", "replication: the publication mason_x does not exist"));
+    await run(lastPoll("a"));
+    await run(slotAt);
+  } });
+  assert.equal(at(failed.states, "a").kept?.notRunning, "the publication mason_x does not exist");
+  // a slot this copy has no record of: not made yet
+  const noSlot = await keptStates({ mode: "replication", replication: replicationX, tables: [table("a")], seed: async (run) => { await run(copied("a")); await run(lastPoll("a")); } });
+  assert.equal(at(noSlot.states, "a").kept?.notRunning, "slot mason_x is not made yet: it starts once it is");
+});
+
+test("a polled copy the passes skip is NOT kept current, and why: to be copied again or caught up first; over the row limit, the command that polls it", async () => {
+  const { states } = await keptStates({
+    mode: "poll",
+    tables: [table("a"), table("big", 2_000_000), table("changed", 10, [column("id"), column("added", "text")]), table("retired"), table("outgrown"), table("caught")],
+    seed: async (run) => {
+      for (const n of ["a", "big", "changed", "retired", "caught"]) { await run(copied(n)); await run(lastPoll(n)); }
+      // copied, but a numeric outgrew its DECIMAL: its watermark is gone until it is copied again, wider
+      await run(copied("outgrown"));
+      await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its copy', now())`);
+      // a copy in the older layout carries its primary key (`findRetired`)
+      await run("CREATE TABLE public.retired (id BIGINT PRIMARY KEY)");
+    },
+  });
+  const asOf = "2026-10-27T19:58:39.000Z";
+  assert.deepEqual(at(states, "a").kept, { by: "poll", polledAt: asOf });
+  assert.equal(keptText(at(states, "a")), "kept current by polling, last poll 2026-10-27 19:58:39 UTC");
+  assert.deepEqual(at(states, "big").kept, { by: "poll", polledAt: asOf, unsynced: "over the 1,000,000-row sync limit" });
+  assert.deepEqual(at(states, "big").unsynced, { reason: "over the 1,000,000-row sync limit", asOf });
+  assert.equal(keptText(at(states, "big")), "NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-27 19:58:39 UTC): mason sync public.big polls it now");
+  const pending: Array<[string, string]> = [
+    ["changed", "its columns changed: it is copied again, then caught up by one poll"],
+    ["retired", "its copy is in an older Mason's layout, key order with an index: it is copied again, then caught up by one poll"],
+    ["outgrown", "a numeric value outgrew its copy's DECIMAL: it is copied again, wider, then caught up by one poll"],
+    ["caught", "it is caught up by one poll after its copy first"],
+  ];
+  for (const [name, why] of pending) {
+    const st = at(states, name);
+    assert.equal(st.kept?.pending, why, name);
+    assert.match(keptText(st), new RegExp(`^NOT kept current \\((as of 2026-10-27 19:58:39 UTC|no poll recorded yet)\\): ${why.replace(/[.()]/g, "\\$&")}$`), name);
+  }
+});
+
+test("a recopied copy's last copy is the instant the ledger holds, said in UTC whatever the machine's zone", async () => {
+  const { states } = await keptStates({ mode: "recopy", tables: [table("a")], seed: async (run) => {
+    await run(`INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.a', 'copied', 10, 0, 1.0, '2026-10-27 19:00:00+00', NULL, '${JSON.stringify([column("id")])}')`);
+  } });
+  assert.deepEqual(at(states, "a").kept, { by: "recopy", copiedAt: "2026-10-27T19:00:00.000Z" });
+  assert.equal(keptText(at(states, "a")), "kept current by copying it again whole, last copied 2026-10-27 19:00:00 UTC");
+});
+
