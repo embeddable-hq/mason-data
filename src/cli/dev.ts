@@ -534,6 +534,6 @@ function listenerTls(listen: PgListenerSettings, selfSigned: boolean, home: stri
  *  and what tells its supervisor a death after it is a crash to restart (src/cli/supervise.ts, which defines it). */
 export const READY = READY_LINE;
 
-/** The one sentence of how the pieces fit, printed first by `mason start` and at the top of its help and the README. */
+/** The one sentence of how the pieces fit, printed first by `mason start` and at the top of its help. */
 export const PROJECT_LINE = "A Mason project is your app's folder: mason/sources/ names the database and the tables to copy, yours to commit; " +
   "this machine's copy of your data and Mason's state are in .mason/, rebuilt from that file.";

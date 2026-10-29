@@ -8,7 +8,7 @@ pull request with a test is better.
 
 **Mason answers differently from Postgres.** The one thing that must never happen. Open
 [an "answers differently" issue](../../issues/new?template=differs.yml) with the statement, the column types it reads,
-Postgres's answer and Mason's. Check [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) "Known differences" first: a difference
+Postgres's answer and Mason's. Check [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) "Answered differently" first: a difference
 listed there is decided and documented, and worth an issue only if you think the decision is wrong.
 
 **Mason is slower than Postgres, or slower than you expect.** Open
@@ -29,11 +29,14 @@ afterwards. If you can write the case yourself, that is the whole first half of 
 
 ## Running the checks
 
+A checkout needs Node ≥ 23.6 (the root `package.json`'s `engines`): its TypeScript is run directly by Node's type
+stripping, with no build step. The published CLI is compiled and needs less (`cli/README.md` says what).
+
 ```bash
 npm install && npm run check        # typecheck + the offline tests, a few minutes
 ```
 
-The integration tests, the oracle included, need a throwaway Postgres (each file makes and drops a database on it;
+The integration tests run the real copy, stream, listener and `mason serve`, and the oracle; they need a throwaway Postgres (each file makes and drops a database on it;
 `tests/integration/README.md`):
 
 ```bash
@@ -44,6 +47,27 @@ node --test tests/integration/duck-oracle.itest.ts         # the oracle alone
 
 CI runs both on every pull request. Every script is TypeScript run directly by Node (no build step).
 
+To run the checkout's `mason` from any folder, with no build or install, define an alias once. A project folder
+elsewhere (`mkdir`, then `mason-local init demo`) is the quickest way to try a change by hand.
+
+```bash
+alias mason-local="node $PWD/src/cli/main.ts"   # from the checkout's root; then mason-local works in any project folder
+```
+
+## Where the code is
+
+| | |
+|---|---|
+| `src/cli/` | the `mason` command: every command, its run (`mason start`), `mason serve`, the sources file |
+| `src/duck/` | the engine: the store, the copy and sync, the stream (logical replication), the plan (Postgres decides, DuckDB computes), the allowlist, the request log, users |
+| `src/api/postgres/` | the Postgres wire-protocol listener and its catalog |
+| `src/cdc/` | reading a Postgres: the wire protocol, the poll, logical decoding |
+| `src/lib/` | shared: logging, `.env`, ports, exact numerics, timezones |
+| `cli/` | the npm package `@mason-data/cli` (built from `src/` by `cli/build.ts`) |
+| `docker/`, `deploy/` | the `mason-data` image and how to run it |
+| `tests/` | `node --test`, offline; `tests/integration/` against a real Postgres |
+| `docs/` | the README's Documentation table says what each one is |
+
 ## Pull requests
 
 - **A test that fails without the change.** `scripts/fails-without.ts <commit> <test-file>` runs a test file with
@@ -51,8 +75,8 @@ CI runs both on every pull request. Every script is TypeScript run directly by N
   a fix the next change can undo.
 - **The check green**, and the integration suite where the change touches the copy, the stream, the listener or a
   statement's answer.
-- **Generated text regenerated, not edited.** `docs/SQL-SUPPORT.md` and two README sections are rendered from the code
-  by tests; change the source (`src/duck/gaps.ts`, `src/duck/verified.ts`, the benchmark fixture) and run
+- **Generated text regenerated, not edited.** `docs/SQL-SUPPORT.md`, `docs/MEASUREMENTS.md` and two short README blocks
+  (the headline numbers, the counts of what is answered) are rendered from the code by tests; change the source (`src/duck/gaps.ts`, `src/duck/verified.ts`, the benchmark fixture) and run
   `UPDATE_FIXTURE=1 npm test`, then read the diff.
 - **Errors say the way out.** A message a person meets names the file and the key, says what is wrong in their words,
   and gives the fix on one report. `CLAUDE.md` has the rest of the conventions, written for coding agents and people

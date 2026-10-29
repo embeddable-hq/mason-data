@@ -2,7 +2,8 @@
 
 `scripts/bench-replica.ts` answers "why not just use a Postgres read replica?" with numbers: what the same SQL costs on
 a Postgres and on Mason as the tables grow and as more readers ask at once. Its result is
-`tests/fixtures/bench-replica.json`, from which the README's "When is Mason faster?" is rendered;
+`tests/fixtures/bench-replica.json`, from which [MEASUREMENTS.md](MEASUREMENTS.md) ("When is Mason faster?") and the
+README's headline numbers are rendered;
 docs/DESIGN.md "Mason against a Postgres read replica" says why the sweep is shaped so and what a run does and does not show.
 
 ## What it measures
@@ -40,7 +41,7 @@ target, and Mason is measured at every cell Postgres is:
 2. **Clients**, at the largest size step 1 measured under the target (`--clients-rows` chooses another): the `--clients`
    list, then doubling past its end, until Postgres reaches the target or `--max-clients` (1024) stops it. The
    container's `max_connections` is raised past `--max-clients` so every client is answered — a production replica's
-   is lower (Postgres's default is 100), which the README's text says.
+   is lower (Postgres's default is 100), which the published text says.
 
 A cell after one whose Postgres p95 was over a tenth of the target is measured for at least 3 × the target, a
 statement's limit (`--timeout`) is at least 5 × the target (its default then; a smaller one is refused), and the
@@ -107,16 +108,17 @@ statements and the same machine, one thing changed per run:
 
 ```bash
 node scripts/bench-replica.ts --label "<the machine>" --target-postgres-seconds 60 … --out tests/fixtures/bench-replica.json
-UPDATE_FIXTURE=1 node --test tests/bench-replica.test.ts    # renders the README's section from it
-git diff README.md                                          # read it
+UPDATE_FIXTURE=1 node --test tests/bench-replica.test.ts    # renders docs/MEASUREMENTS.md and the README's headline from it
+git diff docs/MEASUREMENTS.md README.md                     # read it
 ```
 
-The section's numbers come from the fixture and its sentences from the renderer's template (`renderReplicaSection`), so
-the wording is changed in the renderer and never in the README. It is laid out for scanning:
+The section's numbers come from the fixture and its sentences from the renderer's template (`renderReplicaSection`, and
+`renderReplicaHeadline` for the README's short table), so the wording is changed in the renderer and never in the
+rendered files. It is laid out for scanning:
 
 - **The short version**: one table of the cells worth a glance (the rows sweep's first and last step, the clients
   sweep's last, and the point lookup at the largest cell by p50), each with Postgres's and Mason's time and **Mason is**
-  (`15× faster`, `79× slower`).
+  (`15× faster`, `79× slower`). The README's "Why Mason" carries this table alone, with a link to the rest.
 - **As the tables grow** and **as more readers ask at once**: a table each, one row per step of its sweep (for a grid,
   the sizes at the per-statement client count and the client counts at the largest size), p95 and statements/s for
   both engines; the sweep's verdict (where Postgres reached the target, or what stopped it, and its slowest statement
