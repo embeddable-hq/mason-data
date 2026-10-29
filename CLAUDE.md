@@ -100,6 +100,10 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   the engine or the listener changed), and merges it. A sub-agent's report is its claim, not the evidence. Two
   implementations of two hours each ran side by side; the review-and-fix round after them was the next hour and a half,
   so the time to land a batch is the slowest implementation plus one review cycle, never the sum.
+- **Implementation runs on Opus 5.5; every review is Fable's.** A sub-agent or a session that writes code is started
+  on Opus 5.5 (`model: "opus"` on the Agent tool, `model: "claude-opus-5-5"` on a session: a session INHERITS the
+  coordinator's model when none is named). The independent review of a PR is done by the coordinating session itself
+  (Fable) or by a Fable agent, never by an Opus one: the reviewer must outread the author (2026-10-29).
 
 ## Git workflow
 
