@@ -50,6 +50,22 @@ Mason runs as a single process, and you install nothing on your Postgres. On you
 npm. On a server, you run the `ghcr.io/embeddable-hq/mason-data` Docker image (see
 [Going to production](#going-to-production)).
 
+<details>
+<summary><b>No internet on the machine?</b></summary>
+
+Mason copies your database through DuckDB's `postgres` extension, which is downloaded once. `mason init` installs
+it. If it can't, it stops and writes nothing. `mason doctor` tells you whether this machine has the extension. On a
+machine with no internet, use one of these:
+
+- the `mason-data` image, which includes the extension
+- run `mason init` once while the machine is online
+- copy `~/.duckdb/extensions/<version>/<platform>/postgres_scanner.duckdb_extension` from a machine of the same
+  platform (`mason doctor` prints the exact path)
+
+Mason never downloads anything else.
+
+</details>
+
 ### Try the demo
 
 ```bash
@@ -101,9 +117,11 @@ after your project. The port stays the same every time Mason starts, so saved co
 **3. Keep an eye on it.**
 
 ```bash
-mason status                         # shows your database, each table's copy, the Postgres API, and slow or refused queries
-mason ui                             # shows the same in your browser, plus the users
-mason logs --requests --failed       # lists every query that was refused or failed, and why
+mason status                         # shows your database, each table's copy, the Postgres API, and the last day's and week's queries
+mason ui                             # shows the same in your browser, with pages for tables, users, queries, usage and syncs
+mason logs --requests --failed       # lists every query that was refused, failed or cancelled, and why
+mason logs --running                 # lists the queries running now (mason cancel <session> stops one)
+mason usage --since 7d --step 1h     # shows the last week, one line per hour: queries, the copy, memory
 mason stop                           # stops Mason; the copy stays, and the next mason start resumes in seconds
 mason destroy                        # deletes the copy and Mason's state (never your files or users)
 ```
@@ -379,6 +397,7 @@ roles:
 mason user add claude --role agent   # prints its password once, inside the connection URL
 mason user add acme --role tenant --set tenant=42
 mason user list                      # lists the users, their roles, and when each was added
+mason user disable claude            # refuses its logins until mason user enable claude (it keeps its password)
 mason user remove claude             # blocks its next connection, and ends its open sessions at their next query
 ```
 
@@ -388,8 +407,9 @@ mason user remove claude             # blocks its next connection, and ends its 
 - When a user reads the catalog or uses the MCP tools, it sees only what its role can read. So an agent never finds a
   table it is not allowed to query.
 - A user with no role can read every table and column the sources file copies.
-- Every user is read-only. Users exist only in Mason, never in your database. `mason user remove` takes effect without
-  a restart.
+- Every user is read-only. Users exist only in Mason, never in your database. `mason user disable` and `mason user remove` take
+  effect without a restart. A disabled user's logins are refused with `28000`, as Postgres refuses a role without
+  `LOGIN`.
 - When clients connect from another machine, the Postgres API requires TLS. The exception is `MASON_PG_PLAIN=1`, for
   when your own TLS proxy sits in front (see [Going to production](#going-to-production)).
 
@@ -418,9 +438,12 @@ tool, and shows the setup for Claude Desktop.
 
 | | |
 |---|---|
-| `mason logs --requests` | Every query, answered or refused. For each one: when it ran, the result and SQLSTATE, how long it took, the rows sent, the tool's `application_name`, and the user and its role. For a refused query, it also shows the grant or filter that refused it. An MCP client shows up as `mason-mcp/<client>`. Add `--failed` for refused and failed queries only, or `--json` for every column. Queries are kept for 7 days (`MASON_REQUEST_LOG_DAYS`). |
-| `mason status` | Each table's copy and how up to date it is, plus the last day's slow and refused queries, each with its reason. |
-| `mason ui` | The status, the slow and refused counts, and the users, in your browser. |
+| `mason logs --requests` | Every query, answered, refused, failed or cancelled. For each one: when it ran, the result and SQLSTATE, how long it took, the rows and bytes sent, the tool's `application_name`, and the user and its role. For a refused query, it also shows the grant or filter that refused it. An MCP client shows up as `mason-mcp/<client>`. Narrow it with `--failed`, `--since 2h`, `--user` or `--client`, or add `--json` for every column. Queries are kept for 7 days (`MASON_REQUEST_LOG_DAYS`). |
+| `mason logs --running` | The queries running now, by session. `mason cancel <session>` stops one, as the client's own cancel would: the client gets `57014`, and its session continues. |
+| `mason logs --events` | The sync's events: each copy, poll or replication stream that failed, the database out of reach, a table up to date again, and each restart of Mason. |
+| `mason usage` | What Mason did over time, from a sample every minute: the queries and their p95, the rows and bytes sent, the copy's size, the stalest copy, the replication lag and the memory. |
+| `mason status` | Each table's copy and how up to date it is. The last day's and week's queries: their results, their p50 and p95 times, and the rows and bytes sent. Then the slow and refused queries, each with its reason. |
+| `mason ui` | All of this in your browser, on six pages: Overview, Tables, Users, Queries, Usage and Syncs. You can also add and remove tables, sync one now, add and disable users, and cancel a running query. Its fonts and icons are bundled, so it works with no internet. |
 | `EXPLAIN` | For each copy a query reads: its rows and how up to date it is, next to the SQL Mason runs. |
 
 ### A CLI for coding agents
@@ -435,7 +458,7 @@ always tells you what to run next. `mason help agent` is the page an agent shoul
 |---|---|
 | [`cli/README.md`](cli/README.md) | every command and option of `mason` |
 | [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) | the Postgres API: how a tool connects, which SQL is answered, and what is refused |
-| [`docs/WEB-UI.md`](docs/WEB-UI.md) | the web page (`mason ui`): what it shows, how access to it is protected, and how to extend it |
+| [`docs/WEB-UI.md`](docs/WEB-UI.md) | the web page (`mason ui`): its pages, how access to it is protected, and how to extend it |
 | [`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) | what is verified to answer exactly as Postgres does, and what is not (generated from the code) |
 | [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) | when Mason is faster than a Postgres read replica: every measurement and how it was taken (generated from the benchmark results) |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | the design: how a query is answered, the copy, replication, and the decisions and measurements behind them |
