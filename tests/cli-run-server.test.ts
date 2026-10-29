@@ -304,6 +304,18 @@ test("the web page: /, /app.js, /app.css, /shared.js and each page's module from
     assert.equal(JSON.parse(r.text).failure.code, "not_found", p);
   }
   assert.equal((await call("POST", "/app.js", { body: {} })).status, 404, "a file is only read");
+  // A VENDORED FILE AT A PINNED VERSION is kept by the browser (its bytes are that release's for good); everything
+  // else, the vendor folder's README included, is read again at every load
+  const { PAGE_ROUTES } = await import("../src/cli/run-server.ts");
+  const pinned = Object.keys(PAGE_ROUTES).filter((p) => p.startsWith("/vendor/") && p !== "/vendor/README.md");
+  assert.ok(pinned.includes("/vendor/uplot-1.6.32/uPlot.esm.js") && pinned.includes("/vendor/geist-1.7.2/Geist-Variable.woff2"), pinned.join(", "));
+  for (const p of pinned) {
+    const r = await call("GET", p);
+    assert.equal(r.status, 200, p);
+    assert.equal(r.headers["cache-control"], "private, max-age=31536000, immutable", p);
+    assert.match(String(r.headers["content-security-policy"]), /^default-src 'self';/, `${p}: the security headers still`);
+  }
+  assert.equal((await call("GET", "/vendor/README.md")).headers["cache-control"], "no-store", "the vendor folder's README is no pinned release");
 });
 
 test("mason serve's run serves no page: / is the 404 it was, and the users are still the commands'", async () => {
