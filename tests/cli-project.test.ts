@@ -385,7 +385,7 @@ test("a bare mason init reads MASON_DATABASE_URL first, then DATABASE_URL, and t
     assert.ok(!fs.existsSync(path.join(both, "mason", "sources", "app_dev.yml")), "not the app's database");
     assert.equal(fs.readFileSync(path.join(both, ".env"), "utf8"), envText, "nothing written to .env");
     assert.match(b.out, /\n✓ Not checking postgres:\/\/mason:\*\*\*\*@localhost:5432\/analytics \(MASON_DATABASE_URL in \.env\) \(--skip-check\): mason start checks it\n/);
-    assert.match(b.out, /\n✓ Wrote mason\/sources\/analytics\.yml: the database \(url: \$\{MASON_DATABASE_URL\}\) and the tables to copy/);
+    assert.match(b.out, /\n✓ Wrote mason\/sources\/analytics\.yml: the database \(url: \$\{MASON_DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to copy/);
     assert.doesNotMatch(b.out, /to \.env/);
     assert.doesNotMatch(b.out, /secret/);
     // the same as data: the variable read, said where it was found; no .env line
