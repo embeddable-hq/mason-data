@@ -63,8 +63,9 @@ export const DUCKDB_VERSION = version();
  * `autoinstall_known_extensions: false`: NOTHING IS DOWNLOADED WHILE MASON RUNS. DuckDB's default fetches any known
  * extension a statement's function or type needs from its repository on the internet, at that statement: an answer
  * that hangs, or fails, on a box with no egress, and code fetched at run time. JSON, ICU and Parquet are built in; the
- * one extension Mason loads, `postgres`, is installed on purpose (src/duck/sync.ts attach) — in the image at build, on
- * a laptop at its first copy, said when it cannot be — and an installed one still loads by itself. Anything else is
+ * one extension Mason loads, `postgres`, is installed on purpose (src/duck/extension.ts) — in the image at build, from
+ * npm by `mason init` (else at the first copy, src/duck/sync.ts attach), `mason doctor` saying whether it is — and an
+ * installed one still loads by itself. Anything else is
  * DuckDB's "exists in the … extension" error, never a download. tests/duck-wire.test.ts holds it.
  */
 const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", autoinstall_known_extensions: "false" };

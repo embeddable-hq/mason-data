@@ -6,13 +6,19 @@
  * (POST /api/pick, `mason add`). A search box filters by name, and All / Added / Failed / Not added by state
  * (`#tables?show=failed`, where the Overview's card leads). With hundreds of tables the page writes the first
  * TABLE_ROWS that pass and "Show N more" / "Show all" (the search is over all of them, at once); a long name is cut with
- * an ellipsis, its whole the title. Reads `/api/state` every poll and `/api/usage`'s `copySizes` every minute.
+ * an ellipsis, its whole the title. Reads `/api/state` every poll (lean: no table's columns) and `/api/usage`'s
+ * `copySizes` every minute; a table's columns once, when its Columns… or Name its key… form opens
+ * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
 import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, POLL_MS } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
 const SIZES_PATH = "/api/usage?since=1m";
+
+/** Where one table's columns are read, when its form opens (src/cli/run-server.ts tableColumns): never with the state,
+ *  which is polled every 2 s and would carry every table's (3.4 MB at 800 tables of 50 columns). */
+export const columnsPath = (table) => `/api/tables/${encodeURIComponent(table)}/columns`;
 
 /** A table's sync in one word (`/api/state` `tables[].sync.state`, src/cli/readiness.ts `syncStateOf`). */
 const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", failed: "Failed", waiting: "Waiting" };
@@ -114,10 +120,13 @@ const tick = (name, c, on) => `<label class="tick"><input type="checkbox" name="
 
 /** The form that adds a table with the columns ticked (`--columns`) and, for one with no primary key, its key (`--key`).
  *  The ticks live in the document while the person ticks (the tables part is held still meanwhile: the page's `held`);
- *  `ticked`, what a refused submit sent, writes them back when the refusal is said under the form. */
-function pickForm(t, ticked = null) {
+ *  `ticked`, what a refused submit sent, writes them back when the refusal is said under the form. `cols` is what
+ *  `GET /api/tables/<table>/columns` answered for it — { table, columns } or { table, failure } — or null while it is read. */
+function pickForm(t, cols, ticked = null) {
   const name = entryName(t.table);
-  const boxes = (field) => t.columns.map((c) => tick(field, c, ticked?.[field]?.includes(c.name) ?? false)).join("");
+  if (cols?.table !== t.table) return `<p class="dim">Reading ${esc(name)}'s columns…</p>${button("Cancel", { cancelChoose: "" }, "small")}`;
+  if ("failure" in cols) return `${renderFailure(cols.failure)}${button("Cancel", { cancelChoose: "" }, "small")}`;
+  const boxes = (field) => cols.columns.map((c) => tick(field, c, ticked?.[field]?.includes(c.name) ?? false)).join("");
   return `<form class="pick" data-pick-form="${esc(t.table)}" autocomplete="off">` +
     (t.key.length ? "" : `<fieldset><legend>Its key: the columns that tell its rows apart, as ${code(`mason add ${name} --key`)}</legend>${boxes("key")}</fieldset>`) +
     `<fieldset><legend>Its columns, as ${code(`mason add ${name} --columns`)} (none ticked: as ${code(`mason add ${name}`)}, every column)</legend>${boxes("columns")}</fieldset>` +
@@ -146,13 +155,14 @@ export function renderTablesCards(s) {
  * its error as a red line (the whole error in a details, `ui.open(key)` whether it is open), or why it cannot be added as
  * it is (`tableFacts`, as `mason tables` prints it). What can be done: Sync and Remove (asking first, `ui.removing`) for an
  * added table; Add (every column, as `mason add <table>`) and Columns… (the form) for one not added; Name its key… for
- * one with no primary key. `ui.choosing` is the table whose form is open (`ui.ticked` its boxes ticked: { columns, key });
+ * one with no primary key. `ui.choosing` is the table whose form is open (`ui.ticked` its boxes ticked: { columns, key };
+ * `ui.columns` its columns as read when it opened: { table, columns } | { table, failure }, null while read);
  * `ui.outcome` what the last add or remove answered ({ table, added } | { table, removed } | { table, failure }) and
  * `ui.synced` what the last sync did, each under its table; `ui.syncing` the tables whose sync is asked; `ui.filter` the
  * search box's text and `ui.show` the state filter (a key of SHOWS).
  */
 export function renderTables(s, ui = {}) {
-  const { removing = null, choosing = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
+  const { removing = null, choosing = null, columns = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
   const stream = s.stream ? new Map(streamRows(s.stream, ui.now ?? Date.now()).tables) : null;
   const head = [["Table", ""], ["State", ""], ["Rows", "num"], ["Key", ""], ["Last sync", "num"], ["Took", "num"], ["Size", "num"], ...(stream ? [["Stream", ""]] : []), ["Note", ""], ["", ""]];
@@ -189,7 +199,7 @@ export function renderTables(s, ui = {}) {
       `<td>${state}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +
       `${t.added && y?.syncSeconds != null ? cell(tookText(y), "num", tookTitle(y)) : cell("", "num")}${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a copy's size is measured every 10 min")) : cell("", "num")}` +
       `${stream ? cell(t.added ? stream.get(t.table) ?? "" : "", "stream") : ""}<td class="what">${note}</td><td class="act">${act}</td></tr>` +
-      (choosing === t.table && !t.added ? under(pickForm(t, ticked)) : "") + said;
+      (choosing === t.table && !t.added ? under(pickForm(t, columns, ticked)) : "") + said;
   };
   const added = s.tables.filter((t) => t.added).length;
   // a refusal for a table the list does not have (dropped since the run read the catalog): said above the list
@@ -212,7 +222,7 @@ export const page = {
   id: "tables",
   title: "Tables",
   create(ctx) {
-    const m = { removing: null, choosing: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], adding: [], synced: null, limit: TABLE_ROWS };
+    const m = { removing: null, choosing: null, columns: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], adding: [], synced: null, limit: TABLE_ROWS };
     const state = () => ctx.read("/api/state")?.body ?? null;
     const monotone = createMonotone();
     // the details open (a copy's whole error), by key: a poll rewrites the part, and they stay open
@@ -240,12 +250,20 @@ export const page = {
         m.adding = m.adding.filter((x) => x !== table);
         // refused: said under the form, which is written again with the boxes the person had ticked
         if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
-        m.outcome = { table, added: r.body }; m.choosing = null; hold();
+        m.outcome = { table, added: r.body }; m.choosing = null; m.columns = null; hold();
         await ctx.refresh(["/api/state"]);
         return true;
       },
-      choose(table) { m.choosing = table; m.removing = null; m.ticked = null; hold(); },
-      cancelChoose() { m.choosing = null; hold(); },
+      /** Open a table's form: its columns read now, once (the state the page polls carries none). */
+      async choose(table) {
+        m.choosing = table; m.removing = null; m.ticked = null; m.columns = null; hold();
+        const r = await ctx.ask(columnsPath(table));
+        // closed, or another table's opened, while it was read: that answer is not this form's
+        if (m.choosing !== table) return false;
+        m.columns = "failure" in r ? { table, failure: r.failure } : { table, columns: r.body.columns };
+        return true;
+      },
+      cancelChoose() { m.choosing = null; m.columns = null; hold(); },
       askRemoveTable(table) { m.removing = table; m.choosing = null; hold(); },
       cancelRemoveTable() { m.removing = null; hold(); },
       /** Remove a table (`mason remove`), once asked: the answer under its line, then the state read again. */
@@ -296,7 +314,7 @@ export const page = {
         const latest = state();
         return {
           "tables-cards": latest ? renderTablesCards(latest) : "",
-          tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, outcome: m.outcome, ticked: m.ticked, now: ctx.now().getTime(),
+          tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, columns: m.columns, outcome: m.outcome, ticked: m.ticked, now: ctx.now().getTime(),
             filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), synced: m.synced, open: opened.has, limit: m.limit,
             sizes: sizes === undefined ? undefined : sizes.failure ? { failure: sizes.failure } : sizes.body }) : "",
         };
@@ -319,7 +337,7 @@ export const page = {
         if (d.showMore === "tables") return actions.showMoreTables() ?? true;
         if (d.showAll === "tables") return actions.showAllTables() ?? true;
         if (d.addTable !== undefined) return actions.addTable(d.addTable);
-        if (d.choose !== undefined) return actions.choose(d.choose) ?? true;
+        if (d.choose !== undefined) return actions.choose(d.choose);
         if (d.cancelChoose !== undefined) return actions.cancelChoose() ?? true;
         if (d.removeTable !== undefined) return actions.askRemoveTable(d.removeTable) ?? true;
         if (d.cancelRemoveTable !== undefined) return actions.cancelRemoveTable() ?? true;

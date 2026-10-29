@@ -21,6 +21,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { STDIO, endText, failed, jsonText, parseCommand, type CommandSpec, type Io, type NextStep } from "./command.ts";
+import { EXTENSION, extensionWayOut, type ExtensionStatus, type ExtensionWay } from "../duck/extension.ts";
 import { checklist, out as styleOut, PLAIN, StepFailed } from "./style.ts";
 import { checkSource, maskedUrl, parseSource, remoteConfirmation, remoteWarning } from "./preflight.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
@@ -43,6 +44,8 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   The source file says url: \${DATABASE_URL}: the URL itself is in .env (written there when you give it here or it is
   only in the shell), never in a committed file. .mason/ and that .env go into .gitignore. Every other mason command
   then works anywhere in this folder. In a project with no source file (an older Mason's), it writes that file alone.
+  It also installs the copy's postgres extension on this machine while it is online (once a machine): a first copy
+  then needs no internet. Offline, it stops before writing anything and says how to get it.
   mason init demo, in a new folder, makes a project on a demo database Mason hosts itself (a shop: customers, products,
   orders, order_items): mason start makes it in .mason/demo/ and changes it every few seconds. Three of its tables are
   added; the fourth is yours to add after mason start (mason add ${DEMO_TABLE_TO_ADD}), to watch its copy begin.
@@ -60,7 +63,7 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   --json            as data: { name, root, folder, config, demo (true for the demo database's project, else false),
                     source: { name (the source's: its file's), file, url (as the file writes it), env (the .env line
                     written, its value masked, or null) }, database: { url (password masked), from, version, tables },
-                    warnings, next }
+                    extension: { installed, installedNow (downloaded by this init), path, platform }, warnings, next }
 `;
 
 export const INIT: CommandSpec = {
@@ -68,7 +71,7 @@ export const INIT: CommandSpec = {
   summary: "make this folder a Mason project on your Postgres: mason init (DATABASE_URL from .env), mason init postgres://… or demo",
   usage: INIT_USAGE,
   options: { name: { type: "string" }, folder: { type: "string" }, remote: { type: "boolean" }, "skip-check": { type: "boolean" }, json: { type: "boolean" } },
-  json: ["name", "root", "folder", "config", "demo", "source", "database", "warnings", "next"],
+  json: ["name", "root", "folder", "config", "demo", "source", "database", "extension", "warnings", "next"],
 };
 
 /** Why `name` cannot be this project's, or null: not a name the Postgres API's database and the slot take. */
@@ -136,7 +139,7 @@ const addEnvLine = (root: string, line: string): void => appendEnvLine(root, lin
 /** A `.env` line as it is said: its value's password masked. */
 const maskedLine = (line: string): string => { const eq = line.indexOf("="); return `${line.slice(0, eq)}=${maskedUrl(line.slice(eq + 1))}`; };
 
-export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io; version?: string } = {}): Promise<number> {
+export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io; version?: string; extension?: ExtensionWay } = {}): Promise<number> {
   const io = deps.io ?? STDIO;
   const { out: say } = io;
   const f = parseCommand(INIT, argv);
@@ -241,6 +244,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const confirmRemote = (): number => failed("init", remoteConfirmation(parsed.source.host, { cmd: "mason init",
     wayOut: "run the same mason init again with --remote: that says yes, copy from that machine",
     next: [["mason init --remote <url>", "the same command, confirmed"]] }), { json, io });
+  let extension: ExtensionStatus & { installedNow: boolean } | null = null;
   try {
     if (demo) {
       // nothing exists yet: mason start makes the database (src/demo/source.ts) at its first start
@@ -266,6 +270,23 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
       }
       notes.push(...checked.warnings);
       database = { ...database, version: checked.facts.versionText, tables: checked.facts.tables.length };
+    }
+    // THE COPY'S POSTGRES EXTENSION, installed while this machine is online (it was, to install Mason from npm): a first
+    // copy offline would fail for want of it (src/duck/extension.ts). Before anything is written, so an init that cannot
+    // is run again as it was, once online
+    const way = deps.extension ?? EXTENSION;
+    let seen: ExtensionStatus | null = null;
+    try {
+      extension = await steps.step("Installing the copy's postgres extension", async () => {
+        seen = await way.status();
+        return seen.installed ? { ...seen, installedNow: false } : { ...await way.install(), installedNow: true };
+      }, (x) => x.installedNow ? `Installed the copy's postgres extension for ${x.platform}: a first copy needs no internet` : `The copy's postgres extension is installed for ${x.platform}`);
+    } catch (e) {
+      const at: Pick<ExtensionStatus, "path" | "platform"> = seen ?? { path: "", platform: "" };
+      return failed("init", { message: `could not install the copy's postgres extension: ${(e as Error).message.split("\n")[0]}`, code: "failed",
+        why: "Mason copies your database through it, and this machine has not downloaded it yet: without it, a first copy fails",
+        fix: extensionWayOut(at, "run the same mason init again (nothing was written)").join("\n"),
+        next: [["mason doctor", "checks it, with the rest of the machine"]] }, { json, io });
     }
     if (sourceless) await steps.step(`Keeping ${STATE_DIR}/config.json`, () => undefined, () => `Kept ${STATE_DIR}/config.json: the project ${name}, its key and its copy`);
     else {
@@ -329,7 +350,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     say(jsonText(INIT, { name, root, folder: path.relative(root, folder) || ".", config: path.join(root, STATE_DIR, "config.json"), demo,
       source: { name: path.basename(sourceFile).replace(/\.ya?ml$/, ""), file: sourceFile, url: keptFile !== null && !("problems" in keptFile) ? ("env" in keptFile.url ? `\${${keptFile.url.env}}` : maskedUrl(keptFile.url.literal)) : `\${${where.variable}}`,
         env: where.line === null ? null : maskedLine(where.line) },
-      database, warnings: notes }, next));
+      database, extension, warnings: notes }, next));
     return 0;
   }
   for (const n of notes) say(`  ! ${n}`);

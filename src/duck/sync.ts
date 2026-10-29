@@ -64,6 +64,7 @@ import { addCounts, countsText, duckValue, foldInto, noChanges, noCounts, Replic
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import type { SyncEventInput } from "./events.ts";
+import { extensionFailure } from "./extension.ts";
 
 /** how a copied table is kept current: Mason's xmin poll (step 1), a whole copy again (step 0), or the database's
  *  logical replication stream (`mason start --replication`, src/duck/stream.ts) */
@@ -1901,13 +1902,13 @@ export class Sync {
   private async attach(): Promise<void> {
     if (!this.attached) {
       // INSTALL fetches the extension from DuckDB's repository the first time on a machine (then ~/.duckdb/extensions):
-      // the image installs it at build (docker/mason-data.Dockerfile); from npm, an offline first copy fails here saying
-      // so. The ONE fetch Mason makes on purpose: no other extension is ever installed at run time (store.ts INSTANCE_SETTINGS)
+      // the image installs it at build (docker/mason-data.Dockerfile), mason init from npm (src/duck/extension.ts); a
+      // machine without it, offline, fails here naming mason doctor. The ONE fetch Mason makes on purpose: no other
+      // extension is ever installed at run time (store.ts INSTANCE_SETTINGS)
       if (!this.loaded) {
         try { await this.store.writer.run("INSTALL postgres; LOAD postgres;"); }
         catch (e) {
-          throw new Error(`Mason could not load the copy's postgres extension: ${(e as Error).message}. The first copy on a machine downloads it from ` +
-            "the extension repository (then ~/.duckdb/extensions): connect to the internet once, and the copy is tried again at the next pass");
+          throw new Error(extensionFailure((e as Error).message));
         }
         this.loaded = true;
       }

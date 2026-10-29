@@ -179,6 +179,11 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 
 ## The copy
 
+- **The copy's `postgres` extension is on the machine before the first copy, never fetched at a statement**
+  (`src/duck/extension.ts`): the image installs it at build, `mason init` while online (a checklist step, before anything
+  is written, its failure the Failure shape with the way out for an air-gapped machine), and `mason doctor` has a line
+  for it; a copy that cannot load it names `mason doctor`. A first copy on an offline machine from npm otherwise failed
+  with no warning. Detector: tests/cli-project.test.ts, tests/cli-doctor.test.ts (the install stubbed).
 - **Heap order, no index** (`src/duck/sync.ts` `copy`):
   every copy holds its rows in the order the source's scan delivers them, with NO PRIMARY KEY, UNIQUE or index
   (`duckdb_constraints()` empty for it). In key order every time-window query on the test server scanned all 195 M rows (a

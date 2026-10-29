@@ -163,6 +163,14 @@ npm i -g @mason-data/cli            # needs Node 22.13+ and nothing else; `mason
 cd your-app
 ```
 
+**A machine with no internet.** Mason copies your database through DuckDB's `postgres`
+extension, which a machine downloads once: `mason init` installs it (it stops, writing nothing,
+when it cannot), and `mason doctor` says whether this machine has it. An air-gapped machine needs
+one of: the `mason-data` image, which has it; `mason init` run once while online; or
+`~/.duckdb/extensions/<version>/<platform>/postgres_scanner.duckdb_extension` copied from a
+machine of the same platform that has it (`mason doctor` prints the exact path). Nothing else is
+ever downloaded.
+
 ### Try it without a database
 
 `mason init demo`, in a new folder, makes a project whose database Mason hosts itself: a small

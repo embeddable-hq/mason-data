@@ -7,7 +7,8 @@
  * `MASON_REQUEST_LOG_DAYS` days (default 7). `mason status` and `mason logs --requests` read it through the run's command
  * server (src/cli/run-server.ts), never by opening the file: DuckDB allows one process per file.
  *
- * Written as the ClickHouse stack this was cut from wrote its request log: rows wait here for at most FLUSH_MS, or until
+ * Written as the ClickHouse stack this was cut from wrote its request log (src/duck/history.ts, the frame the sync's
+ * events and the usage samples share): rows wait here for at most FLUSH_MS, or until
  * BATCH_ROWS have gathered, and go in ONE INSERT, on a connection of the ledger's own — never the sync's writer turn
  * (`onWriter`), which a copy's swap or a stream batch may hold for seconds; DuckDB's MVCC lets two connections write two
  * tables at once. A read is on a third connection and sees committed batches only. A flush that fails is said once, with
@@ -17,12 +18,21 @@
  * The Postgres catalog never lists `_mason`, so a tool connected to the listener cannot read the ledger.
  */
 import type { DuckDBValue } from "@duckdb/node-api";
-import type { DuckConnection } from "./executor.ts";
 import { outcomeOf, outcomeSql, statusOf, type ApiLogRow, type Outcome, type RequestStatus } from "../api/request-log.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
+import { Batches, History, Streak } from "./history.ts";
 import { GAPS, type GapId } from "./gaps.ts";
 import { quantileContOf } from "./usage.ts";
-import type { RefusedQuery, SlowQuery } from "../cli/run-server.ts";
+
+/** A statement the Postgres API answered slowly in the last day, with how often and how slowly (src/duck/requests.ts slow). */
+export interface SlowQuery {
+  /** where it was asked: `postgres`, an SQL statement on the Postgres API */
+  route: "postgres"; payload: string; runs: number; medianMs: number; maxMs: number; latestMs: number; last: string }
+
+/** A statement the Postgres API refused or failed in the last day: the statement, how often, and the message (which says what to change). */
+export interface RefusedQuery {
+  /** as SlowQuery's: `postgres`, whose code is its SQLSTATE */
+  route: "postgres"; code: string; message: string; runs: number; last: string; payload: string }
 
 export const REQUESTS_TABLE = `${MASON_SCHEMA}.requests`;
 
@@ -30,8 +40,6 @@ export const REQUESTS_TABLE = `${MASON_SCHEMA}.requests`;
 export const DEFAULT_REQUEST_LOG_DAYS = 7;
 const FLUSH_MS = 1000;
 const BATCH_ROWS = 1000;
-/** how often the rows past the retention are deleted (and once at open) */
-const TRIM_EVERY_MS = 60 * 60 * 1000;
 
 /**
  * The days MASON_REQUEST_LOG_DAYS keeps, or why the text is not a number of days. Unset or empty: the default.
@@ -230,46 +238,30 @@ export interface LedgerOptions {
 }
 
 export class RequestLedger {
-  private buffer: Numbered[] = [];
   /** the next row's number (REQUESTS_SEQ_DDL): one past the ledger's last at open, then one per request recorded */
   private next = 0;
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private trimTimer: ReturnType<typeof setInterval> | null = null;
-  /** the flush in flight: one at a time, so batches commit in the order they were taken */
-  private flushing: Promise<void> = Promise.resolve();
   /** rows lost since the last flush that succeeded: said once when the streak begins, and when it ends */
-  private lost = 0;
+  private readonly lost = new Streak();
   private closed = false;
 
-  private readonly writer: DuckConnection;
-  private readonly reader: DuckConnection;
+  private readonly history: History;
+  private readonly batches: Batches<Numbered>;
   private readonly log: (line: string) => void;
   private readonly options: LedgerOptions;
   /** days kept */
   readonly days: number;
 
-  private constructor(writer: DuckConnection, reader: DuckConnection, log: (line: string) => void, options: LedgerOptions) {
-    this.writer = writer; this.reader = reader; this.log = log; this.options = options; this.days = options.days;
+  private constructor(history: History, log: (line: string) => void, options: LedgerOptions) {
+    this.history = history; this.log = log; this.options = options; this.days = options.days;
+    this.batches = new Batches({ rows: BATCH_ROWS, ms: options.flushMs ?? FLUSH_MS, write: (rows) => this.write(rows) });
   }
 
   /** The ledger of a store: its table made, the rows past the retention deleted, and a trim every hour. */
   static async open(store: DuckStore, log: (line: string) => void, options: LedgerOptions): Promise<RequestLedger> {
-    const writer = await store.instance.connect();
-    await writer.run(`CREATE SCHEMA IF NOT EXISTS ${MASON_SCHEMA}`);
-    await writer.run(REQUESTS_DDL);
-    await writer.run(REQUESTS_USER_DDL);
-    await writer.run(REQUESTS_SEQ_DDL);
-    await writer.run(REQUESTS_JSON_DDL);
-    await writer.run(REQUESTS_BYTES_DDL);
-    await writer.run(REQUESTS_GAP_DDL);
-    const reader = await store.instance.connect();
-    const ledger = new RequestLedger(writer, reader, log, options);
-    ledger.next = Number((await reader.runAndReadAll(`SELECT coalesce(max(seq), -1) + 1 FROM ${REQUESTS_TABLE}`)).getRowsJS()[0]![0]);
-    await ledger.trim();
-    ledger.trimTimer = setInterval(() => {
-      ledger.trim().catch((e: unknown) => log(`request log: deleting the requests older than ${ledger.days} days failed: ${(e as Error).message}`));
-    }, TRIM_EVERY_MS);
-    ledger.trimTimer.unref();
+    const history = await History.open(store, [REQUESTS_DDL, REQUESTS_USER_DDL, REQUESTS_SEQ_DDL, REQUESTS_JSON_DDL, REQUESTS_BYTES_DDL, REQUESTS_GAP_DDL]);
+    const ledger = new RequestLedger(history, log, options);
+    ledger.next = Number((await history.reader.runAndReadAll(`SELECT coalesce(max(seq), -1) + 1 FROM ${REQUESTS_TABLE}`)).getRowsJS()[0]![0]);
+    await history.keepTrimmed(() => ledger.trim(), (e) => log(`request log: deleting the requests older than ${ledger.days} days failed: ${e.message}`));
     return ledger;
   }
 
@@ -277,20 +269,11 @@ export class RequestLedger {
   record(row: ApiLogRow): void {
     // the listener closes before the ledger (mason stop), so nothing should arrive after: said if it does, never written
     if (this.closed) { this.log(`request log: a request after the log closed, not recorded (${row.requestId})`); return; }
-    this.buffer.push({ row, seq: this.next++ });
-    if (this.buffer.length >= BATCH_ROWS) { void this.flush(); return; }
-    this.timer ??= setTimeout(() => { void this.flush(); }, this.options.flushMs ?? FLUSH_MS);
+    this.batches.push({ row, seq: this.next++ });
   }
 
   /** Writes what is waiting, after any flush in flight. Resolves whether it was written or not (a failure is said). */
-  flush(): Promise<void> {
-    if (this.timer !== null) { clearTimeout(this.timer); this.timer = null; }
-    const rows = this.buffer;
-    this.buffer = [];
-    if (rows.length === 0) return this.flushing;
-    this.flushing = this.flushing.then(() => this.write(rows));
-    return this.flushing;
-  }
+  flush(): Promise<void> { return this.batches.flush(); }
 
   private async write(rows: Numbered[]): Promise<void> {
     const width = COLUMNS.length;
@@ -299,22 +282,21 @@ export class RequestLedger {
     const values = rows.flatMap(valuesOf);
     try {
       if (this.options.insert !== undefined) await this.options.insert(sql, values);
-      else await this.writer.run(sql, values);
+      else await this.history.writer.run(sql, values);
     } catch (e) {
       // Tolerated, narrowly, as the ClickHouse writer tolerates it: the answers are sent, so there is no statement left
       // to fail, and a ledger that cannot write must not take the listener down. SAID, once per streak with the rows it
       // costs, so a ledger that stopped recording never reads as a quiet listener.
-      if (this.lost === 0) this.log(`request log: could not record ${rows.length} request(s) in ${REQUESTS_TABLE} (${rows[0]!.row.requestId}` +
-        `${rows.length > 1 ? ` … ${rows[rows.length - 1]!.row.requestId}` : ""}): ${(e as Error).message}; said once until a write succeeds`);
-      this.lost += rows.length;
+      this.lost.failed(rows.length, () => this.log(`request log: could not record ${rows.length} request(s) in ${REQUESTS_TABLE} (${rows[0]!.row.requestId}` +
+        `${rows.length > 1 ? ` … ${rows[rows.length - 1]!.row.requestId}` : ""}): ${(e as Error).message}; said once until a write succeeds`));
       return;
     }
-    if (this.lost > 0) { this.log(`request log: recording again; ${this.lost} request(s) were not recorded`); this.lost = 0; }
+    this.lost.succeeded((n) => this.log(`request log: recording again; ${n} request(s) were not recorded`));
   }
 
   /** Deletes the requests older than the retention; the count is said when there were any. */
   async trim(): Promise<number> {
-    const r = await this.writer.runAndReadAll(`DELETE FROM ${REQUESTS_TABLE} WHERE started_at < now() - INTERVAL (${this.days}) DAY`);
+    const r = await this.history.writer.runAndReadAll(`DELETE FROM ${REQUESTS_TABLE} WHERE started_at < now() - INTERVAL (${this.days}) DAY`);
     const n = Number(r.getRowsJS()[0]?.[0] ?? 0);
     if (n > 0) this.log(`request log: deleted ${n} request(s) older than ${this.days} days (MASON_REQUEST_LOG_DAYS)`);
     return n;
@@ -363,7 +345,7 @@ export class RequestLedger {
       where.push(`(started_at < ${at} OR (started_at = ${at} AND coalesce(seq, -1) < ${arg(q.before.seq)}))`);
     }
     const limit = arg(q.limit);
-    const rows = (await this.reader.runAndReadAll(`SELECT * FROM (SELECT * FROM ${REQUESTS_TABLE}${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ` +
+    const rows = (await this.history.reader.runAndReadAll(`SELECT * FROM (SELECT * FROM ${REQUESTS_TABLE}${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ` +
       `ORDER BY started_at DESC, coalesce(seq, -1) DESC LIMIT ${limit}) ORDER BY started_at, coalesce(seq, -1)`, values)).getRowObjectsJson();
     return rows as Array<Record<string, unknown>>;
   }
@@ -383,7 +365,7 @@ export class RequestLedger {
    * (docs/OBSERVABILITY.md "Architecture review").
    */
   async summary(): Promise<QuerySummary> {
-    const groups = (await this.reader.runAndReadAll(`SELECT started_at > now() - INTERVAL 1 DAY AS in_day, sqlstate, ` +
+    const groups = (await this.history.reader.runAndReadAll(`SELECT started_at > now() - INTERVAL 1 DAY AS in_day, sqlstate, ` +
       `CASE WHEN ${outcomeSql("sqlstate")} = 'ok' THEN duration_ms END AS ms, count(*) AS n, sum(duration_ms) AS duration, ` +
       `coalesce(sum("rows"), 0) AS sent_rows, coalesce(sum(bytes_sent), 0) AS sent_bytes ` +
       `FROM ${REQUESTS_TABLE} WHERE started_at > now() - INTERVAL 7 DAY AND method <> 'CONNECT' GROUP BY ALL`)).getRowObjectsJson() as Array<Record<string, unknown>>;
@@ -415,7 +397,7 @@ export class RequestLedger {
    */
   async slow(slowMs: number, limit = 5): Promise<SlowQuery[]> {
     const day = `sqlstate IS NULL AND started_at > now() - INTERVAL 1 DAY AND query <> '' AND NOT query_truncated`;
-    const rows = (await this.reader.runAndReadAll(`SELECT query, count(*) AS runs, CAST(quantile_disc(duration_ms, 0.5) AS INTEGER) AS median_ms, ` +
+    const rows = (await this.history.reader.runAndReadAll(`SELECT query, count(*) AS runs, CAST(quantile_disc(duration_ms, 0.5) AS INTEGER) AS median_ms, ` +
       `max(duration_ms) AS max_ms, arg_max(duration_ms, started_at) AS latest_ms, max(started_at) AS last FROM ${REQUESTS_TABLE} ` +
       `WHERE ${day} AND query IN (SELECT query FROM ${REQUESTS_TABLE} WHERE ${day} AND duration_ms >= $1) ` +
       `GROUP BY query HAVING arg_max(duration_ms, started_at) >= $1 ORDER BY latest_ms DESC LIMIT $2`, [slowMs, limit])).getRowObjectsJson();
@@ -429,9 +411,9 @@ export class RequestLedger {
    */
   async refused(limit = 8): Promise<{ refused: RefusedQuery[]; total: number }> {
     const day = `sqlstate IS NOT NULL AND started_at > now() - INTERVAL 1 DAY`;
-    const rows = (await this.reader.runAndReadAll(`SELECT query, count(*) AS runs, max(started_at) AS last, arg_max(sqlstate, started_at) AS code, arg_max(message, started_at) AS message ` +
+    const rows = (await this.history.reader.runAndReadAll(`SELECT query, count(*) AS runs, max(started_at) AS last, arg_max(sqlstate, started_at) AS code, arg_max(message, started_at) AS message ` +
       `FROM ${REQUESTS_TABLE} WHERE ${day} GROUP BY query ORDER BY last DESC LIMIT $1`, [limit])).getRowObjectsJson();
-    const total = Number((await this.reader.runAndReadAll(`SELECT count(*) FROM ${REQUESTS_TABLE} WHERE ${day}`)).getRowsJS()[0]?.[0] ?? 0);
+    const total = Number((await this.history.reader.runAndReadAll(`SELECT count(*) FROM ${REQUESTS_TABLE} WHERE ${day}`)).getRowsJS()[0]?.[0] ?? 0);
     return { total, refused: rows.map((r) => ({ route: "postgres", payload: String(r.query), runs: Number(r.runs), last: new Date(String(r.last)).toISOString(),
       code: String(r.code), message: String(r.message ?? "") })) };
   }
@@ -443,7 +425,7 @@ export class RequestLedger {
    * refused for any other reason (a missing table, a syntax error) has no entry, so it is not here. Committed rows only.
    */
   async unsupported(q: { since: string; limit: number }): Promise<UnsupportedSql[]> {
-    const rows = (await this.reader.runAndReadAll(`SELECT gap, count(*) AS runs, ` +
+    const rows = (await this.history.reader.runAndReadAll(`SELECT gap, count(*) AS runs, ` +
       `coalesce(list_sort(list(DISTINCT user_name) FILTER (WHERE user_name <> '')), []) AS users, ` +
       `coalesce(list_sort(list(DISTINCT application_name) FILTER (WHERE application_name <> '')), []) AS clients, ` +
       `max(started_at) AS last, arg_max(query, started_at) AS example ` +
@@ -460,11 +442,10 @@ export class RequestLedger {
 
   /** Writes what is waiting and closes the ledger's connections (mason stop). */
   async close(): Promise<void> {
-    if (this.trimTimer !== null) { clearInterval(this.trimTimer); this.trimTimer = null; }
+    this.history.stopTrimming();
     await this.flush();
     this.closed = true;
-    this.writer.closeSync();
-    this.reader.closeSync();
+    this.history.closeConnections();
   }
 
   /**
@@ -482,7 +463,7 @@ export class RequestLedger {
     const params: DuckDBValue[] = [];
     const at = (v: string | number | null): string => { params.push(v); return `$${params.length}`; };
     const windows = users.map((u, i) => `(${at(i)}::INTEGER, ${at(u.name)}::VARCHAR, ${at(u.since)}::TIMESTAMPTZ, ${at(u.until)}::TIMESTAMPTZ)`).join(", ");
-    const found = (await this.reader.runAndReadAll(`SELECT u.i, epoch_ms(max(r.started_at)) AS at FROM (VALUES ${windows}) AS u(i, name, since, until) ` +
+    const found = (await this.history.reader.runAndReadAll(`SELECT u.i, epoch_ms(max(r.started_at)) AS at FROM (VALUES ${windows}) AS u(i, name, since, until) ` +
       `JOIN ${REQUESTS_TABLE} r ON r.user_name = u.name AND r.started_at >= u.since AND (u.until IS NULL OR r.started_at <= u.until) ` +
       `WHERE r.sqlstate IS NULL OR r.sqlstate NOT IN ('28P01', '57P03', '28000') GROUP BY u.i`, params)).getRowsJS();
     const row = new Map(found.map(([i, ms]) => [Number(i), ms]));

@@ -24,6 +24,10 @@ const QUERIES_EVERY_MS = 30_000;
 const unsupportedPath = (range = DEFAULT_RANGE) => `/api/unsupported?since=${RANGES[rangeOf(range)].since}`;
 const UNSUPPORTED_EVERY_MS = 60_000;
 const NEWEST_EVERY_MS = 5000;
+/** The newest page while a search is set: a search reads every statement's text of the range (7 days of a busy log,
+ *  ~0.6 s a read), so it is read every 30 s, not 5 — said under the log (SEARCH_NOTE). */
+const SEARCH_EVERY_MS = 30_000;
+export const SEARCH_NOTE = `Refreshed every ${SEARCH_EVERY_MS / 1000} s while searching: a search reads the text of every statement in the range.`;
 /** Who is connected: the clients with the most sessions open, this many; the rest in one row. */
 const SESSIONS_TOP = 10;
 /** The most of a statement (or an error) an expanded row writes, in characters. */
@@ -270,9 +274,9 @@ export const page = {
     };
     return {
       model: m,
-      // the running statements every poll; the newest page of the log every 5 s, an older one only when first asked
-      // (and who is connected, from the state, every 5 s; the last day's summary for the cards every 30 s)
-      reads: () => [{ path: RUNNING, everyMs: POLL_MS }, { path: path(), everyMs: m.before === null ? NEWEST_EVERY_MS : Infinity }, { path: STATE, everyMs: NEWEST_EVERY_MS },
+      // the running statements every poll; the newest page of the log every 5 s (30 s while a search is set), an older
+      // one only when first asked (and who is connected, from the state, every 5 s; the last day's summary every 30 s)
+      reads: () => [{ path: RUNNING, everyMs: POLL_MS }, { path: path(), everyMs: m.before !== null ? Infinity : m.filters.search ? SEARCH_EVERY_MS : NEWEST_EVERY_MS }, { path: STATE, everyMs: NEWEST_EVERY_MS },
         { path: QUERIES, everyMs: QUERIES_EVERY_MS }, { path: unsupportedPath(ctx.range()), everyMs: UNSUPPORTED_EVERY_MS }],
       afterRead() {
         // a statement that ended since it was asked about has nothing left to cancel
@@ -291,7 +295,8 @@ export const page = {
           "running-now": running ? renderRunning(running.running, m.asking, m.outcome) : "",
           unsupported: readPart(ctx, unsupportedPath(ctx.range()), (b) => renderUnsupported(b, (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span), true),
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
-            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(ctx.read(STATE)?.body?.postgres, { first: true, table: ctx.read(STATE)?.body?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) }) : ""),
+            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(ctx.read(STATE)?.body?.postgres, { first: true, table: ctx.read(STATE)?.body?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) }) : "") +
+            (log?.body && m.filters.search && m.before === null ? `<p class="dim refresh-note">${esc(SEARCH_NOTE)}</p>` : ""),
         };
       },
       toggle: (target) => opened.toggle(target),

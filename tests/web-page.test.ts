@@ -16,7 +16,7 @@ import { runState, type RunContext } from "../src/cli/run-server.ts";
 import * as pgUrl from "../src/cli/pg-url.ts";
 const { psqlLine } = pgUrl;
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
-import { parseSourceText } from "../src/cli/sources.ts";
+import { catalogTable, parseSourceText } from "../src/cli/sources.ts";
 import type { CopyProgressView, CopyState } from "../src/duck/sync.ts";
 import type { RunState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
@@ -39,7 +39,7 @@ interface App {
   model: Record<string, unknown>;
   show(page: string, env?: unknown): void; poll(): Promise<void>; addUser(name: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
   confirmRemove(name: string): Promise<boolean>; dismissAdded(): void; view(): Record<string, string>;
-  addTable(table: string, columns?: string[], key?: string[]): Promise<boolean>; choose(table: string): void; cancelChoose(): void;
+  addTable(table: string, columns?: string[], key?: string[]): Promise<boolean>; choose(table: string): Promise<boolean>; cancelChoose(): void;
   askRemoveTable(table: string): void; cancelRemoveTable(): void; confirmRemoveTable(table: string): Promise<boolean>; dismissOutcome(): void;
 }
 
@@ -102,6 +102,8 @@ const withAccounts = parseSourceText("kind: postgres\nurl: x\ntables:\n  custome
 assert.ok(!("problems" in withAccounts));
 const ACCOUNTS_ADDED = stateOf(THREE_COPIED(), { tables: CATALOG, sources: withAccounts });
 const FILE = "/app/mason/sources/shop.yml";
+/** `GET /api/tables/<table>/columns`'s answer for a table of CATALOG (src/cli/run-server.ts tableColumns): what its form ticks. */
+const columnsOf = (name: string) => ({ table: name, columns: catalogTable(CATALOG.find((t) => t.source === name)!, undefined).columns });
 /** `/api/pick`'s answers (src/cli/run-server.ts PickResult): every column with a secret left out, a --columns list
  *  the key was added to, a table with no primary key added by --key, one the file named so already. */
 const PICKED = {
@@ -278,7 +280,7 @@ test("no table added: the commands' sentence, and what adds one", () => {
 });
 
 test("the tables: each of the database's, added, not added or cannot be added with its reason and no Add; Remove asks first", () => {
-  type Ui = { removing?: string | null; choosing?: string | null; outcome?: unknown };
+  type Ui = { removing?: string | null; choosing?: string | null; columns?: unknown; outcome?: unknown };
   const renderTables = fn<[unknown, Ui?], string>("renderTables");
   const html = renderTables(CATALOG_STATE);
   const text = textOf(html);
@@ -305,13 +307,14 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.match(asking, /data-confirm-remove-table="public\.customers"/);
   assert.ok(!/data-confirm-remove-table="public\.orders"/.test(asking), "only the one asked");
   // the form: a table with no primary key ticks its key and its columns, one with a key its columns only
-  const keyForm = renderTables(CATALOG_STATE, { choosing: "public.event_log" });
+  assert.match(textOf(renderTables(CATALOG_STATE, { choosing: "public.event_log" })), /public\.event_log .* Reading event_log's columns… Cancel public\.staging/, "the form waits for its columns, read when it opens");
+  const keyForm = renderTables(CATALOG_STATE, { choosing: "public.event_log", columns: columnsOf("public.event_log") });
   assert.match(keyForm, /<form class="pick" data-pick-form="public\.event_log"/);
   assert.match(keyForm, /<button type="submit" class="primary small">Add event_log<\/button>/);
   assert.match(textOf(keyForm), /Its key: the columns that tell its rows apart, as mason add event_log --key tenant_id bigint id bigint payload jsonb Its columns, as mason add event_log --columns \(none ticked: as mason add event_log ?, every column\) tenant_id bigint id bigint payload jsonb Add event_log Cancel/);
   assert.deepEqual([...keyForm.matchAll(/name="(key|columns)" value="([^"]*)"/g)].map((m) => `${m[1]}=${m[2]}`),
     ["key=tenant_id", "key=id", "key=payload", "columns=tenant_id", "columns=id", "columns=payload"]);
-  const columnsForm = renderTables(CATALOG_STATE, { choosing: "public.accounts" });
+  const columnsForm = renderTables(CATALOG_STATE, { choosing: "public.accounts", columns: columnsOf("public.accounts") });
   assert.ok(!/name="key"/.test(columnsForm) && !/Its key/.test(columnsForm), "a table with a primary key is copied by it: no key to name");
   assert.deepEqual([...columnsForm.matchAll(/name="columns" value="([^"]*)"/g)].map((m) => m[1]), ["id", "email", "password_hash"]);
   assert.ok(!/pattern=|required/.test(keyForm + columnsForm), "the server judges what is sent, never the page");
@@ -414,6 +417,7 @@ function fakeRun(): { fetch: (p: string, init?: { method?: string; body?: string
   answers.set("GET /api/requests?since=24h", json({ requests: [], keptDays: 7, before: null }));
   for (const p of ["limit=100", "since=1h", "since=24h", "since=7d"]) answers.set(`GET /api/unsupported?${p}`, json({ since: "2026-10-26T09:05:00.000Z", unsupported: [], keptDays: 7 }));
   answers.set("GET /api/users?lastUsed=1", json({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true }] }));
+  for (const t of ["public.audit", "public.accounts", "public.event_log"]) answers.set(`GET /api/tables/${encodeURIComponent(t)}/columns`, json(columnsOf(t)));
   return {
     asked, answers,
     fetch: async (p, init) => {
@@ -530,8 +534,10 @@ test("the app: the form sends the columns ticked as columns and the key's as key
   const app = fn<[unknown], App>("createApp")(run.fetch);
   run.answers.set("POST /api/pick", answer({ ...PICKED.keyed, state: COPYING }));
   assert.deepEqual(fn<[string, string[]?, string[]?], unknown>("pickBody")("public.audit", [], []), { table: "public.audit", picked: true });
-  app.choose("public.event_log");
+  assert.equal(await app.choose("public.event_log"), true);
   assert.equal(app.model.choosing, "public.event_log");
+  assert.deepEqual(run.asked, ["GET /api/tables/public.event_log/columns"], "its columns read once, as the form opens: the state the page polls has none");
+  run.asked.length = 0;
   assert.equal(await app.addTable("public.event_log", ["payload"], ["tenant_id", "id"]), true);
   assert.equal(run.asked[0], `POST /api/pick ${JSON.stringify({ table: "public.event_log", picked: true, columns: ["payload"], key: ["tenant_id", "id"] })}`);
   assert.equal(app.model.choosing, null, "added: the form closes");
@@ -547,7 +553,7 @@ test("the app: a refusal to add renders the server's Failure under its table, in
   await app.poll();
   const message = "public.event_log cannot be added: no primary key: name the columns that tell its rows apart, mason add event_log --key tenant_id,id (its unique index event_log_tenant_id_id_key)";
   run.answers.set("POST /api/pick", answer({ error: message, failure: { code: "refused", message, next: [] } }, 409));
-  app.choose("public.event_log");
+  await app.choose("public.event_log");
   run.asked.length = 0;
   assert.equal(await app.addTable("public.event_log"), false);
   assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.event_log", picked: true })}`], "nothing read again: nothing changed");
@@ -1120,7 +1126,7 @@ test("Tables: the search box and the state filter narrow the one list, their tex
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
   assert.match(textOf(renderTables(CATALOG_STATE, { filter: "ORD" })), /^1 with “ORD” in the name Table State Rows Key Last sync Took Size Note public\.orders Synced 2,000,000 key id — Sync Remove /);
   assert.equal(renderTables(CATALOG_STATE, { filter: "" }), renderTables(CATALOG_STATE), "nothing typed: every table, as before");
-  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit" })), /^1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… Its columns/, "the table whose form is open stays");
+  assert.match(textOf(renderTables(CATALOG_STATE, { filter: "zzz", choosing: "public.audit", columns: columnsOf("public.audit") })), /^1 with “zzz” in the name .* public\.audit Not added ~50 rows key id Add Columns… Its columns/, "the table whose form is open stays");
   assert.match(textOf(renderTables(SYNCED, { filter: "nope" })), /No table's name has “nope”\./);
   // All / Added / Not added
   const names = (html: string) => [...html.matchAll(/<th scope="row"><code class="name" title="[^"]*">([^<]*)<\/code>/g)].map((m) => m[1]);
@@ -1331,6 +1337,27 @@ test("the app: the newest page is read every 5 s; Older reads the page before wi
   assert.match(textOf(app.view()["request-log"]!), /r-new .* Older$/);
   t += 5000;
   assert.deepEqual(await asked(), ["GET /api/running", "GET /api/requests?since=24h", "GET /api/state"], "the newest page is polled again");
+});
+
+test("the app: a search is read every 30 s, not 5 (it reads every statement's text of the range), and the log says so; cleared, every 5 s again", async () => {
+  const run = fakeRun();
+  let t = Date.UTC(2026, 9, 28, 9, 0, 0);
+  const page = { requests: [REQUESTS[1]], keptDays: 7, before: null };
+  run.answers.set("GET /api/requests?since=24h&search=orders", answer(page));
+  run.answers.set("GET /api/requests?since=24h", answer(page));
+  const app = fn<[unknown, () => Date], QueriesApp>("createApp")(run.fetch, () => new Date(t));
+  app.show("queries");
+  await app.poll();
+  await app.filterRequests({ search: "orders" });
+  const searches = async () => { run.asked.length = 0; await app.poll(); return run.asked.filter((a) => a.startsWith("GET /api/requests")); };
+  assert.match(textOf(app.view()["request-log"]!), /Refreshed every 30 s while searching: a search reads the text of every statement in the range\.$/);
+  for (const step of [5000, 5000, 5000, 5000, 5000]) { t += step; assert.deepEqual(await searches(), [], "not read again within 30 s"); }
+  t += 5000;
+  assert.deepEqual(await searches(), ["GET /api/requests?since=24h&search=orders"], "read again after 30 s");
+  await app.filterRequests({});
+  assert.doesNotMatch(app.view()["request-log"]!, /Refreshed every/);
+  t += 5000;
+  assert.deepEqual(await searches(), ["GET /api/requests?since=24h"], "no search: the newest page every 5 s");
 });
 
 test("the app: a filter the server refuses renders its Failure, not a table: the page validates nothing", async () => {
@@ -2778,4 +2805,29 @@ test("Tables: an added copy not measured yet says so (—, with why in its title
   assert.ok(!/\b0 B\b/.test(textOf(html)), "no 0 B");
   // a measure that is 0 (a file from an earlier run stored one) is not shown as a size either: the server skips it, the page never says 0 B for a copy
   assert.ok(!/\b0 B\b/.test(textOf(fn<[unknown, unknown?], string>("renderTables")(SYNCED, { sizes: { copySizes: [] } }))));
+});
+
+test("Tables: the state the page polls carries no table's columns; a form reads its table's once as it opens, a refusal said in the form, a late answer for a form closed dropped", async () => {
+  assert.ok(CATALOG_STATE.tables.every((t) => !("columns" in t)), "the state, as the run answers it to the page, is lean");
+  const columnsPath = fn<[string], string>("columnsPath");
+  assert.equal(columnsPath("public.Odd/name"), "/api/tables/public.Odd%2Fname/columns", "a name is one segment of the path");
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(CATALOG_STATE));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("tables");
+  await app.poll();
+  run.asked.length = 0;
+  await app.poll();
+  assert.ok(!run.asked.some((a) => a.includes("/columns")), "a poll reads no columns");
+  const message = 'the database has no table "public.audit" this user can read';
+  run.answers.set("GET /api/tables/public.audit/columns", answer({ error: message, failure: { code: "not_found", message, next: [] } }, 404));
+  assert.equal(await app.choose("public.audit"), true);
+  assert.match(textOf(app.view().tables!), /public\.audit Not added ~50 rows key id Add Columns… ✗ the database has no table "public\.audit" this user can read Cancel/);
+  // closed before its columns came: the answer is not written into another table's form
+  const opening = app.choose("public.accounts");
+  app.cancelChoose();
+  assert.equal(await opening, false);
+  assert.ok(!/data-pick-form|Reading/.test(app.view().tables!), "no form, nothing being read");
+  await app.choose("public.accounts");
+  assert.deepEqual([...app.view().tables!.matchAll(/name="columns" value="([^"]*)"/g)].map((m) => m[1]), ["id", "email", "password_hash"]);
 });

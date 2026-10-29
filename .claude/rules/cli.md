@@ -106,7 +106,7 @@ CLI lacks).
 - **Up means it answers** (what a reboot does to a run): a run is up only when its command server answers
   `/api/ping` with the run's token and its own pid (`answers`, src/cli/runs.ts); a pid in the config that is alive is
   not proof — after a reboot the number belongs to someone else.
-- **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state`, `/api/slow`,
+- **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state?columns=1` (the page polls it lean), `/api/slow`,
   `/api/refused`, `/api/unsupported`, `/api/requests`, `/api/queries`, `/api/running`, `/api/events`, `/api/usage`, `/api/logs`, `/api/users`, `POST /api/pick|remove|sync|cancel`), with the run's token as `Authorization:
   Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
   Under `mason start` it serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), whose users are
@@ -114,7 +114,7 @@ CLI lacks).
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
   worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint
-  (`/api/queries`, one scan of the ledger), never part of `/api/state`, which the page asks every 2 s. `mason cancel`
+  (`/api/queries`, one scan of the ledger, shared for 30 s: `SUMMARY_TTL_MS`), never part of `/api/state`, which the page asks every 2 s. `mason cancel`
   cancels through the listener's one path, the CancelRequest's (`interrupt`, src/api/postgres/server.ts); what it
   names is the statement `mason logs --running` listed (`--statement`, `RunningStatement.statement`), refused 409 when
   the session runs another by then — a session's number alone is whatever it runs at the moment. **A time is read by ONE

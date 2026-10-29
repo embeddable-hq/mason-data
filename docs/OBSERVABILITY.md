@@ -11,8 +11,9 @@ same JSON; the web page and the managed service read those endpoints, never a se
 
 | Endpoint | Command | What |
 |---|---|---|
-| `GET /api/state` | `mason status`, `mason tables`, `mason wait` | each copy's rows, state and last sync (`tables[].sync`), the totals, the readiness |
-| `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent |
+| `GET /api/state` | `mason status`, `mason wait` (with `?columns=1`) | each copy's rows, state and last sync (`tables[].sync`), the totals, the readiness; each table's columns only with `?columns=1` |
+| `GET /api/tables/<table>/columns` | `mason tables <table>` `columns` | one table's columns (`{ table, columns }`): the Tables page's form reads it as it opens |
+| `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent; read at most once every 30 s, so up to 30 s old |
 | `GET /api/slow`, `GET /api/refused` | `mason status` | the slow statements; the refused and failed ones, each distinct one once |
 | `GET /api/unsupported?since=&limit=` | `mason status` `unsupported` | the refused statements grouped by the registry entry (docs/SQL-SUPPORT.md) that refused them: `[{ gap, title, runs, users, clients, last, example }]`, the most refused first; a day and 10 entries by default |
 | `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&slow=&search=&before=` | `mason logs --requests` | the request log, filtered and paged; `slow=1` (`--slow`) the ones that took `SLOW_MS` (1 s) or more, `search` (`--search`) a piece of the statement's text, any case |
@@ -82,7 +83,8 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   copy's own size, in replication mode its stream state, its error, **Sync** (`POST /api/sync`) and Remove; one not added
   its rows and key and why it cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
-  (2 s), `/api/usage` `copySizes` (60 s).
+  (2 s, lean: no table's columns), `/api/usage` `copySizes` (60 s), and a table's columns once as its form opens
+  (`/api/tables/<table>/columns`).
 - **Users** (`#users`): today's add form and Remove, and each user's status (Active / Removed), when it was added, its
   last use, and its URL without the password (**Copy**). Reads `/api/users?lastUsed=1` (on opening, then 30 s).
 - **Observability › Queries** (`#observability/queries`): who is connected now (`sessions` of `/api/state`: the 10
@@ -93,7 +95,8 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   (1 s or more), the statement's text, time (the range unless Since says), user and client, paged by **Older**, its page
   sorted by Started, Duration or Rows. Rows scanned is not a column: decide later, it may add cost to every statement.
   The unsupported SQL of the range, grouped by its entry of docs/SQL-SUPPORT.md (`/api/unsupported?since=`, 60 s), in
-  `mason status`'s lines. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, never on an older one),
+  `mason status`'s lines. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, 30 s while a search
+  is set — said under the log — never on an older one),
   `/api/state` (5 s).
 - **Observability › Usage** (`#observability/usage`): the statements of the range's window of `/api/queries` (the week
   for 7 days, else the day), the range's samples (`/api/usage?since=<range>&step=<60|3600|21600>`, newest first, the
@@ -282,20 +285,33 @@ parsed in 1 ms, and polled every 2 s by the Overview and Tables.
 
 **Nothing is fetched at run time**: no URL in src/ is fetched but DuckDB's extension repository; JSON, ICU and Parquet
 are built into DuckDB; the `postgres` extension is installed by the image at build, and DuckDB's autoinstall of any
-other extension is off (src/duck/store.ts). From npm, the first copy on a machine downloads it.
+other extension is off (src/duck/store.ts). From npm, `mason init` downloads it (else the first copy on a machine).
 
 **Left, most worth it first**:
 
-1. `/api/state` carries every catalog table's columns, polled every 2 s: ~0.6 MB at 800 narrow tables, ~4 MB at 800
-   tables of 50 columns. A `?columns=0` for the Overview, or the columns only on Tables' Columns… dialog.
-2. From npm, an offline machine's first copy fails (the extension download); `mason doctor` could say whether it is
-   installed, and `mason init` fetch it while online. Shipping it in the npm package is ~45 MB a platform.
-3. Queries' `search` over 7 days is ~0.6 s every 5 s while it is shown: poll a search less often, or only on asking.
-4. The summary is still a 7-day scan per ask (0.15 s): cache it for the 30 s the Overview waits, or derive the week
-   from the minute samples (whose p95s do not merge exactly).
-5. The three history tables (requests, sync events, usage) each repeat the same frame — two connections, the hourly
-   trim, a failure said once per streak, the close: one module for it. `src/duck/events.ts` adds a third type import
-   from src/cli/ (as requests.ts and sync.ts do): the shapes belong in src/duck/.
+1. **Done**: `/api/state` carried every catalog table's columns, polled every 2 s. It is lean now: 800 tables of 5
+   columns 465 KB → **134 KB**, of 50 columns 3,414 KB → **134 KB** (built and serialised 4.6 → 1.2 ms); a form's
+   columns are `GET /api/tables/<table>/columns`, read once as Columns… or Name its key… opens, and `?columns=1` keeps
+   them for `mason status --json` (its shape unchanged).
+2. **Done**: from npm, an offline machine's first copy failed (the extension download), said only then. Now `mason
+   init` (and `init demo`) installs it as a checklist step before anything is written — 6–47 ms when it is there, 0.7 s
+   to download (44 MB, osx_arm64) on a fresh home — and, offline, fails in the Failure shape with the way out, writing
+   nothing; `mason doctor` has an `extension` line (read in 6–13 ms, never a download); a copy that cannot load it names
+   `mason doctor`. An air-gapped machine needs the image, `mason init` run once online, or the file copied from a
+   machine of its platform (README "How you use it"). Shipping it in the npm package (~45 MB a platform) was not done.
+3. **Done**: Queries' `search` over 7 days was ~0.6 s every 5 s while shown (12 scans, ~7.2 s of a core a minute); a
+   search is read every 30 s now (2, ~1.2 s a minute), and the log says "Refreshed every 30 s while searching".
+4. **Done**: the summary was a 7-day scan per ask (146–162 ms at 30 M rows), for each page and `mason status` that
+   asked. It is one read shared for 30 s now (`SUMMARY_TTL_MS`, src/cli/run-server.ts `timedCache`, by time only;
+   asks at once share the read in flight, a failed read is not kept): at most one scan every 30 s, whoever asks, so
+   **the summary is up to 30 s old** — on the Overview, Usage, Queries' cards and `mason status`.
+5. **Done**: the three history tables (requests, sync events, usage) each repeated the same frame — two connections,
+   batched writes, the hourly trim, a failure said once per streak, the close. It is one module now,
+   `src/duck/history.ts` (`History`, `Batches`, `Streak`), behaviour and the tables' tests unchanged: the three went
+   from 1,151 lines to 1,099 (the frame's 99, its account included, said once). The shapes `src/duck/` imported
+   from `src/cli/` live in `src/duck/` (`Restart` in events.ts, `SlowQuery` / `RefusedQuery` in requests.ts, re-exported
+   where the commands import them); `src/duck/sync.ts`'s import of the source's shapes from `src/cli/preflight.ts`,
+   older than this review, is left.
 
 ## Decided
 

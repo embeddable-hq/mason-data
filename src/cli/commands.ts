@@ -48,7 +48,10 @@ const err = (m: string): void => { process.stderr.write(`${m}\n`); };
 export type ColumnState = CatalogColumn;
 /** A table as the run's state says it: the catalog's and the sources file's facts (sources.ts catalogTable, what mason
  *  tables reads without the run), and its copy (src/cli/run-server.ts runState) */
-export interface TableState extends CatalogTable {
+export interface TableState extends Omit<CatalogTable, "columns"> {
+  /** its columns: only in the state asked with `?columns=1` (readState; mason status --json carries them), never in
+   *  the lean one the page polls (src/cli/run-server.ts runState) */
+  columns?: ColumnState[];
   copy: { phase: "copying" | "done" | "failed"; rowsCopied: number; updatedAt: string;
     /** while its chunks are read: the chunks done and reading, the measured rate, the time left, as of the moment the
      *  state was asked (src/duck/sync.ts copyProgressNow) */
@@ -117,8 +120,9 @@ async function runOr(spec: CommandSpec & { needs: "run" }, json: boolean): Promi
   return w !== null && "run" in w ? w.run : null;
 }
 
+/** The run's state with each table's columns (`?columns=1`: `mason status --json` carries them; the page polls it lean). */
 export async function readState(run: DevRun): Promise<RunState> {
-  const r = await callRun(run, "GET", "/api/state");
+  const r = await callRun(run, "GET", "/api/state?columns=1");
   if (r.status !== 200) throw new RunUnreachable(String(r.body.error ?? `HTTP ${r.status}`));
   return r.body as unknown as RunState;
 }
@@ -138,7 +142,7 @@ const bullets = (xs: readonly string[]): string => xs.map((x) => `  - ${x.split(
 const firstLine = (s: string): string => s.split("\n")[0]!.trim();
 
 /** A table as the commands name it: `orders` (in public), or `schema.table` — never a third part (tableNameProblem). */
-export function findTable<T extends CatalogTable>(tables: readonly T[], name: string): T | Failure {
+export function findTable<T extends Omit<CatalogTable, "columns">>(tables: readonly T[], name: string): T | Failure {
   const malformed = tableNameProblem(name, tables.map((t) => t.table));
   if (malformed !== null) return { message: malformed, code: "usage" };
   const exact = tables.find((t) => t.table === name) ?? tables.find((t) => t.table === `public.${name}`);
@@ -160,7 +164,7 @@ export const READY_STEPS: readonly NextStep[] = [
 
 /** What to run next over a database's tables: a table's columns, then adding it — named after a real table not yet added.
  *  `from: "tables"` is mason tables itself asking: it never points at itself. */
-export function addSteps(tables: readonly CatalogTable[], from: "tables" | null = null): NextStep[] {
+export function addSteps(tables: ReadonlyArray<Omit<CatalogTable, "columns">>, from: "tables" | null = null): NextStep[] {
   const one = tables.find((t) => !t.added && t.reason === null);
   if (!one) return [...READY_STEPS];
   const name = tableArg(one.table);
@@ -981,7 +985,7 @@ export async function add(argv: string[]): Promise<number> {
 /** Where `mason add` adds a table: the database's tables as it names them, the sources file, the one edit, and what to
  *  run once `n` tables are added — the run (Mason up) or the file itself (Mason down). */
 interface AddWay {
-  tables: readonly CatalogTable[];
+  tables: ReadonlyArray<Omit<CatalogTable, "columns">>;
   file: string | null;
   pick: (table: string, columns: string[], key: string[] | null) => Promise<Edited<PickResult>>;
   next: (n: number) => NextStep[];

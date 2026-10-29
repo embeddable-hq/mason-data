@@ -14,6 +14,7 @@ import { theRun, type DevRun } from "./runs.ts";
 import { projectSource, type Project } from "./project.ts";
 import { DEFAULT_PG_PORT } from "../api/postgres/listener.ts";
 import { defaultMemoryLimit, machineMemoryBytes, MEMORY_LIMIT_RE } from "../duck/store.ts";
+import { EXTENSION, extensionWayOut, type ExtensionWay } from "../duck/extension.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 
@@ -114,6 +115,20 @@ function portOf(url: string): number | null {
   try { const u = new URL(url); return u.port ? Number(u.port) : null; } catch { return null; }   // not a URL: no port to compare with
 }
 
+/**
+ * WHETHER THIS MACHINE CAN COPY OFFLINE: the copy's postgres extension installed for it (src/duck/extension.ts). From
+ * npm it is downloaded at `mason init` or the first copy; a machine offline then could not copy, and is told here
+ * before, with the way out. Read, never downloaded (doctor changes nothing); a read that fails is "could not tell".
+ */
+export async function extensionCheck(way: Pick<ExtensionWay, "status"> = EXTENSION): Promise<Check> {
+  let s;
+  try { s = await way.status(); }
+  catch (e) { return { name: "extension", ok: null, detail: `could not tell whether the copy's postgres extension is installed: ${(e as Error).message}` }; }
+  if (s.installed) return { name: "extension", ok: true, detail: `the copy's postgres extension is installed for ${s.platform} (${s.path})` };
+  const [online, offline] = extensionWayOut(s, "run mason init, or mason start (its first copy installs it)");
+  return { name: "extension", ok: false, detail: `the copy's postgres extension is not installed for ${s.platform}, so a first copy needs the internet. To install it, ${online}; on ${offline}` };
+}
+
 /** The database a URL names: reachable, its version, what this user can read. */
 export async function databaseCheck(url: string, o: ConnectContext = {}): Promise<Check> {
   const parsed = parseSource(url);
@@ -161,12 +176,16 @@ export function nextSteps(checks: readonly Check[], run: DevRun | null, project:
   // the demo database is hosted by the run itself (src/cli/demo.ts): down until mason start makes it
   if (bad("database") && project?.config.demo === true) return [["mason start", "hosts the demo database, then copies its tables"]];
   if (bad("database")) return [["mason start", `once the connection works (the detail above says how; the URL is in ${project ? `${project.dir}/config.json` : ".mason/config.json"})`]];
+  // no extension and no project: mason init installs it (the next step anyway); with a project, its first copy does
+  if (bad("extension") && project !== null && run === null) return [["mason start", "online: its first copy installs the copy's postgres extension, once a machine"]];
   if (project === null) return [
     ["mason init", "in your app's folder: the database from DATABASE_URL in .env.local, .env or the shell"],
     ["mason init postgres://user:password@localhost:5432/your_app", "or name it"],
   ];
   if (run === null) return [["mason start", "Mason in the background, for this folder"]];
   if (bad("mason start")) return [["mason logs", "why Mason does not answer"], ["mason stop", "then mason start, to start it again"]];
+  // Mason up without it: its next pass installs it once the machine is online, and copies
+  if (bad("extension")) return [["mason wait", "once the machine is online: the next pass installs the extension and copies"]];
   if (bad("project")) return [["mason wait", "each problem, with the way out"]];
   if (checks.some((c) => c.name === "project" && /no table added/.test(c.detail))) return [["mason tables", "the database's tables and their columns"], ["mason add <table>", "copy a table into Mason"]];
   if (bad("queries")) return [["mason status", "the refused and slow statements, each with what to do"]];
@@ -191,7 +210,7 @@ function markOf(c: Check, s: Style): string {
   return c.ok === false ? s.red("!! ") : c.ok === null ? s.yellow("?  ") : s.green("ok ");
 }
 
-export async function doctor(argv: string[], deps: { which?: (cwd: string) => ReturnType<typeof theRun> } = {}): Promise<number> {
+export async function doctor(argv: string[], deps: { which?: (cwd: string) => ReturnType<typeof theRun>; extension?: Pick<ExtensionWay, "status"> } = {}): Promise<number> {
   const f = parseCommand(DOCTOR, argv);
   if (typeof f === "number") return f;
   if (f.positionals.length) return failed("doctor", { message: "it takes no URL", code: "usage", fix: "in a project's folder it checks the project's database (mason init makes one)", usage: DOCTOR_USAGE }, { json: f.values.json === true });
@@ -204,6 +223,7 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
   if (run === null) {
     checks.push(nodeCheck());
     checks.push(memoryCheck());
+    checks.push(await extensionCheck(deps.extension));
     checks.push(await portsCheck([], portHolder, process.env, project?.config.pgPort ?? null));
     if (project) {
       // the database the project's sources file names (src/cli/sources.ts): a file that cannot be read is the failing line
@@ -215,6 +235,8 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
     if ("code" in which && which.code === "bad_config") checks.push({ name: "project", ok: false, detail: `${which.problem}. ${(which.fix ?? "").replace(/^./, (c) => c.toUpperCase())}`.trim() });
   } else {
     checks.push(...await runChecks(run));
+    // a copy that could not load it names mason doctor (src/duck/sync.ts attach): the line is here with Mason up too
+    checks.push(await extensionCheck(deps.extension));
   }
   const next = nextSteps(checks, run, project);
   const { ready, verdict } = verdictOf(checks, run, project);
