@@ -888,6 +888,8 @@ export class Sync {
    *  here and current (said as its records say it, `addedText`), a removed one dropped.
    *  What it returns is the catalog rebuilt over them (never rejected: a failure is said in the log) */
   setTables(tables: readonly AddedTable[]): Promise<void> {
+    // (called at mason start and at mason add / remove only: the catalog's keys and constraints are the source's as of
+    // then — docs/DESIGN.md "A count of distinct keys")
     const before = this.tables;
     this.tables = new Map(tables.map((t) => [t.source, t]));
     // said as it happens: what is added, each table as its records say it is (`addedText`), and what is no longer
@@ -2802,8 +2804,10 @@ export class Sync {
       const types = await c.prepare(`SELECT * FROM ${ident(t.schema)}.${ident(t.table)} LIMIT 0`);
       const duckTypes = new Map(Array.from({ length: types.columnCount }, (_, i) => [types.columnName(i), types.columnType(i)] as const));
       types.destroySync();
-      // the column's constraints and default as the source has them NOW (its catalog is read every poll): what the copy
-      // recorded describes its types, which a change of recopies
+      // the column's constraints and default — and below the table's keys and unique indexes — as the source had them
+      // when the tables were last set (`setTables`: at mason start, and at mason add / remove; the run's 10-second
+      // catalog read reaches the commands' facts, not this): what the copy recorded describes its types, which a
+      // change of recopies
       const now = new Map(t.columns.map((c) => [c.name, c]));
       const columns: PgColumn[] = cols.filter((c) => duckTypes.has(c.name)).map((c) => pgColumn(c, duckTypes.get(c.name)!, now.get(c.name)));
       const joins: PgJoin[] = t.foreignKeys.filter((f) => this.tables.has(f.target) && columns.some((c) => c.name === f.column))

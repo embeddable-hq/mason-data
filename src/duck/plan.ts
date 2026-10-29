@@ -18,6 +18,8 @@ import { pgTyplen } from "./types.ts";
 import type { CopyState } from "./sync.ts";
 import { datumText, masonCalls, rewrite, treeDifference, Unrewritable, type DuckCollation, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
+import { distinctCountTables, distinctKeyCounts, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
+import type { PgAnalysis } from "./analyze.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802;
 
@@ -34,6 +36,15 @@ async function keptLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, t
     `JOIN pg_attribute a ON a.attrelid = c.oid WHERE (c.oid::int8, a.attnum::int8) IN (${pairs}) AND c.relkind = 'r' AND NOT a.attisdropped`);
   const at = new Map(rows.map(([relid, attno, schema, table, column]) => [`${relid}.${attno}`, { source: `${schema}.${table}`, column: column! }]));
   return { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null, ready: (read) => kept.ready(read) };
+}
+
+/** the count(DISTINCT x) of the statement that are count(x) (src/duck/distinct-key.ts), by their offsets into the
+ *  analysed text: x unique by the CATALOG's own pg_index — the source's keys as the catalog declares them — read only
+ *  for a statement that counts DISTINCT values at all */
+async function distinctKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<ReadonlySet<number>> {
+  const relids = distinctCountTables(tree);
+  if (relids.length === 0) return new Set();
+  return distinctKeyCounts(tree, uniqueColumnsOf(await catalogRows(catalog, uniqueColumnsSql(relids))));
 }
 
 /**
@@ -209,8 +220,9 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const sourceRows = new Map([...rowTypes].filter(([oid]) => userTypes.has(catalogTypes.get(oid) ?? "")));
   // the stored JSON paths the statement's JSON reads may be answered from (src/duck/kept-route.ts)
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
+  const keyCounts = await distinctKeys(catalog, analysis.tree);
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite(stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, catalogTypes, sourceRows, timeZone, enums, l, wireBound);
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite(stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, catalogTypes, sourceRows, timeZone, enums, l, wireBound, keyCounts);
   try {
     ({ tree, dropLast, exact, clock, jsonReads, unboundedLateral } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them

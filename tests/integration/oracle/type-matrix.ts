@@ -176,7 +176,20 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   "ELSE json_build_object('event', 'e' || (g % 7), 'n', g, 'ok', g % 2 = 0, 'nested', json_build_object('k', g % 3), 'z', CASE WHEN g % 3 = 0 THEN NULL ELSE 'x' || g END)::text END AS d FROM generate_series(1, 300) g) s;" +
   // A NULLABLE COLUMN OF EACH KIND A SORT MEETS (the nulls-placement idiom): NULLs among ties
   "CREATE TABLE public.nullish (id int PRIMARY KEY, ts timestamp, t text, n int); INSERT INTO public.nullish SELECT g, CASE WHEN g % 5 = 0 THEN NULL ELSE timestamp '2026-01-01' + (g % 17) * interval '1 hour' END, " +
-  "CASE WHEN g % 7 = 0 THEN NULL ELSE 'v' || (g % 11) END, CASE WHEN g % 4 = 0 THEN NULL ELSE g % 9 END FROM generate_series(1, 60) g;"
+  "CASE WHEN g % 7 = 0 THEN NULL ELSE 'v' || (g % 11) END, CASE WHEN g % 4 = 0 THEN NULL ELSE g % 9 END FROM generate_series(1, 60) g;" +
+  // KEYS AND NOT-KEYS FOR A COUNT OF DISTINCT VALUES (src/duck/distinct-key.ts: only a primary key drops its DISTINCT):
+  // a UNIQUE text column holding NULLs and a case pair, a UNIQUE citext (one value in either case), a partial unique
+  // index (repeats where it does not apply), a composite UNIQUE (a column repeats), and references to each; `pairs` has
+  // a composite primary key whose first column is named `id` and repeats; `vkeys` a varchar primary key (joined from a
+  // text column: the key side read through a relabel)
+  "CREATE TABLE public.keyed (id int PRIMARY KEY, code text UNIQUE, tag citext UNIQUE, part int, a int NOT NULL, b int NOT NULL, ref text, tag_ref citext, UNIQUE (a, b)); " +
+  "CREATE UNIQUE INDEX keyed_part ON public.keyed (part) WHERE part > 0; " +
+  "INSERT INTO public.keyed VALUES (1, 'a', 'x', 1, 1, 1, 'a', 'X'), (2, 'A', 'y', 2, 1, 2, 'a', 'x'), (3, NULL, NULL, 0, 2, 1, 'A', 'Y'), (4, NULL, 'Zz', 0, 2, 2, NULL, NULL), " +
+  "(5, 'b', NULL, -1, 3, 1, 'zz', 'zZ'), (6, '', 'w', -1, 3, 2, '', 'none'), (7, 'c', 'v', NULL, 4, 1, 'b', 'W'), (8, 'd', 'u', NULL, 4, 2, NULL, 'v'); " +
+  "CREATE TABLE public.pairs (id int, line int, v text, PRIMARY KEY (id, line)); " +
+  "INSERT INTO public.pairs VALUES (1, 1, 'a'), (1, 2, 'a'), (2, 1, 'A'), (2, 2, NULL), (3, 1, 'b'), (5, 1, 'none'), (5, 2, ''), (5, 3, 'c'); " +
+  "CREATE TABLE public.vkeys (id varchar(8) PRIMARY KEY, label text); " +
+  "INSERT INTO public.vkeys VALUES ('a', 'one'), ('A', 'one'), ('b', NULL), ('', 'empty'), ('zz', 'two'), ('none', 'two');"
 
 /** a round of changes the poll carries: values move, a row goes, one comes */
 export function typedMutations(round: number): string {
@@ -831,6 +844,23 @@ function* matrix(): Generator<Matrixed> {
   // an integer constant is an output position bare, a constant inside the test
   yield q("ORDER BY 2 IS NULL, 2 DESC", "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NULL, 2 DESC, 1");
   yield q("ORDER BY 2 IS NOT NULL, 2", "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NOT NULL, 2, 1");
+  // ---- a count of distinct keys sent as a count (src/duck/distinct-key.ts: a primary key alone, counted, or the other
+  // side of a join): an int key, a varchar key joined from a text column; and what keeps its DISTINCT, each of which a
+  // count would answer otherwise or which a copy's transient duplicate could: a UNIQUE column that is not the key
+  // (counted, and on a join's other side), a citext UNIQUE, a partial unique index, a composite UNIQUE's column, a
+  // composite primary key's column named `id`, a join on a non-key -----------------------------------------------------
+  yield q("count(DISTINCT) of a primary key, of a UNIQUE column with NULLs that is not the key", "SELECT count(DISTINCT id), count(DISTINCT code), count(code), count(tag), count(*) FROM keyed");
+  yield q("count(DISTINCT) of a partial unique index's column, of a composite UNIQUE's", "SELECT count(DISTINCT part), count(part), count(DISTINCT a), count(DISTINCT b) FROM keyed");
+  yield q("count(DISTINCT id) of a composite primary key's id", "SELECT count(DISTINCT p.id), count(p.id), count(DISTINCT p.line) FROM pairs p");
+  yield q("count(DISTINCT) over a LEFT JOIN on a UNIQUE text column that is not the key", "SELECT r.code, count(DISTINCT k.id) AS n, count(DISTINCT k.code) AS codes FROM keyed k LEFT JOIN keyed r ON r.code = k.ref GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  // (a citext grouped, or counted DISTINCT, is citext-forms's refusal: counted ungrouped here)
+  yield q("count(DISTINCT) over a JOIN on a citext UNIQUE that is not the key", "SELECT count(DISTINCT k.id), count(k.id) FROM keyed k JOIN keyed r ON r.tag = k.tag_ref");
+  yield q("count(DISTINCT) over a FULL JOIN on a UNIQUE text column that is not the key", "SELECT count(DISTINCT k.id), count(DISTINCT r.id), count(*) FROM keyed k FULL JOIN keyed r ON r.code = k.ref");
+  yield q("count(DISTINCT) of a varchar primary key, and over a LEFT JOIN on it from a text column", "SELECT v.label, count(DISTINCT k.id) AS n, count(DISTINCT v.id) AS keys FROM keyed k LEFT JOIN vkeys v ON v.id = k.ref GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  yield q("count(DISTINCT) of a varchar primary key alone", "SELECT count(DISTINCT v.id), count(v.id) FROM vkeys v");
+  yield q("count(DISTINCT id) over a join to a composite key's table (repeated)", "SELECT count(DISTINCT k.id), count(k.id) FROM keyed k JOIN pairs p ON p.id = k.id");
+  yield q("count(DISTINCT id) over a join on a partial unique index's column (repeated)", "SELECT count(DISTINCT k.id), count(k.id) FROM keyed k JOIN keyed r ON r.part = k.part");
+  yield q("count(DISTINCT id) of a composite key's table joined on the other's key", "SELECT k.code, count(DISTINCT p.id), count(DISTINCT p.line) FROM pairs p LEFT JOIN keyed k ON k.id = p.id GROUP BY 1 ORDER BY 1 NULLS FIRST");
   yield q("window frames", "SELECT id, sum(i4) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND CURRENT ROW), count(*) OVER (ORDER BY ts RANGE BETWEEN interval '1 day' PRECEDING AND interval '1 day' FOLLOWING), sum(i4) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), max(i4) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW), sum(i4) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW), sum(i4) OVER (ORDER BY id RANGE UNBOUNDED PRECEDING) FROM typed WHERE id < 100 ORDER BY id");
 }
 

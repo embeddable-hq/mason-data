@@ -89,6 +89,8 @@ const DDL = [
      FROM (SELECT range, ['widget', 'Widget', 'gadget', '', 'sprocket', '1', '01', '17', 'x', 'widget ', 'O''Hara', 'unsold'][range + 1] AS sku FROM range(12))`,
   `CREATE TABLE public.categories AS SELECT code, ${TENANTS} AS tenant_id, 'category ' || code AS name, 0::BIGINT AS changed_seq
      FROM (SELECT range, ['a', 'x', '', 'tools', 'Tools', '1', 'toys'][range + 1] AS code FROM range(7))`,
+  // three tags an order for the first 100,000 orders: keyed by (order_id, tag) together
+  "CREATE TABLE public.order_tags AS SELECT (range // 3 + 1)::BIGINT AS order_id, ['a', 'b', 'c'][range % 3 + 1] AS tag FROM range(300000)",
 ];
 const text = (name: string): PgColumn => ({ name, type: "text" });
 const int8 = (name: string): PgColumn => ({ name, type: "int8" });
@@ -97,7 +99,9 @@ const schema: PgSchema = {
   database: "app",
   tables: [
     { name: "tenants", primaryKey: ["id"], joins: [], columns: [text("id"), text("name"), text("plan"), int8("changed_seq")] },
-    { name: "customers", primaryKey: ["id"], joins: [], columns: [int8("id"), text("tenant_id"), text("name"), text("email"), tstz("created_at"), int8("changed_seq")] },
+    // email UNIQUE in the catalog, as a source declares it: not the key the copy is written by (KEY_COUNTS' contrasts)
+    { name: "customers", primaryKey: ["id"], joins: [], columns: [int8("id"), text("tenant_id"), text("name"), text("email"), tstz("created_at"), int8("changed_seq")],
+      uniqueKeys: [{ name: "customers_email_key", columns: ["email"], constraint: true, nullsNotDistinct: false }] },
     { name: "orders", primaryKey: ["id"], joins: [],
       columns: [int8("id"), text("tenant_id"), int8("customer_id"), text("status"), { name: "amount", type: "numeric", spelled: "numeric(12,2)" }, tstz("created_at"),
         { name: "shipped_at", type: "timestamptz", spelled: "timestamp" }, text("notes"), int8("changed_seq"), { name: "meta", type: "jsonb" }] },
@@ -105,6 +109,8 @@ const schema: PgSchema = {
       columns: [int8("id"), text("tenant_id"), int8("order_id"), text("product"), { name: "quantity", type: "int4" }, { name: "unit_price", type: "numeric", spelled: "numeric(12,2)" }, int8("changed_seq")] },
     { name: "products", primaryKey: ["sku"], joins: [], columns: [text("sku"), text("tenant_id"), text("name"), text("category"), tstz("created_at"), int8("changed_seq")] },
     { name: "categories", primaryKey: ["code"], joins: [], columns: [text("code"), text("tenant_id"), text("name"), int8("changed_seq")] },
+    // a composite primary key: neither column is unique (a count of distinct order_ids keeps its DISTINCT)
+    { name: "order_tags", primaryKey: ["order_id", "tag"], joins: [], columns: [int8("order_id"), text("tag")] },
   ],
 };
 
@@ -268,7 +274,32 @@ const JSONB_SHAPES: Shape[] = [
   { name: "jsonb under libc: WHERE jsonb = a document, the C key stored", sql: JSONB.equal, on: "libc, the key stored" },
 ];
 
-const SHAPES: Shape[] = [...REWRITTEN, ...HELD_BI.map((name) => {
+/**
+ * A COUNT OF DISTINCT KEYS (src/duck/distinct-key.ts): a BI tool's "count of entities" is `count(DISTINCT t.id)` of
+ * the table's primary key, often grouped by a dimension joined on ITS key, which DuckDB computed as a hash aggregate of
+ * every id (a 197 M-row table grouped by a 780-row dimension: two levels of hash aggregate, 1.5 GB spilled, 120 s,
+ * against 9 s for `count(t.id)`). Where the column is its table's primary key and the FROM repeats no row of its table
+ * (every join on the other table's primary key) it is sent as `count(id)`; each other shape keeps its DISTINCT (the
+ * contrasts, a UNIQUE column that is not the key among them, counted and joined on). The invariant below holds both by the SQL
+ * sent and by the plan's aggregates.
+ */
+const KEY_COUNTS: Shape[] = [
+  { name: "count distinct key: count(DISTINCT id) over the table alone", sql: "SELECT count(DISTINCT o.id) FROM orders o" },
+  { name: "count distinct key: LEFT JOIN a dimension on its key, GROUP BY its name", sql: "SELECT \"t\".\"name\" AS \"name\", count(DISTINCT \"o\".\"id\") AS \"count\" FROM \"public\".\"orders\" AS \"o\" LEFT JOIN \"public\".\"tenants\" AS \"t\" ON \"o\".\"tenant_id\" = \"t\".\"id\" GROUP BY \"t\".\"name\" ORDER BY \"t\".\"name\" ASC" },
+  { name: "count distinct key: INNER JOIN a dimension on its key, GROUP BY its name", sql: "SELECT t.name, count(DISTINCT o.id) AS n FROM orders o JOIN tenants t ON t.id = o.tenant_id GROUP BY t.name ORDER BY n DESC" },
+  { name: "count distinct key: FILTER (WHERE …) kept", sql: "SELECT t.name, count(DISTINCT o.id) FILTER (WHERE o.status = 'paid') AS paid FROM orders o LEFT JOIN tenants t ON o.tenant_id = t.id GROUP BY t.name ORDER BY 1" },
+  { name: "count distinct key: a join on a non-key column (not rewritten)", sql: "SELECT t.name, count(DISTINCT o.id) AS n FROM orders o JOIN tenants t ON o.status = t.plan GROUP BY t.name ORDER BY 1" },
+  { name: "count distinct key: a LATERAL jsonb_each beside it (not rewritten)", sql: "SELECT count(DISTINCT o.id) FROM orders o LEFT JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(o.meta) = 'object' THEN o.meta END) d ON TRUE" },
+  { name: "count distinct key: a column that is not a key (not rewritten)", sql: "SELECT o.tenant_id, count(DISTINCT o.customer_id) AS n FROM orders o GROUP BY 1 ORDER BY 1" },
+  { name: "count distinct key: a derived table in FROM (not rewritten)", sql: "SELECT count(DISTINCT s.id) FROM (SELECT o.id FROM orders o WHERE o.status = 'paid') s" },
+  { name: "count distinct key: a column of a composite key (not rewritten)", sql: "SELECT count(DISTINCT g.order_id) FROM order_tags g" },
+  // a UNIQUE column that is not the primary key, counted and on a join's other side: the copy is not written by it, so
+  // it may hold one value twice for a moment the source never showed
+  { name: "count distinct key: a UNIQUE column that is not the key, counted (not rewritten)", sql: "SELECT c.tenant_id, count(DISTINCT c.email) AS n FROM customers c GROUP BY 1 ORDER BY 1" },
+  { name: "count distinct key: a join on a UNIQUE column that is not the key (not rewritten)", sql: "SELECT c.tenant_id, count(DISTINCT o.id) AS n FROM orders o JOIN customers c ON c.email = o.status GROUP BY 1 ORDER BY 1" },
+];
+
+const SHAPES: Shape[] = [...REWRITTEN, ...KEY_COUNTS, ...HELD_BI.map((name) => {
   const s = BI_SHAPES.find((b) => b.name === name);
   if (s === undefined) throw new Error(`no BI shape named ${JSON.stringify(name)} in tests/integration/oracle/bi-shapes.ts: a shape renamed there is renamed here`);
   return { name: `BI shape: ${name}`, sql: s.sql };
@@ -648,6 +679,28 @@ async function scans(sql: string, table: string, on?: Where): Promise<Scan[]> {
 }
 const sqlOf = (name: string): string => SHAPES.find((s) => s.name === name)!.sql;
 const said = (ss: readonly Scan[]): string => ss.map((s) => `${s.rowGroups} of ${s.of} row groups, ${s.rows} rows`).join("; ");
+
+// A COUNT OF DISTINCT KEYS (KEY_COUNTS): DuckDB 2.0 computes a count(DISTINCT x) as an aggregate of its own over the
+// groups and x (a HASH_GROUP_BY to make x distinct, under the one that counts: the two levels that spilled 1.5 GB over
+// 197 M rows), and count(x) as one. Each rewritten shape is sent without a DISTINCT and aggregates ONCE (or not at all:
+// DuckDB answers an ungrouped count of a column with no NULL from its statistics while planning); each contrast keeps
+// count(DISTINCT …) and its two levels — which a rewrite gone too far (a contrast counted plainly) fails as surely as
+// one lost (a lateral's delimiter join adds an aggregate of its own).
+for (const shape of KEY_COUNTS) {
+  const rewritten = !shape.name.endsWith("(not rewritten)");
+  test(`a count of distinct ${rewritten ? "keys aggregates once, sent as count(x)" : "non-keys keeps its DISTINCT and its two aggregates"}: ${shape.name}`, async () => {
+    const { plan, sent } = await explained(shape.sql);
+    const aggregates = skeletonOf(plan, [], sent).plan.filter((l) => /^\s*(HASH_GROUP_BY|PERFECT_HASH_GROUP_BY|UNGROUPED_AGGREGATE)\b/.test(l)).length;
+    if (rewritten) {
+      assert.doesNotMatch(sent, /DISTINCT/i, `${shape.name}: sent with its DISTINCT`);
+      assert.ok(aggregates <= 1, `${shape.name}: ${aggregates} aggregates in DuckDB's plan, where count(x) is one\n${sent}`);
+    } else {
+      assert.match(sent, /count\(DISTINCT /i, `${shape.name}: its DISTINCT dropped where it may change the count`);
+      // two, and a lateral's delimiter join a third (its distinct arguments)
+      assert.ok(aggregates >= 2, `${shape.name}: a count(DISTINCT …) planned in ${aggregates} aggregates, where DuckDB 2.0 plans two\n${sent}`);
+    }
+  });
+}
 /** DuckDB's row group: 122,880 rows */
 const ROW_GROUPS = Math.ceil(ORDERS / 122_880);
 

@@ -520,6 +520,229 @@
       "full_sort": false
     },
     {
+      "name": "count distinct key: count(DISTINCT id) over the table alone",
+      "sql": "SELECT count(DISTINCT o.id) FROM orders o",
+      "plan": [
+        "COLUMN_DATA_SCAN"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "count distinct key: LEFT JOIN a dimension on its key, GROUP BY its name",
+      "sql": "SELECT \"t\".\"name\" AS \"name\", count(DISTINCT \"o\".\"id\") AS \"count\" FROM \"public\".\"orders\" AS \"o\" LEFT JOIN \"public\".\"tenants\" AS \"t\" ON \"o\".\"tenant_id\" = \"t\".\"id\" GROUP BY \"t\".\"name\" ORDER BY \"t\".\"name\" ASC",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              HASH_JOIN",
+        "                TABLE_SCAN public.orders",
+        "                TABLE_SCAN public.tenants"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "count distinct key: INNER JOIN a dimension on its key, GROUP BY its name",
+      "sql": "SELECT t.name, count(DISTINCT o.id) AS n FROM orders o JOIN tenants t ON t.id = o.tenant_id GROUP BY t.name ORDER BY n DESC",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              HASH_JOIN",
+        "                TABLE_SCAN public.orders",
+        "                TABLE_SCAN public.tenants"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "count distinct key: FILTER (WHERE …) kept",
+      "sql": "SELECT t.name, count(DISTINCT o.id) FILTER (WHERE o.status = 'paid') AS paid FROM orders o LEFT JOIN tenants t ON o.tenant_id = t.id GROUP BY t.name ORDER BY 1",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              HASH_JOIN",
+        "                TABLE_SCAN public.orders",
+        "                TABLE_SCAN public.tenants"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "count distinct key: a join on a non-key column (not rewritten)",
+      "sql": "SELECT t.name, count(DISTINCT o.id) AS n FROM orders o JOIN tenants t ON o.status = t.plan GROUP BY t.name ORDER BY 1",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                HASH_GROUP_BY",
+        "                  PROJECTION",
+        "                    PROJECTION",
+        "                      HASH_JOIN",
+        "                        TABLE_SCAN public.orders",
+        "                        TABLE_SCAN public.tenants"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "count distinct key: a LATERAL jsonb_each beside it (not rewritten)",
+      "sql": "SELECT count(DISTINCT o.id) FROM orders o LEFT JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(o.meta) = 'object' THEN o.meta END) d ON TRUE",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  PROJECTION",
+        "    HASH_GROUP_BY",
+        "      PROJECTION",
+        "        PROJECTION",
+        "          CTE",
+        "            TABLE_SCAN public.orders",
+        "            PROJECTION",
+        "              HASH_JOIN",
+        "                CTE_SCAN",
+        "                PROJECTION",
+        "                  UNNEST",
+        "                    HASH_GROUP_BY",
+        "                      PROJECTION",
+        "                        CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": true,
+      "full_sort": false
+    },
+    {
+      "name": "count distinct key: a column that is not a key (not rewritten)",
+      "sql": "SELECT o.tenant_id, count(DISTINCT o.customer_id) AS n FROM orders o GROUP BY 1 ORDER BY 1",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                HASH_GROUP_BY",
+        "                  PROJECTION",
+        "                    PROJECTION",
+        "                      TABLE_SCAN public.orders"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "count distinct key: a derived table in FROM (not rewritten)",
+      "sql": "SELECT count(DISTINCT s.id) FROM (SELECT o.id FROM orders o WHERE o.status = 'paid') s",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  PROJECTION",
+        "    HASH_GROUP_BY",
+        "      PROJECTION",
+        "        PROJECTION",
+        "          TABLE_SCAN public.orders [zone-map filter: status = constant]"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "count distinct key: a column of a composite key (not rewritten)",
+      "sql": "SELECT count(DISTINCT g.order_id) FROM order_tags g",
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  PROJECTION",
+        "    HASH_GROUP_BY",
+        "      PROJECTION",
+        "        PROJECTION",
+        "          TABLE_SCAN public.order_tags"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "count distinct key: a UNIQUE column that is not the key, counted (not rewritten)",
+      "sql": "SELECT c.tenant_id, count(DISTINCT c.email) AS n FROM customers c GROUP BY 1 ORDER BY 1",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                HASH_GROUP_BY",
+        "                  PROJECTION",
+        "                    PROJECTION",
+        "                      TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "count distinct key: a join on a UNIQUE column that is not the key (not rewritten)",
+      "sql": "SELECT c.tenant_id, count(DISTINCT o.id) AS n FROM orders o JOIN customers c ON c.email = o.status GROUP BY 1 ORDER BY 1",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                HASH_GROUP_BY",
+        "                  PROJECTION",
+        "                    PROJECTION",
+        "                      HASH_JOIN",
+        "                        TABLE_SCAN public.orders",
+        "                        TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
       "name": "BI shape: cast: ::varchar(n) (truncates)",
       "sql": "SELECT o.id, o.notes::varchar(12) AS head, c.name::varchar(3) AS initials FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 20",
       "plan": [
