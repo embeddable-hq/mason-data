@@ -15,8 +15,12 @@ import * as path from "node:path";
 import { DuckStore, MASON_SCHEMA } from "../src/duck/store.ts";
 import * as syncModule from "../src/duck/sync.ts";
 import * as explainModule from "../src/duck/explain.ts";
-import type { AddedTable, Sync as SyncClass, SyncMode, SyncReplication } from "../src/duck/sync.ts";
+import type { AddedTable, CopyState, StreamStatus, Sync as SyncClass, SyncMode, SyncReplication } from "../src/duck/sync.ts";
 import type { Source } from "../src/cli/preflight.ts";
+import { runState, type RunContext } from "../src/cli/run-server.ts";
+import { STATUS, streamLines, tableLines, WAIT, type RunState } from "../src/cli/commands.ts";
+import * as commands from "../src/cli/commands.ts";
+import { jsonText } from "../src/cli/command.ts";
 
 // read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
 type Status = { source: string } & ({ copy: string } | { behind: string } | { refused: string } | { unsynced: boolean });
@@ -223,3 +227,75 @@ test("a recopied copy's last copy is the instant the ledger holds, said in UTC w
   assert.equal(keptText(at(states, "a")), "kept current by copying it again whole, last copied 2026-10-27 19:00:00 UTC");
 });
 
+
+// MASON STATUS --JSON CARRIES THE SAME FACT (src/cli/run-server.ts runState): each added table's `kept` is the sync's
+// state's, beside the `unsynced` and the stream's tables that its text renders (tableLines, streamLines) — one
+// derivation, which the JSON and the text both read. Before, the run server mapped a copy's fields one by one and
+// `kept` was not among them: an agent reading --json could not tell how a table was kept current, or why it was not.
+// read from the module, not imported by name: the file loads at a commit without it (scripts/fails-without.ts)
+const waitTable = (commands as unknown as { waitTable?: (t: RunState["tables"][number]) => Record<string, unknown> }).waitTable;
+/** the run's context as runState reads it: the catalog the sync's tables are in, each one added in the sources file */
+const runContext = (tables: readonly AddedTable[], changes: "poll" | "replication"): RunContext => ({
+  source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [], changes,
+  slot: changes === "replication" ? "mason_x" : "", page: false, folder: () => null,
+  sources: () => ({ file: { name: "x", file: "/x/mason/sources/x.yml", kind: "postgres", url: { env: "DATABASE_URL" },
+    tables: tables.map((t) => ({ name: t.table, table: t.source, columns: null, exclude: [], key: null })) }, problem: null }),
+  duck: { file: path.join(os.tmpdir(), "mason-no-such-copy.db"), pollSeconds: 5 },
+}) as unknown as RunContext;
+/** what mason status --json says of a sync (the run's /api/state, as the command reads it), and the sync's own states */
+const statusOf = (t: Started, changes: "poll" | "replication") => withSync(t, async (sync) => {
+  const states: CopyState[] = sync.state();
+  const json = JSON.parse(JSON.stringify(runState(runContext(t.tables, changes), states, await sync.streamStatus()))) as RunState;
+  return { states, json };
+});
+
+test("mason status --json says how each table is kept current as the sync derives it: the same fact its text renders, in poll and replication mode", async () => {
+  const sameAsTheSync = (states: readonly CopyState[], json: RunState): void => {
+    assert.equal(json.tables.length, states.length);
+    for (const t of json.tables) {
+      const st = states.find((s) => s.source === t.table)!;
+      assert.ok(st.kept !== undefined, `${t.table}: the sync says how it is kept current`);
+      assert.deepEqual(t.kept, st.kept, `${t.table}: --json's kept is the sync's state's`);
+      // mason status --json (the run's state under its declared key) and mason wait --json carry it as it is
+      assert.deepEqual((JSON.parse(jsonText(STATUS, { tables: json.tables })) as RunState).tables.find((x) => x.table === t.table)?.kept, st.kept, `${t.table}: mason status --json`);
+      assert.ok(waitTable !== undefined, "mason wait --json's table (waitTable)");
+      assert.deepEqual((JSON.parse(jsonText(WAIT, { tables: [waitTable(t)] })) as { tables: Array<{ kept?: unknown }> }).tables[0]!.kept, st.kept, `${t.table}: mason wait --json`);
+    }
+  };
+
+  // POLL MODE: one polled, one over the row limit, which the text says NOT kept current from the same fact
+  const pollTables = [table("a"), table("big", 2_000_000)];
+  const poll = await statusOf({ mode: "poll", tables: pollTables, seed: async (run) => { for (const n of ["a", "big"]) { await run(copied(n)); await run(lastPoll(n)); } } }, "poll");
+  sameAsTheSync(poll.states, poll.json);
+  const asOf = "2026-10-27T19:58:39.000Z";
+  const by = (name: string) => poll.json.tables.find((t) => t.table === `public.${name}`)!;
+  assert.deepEqual(by("a").kept, { by: "poll", polledAt: asOf });
+  assert.deepEqual(by("big").kept, { by: "poll", polledAt: asOf, unsynced: "over the 1,000,000-row sync limit" });
+  // the text's source, `unsynced`, is the same kept: its reason and when it was last polled
+  assert.deepEqual(by("big").unsynced, { reason: "over the 1,000,000-row sync limit", asOf });
+  assert.equal("unsynced" in by("a"), false);
+  const lines = tableLines(poll.json);
+  assert.match(lines.find((l) => l.startsWith("public.big"))!, /NOT kept current \(over the 1,000,000-row sync limit; as of 2026-10-27 19:58 UTC\)/);
+  assert.doesNotMatch(lines.find((l) => l.startsWith("public.a "))!, /NOT kept current/);
+
+  // REPLICATION MODE: streamed, and caught up by one poll first — the stream section's state and why are kept's
+  const replTables = [table("a"), table("caught")];
+  const repl = await statusOf({ mode: "replication", replication: replicationX, tables: replTables, seed: async (run) => {
+    for (const n of ["a", "caught"]) { await run(copied(n)); await run(lastPoll(n)); }
+    await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its copy', now())`);
+    await run(slotAt);
+  } }, "replication");
+  sameAsTheSync(repl.states, repl.json);
+  const stream = repl.json.stream;
+  assert.ok(stream !== undefined, "replication mode: the stream");
+  for (const t of repl.json.tables) {
+    const k = t.kept!;
+    assert.equal(k.by, "replication", t.table);
+    const said: StreamStatus["tables"][number] = stream.tables.find((s) => s.table === t.table)!;
+    assert.deepEqual([said.state, said.why], k.by === "replication" ? [k.state, k.why] : [], `${t.table}: the stream section says what kept says`);
+    assert.equal(t.unsynced, undefined, "the row limit is the polls', never the stream's");
+  }
+  assert.deepEqual(repl.json.tables.find((t) => t.table === "public.caught")!.kept,
+    { by: "replication", slot: "mason_x", state: "catching-up", why: "caught up by one poll after its copy", position: "0/16B3F28", lastCommit: null, notRunning: "Mason is stopping" });
+  assert.match(streamLines(stream).find((l) => l.startsWith("public.caught"))!, /catching up by one poll/);
+});

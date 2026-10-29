@@ -330,6 +330,33 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
   } finally { copies = []; }
 });
 
+test("the state says how each copy is kept current, as the sync's state has it (src/duck/sync.ts KeptCurrent); a table the sync holds none of says nothing", async () => {
+  // the run server once mapped a copy's fields one by one, and kept was not among them: mason status --json could not
+  // say how a table was kept current, or why it was not, though its text and EXPLAIN did
+  const polled = { by: "poll" as const, polledAt: "2026-10-24T10:01:00.000Z", unsynced: "over the 1,000,000-row sync limit" };
+  const streamed = { by: "replication" as const, slot: "mason_app", state: "left-out" as const, why: "publication app_pub does not carry public.orders",
+    position: "0/16B3F28", lastCommit: null, notRunning: null };
+  const recopied = { by: "recopy" as const, copiedAt: "2026-10-24T10:00:00.000Z" };
+  copies = [
+    { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null,
+      unsynced: { reason: polled.unsynced, asOf: polled.polledAt }, kept: polled },
+    { source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: streamed },
+    { source: "public.Shouty", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: recopied },
+    // a copy from a sync before kept was said: nothing is made up for it
+    { source: "public.logs", phase: "waiting", rows: 3, bytes: 8192, seconds: null, copiedAt: null, error: null },
+  ];
+  try {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/api/state`, { headers: { Authorization: "Bearer t0ken-of-this-run" } });
+    assert.equal(r.status, 200);
+    const by = new Map(((await r.json()) as { tables: Array<{ table: string; kept?: unknown }> }).tables.map((t) => [t.table, t]));
+    assert.deepEqual(by.get("public.customers")!.kept, polled);
+    assert.deepEqual(by.get("public.orders")!.kept, streamed);
+    assert.deepEqual(by.get("public.Shouty")!.kept, recopied);
+    assert.equal("kept" in by.get("public.logs")!, false, "a copy the sync says nothing of: no kept");
+    assert.equal("kept" in by.get("public.events")!, false, "a table the sync holds no copy of: no kept");
+  } finally { copies = []; }
+});
+
 test("a table of any size on a database elsewhere can be added, and mason tables says nothing against it (a 22 M-row table could not be)", async () => {
   const remote = parseSource("postgres://me@db.example.com:5432/app");
   assert.ok("source" in remote && remote.source.remote);

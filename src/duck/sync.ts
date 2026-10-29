@@ -139,7 +139,8 @@ export interface CopyState {
 
 /**
  * HOW A COPY IS KEPT CURRENT, NOW: the ONE derivation, by the sync (`Sync.keptOf`), that `mason status` (`state`'s
- * `unsynced`, `streamStatus`'s tables) and EXPLAIN (src/duck/explain.ts `keptText`) read. EXPLAIN once derived it from
+ * `unsynced`, `streamStatus`'s tables; under `--json` each table's `kept`, as it is: src/cli/run-server.ts runState) and
+ * EXPLAIN (src/duck/explain.ts `keptText`) read. EXPLAIN once derived it from
  * the poll's ledger alone (`_mason.poll_state`), and a project switched to logical replication was said to be "kept
  * current by polling, last poll" two days before, while status said streamed.
  * - `poll`: polled every interval, `polledAt` its last copy or poll; `unsynced` (a table over POLL_ROW_LIMIT) is why the
