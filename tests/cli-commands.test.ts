@@ -65,7 +65,7 @@ test("a table is named as the database names it: by its name alone in public, or
 const at = (s: number): string => new Date(Date.UTC(2026, 9, 7, 10, 0, s)).toISOString();
 const state = (o: { tables?: TableState[]; stream?: StreamStatus }): RunState => ({
   source: { url: "postgres://x", database: "shop", remote: false, version: "16", standby: false, changes: "poll", name: "shop", file: "/app/mason/sources/shop.yml" }, warnings: [], folder: "/app/mason",
-  project: "v1", tables: o.tables ?? [], engine: { name: "duckdb", file: "/app/.mason/duck.db", bytes: 10, pollSeconds: 5 },
+  project: "v1", tables: o.tables ?? [], engine: { file: "/app/.mason/duck.db", bytes: 10, pollSeconds: 5 },
   ...(o.stream ? { stream: o.stream } : {}),
 });
 

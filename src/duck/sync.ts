@@ -1905,8 +1905,8 @@ export class Sync {
       if (!this.loaded) {
         try { await this.store.writer.run("INSTALL postgres; LOAD postgres;"); }
         catch (e) {
-          throw new Error(`DuckDB could not load its postgres extension: ${(e as Error).message}. The first copy on a machine downloads it from ` +
-            "DuckDB's extension repository (then ~/.duckdb/extensions): connect to the internet once, and the copy is tried again at the next pass");
+          throw new Error(`Mason could not load the copy's postgres extension: ${(e as Error).message}. The first copy on a machine downloads it from ` +
+            "the extension repository (then ~/.duckdb/extensions): connect to the internet once, and the copy is tried again at the next pass");
         }
         this.loaded = true;
       }
@@ -1992,7 +1992,7 @@ export class Sync {
       });
       // the copies serve while the source is away: the catalog lists them (on a fresh start, nothing else has)
       await this.rebuildSchema();
-      throw new Error(`DuckDB could not attach ${this.source.database} on ${this.source.host}:${this.source.port}: ${m}`);
+      throw new Error(`Mason could not attach ${this.source.database} on ${this.source.host}:${this.source.port}: ${m}`);
     }
     this.recovered("attach", "the database is attached again");
     try { await this.work(); }
@@ -2285,12 +2285,12 @@ export class Sync {
     // (`adds`: the keys a stage still to be written adds to DuckDB's count)
     const reconcile = async (t: AddedTable, target: string, from: string, adds = 0n): Promise<{ rows: number; deleted: number; countMs: number }> => {
       const c0 = Date.now();
-      doing = `${t.source}: counting its rows on the source and in DuckDB`;
+      doing = `${t.source}: counting its rows on the source and in the copy`;
       const counts = (await w.runAndReadAll(`SELECT (SELECT count FROM ${pq(`SELECT count(*) AS count FROM ${from}`)}), (SELECT count(*) FROM ${target})`)).getRowsJS()[0] as [bigint, bigint];
       const countMs = Date.now() - c0;
       let deleted = 0;
       if (counts[0] !== counts[1] + adds) {
-        doing = `${t.source}: deleting the keys the source no longer holds (its keys anti-joined with DuckDB's)`;
+        doing = `${t.source}: deleting the keys the source no longer holds (its keys anti-joined with the copy's)`;
         const on = t.key.map((k) => `t.${ident(k)} = k.${ident(k)}`).join(" AND ");
         const gone = await w.run(`DELETE FROM ${target} WHERE rowid IN (SELECT t.rowid FROM ${target} t ANTI JOIN ${pq(`SELECT ${t.key.map(pgIdent).join(", ")} FROM ${from}`)} k ON ${on})`);
         deleted = Number(gone.rowsChanged);
@@ -2323,7 +2323,7 @@ export class Sync {
             `${pq(`SELECT ${pgCols} FROM ${from} WHERE ${xmin8Sql(xmax)} >= ${watermark}`)}) AS polled(${t.columns.map((_, i) => `c${i}`).join(", ")})`)).rowsChanged);
           if (staged > POLL_PIECE_ROWS) {
             const c1 = Date.now();
-            doing = `${t.source}: counting the keys its ${staged} changed row(s) add to DuckDB (the stage anti-joined with DuckDB's keys)`;
+            doing = `${t.source}: counting the keys its ${staged} changed row(s) add to the copy (the stage anti-joined with the copy's keys)`;
             const on = t.key.map((k) => `s.${ident(`c${t.columns.findIndex((c) => c.name === k)}`)} = t.${ident(k)}`).join(" AND ");
             const adds = (await w.runAndReadAll(`SELECT count(*) FROM ${stage} s ANTI JOIN ${target} t ON ${on}`)).getRowsJS()[0]![0] as bigint;
             const { rows, deleted, countMs } = await reconcile(t, target, from, adds);
@@ -2892,8 +2892,8 @@ export class Sync {
       const declared = NUMERIC_TYPE.exec(c.type)!;
       const scale = declared[1] !== undefined ? used ?? 0 : maxScale ?? 0;
       const width = (digits ?? 1) + scale;
-      if ((special ?? 0) > 0) { this.log(`${t.source}.${c.name}: ${special} value(s) NaN or Infinity, which DuckDB's DECIMAL cannot hold: copied as a double`); return; }
-      if (scale > 38 || width > 38) { this.log(`${t.source}.${c.name}: values of ${digits ?? 1} digit(s) and ${scale} decimal(s) do not fit DuckDB's DECIMAL(38): copied as a double (15 significant digits)`); return; }
+      if ((special ?? 0) > 0) { this.log(`${t.source}.${c.name}: ${special} value(s) NaN or Infinity, which the copy's DECIMAL cannot hold: copied as a double`); return; }
+      if (scale > 38 || width > 38) { this.log(`${t.source}.${c.name}: values of ${digits ?? 1} digit(s) and ${scale} decimal(s) do not fit the copy's DECIMAL(38): copied as a double (15 significant digits)`); return; }
       if (declared[1] === undefined && minScale !== null && minScale !== maxScale) this.log(`${t.source}.${c.name}: values of ${minScale} to ${maxScale} decimals: Mason answers each with ${scale}, Postgres with its own`);
       out.set(c.name, scale);
     });

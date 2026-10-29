@@ -130,7 +130,7 @@ names the tables the server copies, and its url: names the variable that holds t
      MASON_DATA             the volume whose .mason/ holds the copy and the state (default .)
      MASON_PG_HOST=0.0.0.0 and TLS: MASON_PG_TLS_CERT / MASON_PG_TLS_KEY, or MASON_PG_SELF_SIGNED_TLS=1, or
      MASON_PG_PLAIN=1 behind a TLS proxy of your own
-   Docker Compose: ${REPO}/deploy/mason-data/README.md. One container per volume, never two: DuckDB lets one process
+   Docker Compose: ${REPO}/deploy/mason-data/README.md. One container per volume, never two: the copy lets one process
    write its file, so run one replica, with no autoscaling, and stop the old container before the new one starts.
    GET /healthz on MASON_HEALTH_PORT (4140) answers 503 while it starts and 200 once it serves; the first start takes
    about 15 seconds before that, then copies the tables.
