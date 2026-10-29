@@ -18,7 +18,7 @@
 // each with the range of what it counts — the statements of the last day, the sync's failures of the days kept — never
 // the Observability views' default, Now: a card that says 12 failed must land on the 12
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
-  slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
+  slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
 import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";

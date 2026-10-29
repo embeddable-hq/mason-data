@@ -1396,10 +1396,20 @@ test("the request log: a row each, newest first, in the commands' words — held
   assert.match(text, /Cancelled r-new 4 min ago 1 min 30 s metabase \(no application_name\) SELECT pg_sleep\(100\) canceling statement due to user request Completed r-old 5 min ago 1\.2 s ana psql 1 SELECT count\(\*\) FROM orders Older$/);
   assert.equal([...html.matchAll(/<details data-open="request:r-(new|old)"><summary>r-(new|old)<\/summary><\/details>/g)].length, 2, "a details per row, closed, keyed by its request, its id the toggle");
   assert.ok(!/<details[^>]* open/.test(html) && !html.includes("Bytes sent"), "closed: the row's details are not written");
-  // the status is a dot AND the word: completed ok, failed bad, cancelled warn
+  // the status is a dot AND the word, from the ledger's outcome as mason logs --requests says it: completed ok, refused
+  // warn, failed bad, cancelled warn — a refusal (Postico's SHOW ALL, 0A000) is Refused, never Failed
   assert.match(html, /<tr class="s-cancelled"><td><span class="indicator warn"><span class="dot" aria-hidden="true"><\/span>Cancelled<\/span>/);
   assert.match(html, /<tr class="s-completed"><td><span class="indicator ok">/);
-  assert.match(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }), /<span class="indicator bad"><span class="dot" aria-hidden="true"><\/span>Failed<\/span>/);
+  const refusedHtml = renderRequests({ requests: [failedRequest], keptDays: 7, before: null });
+  assert.match(refusedHtml, /<tr class="s-refused"><td><span class="indicator warn"><span class="dot" aria-hidden="true"><\/span>Refused<\/span>/);
+  assert.ok(!refusedHtml.includes("Failed"), "a refusal is not said to have failed");
+  assert.match(renderRequests({ requests: [{ ...failedRequest, outcome: "failed", sqlstate: "XX000", message: "boom" }], keptDays: 7, before: null }),
+    /<tr class="s-failed"><td><span class="indicator bad"><span class="dot" aria-hidden="true"><\/span>Failed<\/span>/);
+  for (const outcome of ["refused", "failed"]) {
+    const line = commands.requestLine({ ...failedRequest, outcome } as never, PLAIN);
+    assert.ok(line.includes(outcome) && textOf(renderRequests({ requests: [{ ...failedRequest, outcome }], keptDays: 7, before: null })).toLowerCase().startsWith(`status query id started ↓ duration ↕ user client rows ↕ statement ${outcome} `),
+      `the page's word for ${outcome} is the CLI's`);
+  }
   // started: how long ago, the UTC time its title
   assert.match(html, /<time datetime="2026-10-28T09:01:00.000Z" title="2026-10-28 09:01:00 UTC">/);
   assert.match(renderRequests({ requests: [REQUESTS[0]], keptDays: 7, before: null }, { now: Date.parse("2026-10-28T09:05:00.000Z") }), /<time [^>]*>5 min ago<\/time>/);
@@ -1419,7 +1429,7 @@ test("the request log: a row each, newest first, in the commands' words — held
     const words = [commands.msText(r.durationMs), r.query, ...(r.message ? [r.message.split("\n")[0]!] : [])];
     for (const w of words) { assert.ok(line.includes(w), `the CLI's line says ${w}`); assert.ok(text.includes(w), "and so does the page"); }
   }
-  assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Failed .* relation "nope" does not exist Newest$/);
+  assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Refused .* relation "nope" does not exist Newest$/);
   assert.match(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true }), /<div class="paging"><button type="button" data-newest>Newest<\/button><\/div>/);
   assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<div class="empty"><p class="empty-title">No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.<\/p><\/div><p class="dim unlisted">A statement that reads no copied table /,
     "nothing listed and nothing filtered: what the log does not list (a select 1 typed to test the connection), as mason logs --requests says it");
@@ -1436,8 +1446,12 @@ test("the request log's filters: each view has its own path — status as the se
   run.answers.set("GET /api/requests?outcome=refused%2Cfailed&since=2h&user=ana&client=psql", answer({ requests: [failedRequest], keptDays: 7, before: null }));
   assert.deepEqual(await asked({ status: "completed" }), ["GET /api/requests?outcome=ok&since=15m"], "since is the range's, Now's 15 minutes unless the hash says");
   assert.match(textOf(app.view()["request-log"]!), /^No request that passes the filters in the last 15 minutes \(the request log keeps 7 days: MASON_REQUEST_LOG_DAYS\)\./);
-  assert.deepEqual(await asked({ status: "failed", since: "2h", user: "ana", client: "psql" }), ["GET /api/requests?outcome=refused%2Cfailed&since=2h&user=ana&client=psql"]);
+  assert.deepEqual(await asked({ status: "refused-or-failed", since: "2h", user: "ana", client: "psql" }), ["GET /api/requests?outcome=refused%2Cfailed&since=2h&user=ana&client=psql"]);
   assert.match(textOf(app.view()["request-log"]!), / relation "nope"/);
+  // Refused and Failed are offered apart, each the ledger's outcome of that name
+  assert.deepEqual(await asked({ status: "refused" }), ["GET /api/requests?outcome=refused&since=15m"]);
+  assert.deepEqual(await asked({ status: "failed" }), ["GET /api/requests?outcome=failed&since=15m"]);
+  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<select id="rq-status" name="status"><option value="">All<\/option><option value="completed">Completed<\/option><option value="refused">Refused<\/option><option value="failed">Failed<\/option><option value="refused-or-failed">Refused or failed<\/option>/);
   assert.deepEqual(await asked({}), ["GET /api/requests?since=15m"], "cleared: every request of the range again");
   // a range in the hash: its since, the filters kept
   app.show("observability/queries?range=24h");
@@ -2366,7 +2380,7 @@ test("Usage: the cards under Now say who is connected and what runs, then the ra
     "Failed, last 15 min 12 10 refused, 2 failed, 2 cancelled p95, last 15 min 900 ms average 120 ms · p50 40 ms Sent, last 15 min 3.0 MiB 52,000 rows");
   assert.deepEqual(labels(live), ["Connected now", "Running now", "Statements, last 15 min", "Failed, last 15 min", "p95, last 15 min", "Sent, last 15 min"]);
   assert.match(live, /^<div class="cards n6">/);
-  assert.deepEqual(hrefs(live), ["#observability/queries", "#observability/queries?status=failed", "#observability/queries?slow=1"], "each statement card leads to the statements it counts");
+  assert.deepEqual(hrefs(live), ["#observability/queries", "#observability/queries?status=refused-or-failed", "#observability/queries?slow=1"], "each statement card leads to the statements it counts");
   assert.match(kpis({ activity: activityOf(), sessions, running: [], range: "now" }), /Running now<\/p><p class="card-value">0<\/p><p class="card-sub">no statement is running<\/p>/);
   assert.match(live, /<a class="card warn link" href="[^"]*"><p class="card-label">Failed, last 15 min/, "a failure colours the one to act on");
   // the Clients card says the totals over EVERY client, never the 50 the endpoint lists (a card once said 50 of 200)
@@ -2378,7 +2392,7 @@ test("Usage: the cards under Now say who is connected and what runs, then the ra
   assert.deepEqual(labels(past), ["Clients, last 24 hours", "Statements, last 24 hours", "Failed, last 24 hours", "p95, last 24 hours", "Sent, last 24 hours"], "what is connected now is Now's alone");
   assert.match(textOf(past), /^Clients, last 24 hours 2 4 sessions Statements, last 24 hours 1,204 /);
   assert.match(past, /^<div class="cards n5">/);
-  assert.deepEqual(hrefs(past), ["#observability/queries?range=24h", "#observability/queries?status=failed&range=24h", "#observability/queries?slow=1&range=24h"]);
+  assert.deepEqual(hrefs(past), ["#observability/queries?range=24h", "#observability/queries?status=refused-or-failed&range=24h", "#observability/queries?slow=1&range=24h"]);
   assert.match(textOf(kpis({ activity: activityOf(), range: "1h" })), /^Clients, last hour 2 /);
   // not read yet: the cards it has, then a skeleton; unreadable: unknown with its reason
   assert.match(kpis({ activity: undefined, sessions, running: RUNNING_NOW, range: "now" }), /Running now.*<span class="skeleton/s);
@@ -2567,7 +2581,7 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
   assert.match(html, new RegExp(`<input type="checkbox" id="rq-slow" name="slow"> Slow \\(${SLOW_MS / 1000} s or more\\)</label>`), "the label is SLOW_MS's");
   assert.match(html, /<input id="rq-search" name="search" type="search" maxlength="200"/);
   const requestsPath = fnOf<[Record<string, unknown>, string | null, string?], string>(queriesModule, "requestsPath");
-  assert.equal(requestsPath({ status: "failed", slow: true, search: "from orders", user: "ana" }, null, "1h"), "/api/requests?outcome=refused%2Cfailed&since=1h&user=ana&slow=1&search=from+orders");
+  assert.equal(requestsPath({ status: "refused-or-failed", slow: true, search: "from orders", user: "ana" }, null, "1h"), "/api/requests?outcome=refused%2Cfailed&since=1h&user=ana&slow=1&search=from+orders");
   assert.equal(requestsPath({ since: "2026-10-28" }, "C~1", "1h"), "/api/requests?since=2026-10-28&before=C%7E1", "a since of its own is used instead of the range");
   const run = fakeRun();
   run.answers.set("GET /api/requests?since=15m&slow=1", answer({ requests: [REQUESTS[0]], keptDays: 7, before: null }));
@@ -2580,8 +2594,8 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
   assert.equal(form.elements.slow.checked, true, "the box is ticked");
   run.asked.length = 0; await app.poll();
   assert.ok(run.asked.includes("GET /api/requests?since=15m&slow=1"), run.asked.join("\n"));
-  app.show("#observability/queries?status=failed", { doc });
-  assert.deepEqual([form.elements.status.value, form.elements.slow.checked], ["failed", false]);
+  app.show("#observability/queries?status=refused-or-failed", { doc });
+  assert.deepEqual([form.elements.status.value, form.elements.slow.checked], ["refused-or-failed", false]);
   run.asked.length = 0; await app.poll();
   assert.ok(run.asked.includes("GET /api/requests?outcome=refused%2Cfailed&since=15m"));
   // Usage's rows lead here by user and client (and the range they were of): the form shows them, the log is read by them
@@ -2591,10 +2605,10 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
   run.asked.length = 0; await app.poll();
   assert.ok(run.asked.includes("GET /api/requests?since=24h&user=metabase&client=Metabase+v0.50&slow=1"), run.asked.join("\n"));
   assert.match(textOf(app.view()["request-log"]!), /r-new/);
-  app.show("#observability/queries?status=failed", { doc });
+  app.show("#observability/queries?status=refused-or-failed", { doc });
   assert.deepEqual([form.elements.user.value, form.elements.client.value], ["", ""], "a link without them clears them");
   app.show("#observability/queries?range=7d");
-  assert.equal((app.pages.get("queries") as unknown as { model: { filters: { status: string } } }).model.filters.status, "failed", "a change of range keeps the filters");
+  assert.equal((app.pages.get("queries") as unknown as { model: { filters: { status: string } } }).model.filters.status, "refused-or-failed", "a change of range keeps the filters");
   // the form's slow box and search field are sent
   run.answers.set("GET /api/requests?since=7d&slow=1&search=sum%28", answer({ requests: [], keptDays: 7, before: null }));
   const submitted = { id: "request-filters", elements: { status: { value: "" }, since: { value: "" }, user: { value: "" }, client: { value: "" }, slow: { checked: true }, search: { value: " sum( " } } };
@@ -2609,7 +2623,7 @@ test("Queries: Slow (1 s or more) and Statement has are the request log's slow a
     assert.match(html2, new RegExp(`<a class="card[^"]*" href="${href!.replace(/[?]/g, "\\?")}"><p class="card-label">${label!.replace(/[()]/g, "\\$&")}</p>`), `${label} → ${href}`);
   }
   assert.match(html2, /Sync errors .*<a class="see" href="#observability\/syncs\?failures=1&amp;range=7d">See all<\/a>/);
-  assert.match(html2, /Query errors .*<a class="see" href="#observability\/queries\?status=failed&amp;range=24h">See all<\/a>/);
+  assert.match(html2, /Query errors .*<a class="see" href="#observability\/queries\?status=refused-or-failed&amp;range=24h">See all<\/a>/);
 });
 const renderStatusOf = (s: RunState) => fn<[unknown, Record<string, unknown>], string>("renderStatus")(s, { queries: QUERIES, events: EVENTS, requests: FAILED_REQUESTS, now: NOW });
 

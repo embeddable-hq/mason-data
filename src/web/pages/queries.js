@@ -23,8 +23,10 @@ export const SEARCH_NOTE = `Refreshed every ${SEARCH_EVERY_MS / 1000} s while se
 /** The most of a statement (or an error) an expanded row writes, in characters. */
 const STATEMENT_MAX = 16 * 1024;
 
-/** The status column's word: the ledger's `status` (completed, failed, cancelled), capitalised; its dot says the same (ok, bad, warn). */
-const STATUS = { completed: "Completed", failed: "Failed", cancelled: "Cancelled" };
+/** The status column's dot and word, by the ledger's `outcome` (src/api/request-log.ts `outcomeOf`): the word
+ *  `mason logs --requests` prints, coloured as its line is (src/cli/commands.ts `requestLine`). A refusal (a statement
+ *  Mason answers as designed, as a Postgres would refuse it) is Refused, never Failed (Mason's or the machine's fault). */
+const OUTCOME = { ok: ["ok", "Completed"], refused: ["warn", "Refused"], failed: ["bad", "Failed"], cancelled: ["warn", "Cancelled"] };
 
 /** The columns of the request log's table: its details row spans them all; the sortable ones by their sort key. */
 const REQUEST_COLUMNS = [["Status"], ["Query id"], ["Started", "started"], ["Duration", "duration", "num"], ["User"], ["Client"], ["Rows", "rows", "num"], ["Statement"]];
@@ -61,7 +63,8 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const key = `request:${r.requestId}`;
     const open = isOpen(key);
     const error = r.sqlstate === null && !r.message ? "" : `<div class="err"${r.sqlstate ? ` title="SQLSTATE ${esc(r.sqlstate)}"` : ""}><span title="${esc(clip(r.message ?? "", TITLE_MAX))}">${esc(clip(firstLine(r.message ?? ""), 300))}</span></div>`;
-    const row = `<tr class="s-${esc(r.status)}"><td>${status(undefined, STATUS[r.status] ?? r.status)}</td>` +
+    const [kind, word] = OUTCOME[r.outcome] ?? [undefined, String(r.outcome)];
+    const row = `<tr class="s-${esc(word.toLowerCase())}"><td>${status(kind, word)}</td>` +
       `<td class="id">${details(key, r.requestId.slice(0, 8), "", open)}</td>` +
       `<td class="when"><time datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td>` +
       `<td class="num">${esc(msText(r.durationMs))}</td><td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td>` +
@@ -82,9 +85,10 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     `<tbody>${rows}</tbody></table></div>${sortNote}${nav}`;
 }
 
-/** The status filter's choices as the server's `outcome` list (src/api/request-log.ts): Completed is ok, Failed is the
- *  statement's own fault and Mason's (refused, failed), Cancelled is a cancel or a timeout (57014). */
-const STATUS_OUTCOMES = { completed: "ok", failed: "refused,failed", cancelled: "cancelled" };
+/** The status filter's choices as the server's `outcome` list (src/api/request-log.ts): Completed is ok, Refused the
+ *  statement's own fault, Failed Mason's or the machine's, Cancelled a cancel or a timeout (57014); Refused or failed is
+ *  both, the count the Overview's query errors and Usage's Failed card lead here with. */
+const STATUS_OUTCOMES = { completed: "ok", refused: "refused", failed: "failed", "refused-or-failed": "refused,failed", cancelled: "cancelled" };
 
 /** The filters as they are before any is set. */
 const NO_FILTERS = { status: "", since: "", user: "", client: "", slow: false, search: "" };
@@ -162,7 +166,7 @@ export const page = {
         const value = (k) => form.elements[k]?.value?.trim() ?? "";
         return actions.filterRequests({ status: value("status"), since: value("since"), user: value("user"), client: value("client"), slow: form.elements.slow?.checked === true, search: value("search") });
       },
-      /** `#observability/queries?slow=1`, `?status=failed`, `?user=metabase&client=Metabase` (where the Overview's cards
+      /** `#observability/queries?slow=1`, `?status=refused-or-failed`,`?user=metabase&client=Metabase` (where the Overview's cards
        *  and Usage's rows lead): those filters, from the newest, and the form's controls showing them. Nothing to do for a
        *  hash without them (a change of range keeps the filters). */
       route(params, { doc } = {}) {

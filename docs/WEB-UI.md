@@ -23,7 +23,7 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | `#overview` (none, or one it does not know) | the Overview |
 | `#tables`, `#tables?show=failed` | Tables (filtered to the failed copies) |
 | `#users` | Users |
-| `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=failed`, `?user=`, `?client=` set those filters |
+| `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=` (`completed`, `refused`, `failed`, `refused-or-failed`, `cancelled`), `?user=`, `?client=` set those filters |
 | `#observability/usage` | Observability › Usage |
 | `#observability/syncs` | Observability › Syncs; `?failures=1` ticks Failures only, `?table=` chooses the table |
 
@@ -62,7 +62,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime
   and restarts, free disk, and sessions open. In replication mode, a Changes table shows the stream and the WAL its slot holds.
 - **Overview**, the statements and errors: the last day and week in one table, then the latest sync errors and the
-  refused or failed statements, each with **See all** (Logs, failures only; Queries, the failed ones), and — when a
+  refused or failed statements, each with **See all** (Logs, failures only; Queries, the refused or failed ones), and — when a
   statement used SQL Mason does not support in the last day — one line naming the most refused entry of
   `docs/SQL-SUPPORT.md`, with **See all** (Queries).
 - **Tables** (`#tables`): the database's tables, as `mason tables` lists them, with a search box by name and an All /
@@ -95,7 +95,9 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
   and the range's numbers are on Usage.
 - **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool (as the Overview's).
-- **Queries**, the request log: newest first, with a status dot per row. Filter by status, **Slow (1 s or more)**, a
+- **Queries**, the request log: newest first, with a status dot and word per row as `mason logs --requests` says it: Completed,
+  Refused (a statement Mason answers as designed, as a Postgres would refuse it: unsupported SQL, a missing relation),
+  Failed (Mason's or the machine's fault) or Cancelled. Filter by status (each, or Refused or failed), **Slow (1 s or more)**, a
   piece of the statement's text (**Statement has**), since (`2h`, `7d`, or a date: used instead of the range), user and
   client; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row

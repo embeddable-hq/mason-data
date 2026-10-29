@@ -275,7 +275,7 @@ export function renderUsageKpis({ activity, usage, sessions, running, range = DE
   if ("failure" in activity) return cards([...list, card(`Statements, ${label}`, "unknown", `could not read them: ${firstLine(activity.failure.message)}`)]);
   const w = activity.window;
   const href = (filters) => queriesHref(filters, range);
-  list.push(...statementCards(w, line, label, { statements: href({}), failed: href({ status: "failed" }), p95: href({ slow: "1" }) }),
+  list.push(...statementCards(w, line, label, { statements: href({}), failed: href({ status: "refused-or-failed" }), p95: href({ slow: "1" }) }),
     card(`Sent, ${label}`, bytesText(w.bytesSent), plural(w.rows, "row"), line("bytes")));
   // a range longer than the log keeps is said, never a short one passed off as whole
   const covered = coveredText(w);
