@@ -51,14 +51,27 @@ export function canonicalRead<T extends Omit<JsonRead, "asText">>(r: T): T {
 /** a read as one string: the request log's key (its `->>` or `->` included: the policy counts both for one path) */
 export const readKey = (r: JsonRead): string => { const c = canonicalRead(r); return JSON.stringify([c.source, c.column, c.steps, c.either, c.canonical, c.asText]); };
 
-/** a read's key, back (null for a string that is not one) */
+/** a read's key, back (null for a string that is not one, and for a read of a kind this Mason does not know: `knownSteps`) */
 export function readOfKey(key: string): JsonRead | null {
   let v: unknown;
   try { v = JSON.parse(key); } catch { return null; }   // a key a later Mason wrote otherwise: not a read this one keeps
   if (!Array.isArray(v) || v.length !== 6) return null;
   const [source, column, steps, either, canonical, asText] = v as unknown[];
   if (typeof source !== "string" || typeof column !== "string" || typeof steps !== "string" || typeof either !== "boolean" || typeof canonical !== "boolean" || typeof asText !== "boolean") return null;
+  if (!knownSteps(steps)) return null;
   return canonicalRead({ source, column, steps, either, canonical, asText });
+}
+
+/**
+ * WHETHER A READ'S STEPS ARE A KIND THIS MASON KNOWS: a path's (a JSON array of keys and indexes) or a jsonb's key
+ * (`isKeyRead`). A request log or a ledger written by another release may hold a kind this one does not know (an
+ * earlier release met `equal:…` and `order:…` and failed every write of the table, and its status, parsing them as a
+ * path): such a read is INERT, never fatal — not counted (`readOfKey`), its ledger row dropped at the start with its
+ * column (src/duck/kept.ts `open`), and said raw (`pathText`).
+ */
+export function knownSteps(steps: string): boolean {
+  if (isKeyRead({ steps })) return true;
+  try { return Array.isArray(JSON.parse(steps)); } catch { return false; }   // not JSON: not a path, so not a kind known here
 }
 
 /**
@@ -107,7 +120,8 @@ export const isOrderRead = (r: { steps: string }): boolean => r.steps === ORDER_
  * A JSONB'S EQUALITY, AS A READ, under a LIBC collation alone (src/duck/rewrite.ts `equalKey`): `GROUP BY j`, `DISTINCT
  * j`, `j = k`, `j IN (…)`, a join on `=`, `count(DISTINCT j)` compare the C key — a libc order's key refuses a string
  * its measured order does not cover, where equality never needed an order (docs/DESIGN.md "jsonb's order"), so the
- * order's stored key cannot serve them, and over 20 M rows a GROUP BY computed the C key per row for ~20 s. So the C key
+ * order's stored key cannot serve them, and over 20 M rows a GROUP BY computing the C key per row took 32–45 s of CPU
+ * (34–77 s wall; docs/DESIGN.md "Under libc, the C key stored for equality"), 0.15–0.23 s from it. So the C key
  * is a read of its own, stored beside the order's as `EQUAL_STEPS:<id>` (src/duck/kept.ts `equalId`). Under C and ICU
  * the order's key equates exactly and never refuses, so equality reads IT and this read is never recorded nor stored
  * (src/duck/kept.ts `own` folds one into the order's).
@@ -122,6 +136,8 @@ export const isKeyRead = (r: { steps: string }): boolean => isOrderRead(r) || is
  *  its `->` read; a jsonb's order and equality as what reads each (under libc the order's key sorts and the C key
  *  equates, two columns: `mason status` names each by its own) */
 export function pathText(r: Omit<JsonRead, "asText" | "source"> & { asText?: boolean }): string {
+  // a kind this Mason does not know (another release's): said as it is stored, never parsed (`knownSteps`)
+  if (!knownSteps(r.steps)) return `${r.column} (stored as ${r.steps}: a kind this Mason does not know)`;
   if (isEqualRead(r)) return `GROUP BY ${r.column} (its jsonb equality: grouped, DISTINCT, = and IN)`;
   if (isOrderRead(r)) return r.steps.startsWith(`${ORDER_STEPS}:libc:`) ? `ORDER BY ${r.column} (its jsonb order: sorted, and compared by < and >)`
     : `ORDER BY ${r.column} (its jsonb order: sorted, grouped and compared)`;
@@ -177,7 +193,8 @@ export interface KeptRoutes {
    *  column; null when the policy decides (src/duck/kept.ts `review`) */
   keepNow: ((reads: readonly JsonRead[]) => Promise<void>) | null;
   /** the collation the listener sorts text by, told once it is known (src/duck/store.ts `listener`): a jsonb's order
-   *  is stored under it alone (`ORDER_STEPS`), and one stored under another is dropped */
+   *  key is stored under it (`ORDER_STEPS`), and under a libc one its equality's C key beside it (`EQUAL_STEPS`); a key
+   *  stored under another collation or version, and a C key under C or ICU, is dropped */
   orderBy(collation: DuckCollation, libc: LibcOrder | undefined): Promise<void>;
 }
 

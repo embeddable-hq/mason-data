@@ -491,6 +491,17 @@ sixth NULL), under en_US.utf8 (the libc container), through the rewrite's plan a
 of CPU, the machine's other work, and is left out.) The fill (the keeper's chunks of 50,000 rows) took 29 s, 1.4 µs a
 row: about one computed GROUP BY, once. Each answer from the stored key equalled the computed one.
 
+A source whose collation turns from libc to C drops the C key at `orderBy` and fills the order's key, whose bytes are
+the same C key's: one fill wasted, once, at a change that is rare; accepted rather than a rename of the column.
+
+**Rolling back past it (the review, 2026-10-29).** The release before this one does not know a `equal:…` row, and
+`mason destroy` (then a copy again under that release) is the only way back to it: its `mason status` and `mason wait`
+throw parsing the row's steps as a JSON path (`pathText`), even once `MASON_STORE_JSON_PATHS=off` has marked the row
+dropped, and its review stores the request log's `equal` reads as a path whose every write raises. So, as the class
+fix, a kind a Mason does not know is inert from this release on (`knownSteps`, src/duck/kept-route.ts): its request
+log reads are not counted (`readOfKey`), its ledger row is dropped at the start with its column (`open`), and
+`mason status` says it raw (`pathText`) — a later release's new kind is never fatal to this one.
+
 ### What DuckDB is sent: the form it computes fastest, where that is Postgres's answer
 
 Three shapes BI tools send on every chart and preview were each the slow path of DuckDB's, and two of them were also

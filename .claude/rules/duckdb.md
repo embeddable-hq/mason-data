@@ -266,6 +266,11 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   `orderBy`. `mason status` names each: `GROUP BY j (its jsonb equality …)` beside `ORDER BY j (its jsonb order …)`.
   `tests/duck-json-columns.test.ts` holds both kinds through every write path, every equality form to PGlite, and the
   lifecycle; the eager oracle under libc reads `public.jorder`'s equality from it.
+- **A stored read of a kind this Mason does not know is inert, never fatal** (`knownSteps`, src/duck/kept-route.ts): a
+  request log's read of it is not counted (`readOfKey`), its ledger row is dropped at the start with its column and
+  said with its steps (`open`), and `pathText` says it raw. A new kind of stored read is added there (the release before
+  `equal:` broke its status and every write of the table on one). `tests/duck-json-columns.test.ts` holds it with a
+  made-up kind `future:x`. ("jsonb's order", "Rolling back past it")
 ## What is not supported, and how the list stays true
 
 - **An allowlist, not a blocklist**: DuckDB answers only a statement whose every resolved piece is in

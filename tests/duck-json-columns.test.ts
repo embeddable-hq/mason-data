@@ -812,8 +812,8 @@ test("a jsonb's key stored by another version of its encoding or of DuckDB is dr
 
 // A JSONB'S EQUALITY STORED UNDER LIBC (src/duck/kept-route.ts EQUAL_STEPS): under a libc collation equality reads the C
 // key (the libc order's key refuses a string its measured order does not cover, which equality never had to order), so
-// the order's stored key could not serve GROUP BY / DISTINCT / = / IN, which computed the C key per row (~20 s over
-// 20 M rows); the C key is stored as a second column beside the order's.
+// the order's stored key could not serve GROUP BY / DISTINCT / = / IN, which computed the C key per row (32–45 s of CPU
+// over 20 M rows, docs/DESIGN.md); the C key is stored as a second column beside the order's.
 
 /** documents equality must tell apart, or not: numbers written apart (`1.0 = 1.00`), an object's keys in another order,
  *  strings the small libc order does not cover (an NFD accent, `è`, an emoji with and without its variation selector),
@@ -1003,6 +1003,91 @@ test("a jsonb's stored C key lives as the order's: swept across starts, dropped 
     const off = await keeperOver(store, kept, { enabled: false });
     assert.equal(off.keeper.ready(EQUAL), null);
     assert.deepEqual(await rows(store, "SELECT count(*) FROM duckdb_columns() WHERE table_name = 'docs' AND starts_with(column_name, '__mason_json_')"), [[0n]]);
+    await off.keeper.stop();
+  } finally { store.close(); }
+});
+
+test("a jsonb's C key waits for a libc collation: no row or column before the collation is told, stored after it, dropped when it turns C", async () => {
+  const { kept, route } = await modules();
+  const store = await newStore();
+  try {
+    await documents(store, "public.docs", 5);
+    const hidden = async (): Promise<unknown[][]> => rows(store, "SELECT column_name FROM duckdb_columns() WHERE table_name = 'docs' AND starts_with(column_name, '__mason_json_')");
+    const ledger = async (): Promise<unknown[][]> => rows(store, `SELECT steps, state FROM ${MASON_SCHEMA}.json_paths ORDER BY steps`);
+    // the oracle's eager store, before the listener tells the collation: nothing written
+    const eager = await keeperOver(store, kept, { eager: true });
+    await eager.keeper.keepNow!([EQUAL]);
+    assert.equal(eager.keeper.ready(EQUAL), null);
+    assert.deepEqual([await ledger(), await hidden()], [[], []], "no ledger row and no column before the collation is told");
+    await eager.keeper.stop();
+    // the policy: the request log's equality reads, reviewed before the collation is told, write nothing either
+    await store.writer.run(`CREATE TABLE ${MASON_SCHEMA}.requests (request_id VARCHAR, duration_ms INTEGER, json_reads VARCHAR)`);
+    await store.writer.run(`INSERT INTO ${MASON_SCHEMA}.requests SELECT 'r', 5, '${JSON.stringify([route.readKey(EQUAL)]).replaceAll("'", "''")}' FROM range(${kept.KEEP_AFTER_STATEMENTS})`);
+    const policy = await keeperOver(store, kept, {});
+    await reviewed(policy.keeper);
+    assert.deepEqual([await ledger(), await hidden()], [[], []], "a review before the collation is told stores nothing");
+    // told a libc collation: the next review stores the C key from the same evidence
+    await policy.keeper.orderBy!({ kind: "libc", icu: "en_us" }, smallLibcOrder());
+    await reviewed(policy.keeper);
+    const h = route.hiddenName(storedAs(EQUAL));
+    assert.deepEqual(policy.keeper.ready(EQUAL), { name: h, exact: true });
+    assert.deepEqual(await ledger(), [[storedAs(EQUAL).steps, "ready"]]);
+    assert.match(storedAs(EQUAL).steps, /^equal:c:k\d+:/);
+    await policy.keeper.stop();
+    // libc → C: the C key is dropped (the order's key equates there) and said, never read
+    const c = await keeperOver(store, kept, {});
+    await c.keeper.orderBy!({ kind: "bytes" }, undefined);
+    const gone = c.keeper.status().find((p) => p.name === h)!;
+    assert.equal(gone.state, "dropped");
+    assert.match(gone.why, /no longer a libc one \(now c:k\d+:.*its order's key equates jsonb/);
+    assert.match(c.host.logged.join("\n"), /GROUP BY j \(its jsonb equality.*no longer stored/);
+    assert.equal(c.keeper.ready(EQUAL), null, "equality now reads the order's key, not stored here yet");
+    await c.keeper.stop();
+  } finally { store.close(); }
+});
+
+// A KIND THIS MASON DOES NOT KNOW (the review of PR #21): an earlier release met `order:…` and `equal:…` rows and parsed
+// them as a JSON path — its status threw, and every write of the table failed. A later release's kind is inert here.
+test("a stored read of a kind this Mason does not know is inert: its ledger row and column dropped at the start, its request-log reads not counted, said raw", async () => {
+  const { kept, route } = await modules();
+  const store = await newStore();
+  try {
+    await documents(store, "public.docs", 5);
+    const s: Read = { source: "public.docs", column: "j", steps: '["s"]', either: false, canonical: true, asText: true };
+    const first = await keeperOver(store, kept, { eager: true });
+    await first.keeper.keepNow!([s]);
+    await first.keeper.stop();
+    // the file as a later release left it: a ledger row of a kind `future:x`, its column, and reads of it in the request log
+    const future: Read = { source: "public.docs", column: "j", steps: "future:x", either: false, canonical: true, asText: false };
+    const col = "__mason_json_0123456789ab";
+    await store.writer.run(`ALTER TABLE public.docs ADD COLUMN ${col} VARCHAR`);
+    await store.writer.run(`INSERT INTO ${MASON_SCHEMA}.json_paths (name, source, column_name, steps, either, canonical, as_text, state, rows_total, rows_done, statements, kept_at, why, marked) ` +
+      `VALUES ('${col}', 'public.docs', 'j', 'future:x', false, true, false, 'ready', 46, 46, 3, now(), 'a later release', 0)`);
+    await store.writer.run(`CREATE TABLE ${MASON_SCHEMA}.requests (request_id VARCHAR, duration_ms INTEGER, json_reads VARCHAR)`);
+    await store.writer.run(`INSERT INTO ${MASON_SCHEMA}.requests SELECT 'r', 5, '${JSON.stringify([route.readKey(future)]).replaceAll("'", "''")}' FROM range(${kept.KEEP_AFTER_STATEMENTS})`);
+    const r = await import("../src/duck/kept-route.ts") as unknown as { readOfKey(k: string): Read | null; pathText(r: Read): string };
+    assert.equal(r.readOfKey(route.readKey(future)), null, "a read of an unknown kind is not counted");
+    assert.ok(r.readOfKey(route.readKey(s)) !== null, "a path's read is");
+    assert.equal(r.pathText(future), "j (stored as future:x: a kind this Mason does not know)");
+    // the next start: the row dropped and said with its steps, its column gone, the known path untouched
+    const next = await keeperOver(store, kept, {});
+    const row = next.keeper.status().find((p) => p.name === col);
+    assert.equal(row?.state, "dropped", JSON.stringify(next.keeper.status()));
+    assert.match(row!.why, /future:x, a kind this Mason does not know/);
+    assert.match(next.host.logged.join("\n"), /dropped the stored j of a kind this Mason does not know \(future:x\)/);
+    assert.deepEqual(await rows(store, `SELECT count(*) FROM duckdb_columns() WHERE table_name = 'docs' AND column_name = '${col}'`), [[0n]]);
+    assert.deepEqual(next.keeper.ready(s), { name: route.hiddenName(s), exact: true });
+    // a review reads the request log's reads of it and stores nothing; mason status says the rest
+    await reviewed(next.keeper);
+    assert.deepEqual(await rows(store, `SELECT name, state FROM ${MASON_SCHEMA}.json_paths WHERE steps = 'future:x'`), [[col, "dropped"]]);
+    assert.deepEqual(await rows(store, "SELECT count(*) FROM duckdb_columns() WHERE table_name = 'docs' AND starts_with(column_name, '__mason_json_')"), [[1n]]);
+    const { jsonPathLines } = await import("../src/cli/commands.ts") as unknown as { jsonPathLines(p: unknown[], st: unknown): string[] };
+    const plain = new Proxy({}, { get: () => (x: string) => x });
+    assert.match(jsonPathLines(next.keeper.status(), plain).join("\n"), /j -> 's' {2}ready[\s\S]*1 dropped/);
+    await next.keeper.stop();
+    // and a start turned off still says its status, the row of the unknown kind in it
+    const off = await keeperOver(store, kept, { enabled: false });
+    assert.ok(off.keeper.status().some((p) => p.steps === "future:x"));
     await off.keeper.stop();
   } finally { store.close(); }
 });

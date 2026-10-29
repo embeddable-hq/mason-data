@@ -59,8 +59,8 @@
 import type { DuckConnection } from "./executor.ts";
 import { DUCKDB_VERSION, MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { createHash } from "node:crypto";
-import { canonicalRead, EQUAL_STEPS, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isEqualRead, isKeyRead, isOrderRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, ORDER_STEPS, pathKey, pathText,
-  readOfKey, VISIBLE_CATALOG,
+import { canonicalRead, EQUAL_STEPS, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isEqualRead, isKeyRead, isOrderRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, knownSteps, ORDER_STEPS, pathKey,
+  pathText, readOfKey, VISIBLE_CATALOG,
   type JsonRead, type KeptRoutes, type ReadyPath } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS, KEY_VERSION, libcUncovered, STORED_SUFFIX } from "./jsonb-order.ts";
 import { encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
@@ -266,7 +266,8 @@ const recomputeSql = (p: { steps: string }): string => isKeyRead(p) ? `unhex('${
 
 /** what a fill's measured rate is kept by (`estimate`, `lastRate`): the JSON column, and whether the fill computes a path,
  *  a jsonb's order key or its C key — a key's function is not a path's (a list of strings, their ICU keys, the key's
- *  bytes), nor a libc order's key the C key's (4.7 µs a row against 1.0), so one's rate is no evidence for another's */
+ *  bytes), nor a libc order's key the C key's (4.7 µs a row against 1.4, docs/DESIGN.md "jsonb's order"), so one's
+ *  rate is no evidence for another's */
 const measuredKey = (r: { source: string; column: string; steps: string }): string =>
   `${r.source}\u0000${r.column}\u0000${isOrderRead(r) ? "order" : isEqualRead(r) ? "equal" : "path"}`;
 
@@ -476,6 +477,13 @@ export class KeptJsonPaths implements KeptRoutes {
         fill: fillSeconds === null || fillSeconds === undefined ? null : { rows: Number(fillRows ?? 0), bytesPerRow: Number(fillBytes ?? 0), seconds: Number(fillSeconds),
           basis: isBasis(fillBasis) ? fillBasis : "text", rowsPerSecond: fillRate === null || fillRate === undefined ? null : Number(fillRate) },
         filled: filledRows === null || filledRows === undefined || filledSeconds === null || filledSeconds === undefined ? null : { rows: Number(filledRows), seconds: Number(filledSeconds) } });
+    }
+    // a row of a kind this Mason does not know (another release's: `knownSteps`) is dropped, its column with it (no
+    // write here could compute it, and none names it once dropped), and said with its steps: inert, never fatal
+    for (const p of this.paths.values()) {
+      if (p.state === "dropped" || knownSteps(p.steps)) continue;
+      await this.drop(w, p, `stored by another release as ${p.steps}, a kind this Mason does not know`);
+      this.host.log(`${p.source}: dropped the stored ${p.column} of a kind this Mason does not know (${p.steps}); its column goes at this start`);
     }
     // a path an earlier Mason stored in another form (a column per spelling or per `->>`, its rows' marks other): its
     // name is not its path's (`hiddenName`), so it is dropped with its column, and stored again as the policy says

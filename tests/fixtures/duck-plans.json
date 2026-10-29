@@ -1610,9 +1610,9 @@
       "full_sort": false
     },
     {
-      "name": "jsonb under libc: GROUP BY a jsonb, the C key computed per row (the libc key stored)",
+      "name": "jsonb under libc: GROUP BY a jsonb, the C key computed per row",
       "sql": "SELECT \"meta\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY \"count\" DESC LIMIT 100",
-      "on": "libc, the key stored",
+      "on": "libc",
       "plan": [
         "TOP_N (1 key)",
         "  PROJECTION",
@@ -1628,9 +1628,9 @@
       "full_sort": false
     },
     {
-      "name": "jsonb under libc: SELECT DISTINCT a jsonb, the C key computed per row (the libc key stored)",
+      "name": "jsonb under libc: SELECT DISTINCT a jsonb, the C key computed per row",
       "sql": "SELECT DISTINCT o.meta FROM orders o LIMIT 100",
-      "on": "libc, the key stored",
+      "on": "libc",
       "plan": [
         "PROJECTION",
         "  LIMIT",
@@ -1648,17 +1648,65 @@
       "full_sort": false
     },
     {
-      "name": "jsonb under libc: WHERE jsonb = a document, the C key computed per row (the libc key stored)",
+      "name": "jsonb under libc: GROUP BY a jsonb, the C key stored",
+      "sql": "SELECT \"meta\", count(*) AS \"count\" FROM \"public\".\"orders\" GROUP BY 1 ORDER BY \"count\" DESC LIMIT 100",
+      "on": "libc, the key stored",
+      "plan": [
+        "TOP_N (1 key)",
+        "  PROJECTION",
+        "    HASH_GROUP_BY",
+        "      PROJECTION calls __mason_marked_key",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_marked_key"
+      ],
+      "sends": [],
+      "keys": [
+        "a stored column"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb under libc: SELECT DISTINCT a jsonb, the C key stored",
+      "sql": "SELECT DISTINCT o.meta FROM orders o LIMIT 100",
+      "on": "libc, the key stored",
+      "plan": [
+        "PROJECTION",
+        "  LIMIT",
+        "    PROJECTION",
+        "      HASH_GROUP_BY",
+        "        PROJECTION",
+        "          PROJECTION calls __mason_marked_key",
+        "            TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_marked_key"
+      ],
+      "sends": [],
+      "keys": [
+        "a stored column"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "jsonb under libc: WHERE jsonb = a document, the C key stored",
       "sql": "SELECT count(*) FROM orders o WHERE o.meta = '{\"status\": \"pending\", \"n\": 0.370, \"tags\": [\"a\", \"B\"]}'::jsonb",
       "on": "libc, the key stored",
       "plan": [
         "UNGROUPED_AGGREGATE",
-        "  TABLE_SCAN public.orders [zone-map filter: an expression] calls __mason_jsonb_key"
+        "  TABLE_SCAN public.orders [zone-map filter: an expression] calls __mason_marked_key"
       ],
       "calls": [
-        "__mason_jsonb_key"
+        "__mason_jsonb_key",
+        "__mason_marked_key"
       ],
       "sends": [],
+      "keys": [
+        "a stored column"
+      ],
       "delim_join": false,
       "full_sort": false
     }
