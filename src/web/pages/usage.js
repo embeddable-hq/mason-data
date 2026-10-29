@@ -113,7 +113,9 @@ export function queriesHref(filters = {}, range = DEFAULT_RANGE) {
   return `#observability/queries${qs ? `?${qs}` : ""}`;
 }
 /** A client's Queries link: its statements in the range. */
-const queriesLink = (user, client, range, label = "Queries") => `<a class="btn small" href="${esc(queriesHref({ user, client }, range))}" title="the statements ${esc(user || "this token")} sent from ${esc(clientText(client))} in ${esc(RANGES[rangeOf(range)].span)}">${esc(label)}</a>`;
+const queriesLink = (user, client, range, label = "Queries") => `<a class="btn small" href="${esc(queriesHref({ user, client }, range))}" title="${esc(user || client
+  ? `the statements ${user ? `of ${user}` : ""}${user && client ? " " : ""}${client ? `from ${client}` : ""} in ${RANGES[rangeOf(range)].span}`
+  : `every statement in ${RANGES[rangeOf(range)].span}: a token's session that names no client cannot be told apart`)}">${esc(label)}</a>`;
 
 /** What a cancel answered, as `mason cancel` says it: its headline, or the refusal as the Failure. */
 function outcomeHtml(o) {

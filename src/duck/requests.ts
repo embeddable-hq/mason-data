@@ -421,13 +421,13 @@ export class RequestLedger {
 
   /**
    * WHO CONNECTED from `since` on, by the statements they sent: a row per user and client (application_name) — its
-   * statements, the failed ones (refused, failed or cancelled), the sessions they came from and when the latest started —
+   * statements, the failed ones (refused or failed, as the Failed card counts them: a cancel is not), the sessions they came from and when the latest started —
    * the most statements first, `limit` of them. A session that sent only what the log does not list (select 1, SET, a
    * catalog query) is not here; the live sessions are `/api/state`'s. Committed rows only.
    */
   async clients(since: string, limit = 50): Promise<ClientActivity[]> {
     const rows = (await this.history.reader.runAndReadAll(`SELECT user_name, token_name, application_name, count(*) AS statements, ` +
-      `count(*) FILTER (WHERE sqlstate IS NOT NULL) AS failed, count(DISTINCT session) AS sessions, max(started_at) AS last ` +
+      `count(*) FILTER (WHERE (${outcomeSql("sqlstate")}) IN ('refused', 'failed')) AS failed, count(DISTINCT session) AS sessions, max(started_at) AS last ` +
       `FROM ${REQUESTS_TABLE} WHERE started_at >= $1::TIMESTAMPTZ AND method <> 'CONNECT' GROUP BY ALL ORDER BY statements DESC, last DESC LIMIT $2`,
     [since, limit])).getRowObjectsJson();
     return rows.map((r) => ({ user: String(r.user_name ?? ""), tokenName: String(r.token_name ?? ""), client: String(r.application_name ?? ""),

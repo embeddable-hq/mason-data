@@ -11,7 +11,7 @@
  * empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away. Usage's rows lead here
  * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`).
  */
-import { msText, agoText, bytesText, esc, firstLine, n, renderFailure, rowsHtml, utcText, details, createOpenSet, status,
+import { msText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, details, createOpenSet, status,
   clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery } from "../shared.js";
 
 const STATE = "/api/state";
