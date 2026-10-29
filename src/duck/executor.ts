@@ -36,8 +36,7 @@ import { fileURLToPath } from "node:url";
 import * as duck from "@duckdb/node-api";
 import type { DuckDBType, DuckDBValue, JS, Json } from "@duckdb/node-api";
 import { runnable } from "../lib/runnable.ts";
-import { StatementError, type DuckAnswer, type DuckRunner } from "../api/postgres/server.ts";
-import type { ExplainOptions } from "../api/postgres/explain.ts";
+import { StatementError, type DuckAnswer, type DuckRunner, type ExplainHow } from "../api/postgres/server.ts";
 import { EncodeError } from "../api/postgres/encode.ts";
 import { NumericError } from "../lib/pg-numeric.ts";
 import type { PlannedSql } from "./plan.ts";
@@ -382,6 +381,8 @@ export class Executor {
   /** how many vectors each Mason function was called with so far (src/duck/functions.ts FUNCTION_CALLS: the worker's
    *  count, the functions being its) — what a test or a measurement reads to know whether a statement reached one */
   async functionCalls(): Promise<Map<string, number>> { return new Map(Object.entries(await this.call<Record<string, number>>({ op: "calls" }))); }
+  /** how many rows each Mason function was handed so far, across its calls (src/duck/functions.ts FUNCTION_ROWS) */
+  async functionRows(): Promise<Map<string, number>> { return new Map(Object.entries(await this.call<Record<string, number>>({ op: "function rows" }))); }
 
   /** a wire session's connection: a slot of the cancel table, its connection on the worker */
   async runner(): Promise<DuckRunner> {
@@ -539,7 +540,7 @@ class RemoteRunner implements DuckRunner {
   }
 
   async explain(sql: PlannedSql, params: readonly (string | null)[], session: Session, signal: AbortSignal,
-    how: { options: ExplainOptions; fields: Fields; exact: readonly ExactColumn[]; planning: { analysisMs: number; rewriteMs: number } }): Promise<string[]> {
+    how: ExplainHow): Promise<string[]> {
     const seq = ++this.seq;
     const unwatch = this.watch(seq, sql, signal);
     let lines: string[];

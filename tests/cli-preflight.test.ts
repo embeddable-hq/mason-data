@@ -5,10 +5,10 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as os from "node:os";
-import * as net from "node:net";
 import { PgError } from "../src/cdc/pg-wire.ts";
 import { checkSource, explainConnectError, isLocalHost, maskedUrl, parseSource, serverlessHost, sourceWarnings, unpickableReason,
   type SourceFacts, type SourceTable } from "../src/cli/preflight.ts";
+import { unassignedPort } from "./test-ports.ts";
 
 const source = (url: string) => {
   const r = parseSource(url);
@@ -29,6 +29,20 @@ test("the URL: the user defaults to the OS user, the database never defaults, a 
   const scheme = parseSource("mysql://me@localhost/app");
   assert.ok("problem" in scheme && /postgres:\/\//.test(scheme.problem));
   assert.equal(source("postgres://me:p%40ss@localhost/app").password, "p@ss");
+});
+
+test("a URL that cannot be read is said with its password masked, whatever the password holds", () => {
+  // the problem is printed, and under mason mcp kept in the MCP client's log file
+  for (const [url, shown] of [
+    ["postgres://claude:s3cret@127.0.0.1:99999/shop", '"postgres://claude:****@127.0.0.1:99999/shop" is not a URL'],
+    ["postgres://claude:s3cret@[::1/shop", '"postgres://claude:****@[::1/shop" is not a URL'],
+    ["postgres://claude:s3/cr@et@local host/shop", '"postgres://claude:****@local host/shop" is not a URL'],
+  ] as const) {
+    const r = parseSource(url);
+    assert.ok("problem" in r, url);
+    assert.ok(r.problem.startsWith(shown), r.problem);
+    assert.doesNotMatch(r.problem, /s3cret|s3\/cr|cr@et/, "never the password");
+  }
 });
 
 test("a database elsewhere is remote, and read over TLS unless the URL says otherwise", () => {
@@ -60,8 +74,9 @@ test("each connection failure says what to change", () => {
 
 test("a refused connection to localhost says nothing is listening, from the real error (::1 and 127.0.0.1 both refused)", async () => {
   // Node tries localhost's two addresses and fails with an AggregateError whose message is EMPTY, so the
-  // hand-written message above was the only ECONNREFUSED this ever saw; mason start said only "Connecting to … ✘"
-  const port = await new Promise<number>((resolve) => { const srv = net.createServer().listen(0, "127.0.0.1", () => { const p = (srv.address() as net.AddressInfo).port; srv.close(() => resolve(p)); }); });
+  // hand-written message above was the only ECONNREFUSED this ever saw; mason start said only "Connecting to … ✘".
+  // A port nothing listens on until the connect: out of the kernel's ephemeral range (tests/test-ports.ts)
+  const port = await unassignedPort();
   const said: string[] = [], progress: string[] = [];
   const r = await checkSource(`postgres://me@localhost:${port}/app`, { remote: false, cmd: "mason start", say: (m) => said.push(m), progress: (m) => progress.push(m) });
   assert.deepEqual(r, { exit: 1 });
@@ -72,7 +87,8 @@ test("a refused connection to localhost says nothing is listening, from the real
 
 test("the demo database refused while its run is down says the way out: it runs inside mason start (the project's config says it is the demo's)", async () => {
   const { connectSource } = await import("../src/cli/preflight.ts");
-  const port = await new Promise<number>((resolve) => { const srv = net.createServer().listen(0, "127.0.0.1", () => { const p = (srv.address() as net.AddressInfo).port; srv.close(() => resolve(p)); }); });
+  // a port nothing listens on until both connects: out of the kernel's ephemeral range (tests/test-ports.ts)
+  const port = await unassignedPort();
   const s = source(`postgres://demo@127.0.0.1:${port}/demo`);
   const demo = await connectSource(s, { demo: true });
   assert.ok("failure" in demo);

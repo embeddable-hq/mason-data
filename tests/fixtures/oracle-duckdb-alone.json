@@ -1,19 +1,19 @@
 {
-  "statements": 2764,
+  "statements": 3086,
   "mason": {
-    "exact": 2620,
-    "decided": 25,
-    "refused": 119,
+    "exact": 2923,
+    "decided": 36,
+    "refused": 127,
     "differs": 0
   },
   "duckdb": {
-    "exact": 850,
-    "name": 687,
-    "refused": 455,
-    "value": 314,
-    "rows": 167,
+    "exact": 938,
+    "name": 699,
+    "refused": 560,
+    "value": 368,
+    "rows": 210,
     "text": 152,
-    "other": 139
+    "other": 159
   },
   "measured": "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy"
 }

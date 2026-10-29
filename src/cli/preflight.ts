@@ -28,7 +28,11 @@ export function maskedUrl(url: string): string {
     const u = new URL(url);
     if (u.password) u.password = "****";
     return u.toString();
-  } catch { return url.replace(/:\/\/([^:@/]*):[^@/]*@/, "://$1:****@"); }
+  } catch {
+    // not a URL: everything from the user's colon to the LAST @ is the password, whatever it holds (a / or an @ that
+    // was not encoded) — a host never holds an @
+    return url.replace(/:\/\/([^:@/]*):.*@/, "://$1:****@");
+  }
 }
 
 /**
@@ -38,7 +42,8 @@ export function maskedUrl(url: string): string {
 export function parseSource(url: string): { source: Source } | { problem: string } {
   let u: URL;
   try { u = new URL(url); } catch {
-    return { problem: `${JSON.stringify(url)} is not a URL. The form is postgres://user:password@localhost:5432/your_app — a password ` +
+    // its password masked: the problem is printed (and, under mason mcp, kept in the MCP client's log)
+    return { problem: `${JSON.stringify(maskedUrl(url))} is not a URL. The form is postgres://user:password@localhost:5432/your_app — a password ` +
       `containing @ : / # ? or % must be URL-encoded (encodeURIComponent; @ is %40).` };
   }
   if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") return { problem: `the URL's scheme is ${u.protocol.replace(/:$/, "")}; it must be postgres:// or postgresql://` };
@@ -225,17 +230,20 @@ export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text F
       THEN (SELECT coalesce(sum(pg_total_relation_size(pt.relid)), 0) FROM pg_partition_tree(c.oid) pt WHERE pt.isleaf)
       ELSE pg_total_relation_size(c.oid) END AS bytes,
     obj_description(c.oid, 'pg_class') AS comment,
+    -- the primary key: only a valid index enforces it
     (SELECT coalesce(json_agg(a.attname ORDER BY k.n), '[]'::json)
       FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, n)
       JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-      WHERE i.indrelid = c.oid AND i.indisprimary) AS key,
+      WHERE i.indrelid = c.oid AND i.indisprimary AND i.indisvalid) AS key,
     (SELECT coalesce(json_agg(json_build_object('name', ic.relname, 'constraint', EXISTS (SELECT FROM pg_constraint u WHERE u.conindid = i.indexrelid AND u.contype = 'u'),
         -- indnullsnotdistinct is Postgres 15's: read through the row, which an older server's lacks
         'nulls_not_distinct', coalesce((to_jsonb(i) ->> 'indnullsnotdistinct')::boolean, false),
         'columns', (SELECT json_agg(a.attname ORDER BY k.n) FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, n)
           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum)) ORDER BY ic.relname), '[]'::json)
       FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid
-      WHERE i.indrelid = c.oid AND i.indisunique AND NOT i.indisprimary AND i.indpred IS NULL AND i.indexprs IS NULL
+      -- an INVALID index (a CREATE UNIQUE INDEX CONCURRENTLY that failed, its duplicates still in the table) enforces
+      -- nothing: never declared to the catalog, never a key: Mason accepts
+      WHERE i.indrelid = c.oid AND i.indisunique AND i.indisvalid AND NOT i.indisprimary AND i.indpred IS NULL AND i.indexprs IS NULL
         AND i.indnkeyatts = i.indnatts) AS unique_keys,
     (SELECT coalesce(json_agg(json_build_object('name', a.attname, 'type', format_type(a.atttypid, a.atttypmod),
         'not_null', a.attnotnull, 'comment', col_description(c.oid, a.attnum), 'type_oid', a.atttypid,

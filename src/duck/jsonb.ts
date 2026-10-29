@@ -114,10 +114,18 @@ export function quoteJson(s: string): string {
   return `${out}"`;
 }
 
-/** jsonb's key order: shorter first, then by the UTF-8 bytes */
+/** jsonb's key order: shorter first, then by the UTF-8 bytes (lengthCompareJsonbStringValue) */
 function keyOrder(a: string, b: string): number {
   const x = Buffer.from(a, "utf8"), y = Buffer.from(b, "utf8");
   return x.length - y.length || Buffer.compare(x, y);
+}
+
+/** an object's pairs as jsonb stores them, in its key order: a key held twice keeps its LAST value
+ *  (uniqueifyJsonbObject). What jsonb writes and what its order compares (src/duck/jsonb-order.ts) both read it. */
+export function storedPairs(members: ReadonlyArray<[string, Json]>): Array<[string, Json]> {
+  const last = new Map<string, Json>();
+  for (const [k, x] of members) last.set(k, x);
+  return [...last.keys()].sort(keyOrder).map((k) => [k, last.get(k)!]);
 }
 
 /** a parsed value as jsonb writes it */
@@ -128,12 +136,7 @@ export function writeJson(v: Json): string {
     case "num": return numericText(parseNumeric(v.text));
     case "str": return quoteJson(v.v);
     case "arr": return `[${v.v.map(writeJson).join(", ")}]`;
-    case "obj": {
-      // a duplicate key keeps its LAST value (jsonb's uniqueifyJsonbObject)
-      const last = new Map<string, Json>();
-      for (const [k, x] of v.v) last.set(k, x);
-      return `{${[...last.keys()].sort(keyOrder).map((k) => `${quoteJson(k)}: ${writeJson(last.get(k)!)}`).join(", ")}}`;
-    }
+    case "obj": return `{${storedPairs(v.v).map(([k, x]) => `${quoteJson(k)}: ${writeJson(x)}`).join(", ")}}`;
   }
 }
 

@@ -32,7 +32,7 @@ import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFact
 import { reach } from "./state.ts";
 import { copyingText, copyProgress, duration, msText, readiness, readinessWord, type Readiness, type SyncTotals, type TableSync } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
-import type { CopyProgressView, StreamStatus } from "../duck/sync.ts";
+import type { CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery, UnsupportedSql } from "../duck/requests.ts";
@@ -65,6 +65,9 @@ export interface TableState extends Omit<CatalogTable, "columns"> {
   unsynced?: { reason: string; asOf: string | null };
   /** an added table's sync: its state, its last sync and its age (src/cli/readiness.ts tableSync); a run from before it has none */
   sync?: TableSync;
+  /** how the run keeps the copy current now, the sync's one derivation (src/duck/sync.ts KeptCurrent): absent for a
+   *  table the sync does not hold, and from a run before it was said */
+  kept?: KeptCurrent;
 }
 export interface RunState {
   /** the database the run copies from: a JSON key named `source` is always this object, never a table (a table is `table`) */
@@ -306,7 +309,8 @@ const STATUS_USAGE = `usage: mason status [--json]
            { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
            source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
            replication, demo (the demo database this run hosts) }, warnings, folder, project, tables: [{ table, rows,
-           bytes, key, added, addedColumns, copy, error, sync: { state (synced, syncing, failed, waiting), syncedAt (when
+           bytes, key, added, addedColumns, copy, error, unsynced: { reason, asOf } (copied and served, not kept
+           current by the poll), kept, sync: { state (synced, syncing, failed, waiting), syncedAt (when
            the copy was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
            ageSeconds (how old the copy is now) }, … }], totals: { added, copied, failed, rows (the copies' rows),
            syncedAt (the latest sync of any) }, engine: { file, bytes, pollSeconds, keptDays (MASON_REQUEST_LOG_DAYS), version (the run's), startedAt,
@@ -325,7 +329,14 @@ const STATUS_USAGE = `usage: mason status [--json]
            newest last: mason logs --events), error (why they could not be read, or null), queries: [{ requestId,
            startedAt, outcome, sqlstate, message, query, … }] (the latest statements refused, failed or cancelled, newest
            last, as mason logs --requests --json shows each: mason logs --requests --failed), queriesError (or null) },
-           readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }; with Mason stopped: { running: false, project, source: { name,
+           readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }.
+           Each table's kept is how its copy is kept current now (absent for a table the sync does not hold):
+           { by: poll, polledAt (its last copy or poll), unsynced (only when it applies: why the passes leave it as
+           copied, mason sync polls it), pending (only when it applies: why the copy is not kept current now, its
+           phase included: waiting for its copy, being copied, its copy failed, to be copied again, caught up first) }
+           or { by: recopy, copiedAt, pending (only when it applies, as the poll's) }
+           or { by: replication, slot, state (streamed, catching-up, waiting, left-out), why, position, lastCommit,
+           notRunning (why the stream is not running, null when it is) }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
            { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
            exit 1. In replication mode stream: { slot, slotWal: { walHeldBytes (the WAL the slot holds on the
@@ -1129,6 +1140,12 @@ export function removedReport(removed: readonly string[], file: string, o: { run
 
 // ------------------------------------------------------------------ mason wait
 
+/** An added table as mason wait --json says it: its copy, its error, and how it is kept current, as the run's state has
+ *  them (mason status --json's own fields, never derived again here) */
+export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "error" | "unsynced" | "kept"> {
+  return { table: t.table, copy: t.copy, error: t.error, ...(t.unsynced ? { unsynced: t.unsynced } : {}), ...(t.kept ? { kept: t.kept } : {}) };
+}
+
 const WAIT_USAGE = `usage: mason wait [--timeout <seconds>] [--json]
 
   Waits until every added table is copied and served, showing every added table on a line of its own: 100% for the
@@ -1138,9 +1155,11 @@ const WAIT_USAGE = `usage: mason wait [--timeout <seconds>] [--json]
     mason wait --timeout 3600     a large table: wait up to an hour
 
   --timeout <seconds>   how long to wait (default 600); the copy goes on after, and mason wait again picks it up
-  --json                as data, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error }]
-                        (copy: { phase, rowsCopied, progress: the chunks done, reading and for how long, the rate, the
-                        seconds left, while its chunks are read }),
+  --json                as data, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
+                        unsynced, kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how
+                        long, the rate, the seconds left, while its chunks are read }; unsynced: { reason, asOf }
+                        and kept as mason status --json says them — kept's pending, when it applies, says why the
+                        copy is not kept current now, its phase included),
                         stream (replication mode: where the stream is, as mason status --json says it), error (on a
                         failure or a timeout: { code, message, next }), next }
 
@@ -1206,7 +1225,7 @@ export async function wait(argv: string[]): Promise<number> {
             next: [["mason wait", "keep waiting (--timeout <seconds> for longer)"], ["mason status", "what Mason is doing"]] }
         : null;
       if (json && (done || failure)) {
-        out(jsonText(WAIT, { ...r, timedOut: !done, tables: picked.map((t) => ({ table: t.table, copy: t.copy, error: t.error, ...(t.unsynced ? { unsynced: t.unsynced } : {}) })),
+        out(jsonText(WAIT, { ...r, timedOut: !done, tables: picked.map(waitTable),
           ...(s.stream ? { stream: s.stream } : {}), ...(failure ? { error: errorJson(failure) } : {}) }, failure ? failure.next ?? [] : readyNext));
       }
       // the block as it ends, too: every table at 100% beside Ready (when the last change was not printed yet)

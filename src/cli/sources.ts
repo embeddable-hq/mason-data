@@ -312,7 +312,8 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
  * A `key:` MUST TELL THE ROWS APART, AS THE DATABASE ENFORCES IT (the review of the sources file: a key with
  * duplicates failed the copy's distinct-key check as "Mason bug", retried for ever, and duplicates after the copy made the
  * poll's update and delete by key change both rows): every column NOT NULL, and a unique index of the table over some of
- * them — then no two rows can share the key. Partial and expression indexes are not read (src/cli/preflight.ts).
+ * them — then no two rows can share the key. Partial, expression and INVALID indexes are not read (src/cli/preflight.ts
+ * TABLES_SQL: a failed CREATE UNIQUE INDEX CONCURRENTLY leaves an invalid one, its duplicates still in the table).
  */
 function keyProblems(t: SourceTable, key: readonly string[], at: string): string[] {
   const cols = key.filter((c) => t.columns.some((x) => x.name === c));

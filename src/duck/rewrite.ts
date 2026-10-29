@@ -30,9 +30,10 @@ import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
-import { caseTwins, type Typed } from "./pgtree.ts";
-import { canonicalRead, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
-import { atTimeZoneOf } from "../lib/timezone.ts";
+import { caseTwins, joinsUsing, type Typed } from "./pgtree.ts";
+import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
+import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
+import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -46,6 +47,10 @@ export type DuckCollation =
   | { kind: "icu"; name: string }
   /** a libc locale (glibc's en_US.UTF-8, RDS's default): ICU's order of the letters and digits, then the punctuation */
   | { kind: "libc"; icu: string };
+
+/** the DuckDB ICU collation a collation's strings are keyed by (`icu_sort_key`): ICU's own, or the one a libc order's
+ *  accent and case levels are read with */
+export const icuNameOf = (c: Exclude<DuckCollation, { kind: "bytes" }>): string => c.kind === "icu" ? c.name : c.icu;
 
 /** Whether pg_database's collation is a libc locale's (not C or POSIX), whose order is read from the database
  *  (src/duck/libc-order.ts) for `duckCollation`'s `libc` */
@@ -120,9 +125,16 @@ const NUMBER_TYPES = new Set([INT2, INT4, INT8, FLOAT4, FLOAT8, NUMERIC]);
 const NUMBER_ELEMENT: Record<number, number> = { 1005: INT2, 1007: INT4, 1016: INT8, 1021: FLOAT4, 1022: FLOAT8, 1231: NUMERIC };
 const TEXTS = new Set([TEXT, VARCHAR, BPCHAR, NAME, UNKNOWN]);
 const JSONS = new Set([JSON_OID, JSONB]);
+const JSONB_ARRAY = 3807;
+/** the way out of a jsonb comparison Mason does not key (gap jsonb-compare) */
+const JSONB_WAY_OUT = "compare a member (j ->> 'k'), or j::text for the canonical text";
 const BOOL = 16, UUID = 2950, TIME = 1083, BYTEA = 17;
 /** pg_type's array types of the element types above */
 const ARRAYS = new Set([1000, 1001, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 1022, 1028, 1115, 1182, 1183, 1185, 1187, 1231, 2951, 199, 3807]);
+/** inet[], which the copy holds as a list of its text (src/duck/sync.ts KEPT_ARRAYS) */
+const INET_ARRAY = 1041;
+/** numeric[] and record[] */
+const NUMERIC_ARRAY = 1231, RECORD_ARRAY = 2287;
 /** pg_collation's C and POSIX: byte order */
 const BYTE_COLLATIONS = new Set([950, 951]);
 
@@ -179,6 +191,8 @@ const arrayCast = (arg: AstNode, element: string): AstNode => ({ TypeCast: { arg
 const op = (name: string, l: AstNode | null, r: AstNode): AstNode => ({ A_Expr: { kind: "AEXPR_OP", name: [S(name)], ...(l === null ? {} : { lexpr: l }), rexpr: r } });
 const not = (n: AstNode): AstNode => ({ BoolExpr: { boolop: "NOT_EXPR", args: [n] } });
 const and = (args: AstNode[]): AstNode => ({ BoolExpr: { boolop: "AND_EXPR", args } });
+/** the call that raises a marked row's error (src/duck/kept-route.ts `markedError`), over the column read */
+const markedRaise = (name: string, column: AstNode, e: { code: string; message: string }): AstNode => fn(name, [column, strConst(e.code), strConst(e.message)]);
 const caseWhen = (arms: Array<[AstNode, AstNode]>, otherwise: AstNode | null): AstNode => ({
   CaseExpr: { args: arms.map(([expr, result]) => ({ CaseWhen: { expr, result } })), ...(otherwise === null ? {} : { defresult: otherwise }) },
 });
@@ -244,6 +258,24 @@ class Rewriter {
   private readonly answering = new Set<Body>();
   /** the function calls a FROM reads (a set-returning function there is a table, not unnest's) */
   private readonly inFrom = new WeakSet<Body>();
+  /** the set-returning functions in FROM a LEFT JOIN … ON TRUE reads, written as a list never empty (leftLateral) */
+  private readonly nonEmpty = new WeakSet<Body>();
+  /** such a function whose argument a step of its own before the lateral computes: the step's column (leftLateral) */
+  private readonly stepArg = new WeakMap<Body, AstNode>();
+  /** the steps leftLateral wrote, each named for its number in the statement */
+  private steps = 0;
+  /** the joins whose every column a `*` of the SELECT that holds them, or a join's own name, reads (markWholeReads):
+   *  a step written into one would be a column of the answer (leftLateral) */
+  private readonly readWhole = new WeakSet<Body>();
+  /** the SELECTs and joins whose rows' order decides the answer (a LIMIT keeps the first of them, an aggregate or a
+   *  window reads them in order): a LEFT lateral of a list is streamed there alone (markBounds, leftLateral) */
+  private bounded = new WeakSet<Body>();
+  /** the same, were the statement's own rows bounded by a row count on the wire (an Execute's, markBounds): null when
+   *  they are (the plan made for that Execute) */
+  private boundedOnWire: WeakSet<Body> | null = null;
+  /** a LEFT lateral of a list left DuckDB's join that a row count on the wire would stream (leftLateral): the
+   *  listener plans the statement again for an Execute that sets one (PlannedSql.unboundedLateral) */
+  unboundedLateral = false;
   /** how the database changes a letter's case */
   private readonly caseMode: CaseMode;
 
@@ -263,15 +295,56 @@ class Rewriter {
    *  `json_reads`, which the keeper's policy reads (src/duck/kept.ts `review`) */
   readonly jsonReads = new Map<string, JsonRead>();
   constructor(analysis: PgAnalysis, base: number, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC",
-    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null) {
+    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set()) {
     this.types = analysis.types; this.base = base; this.collation = collation; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone;
     this.enums = enums; this.kept = kept;
+    for (const at of keyCounts) this.keyCounts.add(at + base);
     this.caseMode = collation.kind === "icu" ? "icu" : collation.kind === "bytes" && collation.ascii === true ? "ascii" : "libc";
     this.twins = caseTwins(analysis.tree);
   }
 
   /** the subqueries and CTEs whose columns have twins in another case, by the name the query calls them (caseTwins) */
   private readonly twins: Map<string, string[]>;
+
+  /**
+   * THE count(DISTINCT x) WHOSE DISTINCT CHANGES NOTHING, by the raw node's offset: x a column unique on the source and
+   * its table's rows not repeated by the FROM, decided over Postgres's analysis (src/duck/distinct-key.ts), and the
+   * same call repeated in its own SELECT's ORDER BY (`repeatedKeyCounts`). Each is counted without its DISTINCT
+   * (`funcCall`): DuckDB's hash aggregate of every value, which finds no duplicate, is what that saves.
+   */
+  private readonly keyCounts = new Set<number>();
+
+  /**
+   * An ORDER BY (or a window's) that repeats a count(DISTINCT x) of its SELECT list is analysed as THAT target
+   * (findTargetlistEntrySQL99): its own offset is in no AGGREF, so the decision never saw it. It is the same call over
+   * the same FROM, so it drops its DISTINCT where its twin in the SAME SELECT did — never by a twin in another SELECT,
+   * whose `x` may be another table's column.
+   */
+  repeatedKeyCounts(root: AstNode): void {
+    if (this.keyCounts.size === 0) return;
+    const select = (b: Body): void => {
+      const own: Body[] = [];
+      const collect = (v: unknown): void => {
+        if (Array.isArray(v)) { for (const x of v) collect(x); return; }
+        if (v === null || typeof v !== "object") return;
+        if (isNode(v) && kindOf(v) === "SelectStmt") { select(bodyOf(v)); return; }
+        if (isNode(v) && kindOf(v) === "FuncCall" && bodyOf(v).agg_distinct === true && lastName(bodyOf(v).funcname) === "count") own.push(bodyOf(v));
+        for (const [k, x] of Object.entries(isNode(v) ? bodyOf(v) : v as Body)) { const arm = armOf(k, x); if (arm !== null) select(bodyOf(arm)); else collect(x); }
+      };
+      for (const [k, x] of Object.entries(b)) { const arm = armOf(k, x); if (arm !== null) select(bodyOf(arm)); else collect(x); }
+      const dropped = new Set(own.filter((f) => this.keyCounts.has(f.location)).map((f) => shapeOf({ FuncCall: f })));
+      for (const f of own) {
+        if (typeof f.location === "number" && !this.keyCounts.has(f.location) && this.at(f, ["AGGREF"]) === null && dropped.has(shapeOf({ FuncCall: f }))) this.keyCounts.add(f.location);
+      }
+    };
+    const visit = (v: unknown): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v) && kindOf(v) === "SelectStmt") { select(bodyOf(v)); return; }
+      for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) visit(x);
+    };
+    visit(root);
+  }
 
   /**
    * A STORED JSON PATH READ FROM ITS COLUMN (docs/DESIGN.md "Stored JSON paths"): `l` a copied table's
@@ -302,10 +375,12 @@ class Rewriter {
     const prefix = fields.length === 1 && t.qualifier !== null ? [S(t.qualifier)] : fields.slice(0, -1).map((f) => structuredClone(f));
     const column = (): AstNode => ({ ColumnRef: { fields: [...prefix.map((f) => structuredClone(f)), S(ready.name)] } });
     const nul = (): AstNode => fn("chr", [intConst(0)]);
+    const recompute = (): AstNode => op("||", nul(), strConst("!"));
     const value = asText ? keptText(column, canonical) : caseWhen([[op("=", column(), nul()), nullConst()]], column());
-    if (ready.exact) return value;
+    // a row marked since the path was counted exact is never read as its value: it raises (kept-route.ts markedError)
+    if (ready.exact) return caseWhen([[op("=", column(), recompute()), markedRaise(MARKED_FUNCTIONS.value, column(), markedError(read, false))]], value);
     // (a copied table's column, checked above: a jsonb's text is the copy's canonical one)
-    return caseWhen([[or([isNull(column()), op("=", column(), op("||", nul(), strConst("!")))]), jsonGet(this.cp, l, steps, either, canonical, asText, canonical)]], value);
+    return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), jsonGet(this.cp, l, steps, either, canonical, asText, canonical)]], value);
   }
 
   /**
@@ -424,6 +499,9 @@ class Rewriter {
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
     const own = isNode(v) ? this.synthetic.get(bodyOf(v)) : undefined;
     if (own !== undefined) this.synthetic.set(bodyOf(out as AstNode), own);
+    // and one typed as another (decidedByKey's any_value): a grouped ORDER BY 1 over a jsonb is keyed over its copy
+    const like = isNode(v) ? this.typedLike.get(bodyOf(v)) : undefined;
+    if (like !== undefined) this.typedLike.set(bodyOf(out as AstNode), like);
     return out as T;
   }
 
@@ -488,9 +566,25 @@ class Rewriter {
       case "ParamRef": return this.param(b);
       case "SortBy": return this.sortBy(b, null, null);
       case "RangeFunction": return this.rangeFunction(b);
+      case "JoinExpr": return this.leftLateral(b);
       case "CollateClause": return this.collateClause(b);
       case "MinMaxExpr": return this.minMax(b);
       case "SQLValueFunction": return this.sqlValueFunction(b);
+      // CASE x WHEN v …: each WHEN is x = v, jsonb's equality for a jsonb (its keys compared)
+      case "CaseExpr": {
+        if (!isNode(b.arg) || (this.typeOf(b.arg) !== JSONB && this.typeOf(b.arg) !== JSONB_ARRAY)) return null;
+        b.arg = this.equated(b.arg, "CASE … WHEN of");
+        for (const w of (b.args ?? []) as AstNode[]) if (isNode(bodyOf(w).expr)) bodyOf(w).expr = this.equalKey(bodyOf(w).expr as AstNode);
+        return null;
+      }
+      // x IN (SELECT …), x = ANY / ALL (SELECT …): the subquery's values compared with x by jsonb's equality
+      case "SubLink": {
+        if (b.subLinkType === "ARRAY_SUBLINK") { this.arraySubquery(b); return null; }
+        if (!isNode(b.testexpr) || !["ANY_SUBLINK", "ALL_SUBLINK", "ROWCOMPARE_SUBLINK"].includes(String(b.subLinkType))) return null;
+        const type = this.typeOf(b.testexpr);
+        if (type === JSONB || type === JSONB_ARRAY || this.rowHoldsJsonb(b.testexpr)) throw new Unrewritable("a jsonb compared with a subquery's values (IN (SELECT …), = ANY (SELECT …)) is not supported by Mason (Postgres equates jsonb by its own rules)", "join the subquery instead: … JOIN (SELECT …) s ON s.v = t.j", "jsonb-compare");
+        return null;
+      }
       // a row as a value anywhere but the SELECT list, a cast to text and the json functions (rowValues) is a struct
       // to DuckDB, compared, tested and grouped by its rules
       case "ColumnRef": case "RowExpr": {
@@ -503,6 +597,10 @@ class Rewriter {
         // and a column its subquery has twice in two cases (`"T"`, `t`) is that subquery's renamed one (caseTwins)
         const fields = (b.fields ?? []) as AstNode[];
         const last = fields.at(-1);
+        // a function's whole row by its FROM name alone, where the function is one column and no row (`e` of
+        // `jsonb_array_elements(x) e`, whose column is `value`): that column, which DuckDB would read as a struct
+        const whole = k === "ColumnRef" && t?.node === "VAR" && fields.length === 1 && last !== undefined && kindOf(last) === "String" ? t.functionColumn : undefined;
+        if (whole !== undefined && String(bodyOf(last!).sval) !== whole.column) return { ColumnRef: { ...b, fields: [S(whole.alias), S(t!.renamed ?? whole.column)] } };
         if (k === "ColumnRef" && t?.node === "VAR" && last !== undefined && kindOf(last) === "String" && (t.renamed !== null || (t.qualifier !== null && fields.length === 1))) {
           const prefix = fields.length === 1 && t.qualifier !== null ? [S(t.qualifier)] : fields.slice(0, -1);
           return { ColumnRef: { ...b, fields: [...prefix, t.renamed !== null ? S(t.renamed) : last] } };
@@ -571,6 +669,37 @@ class Rewriter {
       case "SVFOP_LOCALTIME": return cast(cast(exec(), ["timestamp"]), ["time"]);
       default: return null;
     }
+  }
+
+  /**
+   * ARRAY(SELECT x …) answers as Postgres's only where x is a scalar DuckDB holds as Postgres does (text, an integer,
+   * jsonb, an enum, a bool, a date, …): a numeric is DuckDB's double there (Postgres's numeric[] is exact), an array
+   * is a list of lists (Postgres accumulates a multi-dimensional array, and raises 2202E on an empty one, 22004 on a
+   * NULL), a row a struct (record[] to Postgres). Those, and an element whose type the analysis does not say, are
+   * refused by name.
+   */
+  private arraySubquery(b: Body): void {
+    let q = isNode(b.subselect) ? bodyOf(b.subselect) : undefined;
+    while (q !== undefined && q.op !== undefined && q.op !== "SETOP_NONE" && q.larg !== undefined) q = q.larg as Body;
+    const target = ((q?.targetList ?? []) as AstNode[])[0];
+    const val = target !== undefined ? bodyOf(target).val : undefined;
+    let t = isNode(val) ? this.typeOf(val) : null;
+    // an array's element (`a[1]`: no offset of its own to the analysis) is a scalar of the array's element type, a
+    // numeric where the array is a numeric[]; a slice is an array
+    if (t === null && isNode(val) && kindOf(val) === "A_Indirection") {
+      const ind = (bodyOf(val).indirection ?? []) as AstNode[];
+      const at = isNode(bodyOf(val).arg) ? this.typeOf(bodyOf(val).arg as AstNode) : null;
+      // (a user type's array other than an enum's may be a table's rows: an element whose type is not told)
+      const told = at !== null && at !== RECORD_ARRAY && (this.userTypes.get(at)?.startsWith("_") !== true || this.enums.arrays.has(at));
+      if (told && ind.length > 0 && ind.every((x) => kindOf(x) === "A_Indices" && bodyOf(x).is_slice !== true)) t = at === NUMERIC_ARRAY ? NUMERIC : TEXT;
+    }
+    const refuse = (what: string): never => {
+      throw new Unrewritable(`ARRAY(SELECT …) of ${what} is not supported by Mason`, "array_agg(x ORDER BY …) in a subquery, or ARRAY(SELECT x::text …)", "array-subquery-element");
+    };
+    if (t === null) refuse("a value whose type Mason cannot tell");
+    if (t === NUMERIC) refuse("a numeric (Postgres's numeric[] is exact)");
+    if (ARRAYS.has(t!) || this.enums.arrays.has(t!) || t === INET_ARRAY || this.userTypes.get(t!)?.startsWith("_") === true) refuse("an array (Postgres accumulates a multi-dimensional array)");
+    if (this.isRowType(t!)) refuse("a row (Postgres's record[])");
   }
 
   private isRowType(oid: number): boolean { return oid === RECORD || this.userTypes.get(oid)?.startsWith("rowtype:") === true; }
@@ -676,6 +805,7 @@ class Rewriter {
   private select(b: Body): AstNode | null {
     for (const c of (b.withClause?.ctes ?? []) as AstNode[]) if (isNode(c) && typeof bodyOf(c).ctename === "string" && isNode(bodyOf(c).ctequery)) this.ctes.set(bodyOf(c).ctename, bodyOf(c).ctequery as AstNode);
     this.rowValues(b);
+    for (const w of (b.windowClause ?? []) as AstNode[]) if (isNode(w)) this.keyedPartition(bodyOf(w));
     // a GROUP BY of an output name is grouped by its ordinal: DuckDB binds a name without regard to case, so `"Name"`
     // would be another table's `name` (the corpus run of fbbf8f08), where Postgres finds no input column of that name
     if (Array.isArray(b.groupClause) && Array.isArray(b.targetList)) {
@@ -687,14 +817,28 @@ class Rewriter {
         return at >= 0 && targets.filter((t) => bodyOf(t).name === f[0]).length === 1 ? intConst(at + 1) : g;
       });
     }
-    for (const g of (b.groupClause ?? []) as AstNode[]) if (isNode(g) && kindOf(g) !== "GroupingSet") this.comparable(this.groupedExpression(g, b), "GROUP BY");
-    if (Array.isArray(b.distinctClause)) for (const t of (b.targetList ?? []) as AstNode[]) if (isNode(bodyOf(t).val)) this.comparable(bodyOf(t).val as AstNode, "SELECT DISTINCT");
-    if (b.op !== undefined && b.op !== "SETOP_NONE" && b.all !== true) {
+    this.keyedGroups(b);
+    // a set operation compares its rows (without ALL, and INTERSECT ALL / EXCEPT ALL count them by equality)
+    if (b.op !== undefined && b.op !== "SETOP_NONE" && (b.all !== true || b.op !== "SETOP_UNION")) {
       let first: Body = b;
       while (first.larg !== undefined) first = first.larg as Body;
-      for (const t of (first.targetList ?? []) as AstNode[]) if (isNode(bodyOf(t).val)) this.comparable(bodyOf(t).val as AstNode, `${String(b.op).replace("SETOP_", "")} (without ALL) of`);
+      const what = `${String(b.op).replace("SETOP_", "")}${b.all === true ? " ALL" : " (without ALL)"} of`;
+      for (const t of (first.targetList ?? []) as AstNode[]) {
+        const v = bodyOf(t).val;
+        if (!isNode(v)) continue;
+        if (this.starHoldsJsonb(v)) throw new Unrewritable(`${what} a * holding a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)`, JSONB_WAY_OUT, "jsonb-compare");
+        // (INTERSECT ALL and EXCEPT ALL: jsonb's equality alone, which is not its text's; the rest as before)
+        if (b.all !== true || this.typeOf(v) === JSONB || this.typeOf(v) === JSONB_ARRAY) this.comparable(v, what);
+      }
     }
     this.decidedByKey(b);
+    // `x IS NULL, x DESC` as `x DESC NULLS LAST` (nullsKeyFolded): the folded key is the statement's own, its rules to run
+    if (Array.isArray(b.sortClause)) {
+      b.sortClause = nullsKeyFolded(b.sortClause as AstNode[], b);
+      for (const s of b.sortClause as AstNode[]) this.original.add(bodyOf(s));
+    }
+    // (after decidedByKey: a DISTINCT ON a target names it as the SELECT list reads it, through any_value where it must)
+    this.keyedDistinct(b);
     // the statement's own ORDER BY: an ordinal or an output name sorts by that target's expression, so its key is
     // built over the expression (DuckDB's `ORDER BY 1 COLLATE …` would sort by the constant)
     if (Array.isArray(b.sortClause) && Array.isArray(b.targetList) && (b.op === undefined || b.op === "SETOP_NONE")) {
@@ -702,6 +846,12 @@ class Rewriter {
       b.sortClause = (b.sortClause as AstNode[]).flatMap((s) => {
         const sb = bodyOf(s);
         this.done.add(sb);
+        // an ordinal that names a jsonb a `*` lists: DuckDB would sort that column's text
+        const n = constInt(sb.node as AstNode);
+        const starred = n === null ? null : this.starColumnType(targets, n);
+        if (starred === JSONB || starred === JSONB_ARRAY) {
+          throw new Unrewritable("ORDER BY the number of a jsonb column a * lists is not supported by Mason (Postgres orders jsonb by its own rules)", "ORDER BY the column's name", "jsonb-compare");
+        }
         return this.sortBy(sb, targets, b) ?? [s];
       });
     }
@@ -741,7 +891,9 @@ class Rewriter {
       const target = bodyOf(targets[n - 1]!);
       const value = target.val as AstNode;
       const c = this.textCollation(value);
-      if (c === null || c.kind === "bytes") continue;
+      // (a jsonb is sorted by its key whatever the collation: the SortBy rule keys the output column)
+      const keyed = this.typeOf(value) === JSONB || this.typeOf(value) === JSONB_ARRAY;
+      if (!keyed && (c === null || c.kind === "bytes")) continue;
       if (target.name === undefined) target.name = `__mason_sort_${n}`;
       const ref: AstNode = { ColumnRef: { fields: [S(String(target.name))] } };
       this.typedLike.set(bodyOf(ref), value);
@@ -1466,6 +1618,8 @@ class Rewriter {
     if (type === INET) throw new Unrewritable("ORDER BY an inet value is not supported by Mason (Postgres orders addresses by network, then host)", "sort by another column", "inet-order");
     // a citext sorts by its lower-cased text under the database's collation (citext_cmp)
     if (this.isCitext(type)) { e = this.foldCitext(e); b.node = e; }
+    // a jsonb sorts by its order key (jsonb's own order: src/duck/jsonb-order.ts), its NULLs where the SortBy puts them
+    if (type === JSONB) return [{ SortBy: { ...b, node: this.jsonbKey(e) } }];
     this.comparable(e, "ORDER BY");
     const c = this.textCollation(e);
     // a char(n) sorts without its padding (bpcharcmp)
@@ -1517,13 +1671,180 @@ class Rewriter {
     return g;
   }
 
-  /** a value Mason cannot sort, group or compare as Postgres does: jsonb (Postgres's own order and equality), a text
-   *  array under the database's collation (each element under it) — refused, where a statement would need it */
+  /** a value Mason cannot sort, group or compare as Postgres does: a jsonb where it is not keyed (`compared` keys it),
+   *  a jsonb array (each element by jsonb's rules), a text array under the database's collation (each element under
+   *  it) — refused, where a statement would need it */
   private comparable(n: AstNode, where: string): void {
     const type = this.typeOf(n);
     if (this.isCitext(type)) throw new Unrewritable(`${where} a citext value is not supported by Mason (Postgres groups and sorts it without regard to case)`, "GROUP BY lower(x), or x::text where case matters", "citext-forms");
-    if (type === JSONB) throw new Unrewritable(`${where} a jsonb value is not supported by Mason (Postgres orders and equates jsonb by its own rules)`, "compare a member (j ->> 'k'), or j::text", "jsonb-compare");
+    if (type === JSONB) throw new Unrewritable(`${where} a jsonb value is not supported by Mason (Postgres orders and equates jsonb by its own rules)`, JSONB_WAY_OUT, "jsonb-compare");
+    if (type === JSONB_ARRAY) throw new Unrewritable(`${where} a jsonb array is not supported by Mason (Postgres compares its elements by jsonb's rules)`, "compare an element (a[1]), or a::text", "jsonb-compare");
+    if (this.rowHoldsJsonb(n)) throw new Unrewritable(`${where} a row holding a jsonb is not supported by Mason (Postgres compares the jsonb by its own rules)`, "list its members one by one: GROUP BY a, j", "jsonb-compare");
     if ((type === 1009 || type === 1015) && this.collation.kind !== "bytes") throw new Unrewritable(`${where} a text array is not supported by Mason under the database's collation`, "sort by an element (a[1]) or by array_to_string(a, ',')", "text-array-order");
+  }
+
+  /**
+   * A JSONB AS ITS ORDER KEY (src/duck/jsonb-order.ts): bytes whose order and equality are Postgres's for jsonb
+   * (`compareJsonbContainers`: by type, then size, then member by member; numbers as numerics; strings under the
+   * database's collation). Under C the key is one call; under ICU or a libc locale each of the document's strings
+   * needs DuckDB's ICU key, which a JavaScript function cannot ask for, so DuckDB makes them over the strings the
+   * function lists (`list_transform` with a lambda, src/duck/store.ts `lambda_syntax`) and hands them to the key.
+   */
+  private jsonbKey(e: AstNode): AstNode {
+    return this.keptKey(e) ?? this.jsonbKeyCall(e);
+  }
+
+  /** the key computed per row (`jsonbKey`): the functions src/duck/jsonb-order.ts `JSONB_KEY_FUNCTIONS` names */
+  private jsonbKeyCall(e: AstNode): AstNode {
+    const c = this.collation;
+    if (c.kind === "bytes") return fn(JSONB_KEY_FUNCTIONS.bytes.key, [e]);
+    const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_s")] } });
+    const f = JSONB_KEY_FUNCTIONS[c.kind];
+    const keys = fn("list_transform", [fn(f.strings, [this.clone(e)]), op("->", each(), fn("icu_sort_key", [each(), strConst(icuNameOf(c))]))]);
+    return fn(f.key, [e, keys]);
+  }
+
+  /**
+   * A JSONB'S STORED KEY (src/duck/kept-route.ts `ORDER_STEPS`): `e` a copied table's jsonb column — recorded as one of
+   * the statement's reads, the order's, so the keeper weighs storing its key as it weighs a path — read from the key's
+   * hidden column once every row of it is stored (READY). The column holds the key, `KEY_NULL` for a NULL document, or
+   * `KEY_RECOMPUTE` where the key raised; read alone while no row is marked, else through a CASE that computes the
+   * marked rows (and raises the key's own error). null: not such a column, or not stored — the caller computes the key.
+   * `steps` `EQUAL_STEPS` is the C key under a libc collation (`equalKey`), recorded and read the same way, computed by
+   * the C key's function where a row is marked.
+   */
+  private keptKey(e: AstNode, steps: typeof ORDER_STEPS | typeof EQUAL_STEPS = ORDER_STEPS): AstNode | null {
+    // a column of a derived table typed as the subquery's target (sortBy's `s.*` wrapper, `typedLike`) is the
+    // subquery's column, whose FROM item has no hidden column (the oracle's eager run: DuckDB's 42703)
+    if (this.kept === null || kindOf(e) !== "ColumnRef" || this.typedLike.has(bodyOf(e))) return null;
+    const fields = (bodyOf(e).fields ?? []) as AstNode[];
+    const last = fields.at(-1);
+    const t = this.typed(e);
+    if (last === undefined || kindOf(last) !== "String" || t === null || t.node !== "VAR" || t.relation === undefined || t.renamed !== null) return null;
+    const at = this.kept.at(t.relation.relid, t.relation.attno);
+    if (at === null) return null;
+    const read: JsonRead = { source: at.source, column: at.column, steps, either: false, canonical: true, asText: false };
+    this.jsonReads.set(readKey(read), read);
+    const ready = this.kept.ready(read);
+    if (ready === null) return null;
+    const computed = (): AstNode => steps === EQUAL_STEPS ? fn(JSONB_KEY_FUNCTIONS.bytes.key, [e]) : this.jsonbKeyCall(e);
+    const prefix = fields.length === 1 && t.qualifier !== null ? [S(t.qualifier)] : fields.slice(0, -1).map((f) => structuredClone(f));
+    const column = (): AstNode => ({ ColumnRef: { fields: [...prefix.map((f) => structuredClone(f)), S(ready.name)] } });
+    const recompute = (): AstNode => fn("unhex", [strConst(KEY_RECOMPUTE_HEX)]);
+    const isNullKey = (): AstNode => op("=", column(), fn("unhex", [strConst(KEY_NULL_HEX)]));
+    // a row marked since the key was counted exact is never read as a key: it raises (kept-route.ts markedError)
+    if (ready.exact) {
+      const raise = markedRaise(MARKED_FUNCTIONS.key, fn("hex", [column()]), markedError(read, this.collation.kind === "libc"));
+      return caseWhen([[isNullKey(), nullConst()], [op("=", column(), recompute()), raise]], column());
+    }
+    return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), computed()]], caseWhen([[isNullKey(), nullConst()]], column()));
+  }
+
+  /**
+   * A JSONB AS ITS EQUALITY KEY: the key under C, whatever the database's collation. Postgres's default collation is
+   * deterministic, so two jsonb strings are equal only when their bytes are (varstr_cmp breaks a collation's tie by
+   * strcmp), and the C key's equality is exactly jsonb's — where the collation's key would refuse a value its order
+   * does not cover (a libc collation's `libc-uncovered`: an emoji's variation selector, an NFD accent) that equality
+   * never needed to order. Every context that only equates (=, <>, IN, = ANY, IS DISTINCT FROM, NULLIF, CASE x WHEN,
+   * GROUP BY, DISTINCT [ON], count(DISTINCT), PARTITION BY) reads this one; ORDER BY, <, >, BETWEEN read `jsonbKey`.
+   */
+  private equalKey(e: AstNode): AstNode {
+    // under C and ICU the order's key is an equality key too (a string's collation key, then its bytes), which never
+    // refuses, so a stored one serves (keptKey) — both sides of an equality read the order's key; only a libc key
+    // refuses a string (libc-uncovered), so under libc equality reads the C key: its own stored column where it is
+    // (`EQUAL_STEPS`, src/duck/kept.ts), else computed
+    if (this.collation.kind !== "libc") return this.jsonbKey(e);
+    return this.keptKey(e, EQUAL_STEPS) ?? fn(JSONB_KEY_FUNCTIONS.bytes.key, [e]);
+  }
+
+  /** a value compared for EQUALITY only (PARTITION BY, IS DISTINCT FROM, NULLIF, CASE x WHEN, = ANY, DISTINCT ON): a
+   *  jsonb as its equality key, a jsonb array refused; any other value as it is (its equality is DuckDB's) */
+  private equated(n: AstNode, where: string): AstNode {
+    const type = this.typeOf(n);
+    if (type === JSONB) return this.equalKey(n);
+    if (type === JSONB_ARRAY) this.comparable(n, where);
+    return n;
+  }
+
+  /** a row value (`(a, j)`, `ROW(…)`, a list of IN's left) one of whose members, at any depth, is a jsonb or a jsonb array */
+  private rowHoldsJsonb(n: AstNode): boolean {
+    if (kindOf(n) !== "RowExpr") return false;
+    return ((bodyOf(n).args ?? []) as AstNode[]).some((a) => isNode(a) && (this.typeOf(a) === JSONB || this.typeOf(a) === JSONB_ARRAY || this.rowHoldsJsonb(a)));
+  }
+
+  /** the type of the `n`th output column where a `*` (or `t.*`) lists it, as Postgres expanded the stars (each column's
+   *  VAR at its star's offset, in order); null where the column is a target of its own, or not known */
+  private starColumnType(targets: readonly AstNode[], n: number): number | null {
+    let at = 0;
+    for (const t of targets) {
+      const v = bodyOf(t).val as AstNode | undefined;
+      if (v === undefined || !hasStar(v) || kindOf(v) !== "ColumnRef") { at++; if (at === n) return null; continue; }
+      const loc = bodyOf(v).location;
+      const cols = typeof loc === "number" ? (this.types.get(loc - this.base) ?? []).filter((x) => x.node === "VAR") : [];
+      if (cols.length === 0) return null;
+      if (n <= at + cols.length) return cols[n - at - 1]!.type;
+      at += cols.length;
+    }
+    return null;
+  }
+
+  /** a `*` (or `t.*`) whose columns hold a jsonb or a jsonb array, as Postgres expanded it (each column's VAR at the
+   *  star's own offset) */
+  private starHoldsJsonb(n: AstNode): boolean {
+    if (!hasStar(n) || kindOf(n) !== "ColumnRef") return false;
+    const at = bodyOf(n).location;
+    return typeof at === "number" && (this.types.get(at - this.base) ?? []).some((t) => t.node === "VAR" && (t.type === JSONB || t.type === JSONB_ARRAY));
+  }
+
+  /**
+   * GROUP BY A JSONB (Postgres groups by jsonb's equality: `1.0` and `1.00` are one group): grouped by its order key,
+   * an ordinal or an output name by its target's. The value itself is then no group key, so `decidedByKey` reads it
+   * through any_value — the group's value, which is one of the texts Postgres's group holds, as Postgres's answer is
+   * the one its plan meets first (gap jsonb-equal-text). Anything else Mason cannot group as Postgres does is refused,
+   * in a grouping set too.
+   */
+  private keyedGroups(b: Body): void {
+    if (!Array.isArray(b.groupClause)) return;
+    const refuseIn = (v: unknown): void => {
+      if (Array.isArray(v)) { for (const x of v) refuseIn(x); return; }
+      if (!isNode(v)) return;
+      if (kindOf(v) === "GroupingSet") refuseIn(bodyOf(v).content);
+      else this.comparable(this.groupedExpression(v, b), "GROUP BY a grouping set of");
+    };
+    b.groupClause = (b.groupClause as AstNode[]).map((g) => {
+      if (!isNode(g)) return g;
+      if (kindOf(g) === "GroupingSet") { refuseIn(bodyOf(g).content); return g; }
+      const e = this.groupedExpression(g, b);
+      if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return g; }
+      return this.equalKey(e === g ? g : this.clone(e));
+    });
+  }
+
+  /**
+   * SELECT DISTINCT OVER A JSONB (Postgres's DISTINCT is jsonb's equality): DuckDB's DISTINCT ON the targets, each
+   * jsonb by its order key — the first row of each set of equal ones, in the ORDER BY's order, as DuckDB's DISTINCT ON
+   * keeps (one of the texts Postgres's answer may be: gap jsonb-equal-text). A DISTINCT ON's own jsonb expression is
+   * keyed alike. A `*` holding a jsonb column is refused (its columns are not written out here).
+   */
+  private keyedDistinct(b: Body): void {
+    if (!Array.isArray(b.distinctClause)) return;
+    const targets = (b.targetList ?? []) as AstNode[];
+    const plain = b.distinctClause.length === 1 && !isNode(b.distinctClause[0]);
+    const values = targets.map((t) => bodyOf(t).val).filter(isNode);
+    for (const v of values) if (this.typeOf(v) !== JSONB) this.comparable(v, "SELECT DISTINCT");
+    if (!plain) {
+      b.distinctClause = (b.distinctClause as AstNode[]).map((d) => {
+        const n = constInt(d);
+        const ordinal = n !== null && n >= 1 && n <= targets.length;
+        const e = ordinal ? bodyOf(targets[n - 1]!).val as AstNode : d;
+        if (this.typeOf(e) !== JSONB) { this.comparable(e, "SELECT DISTINCT ON"); return d; }
+        return this.equalKey(ordinal ? this.clone(e) : d);
+      });
+      return;
+    }
+    for (const v of values) if (this.starHoldsJsonb(v)) throw new Unrewritable("SELECT DISTINCT * over a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "name the columns: SELECT DISTINCT a, b, …", "jsonb-compare");
+    if (!values.some((v) => this.typeOf(v) === JSONB)) return;
+    b.distinctClause = values.map((v) => this.equated(this.clone(v), "SELECT DISTINCT"));
   }
 
   private collateClause(b: Body): AstNode | null {
@@ -1544,6 +1865,9 @@ class Rewriter {
   private minMax(b: Body): AstNode | null {
     // GREATEST / LEAST of text compare under the collation
     const t = this.at(b, ["MINMAXEXPR"]);
+    if (t !== null && (t.type === JSONB || t.type === JSONB_ARRAY)) {
+      throw new Unrewritable(`${b.op === "IS_LEAST" ? "LEAST" : "GREATEST"} of jsonb values is not supported by Mason (Postgres orders jsonb by its own rules)`, "ORDER BY the value … LIMIT 1 in a subquery", "jsonb-compare");
+    }
     if (t !== null) b.args = (b.args as AstNode[]).map((a, i) => this.widen(a, t.args[i]?.type));
     if (t === null || !TEXTS.has(t.type) || BYTE_COLLATIONS.has(t.inputCollation) || this.collation.kind === "bytes") return null;
     if (this.collation.kind === "libc") {
@@ -1569,8 +1893,66 @@ class Rewriter {
     const a0 = args[0]?.type ?? null, a1 = args[1]?.type ?? null;
     // jsonb's jsonpath operators: Postgres's answer for each row (src/duck/pg-eval.ts)
     if (b.kind === "AEXPR_OP" && (name === "@?" || name === "@@") && a0 === JSONB && l !== undefined && r !== undefined) return pgCall("bool", `a1::jsonb ${name} a2::jsonpath`, [l, r]);
+    // x = ANY (ARRAY(SELECT …)): DuckDB binds the array's subquery as a comparison of its own and refuses the types
+    if ((b.kind === "AEXPR_OP_ANY" || b.kind === "AEXPR_OP_ALL") && r !== undefined && kindOf(r) === "SubLink" && bodyOf(r).subLinkType === "ARRAY_SUBLINK") {
+      throw new Unrewritable(`${b.kind === "AEXPR_OP_ANY" ? "ANY" : "ALL"} of ARRAY(SELECT …) is not supported by Mason`, `x ${name} ${b.kind === "AEXPR_OP_ANY" ? "ANY" : "ALL"} (SELECT …), without the ARRAY`, "array-subquery-element");
+    }
     if ((b.kind === "AEXPR_OP_ANY" || b.kind === "AEXPR_OP_ALL") && this.isCitext(a0)) {
       throw new Unrewritable("a citext compared with ANY or ALL of an array is not supported by Mason", "x IN (…) with the values written out, or lower(x) = ANY (…)", "citext-forms");
+    }
+    // A JSONB COMPARED (jsonb's =, <>, <, … and its btree's order: src/duck/jsonb-order.ts), each side as its order key
+    // (an operand of a jsonb operator is a jsonb, a literal included: each is keyed, whatever its own analysis says)
+    const lType = l === undefined ? null : this.typeOf(l);
+    const comparing = ["=", "<>", "!=", "<", "<=", ">", ">="].includes(name);
+    // rows compared member by member (`(id, j) = (1, '…')`: Postgres's per-member operators; a struct to DuckDB,
+    // compared by its text)
+    if ((l !== undefined && this.rowHoldsJsonb(l)) || (r !== undefined && this.rowHoldsJsonb(r))) {
+      throw new Unrewritable("a row holding a jsonb compared with another is not supported by Mason (Postgres compares the jsonb by its own rules)", "compare the members one by one: a = x AND j = y", "jsonb-compare");
+    }
+    // a jsonb array's containment and overlap compare its elements by jsonb's equality, DuckDB's list operators by text
+    if (b.kind === "AEXPR_OP" && ["@>", "<@", "&&"].includes(name) && (a0 === JSONB_ARRAY || a1 === JSONB_ARRAY)) {
+      throw new Unrewritable(`a jsonb array's ${name} is not supported by Mason (Postgres compares its elements by jsonb's equality)`, "compare an element: a[1] = '…'::jsonb, or a::text", "jsonb-compare");
+    }
+    // a jsonb's containment with ANY / ALL of an array written out: each element's containment, OR'd (ALL: AND'd), as
+    // SQL's three values are ANY's and ALL's (DuckDB has no `@> ANY`)
+    if ((b.kind === "AEXPR_OP_ANY" || b.kind === "AEXPR_OP_ALL") && (name === "@>" || name === "<@") && (a0 === JSONB || lType === JSONB) && l !== undefined && r !== undefined) {
+      if (kindOf(r) !== "A_ArrayExpr" || ((bodyOf(r).elements ?? []) as AstNode[]).length === 0) {
+        throw new Unrewritable(`a jsonb's ${name} with ${b.kind === "AEXPR_OP_ANY" ? "ANY" : "ALL"} of an array that is not written out is not supported by Mason`, `write the values out: j ${name} '…' OR j ${name} '…'`, "jsonb-compare");
+      }
+      const each = ((bodyOf(r).elements ?? []) as AstNode[]).map((e, i) => {
+        const x: AstNode = i === 0 ? l! : this.clone(l!);
+        return name === "@>" ? fn("__mason_jsonb_contains", [jsonArg(x), jsonArg(e)]) : fn("__mason_jsonb_contains", [jsonArg(e), jsonArg(x)]);
+      });
+      return b.kind === "AEXPR_OP_ANY" ? or(each) : and(each);
+    }
+    // an operator's ANY / ALL compares only for a comparison (`j @> ANY (…)` is containment, above)
+    const compares = b.kind === "AEXPR_OP" || b.kind === "AEXPR_OP_ANY" || b.kind === "AEXPR_OP_ALL" ? comparing : true;
+    if (l !== undefined && r !== undefined && (a0 === JSONB || a0 === JSONB_ARRAY || lType === JSONB || lType === JSONB_ARRAY) && compares) {
+      const what = `comparing (${b.kind === "AEXPR_OP" ? name : b.kind.replace("AEXPR_", "").replace(/_/g, " ").toLowerCase()})`;
+      if (a0 === JSONB_ARRAY || lType === JSONB_ARRAY) this.comparable(l, what);
+      // equality by the equality key (no collation: equalKey), an order by the collation's
+      const equating = ["=", "<>", "!="].includes(name) || ["AEXPR_DISTINCT", "AEXPR_NOT_DISTINCT", "AEXPR_NULLIF"].includes(String(b.kind));
+      const key = (x: AstNode): AstNode => equating ? this.equalKey(x) : this.jsonbKey(x);
+      switch (b.kind) {
+        case "AEXPR_OP": return op(name, key(l), key(r));
+        case "AEXPR_DISTINCT": case "AEXPR_NOT_DISTINCT": return { A_Expr: { ...b, lexpr: key(l), rexpr: key(r) } };
+        // NULLIF(a, b): NULL where a = b, else a (the value, never its key)
+        case "AEXPR_NULLIF": return caseWhen([[op("=", key(l), key(r)), nullConst()]], this.clone(l));
+        case "AEXPR_IN":
+          if (kindOf(r) === "List") return { A_Expr: { ...b, lexpr: key(l), rexpr: { List: { items: ((bodyOf(r).items ?? []) as AstNode[]).map(key) } } } };
+          break;
+        case "AEXPR_OP_ANY": case "AEXPR_OP_ALL":
+          if (kindOf(r) === "A_ArrayExpr" && comparing) return { A_Expr: { ...b, lexpr: key(l), rexpr: { A_ArrayExpr: { ...bodyOf(r), elements: ((bodyOf(r).elements ?? []) as AstNode[]).map(key) } } } };
+          throw new Unrewritable(`a jsonb compared with ${b.kind === "AEXPR_OP_ANY" ? "ANY" : "ALL"} of an array that is not written out is not supported by Mason`, "write the values out: x IN ('…'::jsonb, …), or ARRAY['…'::jsonb, …]", "jsonb-compare");
+        case "AEXPR_BETWEEN": case "AEXPR_NOT_BETWEEN": {
+          const [lo, hi] = (bodyOf(r).items ?? []) as AstNode[];
+          if (lo === undefined || hi === undefined) break;
+          const inside = and([op(">=", key(l), key(lo)), op("<=", key(this.clone(l)), key(hi))]);
+          return b.kind === "AEXPR_NOT_BETWEEN" ? not(inside) : inside;
+        }
+        default: break;
+      }
+      throw new Unrewritable(`${what} a jsonb value is not supported by Mason (Postgres orders and equates jsonb by its own rules)`, JSONB_WAY_OUT, "jsonb-compare");
     }
     switch (b.kind) {
       case "AEXPR_LIKE": case "AEXPR_ILIKE": {
@@ -1822,8 +2204,14 @@ class Rewriter {
 
   // --------------------------------------------------------------------------------------------- functions
 
+  /** a window's PARTITION BY: a jsonb by its order key (jsonb's equality), a jsonb array refused */
+  private keyedPartition(w: Body | undefined): void {
+    if (w !== undefined && Array.isArray(w.partitionClause)) w.partitionClause = (w.partitionClause as AstNode[]).map((p) => isNode(p) ? this.equated(p, "PARTITION BY") : p);
+  }
+
   private funcCall(b: Body): AstNode | AstNode[] | null {
     const name = lastName(b.funcname);
+    this.keyedPartition(b.over as Body | undefined);
     const t = this.typed({ FuncCall: b });
     const args = (b.args ?? []) as AstNode[];
     const argType = (i: number): number | null => t?.args[i]?.type ?? (args[i] !== undefined ? this.typeOf(args[i]!) : null);
@@ -1843,7 +2231,17 @@ class Rewriter {
     }
     if ((name === "sum" || name === "avg") && argType(0) === INTERVAL) throw new Unrewritable(`${name}() of an interval is not supported by Mason`, "sum(extract(epoch FROM x)) for the seconds", "interval-aggregates");
     if (name === "sum" && this.typeOf(args[0] ?? { A_Const: {} }) === FLOAT4 && argType(0) === FLOAT4) throw new Unrewritable("sum() of a real is not supported by Mason (Postgres adds in single precision)", "sum(x::double precision)", "sum-real");
-    if (b.agg_distinct === true && args[0] !== undefined) this.comparable(args[0], `${name}(DISTINCT …) of`);
+    // count(DISTINCT x) of a column unique on the source, over a FROM that repeats none of its table's rows: no value is
+    // there twice, so it is count(x), its FILTER kept (src/duck/distinct-key.ts, `keyCounts`)
+    if (b.agg_distinct === true && name === "count" && typeof b.location === "number" && this.keyCounts.has(b.location)) delete b.agg_distinct;
+    // count(DISTINCT j) counts jsonb's equal values once: their keys, counted (another aggregate's DISTINCT would hand
+    // the key itself to the aggregate)
+    if (b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 && this.typeOf(args[0]) === JSONB) args[0] = this.equalKey(args[0]);
+    else if (b.agg_distinct === true && args[0] !== undefined) this.comparable(args[0], `${name}(DISTINCT …) of`);
+    // a jsonb array searched for an element: jsonb's equality, where DuckDB's list functions compare the text
+    if (["array_position", "array_positions", "array_remove", "array_replace"].includes(name) && args[0] !== undefined && this.typeOf(args[0]) === JSONB_ARRAY) {
+      throw new Unrewritable(`${name}() of a jsonb array is not supported by Mason (Postgres compares its elements by jsonb's equality)`, "compare an element: a[1] = '…'::jsonb", "jsonb-compare");
+    }
     // a function-style cast (`date(x)`, `text(x)`, `numeric(x)`) is the cast
     if (t !== null && (t.node === "COERCEVIAIO" || t.node === "RELABELTYPE" || (t.node === "FUNCEXPR" && t.format !== null && t.format !== 0 && t.format !== 3)) && args.length === 1) {
       if (t.type === TEXT || t.type === VARCHAR) { const text = this.pgText(args[0]!, this.typeOf(args[0]!), true); if (text !== null) return text; }
@@ -1900,10 +2298,17 @@ class Rewriter {
         return null;
       case "date_trunc":
         if (args.length === 3) {
-          // in a zone: the wall clock there truncated, read back as an instant in that zone
+          // in a zone: the instant's own arithmetic where that is Postgres's answer (truncInstant), else the wall clock
+          // there truncated, read back as an instant in that zone
           const [unit, ts] = args as [AstNode, AstNode, AstNode];
           const zone = this.zoneArg(args[2]!);
-          return fn("timezone", [zone, fn("date_trunc", [unit, fn("timezone", [this.clone(zone), this.asInstant(ts, argType(1))])])]);
+          const instant = this.asInstant(ts, argType(1));
+          const fast = this.truncInstant((constString(unit) ?? "").toLowerCase(), instant, zone, constString(zone));
+          // date_trunc is strict and reads its zone first: a zone not a constant name (a row's, a NULL) is read here
+          // (`__mason_zone`, which refuses a name Postgres would) and a NULL one is NULL, whatever the part — a second
+          // or less never names the zone, and a minute's or an hour's ±infinity is the instant's own
+          if (fast !== null) return constString(zone) !== null ? fast : caseWhen([[isNull(zone), nullConst()]], fast);
+          return fn("timezone", [zone, this.truncWall(unit, fn("timezone", [this.clone(zone), instant]), TIMESTAMP)]);
         }
         if (args.length !== 2) return null;
         {
@@ -1912,22 +2317,24 @@ class Rewriter {
           if (own === TIME) throw new Unrewritable("date_trunc() of a time is not supported by Mason", "date_trunc a timestamp, or extract the parts", "time-date-trunc");
           if (argType(1) === INTERVAL && unit === "week") throw new Unrewritable(`unit "week" not supported for type interval`, "", { postgres: "0A000" });
           const x = argType(1) === TIMESTAMPTZ && own === DATE ? cast(args[1]!, ["timestamptz"]) : args[1]!;
-          // Postgres's centuries and millennia begin in a year 1 (2001-01-01), DuckDB's in a year 0 (DT_CENTURY)
-          // (and a decade before year 1 is counted back as Postgres counts it: timestamp_trunc's DTK_DECADE)
-          if ((unit === "century" || unit === "millennium" || unit === "decade") && argType(1) !== INTERVAL) {
-            const y = fn("year", [this.clone(x)]);
-            const first = unit === "decade"
-              ? caseWhen([[op(">", y, intConst(0)), op("*", op("//", this.clone(y), intConst(10)), intConst(10))]],
-                op("*", op("-", intConst(0), op("//", op("-", intConst(8), op("-", this.clone(y), intConst(1))), intConst(10))), intConst(10)))
-              : (() => {
-                const n = unit === "century" ? 100 : 1000;
-                return caseWhen([[op(">", y, intConst(0)), op("-", op("*", op("//", op("+", this.clone(y), intConst(n - 1)), intConst(n)), intConst(n)), intConst(n - 1))]],
-                  op("+", op("*", op("-", intConst(0), op("//", op("-", intConst(n - 1), op("-", this.clone(y), intConst(1))), intConst(n))), intConst(n)), intConst(1)));
-              })();
-            const truncated = op("+", fn("date_trunc", [strConst("year"), this.clone(x)]), fn("to_years", [cast(op("-", first, this.clone(y)), ["integer"])]));
-            return caseWhen([[fn("isfinite", [this.clone(x)]), truncated]], argType(1) === TIMESTAMPTZ ? cast(x, ["timestamptz"]) : cast(x, ["timestamp"]));
+          const wall = (v: AstNode): AstNode | null => (unit === "century" || unit === "millennium" || unit === "decade") && argType(1) !== INTERVAL
+            ? this.truncWall(args[0]!, v, argType(1) === TIMESTAMPTZ ? TIMESTAMPTZ : TIMESTAMP)
+            : v === args[1] ? null : fn("date_trunc", [args[0]!, v]);
+          // a timestamptz in the session's zone: the instant's own arithmetic where that is Postgres's answer. The
+          // zone is the one the statement EXECUTES in, never the one it was planned in (a prepared statement is
+          // planned at its Parse and run after any later SET TimeZone): `current_setting('TimeZone')`, which DuckDB
+          // folds to a constant when it plans the statement it runs, so the CASE costs no row anything
+          if (argType(1) === TIMESTAMPTZ) {
+            const session = (): AstNode => fn("current_setting", [strConst("TimeZone")]);
+            const utc = this.truncInstant(unit, this.clone(x), session(), "UTC");
+            if (utc !== null && ["microseconds", "milliseconds", "second"].includes(unit)) return utc;
+            if (utc !== null) {
+              const inUtc = or(UTC_NAMES.map((z) => op("=", session(), strConst(z))));
+              const elsewhere = this.truncInstant(unit, x, session(), null) ?? wall(x) ?? fn("date_trunc", [args[0]!, x]);
+              return caseWhen([[inUtc, utc]], elsewhere);
+            }
           }
-          return x === args[1] ? null : fn("date_trunc", [args[0]!, x]);
+          return wall(x);
         }
       case "make_interval": return makeInterval(args);
       // isfinite of a time or an interval: DuckDB has none, and neither is ever infinite here
@@ -2026,7 +2433,7 @@ class Rewriter {
       }
       case "jsonb_object_keys": case "json_object_keys":
         if (this.inFrom.has(b)) return null;
-        return fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(name.startsWith("jsonb"))])]);
+        return fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(name.startsWith("jsonb")), boolConst(false)])]);
       case "jsonb_array_elements": case "json_array_elements": case "jsonb_array_elements_text": case "json_array_elements_text":
       case "jsonb_each": case "json_each": case "jsonb_each_text": case "json_each_text":
         throw new Unrewritable(`${name}() in a SELECT list is not supported by Mason`, `read it in FROM: SELECT … FROM ${name}(…) AS e`, "json-rows-in-select");
@@ -2123,6 +2530,68 @@ class Rewriter {
     return wanted === TIMESTAMPTZ && own !== null && own !== TIMESTAMPTZ && own !== UNKNOWN ? cast(n, ["timestamptz"]) : n;
   }
 
+  /**
+   * A TIMESTAMPTZ TRUNCATED AS THE INSTANT'S OWN ARITHMETIC (docs/DESIGN.md "date_trunc of a timestamptz"), where
+   * that is exactly Postgres's `timestamptz_trunc_internal` and cheaper than DuckDB's: DuckDB's `date_trunc(part,
+   * TIMESTAMPTZ)` is ICU's calendar, ~45 ns a row a thread even in UTC (and its sub-day parts in another zone re-read the
+   * wall clock, so an instant in a repeated hour lands on the other side of the transition, where Postgres keeps its
+   * offset), while the instant's microseconds (`epoch_us`, `make_timestamptz`) are ~7. Postgres truncates the wall clock
+   * in `zone` and, for a day or longer, reads the truncated wall clock back in that zone (`redotz`), else keeps the
+   * instant's own offset. So, the instant's microseconds `u`, floored by integer arithmetic (`%` is truncating, hence
+   * `((u % k) + k) % k`):
+   *  - microseconds: the instant itself;
+   *  - milliseconds, second: `u` floored, in every zone (an offset is whole seconds);
+   *  - minute, hour: in UTC `u` floored; elsewhere `u` less the wall clock's remainder (one zone conversion, the
+   *    offset kept);
+   *  - day, week (Monday's, ISO: 1970-01-01 was a Thursday), month and up: in UTC only — `u` floored by a day or a
+   *    week, or the naive calendar (`make_timestamp(u)`, no zone) truncated as a timestamp is (`truncWall`); in
+   *    another zone the wall clock read back is a zone lookup DuckDB's own call makes as cheaply, so null (the caller's
+   *    path).
+   * `zoneName` is the zone as a constant (UTC and its aliases: `isUtc`), null for a zone a row holds. ±infinity is
+   * itself (Postgres 14+) and NULL is NULL: the CASE's ELSE. null where the unit is not a constant this handles.
+   */
+  private truncInstant(unit: string, value: AstNode, zone: AstNode, zoneName: string | null): AstNode | null {
+    // a literal Postgres read as a timestamptz is one to DuckDB too (in the session's zone, as Postgres reads it)
+    const x = this.typeOf(value) === UNKNOWN ? cast(value, ["timestamptz"]) : value;
+    const utc = zoneName !== null && isUtc(zoneName);
+    const DAY = 86_400_000_000n;
+    const k = ({ milliseconds: 1000n, second: 1_000_000n, minute: 60_000_000n, hour: 3_600_000_000n, day: DAY } as Record<string, bigint>)[unit];
+    const big = (n: bigint): AstNode => n <= 2_147_483_647n ? intConst(Number(n)) : numConst(String(n));
+    const u = (): AstNode => fn("epoch_us", [this.clone(x)]);
+    const floorMod = (v: () => AstNode, by: bigint, plus = 0n): AstNode => op("%", op("+", op("%", v(), big(by)), big(by + plus)), big(by));
+    let micros: AstNode;
+    if (unit === "microseconds") return x;
+    if (k !== undefined && (utc || unit === "milliseconds" || unit === "second")) micros = op("-", u(), floorMod(u, k));
+    else if (k !== undefined && unit !== "day") micros = op("-", u(), floorMod(() => fn("epoch_us", [fn("timezone", [this.clone(zone), this.clone(x)])]), k));
+    else if (!utc) return null;
+    // Monday's: u - ((u + 3 days) mod 7 days), as ((u % 7d) + 10d) % 7d, which no instant overflows
+    else if (unit === "week") micros = op("-", u(), floorMod(u, 7n * DAY, 3n * DAY));
+    else if (["month", "quarter", "year", "decade", "century", "millennium"].includes(unit)) micros = fn("epoch_us", [this.truncWall(strConst(unit), fn("make_timestamp", [u()]), TIMESTAMP)]);
+    else return null;
+    return caseWhen([[fn("isfinite", [this.clone(x)]), fn("make_timestamptz", [micros])]], x);
+  }
+
+  /**
+   * `date_trunc(unit, x)` of a wall clock (a timestamp, or a timestamptz read in the session's zone: `type`), DuckDB's
+   * except where Postgres counts otherwise: its centuries and millennia begin in a year 1 (2001-01-01), DuckDB's in a
+   * year 0 (DT_CENTURY), and a decade before year 1 is counted back as timestamp_trunc's DTK_DECADE counts it.
+   */
+  private truncWall(unitNode: AstNode, x: AstNode, type: number): AstNode {
+    const unit = (constString(unitNode) ?? "").toLowerCase();
+    if (unit !== "century" && unit !== "millennium" && unit !== "decade") return fn("date_trunc", [unitNode, x]);
+    const y = fn("year", [this.clone(x)]);
+    const first = unit === "decade"
+      ? caseWhen([[op(">", y, intConst(0)), op("*", op("//", this.clone(y), intConst(10)), intConst(10))]],
+        op("*", op("-", intConst(0), op("//", op("-", intConst(8), op("-", this.clone(y), intConst(1))), intConst(10))), intConst(10)))
+      : (() => {
+        const n = unit === "century" ? 100 : 1000;
+        return caseWhen([[op(">", y, intConst(0)), op("-", op("*", op("//", op("+", this.clone(y), intConst(n - 1)), intConst(n)), intConst(n)), intConst(n - 1))]],
+          op("+", op("*", op("-", intConst(0), op("//", op("-", intConst(n - 1), op("-", this.clone(y), intConst(1))), intConst(n))), intConst(n)), intConst(1)));
+      })();
+    const truncated = op("+", fn("date_trunc", [strConst("year"), this.clone(x)]), fn("to_years", [cast(op("-", first, this.clone(y)), ["integer"])]));
+    return caseWhen([[fn("isfinite", [this.clone(x)]), truncated]], type === TIMESTAMPTZ ? cast(x, ["timestamptz"]) : cast(x, ["timestamp"]));
+  }
+
   private textMinMax(name: string, b: Body, args: AstNode[]): AstNode | null {
     const arg = args[0];
     // a window's too (`max(t) OVER (…)`): arg_min / arg_max are DuckDB window aggregates as well
@@ -2142,6 +2611,10 @@ class Rewriter {
   private withinGroup(name: string, b: Body): AstNode | null {
     const order = (b.agg_order ?? []) as AstNode[];
     const key = order[0] !== undefined ? bodyOf(order[0]).node as AstNode : undefined;
+    // a jsonb's position in its order, or its most frequent value: DuckDB would pick by its text
+    if (key !== undefined && (this.typeOf(key) === JSONB || this.typeOf(key) === JSONB_ARRAY)) {
+      throw new Unrewritable(`${name}() WITHIN GROUP (ORDER BY a jsonb) is not supported by Mason (Postgres orders jsonb by its own rules)`, "ORDER BY the value … LIMIT 1 OFFSET n in a subquery", "jsonb-compare");
+    }
     const c = key === undefined ? null : this.textCollation(key);
     if (c === null || c.kind === "bytes") return null;
     if (name === "mode" && order.length === 1) {
@@ -2499,18 +2972,315 @@ class Rewriter {
 
   // --------------------------------------------------------------------------------------------- FROM
 
+  /**
+   * WHERE THE ORDER OF A JOIN'S ROWS DECIDES THE ANSWER (leftLateral), computed for the whole statement before the walk
+   * (`rewrite`): libpg-query writes a SELECT's keys in its struct's order (fromClause … limitCount, withClause, larg,
+   * rarg) and the walk follows it, so a SELECT's CTEs and arms are met after its FROM, and a CTE another CTE reads is
+   * met before the one that reads it. So every SELECT of the statement is collected with the CTEs it sees (its own
+   * WITH's and those around it, the nearest first), and `limitBounds` runs over them all until no more is bounded.
+   *
+   * `wire`: the statement's own rows are bounded by a row count the Execute sets on the wire (JDBC's setMaxRows or
+   * fetch size: the client reads the first rows and may read no more), which the rewrite never sees in the SQL — its
+   * outermost SELECT is bounded as a SELECT a LIMIT reads is (limitBounds: no aggregate, GROUP BY, DISTINCT, window or
+   * set operation but UNION ALL between, and under an ORDER BY only a LIMIT of its own, which a row count on the wire
+   * is not: DuckDB sorts every row first whichever plan it is given). Unless `wire`, the bounds a wire's row count
+   * would add are computed too (`boundedOnWire`), so the plan says whether such an Execute plans it again.
+   */
+  markBounds(root: AstNode, wire = false): void {
+    this.bounded = this.boundsOf(root, wire);
+    this.boundedOnWire = wire ? null : this.boundsOf(root, true);
+  }
+
+  private boundsOf(root: AstNode, wire: boolean): WeakSet<Body> {
+    const selects: Array<{ b: Body; scope: ReadonlyMap<string, Body> }> = [];
+    const select = (b: Body, outer: ReadonlyMap<string, Body>): void => {
+      const scope = new Map(outer);
+      for (const c of (b.withClause?.ctes ?? []) as AstNode[]) {
+        const cb = isNode(c) ? bodyOf(c) : null;
+        if (cb !== null && typeof cb.ctename === "string" && isNode(cb.ctequery) && kindOf(cb.ctequery) === "SelectStmt") scope.set(cb.ctename, bodyOf(cb.ctequery));
+      }
+      selects.push({ b, scope });
+      for (const [k, x] of Object.entries(b)) { const arm = armOf(k, x); if (arm !== null) select(bodyOf(arm), scope); else visit(x, scope); }
+    };
+    const visit = (v: unknown, scope: ReadonlyMap<string, Body>): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x, scope); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v) && kindOf(v) === "SelectStmt") { select(bodyOf(v), scope); return; }
+      for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) visit(x, scope);
+    };
+    visit(root, new Map());
+    const set = new WeakSet<Body>();
+    let count = 0;
+    const bound = (b: Body): void => { if (!set.has(b)) { set.add(b); count++; } };
+    if (wire && isNode(root) && kindOf(root) === "SelectStmt") bound(bodyOf(root));
+    let before: number;
+    do { before = count; for (const s of selects) this.limitBounds(s.b, s.scope, set, bound); } while (count !== before);
+    return set;
+  }
+
+  /**
+   * One SELECT's part of markBounds. Its FROM's order decides the answer where:
+   *  - a LIMIT or an OFFSET keeps the first of its rows — its own, or one around it whose rows are its rows in their
+   *    order (`bounded`: the SELECT reads it as a derived table or a CTE, or as an arm of its UNION ALL) — with no
+   *    aggregate, GROUP BY, DISTINCT, window or other set operation between, each of which reads every row first and
+   *    hands back an order of its own. Under an ORDER BY only a LIMIT of its own bounds (never WITH TIES: Mason ranks
+   *    every row for it, src/duck/rewrite.ts withTies), and only when its first key, once the nulls idiom is folded
+   *    (nullsKeyFolded), is a column of a table sorted bare (sortsByTableColumn): DuckDB's top N pushes its bound into
+   *    that table's scan as a filter, so the rows reaching the lateral are few (measured, docs/DESIGN.md "A LEFT lateral
+   *    of a list": 0.1–6 s streamed against 0.4–106 s for the delimiter join over 20 M rows); any other key — the
+   *    lateral's own column, an expression, a text under a collation, a citext, a char(n), a jsonb, each sorted by an
+   *    expression — is a top N over every row, each row's function calls paid in full;
+   *  - an aggregate that reads its rows in order (string_agg, array_agg, json_agg …) has no ORDER BY of its own, or a
+   *    window function that reads its frame in order (row_number, lag, first_value …, or such an aggregate) has a
+   *    window with no ORDER BY: Postgres hands each base row's members to it in their order (`readsInOrder`).
+   * Its joins, and the derived tables and CTEs its FROM reads, are bounded. An OFFSET alone is bounded for the
+   * answer's sake (Postgres's rows after it) and streams every row it does not skip; a CTE read twice or MATERIALIZED
+   * is computed whole, a call a row. Bounding too much costs time, never an answer (the streamed lateral is Postgres's
+   * rows in Postgres's order); bounding too little keeps DuckDB's delimiter join, whose rows come in an order of its own.
+   */
+  private limitBounds(b: Body, scope: ReadonlyMap<string, Body>, bounded: WeakSet<Body>, bound: (b: Body) => void): void {
+    const keeps = (n: unknown): boolean => isNode(n) && !(kindOf(n) === "A_Const" && bodyOf(n).isnull === true);
+    const sort = (b.sortClause ?? []) as AstNode[];
+    const inOrder = this.readsInOrder(b);
+    if (!inOrder) {
+      if (!keeps(b.limitCount) && !keeps(b.limitOffset) && !bounded.has(b)) return;
+      if (b.limitOption === "LIMIT_OPTION_WITH_TIES") return;
+      // a UNION ALL's arms, each read in turn (a set operation's arm is a SELECT body, unwrapped: walkBody)
+      if (b.op !== undefined && b.op !== "SETOP_NONE") {
+        if (b.op === "SETOP_UNION" && b.all === true && sort.length === 0) for (const arm of [b.larg, b.rarg]) if (arm !== null && typeof arm === "object" && !isNode(arm)) bound(arm as Body);
+        return;
+      }
+      if (sort.length > 0) {
+        const first = nullsKeyFolded(sort, b)[0];
+        if (!keeps(b.limitCount) || first === undefined || kindOf(first) !== "SortBy" || !this.sortsByTableColumn(bodyOf(first).node as AstNode, b, scope)) return;
+      }
+      if ((Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || b.distinctClause !== undefined) return;
+      if ((Array.isArray(b.windowClause) && b.windowClause.length > 0) || ((b.targetList ?? []) as AstNode[]).some((t) => this.hasAggregate(t) || hasWindow(t))) return;
+    } else if (b.op !== undefined && b.op !== "SETOP_NONE") return;
+    const visit = (x: unknown): void => {
+      if (!isNode(x)) return;
+      const xb = bodyOf(x);
+      if (kindOf(x) === "JoinExpr") { bound(xb); visit(xb.larg); visit(xb.rarg); return; }
+      if (kindOf(x) === "RangeSubselect" && isNode(xb.subquery)) { bound(bodyOf(xb.subquery as AstNode)); return; }
+      if (kindOf(x) === "RangeVar" && xb.schemaname === undefined) {
+        const cte = scope.get(String(xb.relname));
+        if (cte !== undefined) bound(cte);
+      }
+    };
+    for (const x of (b.fromClause ?? []) as AstNode[]) visit(x);
+  }
+
+  /** whether a SELECT's aggregate or window function reads its rows in the order they come (limitBounds): an
+   *  order-sensitive aggregate with no ORDER BY of its own (nor DISTINCT, whose values Postgres sorts), or a window
+   *  function that reads its frame in order over a window with no ORDER BY; not inside a subquery */
+  private readsInOrder(b: Body): boolean {
+    const windows = new Map(((b.windowClause ?? []) as AstNode[]).filter(isNode).map((w) => [String(bodyOf(w).name ?? ""), bodyOf(w)]));
+    const ordered = (w: Body | undefined): boolean => {
+      if (w === undefined) return false;
+      if (Array.isArray(w.orderClause) && w.orderClause.length > 0) return true;
+      return typeof w.refname === "string" && ordered(windows.get(w.refname));
+    };
+    const reads = (v: unknown): boolean => {
+      if (Array.isArray(v)) return v.some(reads);
+      if (v === null || typeof v !== "object") return false;
+      if (!isNode(v)) return Object.values(v as Body).some(reads);
+      if (kindOf(v) === "SubLink") return false;
+      if (kindOf(v) === "FuncCall") {
+        const c = bodyOf(v), name = lastName(c.funcname);
+        const aggregate = IN_ORDER_AGGREGATES.has(name) && c.agg_order === undefined && c.agg_distinct !== true;
+        if (c.over === undefined ? aggregate : (aggregate || IN_ORDER_WINDOWS.has(name)) && !ordered(c.over as Body)) return true;
+      }
+      return Object.values(bodyOf(v)).some(reads);
+    };
+    return reads(b.targetList) || reads(b.havingClause);
+  }
+
+  /** whether an ORDER BY key is a column of a table sorted as it is stored (limitBounds): an ordinal or an output
+   *  name is its target's expression, and a derived table's or a CTE's column is followed to what it selects */
+  private sortsByTableColumn(key: AstNode, b: Body, scope: ReadonlyMap<string, Body>): boolean {
+    const targets = (b.targetList ?? []) as AstNode[];
+    const n = constInt(key);
+    if (n !== null) return n >= 1 && n <= targets.length && this.tableColumn(bodyOf(targets[n - 1]!).val as AstNode, b, scope, 0);
+    const f = kindOf(key) === "ColumnRef" ? names(bodyOf(key).fields) : [];
+    const named = f.length === 1 ? targets.filter((t) => bodyOf(t).name === f[0]) : [];
+    return this.tableColumn(named.length === 1 ? bodyOf(named[0]!).val as AstNode : key, b, scope, 0);
+  }
+
+  /** a column of a table, or of a derived table or CTE that selects one, sorted bare: no collation's keys, citext's
+   *  lower(), char(n)'s rtrim() or jsonb's order key (sortBy), each an expression no top N filter reaches the scan by.
+   *  (A CTE is looked up among those the SELECT sees; a derived table's own WITH is not followed through its `*`.) */
+  private tableColumn(e: AstNode, select: Body, scope: ReadonlyMap<string, Body>, depth: number): boolean {
+    if (!isNode(e) || kindOf(e) !== "ColumnRef" || depth > 8) return false;
+    const t = this.typed(e);
+    if (t !== null) {
+      if (t.node !== "VAR" || t.functionColumn !== undefined || (t.levelsUp ?? 0) !== 0) return false;
+      if (t.type === JSONB || t.type === BPCHAR || t.type === INET || this.isCitext(t.type)) return false;
+      const c = this.textCollation(e);
+      if (c !== null && c.kind !== "bytes") return false;
+      if (t.relation !== undefined) return true;
+    }
+    // a derived table's or a CTE's column: what it selects under that name, or a column of the one table its * reads
+    const f = names(bodyOf(e).fields);
+    const col = f.at(-1), alias = f.length === 2 ? f[0] : undefined;
+    const sources: Array<{ alias: string; query: Body }> = [];
+    const from = (x: unknown): void => {
+      if (!isNode(x)) return;
+      const xb = bodyOf(x);
+      if (kindOf(x) === "JoinExpr") { from(xb.larg); from(xb.rarg); return; }
+      if (kindOf(x) === "RangeSubselect" && typeof xb.alias?.aliasname === "string" && isNode(xb.subquery) && xb.alias?.colnames === undefined) sources.push({ alias: xb.alias.aliasname, query: bodyOf(xb.subquery as AstNode) });
+      if (kindOf(x) === "RangeVar" && xb.schemaname === undefined && xb.alias?.colnames === undefined) {
+        const cte = scope.get(String(xb.relname));
+        if (cte !== undefined) sources.push({ alias: xb.alias?.aliasname ?? String(xb.relname), query: cte });
+      }
+    };
+    for (const x of (select.fromClause ?? []) as AstNode[]) from(x);
+    const matching = sources.filter((s) => alias === undefined || s.alias === alias);
+    if (col === undefined || matching.length !== 1) return false;
+    const q = matching[0]!.query;
+    if (q.op !== undefined && q.op !== "SETOP_NONE") return false;
+    const qt = (q.targetList ?? []) as AstNode[];
+    const hits = qt.filter((x) => isNode(bodyOf(x).val) && !hasStar(bodyOf(x).val) && (bodyOf(x).name ?? figureColname(bodyOf(x).val as AstNode)) === col);
+    if (hits.length === 1) return this.tableColumn(bodyOf(hits[0]!).val as AstNode, q, scope, depth + 1);
+    const qf = (q.fromClause ?? []) as AstNode[];
+    return t !== null && hits.length === 0 && qt.some((x) => hasStar(bodyOf(x).val)) && qf.length === 1 && kindOf(qf[0]!) === "RangeVar" && !scope.has(String(bodyOf(qf[0]!).relname));
+  }
+
+  /**
+   * A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE (docs/DESIGN.md "A LEFT lateral of a list"): `FROM base LEFT JOIN
+   * json_each(base.doc) d ON TRUE` is every base row with each of its members, or once with NULLs where it has none.
+   * DuckDB plans a LEFT lateral as a delimiter join — the whole base grouped, the function called for every distinct
+   * argument, a hash join back — so a LIMIT over it reads every row (a BI tool's "expand the JSON" preview: 37.9 s over
+   * 22 M rows), and the join hands its rows back in an order of its own, so the LIMIT kept OTHER rows than Postgres's
+   * (Postgres walks the base and each row's members in order). Written as an INNER lateral over a list that is never
+   * empty — the members, or one NULL (`orNull`) — it is the same rows, and DuckDB runs it as a streaming UNNEST: in the
+   * base's order, the members in theirs, stopping at the LIMIT. But it calls the function once per ROW where the
+   * delimiter join calls it once per DISTINCT argument, so where every row is read anyway — a count, a GROUP BY, a
+   * DISTINCT, a window, a whole result, a sort by the lateral's own column — it is the slower plan (a count over 22 M
+   * rows of few distinct documents: 79 s joined, over 200 s streamed; 2.2 s against 62.5 s over 20 M rows of 2,000).
+   * So it is written only where the order of the join's rows decides the answer — a LIMIT keeps the first of them, or
+   * an aggregate or a window reads them in order (`bounded`: markBounds, limitBounds) — and only for a
+   * join that is LEFT, ON a literal TRUE, its right side one function of a list Mason writes (the json rows, an array's
+   * unnest: a column's, or an expression's, computed once), without ORDINALITY. A RIGHT or FULL join, another
+   * condition, or another function keeps DuckDB's own plan. Such a join a row count on the wire alone would bound
+   * (`boundedOnWire`) is left DuckDB's and said (`unboundedLateral`): the listener plans the statement again, bounded,
+   * for an Execute that sets one.
+   */
+  private leftLateral(b: Body): AstNode | null {
+    const bounded = this.bounded.has(b);
+    if (!bounded && this.boundedOnWire?.has(b) !== true) return null;
+    const quals = b.quals as AstNode | undefined;
+    if (b.jointype !== "JOIN_LEFT" || b.isNatural === true || b.usingClause !== undefined || quals === undefined || kindOf(quals) !== "A_Const" || bodyOf(quals).boolval?.boolval !== true) return null;
+    const rarg = b.rarg as AstNode | undefined;
+    if (rarg === undefined || kindOf(rarg) !== "RangeFunction") return null;
+    const r = bodyOf(rarg);
+    const items = (r.functions ?? []) as AstNode[];
+    const calls = items.length === 1 ? (bodyOf(items[0]!).items ?? []) as AstNode[] : [];
+    const call = calls[0];
+    if (r.ordinality === true || r.is_rowsfrom === true || r.coldeflist !== undefined || call === undefined || kindOf(call) !== "FuncCall") return null;
+    const c = bodyOf(call);
+    const args = (c.args ?? []) as AstNode[];
+    const name = lastName(c.funcname);
+    if (args.length !== 1 || c.agg_star === true || c.func_variadic === true || kindOf(args[0]!) === "NamedArgExpr") return null;
+    if (!LIST_ROWS.has(name) && name !== "unnest") return null;
+    if (!bounded) { this.unboundedLateral = true; return null; }
+    this.nonEmpty.add(r);
+    const { quals: _true, ...rest } = b;
+    // DuckDB 2.0 streams the INNER lateral only where its list reads ONE column of the row, or an array column
+    // (measured, docs/DESIGN.md "A LEFT lateral of a list"): one that reads two or more is its delimiter join again,
+    // the rows in an order of its own. Such an argument is computed by a step of its own before the lateral, `CROSS
+    // JOIN LATERAL (SELECT <arg> AS __mason_arg<n>) AS __mason_arg<n>` (a name no column of the query has) — a
+    // projection under the same UNNEST — and the lateral reads the step's one column; so is an unnest's expression of
+    // any columns, whose never-empty CASE then names the step's column twice, at no cost but the expression's. Not where the argument reads an array (DuckDB plans that
+    // step as a delimiter join, and the lateral streams without it: an unnest's expression is computed once inside,
+    // rangeFunction's list_transform), nor where a `*` or a join's name reads every column of the join (the step's
+    // would be one of them), nor for a subquery (a delimiter join in every form): `limit-lateral-argument`, decided
+    const arg = args[0]!;
+    if (kindOf(arg) === "ColumnRef" || this.readWhole.has(b)) return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
+    const reads = this.rowReads(arg);
+    if (reads === null || (reads < 2 && name !== "unnest")) return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
+    const alias = `__mason_arg${++this.steps}`;
+    const sub: Body = { targetList: [{ ResTarget: { name: alias, val: arg } }], op: "SETOP_NONE" };
+    this.done.add(sub);
+    this.stepArg.set(r, { ColumnRef: { fields: [S(alias), S(alias)] } });
+    const step: AstNode = { RangeSubselect: { lateral: true, subquery: { SelectStmt: sub }, alias: { aliasname: alias } } };
+    return { JoinExpr: { ...rest, jointype: "JOIN_INNER", larg: { JoinExpr: { jointype: "JOIN_INNER", larg: b.larg, rarg: step } } } };
+  }
+
+  /** how many columns of the row an argument reads (each named once), or null where it reads an array, a whole row,
+   *  a column whose type Postgres did not say, or holds a subquery: a step before the lateral is no help there
+   *  (leftLateral) */
+  private rowReads(arg: AstNode): number | null {
+    const seen = new Set<string>();
+    let plain = true;
+    const visit = (v: unknown): void => {
+      if (!plain) return;
+      if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v)) {
+        if (kindOf(v) === "SubLink") { plain = false; return; }
+        if (kindOf(v) === "ColumnRef") {
+          const t = this.typed(v)?.type;
+          // an array (a list to DuckDB, whose step it plans as its join) or a row (a struct) reads as no column a
+          // step could hold; a user type's array is named `_<type>` in pg_type. A scalar user type (an enum, a
+          // domain, citext) is a column like any other
+          if (t === undefined || ARRAYS.has(t) || this.enums.arrays.has(t) || this.isRowType(t) || this.userTypes.get(t)?.startsWith("_") === true || t === INET_ARRAY) { plain = false; return; }
+          seen.add(JSON.stringify(names(bodyOf(v).fields)));
+          return;
+        }
+      }
+      for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) visit(x);
+    };
+    visit(arg);
+    return plain ? seen.size : null;
+  }
+
+  /**
+   * The joins whose every column the answer reads (leftLateral): those in the FROM of a SELECT whose list holds a bare
+   * `*`, and those inside a join that has a name of its own (`(a JOIN b) AS j`, read whole by `j.*` or `j`). A column a
+   * step added to one would be a column of the answer that Postgres's has not.
+   */
+  markWholeReads(root: AstNode): void {
+    const joins = (x: unknown): void => {
+      if (!isNode(x) || kindOf(x) !== "JoinExpr") return;
+      const j = bodyOf(x);
+      this.readWhole.add(j);
+      joins(j.larg); joins(j.rarg);
+    };
+    const bareStar = (t: unknown): boolean => {
+      const v = isNode(t) ? bodyOf(t).val : undefined;
+      if (!isNode(v) || kindOf(v) !== "ColumnRef") return false;
+      const fields = (bodyOf(v).fields ?? []) as AstNode[];
+      return fields.length === 1 && kindOf(fields[0]!) === "A_Star";
+    };
+    const visit = (v: unknown): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v)) {
+        const b = bodyOf(v);
+        if (kindOf(v) === "SelectStmt" && ((b.targetList ?? []) as unknown[]).some(bareStar)) for (const f of (b.fromClause ?? []) as unknown[]) joins(f);
+        if (kindOf(v) === "JoinExpr" && b.alias !== undefined) joins(v);
+      }
+      for (const [k, x] of Object.entries(isNode(v) ? bodyOf(v) : v as Body)) visit(armOf(k, x) ?? x);
+    };
+    visit(root);
+  }
+
   private rangeFunction(b: Body): AstNode | null {
     const items = (b.functions ?? []) as AstNode[];
     const first = items[0] !== undefined ? (bodyOf(items[0]).items as AstNode[] | undefined)?.[0] : undefined;
     if (first === undefined || kindOf(first) !== "FuncCall") return null;
     const call = bodyOf(first);
     const name = lastName(call.funcname);
-    const args = (call.args ?? []) as AstNode[];
+    // a LEFT lateral's argument computed by a step of its own before it (leftLateral): its column, in its place
+    const stepped = this.stepArg.get(b);
+    const args = stepped !== undefined ? [stepped] : (call.args ?? []) as AstNode[];
     const alias = b.alias as Body | undefined;
     const aliasName = alias?.aliasname as string | undefined;
     const colnames = names(alias?.colnames);
     for (const item of items) for (const f of (bodyOf(item).items ?? []) as AstNode[]) if (isNode(f) && kindOf(f) === "FuncCall") this.inFrom.add(bodyOf(f));
     const canonical = name.startsWith("jsonb");
+    // the right side of a LEFT JOIN … ON TRUE whose rows are a list: written never empty (leftLateral)
+    const orNull = this.nonEmpty.has(b);
     switch (name) {
       // jsonpath's rows, as Postgres finds them (src/duck/pg-eval.ts), unnested
       case "jsonb_path_query": {
@@ -2524,11 +3294,13 @@ class Rewriter {
       case "jsonb_array_elements": case "json_array_elements": case "jsonb_array_elements_text": case "json_array_elements_text": {
         if (b.ordinality === true) throw new Unrewritable(`${name}() WITH ORDINALITY is not supported by Mason`, "number the elements with row_number() OVER () instead", "with-ordinality");
         const text = name.endsWith("_text");
-        const elements = fn("__mason_json_elements", [jsonArg(args[0]!), boolConst(canonical), boolConst(text)]);
+        const elements = fn("__mason_json_elements", [jsonArg(args[0]!), boolConst(canonical), boolConst(text), boolConst(orNull)]);
         const list = text ? elements : arrayCast(elements, "json");
-        // a scalar function's column is named by its alias (or `value`), and so is DuckDB's unnest column here
-        const column = colnames[0] ?? aliasName ?? "value";
+        // its column is its OUT parameter's, `value`, under a FROM name too (`e.value`), unless the alias names it;
+        // the FROM name alone is the element (the ColumnRef rule: Typed.functionColumn)
+        const column = colnames[0] ?? "value";
         const unnest: AstNode = fn("unnest", [list]);
+        if (orNull) return listLateral([{ name: column, list }], aliasName ?? name, this.done);
         const item = bodyOf(items[0]!);
         return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [unnest, ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
       }
@@ -2566,21 +3338,34 @@ class Rewriter {
         if (b.ordinality === true) throw new Unrewritable(`${name}() WITH ORDINALITY is not supported by Mason`, "number the members with row_number() OVER () instead", "with-ordinality");
         const text = name.endsWith("_text");
         // each member's key and value, two lists of one length that unnest side by side
-        const sub: Body = {
-          targetList: [
-            { ResTarget: { name: colnames[0] ?? "key", val: fn("unnest", [fn("__mason_json_keys", [jsonArg(args[0]!), boolConst(canonical)])]) } },
-            { ResTarget: { name: colnames[1] ?? "value", val: fn("unnest", [fn("__mason_json_values", [this.clone(args[0]!), boolConst(canonical), boolConst(text)])]) } },
-          ],
-          op: "SETOP_NONE",
-        };
-        this.done.add(sub);
-        return { RangeSubselect: { lateral: true, subquery: { SelectStmt: sub }, alias: { aliasname: aliasName ?? name } } };
+        return listLateral([
+          { name: colnames[0] ?? "key", list: fn("__mason_json_keys", [jsonArg(args[0]!), boolConst(canonical), boolConst(orNull)]) },
+          { name: colnames[1] ?? "value", list: fn("__mason_json_values", [this.clone(args[0]!), boolConst(canonical), boolConst(text), boolConst(orNull)]) },
+        ], aliasName ?? name, this.done);
       }
       case "jsonb_object_keys": case "json_object_keys": {
         const column = colnames[0] ?? aliasName ?? name;
-        const unnest = fn("unnest", [fn("__mason_json_keys", [args[0]!, boolConst(canonical)])]);
+        const keys = fn("__mason_json_keys", [args[0]!, boolConst(canonical), boolConst(orNull)]);
+        if (orNull) return listLateral([{ name: column, list: keys }], aliasName ?? name, this.done);
         const item = bodyOf(items[0]!);
-        return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [unnest, ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
+        return { RangeFunction: { ...b, functions: [{ List: { ...item, items: [fn("unnest", [keys]), ...(item.items as unknown[]).slice(1)] } }], alias: { aliasname: aliasName ?? name, colnames: [S(column)] } } };
+      }
+      // an array's elements, never empty: its list where it has one, else one NULL (leftLateral). The CASE names the
+      // list twice: a column's (or the column of the step leftLateral computed the expression in) costs nothing
+      // twice; an expression left here (it reads an array, holds a subquery, or a `*` reads the join) would be
+      // computed twice (a call of Mason's string_to_array a row more), so it is computed ONCE, the one element of a
+      // list whose lambda names it twice: `list_transform(list_value(<expr>), __mason_l -> CASE … __mason_l …
+      // END)[1]`, a copy of its list a row more, the same streaming UNNEST (measured: docs/DESIGN.md "A LEFT lateral
+      // of a list")
+      case "unnest": {
+        if (!orNull) return null;
+        const list = args[0]!;
+        const column = colnames[0] ?? aliasName ?? name;
+        const never = (l: () => AstNode): AstNode => caseWhen([[op(">", fn("len", [l()]), intConst(0)), l()]], arrayOf([nullConst()]));
+        const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_l")] } });
+        const once = kindOf(list) === "ColumnRef" ? never(() => this.clone(list))
+          : { A_Indirection: { arg: fn("list_transform", [fn("list_value", [list]), op("->", each(), never(each))]), indirection: [{ A_Indices: { uidx: intConst(1) } }] } };
+        return listLateral([{ name: column, list: once }], aliasName ?? name, this.done);
       }
       default: return null;
     }
@@ -2592,6 +3377,82 @@ class Rewriter {
 /** a deep copy that stays the statement's own: each helper below that uses a node twice is handed its rewriter's */
 type Copy = <T>(n: T) => T;
 
+/**
+ * THE NULLS-PLACEMENT IDIOM AS ONE KEY (docs/DESIGN.md "Nulls placed by a key of their own"): `ORDER BY x IS NULL,
+ * x DESC` — nulls last, written without NULLS LAST, as SQL that must also run where NULLS LAST is not grammar — orders
+ * exactly as `ORDER BY x DESC NULLS LAST`. DuckDB's top N cannot push its threshold into the scan of an expression key,
+ * so it read every row of a 197 M-row copy for a 100-row page (6.4 s by a timestamp; 91 s by a text id, cut off by
+ * the tool); one plain key with its NULLS placement is pruned by the zone maps. So a pair of CONSECUTIVE keys, the
+ * first `<e> IS [NOT] NULL` (either direction, no USING) and the second the same `<e>` (the same tree, parentheses
+ * being no node of it), is one key on `<e>` with the second's direction and the nulls where the first put them: `IS
+ * NULL ASC` and `IS NOT NULL DESC` last, `IS NULL DESC` and `IS NOT NULL ASC` first. Every other key stays in place.
+ * Not under a DISTINCT ON, whose expressions must lead the ORDER BY as written, and never a window's ORDER BY.
+ */
+function nullsKeyFolded(keys: AstNode[], select: Body): AstNode[] {
+  const distinctOn = Array.isArray(select.distinctClause) && (select.distinctClause as unknown[]).some((d) => isNode(d));
+  if (distinctOn || keys.length < 2) return keys;
+  const out: AstNode[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const first = keys[i]!, second = keys[i + 1];
+    const a = kindOf(first) === "SortBy" ? bodyOf(first) : null, b = second !== undefined && kindOf(second) === "SortBy" ? bodyOf(second) : null;
+    const test = a !== null && isNode(a.node) && kindOf(a.node) === "NullTest" ? bodyOf(a.node) : null;
+    if (a === null || b === null || test === null || a.useOp !== undefined || b.useOp !== undefined || !isNode(test.arg) || !alikeTree(test.arg, b.node)
+      || !bareKeyIsInput(test.arg, b.node as AstNode, select)) { out.push(first); continue; }
+    const last = (test.nulltesttype === "IS_NULL") === (a.sortby_dir !== "SORTBY_DESC");
+    out.push({ SortBy: { ...b, sortby_nulls: last ? "SORTBY_NULLS_LAST" : "SORTBY_NULLS_FIRST" } });
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Whether an ORDER BY key read BARE is the same value as the same tree read inside an expression (the `x` of `x IS
+ * NULL`), where Postgres reads them by two rules (findTargetlistEntrySQL92, parse_clause.c): inside an expression a name
+ * is always an input column, while a bare key that is an integer constant is an output column by its position (`ORDER
+ * BY 2`), and a bare one-part name that is an output column's name is that output column (`SELECT coalesce(x, 0) AS x
+ * … ORDER BY x`). Every other node is read alike either way. So a constant is never, and a one-part name is only
+ * where no output column may bear its name or every one that may is the same tree as the input's (`SELECT x … ORDER BY
+ * x`). An output column's name is its alias, else Postgres's FigureColname (a CASE's may be its ELSE's).
+ */
+function bareKeyIsInput(inner: AstNode, bare: AstNode, select: Body): boolean {
+  if (kindOf(bare) === "A_Const") return false;
+  if (kindOf(bare) !== "ColumnRef") return true;
+  const fields = (bodyOf(bare).fields ?? []) as AstNode[];
+  if (fields.length !== 1 || kindOf(fields[0]!) !== "String") return true;
+  const name = String(bodyOf(fields[0]!).sval);
+  return ((select.targetList ?? []) as AstNode[]).every((t) => {
+    const r = bodyOf(t), val = r.val as AstNode | undefined;
+    if (val === undefined) return true;
+    // `*` and `t.*` are the input columns themselves
+    const last = kindOf(val) === "ColumnRef" ? ((bodyOf(val).fields ?? []) as AstNode[]).at(-1) : undefined;
+    if (last !== undefined && kindOf(last) === "A_Star") return true;
+    // every target is named by now: its alias, else Postgres's name for it (nameTargets, figureColname)
+    return (typeof r.name === "string" && r.name !== name) || alikeTree(val, inner);
+  });
+}
+
+/** two trees alike but for where their text stood (`location`): `(x)` and `x` are one tree, parentheses no node */
+function alikeTree(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((x, i) => alikeTree(x, b[i]));
+  if (a === null || typeof a !== "object") return a === b;
+  if (b === null || typeof b !== "object" || Array.isArray(b)) return false;
+  const ka = Object.keys(a).filter((k) => k !== "location"), kb = Object.keys(b).filter((k) => k !== "location");
+  return ka.length === kb.length && ka.every((k) => alikeTree((a as Body)[k], (b as Body)[k]));
+}
+
+/** the json functions whose rows Mason writes as lists in FROM (src/duck/rewrite.ts rangeFunction), each with an
+ *  `orNull` form (src/duck/functions.ts) */
+const LIST_ROWS = new Set(["jsonb_each", "json_each", "jsonb_each_text", "json_each_text", "jsonb_array_elements", "json_array_elements",
+  "jsonb_array_elements_text", "json_array_elements_text", "jsonb_object_keys", "json_object_keys"]);
+
+/** `LATERAL (SELECT unnest(<list>) AS <name>, …) AS <alias>`: lists of one length unnested side by side, a subquery
+ *  DuckDB runs as its UNNEST operator when the join is INNER (leftLateral) */
+function listLateral(columns: Array<{ name: string; list: AstNode }>, alias: string, done: WeakSet<Body>): AstNode {
+  const sub: Body = { targetList: columns.map((c) => ({ ResTarget: { name: c.name, val: fn("unnest", [c.list]) } })), op: "SETOP_NONE" };
+  done.add(sub);
+  return { RangeSubselect: { lateral: true, subquery: { SelectStmt: sub }, alias: { aliasname: alias } } };
+}
+
 type Built = { p: NumericProgram; kind: "int" | "numeric" };
 /** a cell an exact program cannot take (in a grouped SELECT, a column not grouped): the column stays DuckDB's */
 const NOT_EXACT = new Error("not exact");
@@ -2600,6 +3461,19 @@ const NOT_EXACT = new Error("not exact");
 /** a set operation's arm (libpg-query's `larg` / `rarg`: a SelectStmt's body, unwrapped), as the node it is */
 const armOf = (key: string, v: unknown): AstNode | null =>
   (key === "larg" || key === "rarg") && v !== null && typeof v === "object" && !Array.isArray(v) && !isNode(v) ? { SelectStmt: v as Body } : null;
+
+/** the aggregates whose answer follows the order their rows come in, without an ORDER BY of their own (readsInOrder) */
+const IN_ORDER_AGGREGATES = new Set(["string_agg", "array_agg", "json_agg", "jsonb_agg", "json_agg_strict", "jsonb_agg_strict", "json_object_agg",
+  "jsonb_object_agg", "json_object_agg_strict", "jsonb_object_agg_strict", "json_object_agg_unique", "jsonb_object_agg_unique",
+  "json_object_agg_unique_strict", "jsonb_object_agg_unique_strict", "xmlagg"]);
+/** the window functions that read their frame in order: over a window with no ORDER BY, the order the rows come in */
+const IN_ORDER_WINDOWS = new Set(["row_number", "ntile", "lag", "lead", "first_value", "last_value", "nth_value"]);
+
+/** whether an expression holds a window function (outside a subquery) */
+const hasWindow = (v: unknown): boolean => Array.isArray(v) ? v.some(hasWindow)
+  : v === null || typeof v !== "object" ? false
+  : isNode(v) ? kindOf(v) !== "SubLink" && ((kindOf(v) === "FuncCall" && bodyOf(v).over !== undefined) || Object.values(bodyOf(v)).some(hasWindow))
+  : Object.values(v as Body).some(hasWindow);
 
 const hasStar = (v: unknown): boolean => isNode(v) && kindOf(v) === "ColumnRef" && (bodyOf(v).fields as AstNode[]).some((f) => kindOf(f) === "A_Star");
 
@@ -3166,17 +4040,35 @@ function strptimeFormat(fmt: AstNode): string {
  * …) s`). Every unnamed target is given this name (`nameTargets`).
  */
 export function figureColname(n: AstNode): string {
+  const [name, strength] = colnameOf(n);
+  return strength === 0 ? "?column?" : name;
+}
+
+/** FigureColnameInternal: the name and its strength — 2 a name of the expression's own (a column's, a function's), 1 a
+ *  kind's (`case`, a cast's type), 0 none. A CASE is named by its ELSE where that name is strong (`CASE … ELSE n END`
+ *  is `n`), and a cast by its argument where that one's is, else by its type */
+function colnameOf(n: AstNode): [string, number] {
+  const k = kindOf(n), b = bodyOf(n);
+  switch (k) {
+    case "TypeCast": { const inner = isNode(b.arg) ? colnameOf(b.arg) : ["?column?", 0] as [string, number]; return inner[1] > 1 ? inner : [lastName(b.typeName?.names), 1]; }
+    case "CollateClause": return isNode(b.arg) ? colnameOf(b.arg) : ["?column?", 0];
+    case "CaseExpr": { const d = isNode(b.defresult) ? colnameOf(b.defresult) : ["?column?", 0] as [string, number]; return d[1] > 1 ? d : ["case", 1]; }
+    case "A_Expr": return b.kind === "AEXPR_NULLIF" ? ["nullif", 2] : ["?column?", 0];
+    case "A_Indirection": {
+      const ind = ((b.indirection ?? []) as AstNode[]);
+      for (let i = ind.length - 1; i >= 0; i--) { if (kindOf(ind[i]!) === "String") return [String(bodyOf(ind[i]!).sval), 2]; if (kindOf(ind[i]!) === "A_Star") break; }
+      return isNode(b.arg) ? colnameOf(b.arg) : ["?column?", 0];
+    }
+    default: { const name = strongColname(n); return name === "?column?" ? [name, 0] : [name, 2]; }
+  }
+}
+
+/** the kinds whose name is their own (strength 2), or none */
+function strongColname(n: AstNode): string {
   const k = kindOf(n), b = bodyOf(n);
   switch (k) {
     case "ColumnRef": { const f = (b.fields ?? []) as AstNode[]; const last = f[f.length - 1]; return last !== undefined && kindOf(last) === "String" ? String(bodyOf(last).sval) : "?column?"; }
-    case "A_Indirection": {
-      const ind = ((b.indirection ?? []) as AstNode[]);
-      for (let i = ind.length - 1; i >= 0; i--) { if (kindOf(ind[i]!) === "String") return String(bodyOf(ind[i]!).sval); if (kindOf(ind[i]!) === "A_Star") break; }
-      return isNode(b.arg) ? figureColname(b.arg) : "?column?";
-    }
     case "FuncCall": return lastName(b.funcname);
-    case "TypeCast": { const inner = isNode(b.arg) ? figureColname(b.arg) : "?column?"; return inner !== "?column?" ? inner : lastName(b.typeName?.names); }
-    case "CollateClause": return isNode(b.arg) ? figureColname(b.arg) : "?column?";
     case "GroupingFunc": return "grouping";
     case "SubLink": {
       if (b.subLinkType === "EXISTS_SUBLINK") return "exists";
@@ -3185,7 +4077,6 @@ export function figureColname(n: AstNode): string {
       const first = ((bodyOf(b.subselect).targetList ?? []) as AstNode[])[0];
       return first !== undefined ? (bodyOf(first).name ?? (isNode(bodyOf(first).val) ? figureColname(bodyOf(first).val as AstNode) : "?column?")) : "?column?";
     }
-    case "CaseExpr": return "case";
     case "A_ArrayExpr": return "array";
     case "RowExpr": return "row";
     case "CoalesceExpr": return "coalesce";
@@ -3220,17 +4111,24 @@ function nameTargets(v: unknown): void {
 }
 
 export function rewrite(stmt: AstNode, base: number, analysis: PgAnalysis, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(),
-  rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null):
-  { tree: AstNode; dropLast: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[] } {
-  const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, enums, kept);
+  rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null,
+  wireBound = false, keyCounts: ReadonlySet<number> = new Set()):
+  { tree: AstNode; dropLast: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
+  const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, enums, kept, keyCounts);
+  if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
+    throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
+  }
   const own = JSON.parse(JSON.stringify(stmt)) as AstNode;
   volatileWindows(own);
   r.adopt(own);
   nameTargets(own);
   r.indexShapes(own);
+  r.repeatedKeyCounts(own);
   const exact = r.exactThrough(own, analysis.fields);
+  r.markBounds(own, wireBound);
+  r.markWholeReads(own);
   const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;
-  return { tree, dropLast: r.excludeRank, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()] };
+  return { tree, dropLast: r.excludeRank, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral };
 }
 
 /** the functions whose every call is a new value (Postgres's volatile ones Mason answers) */

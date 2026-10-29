@@ -648,3 +648,82 @@ test("the engine-name guard catches the real thing, and leaves the engine's own 
   assert.deepEqual(engineNamedInStrings("a(\"SELECT * FROM duckdb_tables()\"); b(process.env.MASON_DUCKDB_MEMORY); c(\"~/.duckdb/extensions\"); d(\"mason-duckdb-postgres:\"); const k = \"duckdb\";"), []);
   assert.deepEqual(engineNamedInStrings("import { DuckDBValue } from \"@duckdb/node-api\"; // DuckDB says\n/* DuckDB */ const DuckDBThing = 1;"), []);
 });
+
+/**
+ * A LINK IN THE FRONT DOOR RESOLVES (the README's restructure, PR 26): the path guard above reads only `src/`, `tests/`,
+ * `scripts/`, `docs/` and `examples/` paths from the root, so a markdown link to `cli/README.md`, `SECURITY.md` or
+ * `LICENSE`, a link from `docs/` relative to its own folder, and every `#anchor` went unchecked — a broken
+ * `[BENCHMARK.md](BENCHMARK.md)` passed. Every relative `](target)` (and an image's src / srcset) in the files below,
+ * outside code fences, must name a file that exists from the linking file's folder, and its `#anchor` a heading of the
+ * target as GitHub makes anchors of them.
+ */
+const LINKS_SCANNED = ["README.md", "docs/MEASUREMENTS.md", "docs/SQL-SUPPORT.md"];
+
+/** a markdown text's lines outside code fences, with their numbers */
+function unfenced(text: string): Array<[number, string]> {
+  let fence = false;
+  return text.split("\n").flatMap((l, i): Array<[number, string]> => {
+    if (/^\s*(```|~~~)/.test(l)) { fence = !fence; return []; }
+    return fence ? [] : [[i + 1, l]];
+  });
+}
+
+/** GitHub's anchor for each heading: its text without markup, lower case, punctuation dropped, each space a hyphen; a repeat gets -1, -2 */
+export function markdownAnchors(text: string): Set<string> {
+  const seen = new Map<string, number>(), out = new Set<string>();
+  for (const [, l] of unfenced(text)) {
+    const h = /^#{1,6}\s+(.*?)\s*#*\s*$/.exec(l);
+    if (h === null) continue;
+    const base = h[1]!.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<[^>]+>/g, "").toLowerCase()
+      .replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, "").replace(/ /g, "-");
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    out.add(n === 0 ? base : `${base}-${n}`);
+  }
+  return out;
+}
+
+/** the links in `text` (the file at `file`, relative to ROOT) that name nothing: `read` gives a file's text, or undefined when there is none */
+export function brokenLinks(file: string, text: string, read: (rel: string) => string | undefined): string[] {
+  return unfenced(text).flatMap(([line, l]) =>
+    [...l.matchAll(/\]\(([^)\s]+)\)/g), ...l.matchAll(/\b(?:src|srcset)="([^"\s]+)"/g)].map((m) => m[1]!)
+      .filter((t) => !/^[a-z][a-z0-9+.-]*:/i.test(t))
+      .flatMap((t) => {
+        const [rel = "", anchor] = t.split("#");
+        const target = rel === "" ? file : path.posix.normalize(path.posix.join(path.posix.dirname(file), rel));
+        const body = read(target);
+        if (body === undefined) return [`${file}:${line} ${t}: no file ${target}`];
+        if (anchor === undefined || anchor === "") return [];
+        if (!target.endsWith(".md")) return [`${file}:${line} ${t}: an anchor into a file that is not markdown`];
+        return markdownAnchors(body).has(anchor) ? [] : [`${file}:${line} ${t}: ${target} has no heading #${anchor}`];
+      }));
+}
+
+test("a link in the README, docs/MEASUREMENTS.md and docs/SQL-SUPPORT.md resolves, its #anchor too", () => {
+  const read = (rel: string): string | undefined => {
+    const p = path.join(ROOT, rel);
+    if (!fs.existsSync(p)) return undefined;
+    return fs.statSync(p).isDirectory() ? "" : fs.readFileSync(p, "utf8");
+  };
+  const broken = LINKS_SCANNED.flatMap((f) => brokenLinks(f, read(f) ?? assert.fail(`${f} is gone`), read));
+  assert.deepEqual(broken, [], "a link to nothing: point it at the file or heading that is there");
+});
+
+test("the link guard would catch the real thing", () => {
+  const files: Record<string, string> = {
+    "README.md": "# Mason\n\n## SQL support\n\n## Why Mason\n\n## Why Mason\n\n```yaml\n# not a heading\n```\n",
+    "guide/A.md": "# A `doc`: the [first](x.md) one\n",
+    "LICENSE": "Apache-2.0",
+  };
+  const read = (rel: string): string | undefined => files[rel];
+  const ok = "[a](#sql-support) [b](#why-mason-1) [c](guide/A.md#a-doc-the-first-one) [d](LICENSE) [e](https://example.com/x) ![f](guide/A.md)";
+  assert.deepEqual(brokenLinks("README.md", ok, read), []);
+  assert.deepEqual(brokenLinks("guide/A.md", "[r](../README.md#why-mason) [s](A.md)", read), [], "a link from a folder is relative to that folder");
+  assert.deepEqual(brokenLinks("guide/A.md", "[b](BENCHMARK.md)\n[l](../LICENSE#x)\n[h](../README.md#not-a-heading)\n[w](#what-of-postgres-is-answered)", read), [
+    "guide/A.md:1 BENCHMARK.md: no file guide/BENCHMARK.md",
+    "guide/A.md:2 ../LICENSE#x: an anchor into a file that is not markdown",
+    "guide/A.md:3 ../README.md#not-a-heading: README.md has no heading #not-a-heading",
+    "guide/A.md:4 #what-of-postgres-is-answered: guide/A.md has no heading #what-of-postgres-is-answered",
+  ]);
+  assert.deepEqual(brokenLinks("README.md", "```\n[x](nothing.md)\n```", read), [], "a link in a code fence is code");
+});

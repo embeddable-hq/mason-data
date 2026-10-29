@@ -2,7 +2,8 @@
 
 `scripts/bench-replica.ts` answers "why not just use a Postgres read replica?" with numbers: what the same SQL costs on
 a Postgres and on Mason as the tables grow and as more readers ask at once. Its result is
-`tests/fixtures/bench-replica.json`, from which the README's "When is Mason faster?" is rendered;
+`tests/fixtures/bench-replica.json`, from which [MEASUREMENTS.md](MEASUREMENTS.md) ("When is Mason faster?") and the
+README's headline numbers are rendered;
 docs/DESIGN.md "Mason against a Postgres read replica" says why the sweep is shaped so and what a run does and does not show.
 
 ## What it measures
@@ -40,7 +41,7 @@ target, and Mason is measured at every cell Postgres is:
 2. **Clients**, at the largest size step 1 measured under the target (`--clients-rows` chooses another): the `--clients`
    list, then doubling past its end, until Postgres reaches the target or `--max-clients` (1024) stops it. The
    container's `max_connections` is raised past `--max-clients` so every client is answered — a production replica's
-   is lower (Postgres's default is 100), which the README's text says.
+   is lower (Postgres's default is 100), which the published text says.
 
 A cell after one whose Postgres p95 was over a tenth of the target is measured for at least 3 × the target, a
 statement's limit (`--timeout`) is at least 5 × the target (its default then; a smaller one is refused), and the
@@ -85,20 +86,39 @@ node scripts/bench-replica.ts --label "m7g.xlarge, EBS" --target-postgres-second
 The output prints a line per run as it ends, and the fixture is written after each size and at the end, so an
 interrupted run keeps the sizes it finished.
 
+## Measuring a layout of the copy (never a published run)
+
+Four bench-only options measure Mason over a copy in another physical order (issue #9) against the same data, the same
+statements and the same machine, one thing changed per run:
+
+- `--order "<ORDER BY list>"` rewrites the copy of `public.orders` once it has landed and its stored JSON path is
+  ready: Mason is closed, its store opened by the bench alone (no sync, poll, request log or listener), the table
+  written again by `CREATE TABLE … AS SELECT * … ORDER BY …` in UTC and swapped in by name, checkpointed, and Mason
+  opened again as after a `mason stop` (a copy made again fails the run). The columns, their types, the rows and the
+  absence of a key are checked equal; `_mason`'s bookkeeping names the table, so it is untouched. The fixture records the
+  order (`environment.mason.order`) and the rewrite (`sizes[].reorder`: its time, the row groups and the file's bytes in
+  use before and after). The answers are compared with Postgres's after it.
+- `--mason-only` measures Mason's cells alone (a grid); Postgres still makes the data and the answers are still compared.
+- `--reuse-postgres` adopts the `bench-pg` container a `--keep-postgres` run left, stopped while Mason is measured as in
+  the run that made it, so a second layout's run is isolated as the first was.
+- `--keep-copy` leaves the copy at the end with `statements.json` beside it: each statement's DuckDB SQL as Mason
+  plans it (its `EXPLAIN (FORMAT JSON)`), to time the statements over the file alone.
+
 ## Publishing a result
 
 ```bash
 node scripts/bench-replica.ts --label "<the machine>" --target-postgres-seconds 60 … --out tests/fixtures/bench-replica.json
-UPDATE_FIXTURE=1 node --test tests/bench-replica.test.ts    # renders the README's section from it
-git diff README.md                                          # read it
+UPDATE_FIXTURE=1 node --test tests/bench-replica.test.ts    # renders docs/MEASUREMENTS.md and the README's headline from it
+git diff docs/MEASUREMENTS.md README.md                     # read it
 ```
 
-The section's numbers come from the fixture and its sentences from the renderer's template (`renderReplicaSection`), so
-the wording is changed in the renderer and never in the README. It is laid out for scanning:
+The section's numbers come from the fixture and its sentences from the renderer's template (`renderReplicaSection`, and
+`renderReplicaHeadline` for the README's short table), so the wording is changed in the renderer and never in the
+rendered files. It is laid out for scanning:
 
 - **The short version**: one table of the cells worth a glance (the rows sweep's first and last step, the clients
   sweep's last, and the point lookup at the largest cell by p50), each with Postgres's and Mason's time and **Mason is**
-  (`15× faster`, `79× slower`).
+  (`15× faster`, `79× slower`). The README's "Why Mason" carries this table alone, with a link to the rest.
 - **As the tables grow** and **as more readers ask at once**: a table each, one row per step of its sweep (for a grid,
   the sizes at the per-statement client count and the client counts at the largest size), p95 and statements/s for
   both engines; the sweep's verdict (where Postgres reached the target, or what stopped it, and its slowest statement

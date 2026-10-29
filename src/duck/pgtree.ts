@@ -122,6 +122,11 @@ export interface Typed {
    *  number in it — what a stored JSON path is found by (src/duck/kept.ts); absent for any other node, and for a column
    *  of a subquery, a CTE, a function or a join */
   relation?: { relid: number; attno: number };
+  /** a VAR read from a FUNCTION of its query's FROM (an RTE_FUNCTION): the function's FROM name and the column's name
+   *  there. A function of one column that is no row (`jsonb_array_elements(x) e`, its column `value`) is read whole
+   *  by its FROM name alone (`e`), which Postgres analyses as that column (makeWholeRowVar): a one-part name that is
+   *  not the column's is that whole row (src/duck/rewrite.ts) */
+  functionColumn?: { alias: string; column: string };
 }
 
 /** a `constvalue`'s bytes: `<length> [ b0 b1 … ]`, each a signed byte */
@@ -224,6 +229,8 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
       };
       const relation = v._node === "VAR" ? relationOf(v, rtables) : null;
       if (relation !== null) typed.relation = relation;
+      const fromFunction = v._node === "VAR" ? functionColumnOf(v, rtables) : null;
+      if (fromFunction !== null) typed.functionColumn = fromFunction;
       const list = out.get(loc);
       if (list) list.push(typed); else out.set(loc, [typed]);
     }
@@ -242,6 +249,16 @@ function relationOf(v: TreeNode, rtables: TreeNode[][]): { relid: number; attno:
   const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
   const relid = rte === undefined ? null : num(rte.relid ?? null);
   return rte === undefined || attno === null || attno < 1 || num(rte.rtekind ?? null) !== RTE_RELATION || relid === null || relid === 0 ? null : { relid, attno };
+}
+const RTE_FUNCTION = 3;
+/** Typed.functionColumn */
+function functionColumnOf(v: TreeNode, rtables: TreeNode[][]): { alias: string; column: string } | null {
+  const up = num(v.varlevelsup ?? null) ?? 0, varno = num(v.varno ?? null), attno = num(v.varattno ?? null);
+  const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
+  if (rte === undefined || attno === null || attno < 1 || num(rte.rtekind ?? null) !== RTE_FUNCTION || !isNode(rte.eref ?? null)) return null;
+  const eref = rte.eref as TreeNode;
+  const column = strings(eref.colnames)[attno - 1];
+  return typeof eref.aliasname === "string" && column !== undefined ? { alias: eref.aliasname, column } : null;
 }
 const strings = (v: TreeValue | undefined): string[] => Array.isArray(v) ? v.map((x) => typeof x === "string" ? x : "") : [];
 /** Typed.qualifier: the name of a VAR's FROM item when another FROM item of its query has the column in another case,
@@ -304,6 +321,27 @@ export function caseTwins(tree: TreeValue): Map<string, string[]> {
   };
   visit(tree);
   return out;
+}
+
+/**
+ * Whether a JOIN … USING or a NATURAL JOIN of the analysed tree joins on a column of one of `types` (jsonb, jsonb[]):
+ * Postgres equates the columns by that type's `=`, which DuckDB's USING would not (it compares the text). The join's
+ * condition is Postgres's own (its `quals`), at no offset of the statement, so it is read here, not by the rewrite.
+ */
+export function joinsUsing(tree: TreeValue, types: ReadonlySet<number>): boolean {
+  const compares = (v: TreeValue | undefined): boolean => {
+    if (Array.isArray(v)) return v.some(compares);
+    if (v === undefined || !isNode(v)) return false;
+    if (v._node === "OPEXPR" && Array.isArray(v.args) && v.args.some((a) => isNode(a) && types.has(exprType(a)?.type ?? 0))) return true;
+    return Object.entries(v).some(([k, x]) => k !== "_node" && compares(x));
+  };
+  const visit = (v: TreeValue | undefined): boolean => {
+    if (Array.isArray(v)) return v.some(visit);
+    if (v === undefined || !isNode(v)) return false;
+    if (v._node === "JOINEXPR" && Array.isArray(v.usingClause) && v.usingClause.length > 0 && compares(v.quals)) return true;
+    return Object.entries(v).some(([k, x]) => k !== "_node" && visit(x));
+  };
+  return visit(tree);
 }
 
 /** The analysed query's output columns, in order (resjunk ones, which a sort may add, left out): their types. */

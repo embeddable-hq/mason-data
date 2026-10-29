@@ -17,6 +17,8 @@ import { pgTyplen } from "./types.ts";
 import type { CopyState } from "./sync.ts";
 import { datumText, masonCalls, rewrite, treeDifference, Unrewritable, type DuckCollation, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
+import { distinctCountTables, distinctKeyCounts, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
+import type { PgAnalysis } from "./analyze.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802;
 
@@ -33,6 +35,15 @@ async function keptLookup(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, t
     `JOIN pg_attribute a ON a.attrelid = c.oid WHERE (c.oid::int8, a.attnum::int8) IN (${pairs}) AND c.relkind = 'r' AND NOT a.attisdropped`);
   const at = new Map(rows.map(([relid, attno, schema, table, column]) => [`${relid}.${attno}`, { source: `${schema}.${table}`, column: column! }]));
   return { at: (relid, attno) => at.get(`${relid}.${attno}`) ?? null, ready: (read) => kept.ready(read) };
+}
+
+/** the count(DISTINCT x) of the statement that are count(x) (src/duck/distinct-key.ts), by their offsets into the
+ *  analysed text: x unique by the CATALOG's own pg_index — the source's keys as the catalog declares them — read only
+ *  for a statement that counts DISTINCT values at all */
+async function distinctKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<ReadonlySet<number>> {
+  const relids = distinctCountTables(tree);
+  if (relids.length === 0) return new Set();
+  return distinctKeyCounts(tree, uniqueColumnsOf(await catalogRows(catalog, uniqueColumnsSql(relids))));
 }
 
 /**
@@ -70,6 +81,13 @@ export interface PlannedSql {
   readonly text: string;
   /** the `__mason_*` functions it calls, sorted; none: it is interrupted and closed at once when cancelled */
   readonly functions: readonly string[];
+  /**
+   * a LEFT lateral of a list it leaves DuckDB's delimiter join that a row count on the wire would stream
+   * (src/duck/rewrite.ts leftLateral, docs/DESIGN.md "A LEFT lateral of a list"): an Execute that sets one runs the
+   * plan made again with that bound asserted (planDuck's `wireBound`), kept beside this one. Absent: no such lateral
+   * (none, a LIMIT already bounds it, or an aggregate, a GROUP BY, a DISTINCT, a window or an ORDER BY reads every row)
+   */
+  readonly unboundedLateral?: true;
   readonly [PLANNED]: true;
 }
 
@@ -135,9 +153,12 @@ export function missingRelationHint(relation: string, copies: readonly CopyState
   }
 }
 
+/** A statement's plan. `wireBound`: its rows are bounded by a row count an Execute sets on the wire, which its SQL
+ *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so) */
 export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: Node, base: number,
   paramOids: readonly number[], searchPath: string, timeZone: string, collation: DuckCollation, verified: ReadonlyMap<string, string> | null,
-  userTypes: ReadonlyMap<string, number> = new Map(), copies: () => readonly CopyState[] = () => [], depth = 0, kept: KeptRoutes | null = null): Promise<DuckPlan> {
+  userTypes: ReadonlyMap<string, number> = new Map(), copies: () => readonly CopyState[] = () => [], depth = 0, kept: KeptRoutes | null = null,
+  wireBound = false): Promise<DuckPlan> {
   const started = performance.now();
   const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
   if ("refused" in analysis) {
@@ -154,7 +175,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const expanded = await expandViews(catalog, stmt, analysis, pathSql(searchPath));
   if (expanded !== null) {
     if (depth >= MAX_VIEW_DEPTH) throw viewRefused(`Mason cannot yet answer views read through more than ${MAX_VIEW_DEPTH} other views`, "read the tables the views read");
-    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept); }
+    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound); }
     catch (e) {
       if (!(e instanceof StatementError)) throw e;
       const { position: _p, ...fields } = e.fields;
@@ -193,23 +214,24 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
       if (source !== undefined) f.oid = source;
     }
   }
-  let tree, dropLast, exact, clock, jsonReads;
+  let tree, dropLast, exact, clock, jsonReads, unboundedLateral;
   // a table's row the source has otherwise (copied in part: no source OID for it) is not the source's row
   const sourceRows = new Map([...rowTypes].filter(([oid]) => userTypes.has(catalogTypes.get(oid) ?? "")));
   // the stored JSON paths the statement's JSON reads may be answered from (src/duck/kept-route.ts)
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
+  const keyCounts = await distinctKeys(catalog, analysis.tree);
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite(stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, catalogTypes, sourceRows, timeZone, enums, l);
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite(stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, catalogTypes, sourceRows, timeZone, enums, l, wireBound, keyCounts);
   try {
-    ({ tree, dropLast, exact, clock, jsonReads } = rewritten());
+    ({ tree, dropLast, exact, clock, jsonReads, unboundedLateral } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
     if (kept?.keepNow != null && lookup !== null && jsonReads.some((r) => kept.ready(r) === null)) {
       await kept.keepNow(jsonReads);
-      ({ tree, dropLast, exact, clock, jsonReads } = rewritten());
+      ({ tree, dropLast, exact, clock, jsonReads, unboundedLateral } = rewritten());
     }
     // a statement that lists a copy's columns without naming them reads none from a stored column (hideKept): made
     // again with every read its call, the reads still recorded
-    if (lookup !== null && exposes(tree)) ({ tree, dropLast, exact, clock, jsonReads } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
+    if (lookup !== null && exposes(tree)) ({ tree, dropLast, exact, clock, jsonReads, unboundedLateral } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
   }
   catch (e) {
     // a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its SQLSTATE, and no gap
@@ -247,7 +269,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
     throw new StatementError({ code: "0A000", message: "Mason cannot run this statement exactly: its rewritten form does not read back as itself (a Mason gap: report it, with the statement)",
       detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
-  const planned = { text: sql, functions: masonCalls(tree) } as unknown as PlannedSql;
+  const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}) } as unknown as PlannedSql;
   return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, dropLast, ...(exact.length > 0 ? { exact } : {}), resolved: keys,
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
 }

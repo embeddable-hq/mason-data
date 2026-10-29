@@ -68,7 +68,7 @@ const SHAPES = process.env.IT_ORACLE_SHAPES !== "0";
 /** `IT_ORACLE_JSON_PATHS=eager` stores every JSON path a statement reads before it is planned (src/duck/kept.ts, the
  *  test's own option): every such read is then answered from its stored column, and must still answer as Postgres */
 const EAGER_JSON = process.env.IT_ORACLE_JSON_PATHS === "eager";
-/** the DuckDB-alone pass's tallies (`duckdbAlone`, below): what README.md's comparison renders (tests/duck-gaps.test.ts) */
+/** the DuckDB-alone pass's tallies (`duckdbAlone`, below): what docs/SQL-SUPPORT.md's comparison renders (tests/duck-gaps.test.ts) */
 const ALONE_FIXTURE = path.join(REPO, "tests", "fixtures", "oracle-duckdb-alone.json");
 const UPDATE_FIXTURE = process.env.UPDATE_FIXTURE === "1";
 // the DuckDB-alone pass reads a timestamptz's JSON text in the process's zone (the client's conversion, not DuckDB's
@@ -84,6 +84,9 @@ function psql(url: string, sql: string): string {
   if (r.status !== 0) throw new Error(`psql: ${r.stderr.trim()}\n  in: ${sql.slice(0, 300)}`);
   return r.stdout.trim();
 }
+
+/** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
+const COPIED = [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -177,7 +180,15 @@ const KNOWN: Decided[] = [
   { sql: /^SELECT min\(a \/ b\), max\(a \/ b\) FROM public\.one, \(VALUES/, kind: "text", gap: "min-max-scale-tie", why: "min of 0 / 7 and 0 / 1000000, equal values at two scales: Postgres keeps the last it reads, Mason the least operands" },
   { sql: /^SELECT x \* 2 FROM \(SELECT 7 \/ 3\.0 AS x/, kind: "text", gap: "nested-exact-numeric", why: "the subquery's 7 / 3.0 is DuckDB's double where the outer query computes with it" },
   { sql: /^SELECT upper\('\u{10D70}'\)/u, kind: "value", gap: "unicode-16-case", why: "a Garay letter (Unicode 16): DuckDB's ICU predates it" },
+  { sql: /^SELECT q\.id, x FROM docs q LEFT JOIN unnest\(ARRAY\[q\.id, \(CASE WHEN q\.id = 10 THEN 'x' ELSE '1' END\)::int\]\) x ON TRUE LIMIT 3$/, kind: "refused", gap: "limit-errors", why: "row 10's 'x' is no integer, and the limit leaves it out: Postgres stops at row 2, DuckDB computes a lateral's argument a vector of rows at a time" },
+  { sql: /^SELECT q\.id, d\.key FROM docs q LEFT JOIN jsonb_each\(CASE WHEN q\.id % 1 = 0 AND q\.id > 2 THEN q\.jb END\) d ON TRUE LIMIT 3$/, kind: "refused", gap: "limit-errors", why: "an array document in a row the limit leaves out: Postgres stops before it, DuckDB computes a lateral's argument a vector of rows at a time" },
   { sql: /^SELECT l\.id, \(l\.j ->> 'n'\)::int, c\.name FROM late l LEFT JOIN late_c c ON c\.id = l\.c ORDER BY l\.k DESC LIMIT 3$/, kind: "answered", gap: "limit-errors", why: "row 2000's 'x' is no integer, and the limit leaves it out: Postgres sorts every row (no index on k) and raises, Mason computes the list for the kept rows" },
+  { sql: /^SELECT x\.id, x\.e FROM \(SELECT s\.id, s\.e::text AS e FROM \(SELECT q\.id, e FROM docs q LEFT JOIN jsonb_array_elements\(.*\) e ON TRUE\) s WHERE s\.id > \$1\) x LIMIT/, kind: "value", gap: "limit-lateral-filter", why: "a parameter in the filter around the lateral: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows (the same statement with the literal keeps Postgres's)" },
+  { sql: /\), b AS \(SELECT \* FROM a WHERE a\.id > 3\) SELECT \* FROM b LIMIT 40 OFFSET 23$/, kind: "value", gap: "limit-lateral-filter", why: "a filter in the CTE that reads the lateral's CTE: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows" },
+  { sql: /^SELECT q\.id, d\.key FROM docs q LEFT JOIN jsonb_each\(.*\) d ON TRUE WHERE d\.key <> 'n' LIMIT 40$/, kind: "value", gap: "limit-lateral-filter", why: "a filter on the lateral's own column: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows" },
+  { sql: /^SELECT \* FROM \(SELECT t\.id, t\.jb FROM docs t\) q LEFT JOIN jsonb_each\(CASE WHEN q\.id % 4 <> 1 AND .*\) d ON TRUE LIMIT 40 OFFSET 7$/, kind: "value", gap: "limit-lateral-argument", why: "an argument of two columns under a `*`: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows (a step of its own would be a column the `*` reads)" },
+  { sql: /^SELECT q\.id, v FROM docs q LEFT JOIN unnest\(ARRAY\(SELECT e FROM jsonb_array_elements_text\(.*\) e\)\) v ON TRUE LIMIT 50 OFFSET 7$/, kind: "value", gap: "limit-lateral-argument", why: "a subquery in the lateral's argument: DuckDB plans the streamed UNNEST as a delimiter join in every form, and the LIMIT keeps other rows" },
+  { sql: /^SELECT q\.id, d\.key, row_number\(\) OVER (\(PARTITION BY q\.id\)|w) AS r/, kind: "value", gap: "window-partition-order", why: "row_number / lag / first_value over PARTITION BY with no ORDER BY: DuckDB's partitioning hands a partition's rows back in its own order, streamed lateral or not" },
   { sql: /^SELECT s FROM coll WHERE id BETWEEN 50 AND 59 ORDER BY s$/, kind: "rows", gap: "libc-symbol-punctuation", why: "glibc's 1-X < 1x: punctuation after a digit outranks the case; Mason's 1x < 1-X" },
 ];
 
@@ -214,8 +225,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   if ("failure" in conn) throw new Error(`connect: ${JSON.stringify(conn.failure)}`);
   const facts = await readSourceFacts(conn.pg);
   conn.pg.close();
-  const added = facts.tables.filter((t) => [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c"].includes(t.table) && t.schema === "public");
-  assert.equal(added.length, TABLES.length + 11, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
+  const added = facts.tables.filter((t) => COPIED.includes(t.table) && t.schema === "public");
+  assert.equal(added.length, COPIED.length, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
   const log: string[] = [];
   store = await DuckStore.open(path.join(dir, "duck.db"), (l) => log.push(l));
   sync = new Sync(store, parsed.source, tag, (l) => log.push(l), 3_600_000, "poll", null, EAGER_JSON ? { json: { eager: true } } : {});
@@ -240,7 +251,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
    * DUCKDB ALONE (why a user would not just use DuckDB by itself): the same statement, as written, to
    * a plain connection of the same copy — no analysis, no rewrite, no Mason function — scored by the oracle's own
    * verdict (names, rows, text; the OIDs taken as Postgres's, since DuckDB has none). The tallies are
-   * tests/fixtures/oracle-duckdb-alone.json, which README.md's comparison renders; UPDATE_FIXTURE=1 rewrites it, and
+   * tests/fixtures/oracle-duckdb-alone.json, which docs/SQL-SUPPORT.md's comparison renders; UPDATE_FIXTURE=1 rewrites it, and
    * a run whose tallies moved by more than a percentage point of the statements fails until it is.
    */
   const alone = await theStore.instance.connect();
@@ -270,13 +281,13 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
 
   // ---- every statement, both ways -------------------------------------------------------------------------------
   const tableSql = (t: string): string => `SELECT * FROM public.${t} ORDER BY ${KEY_OF[t] ?? "id"} COLLATE "C"`;
-  const all = (): Array<{ group: string; name: string; sql: string; inOrder?: boolean }> => [
-    ...[...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c"].map((t) => ({ group: "copy", name: `the table ${t}, whole`, sql: tableSql(t) })),
+  const all = (): Array<{ group: string; name: string; sql: string; inOrder?: boolean; zone?: string }> => [
+    ...COPIED.map((t) => ({ group: "copy", name: `the table ${t}, whole`, sql: tableSql(t) })),
     ...CASES.map((c) => ({ group: "dialect", name: c, sql: `SELECT ${c} FROM public.one` })),
     ...QUERY_CASES.map((q) => ({ group: "query case", name: q.slice(0, 80), sql: throughOne(q) })),
     ...REFUSED_CASES.map((q) => ({ group: "refused case", name: q.sql.slice(0, 80), sql: throughOne(q.sql) })),
     ...BI_SHAPES.map((q) => ({ group: "BI shape", name: q.name, sql: q.sql })),
-    ...TYPE_MATRIX.map((q) => ({ group: "type matrix", name: q.name, sql: q.sql })),
+    ...TYPE_MATRIX.map((q) => ({ group: "type matrix", name: q.name, sql: q.sql, ...(q.zone === undefined ? {} : { zone: q.zone }) })),
     ...GAP_CASES.map((q) => ({ group: "gap case", name: `gap case: ${q.gap}`, sql: q.sql })),
     { group: "decided", name: "numeric values of several scales", sql: MIXED_SCALE },
   ].filter((q) => ONLY === null || ONLY.test(q.name));
@@ -296,9 +307,17 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   let shaped = 0;
   /** the copy phase's tallies: how Mason answered each statement, and how DuckDB alone did (`duckdbAlone`) */
   const tallies = { statements: 0, mason: { exact: 0, decided: 0, refused: 0, differs: 0 }, duckdb: { exact: 0, name: 0, refused: 0, value: 0, rows: 0, text: 0, other: 0 } };
+  // the sessions' TimeZone: UTC, as set at their start, until a statement asks for another
+  let zone = "UTC";
   const run = async (phase: string): Promise<void> => {
     const first = phase === "after the copy";
     for (const q of all()) {
+      // A STATEMENT ASKED IN A SESSION ZONE OF ITS OWN (`zone`; UTC otherwise): both sessions, and DuckDB alone, set to it
+      if ((q.zone ?? "UTC") !== zone) {
+        zone = q.zone ?? "UTC";
+        for (const c of [source, mason]) await c.query(`SET TimeZone = '${zone}'`);
+        if (first) await alone.run(`SET TimeZone = '${zone}'`);
+      }
       const [want, got] = [await ask(source, q.sql), await ask(mason, q.sql)];
       const v = verdict(want, got, q.inOrder ?? ordered(q.sql));
       if (first) {
@@ -322,9 +341,14 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         shaped++;
         const [sw, sg] = [await ask(source, s.sql, s.values), await ask(mason, s.sql, s.values)];
         const sv = verdict(sw, sg, s.inOrder);
+        // a decided difference a shape alone meets (a filter's literal sent as a parameter: limit-lateral-filter),
+        // decided before an agreement so one that no longer differs is said so (staleDecisions)
+        const sk = KNOWN.find((x) => x.sql.test(s.sql));
+        if (sk) decided.add(sk);
         if (sv === null) continue;
         const sgap = namedGap(sg);
         if (sgap !== null) { meet(sgap); continue; }
+        if (sk && sv.kind === sk.kind) { known.add(sk); meet(sk.gap); continue; }
         differences.push({ phase, group: `${q.group} [${s.shape}]`, kind: sv.kind, name: `${q.name} [${s.shape}]`, detail: sv.detail,
           sql: s.values === undefined ? s.sql : `${s.sql} -- with ${JSON.stringify(s.values)}` });
       }
@@ -332,7 +356,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   };
   await run("after the copy");
   alone.closeSync();
-  // the DuckDB-alone tallies, held to the fixture README.md renders (a percentage point of the statements of play)
+  // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of play)
   if (ONLY === null) {
     const fixture = { ...tallies, measured: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy" };
     const pct = (n: number): string => `${(100 * n / tallies.statements).toFixed(1)}%`;
@@ -344,7 +368,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       const was = JSON.parse(fs.readFileSync(ALONE_FIXTURE, "utf8")) as typeof fixture;
       const moved = (["mason", "duckdb"] as const).flatMap((side) => Object.entries(fixture[side]).filter(([k, n]) => Math.abs(n - (was[side] as Record<string, number>)[k]!) > tallies.statements / 100)
         .map(([k, n]) => `${side}.${k}: ${n} where the fixture has ${(was[side] as Record<string, number>)[k]}`));
-      assert.deepEqual(moved, [], `${ALONE_FIXTURE} is not what this run measured (README.md's comparison renders it): regenerate with UPDATE_FIXTURE=1 and read the diff`);
+      assert.deepEqual(moved, [], `${ALONE_FIXTURE} is not what this run measured (docs/SQL-SUPPORT.md's comparison renders it): regenerate with UPDATE_FIXTURE=1 and read the diff`);
     }
   }
   for (const round of [1, 2]) {
@@ -368,8 +392,18 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   if (EAGER_JSON) {
     // the run read JSON from stored columns: how many paths, and none left unfilled
     const paths = theSync.kept.status();
-    console.log(`duck oracle: ${paths.filter((p) => p.state === "ready").length} JSON path(s) stored and read from their columns, over ${new Set(paths.map((p) => p.table)).size} table(s)`);
+    const orders = paths.filter((p) => p.state === "ready" && p.steps.startsWith("order:"));
+    console.log(`duck oracle: ${paths.filter((p) => p.state === "ready").length} JSON path(s) stored and read from their columns, over ${new Set(paths.map((p) => p.table)).size} table(s); ` +
+      `${orders.length} of them a jsonb's order (${orders.map((p) => `${p.table}.${p.column}`).join(", ")})`);
     assert.ok(paths.some((p) => p.state === "ready"), "IT_ORACLE_JSON_PATHS=eager stored no JSON path: the run did not exercise them");
+    // a jsonb sorted, grouped or compared is read from its stored key (src/duck/kept-route.ts ORDER_STEPS)
+    assert.ok(orders.some((p) => p.table === "public.jorder"), "IT_ORACLE_JSON_PATHS=eager stored no jsonb's order: the run did not exercise it");
+    // under a libc collation a jsonb's equality is read from its stored C key, a second column (EQUAL_STEPS); under C
+    // and ICU the order's key serves it, and no second column is ever made
+    const equals = paths.filter((p) => p.steps.startsWith("equal:"));
+    console.log(`duck oracle: ${equals.filter((p) => p.state === "ready").length} jsonb equality key(s) stored (${equals.map((p) => `${p.table}.${p.column} ${p.state}`).join(", ")})`);
+    if (libc !== undefined) assert.ok(equals.some((p) => p.table === "public.jorder" && p.state === "ready"), "IT_ORACLE_JSON_PATHS=eager under libc stored no jsonb's C key: the run did not exercise it");
+    else assert.deepEqual(equals.map((p) => `${p.table}.${p.column} ${p.steps} ${p.state}`), [], "under C or ICU no jsonb's C key is stored: the order's key equates");
     assert.deepEqual(paths.filter((p) => p.state !== "ready").map((p) => `${p.table} ${p.column} ${p.steps}: ${p.state} ${p.why}`), [], "every path stored is ready");
   }
   // a filtered run asks only some statements: a decision it did not meet is not stale

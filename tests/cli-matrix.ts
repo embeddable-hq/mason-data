@@ -32,6 +32,8 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   remove: ["no_such_table"],
   wait: ["--timeout", "1"],
   user: ["list"],
+  // no URL: refused in every state, with the way out (stdin is closed, so a server would end at once)
+  mcp: [],
   status: [],
   // never a browser: in a state with no run it is refused before; --no-open whatever happens
   ui: ["--no-open"],

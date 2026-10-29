@@ -21,7 +21,7 @@ import { DuckDBInstance, version, type DuckDBConnection, type DuckDBPreparedStat
 import { Executor, type DuckConnection } from "./executor.ts";
 import { beginStatement, cancelStatement, slotName, statementCancelled } from "./cancel.ts";
 import type { PgSession } from "../api/postgres/encode.ts";
-import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner } from "../api/postgres/server.ts";
+import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner, type ExplainHow } from "../api/postgres/server.ts";
 import { duckParameters, missingRelationHint, planDuck, quoteDuckKeywords } from "./plan.ts";
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
@@ -34,8 +34,7 @@ import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } fro
 import type { ExactColumn } from "./rewrite.ts";
 import { gapIn, gapMark, type GapId } from "./gaps.ts";
 import { cellsOf, evaluateText, NumericError } from "../lib/pg-numeric.ts";
-import { explainJson, explainText, planNodes, scannedTables, type Copy, type Explained, type PlanNode } from "./explain.ts";
-import type { ExplainOptions } from "../api/postgres/explain.ts";
+import { explainJson, explainText, planNodes, profiled, qualifiedName, scannedTables, type Copy, type CopyFacts, type Explained, type PlanNode, type TableName } from "./explain.ts";
 import type { PlannedSql } from "./plan.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -67,8 +66,16 @@ export const DUCKDB_VERSION = version();
  * npm by `mason init` (else at the first copy, src/duck/sync.ts attach), `mason doctor` saying whether it is — and an
  * installed one still loads by itself. Anything else is
  * DuckDB's "exists in the … extension" error, never a download. tests/duck-wire.test.ts holds it.
+ *
+ * `lambda_syntax: ENABLE_SINGLE_ARROW`: the rewrite is a Postgres parse tree, printed by Postgres's deparser, which
+ * can spell DuckDB's lambda only as `x -> f(x)` (Postgres's `->` operator), never as `lambda x: f(x)`; DuckDB 2.0
+ * refuses that spelling by default. Two rewrites need a lambda: a jsonb's order under ICU or a libc locale, which maps
+ * DuckDB's `icu_sort_key` over the document's strings (src/duck/rewrite.ts `jsonbKey`; tests/duck-jsonb-order.test.ts
+ * holds the key under every collation), and a LEFT lateral's unnest of an expression, which computes the expression
+ * once with `list_transform(list_value(e), l -> CASE … l … END)[1]` (`rangeFunction`; tests/duck-wire.test.ts). A `->`
+ * that is not a lambda function's argument is still the json operator.
  */
-const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", autoinstall_known_extensions: "false" };
+const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", autoinstall_known_extensions: "false", lambda_syntax: "ENABLE_SINGLE_ARROW" };
 
 /**
  * DUCKDB'S MEMORY, BOUNDED FOR THIS PROCESS: DuckDB's default is 80% of the machine's RAM, in a process
@@ -182,6 +189,8 @@ export class DuckStore {
   onCrash(f: (reason: string) => void): void { this.executor.onCrash(f); }
   /** how many vectors each Mason function was called with so far, on the copy's thread (a test's, a measurement's) */
   functionCalls(): Promise<Map<string, number>> { return this.executor.functionCalls(); }
+  /** how many rows each Mason function was handed so far, on the copy's thread (a plan's cost in calls) */
+  functionRows(): Promise<Map<string, number>> { return this.executor.functionRows(); }
 
   /** a connection for one Postgres session (on the executor worker: SessionRunner) */
   runner(): Promise<DuckRunner> { return this.executor.runner(); }
@@ -215,11 +224,15 @@ export class DuckStore {
       if (libc === undefined) throw new Error(`the database orders text by the libc collation ${collation!.collate}, and its order was not read (Mason bug: report it)`);
       await this.executor.registerLibcOrder(libc);
     }
+    // a jsonb's stored key is this collation's (src/duck/kept.ts `orderBy`)
+    await kept?.orderBy(c, c.kind === "libc" ? libc : undefined);
     return {
       collation: c,
       open: () => this.runner(),
-      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes) => planDuck(catalog, text, stmt, base, paramOids, searchPath, timeZone, c, verified, userTypes, copies, 0, kept ?? null),
+      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound) => planDuck(catalog, text, stmt, base, paramOids, searchPath, timeZone, c, verified, userTypes, copies, 0, kept ?? null, wireBound ?? false),
       parameters: duckParameters,
+      // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
+      copies,
       // a stored JSON path ready or gone (src/duck/kept.ts): the plans kept are made again
       ...(kept !== undefined ? { generation: () => kept.generation() } : {}),
     };
@@ -422,9 +435,11 @@ export class SessionRunner implements DuckRunner {
   }
 
   /** `run`, and where its time goes as it is read: DuckDB's (its prepare, which plans; each chunk it computes) and
-   *  Mason's (the exact numerics, the encoding), ms — what an EXPLAIN ANALYZE says */
+   *  Mason's (the exact numerics, the encoding), ms — what an EXPLAIN ANALYZE says. `profile`: the file DuckDB's
+   *  profiler writes this statement's profile to (EXPLAIN ANALYZE), turned on here, after the settle */
   private async streamed(planned: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
-    fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact: readonly ExactColumn[]): Promise<{ answer: DuckAnswer; timing: { prepareMs: number; duckdbMs: number; masonMs: number } }> {
+    fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact: readonly ExactColumn[],
+    profile: string | null = null): Promise<{ answer: DuckAnswer; timing: { prepareMs: number; duckdbMs: number; masonMs: number } }> {
     const sql = planned.text;
     const seq = this.next;
     await Promise.all([...this.releasing]);
@@ -433,6 +448,14 @@ export class SessionRunner implements DuckRunner {
     beginStatement(this.cancels, this.slot, seq);
     try { await this.settle(session); }
     catch (e) { throw pgErrorOf(e, sql); }
+    // THE PROFILER IS ON FOR THE STATEMENT ALONE: DuckDB writes the profile of the LAST statement it profiled on the
+    // connection, so it is turned on after every other statement Mason runs here (the settle's probe of the schemas,
+    // turned on before it, was reported as the plan of a count(*) that wrote no profile of its own), and the caller turns
+    // it off before it runs another (`explained`, which also holds the profile to the statement's text)
+    if (profile !== null) {
+      try { await this.conn.run("SET enable_profiling = 'json'"); await this.conn.run(`SET profiling_output = ${quoteLiteral(profile)}`); }
+      catch (e) { throw pgErrorOf(e, sql); }
+    }
     const timing = { prepareMs: 0, duckdbMs: 0, masonMs: 0 };
     const t0 = performance.now();
     const p = await this.prepare(sql);
@@ -599,67 +622,78 @@ export class SessionRunner implements DuckRunner {
    * EXPLAIN of a plan (src/duck/explain.ts). Without ANALYZE: DuckDB's `EXPLAIN (FORMAT JSON)` of the planned SQL, its
    * parameters bound. With it: the statement RUN as `run` runs it — every chunk read, its exact numerics computed and
    * encoded, none sent — with DuckDB's profiler writing each operator's rows and time to a file of its own, read after.
-   * Then the copies its scans read: their rows, and their last poll (`_mason.poll_state`).
+   * Then the copies its scans read: their rows, and how each is kept current as the sync says it (`how.copies`).
    */
   explain(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
-    how: { options: ExplainOptions; fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null; exact: readonly ExactColumn[]; planning: { analysisMs: number; rewriteMs: number } }): Promise<string[]> {
+    how: ExplainHow): Promise<string[]> {
     return this.track(this.explained(sql, params, session, signal, how));
   }
 
   private async explained(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
-    how: { options: ExplainOptions; fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null; exact: readonly ExactColumn[]; planning: { analysisMs: number; rewriteMs: number } }): Promise<string[]> {
+    how: ExplainHow): Promise<string[]> {
     await Promise.all([...this.releasing]);
     const o = how.options;
     let plan: PlanNode[];
     let analyzed: Explained["analyzed"];
-    if (!o.analyze) {
-      try { await this.settle(session); }
-      catch (e) { throw pgErrorOf(e, sql.text); }
-      const p = await this.prepare(`EXPLAIN (FORMAT JSON) ${sql.text}`);
-      const interrupt = (): void => this.conn.interrupt();
-      signal.addEventListener("abort", interrupt);
-      try {
-        if (signal.aborted) throw failureOf(signal, null, sql.text);
-        params.forEach((v, i) => { if (v === null) p.bindNull(i + 1); else p.bindVarchar(i + 1, v); });
-        let r;
-        try { r = await p.runAndReadAll(); }
-        catch (e) { throw failureOf(signal, e, sql.text); }
-        plan = planNodes(JSON.parse(String(r.getRowsJS()[0]?.[1] ?? "[]")));
-      } finally { signal.removeEventListener("abort", interrupt); p.destroySync(); }
-    } else {
+    if (!o.analyze) plan = await this.plainPlan(sql, params, session, signal);
+    else {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-explain-"));
       const file = path.join(dir, "profile.json");
       try {
         let rows = 0;
         let timing;
-        await this.conn.run("SET enable_profiling = 'json'");
         try {
-          await this.conn.run(`SET profiling_output = ${quoteLiteral(file)}`);
-          const s = await this.streamed(sql, params, session, signal, how.fields, how.exact);
+          const s = await this.streamed(sql, params, session, signal, how.fields, how.exact, file);
           timing = s.timing;
           try { for (let chunk = await s.answer.fetch([], { timeZone: session.timeZone }); chunk !== null; chunk = await s.answer.fetch([], { timeZone: session.timeZone })) rows += chunk.length; }
           finally { s.answer.close(); }
         } finally { await this.conn.run("PRAGMA disable_profiling"); }
-        // the profile is the statement's: written when its result was read to its end, after every other statement here
-        plan = planNodes((JSON.parse(fs.readFileSync(file, "utf8")) as { operator?: unknown[] }).operator ?? []);
-        analyzed = { rows, planning: { ...how.planning, duckdbMs: timing.prepareMs }, execution: { duckdbMs: timing.duckdbMs, masonMs: timing.masonMs } };
+        // THE PROFILE IS HELD TO THE STATEMENT, never assumed its: DuckDB writes one when the result is read to its end,
+        // naming the statement it timed. None: DuckDB ran no operator (it answered while planning — a count(*) of a
+        // whole table is the table's row count), and its plan is its EXPLAIN, the rows the ones it answered
+        const profile = fs.existsSync(file) ? profiled(JSON.parse(fs.readFileSync(file, "utf8"))) : null;
+        if (profile !== null && profile.sql !== sql.text) {
+          throw new StatementError({ code: "XX000", message: `the copy's profile of an EXPLAIN ANALYZE is of another statement (${oneLine(profile.sql ?? "none named")}): report it (Mason's EXPLAIN)` }, sql.text);
+        }
+        if (profile !== null) plan = profile.plan;
+        else {
+          plan = await this.plainPlan(sql, params, session, signal);
+          if (plan[0] !== undefined) plan[0].actualRows = rows;
+        }
+        analyzed = { rows, profiled: profile !== null, planning: { ...how.planning, duckdbMs: timing.prepareMs }, execution: { duckdbMs: timing.duckdbMs, masonMs: timing.masonMs } };
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }
     // what it calls is the plan's (src/duck/plan.ts PlannedSql), the list that decides how it is cancelled
-    const explained: Explained = { copies: await this.copies(scannedTables(plan)), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
+    const explained: Explained = { copies: await this.copies(scannedTables(plan), how.copies), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
       functions: [...sql.functions], plan, ...(analyzed === undefined ? {} : { analyzed }) };
     return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
   }
 
-  /** each copy's rows and last poll (none recorded: a copy made whole, not polled yet) */
-  private async copies(tables: readonly string[]): Promise<Copy[]> {
-    const polls = (await this.conn.runAndReadAll(`SELECT count(*) FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = '${MASON_SCHEMA}' AND table_name = 'poll_state'`)).getRowsJS()[0]![0] !== 0n;
+  /** DuckDB's `EXPLAIN (FORMAT JSON)` of the planned SQL, its parameters bound: its plan, estimates only */
+  private async plainPlan(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal): Promise<PlanNode[]> {
+    try { await this.settle(session); }
+    catch (e) { throw pgErrorOf(e, sql.text); }
+    const p = await this.prepare(`EXPLAIN (FORMAT JSON) ${sql.text}`);
+    const interrupt = (): void => this.conn.interrupt();
+    signal.addEventListener("abort", interrupt);
+    try {
+      if (signal.aborted) throw failureOf(signal, null, sql.text);
+      params.forEach((v, i) => { if (v === null) p.bindNull(i + 1); else p.bindVarchar(i + 1, v); });
+      let r;
+      try { r = await p.runAndReadAll(); }
+      catch (e) { throw failureOf(signal, e, sql.text); }
+      return planNodes(JSON.parse(String(r.getRowsJS()[0]?.[1] ?? "[]")));
+    } finally { signal.removeEventListener("abort", interrupt); p.destroySync(); }
+  }
+
+  /** each copy's rows, and the sync's facts of it (how it is kept current: src/duck/sync.ts `KeptCurrent`, never the
+   *  poll's ledger read here — a project switched to logical replication still holds its last poll there) */
+  private async copies(tables: readonly TableName[], facts: readonly CopyFacts[]): Promise<Copy[]> {
     const out: Copy[] = [];
-    for (const table of tables) {
-      const [schema, name] = table.split(".") as [string, string];
+    for (const { schema, name } of tables) {
       const rows = (await this.conn.runAndReadAll("SELECT estimated_size FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2", [schema, name])).getRowsJS()[0]?.[0];
-      const polled = polls ? (await this.conn.runAndReadAll(`SELECT strftime(polled_at AT TIME ZONE 'UTC', '%Y-%m-%d %H:%M:%S') || ' UTC' FROM ${MASON_SCHEMA}.poll_state WHERE source = $1`, [table])).getRowsJS()[0]?.[0] : undefined;
-      out.push({ table, rows: rows === undefined || rows === null ? null : Number(rows), polledAt: typeof polled === "string" ? polled : null });
+      // the sync's source is the two names as they are; EXPLAIN says the table as a statement writes it (qualifiedName)
+      out.push({ table: qualifiedName({ schema, name }), rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === `${schema}.${name}`) ?? null });
     }
     return out;
   }

@@ -17,7 +17,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, memoryLimitBytes } from "../src/duck/store.ts";
-import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.ts";
+import { startPostgresApi, StatementError, type PgApiServer } from "../src/api/postgres/server.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import { wireColumn } from "../src/duck/types.ts";
 import { TABLES_SQL } from "../src/cli/preflight.ts";
@@ -46,6 +46,21 @@ const JDOCS: Array<[number, string | null, string | null]> = [
   [7, '{"1": "one", "1 ": "trailing", " 1": "leading", "+1": "plus", "01": "zero-one"}', '{"1": "one", "1 ": "trailing", " 1": "leading", "+1": "plus", "01": "zero-one"}'],
 ];
 const jdocsInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jdocs VALUES ${JDOCS.map(([id, b, j]) => `(${id}, ${b === null ? "NULL" : `'${asHeld(b)}'`}, ${j === null ? "NULL" : `'${j}'`})`).join(", ")}`;
+/** instants a truncation meets at its edges: each side of a daylight-saving change (Europe/Berlin's 2026-03-29 02:00
+ *  and 2026-10-25 03:00, America/New_York's), a repeated hour's two halves, before 1970, a zone's local mean time
+ *  (1880), a week's and a century's first instant, a microsecond, ±infinity and NULL (as UTC text: both sides read it so) */
+const INSTANTS: Array<[number, string | null]> = [
+  [1, "2026-03-29 00:59:59.999999+00"], [2, "2026-03-29 01:00:00+00"], [3, "2026-03-29 01:30:00+00"], [4, "2026-10-25 00:30:00+00"],
+  [5, "2026-10-25 01:00:00+00"], [6, "2026-10-25 01:30:00+00"], [7, "2026-10-25 02:00:00+00"], [8, "2026-03-08 06:59:59+00"],
+  [9, "2026-03-08 07:00:00+00"], [10, "2026-11-01 05:30:00+00"], [11, "2026-11-01 06:30:00+00"], [12, "1969-12-31 23:59:59.5+00"],
+  [13, "1960-02-29 12:34:56.789+00"], [14, "1880-06-15 12:00:30+00"], [15, "2000-12-31 23:00:00+00"], [16, "2001-01-01 00:00:00+00"],
+  [17, "2026-01-04 23:59:59+00"], [18, "2026-01-05 00:00:00+00"], [19, "2026-07-01 12:34:56.123456+00"], [20, "infinity"], [21, "-infinity"], [22, null],
+  [23, "1999-12-31 23:59:59.999999+00"], [24, "2262-04-11 23:47:16+00"],
+];
+const instantsInsert = `INSERT INTO public.instants VALUES ${INSTANTS.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v}'`})`).join(", ")}`;
+/** a nullable column of each kind a sort meets, NULLs among the values and ties beside them */
+const NULLISH = "INSERT INTO public.nullish VALUES (1, '2026-01-02 03:04:05', 'b', 3), (2, NULL, NULL, NULL), (3, '2025-12-31 00:00:00', 'a', 1), (4, '2026-01-02 03:04:05', NULL, 3), " +
+  "(5, NULL, 'c', 2), (6, '2027-06-01 00:00:00', 'b', NULL), (7, '2024-02-29 12:00:00', 'B', 7), (8, NULL, NULL, 1)";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-wire-"));
 let store: DuckStore;
 let api: PgApiServer;
@@ -95,6 +110,10 @@ const DDL = [
   // a jsonb column whose name is jdocs.b's in another case: a bare "B" beside b is ambiguous to DuckDB
   "CREATE TABLE public.jcase (id INTEGER PRIMARY KEY, \"B\" JSON)",
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
+  "CREATE TABLE public.instants (id INTEGER PRIMARY KEY, \"at\" TIMESTAMPTZ)",
+  instantsInsert,
+  "CREATE TABLE public.nullish (id INTEGER PRIMARY KEY, ts TIMESTAMP, t VARCHAR, n INTEGER)",
+  NULLISH,
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -136,6 +155,10 @@ const PG_DDL = [
   jdocsInsert((doc) => doc),
   "CREATE TABLE public.jcase (id integer PRIMARY KEY, \"B\" jsonb)",
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
+  "CREATE TABLE public.instants (id integer PRIMARY KEY, at timestamptz)",
+  instantsInsert,
+  "CREATE TABLE public.nullish (id integer PRIMARY KEY, ts timestamp, t text, n integer)",
+  NULLISH,
   "ANALYZE public.late",
   // a source's views, as the catalog has them: over the copied tables, one over another
   "CREATE VIEW public.paid_orders AS SELECT id, amount FROM public.orders WHERE status = 'paid'",
@@ -178,6 +201,8 @@ const schema: PgSchema = {
     { name: "late_c", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "name", type: "text" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
+    { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
+    { name: "nullish", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp" }, { name: "t", type: "text" }, { name: "n", type: "int4" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -318,7 +343,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "moods"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -452,6 +477,14 @@ test("the review's silent differences: citext without regard to case, an inet as
     // inet: Postgres's text (no /32), its OID (869), its functions; its order refused
     await alike("SELECT ip, ip::text, host(ip), ip = '10.3.6.45' FROM accounts ORDER BY id");
     await assert.rejects(c.query("SELECT ip FROM accounts ORDER BY ip"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap inet-order/.test(e.detail ?? ""));
+    // ARRAY(SELECT x …): a scalar answered; a numeric (DuckDB's double), an array (Postgres's multi-dimensional one), a
+    // row, and = ANY (ARRAY(SELECT …)) (DuckDB's binder error) refused by name
+    await alike("SELECT ARRAY(SELECT status FROM orders ORDER BY id DESC), ARRAY(SELECT tags[1] FROM orders ORDER BY id)");
+    for (const sql of ["SELECT ARRAY(SELECT amount FROM orders ORDER BY id)", "SELECT ARRAY(SELECT amount / 3 FROM orders ORDER BY id)",
+      "SELECT ARRAY(SELECT tags FROM orders ORDER BY id)", "SELECT ARRAY(SELECT tags[1:1] FROM orders ORDER BY id)", "SELECT ARRAY(SELECT (id, qty) FROM orders ORDER BY id)",
+      "SELECT count(*) FROM orders WHERE id = ANY (ARRAY(SELECT qty FROM orders))"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap array-subquery-element/.test(e.detail ?? ""), sql);
+    }
     // a derived table's column sorted through `s.*`: under the collation, as the column itself sorts
     await alike("SELECT s.* FROM (SELECT team AS pod FROM accounts) AS s ORDER BY s.pod");
     await alike("WITH s AS (SELECT team AS pod, id FROM accounts) SELECT * FROM s ORDER BY pod DESC, id");
@@ -631,8 +664,8 @@ test("the BI-tools test: a sum over a CASE has the scale of the arms its rows to
 });
 
 /** One session over a raw socket, its reading in the test's hands (`pg` reads every reply as it comes). */
-async function rawSession(): Promise<{ socket: net.Socket; pid: number; secret: number; untilReady(): Promise<BackendMessage[]>; end(): void; readonly bytes: number }> {
-  const socket = net.connect(api.port, "127.0.0.1");
+async function rawSession(port = api.port): Promise<{ socket: net.Socket; pid: number; secret: number; untilReady(): Promise<BackendMessage[]>; end(): void; readonly bytes: number }> {
+  const socket = net.connect(port, "127.0.0.1");
   await new Promise<void>((r) => socket.once("connect", () => r()));
   let chunks: Buffer[] = [];
   let tail = Buffer.alloc(0);
@@ -906,6 +939,666 @@ test("a timestamptz before year 1 is written in UTC as Postgres does, and refuse
   } finally { await c.end(); }
 });
 
+// DATE_TRUNC OF A TIMESTAMPTZ IS THE INSTANT'S OWN ARITHMETIC where that is Postgres's answer (src/duck/rewrite.ts
+// truncInstant): DuckDB's date_trunc of a TIMESTAMPTZ is ICU's calendar, ~45 ns a row a thread even in UTC (a BI tool's
+// monthly histogram over 197 M rows took 7.9 s on the test server), and its sub-day parts in another zone re-read the
+// wall clock, so an instant in a repeated hour (02:30 CEST on 2026-10-25) was truncated to the OTHER 02:00 (+01).
+test("date_trunc of a timestamptz is Postgres's in every zone and part, by the instant's arithmetic where that is Postgres's", async () => {
+  const c = await client();
+  const units = ["microseconds", "milliseconds", "second", "minute", "hour", "day", "week", "month", "quarter", "year", "decade", "century", "millennium"];
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  const planned = new Map<string, string>();
+  try {
+    for (const zone of ["UTC", "Europe/Berlin", "America/New_York", "Australia/Lord_Howe", "Asia/Kathmandu"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      for (const unit of units) {
+        const sql = `SELECT id, date_trunc('${unit}', at) AS t FROM instants ORDER BY id`;
+        const from = logged.length;
+        assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+        const duck = sent(from);
+        // every part but the microsecond is the instant's arithmetic: a second or less in every zone; a minute and up
+        // under a CASE on the zone the statement EXECUTES in (in UTC the arithmetic; elsewhere a minute or an hour
+        // with the offset kept, a day and up DuckDB's own truncation), never the zone it was planned in
+        if (unit !== "microseconds") assert.match(duck, /make_timestamptz\(/, `${unit} in ${zone}: ${duck}`);
+        if (unit === "milliseconds" || unit === "second") assert.doesNotMatch(duck, /date_trunc\(|current_setting\(/, `${unit} in ${zone}: ${duck}`);
+        if (!["microseconds", "milliseconds", "second"].includes(unit)) assert.match(duck, /CASE WHEN current_setting\('TimeZone'\) = 'UTC' OR /, `${unit} in ${zone}: ${duck}`);
+        // so what is sent names no session zone: one text in every zone
+        const first = planned.get(unit);
+        if (first === undefined) planned.set(unit, duck); else assert.equal(duck, first, `${unit} in ${zone}`);
+      }
+      // the three-argument form, in a zone of its own, whatever the session's
+      for (const [unit, z] of [["hour", "Europe/Berlin"], ["minute", "Asia/Kathmandu"], ["day", "America/New_York"], ["month", "UTC"], ["century", "Europe/Berlin"], ["week", "utc"]]) {
+        const sql = `SELECT id, date_trunc('${unit}', at, '${z}') AS t FROM instants ORDER BY id`;
+        assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} in ${zone}`);
+      }
+    }
+    // the histogram a BI tool sends, grouped and ordered by the truncation
+    await c.query("SET TimeZone = 'UTC'");
+    await truth.exec("SET TimeZone = 'UTC'");
+    const histogram = "SELECT DATE_TRUNC('month', i.at) AS m, count(*) FROM instants i GROUP BY 1 ORDER BY 1 DESC LIMIT 100";
+    assert.deepEqual(await answer(c, histogram), await postgres(histogram));
+  } finally {
+    await truth.exec("SET TimeZone = 'UTC'");
+    await c.end();
+  }
+});
+
+// A prepared statement is planned at its Parse and executed after any later SET TimeZone: the truncation's zone is the
+// one each execution runs in (the arithmetic once read the zone of the Parse, so a statement prepared in UTC truncated
+// by UTC's days in Berlin).
+test("date_trunc of a timestamptz in a prepared statement truncates in the zone it executes in", async () => {
+  const c = await client();
+  try {
+    for (const unit of ["hour", "day", "month", "week"]) {
+      const text = `SELECT id, date_trunc('${unit}', at) AS t FROM instants WHERE id > $1 ORDER BY id`;
+      const name = `trunc_${unit}`;
+      for (const zone of ["UTC", "Europe/Berlin", "America/New_York", "UTC"]) {
+        await c.query(`SET TimeZone = '${zone}'`);
+        await truth.exec(`SET TimeZone = '${zone}'`);
+        const r = await c.query({ name, text, values: [0], rowMode: "array", types: raw } as pg.QueryConfig);
+        assert.deepEqual({ fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows }, await postgres(text, [0]), `${name} executed in ${zone}`);
+      }
+    }
+  } finally {
+    await truth.exec("SET TimeZone = 'UTC'");
+    await c.end();
+  }
+});
+
+// date_trunc(part, timestamptz, zone) is strict and reads its zone before the part: a second or less never needs the
+// zone to compute, so the arithmetic once left it out, and a NULL zone (a literal, a row's) answered the instant, a
+// row's unknown zone no error (a review finding)
+test("date_trunc in a zone of its own is NULL in a NULL zone and reads a row's zone, whatever the part", async () => {
+  const c = await client();
+  const rowZone = "CASE WHEN id % 3 = 0 THEN NULL WHEN id % 3 = 1 THEN 'Europe/Berlin' ELSE 'asia/kathmandu' END";
+  try {
+    for (const unit of ["microseconds", "milliseconds", "second", "minute", "hour", "day"]) {
+      for (const zone of ["NULL", "NULL::text", rowZone, "'Europe/Berlin'"]) {
+        const sql = `SELECT id, date_trunc('${unit}', at, ${zone}) AS t FROM instants ORDER BY id`;
+        assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      }
+      // a row's zone Postgres does not know: its error, though the part never needs the zone
+      const bad = `SELECT id, date_trunc('${unit}', at, CASE WHEN id = 5 THEN 'Nowhere/Land' ELSE 'UTC' END) FROM instants ORDER BY id`;
+      await assert.rejects(c.query(bad), (e: pg.DatabaseError) => e.code === "22023", bad);
+      await assert.rejects(postgres(bad), /time zone "Nowhere\/Land" not recognized/);
+    }
+  } finally { await c.end(); }
+});
+
+/** a LEFT lateral whose argument reads an enum and another column (moods): the step, as for two columns of any type */
+const ENUM_STEPPED = [
+  "SELECT q.id, x FROM moods q LEFT JOIN unnest(ARRAY[q.m::text, q.id::text]) x ON TRUE LIMIT 5",
+  "SELECT q.id, k FROM moods q LEFT JOIN jsonb_object_keys(CASE WHEN q.m = 'ok' AND q.id > 0 THEN '{\"a\": 1, \"b\": 2}'::jsonb END) k ON TRUE LIMIT 5",
+];
+
+// A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE UNDER A LIMIT IS AN INNER LATERAL OF A LIST NEVER EMPTY
+// (src/duck/rewrite.ts leftLateral, limitBounds): DuckDB planned the LEFT one as a delimiter join over the whole base
+// (a BI tool's "expand the JSON" preview, LIMIT 100 over 22 M rows: 37.9 s), handing its rows back in an order of its
+// own, so a LIMIT kept other rows than Postgres's; the INNER one is DuckDB's streaming UNNEST, in the base's order,
+// stopping at the LIMIT. Where no LIMIT keeps the first rows (a count, a GROUP BY, a DISTINCT, a window, a whole
+// result, a sort by the lateral's own column) every row is read either way, and the delimiter join calls the function
+// once per DISTINCT document where the UNNEST calls it once per row: the count over 20 M rows of 2,000 documents took
+// 62.5 s streamed, 2.2 s joined (docs/DESIGN.md "A LEFT lateral of a list"), so DuckDB's own plan is kept there.
+test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT, in Postgres's order and streamed", async () => {
+  const c = await client();
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  // documents beside NULL, an empty object and an empty array: the rows a LEFT JOIN keeps once, with NULLs (over a
+  // copied table: a statement that reads none is never DuckDB's)
+  const few = "(SELECT t.id, CASE t.id WHEN 1 THEN '{\"a\": 1, \"b\": [2]}'::jsonb WHEN 3 THEN '{}'::jsonb WHEN 4 THEN '{\"c\": null}'::jsonb WHEN 5 THEN '[]'::jsonb WHEN 6 THEN '[7, {}]'::jsonb END AS b FROM jdocs t) AS v";
+  const objects = "CASE WHEN jsonb_typeof(v.b) = 'object' THEN v.b END", arrays = "CASE WHEN jsonb_typeof(v.b) = 'array' THEN v.b END";
+  try {
+    const streamed = [
+      // the preview, over jsonb and json, guarded to objects as the tool guards it, with and without an OFFSET
+      "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.b FROM jdocs t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b ELSE NULL END) d ON TRUE LIMIT 6 OFFSET 0",
+      "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.b FROM jdocs t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b ELSE NULL END) d ON TRUE LIMIT 9 OFFSET 11",
+      "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.j FROM jdocs t) AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(q.j::text), 1, 1) = '{' THEN q.j::json ELSE NULL END) d ON TRUE LIMIT 7 OFFSET 2",
+      "SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements_text(CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END) AS e ON TRUE LIMIT 4 OFFSET 3",
+      "SELECT t.id, k FROM jdocs t LEFT JOIN jsonb_object_keys(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) AS k ON TRUE WHERE t.id > 1 LIMIT 5",
+      "SELECT o.id, u FROM orders o LEFT JOIN unnest(o.tags) u ON TRUE LIMIT 3",
+      // an unnest of an EXPRESSION, its list computed once (by a step of its own before the lateral; inside it, a
+      // list_transform's one element, where it reads an array — DuckDB plans such a step as its delimiter join — or a
+      // `*` or a join's name reads the join): Postgres's first rows, (1,1) before (1,10) — DuckDB's delimiter join had
+      // (1,10) first; NULL and empty arrays one row each; a text split, an array of a json's values; an array column's
+      // list changed; two in one FROM; read by a `*` and by a join's name
+      "SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id, o.id * 10]) x ON true LIMIT 1",
+      "SELECT o.id, t FROM orders o LEFT JOIN unnest(array_append(o.tags, 'z')) AS t ON TRUE LIMIT 4",
+      "SELECT o.id, t FROM orders o LEFT JOIN unnest(o.tags[2:]) AS t ON TRUE LIMIT 4",
+      "SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id, o.id * 10]) x ON true LIMIT 3",
+      "SELECT o.id, x FROM orders o LEFT JOIN unnest(CASE o.id WHEN 2 THEN NULL::bigint[] WHEN 3 THEN ARRAY[]::bigint[] ELSE ARRAY[o.id + 1, o.id] END) AS x ON TRUE LIMIT 5",
+      "SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.status, 'a')) AS p ON TRUE LIMIT 4",
+      "SELECT o.id, v FROM orders o LEFT JOIN unnest(ARRAY[o.meta ->> 'k', o.meta #>> '{k}', o.tags[1]]) AS v ON TRUE LIMIT 5",
+      "SELECT o.id, x, y FROM orders o LEFT JOIN unnest(ARRAY[o.id, -o.id]) x ON TRUE LEFT JOIN unnest(string_to_array(o.status, 'a')) y ON TRUE LIMIT 7",
+      "SELECT * FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.id * 10]) x ON TRUE LIMIT 3",
+      "SELECT j.* FROM (orders o LEFT JOIN unnest(ARRAY[o.id, o.id * 10]) x ON TRUE) AS j LIMIT 3",
+      // a list that reads TWO columns of the row (DuckDB's delimiter join, the rows in its order, until the argument
+      // was computed by a step of its own before the lateral): an unnest, a json document's members, a text split
+      "SELECT o.id, x FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.qty::bigint]) x ON TRUE LIMIT 4",
+      "SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.status || ',' || o.id, ',')) p ON TRUE LIMIT 5",
+      "SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN t.id > 1 AND jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE LIMIT 6",
+      "SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements_text(CASE WHEN t.id % 2 = 1 AND jsonb_typeof(t.b -> 'arr') = 'array' THEN t.b -> 'arr' END) e ON TRUE LIMIT 6",
+      // two columns and an array: no step (DuckDB plans that step as a delimiter join), the lateral streams as it is
+      "SELECT o.id, t FROM orders o LEFT JOIN unnest(array_append(o.tags, o.status)) t ON TRUE LIMIT 4",
+      // an enum beside another column: a column like any other, computed in the step (ENUM_STEPPED)
+      ...ENUM_STEPPED,
+      // an OFFSET alone keeps Postgres's rows after it too
+      "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE OFFSET 20",
+      // the LIMIT outside: a derived table, a CTE, two levels down
+      "SELECT * FROM (SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE) AS s LIMIT 5 OFFSET 2",
+      "WITH s AS (SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE) SELECT s.key, s.id FROM s LIMIT 6",
+      "SELECT x.id FROM (SELECT s.id FROM (SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements(CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END) e ON TRUE) s WHERE s.id > 2) x LIMIT 4",
+      "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE WHERE t.id < 3 UNION ALL SELECT t.id, k FROM jdocs t LEFT JOIN jsonb_object_keys(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) AS k ON TRUE LIMIT 20",
+      // a CTE another CTE reads, and a CTE both arms of a UNION ALL read: met by the walk before the SELECT that bounds
+      // them (markBounds, a pre-pass)
+      "WITH a AS (SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE), b AS (SELECT a.key, a.id FROM a) SELECT * FROM b LIMIT 5 OFFSET 2",
+      "WITH s AS (SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE) SELECT s.id, s.key FROM s UNION ALL SELECT s.id, s.key FROM s LIMIT 20 OFFSET 30",
+      // an aggregate or a window reading the rows in order, with no ORDER BY of its own: Postgres's order of the members
+      "SELECT t.id, string_agg(d.key, ','), array_agg(d.key) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE GROUP BY t.id ORDER BY t.id",
+      "SELECT row_number() OVER () AS r, t.id, d.key FROM jdocs t LEFT JOIN json_each(CASE WHEN substring(ltrim(t.j::text), 1, 1) = '{' THEN t.j::json END) d ON TRUE ORDER BY 1",
+      // the nulls idiom on the table's column, folded to that one key before the bound is decided
+      "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY (t.id) IS NULL, t.id DESC, d.key LIMIT 6",
+      // ORDER BY a column of the table LIMIT: the top N's filter reaches the table's scan (by name, by ordinal, through a
+      // derived table), so the rows reaching the lateral are few
+      "SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY t.id DESC, d.key LIMIT 6",
+      "SELECT q.id, d.key FROM (SELECT t.id, t.b FROM jdocs t) q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY 1, 2 NULLS FIRST LIMIT 7 OFFSET 1",
+      // NULL, an empty object, an empty array: the one row each with NULLs, under a LIMIT
+      `SELECT v.id, d.key, d.value::text FROM ${few} LEFT JOIN jsonb_each(${objects}) d ON TRUE LIMIT 5`,
+      `SELECT v.id, e::text FROM ${few} LEFT JOIN jsonb_array_elements(${arrays}) e ON TRUE LIMIT 9`,
+    ];
+    const joined = [
+      // no LIMIT: a whole result, sorted or not
+      "SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN LATERAL jsonb_each_text(CASE WHEN jsonb_typeof(t.b -> 'o') = 'object' THEN t.b -> 'o' END) AS d ON true",
+      "SELECT t.id, e.v FROM jdocs t LEFT JOIN jsonb_array_elements(t.b -> 'arr') AS e(v) ON TRUE ORDER BY t.id DESC, e.v::text",
+      "SELECT o.id, tag FROM orders o LEFT JOIN unnest(o.tags) AS tag ON TRUE ORDER BY o.id, tag",
+      // counted, over each kind of list
+      "SELECT count(*), count(d.key) FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE",
+      "SELECT count(*) FROM (SELECT q.id, d.key, d.value FROM (SELECT t.id, t.j FROM jdocs t) AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(q.j::text), 1, 1) = '{' THEN q.j::json ELSE NULL END) d ON TRUE) sub",
+      "SELECT count(*), count(e) FROM (SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements(CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END) e ON TRUE) sub",
+      // sorted by the lateral's own column: a top N over every row
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY d.key NULLS FIRST, q.id LIMIT 8",
+      // sorted by a table's column Mason sorts by an expression (a jsonb's order key, a citext's lower()): no filter
+      // reaches the scan, a top N over every row
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY q.b, q.id, d.key LIMIT 6",
+      "SELECT a.id, k FROM accounts a LEFT JOIN jsonb_object_keys(CASE WHEN a.id > 1 THEN '{\"x\": 1, \"y\": 2}'::jsonb END) AS k ON TRUE ORDER BY a.status, a.id, k LIMIT 5",
+      // WITH TIES: Mason ranks every row for it
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON TRUE ORDER BY q.id DESC, d.key FETCH FIRST 3 ROWS WITH TIES",
+      // grouped, distinct, windowed — with a LIMIT above too: each reads every row first
+      "SELECT d.key, count(*) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE GROUP BY 1 ORDER BY 1 NULLS FIRST",
+      "SELECT d.key, count(*) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 3",
+      "SELECT DISTINCT d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY 1 NULLS LAST",
+      "SELECT DISTINCT t.id FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY 1 LIMIT 4",
+      "SELECT t.id, d.key, count(*) OVER (PARTITION BY t.id), row_number() OVER (PARTITION BY t.id ORDER BY d.key) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY 1, 2 LIMIT 9",
+      // NULL, an empty object, an empty array: the one row each with NULLs, whole and counted
+      `SELECT v.id, d.key, d.value::text FROM ${few} LEFT JOIN jsonb_each(${objects}) d ON TRUE`,
+      `SELECT v.id, count(d.key), count(*) FROM ${few} LEFT JOIN jsonb_each(${objects}) d ON TRUE GROUP BY 1 ORDER BY 1`,
+      `SELECT count(*), count(e) FROM ${few} LEFT JOIN jsonb_array_elements(${arrays}) e ON TRUE`,
+    ];
+    for (const sql of streamed) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      // an INNER lateral of a list never empty: the last argument of each list's function, or the array's CASE (in a
+      // lambda where the join is read whole)
+      assert.match(sent(from), /CROSS JOIN LATERAL \( SELECT unnest\((CAST\()?(__mason_json_\w+\(getvariable\('__mason_session'\), .*, true\)|CASE WHEN len\(|\(list_transform\(list_value\()/, `${sql}\n${sent(from)}`);
+      assert.doesNotMatch(sent(from), /LEFT JOIN/, sql);
+    }
+    // a whole result without an ORDER BY is the same rows, in an order neither promises (the oracle's set comparison)
+    const asSet = (r: { fields: Array<[string, number]>; rows: unknown[][] }): { fields: Array<[string, number]>; rows: unknown[][] } =>
+      ({ fields: r.fields, rows: r.rows.map((x) => JSON.stringify(x)).sort().map((x) => JSON.parse(x) as unknown[]) });
+    for (const sql of joined) {
+      const from = logged.length;
+      if (/ORDER BY/.test(sql)) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      else assert.deepEqual(asSet(await answer(c, sql)), asSet(await postgres(sql)), sql);
+      // DuckDB's own LEFT lateral: no list padded with a NULL
+      assert.match(sent(from), /LEFT JOIN/, `${sql}\n${sent(from)}`);
+      assert.doesNotMatch(sent(from), /CROSS JOIN LATERAL|, true\)( AS JSON\[\])?\)|CASE WHEN len\(/, `${sql}\n${sent(from)}`);
+    }
+    // the enum's statements: the argument computed by a step of its own before the lateral (rewrite.ts rowReads)
+    for (const sql of ENUM_STEPPED) {
+      const from = logged.length;
+      await answer(c, sql);
+      assert.match(sent(from), /AS __mason_arg\d+ \) AS __mason_arg\d+ CROSS JOIN LATERAL/, `${sql}\n${sent(from)}`);
+    }
+    // DuckDB runs the streamed one as its UNNEST, no delimiter join over the base
+    for (const sql of streamed) {
+      const plan = (await c.query({ text: `EXPLAIN ${sql}`, rowMode: "array" })).rows.map((r) => String(r[0])).join("\n");
+      assert.doesNotMatch(plan, /delim/i, `${sql}\n${plan}`);
+      assert.match(plan, /unnest/i, plan);
+    }
+    // not a document's rows the function refuses (an array to jsonb_each): Postgres's error, whichever row it is
+    await assert.rejects(c.query("SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(t.b) d ON TRUE"), (e: pg.DatabaseError) => e.code === "22023");
+    await assert.rejects(postgres("SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(t.b) d ON TRUE"), /cannot call jsonb_each on a non-object/);
+    // what is not a LEFT … ON TRUE of a list keeps its own plan under a LIMIT too: an INNER lateral (a row with no
+    // members has none), a condition
+    for (const sql of ["SELECT q.id, d.key FROM jdocs q CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d LIMIT 5",
+      "SELECT q.id, d.key FROM jdocs q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.b) = 'object' THEN q.b END) d ON d.key <> 'a' ORDER BY 1, 2 LIMIT 20"]) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.doesNotMatch(sent(from), /, true\)\)/, `${sql}\n${sent(from)}`);
+    }
+  } finally { await c.end(); }
+});
+
+// A ROW COUNT ON THE WIRE IS A BOUND THE PLAN AT PARSE COULD NOT SEE (src/api/postgres/server.ts boundOnWire): an
+// Execute's row count (JDBC's setMaxRows or fetch size) arrives after the Parse, so a LEFT lateral of a list with no LIMIT
+// in its SQL was planned as DuckDB's delimiter join — the whole base read before the first row, the first rows in its own
+// order (the gap row-limit-on-the-wire, closed). Such a plan says so (PlannedSql.unboundedLateral), and an Execute with a
+// row count runs the statement planned again with the bound asserted — once, kept — its portal paged on from the same
+// result. Where every row is read anyway (an aggregate, a GROUP BY, an ORDER BY of the lateral's column), or a LIMIT
+// already bounds it, nothing is planned again.
+test("an Execute's row count over a LEFT lateral streams Postgres's first rows: planned again once, kept, the portal paged on", async () => {
+  const duck = await store.listener(undefined, undefined, undefined, () => copies);
+  const planned: Array<{ text: string; wire: boolean }> = [];
+  /** the search_path and TimeZone each plan made again for a row count was made under */
+  const under: string[] = [];
+  /** held until the test lets a plan made again for a row count go on */
+  let gate: Promise<void> = Promise.resolve();
+  let skew = false;
+  /** a plan made again for a row count is refused, as Postgres or the rewrite refuses one */
+  let failWire = false;
+  /** the session connections the listener opened on the copy */
+  let opened = 0;
+  // a view over the lateral, and the same view as a schema moved since would define it
+  const members = (where: string): string => `SELECT t.id, d.key, d.value FROM public.jdocs t LEFT JOIN jsonb_each(CASE WHEN (jsonb_typeof(t.b) = 'object'::text) THEN t.b ELSE NULL::jsonb END) d ON true${where}`;
+  const viewing = (where: string): PgSchema => ({ ...schema, views: [...schema.views!, { schema: "public", name: "jdoc_members", definition: ` ${members(where)};` }] });
+  let current = viewing("");
+  const counted = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => current,
+    record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
+    duck: { ...duck, open: () => { opened++; return duck.open(); }, plan: async (...a: Parameters<typeof duck.plan>) => {
+      planned.push({ text: a[1], wire: a[8] === true });
+      if (a[8] === true) { under.push(`${a[5]} | ${a[6]}`); await gate; }
+      if (a[8] === true && failWire) throw new StatementError({ code: "0A000", message: "refused for the test" }, a[1]);
+      const p = await duck.plan(...a);
+      // a schema moved between the Parse and the Execute: the plan made again answers another column
+      return skew && a[8] === true ? { ...p, fields: p.fields!.map((f, i) => i === 0 ? { ...f, name: "moved" } : f) } : p;
+    } },
+  });
+  // a portal's statement is logged once its result is released, a moment after its last rows
+  const sent = async (from: number): Promise<string> => {
+    for (let i = 0; i < 200; i++) {
+      const line = logged.slice(from).findLast((l) => l.startsWith("statement: "));
+      if (line !== undefined) return line.replace(/^statement: [^—]*— /, "");
+      await sleep(10);
+    }
+    return "";
+  };
+  const text = (m: Extract<BackendMessage, { type: "DataRow" }>): string => JSON.stringify(m.values.map((v) => v === null ? null : v.toString("utf8")));
+  const asSet = (rows: string[]): string[] => [...rows].sort();
+  const tag = (ms: BackendMessage[]): string | undefined => (ms.find((m) => m.type === "CommandComplete") as Extract<BackendMessage, { type: "CommandComplete" }> | undefined)?.tag;
+  const s = await rawSession(counted.port);
+  /** a portal of the statement executed `maxRows` at a time to its end: every page's rows, and its tag */
+  const paged = async (statement: string, portal: string, maxRows: number): Promise<{ pages: string[][]; tag: string | undefined }> => {
+    const pages: string[][] = [];
+    s.socket.write(Buffer.concat([wire.bind(portal, statement, [], [0]), wire.execute(portal, maxRows), wire.sync()]));
+    for (;;) {
+      const ms = await s.untilReady();
+      const err = ms.find((m) => m.type === "ErrorResponse");
+      if (err !== undefined) throw new Error(JSON.stringify(err));
+      pages.push(dataRows(ms).map(text));
+      if (ms.some((m) => m.type === "PortalSuspended")) { s.socket.write(Buffer.concat([wire.execute(portal, maxRows), wire.sync()])); continue; }
+      // closed, as a driver closes its portal
+      s.socket.write(Buffer.concat([wire.close("P", portal), wire.sync()]));
+      await s.untilReady();
+      return { pages, tag: tag(ms) };
+    }
+  };
+  const truthRows = async (sql: string): Promise<string[]> => (await postgres(sql)).rows.map((r) => JSON.stringify(r));
+  try {
+    const lateral = "SELECT t.id, d.key, d.value FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE";
+    const all = await truthRows(lateral);
+    assert.ok(all.length > 15, `${all.length} rows: several pages of 5`);
+    s.socket.write(Buffer.concat([wire.parse("lat", lateral), wire.sync()]));
+    await s.untilReady();
+    assert.deepEqual(planned, [{ text: lateral, wire: false }]);
+    // a row count of 5: Postgres's first 5 rows in its order, then the NEXT 5 from the same result, to its end
+    let from = logged.length;
+    const five = await paged("lat", "p1", 5);
+    assert.deepEqual(five.pages[0], all.slice(0, 5));
+    assert.deepEqual(five.pages[1], all.slice(5, 10));
+    assert.deepEqual(five.pages.flat(), all, "the portal resumed reads on: the whole result, once");
+    assert.ok(five.pages.slice(0, -1).every((p) => p.length === 5), five.pages.map((p) => p.length).join(" "));
+    assert.equal(five.tag, `SELECT ${all.length}`);
+    const streamed = await sent(from);
+    assert.match(streamed, /CROSS JOIN LATERAL \( SELECT unnest\(/, streamed);
+    assert.doesNotMatch(streamed, /LEFT JOIN/, streamed);
+    // planned again ONCE, with the bound
+    assert.deepEqual(planned, [{ text: lateral, wire: false }, { text: lateral, wire: true }]);
+    // the same statement with no row count: DuckDB's own join, the same rows as a set, nothing planned again
+    from = logged.length;
+    const whole = await paged("lat", "p2", 0);
+    assert.deepEqual(asSet(whole.pages.flat()), asSet(all));
+    assert.equal(whole.pages.length, 1);
+    const joined = await sent(from);
+    assert.match(joined, /LEFT JOIN/, joined);
+    assert.doesNotMatch(joined, /CROSS JOIN LATERAL/, joined);
+    // and with a row count again, after a later SET: the statement's plan kept (no third plan), Postgres's first rows
+    s.socket.write(wire.query("SET TimeZone = 'Europe/Berlin'"));
+    await s.untilReady();
+    from = logged.length;
+    assert.deepEqual((await paged("lat", "p3", 7)).pages[0], all.slice(0, 7));
+    assert.match(await sent(from), /CROSS JOIN LATERAL/);
+    s.socket.write(wire.query("SET TimeZone = 'UTC'"));
+    await s.untilReady();
+    // the same text in a statement of its own: both plans from the plans kept
+    s.socket.write(Buffer.concat([wire.parse("lat2", lateral), wire.sync()]));
+    await s.untilReady();
+    assert.deepEqual((await paged("lat2", "p4", 3)).pages.flat(), all);
+    assert.deepEqual(asSet((await paged("lat2", "p5", 0)).pages.flat()), asSet(all));
+    assert.equal(planned.length, 2, JSON.stringify(planned));
+
+    // the bound passes down as a LIMIT's does: through a derived table, a CTE, a UNION ALL's arms
+    for (const sql of [`SELECT q.key, q.id FROM (${lateral}) q`, `WITH w AS (${lateral}) SELECT * FROM w`, `${lateral} UNION ALL ${lateral.replace("t.id", "-t.id")}`]) {
+      s.socket.write(Buffer.concat([wire.parse("", sql), wire.sync()]));
+      await s.untilReady();
+      from = logged.length;
+      assert.deepEqual((await paged("", "d", 4)).pages.flat(), await truthRows(sql), sql);
+      assert.doesNotMatch(await sent(from), /LEFT JOIN/, sql);
+      assert.deepEqual(planned.slice(-2), [{ text: sql, wire: false }, { text: sql, wire: true }], sql);
+    }
+    // an unnest of an EXPRESSION, by a row count of 1 and of 3: Postgres's first rows, (1,1) before (1,10) — DuckDB's
+    // delimiter join answered (1,10) first — its list computed once, by a step of its own before the lateral (or
+    // inside it, where it reads an array or a `*` reads the join); NULL and empty arrays one row each; a text split; a
+    // json document's members over an argument of two columns
+    const once = / AS __mason_arg1 \) AS __mason_arg1 CROSS JOIN LATERAL \( SELECT unnest\(CASE WHEN len\(__mason_arg1\.__mason_arg1\)/;
+    const inside = /CROSS JOIN LATERAL \( SELECT unnest\(\(list_transform\(list_value\(/;
+    for (const [sql, form] of [
+      ["SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id, o.id * 10]) x ON true", once],
+      ["SELECT o.id, t FROM orders o LEFT JOIN unnest(array_append(o.tags, 'z')) AS t ON TRUE", inside],
+      ["SELECT o.id, x FROM orders o LEFT JOIN unnest(CASE o.id WHEN 2 THEN NULL::bigint[] WHEN 3 THEN ARRAY[]::bigint[] ELSE ARRAY[o.id + 1, o.id] END) AS x ON TRUE", once],
+      ["SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.status || ',' || o.id, ',')) AS p ON TRUE", once],
+      ["SELECT * FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.id * 10]) x ON TRUE", inside],
+      ["SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN t.id > 1 AND jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE", / AS __mason_arg1 \) AS __mason_arg1 CROSS JOIN LATERAL \( SELECT unnest\(__mason_json_keys\(getvariable\('__mason_session'\), __mason_arg1\.__mason_arg1, /],
+    ] as const) {
+      const want = await truthRows(sql);
+      if (sql.startsWith("SELECT o.id, x FROM orders o LEFT JOIN LATERAL")) assert.deepEqual(want.slice(0, 2), ['["1","1"]', '["1","10"]'], "Postgres's own first rows");
+      s.socket.write(Buffer.concat([wire.parse("", sql), wire.sync()]));
+      await s.untilReady();
+      for (const n of [1, 3]) {
+        from = logged.length;
+        const got = await paged("", "u", n);
+        assert.deepEqual(got.pages[0], want.slice(0, n), `${sql}: the first ${n}`);
+        assert.deepEqual(got.pages.flat(), want, sql);
+        const streamedSql = await sent(from);
+        assert.doesNotMatch(streamedSql, /LEFT JOIN/, `${sql}\n${streamedSql}`);
+        assert.match(streamedSql, form, `${sql}\n${streamedSql}`);
+      }
+      assert.deepEqual(planned.slice(-2), [{ text: sql, wire: false }, { text: sql, wire: true }], sql);
+    }
+    planned.length = 2;
+
+    // a LIMIT in the SQL: planned once, the LIMIT's plan, streamed
+    const limited = `${lateral} LIMIT 12`;
+    s.socket.write(Buffer.concat([wire.parse("lim", limited), wire.sync()]));
+    await s.untilReady();
+    from = logged.length;
+    const lim = await paged("lim", "p6", 5);
+    assert.deepEqual(lim.pages.flat(), all.slice(0, 12));
+    assert.match(await sent(from), /CROSS JOIN LATERAL/);
+    assert.deepEqual(planned.slice(2), [{ text: limited, wire: false }]);
+
+    // every row read anyway — an aggregate, a GROUP BY, an ORDER BY of the lateral's column, a DISTINCT: not planned
+    // again, DuckDB's join kept, Postgres's answer (ordered where the SQL orders it)
+    for (const sql of [
+      "SELECT count(*), count(d.key) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE",
+      "SELECT d.key, count(*) FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE GROUP BY 1 ORDER BY 1 NULLS FIRST",
+      "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY d.key NULLS FIRST, t.id",
+      // ORDER BY a table's column with no LIMIT: DuckDB sorts every row first, whichever plan it is given
+      "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE ORDER BY t.id DESC, d.key",
+      "SELECT DISTINCT d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE",
+    ]) {
+      const plannedBefore: number = planned.length;
+      s.socket.write(Buffer.concat([wire.parse("", sql), wire.sync()]));
+      await s.untilReady();
+      from = logged.length;
+      const got = (await paged("", "q", 2)).pages.flat();
+      const want = await truthRows(sql);
+      if (/ORDER BY/.test(sql)) assert.deepEqual(got, want, sql); else assert.deepEqual(asSet(got), asSet(want), sql);
+      assert.match(await sent(from), /LEFT JOIN/, sql);
+      assert.deepEqual(planned.slice(plannedBefore), [{ text: sql, wire: false }], sql);
+    }
+
+    // EXPLAIN through the wire is the statement's own plan, a row count or none
+    const explained = async (maxRows: number): Promise<string[]> => {
+      s.socket.write(Buffer.concat([wire.parse("", `EXPLAIN ${lateral}`), wire.sync()]));
+      await s.untilReady();
+      return (await paged("", "x", maxRows)).pages.flat();
+    };
+    const plain = await explained(0);
+    assert.deepEqual(await explained(1), plain);
+    // the SQL sent is the join's, and DuckDB plans its delimiter join
+    assert.match(plain.join("\n"), /Sent to the copy: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
+    assert.doesNotMatch(plain.join("\n"), /CROSS JOIN LATERAL/, plain.join("\n"));
+
+    // planned again under the search_path and TimeZone of its Parse, never a later SET's
+    const zoned = `${lateral} WHERE t.id > 0`;
+    s.socket.write(Buffer.concat([wire.parse("zoned", zoned), wire.sync()]));
+    await s.untilReady();
+    s.socket.write(wire.query("SET TimeZone = 'Europe/Berlin'; SET search_path = sales, public"));
+    await s.untilReady();
+    assert.deepEqual((await paged("zoned", "z", 3)).pages.flat(), all);
+    assert.equal(under.at(-1), '"$user", public | UTC');
+    s.socket.write(wire.query("SET TimeZone = 'UTC'; SET search_path = DEFAULT"));
+    await s.untilReady();
+
+    // a plan made again that answers other columns than the Parse said (the schema moved) is not run: the Parse's is,
+    // kept for the next Execute too
+    const moved = `${lateral} WHERE t.id > 1`;
+    s.socket.write(Buffer.concat([wire.parse("moved", moved), wire.sync()]));
+    await s.untilReady();
+    skew = true;
+    from = logged.length;
+    const movedRows = (await paged("moved", "m", 4)).pages.flat();
+    skew = false;
+    const movedAll = await truthRows(moved);
+    assert.deepEqual(asSet(movedRows), asSet(movedAll));
+    assert.match(await sent(from), /LEFT JOIN/);
+    assert.ok(logged.slice(from).some((l) => /answers other columns than its Parse said/.test(l)), logged.slice(from).join("\n"));
+    const plans = planned.length;
+    assert.deepEqual(asSet((await paged("moved", "m2", 4)).pages.flat()), asSet(movedAll));
+    assert.equal(planned.length, plans, "the Parse's plan kept: nothing planned again");
+
+    // a CancelRequest landing while the statement is planned again is answered: 57014, and the session goes on
+    const cancelled = `${lateral} WHERE t.id > 2`;
+    s.socket.write(Buffer.concat([wire.parse("cancelled", cancelled), wire.sync()]));
+    await s.untilReady();
+    let release = (): void => undefined;
+    gate = new Promise<void>((r) => { release = r; });
+    const replans = under.length;
+    s.socket.write(Buffer.concat([wire.bind("k", "cancelled", [], [0]), wire.execute("k", 5), wire.sync()]));
+    for (let i = 0; i < 500 && under.length === replans; i++) await sleep(10);
+    assert.equal(under.length, replans + 1, "planned again");
+    const cancel = net.connect(counted.port, "127.0.0.1");
+    await new Promise<void>((r) => cancel.once("connect", () => r()));
+    cancel.end(wire.cancelRequest(s.pid, s.secret));
+    await sleep(100);
+    release();
+    gate = Promise.resolve();
+    const refused = (await s.untilReady()).find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+    assert.deepEqual([refused?.fields.C, refused?.fields.M], ["57014", "canceling statement due to user request"]);
+    s.socket.write(Buffer.concat([wire.close("P", "k"), wire.sync()]));
+    await s.untilReady();
+
+    // Mason gap limit-lateral-filter, by a row count on the wire: under a filter above the join that DuckDB does not
+    // push down, it plans the streamed lateral as its delimiter join again, its rows in an order of its own — the same
+    // rows, as a set
+    const filtered = `${lateral} WHERE d.key <> 'n'`;
+    s.socket.write(Buffer.concat([wire.parse("filtered", filtered), wire.sync()]));
+    await s.untilReady();
+    from = logged.length;
+    assert.deepEqual(asSet((await paged("filtered", "f", 4)).pages.flat()), asSet(await truthRows(filtered)));
+    assert.match(await sent(from), /CROSS JOIN LATERAL/);
+    assert.deepEqual(planned.slice(-2), [{ text: filtered, wire: false }, { text: filtered, wire: true }]);
+
+    // a plan made again that is refused: said in the log, and the Parse's plan runs, kept for the next Execute
+    const refusing = `${lateral} WHERE t.id > 4`;
+    s.socket.write(Buffer.concat([wire.parse("refusing", refusing), wire.sync()]));
+    await s.untilReady();
+    failWire = true;
+    from = logged.length;
+    const refusingRows = (await paged("refusing", "r", 4)).pages.flat();
+    failWire = false;
+    const refusingAll = await truthRows(refusing);
+    assert.deepEqual(asSet(refusingRows), asSet(refusingAll));
+    assert.match(await sent(from), /LEFT JOIN/);
+    assert.ok(logged.slice(from).some((l) => /planned again for an Execute's row count was refused \(0A000: refused for the test\)/.test(l)), logged.slice(from).join("\n"));
+    const refusedPlans = planned.length;
+    assert.deepEqual(asSet((await paged("refusing", "r2", 4)).pages.flat()), asSet(refusingAll));
+    assert.equal(planned.length, refusedPlans, "the Parse's plan kept: nothing planned again");
+
+    // a view over the lateral: planned again, the bound reaching into its definition, Postgres's first rows in order
+    const viewed = "SELECT * FROM jdoc_members";
+    s.socket.write(Buffer.concat([wire.parse("viewed", viewed), wire.sync()]));
+    await s.untilReady();
+    from = logged.length;
+    assert.deepEqual((await paged("viewed", "v", 4)).pages.flat(), await truthRows(members("")));
+    assert.match(await sent(from), /CROSS JOIN LATERAL/);
+    assert.deepEqual(planned.slice(-2), [{ text: viewed, wire: false }, { text: viewed, wire: true }]);
+
+    // the schema moves between the Parse and the first Execute with a row count: the plan made again is made over the
+    // new schema's catalog (the view's new definition), never the Parse's catalog kept under the new schema
+    const moving = "SELECT * FROM jdoc_members WHERE id > 0";
+    s.socket.write(Buffer.concat([wire.parse("moving", moving), wire.sync()]));
+    await s.untilReady();
+    current = viewing(" WHERE t.id > 3");
+    from = logged.length;
+    assert.deepEqual((await paged("moving", "mv", 3)).pages.flat(), await truthRows(`SELECT * FROM (${members(" WHERE t.id > 3")}) v WHERE id > 0`));
+    assert.match(await sent(from), /CROSS JOIN LATERAL/);
+    assert.deepEqual(planned.slice(-2), [{ text: moving, wire: false }, { text: moving, wire: true }]);
+
+    // the session closing while its statement is planned again: it runs nothing, no connection opened for it
+    const leaving = await rawSession(counted.port);
+    const closing = `${lateral} WHERE t.id > 5`;
+    leaving.socket.write(Buffer.concat([wire.parse("closing", closing), wire.sync()]));
+    await leaving.untilReady();
+    gate = new Promise<void>((r) => { release = r; });
+    const replansBefore = under.length, opens = opened;
+    leaving.socket.write(Buffer.concat([wire.bind("c", "closing", [], [0]), wire.execute("c", 5), wire.sync()]));
+    for (let i = 0; i < 500 && under.length === replansBefore; i++) await sleep(10);
+    assert.equal(under.length, replansBefore + 1, "planned again");
+    from = logged.length;
+    leaving.end();
+    for (let i = 0; i < 500 && !logged.slice(from).some((l) => /closed: closed by the client/.test(l)); i++) await sleep(10);
+    release();
+    gate = Promise.resolve();
+    for (let i = 0; i < 500 && !logged.slice(from).some((l) => /closed while its statement was planned again/.test(l)); i++) await sleep(10);
+    assert.ok(logged.slice(from).some((l) => /closed while its statement was planned again/.test(l)), logged.slice(from).join("\n"));
+    assert.equal(opened, opens, "no connection opened for a session gone");
+
+    // statement_timeout stops the statement planned again as any other: 57014, and the session goes on
+    const slow = "SELECT a.id, d.key FROM late a CROSS JOIN late b LEFT JOIN jsonb_each(a.j) d ON TRUE WHERE d.value::text || (b.j ->> 'n') = 'never'";
+    s.socket.write(wire.query("SET statement_timeout = 300"));
+    await s.untilReady();
+    const t0 = Date.now();
+    s.socket.write(Buffer.concat([wire.parse("", slow), wire.bind("", "", [], [0]), wire.execute("", 5), wire.sync()]));
+    const err = (await s.untilReady()).find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+    assert.equal(err?.fields.C, "57014", JSON.stringify(err));
+    assert.equal(err?.fields.M, "canceling statement due to statement timeout");
+    assert.ok(Date.now() - t0 < 5000, `stopped after ${Date.now() - t0} ms`);
+    assert.deepEqual(planned.slice(-2), [{ text: slow, wire: false }, { text: slow, wire: true }]);
+    s.socket.write(wire.query("SET statement_timeout = 0"));
+    await s.untilReady();
+    assert.deepEqual((await paged("lat", "p7", 4)).pages[0], all.slice(0, 4), "the session goes on");
+  } finally { s.end(); await counted.close(); }
+});
+
+// THE NULLS-PLACEMENT IDIOM IS ONE KEY (src/duck/rewrite.ts nullsKeyFolded): `ORDER BY (x) IS NULL ASC, x DESC` is
+// `x DESC NULLS LAST`; with the expression first DuckDB's top N read and heaped every row of a 197 M-row copy (6.4 s by
+// a timestamp), where one key with its nulls placed lets the scan skip what cannot be in the page.
+test("ORDER BY x IS [NOT] NULL, x is one key with its nulls placed, as Postgres orders it", async () => {
+  const c = await client();
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  try {
+    const folded: Array<[string, RegExp]> = [];
+    for (const col of ["ts", "t", "n"]) {
+      for (const [test, dir, nulls] of [["IS NULL", "ASC", "LAST"], ["IS NULL", "DESC", "FIRST"], ["IS NOT NULL", "ASC", "FIRST"], ["IS NOT NULL", "DESC", "LAST"]] as const) {
+        for (const second of ["DESC", "ASC", ""]) {
+          const want = new RegExp(`ORDER BY (e\\.)?${col}${second === "DESC" ? " DESC" : second === "ASC" ? " ASC" : ""} NULLS ${nulls}`);
+          folded.push([`SELECT e.id, e.${col} FROM nullish e ORDER BY (e.${col}) ${test} ${dir}, e.${col} ${second}, e.id LIMIT 5 OFFSET 0`, want]);
+          folded.push([`SELECT e.id FROM nullish e ORDER BY e.${col} ${test} ${dir}, e.${col} ${second}, e.id`, want]);
+        }
+      }
+      // a key before the pair and one after it stay where they are
+      folded.push([`SELECT e.id, e.${col} FROM nullish e ORDER BY e.id % 2, (e.${col}) IS NULL, e.${col} DESC, e.id LIMIT 6`, new RegExp(`ORDER BY e\\.id % 2, e\\.${col} DESC NULLS LAST, e\\.id`)]);
+    }
+    for (const [sql, want] of folded) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.match(sent(from), want, `${sql}\n${sent(from)}`);
+      assert.doesNotMatch(sent(from), /IS (NOT )?NULL/, `${sql}\n${sent(from)}`);
+    }
+    // what is not the idiom keeps both keys: another column second, the test alone, under a DISTINCT ON
+    for (const sql of ["SELECT e.id FROM nullish e ORDER BY e.ts IS NULL, e.t DESC, e.id", "SELECT e.id FROM nullish e ORDER BY e.ts IS NULL, e.id",
+      "SELECT DISTINCT ON (e.ts IS NULL, e.ts) e.id, e.ts FROM nullish e ORDER BY e.ts IS NULL, e.ts, e.id"]) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.match(sent(from), /ORDER BY e\.ts IS NULL/, `${sql}\n${sent(from)}`);
+    }
+  } finally { await c.end(); }
+});
+
+// json(b)_array_elements(_text)'s column is its OUT parameter's, `value`, under a FROM name too, and the FROM name
+// alone is the element (a function of one column that is no row is read whole as that column): Mason named the
+// column by the FROM name, so `e.value` was NULL or an error, in the INNER form and the LEFT one alike
+test("jsonb_array_elements' column is value under a FROM name, and the FROM name alone is the element", async () => {
+  const c = await client();
+  const arrays = "CASE WHEN jsonb_typeof(t.b) = 'array' THEN t.b END";
+  // the rows as a set: a json text's order is the collation's, which is not what is tested here
+  const sorted = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: r.rows.map((x) => JSON.stringify(x)).sort() });
+  try {
+    for (const fn of ["jsonb_array_elements", "jsonb_array_elements_text"]) {
+      for (const join of ["JOIN", "LEFT JOIN"]) {
+        for (const sql of [
+          `SELECT t.id, e.value FROM jdocs t ${join} ${fn}(${arrays}) e ON TRUE`,
+          `SELECT t.id, e FROM jdocs t ${join} ${fn}(${arrays}) e ON TRUE`,
+          `SELECT t.id, e::text, e IS NULL FROM jdocs t ${join} ${fn}(${arrays}) AS e ON TRUE`,
+          `SELECT t.id, e, e.v FROM jdocs t ${join} ${fn}(${arrays}) AS e(v) ON TRUE`,
+          `SELECT t.id, value FROM jdocs t ${join} ${fn}(${arrays}) ON TRUE`,
+          `SELECT t.id, ${fn}, ${fn}.value FROM jdocs t ${join} ${fn}(${arrays}) ON TRUE`,
+        ]) assert.deepEqual(sorted(await answer(c, sql)), sorted(await postgres(sql)), sql);
+      }
+    }
+    // the comma form, the element counted and compared by the FROM name alone
+    const comma = `SELECT count(e), count(e.value), count(*) FILTER (WHERE e.value ->> 0 IS NULL), max(e #>> '{}') FROM jdocs t, jsonb_array_elements(${arrays}) e`;
+    assert.deepEqual(await answer(c, comma), await postgres(comma), comma);
+  } finally { await c.end(); }
+});
+
+// A BARE ORDER BY KEY IS READ BY ANOTHER RULE THAN THE SAME TREE INSIDE THE TEST (findTargetlistEntrySQL92): an integer
+// is an output position and a one-part name an output column's, where inside `x IS NULL` each is the constant or the
+// input column. So the pair is folded only where both read alike (a review finding: `SELECT coalesce(n, 0) AS n …
+// ORDER BY n IS NULL, n` was sorted by the coalesce with its NULLs placed).
+test("ORDER BY x IS NULL, x is not one key where the bare x is an output column or a position", async () => {
+  const c = await client();
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  try {
+    for (const sql of [
+      "SELECT e.id, coalesce(e.n, 0) AS n FROM nullish e ORDER BY n IS NULL, n, e.id",
+      "SELECT e.id, e.t AS n FROM nullish e ORDER BY n IS NULL, n DESC, e.id",
+      "SELECT e.id, CASE WHEN e.id > 4 THEN 0 ELSE e.n END FROM nullish e ORDER BY n IS NULL, n, e.id",
+      "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NULL, 2 DESC, 1",
+      "SELECT e.id, e.n FROM nullish e ORDER BY 2 IS NOT NULL, 2, 1",
+    ]) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.match(sent(from), /ORDER BY .*IS (NOT )?NULL/, `${sql}\n${sent(from)}`);
+    }
+    // where the output column is the input's own tree, or a star's, it is the idiom still
+    for (const sql of ["SELECT id, n FROM nullish ORDER BY n IS NULL, n DESC, id", "SELECT * FROM nullish ORDER BY n IS NULL, n DESC, id"]) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.match(sent(from), /ORDER BY n DESC NULLS LAST, id/, `${sql}\n${sent(from)}`);
+    }
+    // an unnamed CASE is named by its ELSE where that name is strong, a cast of a CASE by its type (FigureColname):
+    // read by those names from a subquery
+    for (const sql of ["SELECT s.n FROM (SELECT e.id, CASE WHEN e.id > 4 THEN 0 ELSE e.n END FROM nullish e) s ORDER BY s.id",
+      "SELECT s.text, s.case FROM (SELECT e.id, (CASE WHEN e.id > 4 THEN 1 END)::text, CASE WHEN e.id > 4 THEN e.n ELSE 0 END FROM nullish e) s ORDER BY s.id"]) {
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+  } finally { await c.end(); }
+});
+
 test("a sum or avg of a text read as an unconstrained numeric is Postgres's exact one, at the most decimals a row's text has (Metabase's JSON numbers)", async () => {
   const c = await client();
   try {
@@ -953,6 +1646,54 @@ test("an EXPLAIN is the statement it explains: a write under EXPLAIN ANALYZE is 
   } finally { await c.end(); }
 });
 
+test("a refusal of the statement an EXPLAIN explains is placed where Postgres places it: in the whole text, past EXPLAIN and its options", async () => {
+  const c = await client();
+  try {
+    const position = async (sql: string, values?: unknown[]): Promise<unknown> => {
+      try { await c.query(values === undefined ? sql : { text: sql, values }); }
+      catch (e) { return (e as pg.DatabaseError).position; }
+      throw new Error(`answered: ${sql}`);
+    };
+    const truthPosition = async (sql: string): Promise<unknown> => {
+      try { await truth.query(sql); }
+      catch (e) { return String((e as { position?: unknown }).position); }
+      throw new Error(`the truth answered: ${sql}`);
+    };
+    for (const sql of ["EXPLAIN SELECT nosuch FROM orders", "EXPLAIN (ANALYZE) SELECT nosuch FROM orders", "  explain  (FORMAT JSON)\n SELECT 1 FROM nowhere",
+      "EXPLAIN SELECT 'héllo', nosuch FROM orders"]) {
+      const want = await truthPosition(sql);
+      assert.ok(Number(want) > "EXPLAIN".length, `${sql}: the truth's position is the whole text's (${want})`);
+      assert.equal(await position(sql), want, sql);
+      assert.equal(await position(sql, []), want, `${sql} (Parse)`);
+    }
+  } finally { await c.end(); }
+});
+
+test("the catalog names the OID the wire sends for a type the source made as the source names it, and its own OIDs as it holds them", async () => {
+  const c = await client();
+  try {
+    // the OIDs the wire sends for an enum, its array, a citext: the source's (here the truth's), which the catalog lacks
+    const r = await c.query({ text: "SELECT m, ms FROM moods LIMIT 0", rowMode: "array" });
+    const a = await c.query({ text: "SELECT status FROM accounts LIMIT 0", rowMode: "array" });
+    const oids = [...r.fields.map((f) => f.dataTypeID), a.fields[0]!.dataTypeID];
+    const named = async (q: (sql: string) => Promise<unknown[][]>): Promise<unknown[][]> =>
+      q(`SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`);
+    const truthNames = (await truth.query<unknown[]>(`SELECT ${oids.map((o) => `format_type(${o}, -1)`).join(", ")}, format_type(23, -1), format_type(1043, 14)`, [], { rowMode: "array" })).rows;
+    assert.deepEqual(truthNames, [["mood", "mood[]", "citext", "integer", "character varying(10)"]]);
+    // mason_wire_type names what the wire sent; format_type too, but for an OID the catalog holds itself (both count
+    // from 16384: here the array's OID is the catalog's row type of moods), which keeps the catalog's meaning
+    assert.deepEqual((await answer(c, `SELECT ${oids.map((o) => `mason_wire_type(${o}, -1)`).join(", ")}, mason_wire_type(23, -1), mason_wire_type(1043, 14)`)).rows, truthNames);
+    const catalogHas = (await answer(c, `SELECT ${oids.map((o) => `EXISTS (SELECT FROM pg_type WHERE oid = ${o})`).join(", ")}`)).rows[0]!;
+    const formatted = (await named(async (sql) => (await answer(c, sql)).rows))[0]!;
+    oids.forEach((o, i) => {
+      if (catalogHas[i] === "f") assert.equal(formatted[i], truthNames[0]![i], `format_type(${o}): the wire's name`);
+    });
+    // the catalog's own OIDs, as pg_attribute holds them: the catalog's names
+    assert.deepEqual((await answer(c, "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'moods'::regclass AND attnum > 0 ORDER BY attnum")).rows,
+      [["id", "integer"], ["m", "mood"], ["ms", "mood[]"]]);
+  } finally { await c.end(); }
+});
+
 test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and computes after it, and DuckDB's plan in Postgres's layout", async () => {
   const c = await client();
   try {
@@ -963,7 +1704,8 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     const p = await plan("EXPLAIN SELECT id, status FROM orders ORDER BY id LIMIT 2");
     assert.deepEqual(p.fields, [["QUERY PLAN", 25]]);
     assert.equal(p.command, "EXPLAIN");
-    assert.equal(p.lines[0], "Mason: answered from its copy of public.orders (about 3 rows; kept current by polling, no poll recorded yet)");
+    // no sync here (`copies` is empty): how it is kept current is said unknown, never guessed
+    assert.equal(p.lines[0], "Mason: answered from its copy of public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
     assert.equal(p.lines[1], "  Sent to the copy: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
     assert.equal(p.lines[2], "  Computed by Mason after the copy: nothing");
     // a preview's late materialization (14a1a831), as DuckDB plans it: the top two by the key, then the other columns
@@ -991,6 +1733,75 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     assert.ok(k.lines.length > 1);
     assert.match((await plan("EXPLAIN SELECT relname FROM pg_class", [])).lines[0]!, /^Mason: answered by the catalog Postgres/);
   } finally { await c.end(); }
+});
+
+test("EXPLAIN says how a copy is kept current as the sync says it to mason status: a streamed table by logical replication, never its last poll", async () => {
+  // a project switched to logical replication still holds its last poll in the poll's ledger: EXPLAIN read that, and
+  // said "kept current by polling, last poll <two days ago>" of a table status said was streamed
+  await store.writer.run("CREATE SCHEMA IF NOT EXISTS _mason");
+  await store.writer.run("CREATE TABLE IF NOT EXISTS _mason.poll_state (source VARCHAR PRIMARY KEY, snapshot VARCHAR, polled_at TIMESTAMPTZ)");
+  await store.writer.run("INSERT OR REPLACE INTO _mason.poll_state VALUES ('public.orders', '100:100:', '2026-10-27 19:58:39+00')");
+  const c = await client();
+  const header = async (sql = "EXPLAIN SELECT id FROM orders"): Promise<string> => String((await c.query({ text: sql, rowMode: "array" })).rows[0]![0]);
+  const json = async (): Promise<Record<string, unknown>> =>
+    (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>)[0]!.Mason.Copies[0]!;
+  const copied = (kept: CopyState["kept"]): CopyState => ({ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 0.1, copiedAt: "2026-10-27 19:00:00+00", error: null, ...(kept ? { kept } : {}) });
+  const head = "Mason: answered from its copy of public.orders (about 3 rows; ";
+  const streamed = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C4D", lastCommit: "2026-10-29T08:15:02.512Z", notRunning: null } as const;
+  const stream = { Slot: "mason_shop", "Applied Through": "0/1A2B3C4D", "Last Change Committed": "2026-10-29T08:15:02.512Z", "Stream Not Running": null };
+  /** the JSON says what the text says, and names a mode only for a copy that mode keeps current now */
+  const jsonSays = async (by: string | null, more: Record<string, unknown>): Promise<void> =>
+    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": by, "Kept Current": (await header()).slice(head.length, -1), ...more });
+  try {
+    copies = [copied(streamed)];
+    const h = await header();
+    assert.equal(h, `${head}kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)`);
+    assert.doesNotMatch(h, /polling|last poll/);
+    await jsonSays("logical replication", { ...stream, "Stream State": "streamed" });
+    // the stream down, nothing applied yet this run: said with why, NOT kept current now, still never the poll
+    copies = [copied({ ...streamed, lastCommit: null, notRunning: "the database closed the connection · it starts again after 08:16 UTC" })];
+    assert.equal(await header(), `${head}streamed by logical replication (slot mason_shop), applied through 0/1A2B3C4D, no change applied this run; NOT kept current now, the stream is not running: the database closed the connection · it starts again after 08:16 UTC)`);
+    await jsonSays(null, { ...stream, "Stream State": "streamed", "Last Change Committed": null, "Stream Not Running": "the database closed the connection · it starts again after 08:16 UTC" });
+    // a table being caught up, or left out of the publication, is said as status says it, and no mode is said at work
+    copies = [copied({ ...streamed, state: "catching-up", why: "caught up by one poll after its copy" })];
+    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: caught up by one poll after its copy)`);
+    await jsonSays(null, { ...stream, "Stream State": "catching-up" });
+    copies = [copied({ ...streamed, state: "left-out", why: "the publication mason_pub does not publish public.orders" })];
+    assert.equal(await header(), `${head}NOT kept current: left out of logical replication (slot mason_shop): the publication mason_pub does not publish public.orders)`);
+    await jsonSays(null, { ...stream, "Stream State": "left-out" });
+    copies = [copied({ ...streamed, state: "waiting", why: "its columns changed: it is copied again, then caught up by one poll" })];
+    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: its columns changed: it is copied again, then caught up by one poll)`);
+    await jsonSays(null, { ...stream, "Stream State": "waiting" });
+    // a polled project keeps today's words, from the sync's last poll
+    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z" })];
+    assert.equal(await header(), `${head}kept current by polling, last poll 2026-10-27 19:58:39 UTC)`);
+    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Kept Current": "kept current by polling, last poll 2026-10-27 19:58:39 UTC", "Last Poll": "2026-10-27T19:58:39.000Z" });
+    copies = [copied({ by: "poll", polledAt: null })];
+    assert.equal(await header(), `${head}kept current by polling, no poll recorded yet)`);
+    // over the poll's row limit: NOT kept current, as status says it, with the command that polls it
+    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z", unsynced: "over the 1,000,000-row sync limit" })];
+    assert.equal(await header(), `${head}NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-27 19:58:39 UTC): mason sync public.orders polls it now)`);
+    await jsonSays(null, { "Last Poll": "2026-10-27T19:58:39.000Z" });
+    // served as copied and skipped by the passes until copied again: NOT kept current, and why
+    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z", pending: "its columns changed: it is copied again, then caught up by one poll" })];
+    assert.equal(await header(), `${head}NOT kept current (as of 2026-10-27 19:58:39 UTC): its columns changed: it is copied again, then caught up by one poll)`);
+    await jsonSays(null, { "Last Poll": "2026-10-27T19:58:39.000Z" });
+    // a copy under way or failed says so before how it would be kept current
+    copies = [{ ...copied(streamed), phase: "copying", rowsSoFar: 1200 }];
+    assert.equal(await header(), `${head}being copied (1,200 rows so far): kept current once copied)`);
+    copies = [{ ...copied(streamed), phase: "failed", error: "permission denied for table orders\n(tried again after 14:05 UTC)" }];
+    assert.equal(await header(), `${head}its last copy failed: permission denied for table orders)`);
+    // a statement over two copies says each on a line of its own
+    copies = [copied(streamed), { ...copied({ by: "poll", polledAt: null }), source: "sales.invoices" }];
+    const two = (await c.query({ text: "EXPLAIN SELECT o.id FROM orders o JOIN sales.invoices i ON i.id = o.id", rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
+    assert.equal(two[0], "Mason: answered from its copies of");
+    assert.ok(two.includes("  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)"), two.join("\n"));
+    assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; kept current by polling, no poll recorded yet\)$/.test(l)), two.join("\n"));
+  } finally {
+    copies = [];
+    await store.writer.run("DELETE FROM _mason.poll_state WHERE source = 'public.orders'");
+    await c.end();
+  }
 });
 
 test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's rows and time, and where the time went", async () => {
@@ -1022,6 +1833,43 @@ test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's
   } finally { await c.end(); }
 });
 
+test("EXPLAIN ANALYZE reports the statement's own profile, never another statement's: one DuckDB answers while planning has its plan and no times", async () => {
+  // DuckDB's profiler writes ONE file, the last profiled statement's on the connection: the settle's probe of the
+  // schemas ran under it, and a count(*) of a whole table — which DuckDB answers from the table's row count while
+  // planning, writing no profile — was reported as that probe's plan (a scan of duckdb_schemas), "reading none of its
+  // copies" (a real deployment's count(*) of a 197 M-row copy)
+  const c = await client();
+  const lines = async (sql: string): Promise<string[]> => (await c.query({ text: sql, rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
+  try {
+    for (const table of ["orders", "big"]) {
+      const l = await lines(`EXPLAIN (ANALYZE) SELECT count(*) FROM ${table}`);
+      const plan = l.filter((x) => !/^ |^(Mason|Planning Time|Execution Time):/.test(x));
+      assert.ok(!l.some((x) => /schemas/i.test(x)), l.join("\n"));
+      // DuckDB's plan of the count (its EXPLAIN: a scan of the one row it computed), the rows it answered, no times
+      assert.deepEqual(plan, ["Column Data Scan  (rows=1) (actual rows=1)"], l.join("\n"));
+      assert.ok(l.includes("  Note: the copy's profiler recorded no operator of this statement: the copy answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered"), l.join("\n"));
+      assert.ok(!l.some((x) => /thread time/.test(x)), l.join("\n"));
+      assert.match(l.at(-1)!, /^Execution Time: \d+\.\d{3} ms /);
+    }
+    // FORMAT JSON says the same
+    const [doc] = JSON.parse(String((await c.query({ text: "EXPLAIN (ANALYZE, FORMAT JSON) SELECT count(*) FROM big", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown> }>;
+    assert.deepEqual([doc!.Plan["Node Type"], doc!.Plan["Actual Rows"], doc!.Plan["DuckDB Thread Time"]], ["Column Data Scan", 1, undefined]);
+    assert.match(String(doc!.Mason.Note), /^the copy's profiler recorded no operator of this statement/);
+    // a statement the profiler does time is its own, after one it did not and after one of another table's; one that
+    // scans a copy says its scan's rows and time
+    for (const [sql, scans] of [["SELECT count(*) FROM big WHERE id > 7", "big"], ["SELECT count(*) FROM orders WHERE qty > 1", "orders"], ["SELECT 1", null], ["SELECT id FROM orders WHERE false", null]] as const) {
+      const l = await lines(`EXPLAIN ANALYZE ${sql}`);
+      assert.ok(!l.some((x) => /schemas|^ {2}Note: DuckDB's profiler/i.test(x)), `${sql}\n${l.join("\n")}`);
+      if (scans !== null) assert.ok(l.some((x) => x.includes(`Table Scan on public.${scans}  (rows=`) && /\(actual rows=\d+, thread time=\d+\.\d{3} ms\)$/.test(x)), `${sql}\n${l.join("\n")}`);
+    }
+    // the profile names the statement as DuckDB was given it: one with a parameter bound, one calling Mason's functions
+    for (const [sql, values] of [["SELECT id FROM orders WHERE status = $1", ["paid"]], ["SELECT sum(amount::text::numeric) FROM orders\nWHERE qty > 0", []]] as const) {
+      const l = (await c.query({ text: `EXPLAIN ANALYZE ${sql}`, values: [...values], rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
+      assert.ok(l.some((x) => /Table Scan on public\.orders {2}\(rows=\d+\) \(actual rows=\d+, thread time=/.test(x)), `${sql}\n${l.join("\n")}`);
+    }
+  } finally { await c.end(); }
+});
+
 test("EXPLAIN (FORMAT JSON) is Postgres's plan document, DuckDB's operators in it and Mason's sections beside: what pgAdmin, DBeaver and DataGrip draw", async () => {
   const c = await client();
   try {
@@ -1035,7 +1883,7 @@ test("EXPLAIN (FORMAT JSON) is Postgres's plan document, DuckDB's operators in i
     const scan = (doc!.Plan.Plans as Array<Record<string, unknown>>)[0]!;
     assert.deepEqual([scan["Node Type"], scan["Relation Name"], scan["Schema"], scan["Plan Rows"]], ["Table Scan", "orders", "public", 3]);
     assert.equal(doc!.Mason["Answered By"], "the copy");
-    assert.deepEqual(doc!.Mason.Copies, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Last Poll": null }]);
+    assert.deepEqual(doc!.Mason.Copies, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": null, "Kept Current": "how it is kept current is unknown: the sync has no record of it" }]);
     assert.ok(typeof doc!["Planning Time"] === "number" && typeof doc!["Execution Time"] === "number");
     // FORMAT XML and YAML are refused by name; Postgres's own errors for an option it does not have, or one that needs ANALYZE
     await assert.rejects(c.query("EXPLAIN (FORMAT XML) SELECT id FROM orders"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap explain-option/.test(e.message));

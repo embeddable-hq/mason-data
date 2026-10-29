@@ -24,6 +24,17 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 - **DuckDB runs only a `PlannedSql`, made in `src/duck/plan.ts` alone, after the read-back** (`tests/conventions.test.ts`):
   a statement's own text never reaches DuckDB, because an `EXPLAIN ANALYZE <write>` that did ran the write
   (docs/DESIGN.md "The review").
+- **How a copy is kept current is derived ONCE, by the sync** (`Sync.keptOf`, carried on `Sync.state` as `kept`):
+  `mason status` (`unsynced`, `streamStatus`'s tables) and EXPLAIN's first line (`keptText`, src/duck/explain.ts) both
+  read it, never the poll's ledger (a project switched to replication keeps its last poll there: EXPLAIN said "kept
+  current by polling" of a streamed table). `tests/duck-sync-added.test.ts` and `tests/duck-wire.test.ts` hold it.
+  ("EXPLAIN")
+- **EXPLAIN ANALYZE's profile is held to its statement, never assumed its** (src/duck/store.ts `explained`): DuckDB's
+  profiler writes the LAST profiled statement's profile on the connection, so it is on for the statement alone (turned
+  on in `streamed` after the settle, off before anything else runs), and the profile must name the planned SQL
+  (`query.sql`; another's is XX000 "report it"). None written — DuckDB answered while planning, a count(*) of a whole
+  table — is said, with DuckDB's EXPLAIN as the plan: the settle's probe of the schemas was once reported as the plan of
+  such a count (`tests/duck-wire.test.ts` "own profile"; docs/DESIGN.md "EXPLAIN").
 - **A node is placed ONCE in the rewritten tree**: the walker runs a node's rule at its first place only, so a rule that
   uses a node twice clones it per use (`this.cp`, a helper's `copy`), or the second place is Postgres's text (a json
   read's column qualified in one arm of its CASE: DuckDB's 42804, a review finding). The walker records a node
@@ -34,6 +45,72 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 - **No DuckDB macro**: with the `postgres` extension loaded, a macro with a lambda or calling a macro
   fails; every helper is a JavaScript scalar function (`src/duck/functions.ts`) or SQL written inline.
   ("How a statement is answered")
+- **What DuckDB is sent is the form it computes natively, where that is Postgres's answer** (each was a BI tool's slow
+  path on the test server, and two were not Postgres's answer either; "What DuckDB is sent"):
+  - **a truncation of a timestamptz is the instant's arithmetic** (`truncInstant`: `epoch_us` floored, `make_timestamptz`),
+    never ICU's calendar where the arithmetic is Postgres's: every part in UTC, a second or less in any zone, a minute or
+    an hour elsewhere with the instant's offset kept (ICU re-read the wall clock: 02:30 CEST truncated to 02:00 +01). A
+    day or more in another zone stays DuckDB's `date_trunc` in the session's zone. ICU is ~45 ns a row even in UTC, the
+    arithmetic ~8; a TIMESTAMP ↔ TIMESTAMPTZ cast is ICU's too, so never "cast, truncate, cast back". The session's
+    zone is read where the statement executes (`current_setting('TimeZone')`), never the rewriter's: a prepared
+    statement's plan is made at its Parse and run after a later `SET TimeZone`;
+  - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty only where its rows' order
+    decides the answer** (`leftLateral`, `markBounds`, `limitBounds`, the functions' `orNull`): DuckDB's LEFT lateral is
+    a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a 100-row preview) and whose order
+    kept other rows than Postgres's; the INNER one is its streaming UNNEST. But the UNNEST calls the function per ROW,
+    the delimiter join per DISTINCT argument, so where every row is read anyway (a count, a GROUP BY, a DISTINCT, a
+    window, a whole result, a sort by the lateral's column) DuckDB's own join stays (a count over 22 M rows: 79 s joined,
+    over 200 s streamed). Bounded: a LIMIT or OFFSET over the join, passing down through a derived table, a CTE and a
+    UNION ALL's arms; under an ORDER BY only a LIMIT (never WITH TIES), and only when its first key, the nulls idiom
+    folded, is a table's column sorted bare (no collation keys, citext, char(n), jsonb: the top N's filter reaches the
+    scan); and an order-sensitive aggregate or window (string_agg, array_agg, row_number …) with no ORDER BY of its
+    own. **DuckDB streams the INNER lateral only where its list reads ONE column of the row or an array column**; two
+    or more and no array is its delimiter join again (a scalar enum, domain or citext counts as a column; a user
+    type's array as an array). So such an argument (any list function's), and an unnest's
+    expression of any columns, is computed ONCE by a step of its own before it, `CROSS JOIN LATERAL (SELECT e AS __mason_arg<n>)
+    AS __mason_arg<n>` (a projection under the UNNEST, free; the never-empty CASE names the step's column twice) —
+    never where e reads an array (DuckDB plans THAT step as its join: an unnest's e is then computed once inside,
+    `list_transform(list_value(e), l -> CASE … l … END)[1]`, a list copy a row, 12–23 ms a million rows), nor where
+    a `*` or a join's name reads the join (`markWholeReads`: the step's column would be read). Decided in a pre-pass
+    over the whole statement (the walk meets a CTE before the SELECT that reads it). Bounding too much costs time, too
+    little an answer; where DuckDB itself falls back to the delimiter join, the difference is registered: under a
+    filter it does not push down (`limit-lateral-filter`), an argument holding a subquery or two columns under a `*`
+    (`limit-lateral-argument`). **A row count an Execute sets on the wire is a bound the Parse's plan cannot see**: the plan says where a lateral was left joined that such a bound
+    would stream (`PlannedSql.unboundedLateral`, the pre-pass run again with the outermost SELECT bounded — never a
+    re-parse), and the portal's first Execute with a row count runs the statement planned again with `wireBound`
+    (`Session.boundOnWire`), under its Parse's settings, kept on the statement and in the plans by text; a suspended
+    portal reads on from its one result, never re-runs (`tests/duck-wire.test.ts` "an Execute's row count");
+  - **equivalent order keys are canonicalised: `x IS [NOT] NULL, x` is one key on `x` with its NULLS placed**
+    (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
+    Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's
+    (findTargetlistEntrySQL92), the same tree inside an expression the input's (`bareKeyIsInput`);
+  - **a count(DISTINCT x) of a key is count(x)** (`src/duck/distinct-key.ts`): x alone its table's PRIMARY KEY in
+    the CATALOG's pg_index (the key the copy is written by; never a sources file's `key:`, and NEVER another UNIQUE
+    index — the copy may hold its value twice for a moment, and the catalog's indexes are the source's as of the start
+    and `mason add` / `remove` only), and the FROM repeating no row of its table (its table alone, or joined only to
+    base tables each on an equality with THAT table's primary key) — all read from the analysed tree and pg_index, never a column's name;
+    when unsure the DISTINCT stays (DuckDB's count(DISTINCT) is a second hash aggregate: 120 s against 9 s over 197 M
+    rows). Only count; an ORDER BY repeating it drops it with its twin in the same SELECT only. `tests/duck-distinct-key.test.ts`,
+    the plan fixture's `KEY_COUNTS` and the oracle's `count of distinct keys` / `keyed` hold it ("A count of distinct keys");
+  A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
+  **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
+  independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the
+  nulls idiom with a bare name an output alias shadows, and with an integer constant; a prepared statement executed
+  after a later `SET`; `SELECT *` beside the named columns; each collation kind (C, ICU, a libc order) where a string
+  is compared, and equality apart from order (equality needs no collation); a NULL or a row-held argument where
+  Postgres is strict.
+- **A new rewrite for speed is held by the PLAN fixture too** (`tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`):
+  its statement in the tool's own spelling, over the shop's million orders, its plan's skeleton in the fixture (the
+  operators, a top N's count of sort keys, each scan's table and top-N / zone-map filter, the Mason functions, what it sorts by beyond a value —
+  ICU's key, a stored column —, a delimiter join, a full sort; a form that reads a stored column, held both stored
+  and not, over a copy of the shop whose keeper stored it), and
+  where the skeleton cannot show the gain an invariant DuckDB's EXPLAIN ANALYZE measures (the row groups or rows a
+  scan read). The oracle is blind to the plan: each of the three forms above was a BI tool's slow path with every
+  answer right. A diff of the fixture is a plan changed: a regression is fixed, a better plan regenerated
+  (`UPDATE_FIXTURE=1 npm test`) and said so in the commit. DuckDB's EXPLAIN names a projection by its alias, so what
+  an expression costs (ICU's date_trunc against the arithmetic) is read from the SQL sent: the skeleton lists the time
+  functions it calls. DuckDB 2.0 plans a delimiter join as a CTE (`__duckdb_delim_<n>`) joined back to a hash group by
+  of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
 - **DuckDB lives on the executor worker; the main thread never runs a Mason function and never waits for the
@@ -110,6 +187,21 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     with `->` or a number, never a string's `->>`;
   - **the JSON paths statements keep reading are stored as columns** (below), which answers a number's digits and
     the rest from a plain column. ("The executor worker", "A `->>` is DuckDB's own read")
+- **A jsonb is sorted, grouped and compared by ONE key, `jsonbKey` (src/duck/jsonb-order.ts), never by its text**:
+  Postgres orders jsonb by its own rules (`[] < 1 < [1]`, objects by size first) and equates `1.0` with `1.00`, so
+  every form that compares two jsonb — ORDER BY, GROUP BY, DISTINCT [ON], PARTITION BY, =, <, IN, BETWEEN, IS DISTINCT
+  FROM, NULLIF, CASE x WHEN, count(DISTINCT) — is rewritten to compare `__mason_jsonb_key*` (`jsonbKey` in
+  src/duck/rewrite.ts), and every other form refuses with `jsonb-compare`. A rule that compares values (a new
+  construct, a sort) asks `comparable`, which refuses a jsonb, or keys it; the allowlist does not see a sort's or a
+  group's operator, so nothing else stops DuckDB's text equality. **Equality reads the C key, an order the
+  collation's**: the database's collation is deterministic (equal strings are equal bytes), so =, IN, GROUP BY,
+  DISTINCT, PARTITION BY … read `equalKey`, and only ORDER BY, <, >, BETWEEN must read the collation's key of each
+  string (ICU's, or the measured libc order's, which refuses a character it does not cover: equality must never
+  refuse what it never had to order). Under C and ICU the order's key equates exactly and never refuses, so
+  `equalKey` is it (and may be stored); under libc it is the C key, stored as a column of its own (`EQUAL_STEPS`, below)
+  or computed. A node the rewrite typed as another (`typedLike`) keeps
+  that type through `clone`. `tests/duck-jsonb-order.test.ts` holds the key to
+  Postgres's order under C, ICU and libc, and the oracle's `jorder` every form. ("jsonb's order")
 
 ## Stored JSON paths (src/duck/kept.ts, src/duck/kept-route.ts; docs/DESIGN.md "Stored JSON paths")
 
@@ -167,11 +259,47 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   `t.*`, a NATURAL JOIN, a whole row) reads the copy's view of its visible columns (`__mason_visible`, `hideKept`), and
   every copy served has that view. PGlite's catalog never has the column (`schemaBuilt` reads the copy's recorded
   columns), and nothing else may `SELECT *` a copy into an answer.
+- **A jsonb's order is stored as a read like a path's** (`ORDER_STEPS`, src/duck/kept-route.ts; the PR's measurement:
+  `ORDER BY j LIMIT 100` over 20 M rows, 19 s by the key's function under C and 83 s under libc, 0.14 s from the
+  stored key): the rewrite records `ORDER BY` / `GROUP BY` / `=` of a copied jsonb column as a read (`keptKey`), the
+  policy weighs it as any path, and the column (BLOB) holds the key by the functions the statement's key calls
+  (`JSONB_KEY_FUNCTIONS`, their `_stored` twins answering NULL where the key raises: the row is marked, its read
+  raises). **A key is its bytes' inputs'**: stored as `ORDER_STEPS:<id>` (`orderId`: the collation, a libc order's
+  content hashed, `KEY_VERSION` and `DUCKDB_VERSION` — bump `KEY_VERSION` with any change of the key's bytes); until
+  the listener tells the collation (`orderBy`) a write leaves it unset and no plan reads it, then the unset rows are
+  swept, a chunk a writer's turn, and it is ready; another id's is dropped. **A mark is never read as a value**: a
+  stream or a poll may write a marked row after the count (a libc string the order does not cover), so the exact read
+  raises at a mark by the column alone (`markedError`: the gap for a libc key, else a Mason bug) until the detector
+  counts it and turns the reads to the CASE. A statement that lists the columns (`*`) reads none, so
+  its sort computes the key per row. `tests/duck-json-columns.test.ts` holds the key to the function under C, ICU and
+  libc and every write path to it; `IT_ORACLE_JSON_PATHS=eager` reads every jsonb sort from it; `tests/duck-plans.test.ts`
+  holds the plans, computed and stored (no row handed a function from the stored key). **A stored key saves the calls,
+  not the scan**: DuckDB 2.0 pushes no top N's filter into the stored key's scan through the mark's CASE (the fixture
+  holds it), nor into the bare BLOB column's (measured once, DuckDB 2.0, 2026-10-29; no test holds it), so a page by a
+  jsonb still reads every row's key (cheap) — never count on its pruning. ("The plan fixture")
+- **Under a libc collation a jsonb's equality is a SECOND stored key, the C key** (`EQUAL_STEPS`, src/duck/kept-route.ts;
+  `equalId`, src/duck/kept.ts: `equal:` and the C order's id, so `KEY_VERSION` and `DUCKDB_VERSION`, never the libc
+  order, which the C key does not read): GROUP BY / DISTINCT / count(DISTINCT) / PARTITION BY / = / IN / a join on `=`
+  record it as a read (`equalKey` → `keptKey(e, EQUAL_STEPS)`), weighed, filled, swept, marked, dropped and read exactly
+  as the order's key, by every write path (`valueSql`). It never marks a libc-uncovered string (the C key covers every
+  string), so a mark of it is a Mason bug (XX000), never the gap. **Under C and ICU no second column is ever made**: the
+  order's key equates there, so the keeper folds an equality read into the order's (`own`) and drops a C key at
+  `orderBy`. `mason status` names each: `GROUP BY j (its jsonb equality …)` beside `ORDER BY j (its jsonb order …)`.
+  `tests/duck-json-columns.test.ts` holds both kinds through every write path, every equality form to PGlite, and the
+  lifecycle; the eager oracle under libc reads `public.jorder`'s equality from it.
+- **A stored read of a kind this Mason does not know is inert, never fatal** (`knownSteps`, src/duck/kept-route.ts): a
+  request log's read of it is not counted (`readOfKey`), its ledger row is dropped at the start with its column and
+  said with its steps (`open`), and `pathText` says it raw. A new kind of stored read is added there (the release before
+  `equal:` broke its status and every write of the table on one). `tests/duck-json-columns.test.ts` holds it with a
+  made-up kind `future:x`. ("jsonb's order", "Rolling back past it")
 ## What is not supported, and how the list stays true
 
 - **An allowlist, not a blocklist**: DuckDB answers only a statement whose every resolved piece is in
   `src/duck/verified.ts`, which the oracle regenerates (`UPDATE_VERIFIED=1`) from what it answered exactly; anything
-  else is refused naming the piece (0A000, `Mason gap unverified`).
+  else is refused naming the piece (0A000, `Mason gap unverified`). **A piece is as wide as every statement that
+  uses it**: one the oracle verified over its scalar forms answers the others too, so a new piece added by
+  `UPDATE_VERIFIED` is read in the diff for the forms it unlocks, and a form not exact is refused by name in the rewrite
+  (ARRAY(SELECT …) of a numeric, an array, a row: `array-subquery-element`).
 - **Every refusal names its entry**: `Unrewritable` takes a `GapId` from `src/duck/gaps.ts`, so a refusal without one
   does not compile; `docs/SQL-SUPPORT.md` is rendered from the registry, and `tests/duck-gaps.test.ts` fails when it is not.
 - **No dead entries**: the oracle fails when a `refused` or `differs` entry is met by none of its statements
@@ -457,7 +585,10 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 - **The oracle is the arbiter** (`tests/integration/duck-oracle.itest.ts`, `IT_ORACLE_ONLY=<regex>` for a subset): every
   statement asked of a real Postgres and of the endpoint, after the copy and after two rounds of changes, and again in
   six shapes (`oracle/shapes.ts`); names, OIDs, text, order and SQLSTATEs must be equal. A fix for a class adds a
-  statement to it (`postgres-cases.ts`, `oracle/bi-shapes.ts`, `oracle/type-matrix.ts`, `oracle/gap-cases.ts`).
+  statement to it (`postgres-cases.ts`, `oracle/bi-shapes.ts`, `oracle/type-matrix.ts`, `oracle/gap-cases.ts`). The
+  sessions are in UTC; a type-matrix statement with a `zone` is asked with both sessions' TimeZone set to it (a time
+  computed in the session's zone must be held in a zone with daylight saving, not UTC alone). Run it against a Linux
+  Postgres (CI's `postgres:18` image): a macOS cluster's libc collation is not glibc's, and its `coll` statements differ.
 - **It needs a disposable Postgres, `IT_POSTGRES_URL`** (a database of its own is created and dropped; `duck-stream` needs
   `wal_level=logical`, the oracle and `duck-poll` any; `tests/integration/README.md`), never a shared deployment's source.
 - **The recorded corpus is answered whole offline** (`tests/duck-corpus.test.ts`: every statement psql, pgjdbc,

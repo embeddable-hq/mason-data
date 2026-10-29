@@ -13,7 +13,7 @@ import * as assert from "node:assert/strict";
 import { addSpecs, addSteps, copyProgress, duration, findTable, paintBar, readiness, STATUS, tableLines, WAIT, type RunState, type TableState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
 import { jsonText } from "../src/cli/command.ts";
-import type { CopyProgressView, StreamStatus } from "../src/duck/sync.ts";
+import type { CopyProgressView, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { connectSource, parseSource, readSourceFacts } from "../src/cli/preflight.ts";
 import { readSource } from "../src/cli/sources.ts";
@@ -243,6 +243,51 @@ test("mason status and wait in replication mode say where the stream is: its pos
     assert.deepEqual(written.stream, stream, `mason ${spec.name} --json writes the stream`);
     assert.match(spec.usage, /\bstream\b/, `mason ${spec.name}'s usage names the stream key`);
   }
+});
+
+test("mason status and wait --json say how each table is kept current (kept, src/duck/sync.ts KeptCurrent), and their usage declares its shape", () => {
+  // an agent reading --json could not tell how a table was kept current, or why it was not: the text said it, the JSON
+  // mapped a copy's fields one by one and left kept out
+  const kepts: KeptCurrent[] = [
+    { by: "poll", polledAt: at(1), unsynced: "over the 1,000,000-row sync limit", pending: "its columns changed: it is copied again, then caught up by one poll" },
+    { by: "recopy", copiedAt: at(2) },
+    { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C8", lastCommit: at(3), notRunning: "Mason is stopping" },
+  ];
+  // read from the module's namespace: this file loads where it is missing, and the test fails by name (scripts/fails-without.ts)
+  const { waitTable } = commands as unknown as { waitTable?: (t: TableState) => Record<string, unknown> };
+  assert.ok(waitTable !== undefined, "mason wait --json's table (waitTable)");
+  for (const kept of kepts) {
+    const added = t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 3, updatedAt: at(1) }, kept });
+    const status = JSON.parse(jsonText(STATUS, { tables: [added] })) as { tables: TableState[] };
+    assert.deepEqual(status.tables[0]!.kept, kept, `mason status --json, kept by ${kept.by}`);
+    const waited = JSON.parse(jsonText(WAIT, { tables: [waitTable(added)] })) as { tables: Array<Record<string, unknown>> };
+    assert.deepEqual(waited.tables[0], { table: "public.orders", copy: added.copy, error: null, kept }, `mason wait --json, kept by ${kept.by}`);
+  }
+  // a table the run's state says nothing of keeping current carries no kept: none is made up
+  assert.equal("kept" in waitTable(t({ table: "public.orders", added: true })), false);
+  // THE SHAPE, declared where every other is (the usage's --json line, src/cli/command.ts CommandSpec): kept, by, and
+  // every field of each way a copy is kept current
+  for (const spec of [STATUS, WAIT]) {
+    const line = spec.usage.slice(spec.usage.indexOf("--json"));
+    // each table's unsynced is an object ({ reason, asOf }), kept's a string: the tables' list declares the object
+    assert.match(line, /\bkept\b/, `mason ${spec.name}'s usage names kept`);
+    assert.match(line, /unsynced: \{ reason, asOf \}/, `mason ${spec.name}'s usage declares a table's unsynced`);
+  }
+  // kept's own declaration, from where it starts to the stopped shape: none of its fields borrowed from the stream's or
+  // the tables' declarations
+  const from = STATUS.usage.indexOf("Each table's kept");
+  const to = STATUS.usage.indexOf("with Mason stopped", from);
+  assert.ok(from >= 0 && to > from, "mason status's usage declares kept, before the stopped shape");
+  const decl = STATUS.usage.slice(from, to).replace(/\s+/g, " ");
+  assert.match(decl, /absent for a table the sync does not hold/);
+  for (const k of [...new Set(kepts.flatMap((k) => Object.keys(k)))]) assert.match(decl, new RegExp(`\\b${k}\\b`), `kept's declaration names ${k}`);
+  for (const by of ["poll", "recopy", "replication"]) assert.match(decl, new RegExp(`\\{ by: ${by}\\b`), `kept's declaration names by: ${by}`);
+  for (const state of ["streamed", "catching-up", "waiting", "left-out"]) assert.match(decl, new RegExp(`\\b${state}\\b`));
+  // unsynced and pending are present only when they apply; pending says why the copy is not kept current, phase included
+  assert.match(decl, /unsynced \(only when it applies/);
+  assert.match(decl, /pending \(only when it applies: why the copy is not kept current now, its phase included/);
+  assert.match(decl, /by: recopy, copiedAt, pending \(only when it applies/);
+  assert.match(WAIT.usage.replace(/\s+/g, " "), /pending, when it applies, says why the copy is not kept current now, its phase included/);
 });
 
 test("what to run next over the tables: mason status points at mason tables first; mason tables itself never does", () => {

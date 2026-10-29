@@ -1,7 +1,7 @@
 // The change reader's Postgres client (src/cdc/pg-wire.ts): how the bytes a socket delivers become messages.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { PgConnection } from "../src/cdc/pg-wire.ts";
+import { PgConnection, PgError } from "../src/cdc/pg-wire.ts";
 
 /** A connection with no socket, fed by hand: what onData made of the bytes, in order. */
 function feed(chunks: Buffer[]): Array<{ type: string; body: string }> {
@@ -103,4 +103,112 @@ test("closing a connection ends a replication stream waiting for its next messag
     const ended = await Promise.race([read.then(() => "returned", (e: Error) => e.message), new Promise((r) => setTimeout(() => r("still waiting"), 2_000))]);
     assert.equal(ended, "connection closed");
   } finally { server.close(); }
+});
+
+// ------------------------------------------------------------------ one statement through the extended protocol
+
+const fieldsOf = (...cols: Array<[string, number, number]>): Buffer => {
+  const count = Buffer.alloc(2);
+  count.writeInt16BE(cols.length);
+  const parts: Buffer[] = [count];
+  for (const [name, oid, typmod] of cols) {
+    const b = Buffer.alloc(18);
+    b.writeInt32BE(0, 0); b.writeInt16BE(0, 4); b.writeInt32BE(oid, 6); b.writeInt16BE(-1, 10); b.writeInt32BE(typmod, 12); b.writeInt16BE(0, 16);
+    parts.push(Buffer.from(`${name}\0`), b);
+  }
+  const body = Buffer.concat(parts);
+  const head = Buffer.alloc(5);
+  head.write("T", 0);
+  head.writeInt32BE(4 + body.length, 1);
+  return Buffer.concat([head, body]);
+};
+const error = (code: string, text: string, severity = "ERROR", more = ""): Buffer => message("E", `S${severity}\0C${code}\0M${text}\0${more}\0`);
+const ready = message("Z", "I");
+
+/** A stubbed connection that records what it sent, by message type, and can be closed as the server closes it. */
+function recording(): { c: PgConnection; onData: (d: Buffer) => void; sent: string[]; close: (e: Error) => void } {
+  const { c, onData } = stubbed();
+  const sent: string[] = [];
+  (c as unknown as { socket: { write: (b: Buffer) => boolean } }).socket.write = (b: Buffer) => { sent.push(String.fromCharCode(b[0]!)); return true; };
+  const fail = (c as unknown as { fail: (e: Error) => void }).fail.bind(c);
+  return { c, onData, sent, close: fail };
+}
+
+test("extended() is Parse, Bind, Describe, Execute at the row count and Sync, and reads PortalSuspended as rows left", async () => {
+  const { c, onData, sent } = recording();
+  const r = c.extended("SELECT id, n FROM t", 2);
+  for (const m of [message("1", ""), message("2", ""), fieldsOf(["id", 20, -1], ["n", 1700, 655366]), row("1"), row("2"), message("s", ""), ready]) onData(m);
+  assert.deepEqual(await r, { fields: [{ name: "id", typeOid: 20, typmod: -1 }, { name: "n", typeOid: 1700, typmod: 655366 }], rows: [["1"], ["2"]], suspended: true, command: "", empty: false });
+  assert.deepEqual(sent, ["P", "B", "D", "E", "S"]);
+  // every row: CommandComplete's tag, nothing left
+  const all = c.extended("SELECT id FROM t", 0);
+  for (const m of [message("1", ""), message("2", ""), fieldsOf(["id", 20, -1]), row("1"), message("C", "SELECT 1\0"), ready]) onData(m);
+  assert.deepEqual(await all, { fields: [{ name: "id", typeOid: 20, typmod: -1 }], rows: [["1"]], suspended: false, command: "SELECT 1", empty: false });
+});
+
+test("extended(): a statement of only comments is EmptyQueryResponse, a statement of no rows NoData", async () => {
+  const { c, onData } = recording();
+  const empty = c.extended("-- nothing", 10);
+  for (const m of [message("1", ""), message("2", ""), message("n", ""), message("I", ""), ready]) onData(m);
+  assert.deepEqual(await empty, { fields: [], rows: [], suspended: false, command: "", empty: true });
+  const set = c.extended("SET x = 1", 10);
+  for (const m of [message("1", ""), message("2", ""), message("n", ""), message("C", "SET\0"), ready]) onData(m);
+  assert.deepEqual(await set, { fields: [], rows: [], suspended: false, command: "SET", empty: false });
+});
+
+test("an error is thrown at ReadyForQuery with its fields, and the connection answers the next statement", async () => {
+  const { c, onData } = recording();
+  const bad = c.extended("SELECT nope FROM t", 10);
+  for (const m of [error("42703", 'column "nope" does not exist', "ERROR", "P8\0"), ready]) onData(m);
+  await assert.rejects(bad, (e: unknown) => e instanceof PgError && e.code === "42703" && e.fields.P === "8" && e.fields.M === 'column "nope" does not exist');
+  const next = c.extended("SELECT 1", 10);
+  for (const m of [message("1", ""), message("2", ""), fieldsOf(["?column?", 23, -1]), row("1"), message("C", "SELECT 1\0"), ready]) onData(m);
+  assert.deepEqual((await next).rows, [["1"]]);
+  const q = c.query("SELECT nope");
+  for (const m of [error("42703", "nope"), ready]) onData(m);
+  await assert.rejects(q, (e: unknown) => e instanceof PgError && e.code === "42703");
+  const q2 = c.query("SELECT 2");
+  for (const m of [message("C", "SELECT 0\0"), ready]) onData(m);
+  assert.equal((await q2).command, "SELECT 0");
+});
+
+test("a server that closes the connection after its ErrorResponse (a FATAL) and before ReadyForQuery: that error, never \"connection closed\"", async () => {
+  for (const run of ["extended", "query"] as const) {
+    const { c, onData, close } = recording();
+    const r = run === "extended" ? c.extended("SELECT 1", 10) : c.query("SELECT 1");
+    onData(error("57P01", "terminating connection due to administrator command", "FATAL"));
+    close(new Error("connection closed by the server"));
+    await assert.rejects(r, (e: unknown) => e instanceof PgError && e.code === "57P01" && e.fields.S === "FATAL", run);
+    // closed with no error said: the close itself
+    const bare = recording();
+    const b = run === "extended" ? bare.c.extended("SELECT 1", 10) : bare.c.query("SELECT 1");
+    bare.close(new Error("connection closed by the server"));
+    await assert.rejects(b, (e: unknown) => !(e instanceof PgError) && (e as Error).message === "connection closed by the server", run);
+  }
+});
+
+test("cancel() sends Postgres's CancelRequest with the key the server gave at startup, on a connection of its own", async () => {
+  const net = await import("node:net");
+  const cancels: Buffer[] = [];
+  const server = net.createServer((sock) => {
+    let first = true;
+    sock.on("data", (d: Buffer) => {
+      if (d.length === 16 && d.readInt32BE(4) === 80877102) { cancels.push(d); return; }
+      if (!first) return;
+      first = false;
+      const key = Buffer.alloc(13); key.write("K", 0); key.writeInt32BE(12, 1); key.writeInt32BE(4242, 5); key.writeInt32BE(-7, 9);
+      sock.write(Buffer.concat([message("R", "\0\0\0\0"), key, ready]));
+    });
+    sock.on("error", () => { /* the client's close resets the socket: nothing of the test's to say */ });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  const c = await PgConnection.connect({ host: "127.0.0.1", port, user: "u", password: "p", database: "d", sslmode: "disable", connectTimeoutMs: 2_000 });
+  // closed whatever the test says: an open connection would hold the test process open for ever
+  try {
+    await c.cancel();
+    for (let i = 0; i < 50 && cancels.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(cancels.length, 1);
+    assert.deepEqual([cancels[0]!.readInt32BE(0), cancels[0]!.readInt32BE(4), cancels[0]!.readInt32BE(8), cancels[0]!.readInt32BE(12)], [16, 80877102, 4242, -7]);
+  } finally { c.close(); server.close(); }
 });

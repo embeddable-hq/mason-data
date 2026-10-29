@@ -7,6 +7,44 @@
 > commit you are reading. To change the wording, edit the renderer; to change what is answered or refused, change the
 > source; an edit made here is undone by the next `UPDATE_FIXTURE=1 npm test`.
 
+## At a glance
+
+Mason is a drop-in replacement for a Postgres read replica: the SQL a tool sends Postgres is answered as Postgres
+answers it — the same columns, types, values, text and order — or refused by name, never answered differently. Every
+piece a statement is made of is verified against a real Postgres by the oracle ("What is verified" below names
+each). The copy is read-only.
+
+| Postgres | Mason |
+|---|---|
+| A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 86 forms of them verified |
+| The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 241 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
+| Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
+| Anything else: 47 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+
+## Why not DuckDB by itself
+
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,086 statements,
+each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
+
+| Of 3,086 statements | Mason | DuckDB alone |
+|---|---|---|
+| answered exactly as Postgres: the rows, their text, the column names | 95% | 30% |
+| answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
+| refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 4% | — |
+| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 23% |
+| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 18% |
+| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 12% |
+| wrong rows, or the rows in another order | — | 7% |
+| the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 5% |
+| another error than Postgres's, or answered where Postgres refuses | — | 5% |
+
+A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
+statement. The oracle's statements are adversarial by design (NULL beside '', ties, every type's edge values), so
+plain reports fare better on DuckDB alone than this table says — and still not as Postgres.
+
+## How a statement is decided
+
 Mason answers a statement on DuckDB only when it can give **exactly** the answer Postgres gives: the same columns,
 types, values, text and order (docs/DESIGN.md). Everything a statement is made of — each
 function, operator, aggregate, cast, type and construct Postgres resolved it to — must be on the **verified** list at
@@ -17,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (46)
+## Refused (47)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -39,18 +77,19 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `json-of-type` | to_json / array_to_json / json_build_object of a value (or an array of elements) of a type Mason does not write as json | answers | refused | cast the value to text, a number, a boolean, a timestamp or json first |
 | `extract-julian` | extract(julian FROM …) | answers | refused | extract(epoch FROM …) / 86400 + 2440587.5 |
 | `with-ordinality` | a function in FROM … WITH ORDINALITY | numbers the rows | refused | row_number() OVER () instead |
+| `array-subquery-element` | ARRAY(SELECT x …) whose x is a numeric, an array or a row; x = ANY or ALL (ARRAY(SELECT …)) | a numeric[] computed exactly, a multi-dimensional array (2202E on an empty element, 22004 on a NULL one), a record[] | refused (DuckDB makes a list of doubles, of lists, of structs; it binds ANY (ARRAY(SELECT …)) as a comparison of its own) | ARRAY(SELECT x::text …), array_agg(x ORDER BY …) in a subquery, or x = ANY (SELECT …) without the ARRAY |
 | `multidim-array` | a multi-dimensional array literal | answers | refused | a one-dimensional array |
 | `format-specifiers` | format() with a specifier other than %s (%I, %L, widths, positions) | answers | refused | concatenate with \|\|, or %s only |
 | `to-char-patterns` | to_char of an interval or a time; its TZ, SP, EEEE, RN, V, B, L patterns; a day or month name padded to 9 characters in a parse | answers | refused | the patterns listed in the hint; extract(… FROM interval) for an interval's parts |
 | `to-timestamp-format` | to_timestamp / to_date with a format that is not a literal | answers | refused | write the format as a string literal |
-| `libc-uncovered` | ORDER BY, <, >, min / max of text holding a combining mark (e + U+0301), a Thai or Lao vowel written before its consonant, a private-use or unassigned code point, under a libc collation | answers, in glibc's order | refused when a value holding one is ordered (the order is read from the database, and glibc orders these otherwise than Mason can follow) | normalize the text (normalize(x, NFC)), or ORDER BY x COLLATE "C" for byte order |
+| `libc-uncovered` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) holding a combining mark (e + U+0301), a Thai or Lao vowel written before its consonant, a private-use or unassigned code point, under a libc collation | answers, in glibc's order | refused when a value holding one is ordered (the order is read from the database, and glibc orders these otherwise than Mason can follow) | normalize the text (normalize(x, NFC)), or ORDER BY x COLLATE "C" for byte order |
 | `percentile-text-libc` | percentile_disc / mode() WITHIN GROUP (ORDER BY text) under a libc collation | answers | refused | order by a number, or ORDER BY … LIMIT in a subquery |
 | `infinite-extract` | extract(year, decade, century, millennium, isoyear or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |
 | `time-date-trunc` | date_trunc of a time (Postgres truncates it as an interval) | an interval | refused | date_trunc of a timestamp, or extract the parts |
 | `quote-ident` | quote_ident() | quotes an identifier when it must be | refused (it needs Postgres's keyword list) | quote it in the statement, or format('%s', …) |
 | `div-numeric` | div() of a value that is not an integer | the integer quotient of two numerics | refused | trunc(a / b) |
 | `jsonb-set` | jsonb_set, jsonb_insert, the #- operator, jsonb - of a text[] or an index | answers | refused | build the value with jsonb_build_object |
-| `jsonb-compare` | ORDER BY, GROUP BY, DISTINCT or <, >, = over jsonb (Postgres orders and equates jsonb by its own rules: numbers by value, objects by size first) | answers | refused | compare a member: j ->> 'k', or j::text for the canonical text |
+| `jsonb-compare` | a jsonb compared by GREATEST / LEAST, WITHIN GROUP (ORDER BY …), IN or = ANY of a subquery or of an array not written out, BETWEEN SYMMETRIC, JOIN … USING or NATURAL JOIN, UNION / INTERSECT / EXCEPT (but UNION ALL), SELECT DISTINCT *, GROUPING SETS / ROLLUP / CUBE, or an aggregate's DISTINCT but count's; ORDER BY the number of a jsonb column a * lists; a row holding a jsonb compared, grouped or sorted; a jsonb[] sorted, grouped, compared, contained (@>, <@, &&) or searched (array_position, array_remove) | answers, by jsonb's own order and equality | refused (ORDER BY, GROUP BY, DISTINCT [ON], =, <, >, IN (…), = ANY (ARRAY[…]), BETWEEN, IS DISTINCT FROM, NULLIF, CASE x WHEN, PARTITION BY and count(DISTINCT …) of a jsonb are answered in its order) | compare the jsonb in one of the answered forms, a member (j ->> 'k'), or j::text for the canonical text |
 | `text-array-order` | ORDER BY, GROUP BY, DISTINCT, min, max or <, > over a text[] under the database's collation | compares the elements under the collation | refused | sort by an element (a[1]), or by array_to_string(a, ',') |
 | `sum-real` | sum() of a real (float4), as an aggregate or a window | accumulates in single precision | refused (DuckDB accumulates in double precision) | sum(x::double precision) |
 | `interval-aggregates` | sum() or avg() of an interval | adds months, days and time apart | refused | sum(extract(epoch FROM x)) for the seconds |
@@ -70,14 +109,17 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `infinite-interval` | an infinite interval read from a text (Postgres 17+) | infinity, -infinity | refused when a row holds one (DuckDB's interval has no infinity) | filter it out first, or read it as text |
 | `relative-time-literal` | a relative time combined with anything else ('today 10:00', 'now'::date + …  written as one literal), or read from a row as a date or a time | the transaction's start (a row's value: when the row is read) | refused (a bare 'now', 'today', 'tomorrow', 'yesterday' literal is answered: the transaction's start at the Parse) | current_date + time '10:00', now(), current_date + 1 |
 
-## Answered differently (11)
+## Answered differently (15)
 
 Answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
 | `libc-symbol-punctuation` | text ordered under a libc collation where punctuation or a space follows a digit or a symbol and a later letter differs only in case ('1-X' beside '1x') | the punctuation outranks the case: 1-X < 1x | the case outranks the punctuation: 1x < 1-X | ORDER BY lower(x), x when the case must not decide first |
-| `limit-errors` | a select-list value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out, where no index gives the ORDER BY | raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers) | answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does | none needed for an answer; filter the bad rows out to have neither raise |
+| `limit-errors` | a value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out: in the select list, where no index gives the ORDER BY; or in the argument of a LEFT JOIN of a list's rows ON TRUE (unnest(ARRAY[…, 'x'::int]), jsonb_each of a non-object), under a LIMIT with no ORDER BY | the select list's raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers); the lateral's answers: it stops at the limit | the select list's answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does; the lateral's raises: DuckDB computes its argument for a whole vector of rows (2,048) before the limit stops it | none needed for the select list's answer; filter the bad rows out to have neither raise |
+| `limit-lateral-filter` | a LEFT JOIN of a json document's rows ON TRUE (json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, with a filter above the join that is not pushed down to the base: a WHERE on the lateral's own column (d.key <> 'n'), one holding a bound parameter ($1) in a SELECT around the join, or one in a SELECT that reads the join through a CTE | the first rows of the base, in its order, each row's members in theirs | the copy plans the lateral under such a filter as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (a filter on the base in the join's own SELECT, literal or parameter, or a literal one around it through a derived table, keeps Postgres's) | ORDER BY the base's key before the LIMIT, or filter the base in the SELECT that holds the join |
+| `limit-lateral-argument` | a LEFT JOIN of a list's rows ON TRUE (unnest, json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, whose argument holds a subquery (unnest(ARRAY(SELECT …))), or reads two or more columns of the row and no array (CASE WHEN t.kind = 'doc' THEN t.body END) in a SELECT whose list is a bare * or inside a join with a name of its own ((a LEFT JOIN … ON TRUE) AS j) | the first rows of the base, in its order, each row's members in theirs | DuckDB plans such a lateral as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (elsewhere an argument of two columns is computed in a step of its own before the lateral, which a * would read as a column; a subquery is a delimiter join in every form) | name the columns instead of *, or ORDER BY the base's key before the LIMIT |
+| `window-partition-order` | a window function that reads its frame in order (row_number, lag, lead, first_value, last_value, nth_value, ntile) over a window with PARTITION BY and no ORDER BY | a partition's rows in the order its sort hands them back: in practice the order they came in | a partition's rows in the order DuckDB's partitioning hands them back, another one | ORDER BY in the window (OVER (PARTITION BY a ORDER BY b)) |
 | `mixed-scale-numeric` | a numeric column whose values have several scales: an integer UNION ALL a numeric, lead(x, 1, 0) beside numeric(2,1) values, an unconstrained column holding 1 and 1.50 | each value its own scale: 1, 1.5 | one scale per column: 1.0, 1.5 | cast to numeric(p, s), or round(x, s) |
 | `unicode-16-case` | upper / lower of letters added in Unicode 16 | maps them (its own Unicode 16 tables) | leaves them as they are (DuckDB's ICU predates Unicode 16) | none needed for letters before Unicode 16 |
 | `float-last-digit` | stddev / variance of a float, and ln, log, exp, power of a double: the last digit may differ | its algorithm and its machine's libm | DuckDB's and its machine's: alike on some pairs of machines, apart in the 16th–17th digit on others | round(x::numeric, 12), or compare within a tolerance (abs(a - b) <= 1e-12 * abs(b)) |
@@ -85,6 +127,7 @@ Answered, but not as Postgres answers. Each is a decided difference the oracle c
 | `float-overflow` | exp / power of a double past its range, or so small it underflows | an error (22003) | Infinity, or 0 | bound the argument |
 | `min-max-scale-tie` | min / max of a numeric expression (a quotient) where equal values have different scales (0 / 7 and 0 / 1000000) | the last of them it reads, so the scan order decides the trailing zeros | the one whose operands are least (min) or greatest (max) | round(min(a / b), n) |
 | `numeric-stddev` | stddev / variance of DISTINCT integers or numerics, or of a numeric declared without a precision or with more than 18 digits: the last digits | exact numeric arithmetic, to its own scale | a double's 15 digits | round(stddev(x), 10) |
+| `jsonb-equal-text` | GROUP BY or DISTINCT of jsonb values that are equal but written apart ('1.0' and '1.00', '{"a": 1}' and '{"a": 1.0}') | one group, written as the value its plan reads first | one group, written as the value DuckDB reads first: either may be any of them | GROUP BY j::text where the text must decide |
 | `char-n-minmax` | greatest / least of a char(n) beside a text | compares without the padding, answers the first of equal values | compares the padded text | cast the char(n) to text first |
 | `nested-exact-numeric` | an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …) | exact digits at every step | the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x), it is exact | compute it in the outermost query, or round(…, n) inside |
 
@@ -102,7 +145,7 @@ Not about one statement: what the prototype cannot do yet.
 | `numeric-parameter` | a numeric parameter ($1) compared in a WHERE | exact | a double (exact to 15 digits) | a literal |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (987)
+## What is verified (993)
 
 ### Types (49)
 
@@ -400,7 +443,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function width_bucket(double precision,double precision,double precision,integer)
 - the function width_bucket(numeric,numeric,numeric,integer)
 
-### Operators (342)
+### Operators (347)
 
 - the operator !~(character,text)
 - the operator !~(text,text)
@@ -532,6 +575,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <(integer,integer)
 - the operator <(integer,smallint)
 - the operator <(interval,interval)
+- the operator <(jsonb,jsonb)
 - the operator <(numeric,numeric)
 - the operator <(real,double precision)
 - the operator <(real,real)
@@ -566,6 +610,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <=(integer,integer)
 - the operator <=(integer,smallint)
 - the operator <=(interval,interval)
+- the operator <=(jsonb,jsonb)
 - the operator <=(numeric,numeric)
 - the operator <=(real,double precision)
 - the operator <=(real,real)
@@ -598,6 +643,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <>(integer,integer)
 - the operator <>(integer,smallint)
 - the operator <>(interval,interval)
+- the operator <>(jsonb,jsonb)
 - the operator <>(numeric,numeric)
 - the operator <>(real,double precision)
 - the operator <>(real,real)
@@ -666,6 +712,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator >(integer,integer)
 - the operator >(integer,smallint)
 - the operator >(interval,interval)
+- the operator >(jsonb,jsonb)
 - the operator >(numeric,numeric)
 - the operator >(real,double precision)
 - the operator >(real,real)
@@ -698,6 +745,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator >=(integer,integer)
 - the operator >=(integer,smallint)
 - the operator >=(interval,interval)
+- the operator >=(jsonb,jsonb)
 - the operator >=(numeric,numeric)
 - the operator >=(real,double precision)
 - the operator >=(real,real)
@@ -1027,9 +1075,10 @@ Not about one statement: what the prototype cannot do yet.
 - an item of the SELECT list
 - an operator
 
-### Forms of a construct (85)
+### Forms of a construct (86)
 
 - AND
+- ARRAY(subquery)
 - CURRENT_DATE
 - CURRENT_TIMESTAMP
 - DISTINCT ON

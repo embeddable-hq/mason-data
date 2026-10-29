@@ -97,7 +97,8 @@ again and remove `mason/models/`.
 | `mason remove <table>…` | Takes tables out of the sources file — each one's entry, every other byte as it was — and Mason drops their copies: at once when it is running, else at the next `mason start`. Mason need not be running. |
 | `mason wait [--timeout <s>]` | Waits until every added table is copied and served, showing every added table on a line of its own: 100% for the finished ones, in the order they finished, and a bar for each still copying (rows, %, rate, time left) at the bottom. Exit 0 ready, 1 a copy failed (printed, with what to do), 124 timed out (default 600 s). |
 | `mason user add\|list\|remove <name>` | The users of the Postgres API: a name and a password that does not expire, as a BI tool's datasource form asks for them or an app's `DATABASE_URL` carries them. `add` prints the password once with the URL; `remove` refuses the next connection at once and ends the sessions it holds at their next statement, without a restart. |
-| `mason ui` | Opens the running Mason's web page in your browser: the Overview (what `mason status` says), the Tables (add, remove or sync one), the Users of `mason user` (add one, its password shown once; remove one) and Observability (the statements, usage over time, the sync's events), refreshed while the tab is open. It prints the URL with the run's token, which the page trades for a cookie on the first visit; `--no-open` prints it only, `--json` is `{ url, port }`. `mason start`'s alone: `mason serve` serves no page. |
+| `mason mcp [--url <url>]` | An MCP server on stdio for Claude Code, Claude Desktop and other agents (below): the tables Mason serves with each copy's rows and how current it is, a table's columns, a statement's rows with their Postgres types or Mason's refusal with its way out, and EXPLAIN — connected as a `mason user` (`MASON_URL`, else `--url`), beside `mason start` or a `mason serve` elsewhere. |
+| `mason ui` | Opens the running Mason's web page in your browser: the Overview (what `mason status` says), the Tables (add, remove or sync one), the Users of `mason user` (add one, its password shown once; disable, enable or remove one) and Observability (the statements, usage over time, the sync's events), refreshed while the tab is open. It prints the URL with the run's token, which the page trades for a cookie on the first visit; `--no-open` prints it only, `--json` is `{ url, port }`. `mason start`'s alone: `mason serve` serves no page. |
 | `mason status` | What Mason is doing: the database and how its changes are read, the project folder, the copy's file, the Postgres API and how it listens, each table's copy, the statements of the last day and week (each outcome, the completed ones' average, p50 and p95 time, the rows and bytes sent), the ones answered slowly in the last day and the ones refused or failed, each with its reason. In replication mode, where the stream is. |
 | `mason sync <table>…` | Makes the copy of these tables current now: a table over the sync's row limit (1,000,000 rows) is copied and served but kept current only so, or by replication. |
 | `mason logs [-n <lines>] [-f] [--start] [--requests [<filters>]] [--events [--failed]] [--running]` | Mason's log: every copy, poll and statement, with warnings and errors and their reasons; `-f` follows it, `--start` shows what `mason start` printed instead. `--requests` is the request log: every statement a tool sent, when, the outcome (ok, refused, failed, cancelled) and SQLSTATE, how long, the rows and bytes sent, the tool and the user; `--failed` only the ones not answered, `--outcome`, `--since` / `--until` (`2h`, `7d`, an ISO time), `--user` and `--client` narrow it, and `--before` reads the page before. `--events` is the sync's events: each copy, poll, catch-up or stream that failed, the database out of reach, a table current again, and each restart of the run (`--failed` only the failures). `--running` lists the statements running now, by session. |
@@ -108,7 +109,7 @@ again and remove `mason/models/`.
 | `mason serve` | Mason for a server or a container: `mason start --attach` configured by the environment alone, its state in one folder (a volume), its log on stdout, `GET /healthz`, a clean stop on SIGTERM. `mason serve --help` lists every setting with its default. |
 
 Every command documents itself: `mason --help` lists them, and `mason <command> --help` (or `mason help <command>`) says
-how to use one, with examples. Every command but `help` takes `--json`. A command means the project of the folder it
+how to use one, with examples. Every command but `help` and `mcp` (whose stdout is the MCP protocol's) takes `--json`. A command means the project of the folder it
 runs in, or the nearest one above it.
 
 ## What `mason start` does
@@ -160,7 +161,7 @@ what changed is written. A different database is refused: `mason destroy`, then 
 `mason help agent` is the page an agent reads first, offline: the commands in the order a project takes them, every
 answer's shape, the exit codes and the failure codes. In short:
 
-- Every command but `help` takes `--json` and answers with **one JSON object on stdout**, always with
+- Every command but `help` and `mcp` takes `--json` and answers with **one JSON object on stdout**, always with
   `next: [{ command, what }]` — the commands to run next, the same a person reads under `Next:`. The other keys are the
   command's own; `mason help <command>` names them on its `--json` line. Lists are wrapped (`{ tables: […], next }`).
 - A failure is `{ "error": { "code", "message", "why", "fix" }, "next": […] }` on stdout, and the **exit code** says it:
@@ -176,6 +177,53 @@ mason doctor --json && mason init --json && mason start --json
 mason tables --json                      # choose the tables
 mason add orders customers --json && mason wait --json
 mason user add app --json                # the password and URL for the app, as data
+```
+
+### From an MCP client: `mason mcp`
+
+A chat agent asks Mason with tools, over MCP, rather than through a shell. `mason mcp` is an MCP server on stdin and
+stdout (newline-delimited JSON-RPC; stdout carries the protocol alone, what it says goes to stderr) that serves until
+the client closes stdin; it takes no `--json`, and says a failure to start on stderr. It connects to the Postgres API as
+a `mason user`, by the URL `mason user add` printed — `MASON_URL`, or `--url` — so it works beside `mason start` as against a `mason serve` elsewhere; TLS is as the URL's `sslmode`
+says (a host off the machine: `require` when it names none). It never makes a user by itself: with no URL, it refuses
+and says `mason user add claude`.
+
+| Tool | Arguments | What it answers |
+|---|---|---|
+| `tables` | none | each table Mason serves, named as a statement writes it (`public.orders`, `public."Clients"`): `rows_about` (the copy's estimate), `kept` (how it is kept current, as `mason status` says it) and `kept_current_by` (`polling`, `logical replication`, `copying again`, or null when nothing keeps it current now) |
+| `describe` | `table` (as `tables` names it, or a bare name in `public`) | its columns with their Postgres types and NOT NULL, its primary key, its foreign keys, comments, and the same rows and `kept` |
+| `query` | `sql`, `max_rows` (200, at most 10,000), `timeout_ms` (30,000, at most 300,000) | `columns` (name, Postgres type), `rows` as Postgres's text, `truncated` when `max_rows` cut it; a refusal is a tool error with the SQLSTATE, message, DETAIL and HINT (the way out) |
+| `explain` | `sql`, `analyze`, `timeout_ms` | Mason's EXPLAIN: each copy read with its rows and how current it is, the SQL it runs, the plan |
+
+Its resources are `mason://help/agent` and `mason://help/mcp` (the two pages `mason help` prints). Every statement it
+runs is in the request log under `application_name` `mason-mcp/<the client's name>` (`mason logs --requests`), a query
+`max_rows` cut with the rows it sent; its catalog reads (the tables, a table's columns) are not, as no catalog read is.
+A request the client cancels (`notifications/cancelled`) cancels its statement on the Postgres API.
+
+Claude Code, in the project's folder with Mason running, the URL in the server's environment (the server's name
+comes before `--env`, which takes every value after it):
+
+```sh
+mason user add claude                    # the URL, printed once
+claude mcp add mason --env MASON_URL="postgres://claude:<password>@127.0.0.1:5433/shop" -- mason mcp
+# or on its command line, where ps shows it to this machine's users and claude mcp add prints it
+claude mcp add mason -- mason mcp --url "postgres://claude:<password>@127.0.0.1:5433/shop"
+```
+
+Claude Desktop, in `claude_desktop_config.json`. The app often starts a server without your shell's `PATH`, where
+neither `mason` nor the `node` its first line asks for is found: name both by their absolute paths (`which node`,
+`which mason`):
+
+```json
+{
+  "mcpServers": {
+    "mason": {
+      "command": "/absolute/path/to/node",
+      "args": ["/absolute/path/to/mason", "mcp"],
+      "env": { "MASON_URL": "postgres://claude:<password>@127.0.0.1:5433/shop" }
+    }
+  }
+}
 ```
 
 ## Cleaning up

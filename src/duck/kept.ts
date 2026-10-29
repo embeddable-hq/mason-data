@@ -30,10 +30,16 @@
  *   a NULL one, or `KEPT_RECOMPUTE` where it must be computed at read time (the function raised) — and a READY read is
  *   the column ALONE while it is EXACT (no row unset or `KEPT_RECOMPUTE`: `marked` 0), so DuckDB never reads the
  *   document; a path with marked rows is read through a CASE that computes them (src/duck/rewrite.ts `keptRead`). A
- *   row is unset after READY only through a write path that does not compute it, and `KEPT_RECOMPUTE` only for a
- *   document Postgres accepted and the function cannot read: Mason bugs both. The DETECTOR: every `CHECK_EVERY`
- *   reviews each READY column's unset and marked rows are counted; the RESPONSE: unset rows are filled, marked rows
- *   turn the path's reads back to the CASE (the generation moves), and either is said.
+ *   row is unset after READY only through a write path that does not compute it (a Mason bug); a row is marked
+ *   where its function raised — for a path, a document Postgres accepted and the function cannot read (a Mason bug);
+ *   for a jsonb's key under a libc collation, a string holding a character the measured order does not cover (the gap
+ *   `libc-uncovered`, which a stream or a poll may write at any time). A MARK WRITTEN AFTER THE COUNT is never read
+ *   as a value: the exact read raises at it by the column alone (src/duck/kept-route.ts `markedError`; the gap's
+ *   refusal for a libc key, else the bug's), so no write path — the poll's, the stream's, a side table's — has to
+ *   report its marks before it commits. The DETECTOR: every `CHECK_EVERY` reviews each READY column's unset and marked
+ *   rows are counted; the RESPONSE: unset rows are filled, marked rows turn the path's reads back to the CASE (the
+ *   generation moves), which computes them and raises the function's own error (the character named), and either is
+ *   said — a libc key's marks as the gap, any other as a bug (`markedText`).
  * - EVERY WRITE COMPUTES IT (`stored`, `storedSet`): the poll's write by key (src/duck/sync.ts `writeStaged`), the
  *   stream's insert by key and unchanged-TOAST update (`writeByKey`, `updateCarried`), and the copy — its side table
  *   filled before its swap (`fillSide`), so the column is never missing from the served table. A column is added only
@@ -41,12 +47,24 @@
  *   every write knows the columns of the table it writes.
  * - HIDDEN: a statement that lists a table's columns without naming them reads the copy's view of its visible columns
  *   (src/duck/kept-route.ts `hideKept`, `VISIBLE_CATALOG`); the catalog Postgres never knows the column.
+ * - A JSONB'S ORDER (src/duck/kept-route.ts `ORDER_STEPS`): `ORDER BY j`, `GROUP BY j`, `j = k` compare a key of the
+ *   whole document, stored as a read like a path's — a BLOB column of the key (`orderKeySql`), under the collation the
+ *   listener tells (`orderBy`): `ORDER_STEPS:<id>`, so a key of another collation is another column, dropped. Under a
+ *   LIBC collation equality reads the C key instead (src/duck/rewrite.ts `equalKey`), a read of its own
+ *   (`EQUAL_STEPS:<equalId>`): a SECOND column beside the order's, stored, filled, swept, marked and dropped exactly as
+ *   it is; under C and ICU the order's key serves equality, and no second column is ever made (`own`, `orderBy`).
  * - OFF (`enabled: false`, `.mason/config.json` `storeJsonPaths: false`, `MASON_STORE_JSON_PATHS=off` for a serve): at
  *   open every stored column is dropped and its row marked dropped, and nothing is recorded, stored or routed.
  */
 import type { DuckConnection } from "./executor.ts";
-import { MASON_SCHEMA, type DuckStore } from "./store.ts";
-import { canonicalRead, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, pathKey, pathText, readOfKey, VISIBLE_CATALOG, type JsonRead, type KeptRoutes, type ReadyPath } from "./kept-route.ts";
+import { DUCKDB_VERSION, MASON_SCHEMA, type DuckStore } from "./store.ts";
+import { createHash } from "node:crypto";
+import { canonicalRead, EQUAL_STEPS, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isEqualRead, isKeyRead, isOrderRead, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, knownSteps, ORDER_STEPS, pathKey,
+  pathText, readOfKey, VISIBLE_CATALOG,
+  type JsonRead, type KeptRoutes, type ReadyPath } from "./kept-route.ts";
+import { JSONB_KEY_FUNCTIONS, KEY_VERSION, libcUncovered, STORED_SUFFIX } from "./jsonb-order.ts";
+import { encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
+import { icuNameOf, type DuckCollation } from "./rewrite.ts";
 
 /** a path read by this many statements in the request log is stored (a larger table's also needs `KEEP_FILL_SHARE`) */
 export const KEEP_AFTER_STATEMENTS = 3;
@@ -105,6 +123,8 @@ const MEASURE_AGAIN_MS = 10 * 60_000;
 export const BACKFILL_ROWS = 50_000;
 /** how often the request log is read for new paths, and backfills continued */
 export const REVIEW_MS = 10_000;
+/** the marked rows whose documents are read to say what they are (`markedText`) */
+const MARKS_READ = 10_000;
 /** every this many reviews, each READY column's unset rows are counted (the detector) */
 const CHECK_EVERY = 6;
 
@@ -204,6 +224,53 @@ export function keptValueSql(p: Omit<JsonRead, "asText">, value: string): string
   return `coalesce(__mason_json_kept(NULL, ${value}, ${literal(p.steps)}, ${p.either}, ${p.canonical}, false), ${NULL_SQL})`;
 }
 
+/**
+ * A JSONB'S STORED KEY, from its column's `value` (src/duck/kept-route.ts `ORDER_STEPS`): the key the statement would
+ * compute (src/duck/rewrite.ts `jsonbKeyCall`), by the same functions (src/duck/jsonb-order.ts `JSONB_KEY_FUNCTIONS`,
+ * their stored twins), never NULL — `KEY_NULL_HEX` for a NULL document (the column's NULL is a row not stored yet), and
+ * `KEY_RECOMPUTE_HEX` where the key raised, which its read computes (and raises) again.
+ */
+export function orderKeySql(c: DuckCollation, value: string): string {
+  const call = (name: string, ...args: string[]): string => `${name}${STORED_SUFFIX}(NULL, ${args.join(", ")})`;
+  const key = c.kind === "bytes" ? call(JSONB_KEY_FUNCTIONS.bytes.key, value)
+    : call(JSONB_KEY_FUNCTIONS[c.kind].key, value, `list_transform(${call(JSONB_KEY_FUNCTIONS[c.kind].strings, value)}, __mason_s -> icu_sort_key(__mason_s, ${literal(icuNameOf(c))}))`);
+  return `CASE WHEN (${value}) IS NULL THEN unhex('${KEY_NULL_HEX}') ELSE coalesce(${key}, unhex('${KEY_RECOMPUTE_HEX}')) END`;
+}
+
+/**
+ * A STORED KEY'S ID in its `steps` (`ORDER_STEPS:<id>`): what its bytes depend on, so a key is read only where the
+ * statement's own key would be the same bytes — its collation (a libc one by its measured order's content: a glibc
+ * whose order moved is another collation), the key's encoding (`KEY_VERSION`) and the DuckDB whose ICU made its strings'
+ * keys (`DUCKDB_VERSION`: an upgrade may bring another ICU). Another id is another column, dropped at `orderBy`.
+ */
+export function orderId(c: DuckCollation, libc: LibcOrder | undefined, versions = `k${KEY_VERSION}:${DUCKDB_VERSION}`): string {
+  if (c.kind === "bytes") return `c:${versions}`;
+  if (c.kind === "icu") return `icu:${c.name}:${versions}`;
+  if (libc === undefined) throw new Error("a libc collation's order was not read (Mason bug: report it)");
+  return `libc:${c.icu}:${createHash("sha256").update(encodeLibcOrder(libc)).digest("hex").slice(0, 16)}:${versions}`;
+}
+
+/**
+ * THE C KEY'S ID, stored under a libc collation for equality (`EQUAL_STEPS:<id>`, src/duck/kept-route.ts): the C
+ * collation's order id (`orderId`), so with the key's encoding (`KEY_VERSION`) and the DuckDB (`DUCKDB_VERSION`) in it,
+ * as an order key's — a release that changes either stores it again. The libc order is not in it: the C key reads no
+ * collation, so a glibc whose order moved keeps it.
+ */
+export function equalId(versions?: string): string {
+  return versions === undefined ? orderId({ kind: "bytes" }, undefined) : orderId({ kind: "bytes" }, undefined, versions);
+}
+
+/** a stored column's type, and its mark of a value computed at read time, as SQL */
+const columnType = (p: { steps: string }): string => isKeyRead(p) ? "BLOB" : "VARCHAR";
+const recomputeSql = (p: { steps: string }): string => isKeyRead(p) ? `unhex('${KEY_RECOMPUTE_HEX}')` : RECOMPUTE_SQL;
+
+/** what a fill's measured rate is kept by (`estimate`, `lastRate`): the JSON column, and whether the fill computes a path,
+ *  a jsonb's order key or its C key — a key's function is not a path's (a list of strings, their ICU keys, the key's
+ *  bytes), nor a libc order's key the C key's (4.7 µs a row against 1.4, docs/DESIGN.md "jsonb's order"), so one's
+ *  rate is no evidence for another's */
+const measuredKey = (r: { source: string; column: string; steps: string }): string =>
+  `${r.source}\u0000${r.column}\u0000${isOrderRead(r) ? "order" : isEqualRead(r) ? "equal" : "path"}`;
+
 /** a read as its stored path's `->` read (src/duck/kept-route.ts pathKey): what the ledger holds */
 export const pathOf = (r: JsonRead): JsonRead => ({ ...canonicalRead(r), asText: false });
 
@@ -296,13 +363,72 @@ export class KeptJsonPaths implements KeptRoutes {
 
   // --------------------------------------------------------------------------------------------- what a plan reads
 
-  ready(read: JsonRead): ReadyPath | null {
+  ready(asked: JsonRead): ReadyPath | null {
     if (!this.enabled) return null;
+    const read = this.own(asked);
     const p = this.paths.get(hiddenName(read));
     return p !== undefined && p.state === "ready" && pathKey(p) === pathKey(read) ? { name: p.name, exact: p.marked === 0 } : null;
   }
   visible(): ReadonlySet<string> { return this.views; }
   generation(): number { return this.gen; }
+
+  // --------------------------------------------------------------------------------------------- a jsonb's order
+
+  /** the collation a jsonb's key is stored under (`orderBy`), and its id (`orderId`); null until told */
+  private order: { id: string; collation: DuckCollation; libc: LibcOrder | undefined } | null = null;
+
+  /**
+   * A READ AS THIS KEEPER STORES IT: a jsonb's order (`ORDER_STEPS`) under the collation it was told; its equality
+   * (`EQUAL_STEPS`) as the C key (`equalId`) under a libc collation, and under C or ICU as the ORDER's read — the order's
+   * key equates there, so one column serves both and no second is ever made; any other read as it is.
+   */
+  private own(r: JsonRead): JsonRead {
+    if (isEqualRead(r) && this.order !== null && this.order.collation.kind !== "libc") return { ...r, steps: `${ORDER_STEPS}:${this.order.id}` };
+    if (isEqualRead(r)) return { ...r, steps: `${EQUAL_STEPS}:${this.order === null ? "?" : equalId()}` };
+    return isOrderRead(r) ? { ...r, steps: `${ORDER_STEPS}:${this.order?.id ?? "?"}` } : r;
+  }
+
+  /** the steps a stored key would have now (`orderBy`): the order's under the collation told, the C key's under a libc
+   *  one (none under C or ICU: the order's key serves); null until told */
+  private nowSteps(p: { steps: string }): string | null {
+    if (this.order === null) return null;
+    if (isEqualRead(p)) return this.order.collation.kind === "libc" ? `${EQUAL_STEPS}:${equalId()}` : null;
+    return `${ORDER_STEPS}:${this.order.id}`;
+  }
+
+  /** a stored key of the collation statements sort and equate by now (`orderBy`): computed by writes and read by plans */
+  private current(p: { steps: string }): boolean { const now = this.nowSteps(p); return now !== null && p.steps === now; }
+
+  /**
+   * THE COLLATION, TOLD (src/duck/store.ts `listener`, once the source's is known): a jsonb's stored key is that
+   * collation's. Until then a stored key is written unset and read by no plan (`open`); now the keys of another
+   * collation (the source's changed, or its glibc's order moved) are dropped, and those of this one filled where a
+   * write left them unset — the backfill's sweep — and ready again.
+   */
+  async orderBy(collation: DuckCollation, libc: LibcOrder | undefined): Promise<void> {
+    if (!this.enabled) return;
+    const id = orderId(collation, libc);
+    await this.host.onWriter(async () => {
+      this.order = { id, collation, libc };
+      for (const p of [...this.paths.values()].filter((x) => isKeyRead(x) && !this.current(x) && (x.state === "backfilling" || x.state === "ready"))) {
+        const was = p.steps.slice(p.steps.indexOf(":") + 1), now = this.nowSteps(p);
+        await this.drop(this.store.writer, p, now === null
+          ? `the database's collation is no longer a libc one (now ${id}): its order's key equates jsonb, so equality reads that one`
+          : `stored under another collation or version (${was}, now ${now.slice(now.indexOf(":") + 1)}); stored again when its reads ask for it`);
+        this.host.log(`${p.source}: ${pathText(p)} is no longer stored: ${p.why}`);
+      }
+    });
+    void this.fills();
+  }
+
+  /** what a stored column takes from its JSON column's `value`: a path's `->` answer (`keptValueSql`), a jsonb's order
+   *  key (`orderKeySql` under the collation told), or its C key (`orderKeySql` under C) — unset (NULL) while the key is
+   *  not the one told (`orderBy`): the sweep fills it */
+  private valueSql(p: KeptPath, value: string): string {
+    if (!isKeyRead(p)) return keptValueSql(p, value);
+    if (!this.current(p)) return "NULL";
+    return orderKeySql(isEqualRead(p) ? { kind: "bytes" } : this.order!.collation, value);
+  }
 
   /** every path with a row, for `mason status` */
   status(): KeptPathStatus[] {
@@ -316,12 +442,12 @@ export class KeptJsonPaths implements KeptRoutes {
    *  write of whole rows names after the copy's own columns */
   stored(source: string, valueOf: (column: string) => string): { names: string[]; values: string[] } {
     const kept = this.physical(source);
-    return { names: kept.map((p) => p.name), values: kept.map((p) => keptValueSql(p, valueOf(p.column))) };
+    return { names: kept.map((p) => p.name), values: kept.map((p) => this.valueSql(p, valueOf(p.column))) };
   }
 
   /** what an UPDATE that sets `carried` sets too: each stored column read from one of them, from its new value */
   storedSet(source: string, carried: readonly string[], valueOf: (column: string) => string): string[] {
-    return this.physical(source).filter((p) => carried.includes(p.column)).map((p) => `${ident(p.name)} = ${keptValueSql(p, valueOf(p.column))}`);
+    return this.physical(source).filter((p) => carried.includes(p.column)).map((p) => `${ident(p.name)} = ${this.valueSql(p, valueOf(p.column))}`);
   }
 
   private physical(source: string): KeptPath[] {
@@ -352,6 +478,13 @@ export class KeptJsonPaths implements KeptRoutes {
           basis: isBasis(fillBasis) ? fillBasis : "text", rowsPerSecond: fillRate === null || fillRate === undefined ? null : Number(fillRate) },
         filled: filledRows === null || filledRows === undefined || filledSeconds === null || filledSeconds === undefined ? null : { rows: Number(filledRows), seconds: Number(filledSeconds) } });
     }
+    // a row of a kind this Mason does not know (another release's: `knownSteps`) is dropped, its column with it (no
+    // write here could compute it, and none names it once dropped), and said with its steps: inert, never fatal
+    for (const p of this.paths.values()) {
+      if (p.state === "dropped" || knownSteps(p.steps)) continue;
+      await this.drop(w, p, `stored by another release as ${p.steps}, a kind this Mason does not know`);
+      this.host.log(`${p.source}: dropped the stored ${p.column} of a kind this Mason does not know (${p.steps}); its column goes at this start`);
+    }
     // a path an earlier Mason stored in another form (a column per spelling or per `->>`, its rows' marks other): its
     // name is not its path's (`hiddenName`), so it is dropped with its column, and stored again as the policy says
     const earlier = "stored by an earlier Mason in another form; stored again when its reads ask for it";
@@ -381,6 +514,13 @@ export class KeptJsonPaths implements KeptRoutes {
       if (p.state === "dropped" || p.state === "waiting" || named.has(`${p.source}\u0000${p.name}`)) continue;
       await this.drop(w, p, "its column is not in the copy");
     }
+    // a jsonb's stored key is its collation's, told after this (`orderBy`): until then a write leaves it unset and no
+    // plan reads it, so a ready one is filled again where unset first — the backfill's sweep alone (its ranges are done)
+    for (const p of this.paths.values()) {
+      if (!isKeyRead(p) || p.state !== "ready") continue;
+      p.state = "backfilling";
+      this.cursors.set(p.name, Number.MAX_SAFE_INTEGER);
+    }
     await w.run(`ATTACH IF NOT EXISTS ':memory:' AS ${VISIBLE_CATALOG}`);
     for (const source of this.host.served().keys()) await this.view(source);
     if (this.reviewMs > 0 && !this.eager) {
@@ -399,7 +539,9 @@ export class KeptJsonPaths implements KeptRoutes {
     this.reader = null;
   }
 
-  /** a path's row marked dropped, with why (on the caller's connection and turn) */
+  /** a path's row marked dropped, with why (on the caller's connection and turn). Its COLUMN stays in the table until
+   *  the next start, whose reconciling of the file with the ledger (`open`, "a column with no row") drops it: every
+   *  write names only the stored columns (`stored`), and DuckDB's DROP COLUMN rewrites the table */
   private async drop(c: DuckConnection, p: KeptPath, why: string): Promise<void> {
     await c.run(`UPDATE ${PATHS_TABLE} SET state = 'dropped', why = ${literal(why)} WHERE name = ${literal(p.name)}`);
     if (p.state === "ready") this.gen++;
@@ -444,14 +586,14 @@ export class KeptJsonPaths implements KeptRoutes {
     if (!this.enabled) return;
     for (const p of this.physical(source).filter((x) => columns.includes(x.column))) {
       // no default: its NULL is "not stored yet", and an ADD COLUMN writes nothing into the rows (`keep`)
-      await c.run(`ALTER TABLE ${side} ADD COLUMN IF NOT EXISTS ${ident(p.name)} VARCHAR`);
+      await c.run(`ALTER TABLE ${side} ADD COLUMN IF NOT EXISTS ${ident(p.name)} ${columnType(p)}`);
       const end = Number((await c.runAndReadAll(`SELECT coalesce(max(rowid), -1) + 1 FROM ${side}`)).getRowsJS()[0]![0]);
       for (let lo = 0; lo < end; lo += this.backfillRows) {
-        await run(`UPDATE ${side} SET ${ident(p.name)} = ${keptValueSql(p, ident(p.column))} WHERE rowid >= ${lo} AND rowid < ${lo + this.backfillRows} AND ${ident(p.name)} IS NULL`);
+        await run(`UPDATE ${side} SET ${ident(p.name)} = ${this.valueSql(p, ident(p.column))} WHERE rowid >= ${lo} AND rowid < ${lo + this.backfillRows} AND ${ident(p.name)} IS NULL`);
       }
       // rows the column cannot answer alone (KEPT_RECOMPUTE) turn its reads to the CASE before the side table serves;
       // counted again once it does (`swapped`)
-      const marked = Number((await c.runAndReadAll(`SELECT count(*) FROM ${side} WHERE ${ident(p.name)} = ${RECOMPUTE_SQL}`)).getRowsJS()[0]![0]);
+      const marked = Number((await c.runAndReadAll(`SELECT count(*) FROM ${side} WHERE ${ident(p.name)} = ${recomputeSql(p)}`)).getRowsJS()[0]![0]);
       if (marked > p.marked) { if (p.marked === 0 && p.state === "ready") this.gen++; p.marked = marked; }
     }
   }
@@ -517,7 +659,7 @@ export class KeptJsonPaths implements KeptRoutes {
     for (const [key, statement, ms] of rows) {
       const read = readOfKey(key);
       if (read === null) continue;
-      const path = pathOf(read), k = pathKey(path);
+      const path = this.own(pathOf(read)), k = pathKey(path);
       let e = by.get(k);
       if (e === undefined) by.set(k, e = { read: path, statements: new Map() });
       e.statements.set(statement, Number(ms));
@@ -537,13 +679,13 @@ export class KeptJsonPaths implements KeptRoutes {
   private readonly measured = new Map<string, { at: number; fill: FillEstimate }>();
   private async estimate(read: JsonRead): Promise<FillEstimate> {
     if (this.estimateFor !== undefined) return this.estimateFor(read);
-    const key = `${read.source}\u0000${read.column}`;
+    const key = measuredKey(read);
     const was = this.measured.get(key);
     if (was !== undefined && Date.now() - was.at < MEASURE_AGAIN_MS) return was.fill;
     this.reader ??= await this.store.instance.connect();
     const target = tableOf(read.source);
     const rows = Number((await this.reader.runAndReadAll(`SELECT count(*) FROM ${target}`)).getRowsJS()[0]![0]);
-    const rate = this.lastRate(read.source, read.column, rows);
+    const rate = this.lastRate(read, rows);
     let fill: FillEstimate;
     if (rate !== null) fill = measuredEstimate(rows, rate);
     else {
@@ -559,12 +701,12 @@ export class KeptJsonPaths implements KeptRoutes {
     return fill;
   }
 
-  /** the rows a second of the last fill of a JSON column (any path of it) that is evidence for a table of `rows` now
-   *  (`MEASURED_MIN_ROWS`, `MEASURED_SPAN`), or null */
-  private lastRate(source: string, column: string, rows: number): number | null {
+  /** the rows a second of the last fill of a JSON column (any path of it; a jsonb's key by a key's fill alone) that is
+   *  evidence for a table of `rows` now (`MEASURED_MIN_ROWS`, `MEASURED_SPAN`), or null */
+  private lastRate(read: JsonRead, rows: number): number | null {
     let last: KeptPath | null = null;
     for (const p of this.paths.values()) {
-      if (p.source !== source || p.column !== column || p.filled === null || p.filled.seconds <= 0 || p.filled.rows < MEASURED_MIN_ROWS) continue;
+      if (measuredKey(p) !== measuredKey(read) || p.filled === null || p.filled.seconds <= 0 || p.filled.rows < MEASURED_MIN_ROWS) continue;
       if (rows > MEASURED_SPAN * p.filled.rows) continue;
       if (last === null || (p.readyAt ?? "") > (last.readyAt ?? "")) last = p;
     }
@@ -666,10 +808,14 @@ export class KeptJsonPaths implements KeptRoutes {
   private storable(read: JsonRead): boolean {
     const cols = this.host.served().get(read.source);
     if (cols === undefined || !this.views.has(read.source) || this.host.rebuilding(read.source)) return false;
+    // a jsonb's key waits for its collation (`orderBy`, at the listener's start), and its C key is stored under a libc
+    // one alone (`own` folds it into the order's elsewhere): nothing to say
+    if (isKeyRead(read) && !this.current(read)) return false;
     const name = hiddenName(read);
     const col = cols.find((c) => c.name === read.column);
     const why = col === undefined ? `${read.column} is not a column of the copy`
       : !/^jsonb?$/.test(col.type) ? `${read.column} is a ${col.type}, not a json or jsonb`
+      : isKeyRead(read) && col.type !== "jsonb" ? `${read.column} is a ${col.type}, which has no order or equality (a jsonb's is stored)`
       : cols.some((c) => c.name.toLowerCase() === name) ? `the copy has a column named ${name} of its own` : null;
     if (why === null) return true;
     const key = pathKey(read);
@@ -726,7 +872,7 @@ export class KeptJsonPaths implements KeptRoutes {
       const target = tableOf(read.source);
       await w.run("BEGIN TRANSACTION");
       try {
-        await w.run(`ALTER TABLE ${target} ADD COLUMN ${ident(name)} VARCHAR`);
+        await w.run(`ALTER TABLE ${target} ADD COLUMN ${ident(name)} ${columnType(read)}`);
         const rows = Number((await w.runAndReadAll(`SELECT count(*) FROM ${target}`)).getRowsJS()[0]![0]);
         const p: KeptPath = { ...pathOf(read), name, state: "backfilling", rowsTotal: rows, rowsDone: 0, statements: c.statements, slowestMs: c.slowestMs, totalMs: c.totalMs,
           fill, filled: null, marked: 0, keptAt: new Date().toISOString(), readyAt: null, why };
@@ -748,6 +894,8 @@ export class KeptJsonPaths implements KeptRoutes {
   /** a backfill continued to its end, a chunk a writer's turn (paused while its table is rebuilt: the next review goes
    *  on), then the path made ready once no row of it is unset — and read by its column alone once none is marked */
   private async backfill(p: KeptPath): Promise<void> {
+    // a jsonb's key waits for its collation (`orderBy`): its rows would be filled unset
+    if (isKeyRead(p) && !this.current(p)) return;
     const target = tableOf(p.source);
     const end = await this.host.onWriter(async () => Number((await this.store.writer.runAndReadAll(`SELECT coalesce(max(rowid), -1) + 1 FROM ${target}`)).getRowsJS()[0]![0]));
     // what this fill measures: the rows its chunks filled and the time they held the writer (never the waits for its
@@ -764,27 +912,55 @@ export class KeptJsonPaths implements KeptRoutes {
       });
       if (!done) return;
     }
-    await this.host.onWriter(async () => {
-      if (this.stopped || this.host.rebuilding(p.source) || p.state !== "backfilling") return;
-      // what the ranges did not reach (a row whose rowid moved), by the mark itself
-      while (await this.fillChunk(p, `rowid IN (SELECT rowid FROM ${target} WHERE ${ident(p.name)} IS NULL LIMIT ${this.backfillRows}) AND `) > 0);
-      p.marked = await this.markedRows(p);
-      Object.assign(p, { state: "ready", readyAt: new Date().toISOString(), filled: rows > 0 && ms > 0 ? { rows, seconds: ms / 1000 } : p.filled });
-      await this.record(this.store.writer, p);
-      this.cursors.delete(p.name);
-      this.measured.delete(`${p.source}\u0000${p.column}`);
-      this.gen++;
-    });
+    // THE SWEEP: what the ranges did not reach (a row whose rowid moved, a row a write left unset while a jsonb's
+    // collation was not told), by the mark itself — a chunk a writer's turn, as the ranges are; the turn whose chunk
+    // finds none unset makes the path ready (every write computes it from then on, so none is left unset after it)
+    for (;;) {
+      const swept = await this.host.onWriter(async () => {
+        if (this.stopped || this.host.rebuilding(p.source) || p.state !== "backfilling") return "paused";
+        if (await this.fillChunk(p, `rowid IN (SELECT rowid FROM ${target} WHERE ${ident(p.name)} IS NULL LIMIT ${this.backfillRows}) AND `) > 0) return "more";
+        p.marked = await this.markedRows(p);
+        Object.assign(p, { state: "ready", readyAt: new Date().toISOString(), filled: rows > 0 && ms > 0 ? { rows, seconds: ms / 1000 } : p.filled });
+        await this.record(this.store.writer, p);
+        this.cursors.delete(p.name);
+        this.measured.delete(measuredKey(p));
+        this.gen++;
+        return "ready";
+      });
+      if (swept !== "more") break;
+    }
     if (p.state === "ready") {
       const took = rows > 0 && ms > 0 ? `, ${rows.toLocaleString("en-US")} by this fill in ${spanText(ms / 1000)}${p.fill === null ? "" : `, estimated at ${spanText(p.fill.seconds)} (${p.fill.basis === "measured" ? "from the last fill" : "modelled"})`}` : "";
       this.host.log(`${p.source}: ${pathText(p)} is stored: statements read it from its column (${p.rowsDone.toLocaleString("en-US")} row(s) filled${took})` +
-        (p.marked > 0 ? `; ${p.marked.toLocaleString("en-US")} row(s) its function could not read are computed from their document when read (a Mason bug: report it, with mason logs)` : ""));
+        (p.marked > 0 ? `; ${await this.markedText(p, p.marked)}` : ""));
     }
+  }
+
+  /**
+   * WHAT A PATH'S MARKED ROWS ARE, in words (the fill's end, the detector): a jsonb's key under a libc collation is
+   * marked where a string holds a character the measured order does not cover — the gap its sort is refused by
+   * (`libc-uncovered`), told apart by reading the marked rows' documents (`libcUncovered`, at most `MARKS_READ` of
+   * them); any other mark is a row its function could not read, a Mason bug.
+   */
+  private async markedText(p: KeptPath, marked: number): Promise<string> {
+    let uncovered = 0, read = marked;
+    const libc = this.order?.libc;
+    if (isOrderRead(p) && this.current(p) && libc !== undefined) {
+      const docs = await this.host.onWriter(async () => (await this.store.writer.runAndReadAll(`SELECT ${ident(p.column)}::VARCHAR FROM ${tableOf(p.source)} ` +
+        `WHERE ${ident(p.name)} = ${recomputeSql(p)} LIMIT ${MARKS_READ}`)).getRowsJS() as Array<[string | null]>);
+      read = docs.length;
+      uncovered = docs.filter(([d]) => d !== null && libcUncovered(libc, d)).length;
+    }
+    const of = read < marked ? ` (of the first ${read.toLocaleString("en-US")} read, of ${marked.toLocaleString("en-US")})` : "";
+    const said: string[] = [];
+    if (uncovered > 0) said.push(`${uncovered.toLocaleString("en-US")} row(s) hold a character the database's libc order is not measured for, so a sort of them is refused by name (Mason gap libc-uncovered)`);
+    if (read > uncovered) said.push(`${(read - uncovered).toLocaleString("en-US")} row(s) its function could not read are computed from their document when read (a Mason bug: report it, with mason logs)`);
+    return said.join("; ") + of;
   }
 
   /** a column's rows marked to be computed at read time (KEPT_RECOMPUTE), on the caller's turn */
   private async markedRows(p: KeptPath): Promise<number> {
-    return Number((await this.store.writer.runAndReadAll(`SELECT count(*) FROM ${tableOf(p.source)} WHERE ${ident(p.name)} = ${RECOMPUTE_SQL}`)).getRowsJS()[0]![0]);
+    return Number((await this.store.writer.runAndReadAll(`SELECT count(*) FROM ${tableOf(p.source)} WHERE ${ident(p.name)} = ${recomputeSql(p)}`)).getRowsJS()[0]![0]);
   }
 
   /** a READY path's marked rows counted again (its table swapped in, the detector): a change of exactness moves the
@@ -804,7 +980,7 @@ export class KeptJsonPaths implements KeptRoutes {
     const w = this.store.writer;
     await w.run("BEGIN TRANSACTION");
     try {
-      const n = Number((await w.run(`UPDATE ${tableOf(p.source)} SET ${ident(p.name)} = ${keptValueSql(p, ident(p.column))} WHERE ${where}${ident(p.name)} IS NULL`)).rowsChanged);
+      const n = Number((await w.run(`UPDATE ${tableOf(p.source)} SET ${ident(p.name)} = ${this.valueSql(p, ident(p.column))} WHERE ${where}${ident(p.name)} IS NULL`)).rowsChanged);
       await w.run(`UPDATE ${PATHS_TABLE} SET rows_done = rows_done + ${n} WHERE name = ${literal(p.name)}`);
       await w.run("COMMIT");
       p.rowsDone += n;
@@ -818,8 +994,8 @@ export class KeptJsonPaths implements KeptRoutes {
   /** THE DETECTOR: a READY column's rows still unset (a write that did not compute it: a Mason bug), filled and said;
    *  and its marked rows counted again (`settle`) */
   private async check(p: KeptPath): Promise<void> {
-    await this.host.onWriter(async () => {
-      if (this.stopped || this.host.rebuilding(p.source) || p.state !== "ready") return;
+    const marked = await this.host.onWriter(async (): Promise<number> => {
+      if (this.stopped || this.host.rebuilding(p.source) || p.state !== "ready") return 0;
       const unset = Number((await this.store.writer.runAndReadAll(`SELECT count(*) FROM ${tableOf(p.source)} WHERE ${ident(p.name)} IS NULL`)).getRowsJS()[0]![0]);
       if (unset > 0) {
         this.host.log(`${p.source}: ${unset} row(s) were written without the stored value of ${pathText(p)} (a Mason bug: report it, with mason logs); they are filled now`);
@@ -827,14 +1003,16 @@ export class KeptJsonPaths implements KeptRoutes {
       }
       const was = p.marked;
       await this.settle(p);
-      if (p.marked > was) this.host.log(`${p.source}: ${p.marked} row(s) of ${pathText(p)} could not be read by its function (a Mason bug: report it, with mason logs); its reads compute them from their document`);
+      return p.marked > was ? p.marked : 0;
     });
+    // (the words read the table again on a writer's turn of their own, never inside the detector's)
+    if (marked > 0) this.host.log(`${p.source}: ${pathText(p)} has marked rows, read through their document from now on: ${await this.markedText(p, marked)}`);
   }
 
   /** THE ORACLE'S (`eager`): every read's path stored and filled now, whatever the request log says */
   private async keepAll(reads: readonly JsonRead[]): Promise<void> {
     for (const r of reads) {
-      const read = pathOf(r);
+      const read = this.own(pathOf(r));
       const name = hiddenName(read);
       if (this.paths.get(name)?.state === "ready" || !this.storable(read)) continue;
       if (this.paths.get(name)?.state !== "backfilling") await this.keep(read, { statements: 0, slowestMs: 0, totalMs: 0 }, null, "stored at once (eager)");
