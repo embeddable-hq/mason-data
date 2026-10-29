@@ -66,7 +66,12 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     scan); and an order-sensitive aggregate or window (string_agg, array_agg, row_number …) with no ORDER BY of its
     own. Decided in a pre-pass over the whole statement (the walk meets a CTE before the SELECT that reads it). Bounding
     too much costs time, too little an answer; where DuckDB itself falls back to the delimiter join under a filter it
-    does not push down, the difference is registered (`limit-lateral-filter`, `row-limit-on-the-wire`);
+    does not push down, the difference is registered (`limit-lateral-filter`). **A row count an Execute sets on the
+    wire is a bound the Parse's plan cannot see**: the plan says where a lateral was left joined that such a bound
+    would stream (`PlannedSql.unboundedLateral`, the pre-pass run again with the outermost SELECT bounded — never a
+    re-parse), and the portal's first Execute with a row count runs the statement planned again with `wireBound`
+    (`Session.boundOnWire`), under its Parse's settings, kept on the statement and in the plans by text; a suspended
+    portal reads on from its one result, never re-runs (`tests/duck-wire.test.ts` "an Execute's row count");
   - **equivalent order keys are canonicalised: `x IS [NOT] NULL, x` is one key on `x` with its NULLS placed**
     (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
     Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's

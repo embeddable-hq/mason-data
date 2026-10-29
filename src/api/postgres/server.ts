@@ -192,8 +192,10 @@ export interface DuckOptions {
   /** Postgres's analysis (in the catalog Postgres, through `catalog`) and the DuckDB SQL; throws a StatementError for
    *  a statement Postgres refuses or DuckDB cannot answer alike */
   /** `timeZone`: the session's, which Postgres parses a literal under (a plan holds the values it parsed) */
+  /** `wireBound`: the statement's rows are bounded by an Execute's row count (PlannedSql.unboundedLateral): planned as
+   *  a LIMIT over its outermost SELECT would be, with no LIMIT in its SQL */
   plan(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: NonNullable<RawStmt["stmt"]>, base: number, paramOids: readonly number[], searchPath: string,
-    timeZone: string, userTypes: ReadonlyMap<string, number>): Promise<DuckPlan>;
+    timeZone: string, userTypes: ReadonlyMap<string, number>, wireBound?: boolean): Promise<DuckPlan>;
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], timeZone: string): Promise<(string | null)[]>;
@@ -449,6 +451,12 @@ interface Statement {
   catalogName: string | null;
   /** a DuckDB statement's plan, made at Parse */
   duck?: DuckPlan;
+  /** the session's search_path and TimeZone it was planned under at its Parse: a plan made again for it is made
+   *  under them, never a later SET's */
+  plannedUnder?: { searchPath: string; timeZone: string };
+  /** its plan for an Execute with a row count, made at the first such Execute when its plan has a LEFT lateral only
+   *  a bound streams (PlannedSql.unboundedLateral, `boundOnWire`) */
+  duckOnWire?: DuckPlan;
   /** an EXPLAIN of a DuckDB statement: its options and that statement's plan, made at Parse */
   explain?: { options: ExplainOptions; plan: DuckPlan };
   /** an EXPLAIN of a catalog statement (the sidecar's): its options, for the line its rows begin with */
@@ -1029,13 +1037,52 @@ class Session {
 
   /** A DuckDB statement's plan (Postgres's analysis and the DuckDB SQL), kept per text, search_path, TimeZone and
    *  declared parameter types until the schema changes. Every statement DuckDB runs has one: never its text as written. */
-  private async duckPlan(raw: RawStmt, whole: string, paramOids: readonly number[]): Promise<DuckPlan> {
+  private async duckPlan(raw: RawStmt, whole: string, paramOids: readonly number[], under: { searchPath: string; timeZone: string } = this.vars, wireBound = false): Promise<DuckPlan> {
     const stmt = raw.stmt!;
     const bytes = Buffer.from(whole, "utf8");
     const base = raw.stmt_location ?? 0;
     const text = bytes.subarray(base, raw.stmt_len ? base + raw.stmt_len : bytes.length).toString("utf8");
-    return this.server.duckPlan(text, paramOids, this.vars.searchPath, this.vars.timeZone, () =>
-      this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, this.vars.searchPath, this.vars.timeZone, this.server.userTypes()));
+    const { searchPath, timeZone } = under;
+    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, () =>
+      this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound));
+  }
+
+  /**
+   * A ROW COUNT ON THE WIRE IS A BOUND THE PLAN AT PARSE COULD NOT SEE (docs/DESIGN.md "A LEFT lateral of a list"): an
+   * Execute's row count (JDBC's setMaxRows or fetch size, DBeaver's, a native question's) arrives after the Parse, so a
+   * LEFT lateral of a list with no LIMIT in its SQL was left DuckDB's delimiter join, which reads the whole base before
+   * the first row and hands its rows back in its own order — the first rows sent were not Postgres's. Where the plan
+   * says such a lateral was left so (PlannedSql.unboundedLateral), the statement is planned again with the bound
+   * asserted, under the search_path and TimeZone of its Parse, kept on the statement and in the plans by text. The
+   * portal's result is begun ONCE, from whichever plan its first Execute picked; an Execute after a PortalSuspended
+   * reads on from that result, never runs it again. A plan made again over a schema moved since the Parse, whose
+   * result or parameters are not the ones the Parse described, is not run: the Parse's plan is (what a client was told
+   * of the result stands). Planning again is the statement's own time: a CancelRequest landing meanwhile aborts its
+   * controller (`running`, answered 57014 as the statement begins), and a session closed meanwhile runs nothing. A
+   * plan made again that Postgres or the rewrite refuses (a StatementError, never a cancel's or a timeout's 57014) is
+   * logged and the Parse's plan runs, kept: the Parse answered, and a row count must not make it fail.
+   */
+  private async boundOnWire(statement: Statement, plan: DuckPlan, controller: AbortController): Promise<DuckPlan> {
+    if (plan.sql.unboundedLateral !== true || statement.raw === null) return plan;
+    if (statement.duckOnWire === undefined) {
+      this.running = controller;
+      let bounded: DuckPlan;
+      try { bounded = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.vars, true); }
+      catch (e) {
+        if (!(e instanceof StatementError) || e.fields.code === "57014") throw e;
+        this.server.log(`session ${this.id}: a statement planned again for an Execute's row count was refused (${e.fields.code}: ${e.fields.message}): its Parse's plan runs`);
+        bounded = plan;
+      }
+      finally { this.settled(); }
+      const shape = (p: DuckPlan): string => JSON.stringify([p.params, p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null]);
+      statement.duckOnWire = shape(bounded) === shape(plan) ? bounded : plan;
+      if (statement.duckOnWire === plan && bounded !== plan) this.server.log(`session ${this.id}: a statement planned again for an Execute's row count answers other columns than its Parse said (the schema moved): its Parse's plan runs`);
+    }
+    if (this.phase === "closed") {
+      this.server.log(`session ${this.id}: closed while its statement was planned again for an Execute's row count: it runs nothing`);
+      throw new PgError({ code: "08006", message: "the session closed while its statement was planned" });
+    }
+    return statement.duckOnWire;
   }
 
   /**
@@ -1332,6 +1379,7 @@ class Session {
       // Postgres's analysis says the result's columns and the parameters' types, and DuckDB's SQL is made from it
       if (statement.shape.kind === "duckdb") {
         statement.duck = await this.duckPlan(raw, m.sql, m.paramTypes);
+        statement.plannedUnder = { searchPath: this.vars.searchPath, timeZone: this.vars.timeZone };
         // the implicit transaction begins with the Parse, as Postgres's does (start_xact_command): its literals read it
         statement.parsedNow = this.txNow ??= this.server.now();
       }
@@ -1485,8 +1533,10 @@ class Session {
     if (statement.duck !== undefined) this.readsOf(statement.duck);
     if (portal.cursor === undefined) {
       if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a DuckDB statement without its plan: report it (Mason's Postgres listener)" });
+      // a row count on the wire bounds the rows: the plan made for it where it differs (boundOnWire)
+      const plan = m.maxRows > 0 ? await this.boundOnWire(statement, statement.duck, controller) : statement.duck;
       const exec = this.txNow ??= this.server.now();
-      const answer = await this.duckAnswer(statement.duck, portal.params, portal.resultFormats, { parse: statement.parsedNow ?? exec, exec }, controller);
+      const answer = await this.duckAnswer(plan, portal.params, portal.resultFormats, { parse: statement.parsedNow ?? exec, exec }, controller);
       portal.cursor = answer.cursor;
       portal.fields = answer.fields;
     }
@@ -1629,7 +1679,8 @@ function relayedError(frame: Buffer): PgError {
 
 class Server {
   readonly sessions = new Map<number, Session>();
-  /** the DuckDB plans by text, search_path and declared parameter types, for the schema they were made under */
+  /** the DuckDB plans by text, search_path, TimeZone, declared parameter types and an Execute's bound (Session.boundOnWire), for
+   *  the schema they were made under */
   private duckPlans = new Map<string, DuckPlan>();
   private duckPlansOf: PgSchema | null = null;
   private duckPlansAt = 0;
@@ -1653,15 +1704,26 @@ class Server {
     return out;
   }
 
-  async duckPlan(text: string, paramOids: readonly number[], searchPath: string, timeZone: string, make: () => Promise<DuckPlan>): Promise<DuckPlan> {
-    const schema = this.options.schema();
+  /**
+   * EVERY PLAN IS MADE OVER THE CATALOG OF THE SCHEMA IT IS KEPT UNDER: the catalog is replaced here (`schema`), not
+   * only at a statement's classify, because a plan is also made at an Execute (Session.boundOnWire) — a re-plan that
+   * read the schema raw analysed against the old catalog and was kept under the new one (a review finding of #23).
+   * The ordering relied on: `schema()` calls `catalog.replace` synchronously, which queues the old instance's close on
+   * the catalog's one chain (src/api/postgres/catalog.ts "SERIALISED") before `make` queues its analysis, so the
+   * analysis starts the instance with the new DDL. A plan whose schema or generation moved while it was made is
+   * returned to its caller and not kept.
+   */
+  async duckPlan(text: string, paramOids: readonly number[], searchPath: string, timeZone: string, wireBound: boolean, make: () => Promise<DuckPlan>): Promise<DuckPlan> {
+    const schema = this.schema();
     const generation = this.options.duck?.generation?.() ?? 0;
     if (schema !== this.duckPlansOf || generation !== this.duckPlansAt) { this.duckPlans.clear(); this.duckPlansOf = schema; this.duckPlansAt = generation; }
     // the zone too: a plan holds the values Postgres parsed its literals to, under the session's zone
-    const key = `${searchPath}\u0000${timeZone}\u0000${paramOids.join(",")}\u0000${text}`;
+    // and the bound: an Execute's row count plans a LEFT lateral of a list otherwise (Session.boundOnWire), kept beside
+    const key = `${searchPath}\u0000${timeZone}\u0000${paramOids.join(",")}\u0000${wireBound ? "wire" : ""}\u0000${text}`;
     const hit = this.duckPlans.get(key);
     if (hit !== undefined) return hit;
     const plan = await make();
+    if (this.duckPlansOf !== schema || this.duckPlansAt !== generation) return plan;
     // bounded: a tool that inlines its values sends a new text per value
     if (this.duckPlans.size >= 2000) this.duckPlans.delete(this.duckPlans.keys().next().value!);
     this.duckPlans.set(key, plan);

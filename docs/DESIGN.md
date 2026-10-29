@@ -665,12 +665,40 @@ times the streamed one and up to 500 times faster; a page sorted by a table's co
 where joined it is minutes. (The repeated rows vary run to run by
 about 2×; a `now` column against its `streamed` or `joined` twin is the same plan.)
 
-What the rewrite cannot see: a row limit set on the wire (the extended protocol's Execute with a row count, as a JDBC
-driver's `setMaxRows` or fetch size sends it) and no LIMIT in the SQL. The plan is made at Parse, so such a statement
-keeps the delimiter join: every row is computed before the first is sent, and the first rows are DuckDB's order, as
-before PR #13 (`row-limit-on-the-wire`, a decided difference; the way out a LIMIT in the SQL). A tool that writes its
-preview's LIMIT into the SQL (as the one on the test server does) is streamed. The follow-up: plan such a statement
-again at its first Execute with a row count, as bounded.
+**A row count on the wire (2026-10-29).** A row limit set on the wire — the extended protocol's Execute with a row
+count, as a JDBC driver's `setMaxRows` or fetch size, DBeaver or a native question sends it — with no LIMIT in the SQL
+is a bound the plan made at Parse cannot see: until then such a statement kept the delimiter join, every row computed
+before the first was sent and the first rows DuckDB's order (`row-limit-on-the-wire`, registered by PR #19). Now the
+rewrite says, on the plan, where a LEFT lateral of a list was left DuckDB's join that such a bound would stream
+(`PlannedSql.unboundedLateral`: the bounds computed twice in the pre-pass, the second time with the outermost SELECT
+bounded as a SELECT read by a LIMIT is — `markBounds(root, wire)`, the same `limitBounds`), and the listener's first
+Execute with a row count of a portal over such a plan plans the statement again with the bound asserted
+(`Session.boundOnWire`, `planDuck`'s `wireBound`), under the search_path and TimeZone of its Parse. That plan is kept
+on the prepared statement and in the plans by text (its key holds the bound), so a repeated Execute plans nothing. A
+portal's result is begun once, by its first Execute, from whichever plan that Execute picked; an Execute after a
+PortalSuspended reads on from the same result, never runs it again, and an Execute with no row count streams the rest.
+
+What is not planned again: a statement whose SQL bounds the lateral already (a LIMIT, an OFFSET, an order-sensitive
+aggregate), and one where every row is read whatever the client reads — an aggregate, a GROUP BY, a DISTINCT, a window,
+a set operation other than UNION ALL — and an ORDER BY: a row count on the wire is no LIMIT DuckDB sees, so no top N
+pushes it into the scan and DuckDB sorts every row first whichever plan it is given (where the delimiter join is the
+cheaper). A plan made again over a schema moved since the Parse whose parameters or result columns are not the Parse's
+is not run (the Parse's is: the client was told that result; the log says so), and so is one Postgres or the rewrite
+refuses (the Parse answered; a row count must not fail it). A plan is made over the catalog of the schema it is kept
+under wherever it is made — the catalog is replaced in `Server.duckPlan`, not only at a statement's classify: a
+re-plan at an Execute that was the first statement after the copied tables moved analysed against the old catalog and
+was kept under the new schema, for every session to read (a review finding). Planning again is the statement's own
+time: a CancelRequest or the statement_timeout landing meanwhile is answered 57014 as for any statement (until the
+review it was lost there: the controller was not yet the session's `running`). EXPLAIN explains the statement's own plan, the one an
+Execute with no row count runs. (`tests/duck-wire.test.ts` "an Execute's row count over a LEFT lateral"; the oracle has
+no portal shape: it sends every statement whole, so a row count on the wire is held there alone.)
+
+The cost, not measured: a client that reads a WHOLE result through repeated Executes with a row count (JDBC's fetch
+size with autocommit off, a node cursor, an export) now takes the streamed plan, which calls the function once per row
+where the delimiter join calls it once per distinct document — the trade the measurements above make against a full
+read (2.2 s joined against 62.5 s streamed for a count over 20 M rows of 2,000 documents). The row count says the
+client may stop early, never that it will; a page's first rows being Postgres's, and sent as soon as they are read, is
+what the bound buys, as a LIMIT's does. Measure a fetch-size export over few distinct documents before tuning this.
 
 What DuckDB does on its own: it plans the streamed `CROSS JOIN LATERAL (SELECT unnest(…))` as a delimiter join again
 when a filter sits above it that it does not push down to the base — a WHERE on the lateral's own column, one holding a
