@@ -26,17 +26,36 @@ export interface PgConnectOptions {
   replication?: boolean;
   applicationName?: string;
   connectTimeoutMs?: number;
+  /** the session's text forms, sent at startup in place of the change reader's (ISO dates in UTC, round-trippable floats,
+   *  ISO 8601 intervals): `mason mcp` sends none, so an agent reads the text Postgres's defaults print, as psql does */
+  textForms?: ReadonlyArray<readonly [name: string, value: string]>;
 }
 
 /** A server ErrorResponse, with its SQLSTATE: callers branch on `code` (42P01, 42710, 55006 …). */
 export class PgError extends Error {
   readonly code: string;
   readonly detail: string | undefined;
+  /** the ErrorResponse's own fields, by their one-letter codes (M the message alone, H the hint, P the position) */
+  readonly fields: Readonly<Record<string, string>>;
   constructor(fields: Record<string, string>) {
     super(`${fields.S ?? "ERROR"}: ${fields.M ?? "unknown error"}${fields.D ? ` (${fields.D})` : ""}`);
     this.code = fields.C ?? "";
     this.detail = fields.D;
+    this.fields = fields;
   }
+}
+
+/** A column of a RowDescription: its name, type OID and type modifier (format_type's two arguments). */
+export interface RowField { name: string; typeOid: number; typmod: number }
+
+/** One statement through the extended protocol (`extended`): its columns, its rows as text, whether a row count cut it. */
+export interface ExtendedResult {
+  fields: RowField[];
+  rows: (string | null)[][];
+  /** the server suspended the portal at the row count: rows were left */
+  suspended: boolean;
+  /** CommandComplete's tag (`SELECT 3`); "" when the portal was suspended */
+  command: string;
 }
 
 export interface QueryResult {
@@ -211,7 +230,7 @@ export class PgConnection {
     const params: [string, string][] = [
       ["user", o.user], ["database", o.database], ["client_encoding", "UTF8"],
       // Text values in the forms the reader parses: ISO dates in UTC, floats round-trippable
-      ["DateStyle", "ISO, YMD"], ["TimeZone", "UTC"], ["extra_float_digits", "3"], ["IntervalStyle", "iso_8601"],
+      ...(o.textForms ?? [["DateStyle", "ISO, YMD"], ["TimeZone", "UTC"], ["extra_float_digits", "3"], ["IntervalStyle", "iso_8601"]] as const).map(([k, v]): [string, string] => [k, v]),
       ["application_name", o.applicationName ?? "mason"],
     ];
     if (o.replication) params.push(["replication", "database"]);
@@ -329,6 +348,36 @@ export class PgConnection {
     }
   }
 
+  /**
+   * ONE STATEMENT THROUGH THE EXTENDED PROTOCOL (`mason mcp`'s query): Parse, Bind, Describe and Execute of the unnamed
+   * portal, then Sync — so the server takes exactly one statement (a second is Postgres's 42601), and `maxRows` is the
+   * Execute's row count: the server stops at it and says so (PortalSuspended), so a query an agent leaves unbounded is
+   * never sent whole. 0 is every row. Every value is text.
+   */
+  async extended(sql: string, maxRows: number): Promise<ExtendedResult> {
+    const int16 = (n: number): Buffer => { const b = Buffer.alloc(2); b.writeInt16BE(n); return b; };
+    this.send("P", Buffer.concat([cstr(""), cstr(sql), int16(0)]));
+    // no parameters, every result column in text
+    this.send("B", Buffer.concat([cstr(""), cstr(""), int16(0), int16(0), int16(0)]));
+    this.send("D", Buffer.concat([Buffer.from("P"), cstr("")]));
+    this.send("E", Buffer.concat([cstr(""), int32(maxRows)]));
+    this.send("S", Buffer.alloc(0));
+    const result: ExtendedResult = { fields: [], rows: [], suspended: false, command: "" };
+    let error: PgError | null = null;
+    for (;;) {
+      const m = await this.next();
+      switch (m.type) {
+        case "T": result.fields = rowFields(m.body); break;
+        case "D": if (error === null) result.rows.push(dataRow(m.body)); break;
+        case "s": result.suspended = true; break;
+        case "C": result.command = cstrings(m.body)[0] ?? ""; break;
+        case "E": error = new PgError(errorFields(m.body)); break;
+        case "Z": if (error) throw error; return result;
+        default: break;   // ParseComplete, BindComplete, NoData, EmptyQueryResponse
+      }
+    }
+  }
+
   // ------------------------------------------------------------------ replication
 
   /** START_REPLICATION, then an async stream of XLogData and keepalives until the connection ends. */
@@ -442,6 +491,22 @@ function rowDescription(b: Buffer): string[] {
     i = end + 1 + 18; // table oid, column no, type oid, size, modifier, format
   }
   return names;
+}
+
+/** A RowDescription's columns with their types (rowDescription keeps the names alone). */
+function rowFields(b: Buffer): RowField[] {
+  const n = b.readInt16BE(0);
+  const out: RowField[] = [];
+  let i = 2;
+  for (let k = 0; k < n; k++) {
+    const end = b.indexOf(0, i);
+    const name = b.toString("utf8", i, end);
+    i = end + 1;
+    // table oid (4), column number (2), type oid (4), type size (2), type modifier (4), format (2)
+    out.push({ name, typeOid: b.readUInt32BE(i + 6), typmod: b.readInt32BE(i + 12) });
+    i += 18;
+  }
+  return out;
 }
 
 /** onData pauses the socket above this many queued bytes, and next() resumes it below a quarter of it. */

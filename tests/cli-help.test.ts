@@ -72,7 +72,7 @@ test("mason --help lists the commands; a misspelt one is answered with the close
 
 test("mason --help lists the commands under the steps a first session takes, in that order", () => {
   assert.deepEqual(STEPS.map(([step]) => step), ["Learn", "Set up", "Add your tables", "Connect", "Run", "Go to production"]);
-  assert.deepEqual(COMMANDS.map((c) => c.name), ["help", "doctor", "init", "start", "tables", "add", "remove", "wait", "user", "status", "ui", "sync", "logs", "stop", "destroy", "serve"]);
+  assert.deepEqual(COMMANDS.map((c) => c.name), ["help", "doctor", "init", "start", "tables", "add", "remove", "wait", "user", "mcp", "status", "ui", "sync", "logs", "stop", "destroy", "serve"]);
   const help = topUsage();
   let at = -1;
   for (const [step, commands] of STEPS) {

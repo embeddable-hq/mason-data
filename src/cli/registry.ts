@@ -8,6 +8,7 @@ import { dev } from "./dev.ts";
 import { devInBackground } from "./background.ts";
 import { ADD, LOGS, REMOVE, STATUS, STOP, TABLES, WAIT, add, logs, remove, status, stop, tables, wait } from "./commands.ts";
 import { USER, user } from "./user.ts";
+import { MCP, mcp } from "./mcp.ts";
 import { UI, ui } from "./ui.ts";
 import { GUIDES, guideText, type Guide } from "./guides.ts";
 import { DOCTOR, NODE_MIN, doctor } from "./doctor.ts";
@@ -137,7 +138,7 @@ export const STEPS: ReadonlyArray<[step: string, commands: readonly Command[]]> 
   ["Learn", [{ ...HELP, run: runHelp }]],
   ["Set up", [{ ...DOCTOR, run: (argv) => doctor(argv) }, { ...INIT, run: (argv) => init(argv) }, { ...DEV, run: runDev }]],
   ["Add your tables", [{ ...TABLES, run: tables }, { ...ADD, run: add }, { ...REMOVE, run: remove }, { ...WAIT, run: wait }]],
-  ["Connect", [{ ...USER, run: user }]],
+  ["Connect", [{ ...USER, run: user }, { ...MCP, run: mcp }]],
   ["Run", [{ ...STATUS, run: status }, { ...UI, run: ui }, { ...SYNC, run: sync }, { ...LOGS, run: logs }, { ...STOP, run: stop }, { ...DESTROY, run: (argv) => destroy(argv) }]],
   ["Go to production", [{ ...SERVE, run: serve }]],
 ];

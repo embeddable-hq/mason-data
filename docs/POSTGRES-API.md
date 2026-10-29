@@ -125,6 +125,23 @@ the refusal's own line above. It is a log line and nothing else:
 nothing is stored, and the password is no statement. It is how the tool corpus was recorded ("How it is
 tested"), and how to see what a tool you are connecting sends.
 
+### From an MCP client
+
+`mason mcp` (`mason help mcp`) is an MCP server on stdio for Claude Code, Claude Desktop and other agents, and a client
+of this API like any tool: it connects as a `mason user` by the URL `mason user add` printed (`--url`, or `MASON_URL`),
+honours the URL's `sslmode`, and sets `application_name` to `mason-mcp/<the MCP client's name>`, so the request log
+names the agent. Its tools say over this wire what a bare SQL tool would leave a model to guess:
+
+- `tables` and `describe` read the catalog (`pg_class`, `pg_attribute`, `pg_index`, `pg_constraint`, which are no rows
+  of the request log) and, for each copy's rows and how it is kept current, `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` —
+  one EXPLAIN of every table, so a remote `mason serve` answers as a local run does;
+- `query` sends ONE statement through the extended protocol (a second is Postgres's 42601), its `max_rows` the
+  Execute's row count (the server stops there and answers PortalSuspended: `truncated`), after `SET statement_timeout`
+  to its `timeout_ms` (57014 past it); the column types are `format_type` of the RowDescription's OID and modifier;
+- a refusal reaches the model whole, as an MCP tool error: SQLSTATE, message, DETAIL (the gap's id) and HINT (its way
+  out), the fields this listener's ErrorResponse carries;
+- `explain` is this API's EXPLAIN, as text.
+
 ## What a tool sees
 
 - **Each copied table**, in the schema it has in the source (`public.orders` stays `public.orders`), with the columns

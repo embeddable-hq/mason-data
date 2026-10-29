@@ -24,7 +24,7 @@ CLI lacks).
   every option named in it, and a wrong option answered with the usage. A new command is added to the registry, or it
   does not run. **The list is the runbook** (the commands in the order a user will likely need them): `STEPS`
   (src/cli/registry.ts) names each command's step — Learn (`help` first), Set up (`doctor`, `init`, `start`), Add your
-  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`), Run (`status`, `ui`, `sync`, `logs`, `stop`, `destroy`), Go to
+  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`, `mcp`), Run (`status`, `ui`, `sync`, `logs`, `stop`, `destroy`), Go to
   production (`serve`) — and `mason --help` prints the steps as headings, and under Learn the guides too, a line each
   beside `mason help`; `COMMANDS` is derived from it. A command's old name (`dev`, `purge`, `rm`, `connect`, `list`, …)
   answers with the new one and exit 2 (src/cli/main.ts), never runs. Nothing a command prints refers to a repository
@@ -188,6 +188,11 @@ CLI lacks).
   edits `.mason/users.json` beside it, `mason serve`'s data folder included). "User" is the word in everything it
   prints, never "token" or "credentials". `mason connect` (a token for a day) is gone: `mason user`
   is enough.
+- **`mason mcp` is an MCP server on stdio, a client of the Postgres API as a `mason user`** (src/cli/mcp.ts, docs/DESIGN.md
+  "An MCP server"): stdout is the protocol's (JSON-RPC frames alone), every log line goes to stderr; a tool's failure is
+  Mason's refusal (SQLSTATE, message, DETAIL, HINT) as an MCP tool error, never a stack; it never makes a user by itself
+  (no URL: refused, naming `mason user add claude`); its tools read only the wire, so a remote `mason serve` answers as a
+  local run does (tests/cli-mcp.test.ts).
 - **Where the listener is comes from ONE reader** (`pgListenerAddress`, src/api/postgres/listener.ts: `MASON_PG_PORT`
   default 5433, `MASON_PG_HOST` default 127.0.0.1), read by the listener, by `mason serve`'s config check and by
   `mason start`, which picks a port free on every address (src/cli/ports.ts, `mason doctor`'s probe too) or takes

@@ -44,6 +44,13 @@ async function agentGuide(): Promise<string> {
   (this reference); mason logs --json is the log's lines, or with --requests the request log. Nothing a command prints
   refers to a file this package does not ship.
 
+  AN AGENT WITH MCP (Claude Code, Claude Desktop, any MCP client) adds Mason as an MCP server first, then asks with
+  its tools rather than through a shell: tables (each copy's rows and how current it is), describe, query (rows with
+  their Postgres types, or the refusal with what to write instead) and explain. In the project's folder, Mason running:
+    mason user add claude --json              its url, printed once
+    claude mcp add mason -- mason mcp --url "<url>"
+  mason help mcp says the rest: Claude Desktop's config, MASON_URL, a mason serve elsewhere.
+
   THE COMMANDS, in the order a project takes them (mason --help lists the same):
 ${commands}
 

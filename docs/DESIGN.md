@@ -982,6 +982,40 @@ statement (28000), no restart; an unreadable file refuses every user (57P03); ro
 user` runs beside the process holding DuckDB's lock. Named as Postgres names it (`CREATE USER … WITH PASSWORD`).
 **Where.** `src/duck/users.ts`, `src/cli/user.ts`; `tests/duck-users.test.ts`, `tests/duck-users-wire.test.ts`.
 
+### An MCP server (2026-10-29)
+
+**Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is
+a client of the Postgres API like any tool, connected as a `mason user` by the URL `mason user add` printed (`--url`,
+`MASON_URL`), with `application_name` `mason-mcp/<client>`. Its tools are named in Mason's words: `tables` (each copy's
+rows and how it is kept current), `describe` (columns, Postgres types, key, foreign keys), `query` (one statement through
+the extended protocol, `max_rows` the Execute's row count so the server stops there and says so, `timeout_ms` a
+`SET statement_timeout`) and `explain`; the agent's guide and `mason help mcp` are its resources. The rows and the kept
+line come from `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` over the wire, one EXPLAIN of every table, never the run's
+command server: a remote `mason serve` answers as a local run does, and the words are the sync's own, as `mason status`
+prints them. With no URL it refuses and names `mason user add claude`; it never makes a user: a password is the person's
+to hand out. The protocol is written by hand (initialize, ping, tools/list, tools/call, resources/list, resources/read)
+rather than taken from `@modelcontextprotocol/sdk`, whose seventeen runtime dependencies (an HTTP server, an OAuth
+library, two schema validators) are for the transports this command does not serve; `src/cdc/pg-wire.ts` is its
+Postgres client, as it is the change reader's.
+
+**Why.** Chat agents reach tools over MCP. A generic Postgres MCP server already works against Mason — it speaks the
+wire protocol and reads a real catalog — but it hands the model a bare "run SQL" tool: the model guesses which tables
+exist and how current each copy is, and when Mason refuses a statement it sees an error string. Mason knows all three,
+and each refusal's way out (the gap's HINT, `src/duck/gaps.ts`), and the CLI was already built for agents (`--json`,
+exit codes, `mason help agent`). A tool error carrying the SQLSTATE and HINT is what lets a model rewrite the statement
+instead of giving up; a `kept` line is what stops it presenting a copy over the poll's row limit as current. And every
+statement lands in the request log under the agent's name.
+
+**Not yet: the same server inside `mason serve`, over HTTPS.** A hosted agent (claude.ai, a team's agent platform)
+cannot spawn a process; it needs MCP's Streamable HTTP transport on the server. What that would take: a route on
+`mason serve` beside `/healthz` (its own port or path, TLS as the Postgres API's: `MASON_PG_TLS_CERT` or the operator's
+proxy), the same tools over the same session code, and authorization by MCP's OAuth 2.1 profile — Mason as the
+resource server, publishing its protected-resource metadata, the bearer token mapped to a `mason user` so the request
+log still names who asked — or, before an authorization server exists, a user's password as a bearer token for the
+clients that take a static header. The tool code would not change; the transport and the login would.
+
+**Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`); `tests/cli-mcp.test.ts`.
+
 ## The request log
 
 **Decision.** Every statement DuckDB answered and every refusal or failure (a Parse, a Bind, a syntax error, a refused
