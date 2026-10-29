@@ -65,16 +65,17 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     folded, is a table's column sorted bare (no collation keys, citext, char(n), jsonb: the top N's filter reaches the
     scan); and an order-sensitive aggregate or window (string_agg, array_agg, row_number …) with no ORDER BY of its
     own. **DuckDB streams the INNER lateral only where its list reads ONE column of the row or an array column**; two
-    or more and no array is its delimiter join again. So such an argument (any list function's), and an unnest's
+    or more and no array is its delimiter join again (a scalar enum, domain or citext counts as a column; a user
+    type's array as an array). So such an argument (any list function's), and an unnest's
     expression of any columns, is computed ONCE by a step of its own before it, `CROSS JOIN LATERAL (SELECT e AS __mason_arg<n>)
     AS __mason_arg<n>` (a projection under the UNNEST, free; the never-empty CASE names the step's column twice) —
     never where e reads an array (DuckDB plans THAT step as its join: an unnest's e is then computed once inside,
     `list_transform(list_value(e), l -> CASE … l … END)[1]`, a list copy a row, 12–23 ms a million rows), nor where
     a `*` or a join's name reads the join (`markWholeReads`: the step's column would be read). Decided in a pre-pass
     over the whole statement (the walk meets a CTE before the SELECT that reads it). Bounding too much costs time, too
-    little an answer; where DuckDB itself falls back to the delimiter join — under a filter it does not push down, an
-    argument holding a subquery, two columns under a `*` — the difference is registered (`limit-lateral-filter`). **A row count an Execute sets on the
-    wire is a bound the Parse's plan cannot see**: the plan says where a lateral was left joined that such a bound
+    little an answer; where DuckDB itself falls back to the delimiter join, the difference is registered: under a
+    filter it does not push down (`limit-lateral-filter`), an argument holding a subquery or two columns under a `*`
+    (`limit-lateral-argument`). **A row count an Execute sets on the wire is a bound the Parse's plan cannot see**: the plan says where a lateral was left joined that such a bound
     would stream (`PlannedSql.unboundedLateral`, the pre-pass run again with the outermost SELECT bounded — never a
     re-parse), and the portal's first Execute with a row count runs the statement planned again with `wireBound`
     (`Session.boundOnWire`), under its Parse's settings, kept on the statement and in the plans by text; a suspended
@@ -295,7 +296,10 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
 
 - **An allowlist, not a blocklist**: DuckDB answers only a statement whose every resolved piece is in
   `src/duck/verified.ts`, which the oracle regenerates (`UPDATE_VERIFIED=1`) from what it answered exactly; anything
-  else is refused naming the piece (0A000, `Mason gap unverified`).
+  else is refused naming the piece (0A000, `Mason gap unverified`). **A piece is as wide as every statement that
+  uses it**: one the oracle verified over its scalar forms answers the others too, so a new piece added by
+  `UPDATE_VERIFIED` is read in the diff for the forms it unlocks, and a form not exact is refused by name in the rewrite
+  (ARRAY(SELECT …) of a numeric, an array, a row: `array-subquery-element`).
 - **Every refusal names its entry**: `Unrewritable` takes a `GapId` from `src/duck/gaps.ts`, so a refusal without one
   does not compile; `docs/SQL-SUPPORT.md` is rendered from the registry, and `tests/duck-gaps.test.ts` fails when it is not.
 - **No dead entries**: the oracle fails when a `refused` or `differs` entry is met by none of its statements

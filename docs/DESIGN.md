@@ -724,7 +724,8 @@ was streamed: its never-empty form names the list twice (`CASE WHEN len(l) > 0 T
 column nothing, and an expression there was left DuckDB's delimiter join — under a LIMIT or a row count on the wire,
 rows in an order of its own and no registry entry: `SELECT o.id, x FROM orders o LEFT JOIN LATERAL unnest(ARRAY[o.id,
 o.id*10]) x ON true LIMIT 1` answered `(1,10)` where Postgres answers `(1,1)` (a review of PR #27, on a real listener;
-fourteen of the oracle's new statements differed on main, two of them json rows). Now an unnest of any expression streams, the expression
+on main, sixteen of the oracle's new statements differ, measured by fails-without: fourteen unregistered, two of
+them json rows, and two that stay registered below). Now an unnest of any expression streams, the expression
 computed ONCE: by a step of its own before the lateral, `CROSS JOIN LATERAL (SELECT e AS __mason_arg<n>) AS __mason_arg<n>`, which
 DuckDB plans as a projection under the same UNNEST, the CASE naming the step's column twice at no cost but the
 expression's; or, where the step is no form (below), inside the lateral as the one element of a list whose lambda names
@@ -740,8 +741,7 @@ functions, is computed by the same step now, the lateral reading its one column.
 argument: DuckDB plans it as a delimiter join once it reads an array column (`array_append(tags, …)`, `tags[2:]`, even
 `[len(tags)]`), where the lateral without it streams; a `*` of the SELECT that holds the join, or a join's own name,
 reads its column; and an argument holding a subquery is a delimiter join in every form (a correlated `FROM (SELECT e AS
-l)`, a CTE and VALUES too). The last two are registered (`limit-lateral-filter`, with the other forms of DuckDB's
-falling back to its join under a streamed lateral). Which forms DuckDB 2.0 streams, by what the list reads (EXPLAIN
+l)`, a CTE and VALUES too). The last two are registered (`limit-lateral-argument`). Which forms DuckDB 2.0 streams, by what the list reads (EXPLAIN
 over 10,000 rows):
 
 | the argument reads | the lateral as it is | a step of its own before it |
@@ -764,6 +764,19 @@ integers), every row streamed (an OFFSET past the end), best of three:
 So the step costs nothing but the expression where DuckDB streams it (37 ms against string_to_array's own 32, 8 against
 7), the list_transform a copy of the list a row over the bare expression (12–23 ms a million rows here, more for longer
 lists: 24 elements cost 88 ms), and the CASE named twice the expression's own time again; a column keeps the CASE.
+
+The review of PR #28 found three things the first round missed. An argument reading an enum beside another column got
+no step (the count of columns refused every user type but citext, where only a user type's ARRAY is a list to DuckDB):
+a scalar enum, a domain, citext is now a column like any other. An argument that raises in a row the LIMIT leaves out
+(`(CASE WHEN id = 10 THEN 'x' END)::int`, jsonb_each of an array document) raises in Mason: DuckDB computes the
+argument a vector of rows at a time, where Postgres stops at the LIMIT — registered under `limit-errors`, as the
+select list's case was. And ARRAY(SELECT …), which the oracle's statements had verified as a whole, answers as
+Postgres's only for a scalar element: a numeric is DuckDB's double where Postgres's numeric[] is exact; an array
+element is a list of lists where Postgres accumulates a multi-dimensional array (and raises 2202E on an empty element,
+22004 on a NULL one); a row is a struct where Postgres's is a record[]; and `x = ANY (ARRAY(SELECT …))` was DuckDB's
+binder error (42804). Each is refused by name (`array-subquery-element`), decided by the element's type in the
+analysis (an array's subscript, which has no offset of its own, by the array's), and a type the analysis does not say
+is refused too.
 
 #### Nulls placed by a key of their own
 

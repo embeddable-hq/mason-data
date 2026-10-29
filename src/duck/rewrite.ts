@@ -133,6 +133,8 @@ const BOOL = 16, UUID = 2950, TIME = 1083, BYTEA = 17;
 const ARRAYS = new Set([1000, 1001, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 1022, 1028, 1115, 1182, 1183, 1185, 1187, 1231, 2951, 199, 3807]);
 /** inet[], which the copy holds as a list of its text (src/duck/sync.ts KEPT_ARRAYS) */
 const INET_ARRAY = 1041;
+/** numeric[] and record[] */
+const NUMERIC_ARRAY = 1231, RECORD_ARRAY = 2287;
 /** pg_collation's C and POSIX: byte order */
 const BYTE_COLLATIONS = new Set([950, 951]);
 
@@ -577,6 +579,7 @@ class Rewriter {
       }
       // x IN (SELECT …), x = ANY / ALL (SELECT …): the subquery's values compared with x by jsonb's equality
       case "SubLink": {
+        if (b.subLinkType === "ARRAY_SUBLINK") { this.arraySubquery(b); return null; }
         if (!isNode(b.testexpr) || !["ANY_SUBLINK", "ALL_SUBLINK", "ROWCOMPARE_SUBLINK"].includes(String(b.subLinkType))) return null;
         const type = this.typeOf(b.testexpr);
         if (type === JSONB || type === JSONB_ARRAY || this.rowHoldsJsonb(b.testexpr)) throw new Unrewritable("a jsonb compared with a subquery's values (IN (SELECT …), = ANY (SELECT …)) is not supported by Mason (Postgres equates jsonb by its own rules)", "join the subquery instead: … JOIN (SELECT …) s ON s.v = t.j", "jsonb-compare");
@@ -666,6 +669,37 @@ class Rewriter {
       case "SVFOP_LOCALTIME": return cast(cast(exec(), ["timestamp"]), ["time"]);
       default: return null;
     }
+  }
+
+  /**
+   * ARRAY(SELECT x …) answers as Postgres's only where x is a scalar DuckDB holds as Postgres does (text, an integer,
+   * jsonb, an enum, a bool, a date, …): a numeric is DuckDB's double there (Postgres's numeric[] is exact), an array
+   * is a list of lists (Postgres accumulates a multi-dimensional array, and raises 2202E on an empty one, 22004 on a
+   * NULL), a row a struct (record[] to Postgres). Those, and an element whose type the analysis does not say, are
+   * refused by name.
+   */
+  private arraySubquery(b: Body): void {
+    let q = isNode(b.subselect) ? bodyOf(b.subselect) : undefined;
+    while (q !== undefined && q.op !== undefined && q.op !== "SETOP_NONE" && q.larg !== undefined) q = q.larg as Body;
+    const target = ((q?.targetList ?? []) as AstNode[])[0];
+    const val = target !== undefined ? bodyOf(target).val : undefined;
+    let t = isNode(val) ? this.typeOf(val) : null;
+    // an array's element (`a[1]`: no offset of its own to the analysis) is a scalar of the array's element type, a
+    // numeric where the array is a numeric[]; a slice is an array
+    if (t === null && isNode(val) && kindOf(val) === "A_Indirection") {
+      const ind = (bodyOf(val).indirection ?? []) as AstNode[];
+      const at = isNode(bodyOf(val).arg) ? this.typeOf(bodyOf(val).arg as AstNode) : null;
+      // (a user type's array other than an enum's may be a table's rows: an element whose type is not told)
+      const told = at !== null && at !== RECORD_ARRAY && (this.userTypes.get(at)?.startsWith("_") !== true || this.enums.arrays.has(at));
+      if (told && ind.length > 0 && ind.every((x) => kindOf(x) === "A_Indices" && bodyOf(x).is_slice !== true)) t = at === NUMERIC_ARRAY ? NUMERIC : TEXT;
+    }
+    const refuse = (what: string): never => {
+      throw new Unrewritable(`ARRAY(SELECT …) of ${what} is not supported by Mason`, "array_agg(x ORDER BY …) in a subquery, or ARRAY(SELECT x::text …)", "array-subquery-element");
+    };
+    if (t === null) refuse("a value whose type Mason cannot tell");
+    if (t === NUMERIC) refuse("a numeric (Postgres's numeric[] is exact)");
+    if (ARRAYS.has(t!) || this.enums.arrays.has(t!) || t === INET_ARRAY || this.userTypes.get(t!)?.startsWith("_") === true) refuse("an array (Postgres accumulates a multi-dimensional array)");
+    if (this.isRowType(t!)) refuse("a row (Postgres's record[])");
   }
 
   private isRowType(oid: number): boolean { return oid === RECORD || this.userTypes.get(oid)?.startsWith("rowtype:") === true; }
@@ -1859,6 +1893,10 @@ class Rewriter {
     const a0 = args[0]?.type ?? null, a1 = args[1]?.type ?? null;
     // jsonb's jsonpath operators: Postgres's answer for each row (src/duck/pg-eval.ts)
     if (b.kind === "AEXPR_OP" && (name === "@?" || name === "@@") && a0 === JSONB && l !== undefined && r !== undefined) return pgCall("bool", `a1::jsonb ${name} a2::jsonpath`, [l, r]);
+    // x = ANY (ARRAY(SELECT …)): DuckDB binds the array's subquery as a comparison of its own and refuses the types
+    if ((b.kind === "AEXPR_OP_ANY" || b.kind === "AEXPR_OP_ALL") && r !== undefined && kindOf(r) === "SubLink" && bodyOf(r).subLinkType === "ARRAY_SUBLINK") {
+      throw new Unrewritable(`${b.kind === "AEXPR_OP_ANY" ? "ANY" : "ALL"} of ARRAY(SELECT …) is not supported by Mason`, `x ${name} ${b.kind === "AEXPR_OP_ANY" ? "ANY" : "ALL"} (SELECT …), without the ARRAY`, "array-subquery-element");
+    }
     if ((b.kind === "AEXPR_OP_ANY" || b.kind === "AEXPR_OP_ALL") && this.isCitext(a0)) {
       throw new Unrewritable("a citext compared with ANY or ALL of an array is not supported by Mason", "x IN (…) with the values written out, or lower(x) = ANY (…)", "citext-forms");
     }
@@ -3155,7 +3193,7 @@ class Rewriter {
     // any columns, whose never-empty CASE then names the step's column twice, at no cost but the expression's. Not where the argument reads an array (DuckDB plans that
     // step as a delimiter join, and the lateral streams without it: an unnest's expression is computed once inside,
     // rangeFunction's list_transform), nor where a `*` or a join's name reads every column of the join (the step's
-    // would be one of them), nor for a subquery (a delimiter join in every form): `limit-lateral-filter`, decided
+    // would be one of them), nor for a subquery (a delimiter join in every form): `limit-lateral-argument`, decided
     const arg = args[0]!;
     if (kindOf(arg) === "ColumnRef" || this.readWhole.has(b)) return { JoinExpr: { ...rest, jointype: "JOIN_INNER" } };
     const reads = this.rowReads(arg);
@@ -3182,7 +3220,10 @@ class Rewriter {
         if (kindOf(v) === "SubLink") { plain = false; return; }
         if (kindOf(v) === "ColumnRef") {
           const t = this.typed(v)?.type;
-          if (t === undefined || ARRAYS.has(t) || this.enums.arrays.has(t) || this.isRowType(t) || (this.userTypes.has(t) && !this.isCitext(t)) || t === INET_ARRAY) { plain = false; return; }
+          // an array (a list to DuckDB, whose step it plans as its join) or a row (a struct) reads as no column a
+          // step could hold; a user type's array is named `_<type>` in pg_type. A scalar user type (an enum, a
+          // domain, citext) is a column like any other
+          if (t === undefined || ARRAYS.has(t) || this.enums.arrays.has(t) || this.isRowType(t) || this.userTypes.get(t)?.startsWith("_") === true || t === INET_ARRAY) { plain = false; return; }
           seen.add(JSON.stringify(names(bodyOf(v).fields)));
           return;
         }

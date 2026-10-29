@@ -20,21 +20,21 @@ each). The copy is read-only.
 | The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 241 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 46 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 47 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,058 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,086 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 3,058 statements | Mason | DuckDB alone |
+| Of 3,086 statements | Mason | DuckDB alone |
 |---|---|---|
-| answered exactly as Postgres: the rows, their text, the column names | 95% | 31% |
+| answered exactly as Postgres: the rows, their text, the column names | 95% | 30% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 4% | — |
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 23% |
 | refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 18% |
-| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 11% |
+| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 12% |
 | wrong rows, or the rows in another order | — | 7% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 5% |
 | another error than Postgres's, or answered where Postgres refuses | — | 5% |
@@ -55,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (46)
+## Refused (47)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -77,6 +77,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `json-of-type` | to_json / array_to_json / json_build_object of a value (or an array of elements) of a type Mason does not write as json | answers | refused | cast the value to text, a number, a boolean, a timestamp or json first |
 | `extract-julian` | extract(julian FROM …) | answers | refused | extract(epoch FROM …) / 86400 + 2440587.5 |
 | `with-ordinality` | a function in FROM … WITH ORDINALITY | numbers the rows | refused | row_number() OVER () instead |
+| `array-subquery-element` | ARRAY(SELECT x …) whose x is a numeric, an array or a row; x = ANY or ALL (ARRAY(SELECT …)) | a numeric[] computed exactly, a multi-dimensional array (2202E on an empty element, 22004 on a NULL one), a record[] | refused (DuckDB makes a list of doubles, of lists, of structs; it binds ANY (ARRAY(SELECT …)) as a comparison of its own) | ARRAY(SELECT x::text …), array_agg(x ORDER BY …) in a subquery, or x = ANY (SELECT …) without the ARRAY |
 | `multidim-array` | a multi-dimensional array literal | answers | refused | a one-dimensional array |
 | `format-specifiers` | format() with a specifier other than %s (%I, %L, widths, positions) | answers | refused | concatenate with \|\|, or %s only |
 | `to-char-patterns` | to_char of an interval or a time; its TZ, SP, EEEE, RN, V, B, L patterns; a day or month name padded to 9 characters in a parse | answers | refused | the patterns listed in the hint; extract(… FROM interval) for an interval's parts |
@@ -108,15 +109,16 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `infinite-interval` | an infinite interval read from a text (Postgres 17+) | infinity, -infinity | refused when a row holds one (DuckDB's interval has no infinity) | filter it out first, or read it as text |
 | `relative-time-literal` | a relative time combined with anything else ('today 10:00', 'now'::date + …  written as one literal), or read from a row as a date or a time | the transaction's start (a row's value: when the row is read) | refused (a bare 'now', 'today', 'tomorrow', 'yesterday' literal is answered: the transaction's start at the Parse) | current_date + time '10:00', now(), current_date + 1 |
 
-## Answered differently (14)
+## Answered differently (15)
 
 Answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
 | `libc-symbol-punctuation` | text ordered under a libc collation where punctuation or a space follows a digit or a symbol and a later letter differs only in case ('1-X' beside '1x') | the punctuation outranks the case: 1-X < 1x | the case outranks the punctuation: 1x < 1-X | ORDER BY lower(x), x when the case must not decide first |
-| `limit-errors` | a select-list value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out, where no index gives the ORDER BY | raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers) | answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does | none needed for an answer; filter the bad rows out to have neither raise |
-| `limit-lateral-filter` | a LEFT JOIN of a list's rows ON TRUE (json_each, jsonb_array_elements, unnest, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, where DuckDB plans the streamed lateral as its delimiter join: under a filter above the join that DuckDB does not push down to the base — a WHERE on the lateral's own column (d.key <> 'n'), one holding a bound parameter ($1) in a SELECT around the join, or one in a SELECT that reads the join through a CTE — or over an argument that holds a subquery (unnest(ARRAY(SELECT …))), or that reads two or more columns of the row and no array (CASE WHEN t.kind = 'doc' THEN t.body END) in a SELECT whose list is a bare * or inside a join with a name of its own | the first rows of the base, in its order, each row's members in theirs | DuckDB plans such a lateral as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (a filter on the base in the join's own SELECT, literal or parameter, or a literal one around it through a derived table, keeps Postgres's; an argument of two columns elsewhere is computed in a step of its own before the lateral, which a * would read as a column) | ORDER BY the base's key before the LIMIT, filter the base in the SELECT that holds the join, or name the columns instead of * |
+| `limit-errors` | a value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out: in the select list, where no index gives the ORDER BY; or in the argument of a LEFT JOIN of a list's rows ON TRUE (unnest(ARRAY[…, 'x'::int]), jsonb_each of a non-object), under a LIMIT with no ORDER BY | the select list's raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers); the lateral's answers: it stops at the limit | the select list's answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does; the lateral's raises: DuckDB computes its argument for a whole vector of rows (2,048) before the limit stops it | none needed for the select list's answer; filter the bad rows out to have neither raise |
+| `limit-lateral-filter` | a LEFT JOIN of a json document's rows ON TRUE (json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, with a filter above the join that DuckDB does not push down to the base: a WHERE on the lateral's own column (d.key <> 'n'), one holding a bound parameter ($1) in a SELECT around the join, or one in a SELECT that reads the join through a CTE | the first rows of the base, in its order, each row's members in theirs | DuckDB plans the lateral under such a filter as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (a filter on the base in the join's own SELECT, literal or parameter, or a literal one around it through a derived table, keeps Postgres's) | ORDER BY the base's key before the LIMIT, or filter the base in the SELECT that holds the join |
+| `limit-lateral-argument` | a LEFT JOIN of a list's rows ON TRUE (unnest, json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, whose argument holds a subquery (unnest(ARRAY(SELECT …))), or reads two or more columns of the row and no array (CASE WHEN t.kind = 'doc' THEN t.body END) in a SELECT whose list is a bare * or inside a join with a name of its own ((a LEFT JOIN … ON TRUE) AS j) | the first rows of the base, in its order, each row's members in theirs | DuckDB plans such a lateral as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (elsewhere an argument of two columns is computed in a step of its own before the lateral, which a * would read as a column; a subquery is a delimiter join in every form) | name the columns instead of *, or ORDER BY the base's key before the LIMIT |
 | `window-partition-order` | a window function that reads its frame in order (row_number, lag, lead, first_value, last_value, nth_value, ntile) over a window with PARTITION BY and no ORDER BY | a partition's rows in the order its sort hands them back: in practice the order they came in | a partition's rows in the order DuckDB's partitioning hands them back, another one | ORDER BY in the window (OVER (PARTITION BY a ORDER BY b)) |
 | `mixed-scale-numeric` | a numeric column whose values have several scales: an integer UNION ALL a numeric, lead(x, 1, 0) beside numeric(2,1) values, an unconstrained column holding 1 and 1.50 | each value its own scale: 1, 1.5 | one scale per column: 1.0, 1.5 | cast to numeric(p, s), or round(x, s) |
 | `unicode-16-case` | upper / lower of letters added in Unicode 16 | maps them (its own Unicode 16 tables) | leaves them as they are (DuckDB's ICU predates Unicode 16) | none needed for letters before Unicode 16 |

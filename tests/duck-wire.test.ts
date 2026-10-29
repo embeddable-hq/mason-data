@@ -474,6 +474,14 @@ test("the review's silent differences: citext without regard to case, an inet as
     // inet: Postgres's text (no /32), its OID (869), its functions; its order refused
     await alike("SELECT ip, ip::text, host(ip), ip = '10.3.6.45' FROM accounts ORDER BY id");
     await assert.rejects(c.query("SELECT ip FROM accounts ORDER BY ip"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap inet-order/.test(e.detail ?? ""));
+    // ARRAY(SELECT x …): a scalar answered; a numeric (DuckDB's double), an array (Postgres's multi-dimensional one), a
+    // row, and = ANY (ARRAY(SELECT …)) (DuckDB's binder error) refused by name
+    await alike("SELECT ARRAY(SELECT status FROM orders ORDER BY id DESC), ARRAY(SELECT tags[1] FROM orders ORDER BY id)");
+    for (const sql of ["SELECT ARRAY(SELECT amount FROM orders ORDER BY id)", "SELECT ARRAY(SELECT amount / 3 FROM orders ORDER BY id)",
+      "SELECT ARRAY(SELECT tags FROM orders ORDER BY id)", "SELECT ARRAY(SELECT tags[1:1] FROM orders ORDER BY id)", "SELECT ARRAY(SELECT (id, qty) FROM orders ORDER BY id)",
+      "SELECT count(*) FROM orders WHERE id = ANY (ARRAY(SELECT qty FROM orders))"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap array-subquery-element/.test(e.detail ?? ""), sql);
+    }
     // a derived table's column sorted through `s.*`: under the collation, as the column itself sorts
     await alike("SELECT s.* FROM (SELECT team AS pod FROM accounts) AS s ORDER BY s.pod");
     await alike("WITH s AS (SELECT team AS pod, id FROM accounts) SELECT * FROM s ORDER BY pod DESC, id");
@@ -1008,6 +1016,12 @@ test("date_trunc in a zone of its own is NULL in a NULL zone and reads a row's z
   } finally { await c.end(); }
 });
 
+/** a LEFT lateral whose argument reads an enum and another column (moods): the step, as for two columns of any type */
+const ENUM_STEPPED = [
+  "SELECT q.id, x FROM moods q LEFT JOIN unnest(ARRAY[q.m::text, q.id::text]) x ON TRUE LIMIT 5",
+  "SELECT q.id, k FROM moods q LEFT JOIN jsonb_object_keys(CASE WHEN q.m = 'ok' AND q.id > 0 THEN '{\"a\": 1, \"b\": 2}'::jsonb END) k ON TRUE LIMIT 5",
+];
+
 // A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE UNDER A LIMIT IS AN INNER LATERAL OF A LIST NEVER EMPTY
 // (src/duck/rewrite.ts leftLateral, limitBounds): DuckDB planned the LEFT one as a delimiter join over the whole base
 // (a BI tool's "expand the JSON" preview, LIMIT 100 over 22 M rows: 37.9 s), handing its rows back in an order of its
@@ -1055,6 +1069,8 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT
       "SELECT t.id, e FROM jdocs t LEFT JOIN jsonb_array_elements_text(CASE WHEN t.id % 2 = 1 AND jsonb_typeof(t.b -> 'arr') = 'array' THEN t.b -> 'arr' END) e ON TRUE LIMIT 6",
       // two columns and an array: no step (DuckDB plans that step as a delimiter join), the lateral streams as it is
       "SELECT o.id, t FROM orders o LEFT JOIN unnest(array_append(o.tags, o.status)) t ON TRUE LIMIT 4",
+      // an enum beside another column: a column like any other, computed in the step (ENUM_STEPPED)
+      ...ENUM_STEPPED,
       // an OFFSET alone keeps Postgres's rows after it too
       "SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE OFFSET 20",
       // the LIMIT outside: a derived table, a CTE, two levels down
@@ -1125,6 +1141,12 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT
       // DuckDB's own LEFT lateral: no list padded with a NULL
       assert.match(sent(from), /LEFT JOIN/, `${sql}\n${sent(from)}`);
       assert.doesNotMatch(sent(from), /CROSS JOIN LATERAL|, true\)( AS JSON\[\])?\)|CASE WHEN len\(/, `${sql}\n${sent(from)}`);
+    }
+    // the enum's statements: the argument computed by a step of its own before the lateral (rewrite.ts rowReads)
+    for (const sql of ENUM_STEPPED) {
+      const from = logged.length;
+      await answer(c, sql);
+      assert.match(sent(from), /AS __mason_arg\d+ \) AS __mason_arg\d+ CROSS JOIN LATERAL/, `${sql}\n${sent(from)}`);
     }
     // DuckDB runs the streamed one as its UNNEST, no delimiter join over the base
     for (const sql of streamed) {
