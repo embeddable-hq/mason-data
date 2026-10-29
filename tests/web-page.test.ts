@@ -384,8 +384,7 @@ test("the users: a row each, active first then removed without Remove; Remove as
   lastUsedNote: null, urlNote: null, requestLogDays: 7 };
   const NOW_U = Date.parse("2026-10-28T09:15:59.000Z");
   const html = renderUsers(list, null, NOW_U);
-  assert.match(textOf(html), /User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC 60 min ago postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Queries Disable Remove grafana id fedcba9876543210 Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days postgres:\/\/grafana@127\.0\.0\.1:5433\/shop Copy Queries Disable Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
-  assert.match(html, /<code id="user-url-metabase" title="postgres:\/\/metabase@127\.0\.0\.1:5433\/shop">postgres:\/\/metabase@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="user-url-metabase" data-room="Press ⌘C">Copy<\/button>/);
+  assert.match(textOf(html), /User Status Added Last used metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC 60 min ago Queries Disable Remove grafana id fedcba9876543210 Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days Queries Disable Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
   // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
   assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
@@ -405,7 +404,8 @@ test("the users: a row each, active first then removed without Remove; Remove as
   const unknown = textOf(renderUsers({ ...list, lastUsedNote: "unknown: the request log could not be read (busy)", urlNote: "Mason is not running" }, null, NOW_U));
   assert.match(unknown, /Active 2026-10-27 09:10 UTC 60 min ago/);
   assert.match(unknown, /Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC unknown /);
-  assert.match(unknown, /Last used: unknown: the request log could not be read \(busy\)\. URL: Mason is not running\.$/);
+  // the URL is the Connect panel's, never a row's: its note goes with it
+  assert.match(unknown, /Last used: unknown: the request log could not be read \(busy\)\.$/);
 });
 
 test("a user just added: the password and the URL to paste, each with a copy button, and that it will not be shown again", () => {
@@ -498,7 +498,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   await app.poll();
   // a page shown is read again whatever its rates (show marks every read stale): the shell's state with it
   assert.deepEqual(run.asked, ["GET /api/users?lastUsed=1", "GET /api/state"]);
-  assert.match(textOf(app.view().users!), /^User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC not used in the last \? days Queries Disable Remove$/);
+  assert.match(textOf(app.view().users!), /^User Status Added Last used metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC not used in the last \? days Queries Disable Remove$/);
   app.show("status");
   // the run stops
   run.answers.clear();
@@ -1559,7 +1559,7 @@ test("in the browser: the filter form filters (blanks are no filter), and Usage'
   assert.match(textOf(el("usage-running").html), /Cancel session 13's statement 7\?/);
 });
 
-test("the users: read with their last use, every 30 s; Copy puts the URL without the password on the clipboard; Remove sends DELETE", async () => {
+test("the users: read with their last use, every 30 s, the state beside them; Copy puts a connect detail on the clipboard; Remove sends DELETE", async () => {
   const run = fakeRun();
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   const U = "GET /api/users?lastUsed=1";
@@ -1573,15 +1573,15 @@ test("the users: read with their last use, every 30 s; Copy puts the URL without
   t += 2000;
   assert.deepEqual(await asked(), [], "not at the 2 s poll");
   t += 28_000;
-  assert.deepEqual(await asked(), [U], "then every 30 s");
-  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC never postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Queries Disable Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC Queries$/);
-  // Copy: the page's own handler writes the URL as shown, and keeps it nowhere
+  assert.deepEqual(await asked(), [U, "GET /api/state"], "then every 30 s, the state with them (the Connect panel's)");
+  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC never Queries Disable Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC Queries$/);
+  // Copy (the Connect panel's): the page's own handler writes the text as shown, and keeps it nowhere
   const written: string[] = [];
-  const doc = { getElementById: (id: string) => id === "user-url-metabase" ? { textContent: "postgres://metabase@127.0.0.1:5433/shop" } : null };
+  const doc = { getElementById: (id: string) => id === "users-connect-host" ? { textContent: "127.0.0.1" } : null };
   const win = { navigator: { clipboard: { writeText: async (s: string) => { written.push(s); } } } };
   const button = { textContent: "Copy" };
-  await app.pages.get("users")!.click({ copy: "user-url-metabase" }, button, { doc, win });
-  assert.deepEqual(written, ["postgres://metabase@127.0.0.1:5433/shop"]);
+  await app.pages.get("users")!.click({ copy: "users-connect-host" }, button, { doc, win });
+  assert.deepEqual(written, ["127.0.0.1"]);
   assert.equal(button.textContent, "Copied");
   // Remove: asks, then DELETE and the list again with the last use
   app.askRemove("metabase");
@@ -3126,16 +3126,24 @@ test("a Copy button, on any page: its code's text to the clipboard, Copied for 2
   assert.equal(copyClick({ sync: "x" }, b, { doc, win: {} }), null, "not a Copy: the page's own click goes on");
 });
 
-test("the Users table's URL: one line, cut with an ellipsis in its cell, its whole the title; Copy copies the whole", () => {
-  const copyable = fn<[string, string, { clip?: boolean }?], string>("copyable");
-  const url = "postgres://metabase@127.0.0.1:5433/a-long-project-name";
-  assert.equal(copyable("u", url, { clip: true }), `<span class="copyrow clipped"><code id="u" title="${url}">${url}</code> <button type="button" class="small" data-copy="u" data-room="Press ⌘C">Copy</button></span>`);
-  assert.equal(copyable("u", url), `<span class="copyrow"><code id="u">${url}</code> <button type="button" class="small" data-copy="u" data-room="Press ⌘C">Copy</button></span>`, "elsewhere, the whole on its line");
-  const html = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url }],
-    lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, NOW);
-  assert.match(html, /<span class="copyrow clipped"><code id="user-url-metabase" title="[^"]+">/);
-  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.copyrow\.clipped code \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);
+test("Users: ONE Connect panel for the run — host, port, database, sslmode, the URL and psql with placeholders, each with Copy — and no URL per user", async () => {
+  // (review, Tom) a row's URL without its password read as a credential to copy, and every row's host, port and
+  // database were the run's: the row keeps what is the user's, the panel says the run's once, and the card shown
+  // once when a user is added is the only place a password is ever copied
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as Record<string, unknown>;
+  const renderUsersConnect = usersPage.renderUsersConnect as ((pg: unknown) => string) | undefined;
+  assert.equal(typeof renderUsersConnect, "function", "src/web/pages/users.js exports renderUsersConnect");
+  const pg = { url: "postgresql://127.0.0.1:5433/shop", host: "127.0.0.1", port: 5433, database: "shop", shown: "postgresql://<user>:<password>@127.0.0.1:5433/shop", psql: "psql 'postgresql://<user>:<password>@127.0.0.1:5433/shop'" };
+  const html = renderUsersConnect!(pg);
+  assert.equal(textOf(html), "Connect Host 127.0.0.1 Copy Port 5433 Copy Database shop Copy SSL mode disable Copy URL postgresql://<user>:<password>@127.0.0.1:5433/shop Copy " +
+    "psql psql 'postgresql://<user>:<password>@127.0.0.1:5433/shop' Copy A user's name and password go in place of <user> and <password> . The password is shown once, when the user is added: lost, remove the user and add it again.");
+  for (const id of ["host", "port", "database", "sslmode", "url", "psql"]) assert.match(html, new RegExp(`<code id="users-connect-${id}">`), id);
+  assert.match(renderUsersConnect!({ ...pg, sslmode: "require" }), /<code id="users-connect-sslmode">require<\/code>/, "off this machine: require");
+  assert.equal(renderUsersConnect!(undefined), "", "a run that did not say: nothing");
+  const rows = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null,
+    url: "postgresql://metabase@127.0.0.1:5433/shop" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, NOW);
+  assert.ok(!/postgresql:\/\/|data-copy|>URL</.test(rows), "no URL, and no Copy, in a user's row");
+  assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<div id="users-connect"><\/div>\s*<div id="users"><\/div>/, "the panel over the list");
 });
 
 test("the Overview's first-run checklist: running, a table copied, a user created, a first statement answered — each ○ with its one action; gone once all are done", async () => {
@@ -3186,7 +3194,7 @@ test("a page opened at its own address that reads no state (Users) still has the
   assert.notEqual(app.view().where, "", "the sidebar names the database");
   assert.match(app.view().version!, /^Mason /);
   run.asked.length = 0; t += 30_000; await app.poll();
-  assert.deepEqual(run.asked, ["GET /api/users?lastUsed=1"], "the state is the sidebar's: once a minute, not at the page's rate");
+  assert.deepEqual(run.asked, ["GET /api/users?lastUsed=1", "GET /api/state"], "Users reads the state itself now (its Connect panel), at its own rate");
 });
 
 test("Tables: an added copy not measured yet says so (—, with why in its title), never 0 B", () => {

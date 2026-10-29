@@ -85,8 +85,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   table with no primary key.
 - **Users** (`#users`): a form that adds a user by name. Its password, URL and psql line are shown once, in a card with
   Copy buttons, with a link to Queries, where its statements will show; Mason keeps no copy, so they are never shown again.
-- **Users**, the list: each user's status (Active, Disabled and when, or Removed), when added, when last used, and its
-  URL with **Copy**. A user that no longer connects is flagged with why. **Disable** asks first (in a popover, in `mason
+- **Users**, Connect: once for the run, where a tool connects — host, port, database and SSL mode, each with **Copy**,
+  and the URL and psql line with `<user>:<password>` in place — as `mason status` says it. No user's row carries a URL:
+  the card shown once when a user is added is the only place its password is copied.
+- **Users**, the list: each user's status (Active, Disabled and when, or Removed), when added, when last used, and
+  **Queries**, its statements. A user that no longer connects is flagged with why. **Disable** asks first (in a popover, in `mason
   user disable`'s words), then runs it; a disabled user's button says **Enable** in the same width, and runs `mason user
   enable` at once. **Remove** asks first; a removed user stays listed, muted.
 - **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs

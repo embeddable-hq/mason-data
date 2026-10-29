@@ -417,11 +417,9 @@ export function placePops(doc, win) {
   return placed;
 }
 
-/** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. `clip`:
- *  one line, cut by the stylesheet with an ellipsis in a narrow cell (a table's URL column), its whole the title —
- *  Copy copies the whole either way. */
-export const copyable = (id, text, { clip = false } = {}) =>
-  `<span class="copyrow${clip ? " clipped" : ""}"><code id="${esc(id)}"${clip ? ` title="${esc(text)}"` : ""}>${esc(text)}</code> ${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}</span>`;
+/** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
+export const copyable = (id, text) =>
+  `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small", { room: ROOMS.copy })}</span>`;
 
 /** How long a Copy button says Copied (or what to press) before it says Copy again. */
 export const COPIED_MS = 2000;

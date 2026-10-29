@@ -93,8 +93,9 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   (2 s, lean: no table's columns), `/api/usage` `copySizes` (60 s), and a table's columns once as its form opens
   (`/api/tables/<table>/columns`).
 - **Users** (`#users`): today's add form, Disable (asks first) / Enable and Remove, and each user's status (Active /
-  Disabled / Removed), when it was added, its
-  last use, and its URL without the password (**Copy**). Reads `/api/users?lastUsed=1` (on opening, then 30 s).
+  Disabled / Removed), when it was added, its last use and its Queries; ONE Connect panel for the run (host, port,
+  database, SSL mode, the URL and psql with `<user>:<password>`, each with **Copy**), never a URL per user. Reads
+  `/api/users?lastUsed=1` and `/api/state` (on opening, then 30 s).
 - **Observability › Queries** (`#observability/queries`): the request log as a table, newest first — the first 8
   characters of the id, started, duration, status, user, client, rows, the statement (two lines at most), its error's
   first line — with a per-row details (the whole id, ended, bytes sent, the statement and error, the first 16 KiB of

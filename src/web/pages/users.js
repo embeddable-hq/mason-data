@@ -9,6 +9,8 @@ import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, 
 const USERS = "/api/users?lastUsed=1";
 const USERS_POST = "/api/users";
 const USERS_EVERY_MS = 30_000;
+/** The run's state: where a tool connects (`postgres`, src/cli/pg-url.ts postgresFacts), the Connect panel's. */
+const STATE = "/api/state";
 
 /** A time as `mason user list` stamps it: `2026-10-27 09:10`, UTC. */
 const stamp = utcMinute;
@@ -35,8 +37,8 @@ const askOf = (confirming) => confirming === null || confirming === undefined ? 
 /**
  * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape), in a table in a card: a row each — its name
  * in mono with its id muted, its status as a dot and the word (Active, Disabled and when, or Removed and when), when it
- * was added, when it was last used (an age, `lastUsedText`'s UTC time in a title; or the note why it is not known), its
- * URL without the password (Copy), then Disable — Enable for a disabled one, in Disable's room — and Remove. The users
+ * was added, when it was last used (an age, `lastUsedText`'s UTC time in a title; or the note why it is not known), then
+ * Queries, Disable — Enable for a disabled one, in Disable's room — and Remove. The users
  * not removed first; a removed user is listed after them, muted, without actions. A Remove or a Disable asks first
  * (`confirming`: the name, Remove's; or { name, verb: "disable" }), in a popover beside the row's actions; an Enable
  * asks nothing. A refused action (`refused`: { name, failure }) is said there too, until dismissed. `now` is the
@@ -49,7 +51,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
   // a Remove's or a Disable's question is a popover beside the user's actions (`pop`), never a row: no row below it moves
   const pops = [];
   const ask = askOf(confirming);
-  return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col">URL</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
+  return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
@@ -66,11 +68,26 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
       `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
-      `<td>${active && u.url ? copyable(`user-url-${u.name}`, u.url, { clip: true }) : ""}</td>` +
       // Queries: its statements of the last 24 hours on Observability › Queries (a removed user's too: its past)
       `<td class="act" id="${esc(anchor)}"><a class="btn small" href="${esc(userQueriesHref(u.name))}" title="the statements ${esc(u.name)} sent in the last 24 hours">Queries</a>${!active ? "" : ` ${toggle(u, disabled, asking === "disable")} ${asking === "remove" ? button("Remove", {}, "danger small", { disabled: true, expanded: true })
         : button("Remove", { remove: u.name }, "danger small")}`}</td></tr>`;
-  }).join("")}</tbody></table>`) + pops.join("") + `${note("Last used", list.lastUsedNote)}${note("URL", list.urlNote)}`;
+  }).join("")}</tbody></table>`) + pops.join("") + note("Last used", list.lastUsedNote);
+}
+
+/**
+ * HOW A TOOL CONNECTS, once for the run (`/api/state` `postgres`: src/cli/pg-url.ts postgresFacts, what `mason status`
+ * prints): the host, port, database and sslmode — what a BI tool's form asks for, each with Copy — then the URL and the
+ * psql line with `<user>:<password>` as placeholders. None of it is a user's: a row carries what is (its name, its
+ * state), and a user's password is copied only from the card shown once when it is added (`renderAdded`). "" when the
+ * run did not say.
+ */
+export function renderUsersConnect(pg) {
+  if (!pg || typeof pg.shown !== "string") return "";
+  const rows = [["Host", pg.host, "users-connect-host"], ["Port", String(pg.port), "users-connect-port"], ["Database", pg.database, "users-connect-database"],
+    ["SSL mode", pg.sslmode ?? "disable", "users-connect-sslmode"], ["URL", pg.shown, "users-connect-url"], ["psql", pg.psql, "users-connect-psql"]];
+  return `<div class="connect"><p class="connect-title">Connect</p>` +
+    `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
+    `<p class="tip">A user's name and password go in place of ${code("<user>")} and ${code("<password>")}. The password is shown once, when the user is added: lost, remove the user and add it again.</p></div>`;
 }
 
 /** A user's statements: Observability › Queries filtered to it, over the last 24 hours (Now's 15 minutes would mostly be empty). */
@@ -145,7 +162,8 @@ export const page = {
     };
     return {
       model: m,
-      reads: () => [{ path: USERS, everyMs: USERS_EVERY_MS }],
+      // the users first (their read's failure is the page's banner), and the state for the Connect panel
+      reads: () => [{ path: USERS, everyMs: USERS_EVERY_MS }, { path: STATE, everyMs: USERS_EVERY_MS }],
       afterRead() {
         const u = users();
         // the user asked about went (removed), or is disabled already (by mason user disable): the question goes
@@ -157,6 +175,7 @@ export const page = {
         const u = users();
         return {
           users: u ? renderUsers(u, m.confirming, ctx.now().getTime(), m.refused) : "",
+          "users-connect": renderUsersConnect(ctx.read(STATE)?.body?.postgres),
           added: m.added ? renderAdded(m.added) : "",
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",
         };
