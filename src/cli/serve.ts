@@ -26,7 +26,7 @@ import { parseSource } from "./preflight.ts";
 import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
-import { pollMsRetired } from "../lib/table-sync.ts";
+import { pollMsRetiredText } from "../lib/table-sync.ts";
 import { version } from "./version.ts";
 import type { CopyState } from "../duck/sync.ts";
 
@@ -103,7 +103,7 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   const changes = env.MASON_CHANGES || null;
   if (changes !== null && changes !== "poll" && changes !== "replication") wrong.push(`MASON_CHANGES=${JSON.stringify(changes)}: poll or replication`);
   // how often a table is polled is the sources file's sync: now, per table (src/lib/table-sync.ts)
-  const pollMs = pollMsRetired(env);
+  const pollMs = pollMsRetiredText(env);
   if (pollMs !== null) wrong.push(pollMs);
   const selfSigned = env.MASON_PG_SELF_SIGNED_TLS || "0";
   if (selfSigned !== "0" && selfSigned !== "1") wrong.push(`MASON_PG_SELF_SIGNED_TLS=${JSON.stringify(selfSigned)}: 1, or 0 (the default)`);

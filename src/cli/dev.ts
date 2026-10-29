@@ -185,7 +185,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (pinned) { say(`mason start: ${pinned}`); return 1; }
   // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
   const pollMs = pollMsRetired(process.env);
-  if (pollMs !== null) { say(`mason start: ${pollMs}`); return 1; }
+  if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: false });
   // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
   // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
   // always was (after the listener's checks): a demo project's port is needed first

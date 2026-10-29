@@ -129,13 +129,21 @@ export function agoText(iso: string, now: number = Date.now()): string {
 
 /**
  * `MASON_POLL_MS` SET IS REFUSED, never run on a default (CLAUDE.md: a renamed setting refuses the start, naming the
- * line to write): how often a table is polled is the sources file's `sync:`, per table. Null when it is unset.
+ * line to write): how often a table is polled is the sources file's `sync:`, per table. Null when it is unset; else what
+ * is wrong, why and the way out — a Failure's fields for `mason start` (before it spawns, and the run itself), joined on
+ * one line of `mason serve`'s settings report (`pollMsRetiredText`).
  */
-export function pollMsRetired(env: Readonly<Record<string, string | undefined>>): string | null {
+export function pollMsRetired(env: Readonly<Record<string, string | undefined>>): { message: string; why: string; fix: string } | null {
   const v = env.MASON_POLL_MS;
   if (v === undefined || v === "") return null;
   const ms = Number(v);
   const line = `sync: poll ${Number.isFinite(ms) && ms >= MIN_POLL_SECONDS * 1000 ? intervalOf(Math.min(ms / 1000, MAX_POLL_SECONDS)) : "5s"}`;
-  return `MASON_POLL_MS=${v} is no longer read: how often each table is polled is the sources file's sync: — write ${line} at its top ` +
-    "(every table) or on a table's entry, then unset MASON_POLL_MS";
+  return { message: `MASON_POLL_MS=${v} is no longer read`, why: "how often each table is polled is its sync: in the sources file",
+    fix: `write ${line} at its top (every table) or on a table's entry, then unset MASON_POLL_MS` };
+}
+
+/** the same, as one line */
+export function pollMsRetiredText(env: Readonly<Record<string, string | undefined>>): string | null {
+  const r = pollMsRetired(env);
+  return r === null ? null : `${r.message}: ${r.why} — ${r.fix}`;
 }
