@@ -21,8 +21,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   `ALIASES` of the view they were: a bookmark lands where it did (`tests/web-page.test.ts` holds each).
 - **A page with a `parent` is in its group** (`observability`, `GROUPS`): its link is under the group's heading in the
   sidebar (always shown, the current page the view itself, `aria-current`), and its views share
-  `ctx.range()` — `RANGES` in src/web/shared.js (Last hour · 24 hours · 7 days, 24 hours by default), each its `since`
-  for every endpoint and its usage step — kept in the hash (`?range=`), never in storage, and in the group's links;
+  `ctx.range()` — `RANGES` in src/web/shared.js (Last hour · 24 hours · 7 days · 30 days · 90 days, 24 hours by default), each its `since`
+  for every endpoint and its usage step; a range past the week is offered only when the run keeps it (`rangeOffered`, from
+  `/api/state` `engine.keptDays`), else shown disabled with MASON_REQUEST_LOG_DAYS as its reason — kept in the hash (`?range=`), never in storage, and in the group's links;
   the range control is in the view's header row, right of its title (`renderSubnav`, its section's `range-<id>`), never in the sidebar. A view builds its paths from
   it, so a change of range is a new read of the view shown alone.
 
@@ -137,6 +138,12 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   glance, its table the day and the week in full.
 - **Numbers are mono and right-aligned in a column; a table scrolls inside its card on a phone, never the page**: the
   reader compares down a column, and a page that scrolls sideways hides the nav.
+- **A row is short cells and its actions; anything long is a line UNDER it, across every column** (a confirm, a copy's
+  words, an error, a reason, the stream state: `tr.under`, src/web/pages/tables.js): a question written into the
+  actions' cell pushed Remove and its row off the card's right edge. A row's actions never wrap (`td.act`), the Tables
+  list's name is the column that gives (cut, its whole the title), a bare table too wide scrolls in its own box
+  (`.table-wrap`), and on a phone a row's actions stay pinned at its card's right. The detector is
+  `tests/web-page.test.ts` "layout guard"; walk every page at 1280, 1024, 900 and 375 px after a change to a row.
 - **Newest first wherever a list is time** (the request log, the sync's events, the raw log, Usage's samples); a chart
   alone reads oldest to newest, left to right. **A column sorts when sorting means something**, by a `sortTh` button
   with `aria-sort`: server-side only where the server pages by that order — the request log's pages follow its cursor

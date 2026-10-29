@@ -15,7 +15,7 @@ import { statementCards, summaryWindow } from "./queries.js";
 
 const EVERY_MS = 60_000;
 /** A step said as the charts' titles say it: `a minute`, `an hour`, `every 6 hours`. */
-const perStep = (seconds) => seconds === 60 ? "a minute" : seconds === 3600 ? "an hour" : seconds % 3600 === 0 ? `every ${seconds / 3600} hours` : `every ${duration(seconds)}`;
+const perStep = (seconds) => seconds === 60 ? "a minute" : seconds === 3600 ? "an hour" : seconds === 86_400 ? "a day" : seconds % 3600 === 0 ? `every ${seconds / 3600} hours` : `every ${duration(seconds)}`;
 const QUERIES = "/api/queries";
 /** How often a copy's own size is measured, in seconds (src/duck/usage.ts SIZE_EVERY_MS, held equal by the tests). */
 export const SIZE_EVERY_SECONDS = 600;
@@ -150,7 +150,7 @@ export function renderUsage(b, isOpen = () => false, sort = { key: "time", dir: 
 export function renderCopySizes(sizes) {
   if (!sizes.length) return empty(`No copy measured yet: each is measured every ${duration(SIZE_EVERY_SECONDS)}.`);
   return `<p class="dim">Measured every ${esc(duration(SIZE_EVERY_SECONDS))}.</p>` + panel(`<table class="sizes">${th(["Table", "Size", "Measured at (UTC)"])}<tbody>` +
-    sizes.map((c) => `<tr><th scope="row"><code>${esc(c.table)}</code></th>${num(fileSize(c.bytes))}<td>${esc(c.at.slice(11, 16))}</td></tr>`).join("") + "</tbody></table>");
+    sizes.map((c) => `<tr><th scope="row"><code class="name" title="${esc(c.table)}">${esc(c.table)}</code></th>${num(fileSize(c.bytes))}<td>${esc(c.at.slice(11, 16))}</td></tr>`).join("") + "</tbody></table>");
 }
 
 export const page = {

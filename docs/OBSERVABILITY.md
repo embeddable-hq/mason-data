@@ -63,8 +63,10 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   by the URL's hash (`#overview`, the default; `#observability/queries`; the old `#status`, `#queries`, `#usage` and
   `#logs` land on their view). Each page is an ES module of its own, a route of `PAGE_ROUTES`. ONLY THE PAGE SHOWN
   polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.
-- **Observability's time range**: Last hour · 24 hours · 7 days (24 hours unless `?range=` says), shared by its three
-  views and kept in the hash: Queries' request log `since`, Usage's samples (`since`, and a step of 60 s, 1 h or 6 h),
+- **Observability's time range**: Last hour · 24 hours · 7 days · 30 days · 90 days (24 hours unless `?range=` says; 30
+  and 90 days only where the run keeps them, `/api/state` `engine.keptDays`, MASON_REQUEST_LOG_DAYS — else shown
+  disabled, saying so), shared by its three views and kept in the hash: Queries' request log `since`, Usage's samples
+  (`since`, and a step of 60 s, 1 h, 6 h or a day — 90 days, 129,600 samples, re-bucket in ~15 ms),
   Logs' events `since`. Each view's filters compose with it.
 - **Overview** (`#overview`): one word, `mason status`'s (Ready / Under way / Failed: `readinessWord` of `readiness`, said
   by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); cards that each link
@@ -99,10 +101,10 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   is set — said under the log — never on an older one),
   `/api/state` (5 s).
 - **Observability › Usage** (`#observability/usage`): the statements of the range's window of `/api/queries` (the week
-  for 7 days, else the day), the range's samples (`/api/usage?since=<range>&step=<60|3600|21600>`, newest first, the
+  for 7 days and longer, else the day), the range's samples (`/api/usage?since=<range>&step=<60|3600|21600|86400>`, newest first, the
   process's memory in a closed details), four charts of them, and each copy's own size (60 s).
 - **Observability › Logs** (`#observability/logs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s),
-  newest first, narrowed by Failures only, a kind and a table. The run's raw log (`/api/logs`, 5 s) is debugging output
+  newest first, narrowed by Failures only, a kind (every kind) and a table (every added table, from `/api/state`, whether the range has an event of it or not). The run's raw log (`/api/logs`, 5 s) is debugging output
   with internal tags and paths: it is behind a closed details, newest first, and read only while that is open.
 
 ## Who reads it

@@ -49,7 +49,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf, POLL_MS } from "./shared.js";
+import { esc, badge, icon, createAsk, renderFailure, updatedText, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -140,12 +140,17 @@ export const renderNav = (shown, range = DEFAULT_RANGE) => `<ul>${tabs().map((t)
  * section's `range-<id>`; the group's name is the sidebar's heading): a segmented control — each a link to the same view
  * at that range, so the hash is the state and Back goes to the range before. "" for a page of its own.
  */
-export function renderSubnav(shown, range = DEFAULT_RANGE) {
+export function renderSubnav(shown, range = DEFAULT_RANGE, keptDays = undefined) {
   const p = PAGES.find((x) => x.id === shown);
   if (!p?.parent) return "";
   const r = rangeOf(range);
-  return `<div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) =>
-      `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}>${esc(v.label)}</a>`).join("")}</div>`;
+  // a range past what the run keeps is shown disabled, saying why and what keeps it (the one chosen by its hash stays a link)
+  return `<div class="range" role="group" aria-label="Time range">${Object.entries(RANGES).map(([k, v]) => {
+    const o = rangeOffered(k, keptDays);
+    if (!o.shown && k !== r) return "";
+    if (!o.offered && k !== r) return `<span class="off" aria-disabled="true" title="${esc(o.why)}">${esc(v.label)}<span class="sr"> (${esc(o.why)})</span></span>`;
+    return `<a href="${esc(hashOf(shown, { range: k }))}"${k === r ? ` aria-current="true"` : ""}>${esc(v.label)}</a>`;
+  }).join("")}</div>`;
 }
 
 /** The heading's line: the database the run copies, and its sources file's name when that is another. */
@@ -210,7 +215,7 @@ export function createApp(fetchFn, now = () => new Date(), shown = "status") {
       return {
         nav: renderNav(m.shown, m.range),
         // the range control in the shown view's header row (each group page's own slot; the others empty)
-        ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range) : ""])),
+        ...Object.fromEntries(PAGES.filter((p) => p.parent).map((p) => [`range-${p.id}`, p.id === m.shown ? renderSubnav(m.shown, m.range, st?.engine?.keptDays) : ""])),
         where: st ? renderWhere(st) : "",
         // the demo database is said beside its name, so a person never takes it for their own
         badge: st?.source?.demo ? badge("demo", "accent") : "",

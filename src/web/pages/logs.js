@@ -2,7 +2,7 @@
  * THE LOGS VIEW (#observability/logs, a view of the Observability group; `#logs`, its old address, lands here;
  * docs/OBSERVABILITY.md "Pages"): the sync's events (`mason logs --events`) over the time range the Observability views
  * share, as a timeline table NEWEST FIRST (When sorts it the other way) — narrowed in the page alone by "Failures only",
- * a kind and a table (the choices are the kinds and tables of what was read), at most EVENTS_SHOWN rows written with
+ * a kind and a table (every kind, and every added table from `/api/state`, events or not), at most EVENTS_SHOWN rows written with
  * "Show more" — and, behind a closed details "The run's raw log (for debugging)", the run's last log entries, newest
  * first (`mason logs`: they carry internal tags and absolute paths, so they are not the page's content). Reads
  * `/api/events` every 10 s, and `/api/logs` every 5 s ONLY WHILE the details is open (the page's own state: nothing is
@@ -16,6 +16,7 @@ const EVENTS_SHOWN = 100;
 /** The events of a range: the newest EVENTS_LIMIT since its start. */
 const eventsPath = (range = DEFAULT_RANGE) => `/api/events?limit=${EVENTS_LIMIT}&since=${RANGES[rangeOf(range)].since}`;
 const LOGS = "/api/logs?lines=200";
+const STATE = "/api/state";
 
 const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
 
@@ -34,9 +35,12 @@ const eventsShown = (events, { failuresOnly = false, kind = "", table = "" } = {
  */
 export function renderEvents(b, { failuresOnly = false, kind = "", table = "", now = Date.now(), sort = { key: "time", dir: "desc" }, limit = EVENTS_SHOWN, span = "" } = {}) {
   const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
-  if (!b.events.length) return empty(`No sync event ${span ? `in ${span} (the events are kept ${days}: MASON_REQUEST_LOG_DAYS)` : `in the last ${days} (MASON_REQUEST_LOG_DAYS)`}.`);
+  const within = span ? `in ${span} (the events are kept ${days}: MASON_REQUEST_LOG_DAYS)` : `in the last ${days} (MASON_REQUEST_LOG_DAYS)`;
   const passing = eventsShown(b.events, { failuresOnly, kind, table });
   const narrowed = failuresOnly || kind || table;
+  // a table chosen that had none (every added table is a choice, events or not): said by its name
+  if (!passing.length && table && !kind) return empty(`No ${failuresOnly ? "failure" : "event"}s for ${table} ${within}.`);
+  if (!b.events.length) return empty(`No sync event ${within}.`);
   if (!passing.length) {
     return empty(failuresOnly && !kind && !table ? `None of the ${b.events.length} sync event${b.events.length === 1 ? "" : "s"} shown failed.` : `None of the ${n(b.events.length)} sync event${b.events.length === 1 ? "" : "s"} read passes the filters.`);
   }
@@ -52,15 +56,23 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
     moreRows("events", Math.min(limit, passing.length), passing.length, EVENTS_SHOWN);
 }
 
-/** The kind and table filters' controls, their choices the kinds and tables of the events read (and the one chosen,
- *  kept while no event read has it). Written into their part: the choices follow what was read. */
-function renderEventFilters(b, { kind = "", table = "" } = {}) {
+/** EVERY KIND OF SYNC EVENT, in its order (src/duck/events.ts `EVENT_KINDS`, held equal by the tests): the Kind filter
+ *  offers each, whether the range has one or not. */
+export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "restart", "copied", "recovered"];
+
+/** The kind and table filters' controls: EVERY kind (EVENT_KINDS), and EVERY added table (`/api/state` `tables`, `s`) —
+ *  the sync's own "(the sync)" first — whether the range has an event of it or not, so the choices never depend on what
+ *  happened to be read; a table only the events name (removed since) and the one chosen are kept too. Written into
+ *  their part: the tables follow the state. */
+export function renderEventFilters(b, { kind = "", table = "" } = {}, s = null) {
   const events = b?.events ?? [];
-  const uniq = (list, chosen) => [...new Set([...list, ...(chosen ? [chosen] : [])])].sort();
+  const added = (s?.tables ?? []).filter((t) => t.added).map((t) => t.table);
+  const others = [...new Set([...events.map((e) => e.table).filter((t) => t !== null && t !== undefined && !added.includes(t)), ...(table && table !== "(the sync)" && !added.includes(table) ? [table] : [])])].sort();
+  const tables = ["(the sync)", ...[...added].sort(), ...others];
+  const kinds = [...EVENT_KINDS, ...[...new Set([...events.map((e) => e.kind), ...(kind ? [kind] : [])])].filter((k) => !EVENT_KINDS.includes(k)).sort()];
   const select = (id, label, all, values, chosen) => `<div class="field"><label for="${id}">${esc(label)}</label><select id="${id}">` +
     `<option value="">${esc(all)}</option>${values.map((v) => `<option value="${esc(v)}"${v === chosen ? " selected" : ""}>${esc(v)}</option>`).join("")}</select></div>`;
-  return select("logs-kind", "Kind", "Every kind", uniq(events.map((e) => e.kind), kind), kind) +
-    select("logs-table", "Table", "Every table", uniq(events.map((e) => e.table ?? "(the sync)"), table), table);
+  return select("logs-kind", "Kind", "Every kind", kinds, kind) + select("logs-table", "Table", "Every table", tables, table);
 }
 
 /** The run's last log entries as a terminal's lines, NEWEST FIRST (the debugging reader wants what just happened); an entry of several lines is one, as written. */
@@ -97,10 +109,11 @@ export const page = {
     };
     return {
       model: m,
-      reads: () => [{ path: events(), everyMs: 10_000 }, ...(m.rawOpen ? [{ path: LOGS, everyMs: 5000 }] : [])],
+      // the state for the Table filter's choices (every added table), as often as tables are added
+      reads: () => [{ path: events(), everyMs: 10_000 }, { path: STATE, everyMs: 30_000 }, ...(m.rawOpen ? [{ path: LOGS, everyMs: 5000 }] : [])],
       actions,
       view: () => ({
-        "logs-filters": renderEventFilters(ctx.read(events())?.body, m),
+        "logs-filters": renderEventFilters(ctx.read(events())?.body, m, ctx.read(STATE)?.body ?? null),
         "logs-events": part(events(), (b) => renderEvents(b, { failuresOnly: m.failuresOnly, kind: m.kind, table: m.table, now: ctx.now().getTime(), sort: m.sort, limit: m.limit,
           span: RANGES[ctx.range()]?.span ?? "" }), false),
         "logs-run": renderRawLog(m.rawOpen, m.rawOpen ? part(LOGS, renderLogs, true) : ""),

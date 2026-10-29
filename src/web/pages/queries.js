@@ -84,9 +84,9 @@ export function renderQueryKpis(sessions, running, queries, range = DEFAULT_RANG
   return cards(list);
 }
 
-/** The window of the request log's summary a range's cards say: the week for 7 days, else the day (the summary has no
- *  hour: the cards of the last hour say the last 24 hours, by name). */
-export const summaryWindow = (range) => range === "7d" ? { key: "week", label: "last 7 days" } : { key: "day", label: "last 24 hours" };
+/** The window of the request log's summary a range's cards say: the week for 7 days and longer, else the day (the
+ *  summary has a day and a week: the cards of the last hour say the last 24 hours, of 30 and 90 days the last 7, by name). */
+export const summaryWindow = (range) => (RANGES[range]?.days ?? 0) >= 7 ? { key: "week", label: "last 7 days" } : { key: "day", label: "last 24 hours" };
 
 /**
  * THE THREE CARDS of a window of the request log's summary (`day`: `/api/queries`' `day` or `week`, `label` its name): the
@@ -121,9 +121,9 @@ export function renderRunning(running, asking = null, outcome = null) {
   const rows = running.map((r) => {
     const key = keyOf(r.session, r.statement);
     const ask = asking === key
-      ? `<tr class="under"><td colspan="8"><span class="confirm" title="SQLSTATE 57014">Cancel session ${r.session}'s statement ${r.statement}? Its client gets a "canceling statement" error.</span> ` +
-        `<button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel statement ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel>Keep it running</button></td></tr>` : "";
-    return `<tr><td>${r.session}</td><td>${r.statement}</td><td>${esc(r.user)}</td><td>${esc(clientText(r.applicationName))}</td>` +
+      ? `<tr class="under asking"><td colspan="8"><div class="under-body"><span class="confirm" title="SQLSTATE 57014">Cancel session ${r.session}'s statement ${r.statement}? Its client gets a "canceling statement" error.</span> ` +
+        `<button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel statement ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel>Keep it running</button></div></td></tr>` : "";
+    return `<tr><td>${r.session}</td><td>${r.statement}</td><td><span class="clip" title="${esc(r.user)}">${esc(r.user)}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num"><time datetime="${esc(r.startedAt)}" title="started ${esc(utcText(r.startedAt))} UTC">${esc(spanText(r.runningMs / 1000))}</time></td><td class="num">${esc(plural(r.rows, "row"))} sent</td>` +
       `<td>${statementCell(r.query)}</td><td class="act">${asking === key ? "" : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td></tr>${ask}${answer(r)}`;
   }).join("");

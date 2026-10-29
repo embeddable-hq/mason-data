@@ -373,7 +373,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.deepEqual(s.body.sessions, sessionsNow, "the listener's own count, by user and client");
     assert.deepEqual(s.body.disk, { path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 10, projectedBytes: null }, "the disk under the copy: its file is engine.bytes, one fact");
     const { uptimeSeconds, ...engine } = s.body.engine as { uptimeSeconds: number };
-    assert.deepEqual(engine, { file: duckFile, bytes: 10, pollSeconds: 5, version: "9.9.9", startedAt: "2026-10-28T08:00:00.000Z", restarts: { count: 0, last: null } });
+    assert.deepEqual(engine, { file: duckFile, bytes: 10, pollSeconds: 5, keptDays: 7, version: "9.9.9", startedAt: "2026-10-28T08:00:00.000Z", restarts: { count: 0, last: null } });
     assert.ok(Math.abs(uptimeSeconds - (Date.now() - Date.parse("2026-10-28T08:00:00.000Z")) / 1000) < 5, `up since the run started: ${uptimeSeconds}`);
     // the slow and refused statements are the request log's, in the shapes mason status renders
     assert.deepEqual((await get("/api/slow")).body, { slow: await requests.slow(), slowMs: 1000 });
