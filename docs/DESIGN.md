@@ -1179,7 +1179,7 @@ BEGIN is chatter and is not. Its columns: `request_id`, `seq`, `started_at`, `du
 `application_name`, `token_name` (a NAME, never the token), `user_name`, `method`, `sqlstate`, `message`, `detail`,
 `hint`, `rows`, `query` (cut at 64 KiB, `query_truncated`) and `json_reads` ("Stored JSON paths" 1.). Written in batches
 (a second or 1,000 rows) on a connection of its own, never the writer's turn; a failed write is said and fails no
-statement; kept `MASON_REQUEST_LOG_DAYS` (7) days; read only through the command server; ordered by `started_at`, `seq`.
+statement; kept `MASON_HISTORY_DAYS` (7) days; read only through the command server; ordered by `started_at`, `seq`.
 
 **Why.** A BI tool met an error on the test server and nothing could be found afterwards: the run threw the rows away
 (`record: () => undefined`). A swap or a stream batch may hold the writer for seconds. With a random uuid and a

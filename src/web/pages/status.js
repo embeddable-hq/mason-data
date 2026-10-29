@@ -305,7 +305,7 @@ export function renderQueries(q) {
   return `<div class="table-wrap"><table class="queries"><caption>Statements (the completed ones' time; ${code("mason logs --requests")} lists each)</caption><thead><tr><th scope="col"></th>` +
     ["Statements", "Completed", "Refused", "Failed", "Cancelled", "Average", "p50", "p95", "Rows sent", "Sent"].map((h) => `<th scope="col">${h}</th>`).join("") +
     `</tr></thead><tbody>${row("Last day", w.day)}${row("Last week", w.week)}</tbody></table></div>` +
-    (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS.</p>` : "") +
+    (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_HISTORY_DAYS.</p>` : "") +
     `<p class="dim">The slow and the refused statements, and every other, are on <a href="${esc(LINKS.queries)}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
 }
 

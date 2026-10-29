@@ -16,6 +16,41 @@
 import type { DuckConnection } from "./executor.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 
+/** How many days every history table keeps (the request log, the sync's events, the usage samples, the copies'
+ *  sizes) unless MASON_HISTORY_DAYS says. */
+export const DEFAULT_HISTORY_DAYS = 7;
+
+/** The days MASON_HISTORY_DAYS keeps, or why the text is not a number of days. Unset or empty: the default. */
+export function historyDays(text: string | undefined): number | { problem: string } {
+  if (text === undefined || text.trim() === "") return DEFAULT_HISTORY_DAYS;
+  const days = Number(text);
+  if (!Number.isInteger(days) || days < 1) {
+    return { problem: `MASON_HISTORY_DAYS=${JSON.stringify(text)} is not a number of days: write a whole number, 1 or more (unset, ${DEFAULT_HISTORY_DAYS})` };
+  }
+  return days;
+}
+
+/**
+ * `MASON_REQUEST_LOG_DAYS` SET IS REFUSED, never run on the default (CLAUDE.md: a renamed setting refuses the start,
+ * naming the line to write): it kept the request log alone once, and the days kept are every history table's now, so it
+ * is MASON_HISTORY_DAYS. Null when it is unset; else what is wrong, why and the way out — a Failure's fields for `mason
+ * start` (before it spawns, and the run itself), joined on one line of `mason serve`'s settings report
+ * (`historyDaysRenamedText`).
+ */
+export function historyDaysRenamed(env: Readonly<Record<string, string | undefined>>): { message: string; why: string; fix: string } | null {
+  const v = env.MASON_REQUEST_LOG_DAYS;
+  if (v === undefined || v === "") return null;
+  return { message: `MASON_REQUEST_LOG_DAYS=${v} is no longer read`,
+    why: "it was renamed MASON_HISTORY_DAYS, since the days it keeps are every history's (the request log, the sync's events, the usage samples and the copies' sizes)",
+    fix: `write MASON_HISTORY_DAYS=${v.trim()} instead, then unset MASON_REQUEST_LOG_DAYS` };
+}
+
+/** the same, as one line */
+export function historyDaysRenamedText(env: Readonly<Record<string, string | undefined>>): string | null {
+  const r = historyDaysRenamed(env);
+  return r === null ? null : `${r.message}: ${r.why} — ${r.fix}`;
+}
+
 /** how often the rows past the retention are deleted (and once at open) */
 export const TRIM_EVERY_MS = 60 * 60 * 1000;
 

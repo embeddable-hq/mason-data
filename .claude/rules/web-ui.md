@@ -23,7 +23,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   sidebar (always shown, the current page the view itself, `aria-current`), and its views share
   `ctx.range()` — `RANGES` in src/web/shared.js (Now · Last hour · 24 hours · 7 days · 30 days · 90 days, Now by default), each its `since`
   for every endpoint and its usage step; a range past the week is offered only when the run keeps it (`rangeOffered`, from
-  `/api/state` `engine.keptDays`), else shown disabled with MASON_REQUEST_LOG_DAYS as its reason — kept in the hash (`?range=`), never in storage, and in the group's links;
+  `/api/state` `engine.keptDays`), else shown disabled with MASON_HISTORY_DAYS as its reason — kept in the hash (`?range=`), never in storage, and in the group's links;
   the range control is in the view's header row, right of its title (`renderSubnav`, its section's `range-<id>`), never in the sidebar. A view builds its paths from
   it, so a change of range is a new read of the view shown alone. **Now is the only live range**: a read bound to the
   range takes its rate from `rangeEvery(range, everyMs)` — that rate under Now, `Infinity` under any other — so a past

@@ -1,7 +1,7 @@
 /**
  * THE DUCKDB RUN'S REQUEST LOG (src/duck/requests.ts, `_mason.requests`; a BI tool met an error on the test server
  * and nothing could be found afterwards): what the listener records is read back as it was written, newest last; the
- * rows past MASON_REQUEST_LOG_DAYS are deleted, said with their count; a write that fails is said once, never thrown,
+ * rows past MASON_HISTORY_DAYS are deleted, said with their count; a write that fails is said once, never thrown,
  * and the next one that succeeds says so; the slow and refused statements are read in mason status's shapes.
  */
 import { test, after } from "node:test";
@@ -11,7 +11,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DuckStore } from "../src/duck/store.ts";
-import { DEFAULT_REQUEST_LOG_DAYS, outcomeOf, RequestLedger, REQUESTS_TABLE, requestLogDays } from "../src/duck/requests.ts";
+import { outcomeOf, RequestLedger, REQUESTS_TABLE } from "../src/duck/requests.ts";
+import { DEFAULT_HISTORY_DAYS, historyDays } from "../src/duck/history.ts";
 import type { ApiLogRow } from "../src/api/request-log.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-requests-"));
@@ -108,7 +109,7 @@ test("lastUsed: each user's newest statement within the window it was a user in;
   await store.writer.run(`DELETE FROM ${REQUESTS_TABLE}`);
 });
 
-test("the requests older than MASON_REQUEST_LOG_DAYS are deleted at open and said with their count; the rest are kept", async () => {
+test("the requests older than MASON_HISTORY_DAYS are deleted at open and said with their count; the rest are kept", async () => {
   const day = 86_400_000;
   const said: string[] = [];
   const first = await RequestLedger.open(store, (l) => said.push(l), { days: 30 });
@@ -118,7 +119,7 @@ test("the requests older than MASON_REQUEST_LOG_DAYS are deleted at open and sai
   await first.close();
   const ledger = await RequestLedger.open(store, (l) => said.push(l), { days: 7 });
   assert.deepEqual((await ledger.recent({ limit: 10 })).map((r) => r.requestId), ["new"]);
-  assert.deepEqual(said, ["request log: deleted 2 request(s) older than 7 days (MASON_REQUEST_LOG_DAYS)"]);
+  assert.deepEqual(said, ["request log: deleted 2 request(s) older than 7 days (MASON_HISTORY_DAYS)"]);
   assert.equal(await ledger.trim(), 0);
   assert.equal(said.length, 1, "a trim that deletes nothing says nothing");
   await ledger.close();
@@ -163,13 +164,13 @@ test("a failed write fails nothing beside it: a statement on another connection 
   } finally { session.closeSync(); await ledger.close(); }
 });
 
-test("MASON_REQUEST_LOG_DAYS: a whole number of days, 1 or more; unset, 7; anything else refuses the start, saying how to write it", () => {
-  assert.equal(DEFAULT_REQUEST_LOG_DAYS, 7);
-  assert.equal(requestLogDays(undefined), 7);
-  assert.equal(requestLogDays(""), 7);
-  assert.equal(requestLogDays("30"), 30);
+test("MASON_HISTORY_DAYS: a whole number of days, 1 or more; unset, 7; anything else refuses the start, saying how to write it", () => {
+  assert.equal(DEFAULT_HISTORY_DAYS, 7);
+  assert.equal(historyDays(undefined), 7);
+  assert.equal(historyDays(""), 7);
+  assert.equal(historyDays("30"), 30);
   for (const bad of ["0", "-1", "1.5", "a week"]) {
-    assert.deepEqual(requestLogDays(bad), { problem: `MASON_REQUEST_LOG_DAYS=${JSON.stringify(bad)} is not a number of days: write a whole number, 1 or more (unset, 7)` }, bad);
+    assert.deepEqual(historyDays(bad), { problem: `MASON_HISTORY_DAYS=${JSON.stringify(bad)} is not a number of days: write a whole number, 1 or more (unset, 7)` }, bad);
   }
 });
 

@@ -96,7 +96,7 @@ export interface RunState {
   totals?: SyncTotals;
   /** the run's copy: its file */
   engine: { file: string; bytes: number | null;
-    /** the days the request log, the events and the usage samples are kept (MASON_REQUEST_LOG_DAYS); a run from before it has none */
+    /** the days the request log, the events and the usage samples are kept (MASON_HISTORY_DAYS); a run from before it has none */
     keptDays?: number;
     /** the run's version, when it started (ISO), and how long it has been up; a run from before them has none */
     version?: string; startedAt?: string; uptimeSeconds?: number;
@@ -332,7 +332,7 @@ const STATUS_USAGE = `usage: mason status [--json]
            bytes, key, added, addedColumns, copy, error, kept, sync: { state (synced, syncing, failed, waiting), syncedAt (when
            the copy was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
            ageSeconds (how old the copy is now) }, … }], totals: { added, copied, failed, rows (the copies' rows),
-           syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_REQUEST_LOG_DAYS), version (the run's), startedAt,
+           syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_HISTORY_DAYS), version (the run's), startedAt,
            uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
            or null }, or { error }) }, disk: { path (where the copy's file is), freeBytes, copyBytes (the file),
            projectedBytes (what the copies running are projected to add; null: none, or too early to say), error },
@@ -593,7 +593,7 @@ export function queryLines(q: QuerySummary | { error: string }, st: Style): stri
   const line = (label: string, w: QueryWindow): string => {
     const counts = `${n(w.statements)} statement${w.statements === 1 ? "" : "s"}: ${n(w.completed)} completed, ${n(w.refused)} refused, ${n(w.failed)} failed, ${n(w.cancelled)} cancelled`;
     const times = w.durationMs === null ? "" : ` · ${msText(w.durationMs.avg)} / ${msText(w.durationMs.p50)} / ${msText(w.durationMs.p95)}`;
-    const short = w.covered < w.days ? st.dim(` (the request log keeps ${w.covered} day${w.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS)`) : "";
+    const short = w.covered < w.days ? st.dim(` (the request log keeps ${w.covered} day${w.covered === 1 ? "" : "s"}: MASON_HISTORY_DAYS)`) : "";
     return `  ${label.padEnd(10)}  ${counts}${times} · ${n(w.rows)} rows, ${bytesText(w.bytesSent)} sent${short}`;
   };
   return [`\n${st.bold("Queries")} ${st.dim("(the completed ones' time: average / p50 / p95; mason logs --requests lists each)")}:`, line("last day", q.day), line("last week", q.week)];
@@ -1324,7 +1324,7 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   statement and the error's first line; the filters narrow it, and a page that has older rows ends with the line that
   reads them (--before). With --events, the sync's events: each copy that failed or finished, each poll, catch-up or
   stream that failed, the database out of reach, a table current again, and each restart of the run — a line each,
-  newest last (a failure repeated word for word is said once an hour). Both are kept MASON_REQUEST_LOG_DAYS days
+  newest last (a failure repeated word for word is said once an hour). Both are kept MASON_HISTORY_DAYS days
   (default 7) in the run's copy, and read through the running Mason. With --running, the statements running now
   instead, one per session, each with its number (mason cancel <session> --statement <n> stops one).
 
@@ -1442,7 +1442,7 @@ async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
     ];
     if (json) { out(jsonText(LOGS, { requests, keptDays, before }, next)); return 0; }
     const st = styleOut();
-    if (!requests.length) out(`No ${filtered ? "request that passes the filters" : "request"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS).`);
+    if (!requests.length) out(`No ${filtered ? "request that passes the filters" : "request"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS).`);
     for (const r of requests) out(requestLine(r, st));
     out(endText({ next, ...(!requests.length && !filtered ? { tips: [`${UNLISTED_STATEMENTS}.`] } : {}) }, st));
     return 0;
@@ -1464,7 +1464,7 @@ async function eventLogs(limit: number, failedOnly: boolean, json: boolean): Pro
       : [["mason logs --events --failed", "only the failures"], ["mason status", "each table's copy and its error now"]];
     if (json) { out(jsonText(LOGS, { events, keptDays }, next)); return 0; }
     const st = styleOut();
-    if (!events.length) out(`No ${failedOnly ? "sync failure" : "sync event"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS).`);
+    if (!events.length) out(`No ${failedOnly ? "sync failure" : "sync event"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS).`);
     for (const e of events) out(eventLine(e, st));
     out(endText({ next }, st));
     return 0;

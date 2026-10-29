@@ -44,7 +44,7 @@ export const RANGES = {
 };
 
 /**
- * WHETHER A RANGE CAN BE CHOSEN, by the days the run keeps (`/api/state` `engine.keptDays`, MASON_REQUEST_LOG_DAYS):
+ * WHETHER A RANGE CAN BE CHOSEN, by the days the run keeps (`/api/state` `engine.keptDays`, MASON_HISTORY_DAYS):
  * the hour, the day and the week always (a log that keeps fewer says so where it shows them); a longer one only when
  * the run keeps at least its days — else it is shown disabled, with why and the setting that keeps it (`why`). A run
  * that has not said how long it keeps (`keptDays` undefined) offers no longer one: never a range it could not tell.
@@ -54,7 +54,7 @@ export function rangeOffered(key, keptDays) {
   if (!r.longer) return { offered: true, shown: true };
   if (typeof keptDays !== "number") return { offered: false, shown: false };
   if (keptDays >= r.days) return { offered: true, shown: true };
-  return { offered: false, shown: true, why: `Mason keeps ${keptDays} day${keptDays === 1 ? "" : "s"} of history: MASON_REQUEST_LOG_DAYS=${r.days} keeps ${r.days}` };
+  return { offered: false, shown: true, why: `Mason keeps ${keptDays} day${keptDays === 1 ? "" : "s"} of history: MASON_HISTORY_DAYS=${r.days} keeps ${r.days}` };
 }
 export const DEFAULT_RANGE = "now";
 /** Whether a range follows what happens (Now) or is read once when chosen (every other). */

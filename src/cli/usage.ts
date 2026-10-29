@@ -18,7 +18,7 @@ const n = (x: number): string => x.toLocaleString("en-US");
 
 export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>] [--step <span>] [--json]
 
-  What Mason was and did over time, from a sample it takes every minute and keeps MASON_REQUEST_LOG_DAYS days
+  What Mason was and did over time, from a sample it takes every minute and keeps MASON_HISTORY_DAYS days
   (default 7): a line each span — the statements of the Postgres API (how many, how many were refused, failed or
   cancelled — the errors column —, the completed ones' p95 duration, the rows sent), the copy's size and rows, the
   tables whose sync is failing, how old the stalest copy was, the stream's lag (with --replication), and the memory

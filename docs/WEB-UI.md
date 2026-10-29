@@ -28,7 +28,7 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | `#observability/syncs` | Observability › Syncs; `?failures=1` ticks Failures only, `?table=` chooses the table |
 
 The hashes of before still land on their view: `#status` is the Overview, `#queries` and `#usage` their views, `#logs`
-and `#observability/logs` Syncs. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — **Now** · Last hour · 24 hours · 7 days · 30 days · 90 days, Now unless the hash says (`?range=1h`, `?range=7d`, `?range=90d`); 30 and 90 days only where Mason keeps that much history (`MASON_REQUEST_LOG_DAYS`, 7 by default), else shown disabled with that setting as the reason
+and `#observability/logs` Syncs. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — **Now** · Last hour · 24 hours · 7 days · 30 days · 90 days, Now unless the hash says (`?range=1h`, `?range=7d`, `?range=90d`); 30 and 90 days only where Mason keeps that much history (`MASON_HISTORY_DAYS`, 7 by default), else shown disabled with that setting as the reason
 — kept in the hash, so a link carries it (the sidebar's links to the three keep it too). **Now is live**: the last 15
 minutes, read every few seconds, said **Live** beside the control. **Every other range is read once**, when it is
 chosen, and stays as it was then: beside it, when it was read and **Refresh**. Queries reads the request log since then,

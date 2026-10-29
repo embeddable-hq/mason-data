@@ -36,7 +36,7 @@ const eventsShown = (events, { failuresOnly = false, kind = "", table = "" } = {
  */
 export function renderEvents(b, { failuresOnly = false, kind = "", table = "", now = Date.now(), sort = { key: "time", dir: "desc" }, limit = EVENTS_SHOWN, span = "" } = {}) {
   const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
-  const within = span ? `in ${span} (the events are kept ${days}: MASON_REQUEST_LOG_DAYS)` : `in the last ${days} (MASON_REQUEST_LOG_DAYS)`;
+  const within = span ? `in ${span} (the events are kept ${days}: MASON_HISTORY_DAYS)` : `in the last ${days} (MASON_HISTORY_DAYS)`;
   const passing = eventsShown(b.events, { failuresOnly, kind, table });
   const narrowed = failuresOnly || kind || table;
   // a table chosen that had none (every added table is a choice, events or not): said by its name

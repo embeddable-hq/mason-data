@@ -530,7 +530,7 @@ current as its `sync:` says — `off` (the default: read again only at `mason sy
   and nothing could be found afterwards; the run passed `record: () => undefined`). The listener builds the row
   (`recordRequest`, src/api/postgres/server.ts: SQLSTATE, message, DETAIL, HINT, rows, session, application_name, a
   token's NAME, never the token, a `mason user`'s name and its ROLE), `RequestLedger` (src/duck/requests.ts) writes it in batches on a connection of its
-  own — never the sync's writer turn — and keeps `MASON_REQUEST_LOG_DAYS` days (7). A failed write is said once and
+  own — never the sync's writer turn — and keeps `MASON_HISTORY_DAYS` days (7). A failed write is said once and
   fails no statement. `mason logs --requests` and `mason status` read it through the run's command server, never the
   file. **Its order is `started_at`, then `seq`** (the row's number in arrival order, continuing across restarts):
   `request_id` is a random uuid and the clock a millisecond, so a refused login and the statement before it read back

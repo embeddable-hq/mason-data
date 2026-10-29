@@ -298,7 +298,7 @@ the session, `application_name`, the `mason user`, the method (`QUERY`, `PARSE`,
 CommandComplete or ErrorResponse included, the ReadyForQuery after it not), the duration and the statement (cut at 64
 KiB, flagged when cut). Its outcome is the SQLSTATE's: `ok`, `refused` (the statement's own fault), `failed` (Mason's
 or the machine's: classes XX, 53, 57, 58) or `cancelled` (57014: a cancel or a statement timeout). It is kept
-`MASON_REQUEST_LOG_DAYS` days (default 7). `mason logs --requests` reads it, a request a line, filtered by
+`MASON_HISTORY_DAYS` days (default 7). `mason logs --requests` reads it, a request a line, filtered by
 `--outcome`, `--since` / `--until`, `--user` and `--client` (`--failed` for every one not answered), a page at a time
 (`--before`, the position the last page answered with), `--json` for every column; `mason status` shows the last
 day's and week's statements (each outcome, the completed ones' average / p50 / p95 time, the rows and bytes sent) and
@@ -321,7 +321,7 @@ whatever the session runs at that moment is stopped, as a `CancelRequest` stops 
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |
 | `MASON_PG_CATALOG_TIMEOUT_MS` | 10000 | how long a catalog statement may take before the embedded Postgres is discarded and the statement refused |
 | `MASON_STATEMENT_TIMEOUT` | 5min | the longest one statement may run (Postgres's units; 0 for none); a session's `statement_timeout` may only shorten it |
-| `MASON_REQUEST_LOG_DAYS` | 7 | how many days of the request log are kept |
+| `MASON_HISTORY_DAYS` | 7 | how many days of the request log (and the sync's events, the usage samples and the copies' sizes) are kept |
 | `MASON_STORE_JSON_PATHS` | on | `off`: never store the JSON paths statements keep reading as columns of the copy (`payload ->> 'customer_id'` read by 3 statements, or by one taking 1 s, is stored, and read from there; `mason status` lists them), and drop those stored, at that start |
 | `MASON_PG_TRACE` | unset | `1`: log every statement text a session receives |
 

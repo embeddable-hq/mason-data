@@ -8,7 +8,7 @@
  * connection of the events' own — never the sync's writer turn (`onWriter`), which a swap or a stream batch may hold
  * for seconds; a read is on a third connection and sees committed batches only; a write that fails is said once with
  * the events it cost, and again when a write succeeds after it, and it NEVER fails the sync that recorded it (the
- * sync's own state and log line are written either way). Kept `MASON_REQUEST_LOG_DAYS` days.
+ * sync's own state and log line are written either way). Kept `MASON_HISTORY_DAYS` days.
  *
  * A failure repeated word for word is ONE event (`REPEAT_MS`): a database away fails every pass, every few seconds,
  * and a list of the same line buries the one before it. It is written again once it was over in between, or an hour
@@ -70,7 +70,7 @@ export const REPEAT_MS = 60 * 60 * 1000;
 interface Pending { at: Date; seq: number; e: SyncEventInput }
 
 export interface EventsOptions {
-  /** days kept (MASON_REQUEST_LOG_DAYS) */
+  /** days kept (MASON_HISTORY_DAYS) */
   days: number;
   /** a test's: how long an event waits before its batch is written */
   flushMs?: number;
@@ -148,7 +148,7 @@ export class SyncEvents {
   async trim(): Promise<number> {
     const r = await this.history.writer.runAndReadAll(`DELETE FROM ${EVENTS_TABLE} WHERE happened_at < now() - INTERVAL (${this.days}) DAY`);
     const n = Number(r.getRowsJS()[0]?.[0] ?? 0);
-    if (n > 0) this.log(`sync events: deleted ${n} event(s) older than ${this.days} days (MASON_REQUEST_LOG_DAYS)`);
+    if (n > 0) this.log(`sync events: deleted ${n} event(s) older than ${this.days} days (MASON_HISTORY_DAYS)`);
     return n;
   }
 

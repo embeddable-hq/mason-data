@@ -68,7 +68,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
 - **Observability's time range**: Now · Last hour · 24 hours · 7 days · 30 days · 90 days (Now unless `?range=` says;
   Now is the last 15 minutes and LIVE — its reads every few seconds — and every other range is read once when chosen,
   with when and Refresh beside it; 30
-  and 90 days only where the run keeps them, `/api/state` `engine.keptDays`, MASON_REQUEST_LOG_DAYS — else shown
+  and 90 days only where the run keeps them, `/api/state` `engine.keptDays`, MASON_HISTORY_DAYS — else shown
   disabled, saying so), shared by its three views and kept in the hash: Queries' request log `since`, Usage's samples
   (`since`, and a step of 60 s, 1 h, 6 h or a day — 90 days, 129,600 samples, re-bucket in ~15 ms),
   Usage's `/api/activity`, Syncs' events `since`. Each view's filters compose with it.
@@ -129,7 +129,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   any page shows it (`.claude/rules/web-ui.md`). The web page, the managed service and a coding agent read the same JSON.
 - **Mason's words**: a "user" (what `mason user` makes), never "credential" or "token"; "the copy"; never the engine's name.
 - **Kept like the request log**: anything with history lives in the run's own file, written on a connection of its own
-  (never the sync's writer turn), kept `MASON_REQUEST_LOG_DAYS` days.
+  (never the sync's writer turn), kept `MASON_HISTORY_DAYS` days.
 
 Key: ✅ built · ⏸ deferred
 

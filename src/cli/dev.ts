@@ -38,7 +38,8 @@ import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChanges
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
 import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, SELF_SIGNED_FILES } from "./pg-tls.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
-import { RequestLedger, REQUESTS_TABLE, requestLogDays } from "../duck/requests.ts";
+import { RequestLedger, REQUESTS_TABLE } from "../duck/requests.ts";
+import { historyDays, historyDaysRenamed } from "../duck/history.ts";
 import { EVENTS_TABLE, SyncEvents } from "../duck/events.ts";
 import { USAGE_TABLE, UsageSampler } from "../duck/usage.ts";
 import { withPlaceholders } from "./pg-url.ts";
@@ -206,6 +207,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
   const pollMs = pollMsRetired(process.env);
   if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: false });
+  // the history's days are MASON_HISTORY_DAYS now: the old name refuses the start, named (src/duck/history.ts)
+  const renamed = historyDaysRenamed(process.env);
+  if (renamed !== null) return failed("start", { code: "refused", ...renamed }, { json: false });
   // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
   // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
   // always was (after the listener's checks): a demo project's port is needed first
@@ -392,7 +396,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const syncMode = changes === "replication" ? "replication" : syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
-  const keptDays = requestLogDays(process.env.MASON_REQUEST_LOG_DAYS);
+  const keptDays = historyDays(process.env.MASON_HISTORY_DAYS);
   if (typeof keptDays !== "number") { fail("Opening the copy"); say(`  ${keptDays.problem}`); await store.close(); return 1; }
   let events: SyncEvents;
   try { events = await SyncEvents.open(store, logLine, { days: keptDays }); }
@@ -449,7 +453,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     await sync.stop(); await events.close(); await store.close(); return 1;
   }
   // THE REQUEST LOG (src/duck/requests.ts): every statement the listener answers or refuses, kept in the copy's own file
-  // for MASON_REQUEST_LOG_DAYS (read above, with the sync's events)
+  // for MASON_HISTORY_DAYS (read above, with the sync's events)
   let requests: RequestLedger;
   try { requests = await RequestLedger.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Starting the Postgres listener"); say(`  the request log (${REQUESTS_TABLE}) could not be opened: ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }
@@ -483,7 +487,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     });
   } catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
   done(`Postgres listener on ${listenerText(pgTls.listener, api.port)}; ${statementTimeoutMs === 0 ? "statements without a time limit" : `each statement at most ${timeoutSetting.trim()}`} (MASON_STATEMENT_TIMEOUT); ` +
-    `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS; mason logs --requests)`);
+    `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS; mason logs --requests)`);
   {
     // a user whose role the file no longer names reads nothing until it is added again (fail closed): said here, by name
     const roles = liveRoles.now();

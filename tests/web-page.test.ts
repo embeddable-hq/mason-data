@@ -1195,7 +1195,7 @@ test("the Overview: the word, the facts (tables synced N of M, rows, the last sy
     // the statements: a row per window, each count as mason status says it
     assert.match(text, /Statements \(the completed ones' time; mason logs --requests lists each\) Statements Completed Refused Failed Cancelled Average p50 p95 Rows sent Sent /);
     assert.match(text, /Last day 1,234 1,200 30 3 1 42 ms 12 ms 380 ms 98,765 5\.1 MiB Last week 5,000 4,900 90 9 1 40 ms 11 ms 1\.3 s 400,000 900 B /);
-    assert.match(text, /The request log keeps 3 days: MASON_REQUEST_LOG_DAYS\./);
+    assert.match(text, /The request log keeps 3 days: MASON_HISTORY_DAYS\./);
     const cliQueries = plain(commands.queryLines(QUERIES.queries as never, PLAIN).join(" "));
     for (const v of ["1,234 statements: 1,200 completed, 30 refused, 3 failed, 1 cancelled", "42 ms / 12 ms / 380 ms", "98,765 rows, 5.1 MiB sent", "400,000 rows, 900 B sent"]) assert.ok(cliQueries.includes(v), `mason status says ${v}`);
     // the database is a row of the facts, the bars only for the copies not finished, no count the errors and statements repeat
@@ -1463,9 +1463,9 @@ test("the request log: a row each, newest first, in the commands' words — held
   }
   assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Refused .* relation "nope" does not exist Newest$/);
   assert.match(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true }), /<div class="paging"><button type="button" data-newest>Newest<\/button><\/div>/);
-  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<div class="empty"><p class="empty-title">No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.<\/p><\/div><p class="dim unlisted">A statement that reads no copied table /,
+  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<div class="empty"><p class="empty-title">No request in the last 7 days \(MASON_HISTORY_DAYS\)\.<\/p><\/div><p class="dim unlisted">A statement that reads no copied table /,
     "nothing listed and nothing filtered: what the log does not list (a select 1 typed to test the connection), as mason logs --requests says it");
-  assert.equal(textOf(renderRequests({ requests: [], keptDays: 1, before: null }, { filtered: true })), "No request that passes the filters in the last 1 day (MASON_REQUEST_LOG_DAYS).");
+  assert.equal(textOf(renderRequests({ requests: [], keptDays: 1, before: null }, { filtered: true })), "No request that passes the filters in the last 1 day (MASON_HISTORY_DAYS).");
 });
 
 test("the request log's filters: each view has its own path — status as the server's outcomes, since, user, client", async () => {
@@ -1477,7 +1477,7 @@ test("the request log's filters: each view has its own path — status as the se
   run.answers.set("GET /api/requests?outcome=ok&since=24h", answer({ requests: [], keptDays: 7, before: null }));
   run.answers.set("GET /api/requests?outcome=refused%2Cfailed&since=2h&user=ana&client=psql", answer({ requests: [failedRequest], keptDays: 7, before: null }));
   assert.deepEqual(await asked({ status: "completed" }), ["GET /api/requests?outcome=ok&since=15m"], "since is the range's, Now's 15 minutes unless the hash says");
-  assert.match(textOf(app.view()["request-log"]!), /^No request that passes the filters in the last 15 minutes \(the request log keeps 7 days: MASON_REQUEST_LOG_DAYS\)\./);
+  assert.match(textOf(app.view()["request-log"]!), /^No request that passes the filters in the last 15 minutes \(the request log keeps 7 days: MASON_HISTORY_DAYS\)\./);
   assert.deepEqual(await asked({ status: "refused-or-failed", since: "2h", user: "ana", client: "psql" }), ["GET /api/requests?outcome=refused%2Cfailed&since=2h&user=ana&client=psql"]);
   assert.match(textOf(app.view()["request-log"]!), / relation "nope"/);
   // Refused and Failed are offered apart, each the ledger's outcome of that name
@@ -1672,12 +1672,12 @@ const withUsageAnswers = (run: ReturnType<typeof fakeRun>) => {
 
 test("Usage: a window the request log keeps fewer days of than it asks says so, in mason status's words (coveredText)", () => {
   const cli = commands.queryLines(UL_QUERIES.queries as never, PLAIN_STYLE).join("\n");
-  assert.ok(cli.includes("(the request log keeps 3 days: MASON_REQUEST_LOG_DAYS)"));
-  assert.equal(fnOf<[unknown], string>(usagePage, "coveredText")(UL_QUERIES.queries.week), "the request log keeps 3 days: MASON_REQUEST_LOG_DAYS");
+  assert.ok(cli.includes("(the request log keeps 3 days: MASON_HISTORY_DAYS)"));
+  assert.equal(fnOf<[unknown], string>(usagePage, "coveredText")(UL_QUERIES.queries.week), "the request log keeps 3 days: MASON_HISTORY_DAYS");
   assert.equal(fnOf<[unknown], string>(usagePage, "coveredText")(UL_QUERIES.queries.day), "", "a window the log covers has no caveat");
   // the cards of a range longer than the log keeps say it under them, never a short window passed off as whole
   const kpis = fnOf<[Record<string, unknown>], string>(usagePage, "renderUsageKpis");
-  assert.match(textOf(kpis({ activity: activityOf({ window: { days: 30, covered: 7 } }), range: "30d" })), /Sent, last 30 days 3\.0 MiB 52,000 rows 30 days: the request log keeps 7 days: MASON_REQUEST_LOG_DAYS$/);
+  assert.match(textOf(kpis({ activity: activityOf({ window: { days: 30, covered: 7 } }), range: "30d" })), /Sent, last 30 days 3\.0 MiB 52,000 rows 30 days: the request log keeps 7 days: MASON_HISTORY_DAYS$/);
   assert.doesNotMatch(textOf(kpis({ activity: activityOf(), range: "24h" })), /the request log keeps/);
   for (const gone of ["renderQueries", "durationsText", "summaryWindow"]) assert.equal(typeof usagePage[gone], "undefined", `${gone} is gone: the cards say the range's statements`);
 });
@@ -1781,9 +1781,9 @@ test("Syncs: the sync's events are mason logs --events' lines in a table, a fail
   assert.equal(textOf(renderEvents(UL_EVENTS, { kind: "copied", failuresOnly: true })), "None of the 3 sync events read passes the filters.");
   assert.equal(textOf(renderEvents({ keptDays: 7, events: [UL_EVENTS.events[0]] }, { failuresOnly: true })), "None of the 1 sync event shown failed.");
   assert.doesNotMatch(html, /<b>/, "a message is escaped");
-  assert.equal(textOf(renderEvents({ events: [], keptDays: 7 })), "No sync event in the last 7 days (MASON_REQUEST_LOG_DAYS).");
-  assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { span: "the last hour" })), "No sync event in the last hour (the events are kept 7 days: MASON_REQUEST_LOG_DAYS).");
-  assert.equal(textOf(renderEvents({ events: [], keptDays: 1 })), "No sync event in the last 1 day (MASON_REQUEST_LOG_DAYS).");
+  assert.equal(textOf(renderEvents({ events: [], keptDays: 7 })), "No sync event in the last 7 days (MASON_HISTORY_DAYS).");
+  assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { span: "the last hour" })), "No sync event in the last hour (the events are kept 7 days: MASON_HISTORY_DAYS).");
+  assert.equal(textOf(renderEvents({ events: [], keptDays: 1 })), "No sync event in the last 1 day (MASON_HISTORY_DAYS).");
 });
 
 test("Syncs: the run's entries are rows, NEWEST FIRST, a multi-line entry kept as one preformatted row", () => {
@@ -2891,7 +2891,7 @@ test("Usage: the unsupported SQL of the range is mason status's lines (unsupport
   assert.ok(html.includes('title="docs/SQL-SUPPORT.md entry frame-groups"') && !textOf(html).includes("frame-groups"), "the registry id is a title, never the words");
   assert.ok(html.includes(`title="${UNSUPPORTED.unsupported[0]!.example}"`), "the whole statement is its title");
   assert.ok(!textOf(html).includes(UNSUPPORTED.unsupported[0]!.example), "the line has it cut, as mason status cuts it");
-  assert.equal(textOf(render({ ...UNSUPPORTED, unsupported: [] }, "the last hour")), "No statement refused for unsupported SQL in the last hour (the request log keeps 7 days: MASON_REQUEST_LOG_DAYS).");
+  assert.equal(textOf(render({ ...UNSUPPORTED, unsupported: [] }, "the last hour")), "No statement refused for unsupported SQL in the last hour (the request log keeps 7 days: MASON_HISTORY_DAYS).");
   assert.match(fs.readFileSync(path.join(WEB, "index.html"), "utf8"), /<h3>Unsupported SQL<\/h3>\s*<div id="unsupported"><\/div>/);
   // the app: the shared range's since — under Now once a minute, another range once — and its failure said where it shows
   const run = fakeRun();
@@ -3126,7 +3126,7 @@ test("Queries, an empty request log: how to connect under its sentence — never
   const renderRequests = fn<[unknown, Record<string, unknown>], string>("renderRequests");
   const connect = fn<[unknown, unknown], string>("renderConnect")(SHOP_PG, { first: true });
   const empty = { requests: [], keptDays: 7, before: null };
-  assert.match(textOf(renderRequests(empty, { span: "the last 24 hours", connect })), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_REQUEST_LOG_DAYS\)\. A statement that reads no copied table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not listed\. Connect your first tool .* Create a user /);
+  assert.match(textOf(renderRequests(empty, { span: "the last 24 hours", connect })), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_HISTORY_DAYS\)\. A statement that reads no copied table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not listed\. Connect your first tool .* Create a user /);
   assert.equal((page as Record<string, unknown>).UNLISTED_STATEMENTS, commands.UNLISTED_STATEMENTS, "the page says what mason logs --requests says");
   assert.ok(fs.readFileSync(path.join(WEB, "index.html"), "utf8").includes(`${commands.UNLISTED_STATEMENTS}.`), "and the request log's lead says it over a log that has rows");
   assert.ok(!textOf(renderRequests(empty, { span: "the last 24 hours", connect, filtered: true })).includes("Connect"), "a filter that passes none is not a fresh install");
@@ -3435,11 +3435,11 @@ test("the time range past a week: 30 and 90 days, a day a point, offered when th
   assert.equal(fn<[string], string>("usagePath")("90d"), "/api/usage?since=90d&step=86400");
   assert.equal(textOf(renderSubnav("usage", "24h")), "Now Last hour 24 hours 7 days Refresh", "a run that has not said what it keeps: no range it could not tell");
   const kept7 = renderSubnav("usage", "24h", 7);
-  assert.match(kept7, /<span class="off" aria-disabled="true" title="Mason keeps 7 days of history: MASON_REQUEST_LOG_DAYS=30 keeps 30">30 days<span class="sr"> \(Mason keeps 7 days of history: MASON_REQUEST_LOG_DAYS=30 keeps 30\)<\/span><\/span>/);
+  assert.match(kept7, /<span class="off" aria-disabled="true" title="Mason keeps 7 days of history: MASON_HISTORY_DAYS=30 keeps 30">30 days<span class="sr"> \(Mason keeps 7 days of history: MASON_HISTORY_DAYS=30 keeps 30\)<\/span><\/span>/);
   assert.ok(!/href="[^"]*range=30d"/.test(kept7) && !/href="[^"]*range=90d"/.test(kept7), "never a link to more than is kept");
   const kept30 = renderSubnav("usage", "24h", 30);
   assert.match(kept30, /<a href="#observability\/usage\?range=30d">30 days<\/a>/);
-  assert.match(kept30, /title="Mason keeps 30 days of history: MASON_REQUEST_LOG_DAYS=90 keeps 90">90 days/);
+  assert.match(kept30, /title="Mason keeps 30 days of history: MASON_HISTORY_DAYS=90 keeps 90">90 days/);
   assert.match(renderSubnav("syncs", "90d", 90), /<a href="#observability\/syncs\?range=90d" aria-current="true">90 days<\/a>/);
   // a bookmark of 90 days on a run that keeps 7 still lands on it (the log says what it keeps)
   assert.match(renderSubnav("queries", "90d", 7), /aria-current="true">90 days<\/a>/);
@@ -3462,9 +3462,9 @@ test("Syncs' filters list every kind and every added table, whatever the range r
   // a removed table's events keep it a choice; nothing read yet still lists the added tables
   assert.match(textOf(renderEventFilters({ events: [{ ...only.events[0], table: "public.gone" }], keptDays: 7 }, {}, RUNNING)), /public\.orders public\.gone$/);
   assert.match(textOf(renderEventFilters(undefined, {}, RUNNING)), /Every table \(the sync\) public\.customers public\.events public\.orders$/);
-  assert.equal(textOf(renderEvents(only, { table: "public.customers", span: "the last 24 hours" })), "No events for public.customers in the last 24 hours (the events are kept 7 days: MASON_REQUEST_LOG_DAYS).");
-  assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { table: "public.customers", span: "the last 24 hours" })), "No events for public.customers in the last 24 hours (the events are kept 7 days: MASON_REQUEST_LOG_DAYS).");
-  assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { span: "the last 24 hours" })), "No sync event in the last 24 hours (the events are kept 7 days: MASON_REQUEST_LOG_DAYS).");
+  assert.equal(textOf(renderEvents(only, { table: "public.customers", span: "the last 24 hours" })), "No events for public.customers in the last 24 hours (the events are kept 7 days: MASON_HISTORY_DAYS).");
+  assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { table: "public.customers", span: "the last 24 hours" })), "No events for public.customers in the last 24 hours (the events are kept 7 days: MASON_HISTORY_DAYS).");
+  assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { span: "the last 24 hours" })), "No sync event in the last 24 hours (the events are kept 7 days: MASON_HISTORY_DAYS).");
 });
 
 test("Syncs: #observability/syncs?table= (a table's View syncs) narrows the events to it, the Table filter showing it; ?failures=1 the failures; a link without either keeps what was chosen", async () => {

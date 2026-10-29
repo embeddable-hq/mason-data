@@ -27,7 +27,7 @@ const th = (cols) => `<thead><tr>${cols.map((c) => `<th scope="col">${esc(c)}</t
 const num = (v) => `<td class="num">${esc(v)}</td>`;
 
 /** The caveat of a window the request log keeps fewer days of than it asks (src/cli/commands.ts `queryLines`); "" when it keeps all. */
-export const coveredText = (w) => w.covered < w.days ? `the request log keeps ${w.covered} day${w.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS` : "";
+export const coveredText = (w) => w.covered < w.days ? `the request log keeps ${w.covered} day${w.covered === 1 ? "" : "s"}: MASON_HISTORY_DAYS` : "";
 
 /** One sample's cells in `mason usage`'s words (src/cli/usage.ts `sampleLine`): the strings the table writes, held equal by the tests. */
 export function sampleCells(s) {
@@ -202,7 +202,7 @@ export function renderRunning(running, asking = null, outcome = null, now = Date
  */
 export function renderUnsupported(b, span = RANGES[DEFAULT_RANGE].span) {
   const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
-  if (!b.unsupported.length) return empty(`No statement refused for unsupported SQL in ${span} (the request log keeps ${days}: MASON_REQUEST_LOG_DAYS).`);
+  if (!b.unsupported.length) return empty(`No statement refused for unsupported SQL in ${span} (the request log keeps ${days}: MASON_HISTORY_DAYS).`);
   return `<p class="lead">The statements refused in ${esc(span)} by the SQL they used that Mason does not support, the most first.</p>` +
     panel(`<ul class="unsupported">${b.unsupported.map((g) => {
       const e = unsupportedEntry(g);

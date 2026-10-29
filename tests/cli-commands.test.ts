@@ -643,7 +643,7 @@ test("mason status's queries: the last day and the last week a line each — eve
   assert.deepEqual(queryLines!({ keptDays: 3, day: w(1, 1), week: { ...w(7, 3), durationMs: null } }, PLAIN), [
     "\nQueries (the completed ones' time: average / p50 / p95; mason logs --requests lists each):",
     "  last day    1,204 statements: 1,190 completed, 10 refused, 2 failed, 2 cancelled · 120 ms / 40 ms / 13.7 s · 52,000 rows, 3.0 MiB sent",
-    "  last week   1,204 statements: 1,190 completed, 10 refused, 2 failed, 2 cancelled · 52,000 rows, 3.0 MiB sent (the request log keeps 3 days: MASON_REQUEST_LOG_DAYS)",
+    "  last week   1,204 statements: 1,190 completed, 10 refused, 2 failed, 2 cancelled · 52,000 rows, 3.0 MiB sent (the request log keeps 3 days: MASON_HISTORY_DAYS)",
   ]);
   assert.deepEqual(queryLines!({ error: "the run answered 500" }, PLAIN), ["\nQueries: could not read them (the run answered 500; mason logs has the detail)"]);
   assert.ok(STATUS.json?.includes("queries") === true, "mason status --json declares it");
@@ -711,7 +711,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     // none listed, nothing filtered: what the log does not list, so a select 1 typed to test the connection is not looked for in vain
     const none = await run(["logs", "--requests"]);
     assert.equal(none.code, 0, none.stdout + none.stderr);
-    assert.match(none.stdout, /^No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.\n\nTip: A statement that reads no copied table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not\s+listed\./);
+    assert.match(none.stdout, /^No request in the last 7 days \(MASON_HISTORY_DAYS\)\.\n\nTip: A statement that reads no copied table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not\s+listed\./);
     assert.ok(!(await run(["logs", "--requests", "--slow"])).stdout.includes("reads no copied table"), "a filter that passes none says nothing of it");
     // a mistake: exit 2, in the flag's name, before the run is asked
     const before = asked.length;

@@ -2,7 +2,7 @@
  * THE SYNC'S EVENTS (src/duck/events.ts, `_mason.sync_events`; a sync failure was kept only as a table's current error,
  * wiped by the next success, and earlier ones only in the log file): what the sync records is read back as it was,
  * newest last, filtered as the commands ask; a failure repeated word for word is one event until its table recovers or
- * an hour passes; the events past MASON_REQUEST_LOG_DAYS are deleted, said; a write that fails is said once and never
+ * an hour passes; the events past MASON_HISTORY_DAYS are deleted, said; a write that fails is said once and never
  * thrown. Offline: a DuckDB file of the test's own.
  */
 import { test, after } from "node:test";
@@ -111,7 +111,7 @@ test("events older than the retention are deleted, said with their count; a writ
   await store.writer.run(`INSERT INTO ${EVENTS_TABLE} VALUES (now() - INTERVAL 10 DAY, 0, 'copied', 'public.a', 'old'), (now() - INTERVAL 1 DAY, 1, 'copied', 'public.a', 'recent')`);
   const said: string[] = [];
   const kept = await SyncEvents.open(store, (l) => said.push(l), { days: 7 });
-  assert.deepEqual(said, ["sync events: deleted 1 event(s) older than 7 days (MASON_REQUEST_LOG_DAYS)"]);
+  assert.deepEqual(said, ["sync events: deleted 1 event(s) older than 7 days (MASON_HISTORY_DAYS)"]);
   assert.deepEqual((await kept.recent({ limit: 10 })).map((e) => e.message), ["recent"]);
   await kept.close();
   said.length = 0;

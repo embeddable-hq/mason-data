@@ -4,7 +4,7 @@
  * Every statement the Postgres listener answered with DuckDB, and every statement it refused or failed, whatever it was,
  * is a row of `_mason.requests` in the run's own DuckDB file: the ClickHouse stack's `ops.api_requests`
  * (src/api/request-log.ts) for the prototype, built from the same `ApiLogRow` the listener builds, kept
- * `MASON_REQUEST_LOG_DAYS` days (default 7). `mason status` and `mason logs --requests` read it through the run's command
+ * `MASON_HISTORY_DAYS` days (default 7). `mason status` and `mason logs --requests` read it through the run's command
  * server (src/cli/run-server.ts), never by opening the file: DuckDB allows one process per file.
  *
  * Written as the ClickHouse stack this was cut from wrote its request log (src/duck/history.ts, the frame the sync's
@@ -36,22 +36,8 @@ export interface RefusedQuery {
 
 export const REQUESTS_TABLE = `${MASON_SCHEMA}.requests`;
 
-/** How many days of requests are kept unless MASON_REQUEST_LOG_DAYS says. */
-export const DEFAULT_REQUEST_LOG_DAYS = 7;
 const FLUSH_MS = 1000;
 const BATCH_ROWS = 1000;
-
-/**
- * The days MASON_REQUEST_LOG_DAYS keeps, or why the text is not a number of days. Unset or empty: the default.
- */
-export function requestLogDays(text: string | undefined): number | { problem: string } {
-  if (text === undefined || text.trim() === "") return DEFAULT_REQUEST_LOG_DAYS;
-  const days = Number(text);
-  if (!Number.isInteger(days) || days < 1) {
-    return { problem: `MASON_REQUEST_LOG_DAYS=${JSON.stringify(text)} is not a number of days: write a whole number, 1 or more (unset, ${DEFAULT_REQUEST_LOG_DAYS})` };
-  }
-  return days;
-}
 
 /** A request's outcome in a word, from its SQLSTATE (src/api/request-log.ts: the listener's refusal line reads it too). */
 export { outcomeOf };
@@ -201,7 +187,7 @@ export function parseRequestCursor(text: string): { at: string; seq: number } | 
 export interface QueryWindow {
   /** the window asked, in days: 1 (the last day) or 7 (the last week) in the summary; a time range's length (a fraction under a day) in `window` */
   days: number;
-  /** the days of it the log keeps (MASON_REQUEST_LOG_DAYS): fewer than `days` when the log keeps fewer */
+  /** the days of it the log keeps (MASON_HISTORY_DAYS): fewer than `days` when the log keeps fewer */
   covered: number;
   /** every statement recorded in it (a refused login is none), and each outcome's count */
   statements: number; completed: number; refused: number; failed: number; cancelled: number;
@@ -234,7 +220,7 @@ export const UNSUPPORTED_EXAMPLE_CHARS = 1000;
 export interface QuerySummary { keptDays: number; day: QueryWindow; week: QueryWindow }
 
 export interface LedgerOptions {
-  /** days kept (MASON_REQUEST_LOG_DAYS) */
+  /** days kept (MASON_HISTORY_DAYS) */
   days: number;
   /** a test's: how long a row waits before its batch is written */
   flushMs?: number;
@@ -336,7 +322,7 @@ export class RequestLedger {
   async trim(): Promise<number> {
     const r = await this.history.writer.runAndReadAll(`DELETE FROM ${REQUESTS_TABLE} WHERE started_at < now() - INTERVAL (${this.days}) DAY`);
     const n = Number(r.getRowsJS()[0]?.[0] ?? 0);
-    if (n > 0) this.log(`request log: deleted ${n} request(s) older than ${this.days} days (MASON_REQUEST_LOG_DAYS)`);
+    if (n > 0) this.log(`request log: deleted ${n} request(s) older than ${this.days} days (MASON_HISTORY_DAYS)`);
     return n;
   }
 

@@ -53,7 +53,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
   if (!page.requests.length) {
     const days = `${page.keptDays} day${page.keptDays === 1 ? "" : "s"}`;
     // nothing asked yet (no filter, the newest page): how to connect, so the first statement is a paste away
-    return empty(`No ${filtered ? "request that passes the filters" : "request"} ${span ? `in ${span} (the request log keeps ${days}: MASON_REQUEST_LOG_DAYS)` : `in the last ${days} (MASON_REQUEST_LOG_DAYS)`}.`) +
+    return empty(`No ${filtered ? "request that passes the filters" : "request"} ${span ? `in ${span} (the request log keeps ${days}: MASON_HISTORY_DAYS)` : `in the last ${days} (MASON_HISTORY_DAYS)`}.`) +
       // a first statement looked for and not there: what the log does not list (a select 1 typed to test the connection)
       (filtered || paged ? "" : `<p class="dim unlisted">${esc(UNLISTED_STATEMENTS)}.</p>${connect}`) + nav;
   }
