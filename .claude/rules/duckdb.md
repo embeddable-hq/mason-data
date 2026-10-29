@@ -49,9 +49,14 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
     arithmetic ~8; a TIMESTAMP ↔ TIMESTAMPTZ cast is ICU's too, so never "cast, truncate, cast back". The session's
     zone is read where the statement executes (`current_setting('TimeZone')`), never the rewriter's: a prepared
     statement's plan is made at its Parse and run after a later `SET TimeZone`;
-  - **a LEFT JOIN of a list's rows ON TRUE is an INNER lateral of a list never empty** (`leftLateral`, the functions'
-    `orNull`): DuckDB's LEFT lateral is a delimiter join over the whole base, whose LIMIT read every row (37.9 s for a
-    100-row preview) and whose order kept other rows than Postgres's; the INNER one is its streaming UNNEST;
+  - **a LEFT JOIN of a list's rows ON TRUE under a LIMIT is an INNER lateral of a list never empty, and only there**
+    (`leftLateral`, `limitBounds`, the functions' `orNull`): DuckDB's LEFT lateral is a delimiter join over the whole
+    base, whose LIMIT read every row (37.9 s for a 100-row preview) and whose order kept other rows than Postgres's;
+    the INNER one is its streaming UNNEST. But the UNNEST calls the function per ROW, the delimiter join per DISTINCT
+    argument, so where every row is read anyway (a count, a GROUP BY, a DISTINCT, a window, a whole result, a sort by
+    the lateral's column) DuckDB's own join stays (a count over 22 M rows: 79 s joined, over 200 s streamed). A LIMIT
+    bounds through a derived table or a CTE above, and under an ORDER BY whose first key is a table's column (the top
+    N's filter reaches the scan); bounding too much costs time, too little an answer;
   - **equivalent order keys are canonicalised: `x IS [NOT] NULL, x` is one key on `x` with its NULLS placed**
     (`nullsKeyFolded`): an expression key stops DuckDB's top N pruning the scan (6.4 s and 91 s for a 100-row page).
     Equivalent means READ alike too: a bare key that is an integer or an output column's name is the output's

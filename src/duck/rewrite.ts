@@ -256,6 +256,9 @@ class Rewriter {
   private readonly inFrom = new WeakSet<Body>();
   /** the set-returning functions in FROM a LEFT JOIN … ON TRUE reads, written as a list never empty (leftLateral) */
   private readonly nonEmpty = new WeakSet<Body>();
+  /** the SELECTs and joins whose rows a LIMIT (or an OFFSET) keeps the first of, nothing between reading every row:
+   *  a LEFT lateral of a list is streamed there alone (limitBounds, leftLateral) */
+  private readonly bounded = new WeakSet<Body>();
   /** how the database changes a letter's case */
   private readonly caseMode: CaseMode;
 
@@ -711,6 +714,7 @@ class Rewriter {
 
   private select(b: Body): AstNode | null {
     for (const c of (b.withClause?.ctes ?? []) as AstNode[]) if (isNode(c) && typeof bodyOf(c).ctename === "string" && isNode(bodyOf(c).ctequery)) this.ctes.set(bodyOf(c).ctename, bodyOf(c).ctequery as AstNode);
+    this.limitBounds(b);
     this.rowValues(b);
     for (const w of (b.windowClause ?? []) as AstNode[]) if (isNode(w)) this.keyedPartition(bodyOf(w));
     // a GROUP BY of an output name is grouped by its ordinal: DuckDB binds a name without regard to case, so `"Name"`
@@ -2869,6 +2873,74 @@ class Rewriter {
   // --------------------------------------------------------------------------------------------- FROM
 
   /**
+   * WHERE A LIMIT KEEPS THE FIRST ROWS OF A JOIN (leftLateral): a SELECT with a LIMIT or an OFFSET — or a SELECT such a
+   * one reads as a FROM item (a derived table, a CTE) or as an arm of its UNION ALL, the bound passing down — whose rows
+   * reach that LIMIT as its FROM yields them: no aggregate, GROUP BY, DISTINCT, window or other set operation between,
+   * each of which reads every row first and hands back an order of its own. An ORDER BY … LIMIT bounds too when its first key is a column of a table
+   * (sortsByTableColumn): DuckDB's top N pushes its bound into that table's scan as a filter, so the rows reaching the
+   * lateral are few (measured, docs/DESIGN.md "A LEFT lateral of a list": 0.1–4.7 s streamed against 0.5–106 s for the
+   * delimiter join over 20 M rows); any other key (the lateral's own column, an expression) is a top N over every row,
+   * each row's function calls paid in full. Its joins, and the derived tables and CTEs its FROM reads, are bounded.
+   * Marked from the SELECT down before its children are walked (the walker runs a SELECT's rule first). Bounding too
+   * much costs time, never an answer (the streamed lateral is Postgres's rows in Postgres's order); bounding too little
+   * keeps DuckDB's delimiter join under a LIMIT, whose rows are not Postgres's.
+   */
+  private limitBounds(b: Body): void {
+    const keeps = (n: unknown): boolean => isNode(n) && !(kindOf(n) === "A_Const" && bodyOf(n).isnull === true);
+    if (!keeps(b.limitCount) && !keeps(b.limitOffset) && !this.bounded.has(b)) return;
+    const sort = (b.sortClause ?? []) as AstNode[];
+    // a UNION ALL's arms, each read in turn (a set operation's arm is a SELECT body, unwrapped: walkBody)
+    if (b.op !== undefined && b.op !== "SETOP_NONE") {
+      if (b.op === "SETOP_UNION" && b.all === true && sort.length === 0) for (const arm of [b.larg, b.rarg]) if (arm !== null && typeof arm === "object" && !isNode(arm)) this.bounded.add(arm as Body);
+      return;
+    }
+    if (sort.length > 0 && (!keeps(b.limitCount) || !this.sortsByTableColumn(bodyOf(sort[0]!).node as AstNode, b))) return;
+    if ((Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || b.distinctClause !== undefined) return;
+    if ((Array.isArray(b.windowClause) && b.windowClause.length > 0) || ((b.targetList ?? []) as AstNode[]).some((t) => this.hasAggregate(t) || hasWindow(t))) return;
+    const visit = (x: unknown): void => {
+      if (!isNode(x)) return;
+      const xb = bodyOf(x);
+      if (kindOf(x) === "JoinExpr") { this.bounded.add(xb); visit(xb.larg); visit(xb.rarg); return; }
+      if (kindOf(x) === "RangeSubselect" && isNode(xb.subquery)) { this.bounded.add(bodyOf(xb.subquery as AstNode)); return; }
+      if (kindOf(x) === "RangeVar" && xb.schemaname === undefined) {
+        const cte = this.ctes.get(String(xb.relname));
+        if (cte !== undefined && kindOf(cte) === "SelectStmt") this.bounded.add(bodyOf(cte));
+      }
+    };
+    for (const x of (b.fromClause ?? []) as AstNode[]) visit(x);
+  }
+
+  /** whether an ORDER BY key is a column of a table as it is stored (limitBounds): an ordinal or an output name is
+   *  its target's expression, and a derived table's or a CTE's column is followed to what it selects */
+  private sortsByTableColumn(key: AstNode, b: Body): boolean {
+    const targets = (b.targetList ?? []) as AstNode[];
+    const n = constInt(key);
+    if (n !== null) return n >= 1 && n <= targets.length && this.tableColumn(bodyOf(targets[n - 1]!).val as AstNode, b, 0);
+    const f = kindOf(key) === "ColumnRef" ? names(bodyOf(key).fields) : [];
+    const named = f.length === 1 ? targets.filter((t) => bodyOf(t).name === f[0]) : [];
+    return this.tableColumn(named.length === 1 ? bodyOf(named[0]!).val as AstNode : key, b, 0);
+  }
+
+  private tableColumn(e: AstNode, select: Body, depth: number): boolean {
+    if (!isNode(e) || kindOf(e) !== "ColumnRef" || depth > 8) return false;
+    const t = this.typed(e);
+    if (t?.node !== "VAR" || t.functionColumn !== undefined || (t.levelsUp ?? 0) !== 0) return false;
+    if (t.relation !== undefined) return true;
+    // a derived table's or a CTE's column: what it selects under that name, or a column of the one table its * reads
+    const f = names(bodyOf(e).fields);
+    const col = f.at(-1), alias = f.length === 2 ? f[0] : undefined;
+    const matching = this.fromSources(select).filter((s) => alias === undefined || s.alias === alias);
+    if (col === undefined || matching.length !== 1 || kindOf(matching[0]!.query) !== "SelectStmt") return false;
+    const q = bodyOf(matching[0]!.query);
+    if (q.op !== undefined && q.op !== "SETOP_NONE") return false;
+    const qt = (q.targetList ?? []) as AstNode[];
+    const hits = qt.filter((x) => isNode(bodyOf(x).val) && !hasStar(bodyOf(x).val) && (bodyOf(x).name ?? figureColname(bodyOf(x).val as AstNode)) === col);
+    if (hits.length === 1) return this.tableColumn(bodyOf(hits[0]!).val as AstNode, q, depth + 1);
+    const from = (q.fromClause ?? []) as AstNode[];
+    return hits.length === 0 && qt.some((x) => hasStar(bodyOf(x).val)) && from.length === 1 && kindOf(from[0]!) === "RangeVar" && !this.ctes.has(String(bodyOf(from[0]!).relname));
+  }
+
+  /**
    * A LEFT JOIN LATERAL OF A LIST'S ROWS ON TRUE (docs/DESIGN.md "A LEFT lateral of a list"): `FROM base LEFT JOIN
    * json_each(base.doc) d ON TRUE` is every base row with each of its members, or once with NULLs where it has none.
    * DuckDB plans a LEFT lateral as a delimiter join — the whole base grouped, the function called for every distinct
@@ -2876,12 +2948,17 @@ class Rewriter {
    * 22 M rows), and the join hands its rows back in an order of its own, so the LIMIT kept OTHER rows than Postgres's
    * (Postgres walks the base and each row's members in order). Written as an INNER lateral over a list that is never
    * empty — the members, or one NULL (`orNull`) — it is the same rows, and DuckDB runs it as a streaming UNNEST: in the
-   * base's order, the members in theirs, stopping at the LIMIT. That holds whatever stands above the join (a WHERE, an
-   * ORDER BY, an aggregate), so the condition is the join's alone: LEFT, ON a literal TRUE, its right side one function
-   * of a list Mason writes (the json rows, an array column's unnest), without ORDINALITY. A RIGHT or FULL join, another
-   * condition, or another function keeps DuckDB's own plan.
+   * base's order, the members in theirs, stopping at the LIMIT. But it calls the function once per ROW where the
+   * delimiter join calls it once per DISTINCT argument, so where every row is read anyway — a count, a GROUP BY, a
+   * DISTINCT, a window, a whole result, a sort by the lateral's own column — it is the slower plan (a count over 22 M
+   * rows of few distinct documents: 79 s joined, over 200 s streamed; 2.2 s against 62.5 s over 20 M rows of 2,000).
+   * So it is written only where a LIMIT keeps the first rows of the join (`bounded`: limitBounds), and only for a
+   * join that is LEFT, ON a literal TRUE, its right side one function of a list Mason writes (the json rows, an array
+   * column's unnest), without ORDINALITY. A RIGHT or FULL join, another condition, or another function keeps DuckDB's
+   * own plan.
    */
   private leftLateral(b: Body): AstNode | null {
+    if (!this.bounded.has(b)) return null;
     const quals = b.quals as AstNode | undefined;
     if (b.jointype !== "JOIN_LEFT" || b.isNatural === true || b.usingClause !== undefined || quals === undefined || kindOf(quals) !== "A_Const" || bodyOf(quals).boolval?.boolval !== true) return null;
     const rarg = b.rarg as AstNode | undefined;
@@ -3086,6 +3163,12 @@ const NOT_EXACT = new Error("not exact");
 /** a set operation's arm (libpg-query's `larg` / `rarg`: a SelectStmt's body, unwrapped), as the node it is */
 const armOf = (key: string, v: unknown): AstNode | null =>
   (key === "larg" || key === "rarg") && v !== null && typeof v === "object" && !Array.isArray(v) && !isNode(v) ? { SelectStmt: v as Body } : null;
+
+/** whether an expression holds a window function (outside a subquery) */
+const hasWindow = (v: unknown): boolean => Array.isArray(v) ? v.some(hasWindow)
+  : v === null || typeof v !== "object" ? false
+  : isNode(v) ? kindOf(v) !== "SubLink" && ((kindOf(v) === "FuncCall" && bodyOf(v).over !== undefined) || Object.values(bodyOf(v)).some(hasWindow))
+  : Object.values(v as Body).some(hasWindow);
 
 const hasStar = (v: unknown): boolean => isNode(v) && kindOf(v) === "ColumnRef" && (bodyOf(v).fields as AstNode[]).some((f) => kindOf(f) === "A_Star");
 

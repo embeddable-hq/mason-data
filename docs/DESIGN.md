@@ -312,7 +312,7 @@ oracle several times while iterating, and one built a 20 M-row dataset twice.
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
-53 statements (17 of PR #13's shapes, their controls, a count by a column and a table's previews, each in the tool's
+58 statements (22 of PR #13's shapes, their controls, a count by a column and a table's previews, each in the tool's
 spelling; 36 of `oracle/bi-shapes.ts`, one of each structure) explained through the
 listener over the shop with a million orders in nine row groups, each reduced to a coarse skeleton — the operators in
 tree order, each scan's table and whether a top-N dynamic filter or a zone-map filter is attached (and whether that
@@ -321,7 +321,10 @@ delimiter join, a full sort; no cost, estimate or row count, so a DuckDB upgrade
 fixture. Five invariants are measured with DuckDB's EXPLAIN ANALYZE, where a skeleton cannot show the gain: a 100-row
 page by a column reads at most 6 of the 9 row groups in each scan (1–3 measured; loose, since the count is how many
 threads claimed a row group before the top N's bound reached the scan), a LEFT lateral preview of json rows under a
-LIMIT at most a tenth of the base's rows.
+LIMIT at most a tenth of the base's rows. Three more are counted by the executor's function counter (a call is a chunk
+of up to 2,048 rows): a count over a LEFT lateral of `jsonb_each` and of `json_each` calls the function for fewer than
+half the chunks of the base (128 of 489 measured: the 240,000 distinct documents, not the million rows), and the lateral
+sorted by a table column under a LIMIT for at most a tenth (9 measured).
 
 **Why.** The oracle holds every answer to Postgres's and is blind to the plan. On 2026-10-28 three regressions of the
 rewrite were found only by a BI tool's slow statements on the test server, each with every answer right: a LEFT JOIN
@@ -496,11 +499,15 @@ as far; not measured there yet.
 #### A LEFT lateral of a list
 
 **Decision.** `FROM base LEFT JOIN <the rows of a list> ON TRUE` — `json_each`, `jsonb_each`, their `_text`,
-`json(b)_array_elements(_text)`, `json(b)_object_keys`, and `unnest` of an array column — is an INNER lateral over a list
-that is never empty: the rows, or one NULL where there are none (`leftLateral`; the functions' `orNull` argument,
-`src/duck/functions.ts`). That is the same rows whatever stands above the join (a WHERE, an ORDER BY, an aggregate), so the
-condition is the join's alone: LEFT, ON a literal TRUE, one such function on its right, no ORDINALITY. An INNER lateral, a
-condition, another function keep DuckDB's own plan.
+`json(b)_array_elements(_text)`, `json(b)_object_keys`, and `unnest` of an array column — UNDER A LIMIT is an INNER
+lateral over a list that is never empty: the rows, or one NULL where there are none (`leftLateral`; the functions'
+`orNull` argument, `src/duck/functions.ts`). The join must be LEFT, ON a literal TRUE, one such function on its right, no
+ORDINALITY; and a LIMIT (or an OFFSET) must keep the first of its rows (`limitBounds`): the SELECT that holds the join
+has one, or a SELECT reading it as a derived table or a CTE does, with no aggregate, GROUP BY, DISTINCT, window or set
+operation between, and no ORDER BY unless its first key is a column of a table. Everywhere else — a count, a GROUP BY, a
+DISTINCT, a window, a whole result, a sort by the lateral's own column — DuckDB's own plan stays, as do an INNER
+lateral, a condition and another function. (2026-10-29; until then every such join was rewritten, whatever stood above
+it.)
 
 **Why.** On the test server a BI tool's "expand the JSON" preview (`SELECT q.*, d.key, d.value FROM (SELECT …) q LEFT
 JOIN json_each(CASE … END) d ON TRUE LIMIT 100 OFFSET 0`) over 22 M rows took 37.9 s, its `count(*)` cut off at 16 s.
@@ -535,6 +542,50 @@ every 17th), best of three:
 
 What reads every row still calls the two functions for every document (~3.4 µs a row), and stays slow: that is the
 executor worker's cost ("The executor worker"), and the stored JSON paths' remedy does not reach a document's members.
+
+**Why only under a LIMIT (2026-10-29).** The measurement above had nearly every document distinct, where the delimiter
+join saves nothing: it calls the function once per DISTINCT argument, the UNNEST once per row. On the test server the
+same preview's row count — `SELECT count(*) FROM (SELECT … FROM base LEFT JOIN LATERAL json_each(base.doc) d ON TRUE)
+sub`, a 22 M-row table whose json column holds a few thousand distinct documents — went from 79 s to over 200 s
+(cut off) with the rewrite: `Ungrouped Aggregate > Projection > Unnest > Table Scan (22,405,332 rows)`, two JavaScript
+calls per base row. The streaming plan wins only where a LIMIT stops it early, which is also the only place its order
+(Postgres's) changes an answer; under an aggregate, a GROUP BY, a DISTINCT or a window every row is read either way,
+and each hands back an order of its own. An ORDER BY … LIMIT reads every row too unless its first key is a column of
+a table: DuckDB's top N then pushes its bound into that table's scan as a filter, and the rows reaching the UNNEST are
+few — measured below, the streamed plan's worst case there is seconds where the delimiter join's is a hundred.
+Bounding too much costs time, never an answer (the streamed lateral is Postgres's rows in Postgres's order);
+bounding too little keeps the delimiter join under a LIMIT, whose rows are not Postgres's, so a LIMIT passes down
+through a derived table, a CTE and a UNION ALL's arms.
+
+Measured through Mason's listener on the laptop (10 cores), two 20 M-row tables, a `json` column of five-key objects:
+one with 2,000 distinct documents, one with every document distinct; `json_each(q.doc)` in a `LEFT JOIN LATERAL … ON
+TRUE`; each statement once (the fast ones best of three), *streamed* the rewrite everywhere (main), *joined* DuckDB's
+delimiter join everywhere (before PR #13), *now* the gate:
+
+| statement | 2,000 docs: streamed | joined | now | all distinct: streamed | joined | now |
+|---|---|---|---|---|---|---|
+| `count(*)` over the lateral | 62.5 s | 2.2 s | 2.7 s | 88.0 s | 117.6 s | 123.4 s |
+| `GROUP BY d.key` | 137.0 s | 0.26 s | 0.58 s | 85.4 s | 92.9 s | 75.5 s |
+| `ORDER BY d.key, q.id LIMIT 100` (the lateral's column) | 62.9 s | 0.85 s | 0.73 s | 76.2 s | 89.9 s | 79.1 s |
+| the preview, `LIMIT 100` | 0.06 s | 1.68 s | 0.10 s | 0.06 s | 164.6 s | 0.52 s |
+| the preview in a derived table, `LIMIT 100` outside | 0.08 s | 1.24 s | 0.12 s | 0.12 s | 93.0 s | 0.18 s |
+| `ORDER BY q.id DESC LIMIT 100` (in heap order) | 0.18 s | 0.66 s | 0.29 s | 0.11 s | 105.8 s | 0.34 s |
+| the same over a derived table `(SELECT t.id, t.doc FROM …) q` | 0.19 s | 0.41 s | 0.37 s | 0.21 s | 85.4 s | 0.23 s |
+| `ORDER BY q.v DESC LIMIT 100` (a column of 1,000 values in every row group) | 3.6 s | 0.51 s | 6.3 s | 4.7 s | 91.9 s | 5.6 s |
+
+The gate takes the faster plan in every row but two: a count (or any full read) over nearly distinct documents, where
+the streamed plan is about a third faster (88 s against 118–123 s) — against 28 times slower over few distinct ones —
+and an ORDER BY a table's column whose zone maps prune nothing, over few distinct documents (3.6–6.3 s streamed, 0.5 s
+joined) — against 92 s joined over distinct ones. Which way a table's documents lean is not known when the statement is
+planned, so each side takes the plan whose worst case is the smaller loss: a full read joined is at most about 1.4
+times the streamed one and up to 500 times faster; a page sorted by a table's column streamed is seconds at worst,
+where joined it is minutes. (The repeated rows vary run to run by
+about 2×; a `now` column against its `streamed` or `joined` twin is the same plan.)
+
+What the rewrite cannot see: a row limit set on the wire (the extended protocol's Execute with a row count, as a JDBC
+driver's `setMaxRows` or fetch size sends it) and no LIMIT in the SQL. The plan is made at Parse, so such a statement
+keeps the delimiter join: every row is computed before the first is sent, and the first rows are DuckDB's order, as
+before PR #13. A tool that writes its preview's LIMIT into the SQL (as the one on the test server does) is streamed.
 
 #### Nulls placed by a key of their own
 

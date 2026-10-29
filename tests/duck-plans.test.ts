@@ -110,8 +110,17 @@ const REWRITTEN: Shape[] = [
   { name: "LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", sql: "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.meta FROM orders t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta ELSE NULL END) d ON TRUE LIMIT 100 OFFSET 0" },
   { name: "LEFT lateral preview: json_each, LIMIT 100 OFFSET 200", sql: "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.meta FROM orders t) AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(q.meta::text), 1, 1) = '{' THEN q.meta::json ELSE NULL END) d ON TRUE LIMIT 100 OFFSET 200" },
   { name: "LEFT lateral preview: jsonb_array_elements_text, LIMIT 100", sql: "SELECT t.id, e FROM orders t LEFT JOIN jsonb_array_elements_text(CASE WHEN jsonb_typeof(t.meta -> 'tags') = 'array' THEN t.meta -> 'tags' END) AS e ON TRUE LIMIT 100" },
+  // sorted by a column of the table under a LIMIT: the top N's filter reaches the table's scan, so it streams too
+  { name: "LEFT lateral sorted by a table column, LIMIT 100", sql: "SELECT q.id, d.key, d.value FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY q.id DESC LIMIT 100" },
+  // where no LIMIT keeps the first rows every row is read either way, and DuckDB's own delimiter join calls the
+  // function once per DISTINCT document where the UNNEST calls it once per row (limitBounds: the count over 20 M rows
+  // of 2,000 documents took 62.5 s streamed, 2.2 s joined): counted, and sorted by the lateral's own column
+  { name: "LEFT lateral counted, no LIMIT: jsonb_each (not rewritten)", sql: "SELECT count(*) FROM (SELECT q.id, d.key, d.value FROM orders q LEFT JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE) sub" },
+  { name: "LEFT lateral counted, no LIMIT: json_each (not rewritten)", sql: "SELECT count(*) FROM (SELECT q.id, d.key, d.value FROM orders q LEFT JOIN LATERAL json_each(CASE WHEN substring(ltrim(q.meta::text), 1, 1) = '{' THEN q.meta::json END) d ON TRUE) sub" },
+  { name: "LEFT lateral counted, no LIMIT: jsonb_array_elements (not rewritten)", sql: "SELECT count(*) FROM (SELECT t.id, e FROM orders t LEFT JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.meta -> 'tags') = 'array' THEN t.meta -> 'tags' END) e ON TRUE) sub" },
+  { name: "LEFT lateral sorted by its own key, LIMIT 100 (not rewritten)", sql: "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY d.key, q.id LIMIT 100" },
   // what is not a LEFT … ON TRUE keeps its own plan: a condition on the lateral's rows
-  { name: "LEFT lateral with a condition (not rewritten)", sql: "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON d.key <> 'n' WHERE q.id < 1000 ORDER BY 1, 2" },
+  { name: "LEFT lateral with a condition (not rewritten)",sql: "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON d.key <> 'n' WHERE q.id < 1000 ORDER BY 1, 2" },
   // nullsKeyFolded: a table's page sorted by a column with its NULLs last, as a BI tool spells it
   { name: "nulls idiom: a timestamp, LIMIT 100 OFFSET 0", sql: "SELECT o.id, o.status, o.shipped_at FROM orders o ORDER BY (o.shipped_at) IS NULL ASC, o.shipped_at DESC LIMIT 100 OFFSET 0" },
   { name: "nulls idiom: a text column under a wide select list, LIMIT 100 OFFSET 0", sql: "SELECT o.id, o.tenant_id, o.customer_id, o.status, o.amount, o.created_at, o.shipped_at, o.notes, o.changed_seq, o.meta FROM orders o ORDER BY (o.notes) IS NULL ASC, o.notes DESC LIMIT 100 OFFSET 0" },
@@ -444,3 +453,34 @@ for (const name of ["LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", "LEF
     assert.ok(rows <= ORDERS / 10, `a 100-row preview read ${said(ss)} of the base's ${ORDERS} rows: its LIMIT no longer stops the scan`);
   });
 }
+
+/** how many times a statement called each Mason function, run through the listener and counted on the thread the
+ *  functions run on (src/duck/executor.ts functionCalls): a call is one of DuckDB's chunks, up to 2,048 rows */
+async function callsOf(sql: string): Promise<Map<string, number>> {
+  await c.query("SET TimeZone = 'UTC'");
+  const before = await store.functionCalls();
+  await c.query(sql);
+  const after = await store.functionCalls();
+  return new Map([...after].map(([k, n]) => [k, n - (before.get(k) ?? 0)]));
+}
+
+// limitBounds: where no LIMIT keeps the first rows, the streamed lateral called the list's function once per ROW of
+// the base (the count over 22 M rows went from 79 s to over 200 s); DuckDB's own delimiter join calls it once per
+// DISTINCT argument. The orders' meta repeats (240,000 distinct documents over the million rows), so a count calls the
+// function for about 240,000 rows joined (measured: 128 chunks), and for every one of the million streamed (one chunk
+// of each 2,048 rows: about 490). Sorted by a table column under a LIMIT it streams, and the top N's filter in the scan
+// leaves it few rows (measured: 9 chunks).
+const CHUNKS = Math.ceil(ORDERS / 2048);
+test("a count over a LEFT lateral of json rows calls the function per distinct document, never for every row", async (t) => {
+  for (const name of ["LEFT lateral counted, no LIMIT: jsonb_each (not rewritten)", "LEFT lateral counted, no LIMIT: json_each (not rewritten)"]) {
+    const keys = (await callsOf(sqlOf(name))).get("__mason_json_keys") ?? 0;
+    t.diagnostic(`${name}: __mason_json_keys called for ${keys} chunks; every row of the base is ${CHUNKS}`);
+    assert.ok(keys > 0, `${name}: __mason_json_keys was never called — the function counter or the statement changed`);
+    assert.ok(keys < CHUNKS / 2, `${name}: __mason_json_keys was called for ${keys} chunks, every row of the base is ${CHUNKS}: the function runs per row, not per distinct document`);
+  }
+});
+test("a LEFT lateral sorted by a table column under a LIMIT calls the function for few rows of the base, never all", async (t) => {
+  const keys = (await callsOf(sqlOf("LEFT lateral sorted by a table column, LIMIT 100"))).get("__mason_json_keys") ?? 0;
+  t.diagnostic(`__mason_json_keys called for ${keys} chunks; every row of the base is ${CHUNKS}`);
+  assert.ok(keys > 0 && keys <= CHUNKS / 10, `a 100-row page sorted by the table's key called __mason_json_keys for ${keys} chunks, every row of the base is ${CHUNKS}: the top N's filter no longer reaches the scan`);
+});
