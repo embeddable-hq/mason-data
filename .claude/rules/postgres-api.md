@@ -39,8 +39,10 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
 - **The password is a user's or a token's, the project is the database** (`authenticate`; `listenerLogins`,
   src/duck/users.ts): a `mason user`'s password (`mason_<id>_<mac>`, the MAC over its NAME and id keyed by the API key,
   so the startup packet's user name must be the user's and every statement is attributed), or a token minted from the
-  API key; a refused one is `28P01` as a wrong password is, with the reason in the log; the wrong database is `3D000`.
-  The users file is re-read before every statement of a user's session (`recheckMs: 0`), so `mason user remove` ends
+  API key; a refused one is `28P01` as a wrong password is, with the reason in the log; a DISABLED user's, its password
+  right, is `28000` "role … is not permitted to log in", as Postgres refuses a role without LOGIN (`user_disabled`); the
+  wrong database is `3D000`.
+  The users file is re-read before every statement of a user's session (`recheckMs: 0`), so `mason user remove` (and `disable`) ends
   a session at its next statement. Fail closed: a users file that cannot be read refuses every user (`57P03`).
 - **What a tool sets is honoured or refused, never silently ignored**: `TimeZone` moves every timestamptz the session
   sends; `extra_float_digits` below 1, a `client_encoding` other than UTF8 and a `DateStyle` other than ISO are

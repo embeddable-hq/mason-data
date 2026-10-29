@@ -602,7 +602,7 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.ok(!fs.readFileSync(usersFile, "utf8").includes(a.password as string), "users.json holds no password");
   // the list: removedAt null, last used from the request log, the URL to paste WITHOUT the password (the add's own builder)
   const listed = await list();
-  assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, live: true, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app" }]);
+  assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, disabledAt: null, live: true, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app" }]);
   assert.deepEqual([listed.lastUsedNote, listed.urlNote, listed.requestLogDays], [null, null, 7]);
   assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: null }, "asked for the window the user was a user in");
   // the web page asks every 2 s and shows no last use: without ?lastUsed=1 the request log is never scanned
@@ -647,7 +647,7 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.deepEqual(gone, { removed: { name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt },
     next: [{ command: "mason user list", what: "the users, removed ones included" }, { command: "mason user add <name>", what: "a new user, with a new password" }] });
   // kept, marked removed: no URL, does not connect, last used asked within [addedAt, removedAt]
-  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt, live: false, lastUsedAt: "2026-10-24T10:04:00.000Z", url: null }]);
+  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt, disabledAt: null, live: false, lastUsedAt: "2026-10-24T10:04:00.000Z", url: null }]);
   assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: gone.removed.removedAt });
   // removing it again is not found; the name can be added again, as a new id, and the removed entry stays
   assert.equal((await call("DELETE", "/api/users/metabase")).status, 404);
@@ -655,6 +655,46 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.notEqual(second.id, a.id);
   assert.deepEqual((await list()).users.map((u) => [u.id, u.removedAt === null]), [[a.id, false], [second.id, true]]);
   assert.ok(!fs.existsSync(`${usersFile}.lock`), "the lock is let go");
+});
+
+test("the users: POST /api/users/<name>/disable and /enable through mason user's own functions — kept with its id, its shapes, a no-op said, its refusals", async () => {
+  fs.rmSync(usersFile, { force: true });
+  const a = JSON.parse((await call("POST", "/api/users", { body: { name: "grafana" } })).text) as { id: string; addedAt: string };
+  const off = await call("POST", "/api/users/grafana/disable");
+  assert.equal(off.status, 200, off.text);
+  const d = JSON.parse(off.text) as { disabled: { disabledAt: string } };
+  // mason user disable --json's shape
+  assert.deepEqual(d, { disabled: { name: "grafana", id: a.id, addedAt: a.addedAt, disabledAt: d.disabled.disabledAt }, already: false,
+    next: [{ command: "mason user enable grafana", what: "it connects again, with the same password" }, { command: "mason user list", what: "the users" }] });
+  assert.ok(logged.includes("user grafana disabled"));
+  const file = readUsers(usersFile);
+  assert.ok("users" in file);
+  assert.deepEqual(file.users.map((u) => [u.id, u.disabledAt, u.removedAt]), [[a.id, d.disabled.disabledAt, undefined]], "kept, its id (so its password) unchanged");
+  const listed = JSON.parse((await call("GET", "/api/users")).text) as { users: Array<Record<string, unknown>> };
+  assert.deepEqual([listed.users[0]!.disabledAt, listed.users[0]!.live, listed.users[0]!.url], [d.disabled.disabledAt, false, "postgres://grafana@127.0.0.1:5433/app"]);
+  // again: said so, nothing written
+  const again = JSON.parse((await call("POST", "/api/users/grafana/disable")).text) as { disabled: { disabledAt: string }; already: boolean };
+  assert.deepEqual([again.disabled.disabledAt, again.already], [d.disabled.disabledAt, true]);
+  // a change from another site never reaches the file; a name it lacks is not found with the closest; a bad name is usage
+  for (const origin of [null, "http://evil.example"]) assert.equal((await call("POST", "/api/users/grafana/enable", { origin })).status, 403, String(origin));
+  const typo = await call("POST", "/api/users/grafana-x/enable");
+  assert.equal(typo.status, 404);
+  assert.deepEqual(JSON.parse(typo.text).failure, { code: "not_found", message: "there is no user \"grafana-x\" — did you mean `grafana`?", why: "the users: grafana",
+    next: [{ command: "mason user list", what: "the users" }] });
+  const bad = await call("POST", "/api/users/Grafana/disable");
+  assert.equal(bad.status, 400);
+  assert.equal(JSON.parse(bad.text).failure.message, `"Grafana" is not a user name: ${USER_NAME_RULE}`);
+  assert.equal((await call("GET", "/api/users/grafana/disable")).status, 404, "a change is a POST");
+  const on = await call("POST", "/api/users/grafana/enable");
+  assert.equal(on.status, 200, on.text);
+  assert.deepEqual(JSON.parse(on.text), { enabled: { name: "grafana", id: a.id, addedAt: a.addedAt }, already: false,
+    next: [{ command: "mason user list", what: "the users" }, { command: "mason user disable grafana", what: "it connects no more, until enabled" }] });
+  assert.ok(logged.includes("user grafana enabled"));
+  assert.equal((readUsers(usersFile) as { users: Array<{ disabledAt?: string }> }).users[0]!.disabledAt, undefined, "cleared");
+  assert.equal(JSON.parse((await call("POST", "/api/users/grafana/enable")).text).already, true, "enabling one not disabled: said so");
+  // a removed user is no user to disable
+  await call("DELETE", "/api/users/grafana");
+  assert.equal((await call("POST", "/api/users/grafana/disable")).status, 404);
 });
 
 test("every error answer carries the Failure shape beside its sentence, the catch-all's wording kept", async () => {

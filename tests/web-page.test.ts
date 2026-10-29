@@ -383,7 +383,7 @@ test("the users: a row each, active first then removed without Remove; Remove as
   lastUsedNote: null, urlNote: null, requestLogDays: 7 };
   const NOW_U = Date.parse("2026-10-28T09:15:59.000Z");
   const html = renderUsers(list, null, NOW_U);
-  assert.match(textOf(html), /User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC 60 min ago postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove grafana id fedcba9876543210 Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days postgres:\/\/grafana@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
+  assert.match(textOf(html), /User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC 60 min ago postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Disable Remove grafana id fedcba9876543210 Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days postgres:\/\/grafana@127\.0\.0\.1:5433\/shop Copy Disable Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
   assert.match(html, /<code id="user-url-metabase" title="postgres:\/\/metabase@127\.0\.0\.1:5433\/shop">postgres:\/\/metabase@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="user-url-metabase" data-room="Press ⌘C">Copy<\/button>/);
   // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
   assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
@@ -497,7 +497,7 @@ test("the app: a poll writes the shown page and when, reading only its endpoints
   await app.poll();
   // a page shown is read again whatever its rates (show marks every read stale): the shell's state with it
   assert.deepEqual(run.asked, ["GET /api/users?lastUsed=1", "GET /api/state"]);
-  assert.match(textOf(app.view().users!), /^User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC not used in the last \? days Remove$/);
+  assert.match(textOf(app.view().users!), /^User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC not used in the last \? days Disable Remove$/);
   app.show("status");
   // the run stops
   run.answers.clear();
@@ -550,6 +550,69 @@ test("the app: Remove asks first, Cancel takes it back, the confirm sends DELETE
   assert.deepEqual(run.asked, ["DELETE /api/users/metabase", "GET /api/users?lastUsed=1"]);
   assert.equal(textOf(app.view().users!), "No users yet A user is the name and password psql, a BI tool or your app connects with. Add one above, as mason user add <name> does: its URL, password included, is shown once.");
   assert.equal(app.model.confirming, null);
+});
+
+test("the users: a disabled user says Disabled and when, as mason user list does, with Enable in Disable's room; Disable asks first in a popover, in mason user disable's words", () => {
+  const renderUsers = fn<[unknown, unknown, number?, unknown?], string>("renderUsers");
+  const list = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, disabledAt: null, live: true, lastUsedAt: null, url: "postgres://metabase@127.0.0.1:5433/shop" },
+    { name: "grafana", id: "fedcba9876543210", addedAt: "2026-10-20T08:00:00.000Z", removedAt: null, disabledAt: "2026-10-28T09:00:59.000Z", live: false, lastUsedAt: null, url: "postgres://grafana@127.0.0.1:5433/shop" }],
+  lastUsedNote: null, urlNote: null, requestLogDays: 7 };
+  const NOW_U = Date.parse("2026-10-28T09:15:59.000Z");
+  const html = renderUsers(list, null, NOW_U);
+  assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
+    ["ok Active", "warn Disabled 2026-10-28 09:00 UTC"]);
+  assert.ok(!/rotated/.test(html), "a disabled user is said disabled, not as one the key's rotation stopped");
+  assert.match(html, /<td class="act" id="act-users-metabase"><button type="button" class="small" data-disable="metabase" data-room="Disable">Disable<\/button> <button type="button" class="danger small" data-remove="metabase">Remove<\/button><\/td>/);
+  assert.match(html, /<td class="act" id="act-users-grafana"><button type="button" class="small" data-enable="grafana" data-room="Disable">Enable<\/button> <button type="button" class="danger small" data-remove="grafana">Remove<\/button><\/td>/);
+  assert.equal(popsOf(html).length, 0, "Enable asks nothing");
+  const asking = renderUsers(list, { name: "metabase", verb: "disable" }, NOW_U);
+  assert.equal(textOf(popOf(asking, "act-users-metabase")), "Disable metabase? It connects no more until mason user enable metabase, with the same password, and the sessions it holds end at their next statement. Disable metabase Cancel");
+  assert.match(asking, /data-confirm-disable="metabase"/);
+  assert.match(asking, /<button type="button" class="small" data-room="Disable" aria-expanded="true" disabled>Disable<\/button>/, "held where it was while it asks");
+  assert.ok(!/data-confirm-remove/.test(asking), "a Disable's question, not a Remove's");
+});
+
+test("Users: a disable's words and a disabled user's state are mason user's (disableEffect, disabledText in src/cli/user.ts)", async () => {
+  const cli = await import("../src/cli/user.ts") as unknown as { disableEffect?: (n: string) => string; disabledText?: (at: string) => string };
+  assert.equal(typeof cli.disableEffect, "function", "src/cli/user.ts exports disableEffect");
+  assert.equal(typeof cli.disabledText, "function", "src/cli/user.ts exports disabledText");
+  const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as { disableEffect: (n: string) => string; disabledText: (at: string) => string };
+  for (const n of ["metabase", "bi.team_1"]) assert.equal(usersPage.disableEffect(n), cli.disableEffect!(n));
+  for (const at of ["2026-10-28T09:00:59.000Z", "2026-01-02T03:04:05.678Z"]) assert.equal(usersPage.disabledText(at), cli.disabledText!(at));
+});
+
+test("the app: Disable asks first and its confirm sends POST /api/users/<name>/disable; Enable sends /enable at once; each reads the users again; a refusal is said beside the user's actions", async () => {
+  const run = fakeRun();
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("users");
+  await app.poll();
+  const a = app as unknown as { askDisable: (n: string) => void; confirmDisable: (n: string) => Promise<boolean>; enableUser: (n: string) => Promise<boolean> };
+  a.askDisable("metabase");
+  assert.match(textOf(app.view().users!), /Disable metabase\? It connects no more until mason user enable metabase/);
+  app.cancelRemove();
+  assert.ok(!/Disable metabase\?/.test(app.view().users!));
+  const disabledList = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", disabledAt: "2026-10-28T09:00:00.000Z", live: false }] };
+  run.answers.set("POST /api/users/metabase/disable", () => new Response(JSON.stringify({ disabled: { name: "metabase" }, already: false, next: [] }), { status: 200 }));
+  run.answers.set("GET /api/users?lastUsed=1", () => new Response(JSON.stringify(disabledList), { status: 200 }));
+  run.asked.length = 0;
+  a.askDisable("metabase");
+  assert.equal(await a.confirmDisable("metabase"), true);
+  assert.deepEqual(run.asked, ["POST /api/users/metabase/disable", "GET /api/users?lastUsed=1"]);
+  assert.equal(app.model.confirming, null);
+  assert.match(textOf(app.view().users!), /Disabled 2026-10-28 09:00 UTC .* Enable Remove/);
+  // Enable: no question; refused, said in a popover beside the user's actions until dismissed
+  run.answers.set("POST /api/users/metabase/enable", () => new Response(JSON.stringify({ error: "no", failure: { code: "failed", message: "the list of users could not be changed: busy", next: [] } }), { status: 500 }));
+  run.asked.length = 0;
+  assert.equal(await a.enableUser("metabase"), false);
+  assert.deepEqual(run.asked, ["POST /api/users/metabase/enable"]);
+  assert.equal(textOf(popOf(app.view().users!, "act-users-metabase")), "✗ the list of users could not be changed: busy Dismiss");
+  run.answers.set("POST /api/users/metabase/enable", () => new Response(JSON.stringify({ enabled: { name: "metabase" }, already: false, next: [] }), { status: 200 }));
+  run.answers.set("GET /api/users?lastUsed=1", () => new Response(JSON.stringify({ users: [{ ...disabledList.users[0], disabledAt: null, live: true }] }), { status: 200 }));
+  run.asked.length = 0;
+  assert.equal(await a.enableUser("metabase"), true);
+  assert.deepEqual(run.asked, ["POST /api/users/metabase/enable", "GET /api/users?lastUsed=1"]);
+  assert.match(textOf(app.view().users!), /Active .* Disable Remove$/);
+  assert.equal(popsOf(app.view().users!).length, 0, "the refusal went with the answer");
 });
 
 test("the app: Add sends POST /api/pick, says what was added beside its table's actions, and reads the state again: the copy shows starting", async () => {
@@ -1510,7 +1573,7 @@ test("the users: read with their last use, every 30 s; Copy puts the URL without
   assert.deepEqual(await asked(), [], "not at the 2 s poll");
   t += 28_000;
   assert.deepEqual(await asked(), [U], "then every 30 s");
-  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC never postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC$/);
+  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC never postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Disable Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC$/);
   // Copy: the page's own handler writes the URL as shown, and keeps it nowhere
   const written: string[] = [];
   const doc = { getElementById: (id: string) => id === "user-url-metabase" ? { textContent: "postgres://metabase@127.0.0.1:5433/shop" } : null };
@@ -3159,12 +3222,14 @@ const queriesPage = await import(path.join(WEB, "pages", "queries.js") as string
 
 test("layout guard: a click moves no row and no column — a question, a form and an answer are popovers beside the button, never a row; a changing label keeps its room; fixed columns; the actions never wrap; a table's card scrolls, never the page", () => {
   const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
-  const renderUsers = fn<[unknown, string | null, number?, unknown?], string>("renderUsers");
+  const renderUsers = fn<[unknown, unknown, number?, unknown?], string>("renderUsers");
   const renderRunning = fn<[unknown[], string | null, unknown?], string>("renderRunning");
   const users = { users: [{ name: "a".repeat(40), id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url: "postgres://x@127.0.0.1:5433/shop" },
     { name: "b", id: "fedcba9876543210", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url: "postgres://b@127.0.0.1:5433/shop" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 };
   const synced = { at: "2026-10-27T09:05:31.000Z", tables: [{ table: "public.customers", changed: 1, deleted: 0, rows: 1201, ms: 40 }] };
   const failure = { code: "refused", message: "no" };
+  // b disabled: its Disable says Enable, in the same room
+  const disabledUsers = { ...users, users: users.users.map((u) => u.name === "b" ? { ...u, disabledAt: "2026-10-28T09:00:00.000Z", live: false } : u) };
   // [what, the page before the click, after it, the popover's anchor]
   const cases: Array<[string, string, string, string]> = [
     ["the Tables page's Remove", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { removing: "public.customers" }), "act-tables-public.customers"],
@@ -3177,6 +3242,9 @@ test("layout guard: a click moves no row and no column — a question, a form an
     ["the Tables page's Sync, refused", renderTables(CATALOG_STATE), renderTables(CATALOG_STATE, { synced: { table: "public.customers", failure } }), "act-tables-public.customers"],
     ["the Users page's Remove", renderUsers(users, null), renderUsers(users, "a".repeat(40)), `act-users-${"a".repeat(40)}`],
     ["the Users page's Remove, refused", renderUsers(users, null), renderUsers(users, null, Date.now(), { name: "b", failure }), "act-users-b"],
+    ["the Users page's Disable", renderUsers(users, null), renderUsers(users, { name: "b", verb: "disable" }), "act-users-b"],
+    ["the Users page's Disable, refused", renderUsers(users, null), renderUsers(users, null, Date.now(), { name: "b", failure }), "act-users-b"],
+    ["the Users page's Enable, refused", renderUsers(disabledUsers, null), renderUsers(disabledUsers, null, Date.now(), { name: "b", failure }), "act-users-b"],
     ["Running now's Cancel", renderRunning(RUNNING_NOW, null), renderRunning(RUNNING_NOW, "12:45"), "act-running-12:45"],
     ["Running now's Cancel, answered", renderRunning(RUNNING_NOW, null), renderRunning(RUNNING_NOW, null, { key: "12:45", cancelled: RUNNING_NOW[0] }), "act-running-12:45"],
   ];
@@ -3214,6 +3282,13 @@ test("layout guard: a click moves no row and no column — a question, a form an
   const sync = renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced, at: 0 }, now: 1 });
   for (const h of [html, syncing, sync]) assert.match(h, /<a class="btn small" href="#observability\/syncs\?table=public\.customers">View syncs<\/a> <button type="button" class="small"[^>]* data-room="Syncing…"[^>]*>(Sync now|Syncing…|Synced ✓)<\/button> <button type="button" class="danger small"/,
     "View syncs, a link that never changes, before the sync's room");
+  // a user's Disable → Enable once disabled: one room, the longer, and no cell or row added
+  for (const label of ["Disable", "Enable"]) assert.ok([...label].length <= [...ROOMS.disable!].length, `${label} fits Disable's room`);
+  const rowB = (h: string) => /<td class="act" id="act-users-b">(.*?)<\/td>/s.exec(h)![1]!;
+  assert.match(rowB(renderUsers(users, null)), /^<button type="button" class="small" data-disable="b" data-room="Disable">Disable<\/button> /);
+  assert.match(rowB(renderUsers(disabledUsers, null)), /^<button type="button" class="small" data-enable="b" data-room="Disable">Enable<\/button> /);
+  assert.equal(cellsOf(renderUsers(disabledUsers, null)), cellsOf(renderUsers(users, null)), "disabling a user adds no cell");
+  assert.equal(rowsOf(renderUsers(disabledUsers, null)).length, rowsOf(renderUsers(users, null)).length, "nor a row");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   // a selector's declarations, wherever it is listed (comments aside; a media query's rules count too)
   const rule = (sel: string) => [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => m[1]!.split(",").map((x) => x.trim()).includes(sel)).map((m) => m[2]!).join(";");

@@ -30,7 +30,7 @@ import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { readiness, syncTotals, tableSync, type SyncTotals, type TableSync } from "./readiness.ts";
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
-import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT, withLastUsed } from "./user.ts";
+import { addedNext, addUser, disabledNext, disableUser, enabledNext, enableUser, listUsers, removeUser, REMOVED_NEXT, withLastUsed } from "./user.ts";
 import { postgresFacts, postgresLink } from "./pg-url.ts";
 import { catalogTable, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
@@ -555,6 +555,23 @@ export function createRunServer(ctx: RunContext): http.Server {
           const { replaced, ...added } = r;
           ctx.log(`user ${added.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}`);
           sendJson(res, 200, { ...added, next: nextJson(addedNext(added.user, true)) });
+        } else if (req.method === "POST" && /^\/api\/users\/[^/]+\/(disable|enable)$/.test(url.pathname)) {
+          // mason user disable|enable --json's shape, through its own functions: kept, its password unchanged
+          const [, , , encoded, verb] = url.pathname.split("/") as [string, string, string, string, "disable" | "enable"];
+          let name: string;
+          try { name = decodeURIComponent(encoded); }
+          catch { throw new Refusal(400, `${url.pathname} does not name a user: POST /api/users/<name>/${verb}`); }
+          if (verb === "disable") {
+            const r = disableUser(ctx.users.file, name);
+            if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
+            if (!r.already) ctx.log(`user ${r.disabled.name} disabled`);
+            sendJson(res, 200, { ...r, next: nextJson(disabledNext(r.disabled.name)) });
+          } else {
+            const r = enableUser(ctx.users.file, name);
+            if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
+            if (!r.already) ctx.log(`user ${r.enabled.name} enabled`);
+            sendJson(res, 200, { ...r, next: nextJson(enabledNext(r.enabled.name)) });
+          }
         } else if (req.method === "DELETE" && url.pathname.startsWith("/api/users/")) {
           let name: string;
           try { name = decodeURIComponent(url.pathname.slice("/api/users/".length)); }

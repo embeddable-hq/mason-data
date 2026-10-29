@@ -110,7 +110,7 @@ CLI lacks).
   `/api/refused`, `/api/unsupported`, `/api/requests`, `/api/queries`, `/api/running`, `/api/events`, `/api/usage`, `/api/logs`, `/api/users`, `POST /api/pick|remove|sync|cancel`), with the run's token as `Authorization:
   Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
   Under `mason start` it serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), whose users are
-  `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`), so the page and the CLI cannot disagree.
+  `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`, `disableUser`, `enableUser`), so the page and the CLI cannot disagree.
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
   worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint
@@ -193,12 +193,13 @@ CLI lacks).
   (`sourceServer`); the same name on another server resets the poll's watermarks (the old server's transaction ids mean
   nothing there), so every row is read and compared and only the changed ones written; another name is refused
   (`sourceMove`: `mason destroy`, then `mason start`). An identifier this user may not read (42501) is said, never guessed.
-- **`mason user add|list|remove` is the login a tool keeps** (src/cli/user.ts, src/duck/users.ts, the rules
+- **`mason user add|list|disable|enable|remove` is the login a tool keeps** (src/cli/user.ts, src/duck/users.ts, the rules
   in .claude/rules/duckdb.md "Users"): a BI tool stores ONE password that does not expire. `add` prints the password
   ONCE with the URL (one builder, `connectionUrl`), when the run is up; the command needs the project, never the run (it
   edits `.mason/users.json` beside it, `mason serve`'s data folder included). "User" is the word in everything it
   prints, never "token" or "credentials". `mason connect` (a token for a day) is gone: `mason user`
-  is enough.
+  is enough. `disable` keeps the user and its password and refuses its logins until `enable`; a no-op (disabled
+  already, not disabled) is said, `already: true`, exit 0.
 - **Where the listener is comes from ONE reader** (`pgListenerAddress`, src/api/postgres/listener.ts: `MASON_PG_PORT`
   default 5433, `MASON_PG_HOST` default 127.0.0.1), read by the listener, by `mason serve`'s config check and by
   `mason start`, which picks a port free on every address (src/cli/ports.ts, `mason doctor`'s probe too) or takes

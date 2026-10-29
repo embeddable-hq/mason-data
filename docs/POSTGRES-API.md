@@ -19,13 +19,16 @@ differently on a guess.
 ```bash
 mason user add metabase                             # the URL, the user and its password: paste them into the tool now
 mason user list                                     # metabase   id 81fcb84caead79b7 · added 2026-10-26 12:00 UTC
+mason user disable metabase                         # kept: its logins refused (28000) until mason user enable metabase
+mason user enable metabase                          # it connects again, with the same password
 mason user remove metabase                          # its next connection is refused; its sessions end at their next statement
 docker compose exec mason mason user add grafana    # beside mason serve, in its data folder
 ```
 
 **A user is how a tool connects** (`mason start` and `mason serve`): a BI tool's datasource stores ONE
 password. `mason user add <name>` makes a named user whose password does not expire and prints it ONCE, with the URL
-to connect with; `mason user list` says the users (name, id, when added); `mason user remove <name>` removes one.
+to connect with; `mason user list` says the users (name, id, when added); `mason user disable <name>` stops one connecting and
+`mason user enable <name>` lets it again; `mason user remove <name>` removes one.
 
 - **The user name must be the user's**: the password is `mason_<id>_<mac>`, the MAC over the user's name and id keyed
   by the project's API key, so a connection sending another name is refused as a wrong password is (28P01), the reason
@@ -39,6 +42,13 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
   connection is refused (28P01, "was removed"), and a session the user holds ends, FATAL (28000), at its next
   statement, whatever it is. A file that cannot be read refuses every user's connection and statement (57P03, the
   reason said), never lets one in. `mason destroy` keeps it, as it keeps the API key.
+- **A disabled user is kept, with its password** (`disabledAt` in the file): its login, the password right, is refused
+  as Postgres refuses a role without LOGIN — `28000`, `role "metabase" is not permitted to log in: the user "metabase"
+  is disabled (mason user enable metabase lets it connect again, with the same password)`, DETAIL `Mason:
+  user_disabled` — and a session it holds ends, FATAL (28000, "was disabled"), at its next statement, as a removed
+  user's does. A wrong password for it is a wrong password (28P01): the state is told only to the login's holder.
+  `mason user enable` clears it: the same password connects again. Disabling one disabled already (or enabling one
+  that is not) says so and changes nothing, exit 0.
 - **Rotating the API key removes every user at once** (`apiKey` in `.mason/config.json`, `MASON_API_KEY` under
   `mason serve`): no password verifies under the new key, the refusal says the key was rotated, and `mason user list`
   marks each as not connecting. Remove and add each again for new passwords.

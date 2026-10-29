@@ -16,3 +16,7 @@ export class ApiError extends Error {
     this.code = code;
   }
 }
+
+/** The code of a DISABLED `mason user`'s refused login or session (src/duck/users.ts): the listener answers it 28000, as
+ *  Postgres answers a role without LOGIN, never 28P01 — its password was right. */
+export const USER_DISABLED = "user_disabled";

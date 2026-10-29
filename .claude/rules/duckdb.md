@@ -448,6 +448,9 @@ current by Mason's xmin poll (the default) or by logical replication (`mason sta
   and the listener (`LiveUsers`) reads only those, so a removal refuses as before; a removed name can be added again (a new
   id); `mason user list` gives each user `lastUsedAt` (`RequestLedger.lastUsed`, within the user's own window) and its URL
   without the password (`connectionUrl`, the one builder).
+- **A disabled user is KEPT with `disabledAt` and its id** (`mason user disable`): `LiveUsers` still holds it, so its
+  login is judged whole first — a wrong password stays 28P01 — and only then refused `user_disabled` (the listener's
+  28000); its sessions end at their next statement; `enable` deletes the field, so the same password connects again.
 
 ## Testing
 
