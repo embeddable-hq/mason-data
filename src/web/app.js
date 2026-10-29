@@ -80,7 +80,7 @@ export function tableLine(t, now = Date.now()) {
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its copy to start" };
   const age = keptAge(t, now);
   // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
-  if (t.kept?.by === "poll" && t.kept.pending !== undefined) {
+  if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && (t.kept.state !== "streamed" || t.kept.notRunning !== null))) {
     return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
   }
   return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
@@ -99,6 +99,11 @@ export function agoText(iso, now = Date.now()) {
 /** How a copied table is kept current and how old its copy is (src/cli/commands.ts `keptAge`). */
 export function keptAge(t, now = Date.now()) {
   const k = t.kept;
+  if (k?.by === "replication") {
+    if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
+    const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : agoText(k.syncedAt, now)}`;
+    return k.notRunning === null ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
+  }
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`;
   if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
@@ -120,9 +125,13 @@ export function addedLines(b, file) {
   const s = b.skippedSecrets;
   const name = entryName(b.table);
   const sync = b.bigOff ? `sync: off written on its entry: it has more than 1,000,000 rows, and each poll scans it whole on your database — ` +
-      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason start --replication keeps every table current from the change log`
+      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason add ${name} --sync replication keeps it current from the change log`
+    : b.notReplicated ? `sync: poll 5m written on its entry, not the file's replication: ${b.notReplicated} — ` +
+      `mason add ${name} --sync "poll 1h" polls it hourly; mason add ${name} --sync off reads it only by mason sync ${name}`
     : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first copy it is read again only by mason sync ${name} — ` +
       `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
+    : b.sync.value === "replication" ? `sync: replication (${b.sync.from === "entry" ? "its entry's" : "the file's"}): kept current from the database's change log after its first copy — ` +
+      `mason add ${name} --sync "poll 5m" polls it instead`
     : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first copy — mason add ${name} --sync off stops that`;
   return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
     sync,
@@ -152,10 +161,11 @@ export function sourceRows(s) {
     ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
-    ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
-        `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `each table as its sync: says, polled with SELECTs (xmin)${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
-        `${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
+    ["Changes", `each table as its sync: says${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
+      (s.source.replication ? `sync: replication tables by logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
+        `(${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others polled with SELECTs (xmin)`
+        : s.source.demo ? "polled with SELECTs (xmin): the demo database is read by polling only"
+        : "polled with SELECTs (xmin); sync: replication on an entry streams that table from the change log instead")],
   ];
 }
 

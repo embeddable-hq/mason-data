@@ -51,7 +51,8 @@ export const SERVE: CommandSpec = {
     MASON_PROJECT           the project folder: sources/, mason.yml (default ./mason)
     MASON_DATA              the folder whose .mason/ holds the copy and the state: the volume (default .)
     MASON_NAME              the project's name, the database name clients connect to (default mason)
-    MASON_CHANGES           poll (SELECTs, the default) or replication (the change log; PG_PUBLICATION names one)
+    MASON_CHANGES           read only where it agrees with the sources file, whose sync: says per table how each is kept
+                            current (replication: every table's is; poll: none is); it goes in the next release
     MASON_HEALTH_PORT       /healthz's port (default 4140), on MASON_HEALTH_HOST (default 0.0.0.0)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1

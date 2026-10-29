@@ -89,7 +89,7 @@ test("the readiness check: REPLICATION, a superuser or RDS's rds_replication may
   const standby = facts({ standby: true, replication: true });
   const v = readinessVerdict(standby, "mason_dev_shop", null, own);
   assert.deepEqual(v.refused.map((c) => c.name), ["publication"]);
-  assert.match(v.refused[0]!.detail, /^this database is a read replica, where Mason cannot make its publication mason_dev_shop \(CREATE PUBLICATION is refused on a standby\)\. Create one on the primary for the tables you add, then name it: mason start --replication --publication <name>$/);
+  assert.match(v.refused[0]!.detail, /^this database is a read replica, where Mason cannot make its publication mason_dev_shop \(CREATE PUBLICATION is refused on a standby\)\. Create one on the primary for the tables whose sync: is replication, then name it: publication: <name> at the top of the sources file$/);
   assert.deepEqual(refused(standby, named), []);
   assert.deepEqual(refused(facts({ standby: true, replication: true, version: 150004, versionText: "15.4" }), named), ["standby"], "before 16 a standby decodes nothing");
   // a slot another reader holds: the way out is this project's own stop, and the pid to end when a run crashed
@@ -102,22 +102,23 @@ test("the readiness check: REPLICATION, a superuser or RDS's rds_replication may
 });
 
 test("mason start says the file's sync once — and LOUDLY when an upgrade stops the polls: no sync: written anywhere over a copy that holds tables", async () => {
-  const dev = await import("../src/cli/dev.ts") as unknown as { syncDefaultLine?: (file: unknown, shown: string, replication: boolean, copiedBefore?: number) => string };
+  const dev = await import("../src/cli/dev.ts") as unknown as { syncDefaultLine?: (file: unknown, shown: string, copiedBefore?: number) => string };
   const { parseSourceText } = await import("../src/cli/sources.ts");
   const file = (text: string) => { const f = parseSourceText(text, "app", "/p/mason/sources/app.yml"); assert.ok(!("problems" in f), JSON.stringify(f)); return f; };
   const line = dev.syncDefaultLine!;
   const older = file("kind: postgres\nurl: x\ntables:\n  orders: {}\n  customers: {}\n  events: {}\n");
   // a file an older Mason wrote, over its copy of three tables: they were polled every 5 s, and are off from now
-  assert.equal(line(older, "mason/sources/app.yml", false, 3),
+  assert.equal(line(older, "mason/sources/app.yml", 3),
     "sync: off (the default): 3 tables are not polled (an older Mason polled every table every 5 s); write `sync: poll 5s` at the top of mason/sources/app.yml to keep them current as before, " +
     "or `mason sync <table>` when you need it");
-  assert.match(line(older, "mason/sources/app.yml", false, 1), /^sync: off \(the default\): 1 table is not polled \(an older Mason polled every table every 5 s\); /);
+  assert.match(line(older, "mason/sources/app.yml", 1), /^sync: off \(the default\): 1 table is not polled \(an older Mason polled every table every 5 s\); /);
   // a new project (nothing copied yet): the default said, how to change it
-  assert.equal(line(older, "mason/sources/app.yml", false, 0),
+  assert.equal(line(older, "mason/sources/app.yml", 0),
     "sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of mason/sources/app.yml polls every table, or on an entry that one");
   // a sync: written anywhere is a choice made: never the upgrade's warning
-  assert.doesNotMatch(line(file("kind: postgres\nurl: x\nsync: off\ntables:\n  orders: {}\n"), "f", false, 3), /are not polled|is not polled/);
-  assert.doesNotMatch(line(file("kind: postgres\nurl: x\ntables:\n  orders: { sync: poll 30s }\n  events: {}\n"), "f", false, 3), /are not polled|is not polled/);
-  // under replication the stream keeps every table current: nothing stopped
-  assert.doesNotMatch(line(older, "f", true, 3), /are not polled|is not polled/);
+  assert.doesNotMatch(line(file("kind: postgres\nurl: x\nsync: off\ntables:\n  orders: {}\n"), "f", 3), /are not polled|is not polled/);
+  assert.doesNotMatch(line(file("kind: postgres\nurl: x\ntables:\n  orders: { sync: poll 30s }\n  events: {}\n"), "f", 3), /are not polled|is not polled/);
+  // a file whose default is replication: every table without its own sync streamed, said so
+  assert.equal(line(file("kind: postgres\nurl: x\nsync: replication\ntables:\n  orders: {}\n"), "f", 3),
+    "sync: replication (f): every table without a sync: of its own is kept current from the database's change log");
 });

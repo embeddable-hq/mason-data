@@ -76,7 +76,7 @@ const API_KEY = "k".repeat(48);
 const ctx: RunContext = {
   page: true, users: { file: usersFile, apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" },
   source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [],
-  slot: "", changes: "poll", port: 0, token: "t0ken-of-this-run",
+  replication: () => null, port: 0, token: "t0ken-of-this-run",
   folder: () => chosen, root: path.join(root, "app"), sources: () => ({ file: null, problem: null }), sourcesChanged: () => { changed++; }, log: (m) => logged.push(m),
   // the file as the run reads it: its URL resolved from no environment (the test's file writes it whole)
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
@@ -337,7 +337,7 @@ test("the state says how each copy is kept current, as the sync's state has it (
   // say how a table was kept current, or why it was not, though its text and EXPLAIN did
   const polled = { by: "poll" as const, sync: { mode: "poll" as const, every: "30s", seconds: 30 }, syncedAt: "2026-10-24T10:01:00.000Z", nextAt: "2026-10-24T10:01:30.000Z" };
   const streamed = { by: "replication" as const, slot: "mason_app", state: "left-out" as const, why: "publication app_pub does not carry public.orders",
-    position: "0/16B3F28", lastCommit: null, notRunning: null };
+    position: "0/16B3F28", lastCommit: null, notRunning: null, syncedAt: null };
   const recopied = { by: "recopy" as const, copiedAt: "2026-10-24T10:00:00.000Z" };
   const waiting = { by: "poll" as const, sync: { mode: "off" as const }, syncedAt: null, nextAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" };
   copies = [
@@ -365,7 +365,7 @@ test("a table of any size on a database elsewhere can be added, and mason tables
   const own = path.join(root, "remote", "mason");
   fs.mkdirSync(path.join(own, "sources"), { recursive: true });
   fs.writeFileSync(path.join(own, "sources", "app.yml"), newSourceText("postgres://me@db.example.com:5432/app"));
-  const remoteCtx: RunContext = { ...ctx, source: remote.source, changes: "poll", folder: () => own,
+  const remoteCtx: RunContext = { ...ctx, source: remote.source, folder: () => own,
     facts: () => ({ version: 160000, versionText: "16", standby: true, tables: [table({ table: "events", rows: 22_000_000 })], systemIdentifier: null }) };
   const remoteServer = createRunServer(remoteCtx);
   await new Promise<void>((r) => remoteServer.listen(0, "127.0.0.1", () => r()));

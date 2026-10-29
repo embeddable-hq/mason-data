@@ -26,7 +26,6 @@ import { listenerText } from "./pg-tls.ts";
 import { SLOW_MS, type RefusedQuery, type SlowQuery } from "./run-server.ts";
 import { catalogTable, entryName, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
-import { changesOf } from "./replication-mode.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import { reach } from "./state.ts";
 import { copyingText, copyProgress, duration, readiness, type Readiness } from "./readiness.ts";
@@ -208,10 +207,17 @@ export function tableLines(s: RunState, now: number = Date.now()): string[] {
 /**
  * HOW A COPIED TABLE IS KEPT CURRENT, AND HOW OLD ITS COPY IS, on its line (issue 33: a copy days old answers today's
  * count(*) wrongly, and nothing else tells): `sync: off, last synced 3 days ago — mason sync orders`, `polled every
- * 30s, last 4 s ago`. Replication's is the Stream section's; a table being caught up or copied again says its pending.
+ * 30s, last 4 s ago`, `replicated, at 0/1A2B3C4D, 2 s ago` (the stream's position, and the last moment it had
+ * everything the database wrote); a table being caught up, copied again or not streamed says why it is NOT kept current.
+ * The Stream section says the rest of the stream.
  */
 export function keptAge(t: Pick<TableState, "table" | "kept">, now: number = Date.now()): string | null {
   const k = t.kept;
+  if (k?.by === "replication") {
+    if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
+    const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : agoText(k.syncedAt, now)}`;
+    return k.notRunning === null ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
+  }
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`;
   if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
@@ -413,10 +419,11 @@ export function sourceRows(s: Pick<RunState, "source">): Array<[string, string]>
     ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`] as [string, string]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
-    ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
-        `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `each table as its sync: says, polled with SELECTs (xmin)${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
-        `${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
+    ["Changes", `each table as its sync: says${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
+      (s.source.replication ? `sync: replication tables by logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
+        `(${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others polled with SELECTs (xmin)`
+        : s.source.demo ? "polled with SELECTs (xmin): the demo database is read by polling only"
+        : "polled with SELECTs (xmin); sync: replication on an entry streams that table from the change log instead")],
   ];
 }
 
@@ -710,7 +717,7 @@ async function withoutRun(cmd: string, p: Project, json: boolean): Promise<{ db:
   }
   const c = await readCatalog(p);
   if ("message" in c) { failed(cmd, c, { json }); return null; }
-  return { db: { tables: c.facts, database: c.database, replication: changesOf(null, p.config.changes) === "replication" },
+  return { db: { tables: c.facts, database: c.database },
     tables: c.facts.map((t) => catalogTable(t, c.src.tables.find((e) => e.table === t.source))), file: c.src.file,
     edit: () => sourceToEdit(p.folder, p.root, () => projectSource(p)) };
 }
@@ -748,11 +755,13 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
 
   After its first copy, a table is kept current as the file's sync: says — at the top for every table (mason init
   writes sync: off: read again only by mason sync <table>), or on its own entry. --sync writes the table's own:
-  off, or poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h). On a table already added, --sync alone changes
-  its sync: line and nothing else; its copy is kept and caught up by one poll. Without --sync a new entry follows the
-  file's — but a table of more than ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows under a file that polls is written sync: off and said,
-  since each poll scans a table whole on your database. A table of tens of millions of rows set to poll more often than
-  every minute is warned of, with an estimate of what each poll costs your database.
+  off, poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h), or replication (the database's change log, through
+  the project's slot). On a table already added, --sync alone changes its sync: line and nothing else; its copy is
+  kept and caught up by one poll. Without --sync a new entry follows the file's — but a table of more than
+  ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows under a file that polls is written sync: off and said, since each poll scans a table whole on your
+  database, and a table replication cannot keep (no primary key: --key; REPLICA IDENTITY NOTHING) under a file whose
+  sync: is replication is written sync: poll 5m and said. A table of tens of millions of rows set to poll more often
+  than every minute is warned of, with an estimate of what each poll costs your database.
 
   A column that looks like a secret (password, token, api_key, private_key, …) is left out unless named, and said:
   it is written as exclude: [password_hash], since anyone with a user's password can read every copied column. Name
@@ -766,12 +775,13 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   --columns <a,b,…>   only these columns (one table at a time: the list is that table's)
   --include <a,b,…>   these columns as well as every other one — a column that looks like a secret, named on purpose
   --key <a,b,…>       for a table with no primary key: the columns that tell its rows apart, which it is copied by (one
-                      table at a time; polling only: logical replication cannot apply a change by them)
-  --sync <sync>       how it is kept current after its first copy, written on its entry: off, or "poll 30s"
+                      table at a time; polled or off: logical replication cannot apply a change by them)
+  --sync <sync>       how it is kept current after its first copy, written on its entry: off, "poll 30s" or replication
   --json              as data: { added: [{ table, entry, columns (null: every one), exclude, key, addedKey (key columns
                       added to --columns), skippedSecrets, already (the file said so already), sync: { value (off, poll
                       30s), from (entry: its own sync:, file: the file's, default: off, as the file writes none) },
-                      bigOff (it is over ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows and its entry was written sync: off), pollCost (an estimate of
+                      bigOff (it is over ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows and its entry was written sync: off), notReplicated (why
+                      its entry was written sync: poll 5m under a file whose sync: is replication, or null), pollCost (an estimate of
                       what a frequent poll of a big table costs your database, or null) } or { table, error }],
                       file (the sources file), error (when a table was not added: { code, message, why }), next };
                       exit 1 when a table could not be added
@@ -891,7 +901,7 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
     const b = r.ok;
     file = b.file;
     results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already,
-      sync: b.sync, bigOff: b.bigOff, pollCost: b.pollCost });
+      sync: b.sync, bigOff: b.bigOff, notReplicated: b.notReplicated, pollCost: b.pollCost });
     added.push(b.table);
     if (t.added) wereAdded++;
     if (json) continue;
@@ -926,9 +936,13 @@ export function addedLines(b: PickResult, file: string): { line: string; notes: 
   // HOW IT IS KEPT CURRENT, always said (issue 33: the default is never met by surprise): the sync: it follows, where it
   // is said, and the one line that changes it — a big table written off, with the alternatives
   const sync = b.bigOff ? `sync: off written on its entry: it has more than ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows, and each poll scans it whole on your database — ` +
-      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason start --replication keeps every table current from the change log`
+      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason add ${name} --sync replication keeps it current from the change log`
+    : b.notReplicated !== null ? `sync: poll 5m written on its entry, not the file's replication: ${b.notReplicated} — ` +
+      `mason add ${name} --sync "poll 1h" polls it hourly; mason add ${name} --sync off reads it only by mason sync ${name}`
     : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first copy it is read again only by mason sync ${name} — ` +
       `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
+    : b.sync.value === "replication" ? `sync: replication (${b.sync.from === "entry" ? "its entry's" : "the file's"}): kept current from the database's change log after its first copy — ` +
+      `mason add ${name} --sync "poll 5m" polls it instead`
     : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first copy — mason add ${name} --sync off stops that`;
   return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
     sync,
@@ -1303,7 +1317,8 @@ export async function stop(argv: string[]): Promise<number> {
   if (alive(run.pid)) return failed("stop", { message: `Mason for ${run.name} (pid ${run.pid}) is still running after 90 s`, code: "failed", next: [["mason logs", "what it is doing"]] }, { json });
   // a replication slot outlives the run that reads it, and holds the database's WAL meanwhile: said where it is left
   const recorded = readProject(run.root);
-  const replicating = isProject(recorded) && recorded.config.changes === "replication";
+  // what a start made on the database, as it recorded it (src/cli/dev.ts): a project none of whose tables is replicated has none
+  const replicating = isProject(recorded) && (recorded.config.replication ?? null) !== null;
   const named = isProject(recorded) ? recorded.config.publication ?? null : null;
   // a demo project's database (src/cli/demo.ts) stays too, as the copy does: said where a person reads the stop
   const demo = isProject(recorded) && recorded.config.demo === true;

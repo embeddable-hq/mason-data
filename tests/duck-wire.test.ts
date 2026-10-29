@@ -1740,20 +1740,23 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>)[0]!.Mason.Copies[0]!;
   const copied = (kept: CopyState["kept"]): CopyState => ({ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 0.1, copiedAt: "2026-10-27 19:00:00+00", error: null, ...(kept ? { kept } : {}) });
   const head = "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; ";
-  const streamed = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C4D", lastCommit: "2026-10-29T08:15:02.512Z", notRunning: null } as const;
-  const stream = { Slot: "mason_shop", "Applied Through": "0/1A2B3C4D", "Last Change Committed": "2026-10-29T08:15:02.512Z", "Stream Not Running": null };
+  // the copy's age is said for a streamed table too: the last moment the stream had everything the database wrote
+  const syncedAt = new Date(Date.now() - 3 * 60_000).toISOString();
+  const synced = `last synced 3 min ago (${syncedAt.slice(0, 19).replace("T", " ")} UTC)`;
+  const streamed = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C4D", lastCommit: "2026-10-29T08:15:02.512Z", notRunning: null, syncedAt } as const;
+  const stream = { Sync: "replication", Slot: "mason_shop", "Applied Through": "0/1A2B3C4D", "Last Synced": syncedAt, "Last Change Committed": "2026-10-29T08:15:02.512Z", "Stream Not Running": null };
   /** the JSON says what the text says, and names a mode only for a copy that mode keeps current now */
   const jsonSays = async (by: string | null, more: Record<string, unknown>): Promise<void> =>
     assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": by, "Kept Current": (await header()).slice(head.length, -1), ...more });
   try {
     copies = [copied(streamed)];
     const h = await header();
-    assert.equal(h, `${head}kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)`);
+    assert.equal(h, `${head}kept current by logical replication (slot mason_shop), replicated, at 0/1A2B3C4D, ${synced}, last change committed 2026-10-29 08:15:02 UTC)`);
     assert.doesNotMatch(h, /polling|last poll/);
     await jsonSays("logical replication", { ...stream, "Stream State": "streamed" });
     // the stream down, nothing applied yet this run: said with why, NOT kept current now, still never the poll
     copies = [copied({ ...streamed, lastCommit: null, notRunning: "the database closed the connection · it starts again after 08:16 UTC" })];
-    assert.equal(await header(), `${head}streamed by logical replication (slot mason_shop), applied through 0/1A2B3C4D, no change applied this run; NOT kept current now, the stream is not running: the database closed the connection · it starts again after 08:16 UTC)`);
+    assert.equal(await header(), `${head}streamed by logical replication (slot mason_shop), replicated, at 0/1A2B3C4D, ${synced}, no change applied this run; NOT kept current now, the stream is not running: the database closed the connection · it starts again after 08:16 UTC)`);
     await jsonSays(null, { ...stream, "Stream State": "streamed", "Last Change Committed": null, "Stream Not Running": "the database closed the connection · it starts again after 08:16 UTC" });
     // a table being caught up, or left out of the publication, is said as status says it, and no mode is said at work
     copies = [copied({ ...streamed, state: "catching-up", why: "caught up by one poll after its copy" })];
@@ -1792,7 +1795,7 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     copies = [copied(streamed), { ...copied({ by: "poll", sync: every30, syncedAt: null, nextAt: null }), source: "sales.invoices" }];
     const two = (await c.query({ text: "EXPLAIN SELECT o.id FROM orders o JOIN sales.invoices i ON i.id = o.id", rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
     assert.equal(two[0], "Mason: answered by DuckDB from its copies of");
-    assert.ok(two.includes("  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)"), two.join("\n"));
+    assert.ok(two.includes(`  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), replicated, at 0/1A2B3C4D, ${synced}, last change committed 2026-10-29 08:15:02 UTC)`), two.join("\n"));
     assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; polled every 30s, not polled yet\)$/.test(l)), two.join("\n"));
   } finally {
     copies = [];

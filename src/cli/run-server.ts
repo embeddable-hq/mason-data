@@ -24,7 +24,6 @@ import { fileURLToPath } from "node:url";
 import { readBody, sendJson } from "../lib/http-json.ts";
 import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, SECURITY_HEADERS } from "./security.ts";
-import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure } from "./command.ts";
 import { readiness } from "./readiness.ts";
@@ -45,12 +44,10 @@ export interface RunContext {
   source: Source;
   facts: () => SourceFacts;
   warnings: string[];
-  /** replication mode: the slot the run reads (src/cli/replication-mode.ts); '' when polling */
-  slot: string;
-  /** how the run reads the database's changes: a database elsewhere is refused large tables only when polled */
-  changes: ChangeSource;
-  /** replication: the publication the run reads, and whether it is Mason's own (else the operator named it: only read) */
-  publication?: { name: string; owned: boolean };
+  /** the slot and publication the run streams through NOW (src/cli/replication-mode.ts; `owned`: the publication is
+   *  Mason's own, else the operator named it, only read), or null while no table's sync is replication (src/duck/sync.ts
+   *  `streams`): it changes as the sources file does */
+  replication: () => { slot: string; publication: string; owned: boolean } | null;
   port: number;
   token: string;
   /** the web page (src/web/, `mason ui`): `mason start`'s run serves it, `mason serve`'s never (its guard is loopback's
@@ -114,6 +111,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   const by = new Map(copies.map((c) => [c.source, c]));
   const project = folder && fs.existsSync(folder) ? projectFingerprint(folder) : null;
   const facts = ctx.facts();
+  const repl = ctx.replication();
   const tables = facts.tables.map((t) => {
     const c = by.get(t.source);
     return {
@@ -140,10 +138,11 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // the run serves the web page (mason ui): mason status prints its URL
     ui: ctx.page,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
-      version: facts.versionText, standby: facts.standby, changes: ctx.changes, name: sources.file?.name ?? null, file: sources.file?.file ?? null,
+      // `replication` while a table's sync is replication (the run streams), else `poll`: each table's own is its kept
+      version: facts.versionText, standby: facts.standby, changes: repl !== null ? "replication" : "poll", name: sources.file?.name ?? null, file: sources.file?.file ?? null,
       // every table's sync unless its entry says its own: the file's top `sync:`, or the default when it writes none
       sync: { default: syncText(sources.file?.sync ?? DEFAULT_SYNC), written: sources.file?.sync != null },
-      ...(ctx.publication ? { replication: { slot: ctx.slot, publication: ctx.publication.name, owned: ctx.publication.owned } } : {}) },
+      ...(repl !== null ? { replication: { slot: repl.slot, publication: repl.publication, owned: repl.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
     warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason copies the tables it read before; mason start reads the file again)`] : [])],
     folder, project, tables,
@@ -181,7 +180,7 @@ function sourceOnDisk(ctx: RunContext): EditTarget {
 }
 
 /** The database this run copies, as an edit is checked against it: the catalog it last read, and how it reads changes. */
-const catalogOf = (ctx: RunContext): EditCatalog => ({ tables: ctx.facts().tables, database: ctx.source.database, replication: ctx.changes === "replication",
+const catalogOf = (ctx: RunContext): EditCatalog => ({ tables: ctx.facts().tables, database: ctx.source.database,
   ...(ctx.duck.measured ? { measured: ctx.duck.measured } : {}) });
 
 /**

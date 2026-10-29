@@ -25,7 +25,7 @@ async function upProject(page: boolean): Promise<{ root: string; port: number; c
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-ui-"));
   made.push(root);
   const ctx = {
-    source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll",
+    source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: [], systemIdentifier: null }), warnings: [], replication: () => null,
     port: 0, token: TOKEN, page, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
     folder: () => null, root, sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined, log: () => undefined,
     readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",

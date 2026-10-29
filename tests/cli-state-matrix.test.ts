@@ -186,7 +186,7 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
   const file = path.join(folder, "sources", "shop.yml");
   const ctx = {
     source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: catalog, systemIdentifier: null }), warnings: [],
-    slot: changes === "replication" ? "mason_matrix" : "", changes, ...(changes === "replication" ? { publication: { name: "mason_matrix", owned: true } } : {}),
+    replication: () => changes === "replication" ? { slot: "mason_matrix", publication: "mason_matrix", owned: true } : null,
     port: 0, token, page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     folder: () => folder, root, sourcesChanged: () => undefined, log: () => undefined, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
     sources: () => ({ file: { name: "shop", file, kind: "postgres", url: { env: "DATABASE_URL" }, tables: ["orders", "events", "fresh"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null }),
@@ -210,9 +210,9 @@ test("mason status and mason wait --json, Mason up: each added table says how it
     ({ source, phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-29T09:00:00.000Z", error: null, kept, ...extra });
   const polled: KeptCurrent = { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: "2026-10-29T09:30:00.000Z", nextAt: "2026-10-29T09:30:30.000Z" };
   const over: KeptCurrent = { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-29T09:00:00.000Z", nextAt: null };
-  const streamed: KeptCurrent = { by: "replication", slot: "mason_matrix", state: "streamed", why: null, position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null };
+  const streamed: KeptCurrent = { by: "replication", slot: "mason_matrix", state: "streamed", why: null, position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null, syncedAt: "2026-10-29T09:30:00.000Z" };
   const leftOut: KeptCurrent = { by: "replication", slot: "mason_matrix", state: "left-out", why: "publication mason_matrix does not carry public.events",
-    position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null };
+    position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null, syncedAt: "2026-10-29T09:00:00.000Z" };
   const zero = { inserts: 0, updates: 0, deletes: 0, truncates: 0 };
   const stream: StreamStatus = { slot: "mason_matrix", publication: "mason_matrix", running: true, failure: null, position: "0/16B3F28", applied: "0/16B3F28",
     database: { lsn: "0/16B3F28", at: "2026-10-29T09:30:00.000Z" }, lag: { bytes: 0, seconds: 1 }, lastBatch: { appliedAt: "2026-10-29T09:30:00.000Z", committedAt: "2026-10-29T09:29:59.000Z" },

@@ -22,6 +22,8 @@ import { liveRun } from "./runs.ts";
 import { projectSource, theProject } from "./project.ts";
 import { runListenerSettings } from "./pg-tls.ts";
 import { demoChangesRefusal, demoPort } from "./demo.ts";
+import { changesAgreement, publicationConflict } from "./replication-mode.ts";
+import { shownPath } from "./sources.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
 import { pollMsRetired } from "../lib/table-sync.ts";
@@ -56,7 +58,7 @@ function demoPortsOf(project: Parameters<typeof projectSource>[0]): Set<number> 
 }
 
 /** `args` are `mason start`'s own, passed on to the run with --attach. */
-export async function devInBackground(args: readonly string[], o: { json: boolean; selfSignedTls: boolean; changes?: ChangeSource | null }): Promise<number> {
+export async function devInBackground(args: readonly string[], o: { json: boolean; selfSignedTls: boolean; changes?: ChangeSource | null; publication?: string | null }): Promise<number> {
   const t = theProject(process.cwd());
   if ("problem" in t) return failed("start", t, { json: o.json });
   const home = t.project.dir;
@@ -69,8 +71,18 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
     return 0;
   }
   // a demo project with --replication (src/cli/demo.ts): refused here too, where it is read, before a run is spawned
-  const demoRefused = demoChangesRefusal(t.project.config, o.changes ?? null);
+  // the sources file as the run reads it (a file it cannot read is the run's to say, in its checklist)
+  const src = projectSource(t.project);
+  const file = "message" in src ? null : src;
+  const shown = file === null ? "" : shownPath(t.project.root, file.file);
+  const demoRefused = demoChangesRefusal(t.project.config, o.changes ?? null, file, shown);
   if (demoRefused) return failed("start", demoRefused, { json: o.json });
+  // --replication / --poll against the sources file, and the publication named twice: refused here too, where the
+  // person (or --json) reads it, by the run's own checks (src/cli/replication-mode.ts), before a run is spawned
+  if (file !== null) {
+    const refused = changesAgreement(file, shown, o.changes ?? null, `--${o.changes ?? ""}`) ?? publicationConflict(o.publication ?? null, file, shown);
+    if (refused) return failed("start", refused, { json: o.json });
+  }
   // a setting no longer read (MASON_POLL_MS: each table's sync: says how often it is polled), refused here too, where
   // the person (or --json) reads it, by the run's own check (src/lib/table-sync.ts)
   const pollMs = pollMsRetired(process.env);

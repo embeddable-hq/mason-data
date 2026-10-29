@@ -2,7 +2,7 @@
 
 A drop-in replacement for a Postgres read replica, built for analytical queries.
 
-Version 0.x: until 1.0, a release may rename a command, a key or a setting, with no compatibility shim. Mason only reads your database; with `--replication` it also creates its own replication slot (and a publication, when you name none).
+Version 0.x: until 1.0, a release may rename a command, a key or a setting, with no compatibility shim. Mason only reads your database; for a table whose `sync:` is `replication` it also creates its own replication slot (and a publication, when you name none).
 
 [Documentation](#documentation) · [Website](https://masondata.ai) · [Issues](https://github.com/embeddable-hq/mason-data/issues)
 
@@ -76,7 +76,7 @@ its own process, kept in `.mason/demo/` and served on a port of this machine. Th
 already; the fourth is yours, so the first thing you do is a real `mason add` and you watch its copy begin. A new order
 lands every few seconds, and the demo's sources file polls every table every 5 seconds (`sync: poll 5s`), so `mason
 status` shows the copy keeping up. Mason reads it as it reads yours, over the Postgres protocol, by polling (the demo
-database has no change log, so `--replication` does not apply).
+database has no change log, so `sync: replication` does not apply).
 
 ### On your app's database
 
@@ -139,8 +139,13 @@ you edit by hand is applied at the next `mason start`, and a mistake in it is re
 - Changing a table's `sync:` keeps its copy: it is caught up by one poll, never copied again.
 - `mason status`, `mason wait`, the MCP tools and EXPLAIN say each table's sync and when it was last synced, so a
   copy's age is never hidden.
-- Logical replication is the project's for now, never a table's: `mason start --replication` keeps every table current
-  from the change log (below), whatever its entry says.
+- **`sync: replication`**: the table is kept current from the database's change log (logical replication), within
+  seconds and with no scan of the table. It needs `wal_level = logical`, a user that may replicate and a primary key.
+  The project has ONE slot, and one publication carrying the replicated tables alone: Mason's own, re-pointed as their
+  `sync:` changes, or the one `publication: <name>` (or `${PG_PUBLICATION}`) at the top of the file names, read as it
+  is and never altered. The other tables are polled beside the stream, or left `off`; when no table is replicated any
+  more the slot is dropped, verified gone. A table with no primary key (`key:`) is polled, never replicated, and
+  `mason add` of one under a `sync: replication` file writes `sync: poll 5m` on its entry and says so.
 
 **2. Connect a tool.** `mason user add` makes a user of Mason's Postgres API and prints its password once, with the
 URL to paste into the tool's datasource form:
@@ -192,8 +197,8 @@ your Postgres  ──SELECTs (or its change log)──▶  the copy, kept curren
   ([`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) is the list).
 - **Read-only on your database.** By default Mason reads with `SELECT`s: each table once, then
   as its `sync:` says — `off`, read again by `mason sync <table>`, or polled at its interval. No
-  `wal_level`, slot or publication is needed or made, and it works on a read replica. Logical
-  replication (`mason start --replication`) reads the change log the way production does.
+  `wal_level`, slot or publication is needed or made, and it works on a read replica. A table
+  whose `sync:` is `replication` is read from the change log, the way production does.
 - **A copy is chunks that resume.** Each table is read a range of heap pages at a time, a few
   chunks in parallel, one Postgres backend each; a copy that stops (a crash, `mason stop`)
   continues with the ranges it did not commit. Small tables are copied first, and a copy runs
@@ -241,10 +246,10 @@ docker compose exec mason mason user add metabase
   and stop the old container before the new one starts.
 - Off the container's loopback the Postgres API needs TLS: `MASON_PG_SELF_SIGNED_TLS=1` makes a
   certificate on the volume (clients connect with `sslmode=require`), or mount one a CA signed.
-- Polling needs a user that can `SELECT` the tables. Replication (`MASON_CHANGES=replication`)
+- Polling needs a user that can `SELECT` the tables. A table whose `sync:` is `replication`
   needs `wal_level = logical`, a user with `REPLICATION`, and either a publication you name
-  (`PG_PUBLICATION`, read as it is and never altered) or the right to create one; cap the slot's
-  WAL with `max_slot_wal_keep_size`.
+  (`publication: ${PG_PUBLICATION}` in the sources file, read as it is and never altered) or the
+  right to create one; cap the slot's WAL with `max_slot_wal_keep_size`.
 - **Memory**: the copy may use half the container's memory limit by default (else half the
   machine's RAM); the other half is the page cache, the catalog (~820 MB) and Node. Give the
   container enough that the page cache holds the columns your dashboards read: a query over a

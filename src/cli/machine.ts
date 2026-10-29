@@ -69,11 +69,12 @@ export async function removeProject(p: Project, o: { isAlive?: (pid: number) => 
     const sup = await (o.stopSupervisor ?? stopSupervisor)(p.dir);
     if (sup !== null) removed.push(`stopped its supervisor (pid ${sup}), which was about to start it again`);
   }
-  // REPLICATION MODE made a publication and a slot on the database (src/cli/replication-mode.ts): the slot holds its WAL
-  // for as long as it exists, so it goes with the copy — and when it cannot, the rest goes and the failure says how
+  // REPLICATION made a publication and a slot on the database (src/cli/replication-mode.ts), recorded by the start or
+  // the run that made them (an older start recorded its mode, `changes`): the slot holds its WAL for as long as it
+  // exists, so it goes with the copy — and when it cannot, the rest goes and the failure says how
   let replication: string | null = null;
   let objects = "publication and replication slot";
-  if (p.config.changes === "replication") {
+  if ((p.config.replication ?? null) !== null || p.config.changes === "replication") {
     // the slot, and the publication only when it is Mason's own: one the operator named is its owner's, left as it is
     const src = projectSource(p);
     // what the start that made them recorded (madeReplication); a project with no record names them by its one sources file

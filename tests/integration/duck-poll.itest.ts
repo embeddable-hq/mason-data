@@ -1239,14 +1239,14 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
     await assert.rejects(sync.pollNow(["public.fats"]), (e: Error) => e instanceof PollRefused && e.code === "not_found" && /^public\.fats is not added \(mason add adds it\) — did you mean `public\.fast`\?$/.test(e.message));
   } finally { await sync.stop(); store.close(); }
 
-  // in replication mode nothing is polled: mason sync answers where the stream is
+  // a replicated table is not polled: mason sync answers where the stream is
   const other = await DuckStore.open(path.join(dir, "mixed-repl.db"), (l) => logged.push(l));
   const repl = new Sync(other, source, source.database, (l) => logged.push(l), 3_600_000, "replication", { slot: "unused", publication: "unused", owned: true });
   try {
     // stopped first, as nothing here may make a slot: its tables set, no pass runs
     await repl.open();
     await repl.stop();
-    await repl.setTables([tableOf("manual", OFF)]);
+    await repl.setTables([tableOf("manual", { mode: "replication" })]);
     const r = await repl.pollNow(["public.manual"]);
     assert.deepEqual([r.tables, r.streamed?.map((t) => t.table)], [[], ["public.manual"]]);
     assert.match(r.streamed![0]!.position, /^[0-9A-F]+\/[0-9A-F]+$/);

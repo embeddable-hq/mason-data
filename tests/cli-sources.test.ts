@@ -72,7 +72,7 @@ test("every mistake in the file is told its key, what is wrong and the way out �
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\n"), ["tables: missing — write tables: {} (mason add adds a table to it)"]);
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\ntables: [orders]\n"), ["tables: is one entry per table, like tables: { orders: {}, customers: { columns: [id, name] } }"]);
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\ntable: {}\n"), [
-    "unexpected key table — did you mean `tables`? — a source file takes kind, url, sync, tables", "tables: missing — write tables: {} (mason add adds a table to it)"]);
+    "unexpected key table — did you mean `tables`? — a source file takes kind, url, sync, publication, tables", "tables: missing — write tables: {} (mason add adds a table to it)"]);
   assert.deepEqual(problems(`kind: postgres
 url: \${DATABASE_URL}
 tables:
@@ -103,7 +103,7 @@ tables:
 
 test("the tables against the database: a name it lacks is refused with a did-you-mean, key only for a table with no primary key, every mistake on one report", () => {
   const f = parse(EXAMPLE) as Sources.SourceFile;
-  const added = S.addedTables(f, CATALOG, "shop", "/app", { replication: false }) as Sources_AddedTable[];
+  const added = S.addedTables(f, CATALOG, "shop", "/app") as Sources_AddedTable[];
   assert.ok(Array.isArray(added), JSON.stringify(added));
   assert.deepEqual(added.map((t) => [t.source, t.columns.map((c) => c.name), t.key, t.primaryKey]), [
     ["public.orders", ["id", "customer_id", "status", "amount"], ["id"], undefined],
@@ -113,7 +113,7 @@ test("the tables against the database: a name it lacks is refused with a did-you
     ["billing.invoices", ["id"], ["id"], undefined],
   ]);
   assert.deepEqual(added[0]!.foreignKeys, orders.foreignKeys, "a foreign key out of a copied column is kept");
-  const narrow = S.addedTables(parse("kind: postgres\nurl: x\ntables:\n  orders: { columns: [status] }\n") as Sources.SourceFile, CATALOG, "shop", "/app", { replication: false }) as Sources_AddedTable[];
+  const narrow = S.addedTables(parse("kind: postgres\nurl: x\ntables:\n  orders: { columns: [status] }\n") as Sources.SourceFile, CATALOG, "shop", "/app") as Sources_AddedTable[];
   assert.deepEqual([narrow[0]!.columns.map((c) => c.name), narrow[0]!.foreignKeys], [["id", "status"], []], "the key always copied; a foreign key out of a column left out goes");
 
   const wrong = S.addedTables(parse(`kind: postgres
@@ -124,7 +124,7 @@ tables:
   customers: { exclude: [id], key: [id] }
   events: {}
   billing.invoices: { key: [nope] }
-`) as Sources.SourceFile, CATALOG, "shop", "/app", { replication: false }) as Failure;
+`) as Sources.SourceFile, CATALOG, "shop", "/app") as Failure;
   assert.equal(wrong.code, "bad_source");
   assert.equal(wrong.message, "mason/sources/app.yml has 6 mistakes");
   assert.equal(wrong.why, [
@@ -136,11 +136,94 @@ tables:
     "- tables.billing.invoices.key: billing.invoices has a primary key (id), which Mason copies it by — remove key",
   ].join("\n"));
   assert.deepEqual(wrong.next, [["mason tables", "the database's tables and their columns"]]);
-  // a key: table under logical replication: its rows have no identity there
-  const repl = S.addedTables(parse("kind: postgres\nurl: x\ntables:\n  events: { key: [tenant_id, id] }\n") as Sources.SourceFile, CATALOG, "shop", "/app", { replication: true }) as Failure;
-  assert.equal(repl.message, "mason/sources/app.yml: tables.events: public.events has no primary key, and logical replication cannot apply its changes by key: — copy it by polling (mason start --poll), or remove it");
+  // a key: table under sync: replication (its entry's, or the file's): its rows have no identity there — the line to write
+  for (const text of ["kind: postgres\nurl: x\ntables:\n  events: { key: [tenant_id, id], sync: replication }\n", "kind: postgres\nurl: x\nsync: replication\ntables:\n  events: { key: [tenant_id, id] }\n"]) {
+    const repl = S.addedTables(parse(text) as Sources.SourceFile, CATALOG, "shop", "/app") as Failure;
+    assert.equal(repl.message, "mason/sources/app.yml: tables.events: public.events has no primary key, so logical replication cannot apply its changes by its key: (sync: replication) — give its entry sync: poll <interval> (poll 5m), or sync: off");
+  }
+  // polled, the same entry is taken
+  assert.ok(Array.isArray(S.addedTables(parse("kind: postgres\nurl: x\nsync: replication\ntables:\n  events: { key: [tenant_id, id], sync: poll 5m }\n") as Sources.SourceFile, CATALOG, "shop", "/app")));
 });
 type Sources_AddedTable = import("../src/duck/sync.ts").AddedTable;
+
+test("sync: replication at the top and on an entry, mixed with off and poll; a table that cannot be replicated refused at its entry with the line to write", () => {
+  const REPL = { mode: "replication" };
+  const f = parse("kind: postgres\nurl: x\nsync: replication\ntables:\n  orders: {}\n  customers: { sync: off }\n  billing.invoices: { sync: poll 30s }\n") as Sources.SourceFile;
+  assert.deepEqual(f.sync, REPL);
+  const added = S.addedTables(f, CATALOG, "shop", "/app") as Sources_AddedTable[];
+  assert.deepEqual(added.map((t) => [t.source, t.sync]), [["public.orders", REPL], ["public.customers", { mode: "off" }], ["billing.invoices", { mode: "poll", every: "30s", seconds: 30 }]]);
+  assert.deepEqual(S.replicatedEntries(f).map((e) => e.table), ["public.orders"]);
+  // on an entry, under a file that polls
+  const entry = parse("kind: postgres\nurl: x\nsync: poll 5m\ntables:\n  orders: { sync: replication }\n  customers: {}\n") as Sources.SourceFile;
+  assert.deepEqual((S.addedTables(entry, CATALOG, "shop", "/app") as Sources_AddedTable[]).map((t) => t.sync?.mode), ["replication", "poll"]);
+  // REPLICA IDENTITY NOTHING (the catalog's: the file cannot know) under replication: refused at its entry, ONE report
+  // with the key: table beside it, each with the line to write; polled, both are taken
+  const nothing = table({ table: "audit", replicaIdentity: "n" });
+  const both = S.addedTables(parse("kind: postgres\nurl: x\nsync: replication\ntables:\n  audit: {}\n  events: { key: [tenant_id, id] }\n  orders: {}\n") as Sources.SourceFile,
+    [...CATALOG, nothing], "shop", "/app") as Failure;
+  assert.equal(both.why, [
+    "- tables.audit: public.audit has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail (sync: replication) — " +
+      "give its entry sync: poll <interval> (poll 5m), or sync: off; or ALTER TABLE public.audit REPLICA IDENTITY DEFAULT on the database",
+    "- tables.events: public.events has no primary key, so logical replication cannot apply its changes by its key: (sync: replication) — give its entry sync: poll <interval> (poll 5m), or sync: off",
+  ].join("\n"));
+  assert.ok(Array.isArray(S.addedTables(parse("kind: postgres\nurl: x\nsync: replication\ntables:\n  audit: { sync: poll 5m }\n  events: { key: [tenant_id, id], sync: off }\n") as Sources.SourceFile,
+    [...CATALOG, nothing], "shop", "/app")));
+});
+
+test("publication: at the top names the publication replication reads, a ${VARIABLE} read as url: is — unset, or written wrong, refused with the way out", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-sources-pub-"));
+  try {
+    const folder = path.join(root, "mason");
+    fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+    const write = (pub: string): void => fs.writeFileSync(path.join(folder, "sources", "app.yml"), `kind: postgres\nurl: postgres://x/db\nsync: replication\n${pub}tables: {}\n`);
+    write("publication: app_pub\n");
+    assert.equal((S.readSource(folder, root, {}) as Sources.ProjectSource).publicationName, "app_pub");
+    write("");
+    assert.equal((S.readSource(folder, root, {}) as Sources.ProjectSource).publicationName, null, "none named: Mason's own");
+    write("publication: ${PG_PUBLICATION}\n");
+    assert.equal((S.readSource(folder, root, { PG_PUBLICATION: "shell_pub" }) as Sources.ProjectSource).publicationName, "shell_pub");
+    fs.writeFileSync(path.join(root, ".env"), "PG_PUBLICATION=dotenv_pub\n");
+    assert.equal((S.readSource(folder, root, { PG_PUBLICATION: "shell_pub" }) as Sources.ProjectSource).publicationName, "dotenv_pub", "as url: is read: the folder's .env over the shell");
+    assert.equal((S.readSource(folder, root, { PG_PUBLICATION: "shell_pub" }, { shellFirst: true }) as Sources.ProjectSource).publicationName, "shell_pub", "a server's environment first");
+    fs.rmSync(path.join(root, ".env"));
+    const unset = S.readSource(folder, root, {}) as Failure;
+    assert.deepEqual([unset.code, unset.message, unset.fix], ["bad_source", "mason/sources/app.yml: publication: ${PG_PUBLICATION} is not set — not in .env.local, .env or the shell",
+      "put PG_PUBLICATION=<the publication's name> in .env (or export it), or take publication: out of the file and Mason makes its own"]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  const problems = (text: string): string[] => (parse(text) as { problems: string[] }).problems;
+  assert.deepEqual(problems("kind: postgres\nurl: x\npublication: $PG_PUBLICATION\ntables: {}\n"), ['publication: "$PG_PUBLICATION" — write ${NAME} alone, like ${PG_PUBLICATION}, or the publication\'s name']);
+  assert.deepEqual(problems("kind: postgres\nurl: x\npublication: ''\ntables: {}\n"), ["publication: write publication: ${PG_PUBLICATION}, or a publication's name (leave it out and Mason makes its own)"]);
+  assert.deepEqual(problems("kind: postgres\nurl: x\npublcation: app_pub\ntables: {}\n"), ["unexpected key publcation — did you mean `publication`? — a source file takes kind, url, sync, publication, tables"]);
+});
+
+test("--replication, --poll and MASON_CHANGES taken only where the file agrees, else refused on one report with the sync: line to write; the publication named twice refused naming both", async () => {
+  const R = await import("../src/cli/replication-mode.ts" as string) as typeof import("../src/cli/replication-mode.ts");
+  const file = (text: string) => parse(text) as Sources.SourceFile;
+  const shown = "mason/sources/app.yml";
+  const mixed = file("kind: postgres\nurl: x\nsync: poll 5s\ntables:\n  orders: { sync: replication }\n  customers: { sync: off }\n  events: {}\n");
+  const repl = R.changesAgreement(mixed, shown, "replication", "--replication")!;
+  assert.deepEqual(repl, { message: "--replication streams every table, and mason/sources/app.yml does not: customers (sync: off, its entry's), events (sync: poll 5s, the file's)", code: "refused",
+    why: "how each table is kept current is its sync: in mason/sources/app.yml now, at the top for every table and on an entry for that one (--replication is read only where it agrees, and goes in the next release)",
+    fix: "write sync: replication at the top of mason/sources/app.yml and take sync: off the entry of customers — or keep the file as it is — then mason start without --replication",
+    next: [["mason start", "each table kept current as its sync: says"]] });
+  const poll = R.changesAgreement(mixed, shown, "poll", "MASON_CHANGES=poll")!;
+  assert.deepEqual([poll.message, poll.fix], ["MASON_CHANGES=poll polls every table, and mason/sources/app.yml streams orders (sync: replication)",
+    "write sync: poll 5m (or off) on the entry of orders — or keep the file as it is — then unset MASON_CHANGES, then start again"]);
+  const allRepl = file("kind: postgres\nurl: x\nsync: replication\ntables:\n  orders: {}\n  customers: {}\n");
+  assert.equal(R.changesAgreement(allRepl, shown, "replication", "--replication"), null, "every table replicated: --replication agrees");
+  assert.match(R.changesAgreement(allRepl, shown, "poll", "--poll")!.fix!, /^write sync: poll 5m \(or off\) at the top of mason\/sources\/app\.yml — /);
+  assert.equal(R.changesAgreement(file("kind: postgres\nurl: x\nsync: poll 5s\ntables:\n  orders: {}\n"), shown, "poll", "--poll"), null, "none replicated: --poll agrees");
+  assert.equal(R.changesAgreement(mixed, shown, null, "--replication"), null, "no flag: the file alone");
+  assert.equal(R.changesAgreement(file("kind: postgres\nurl: x\ntables: {}\n"), shown, "replication", "--replication")!.message,
+    "--replication streams every table, and mason/sources/app.yml does not: its sync: (off, the default)");
+  // the publication named twice
+  assert.deepEqual(R.publicationConflict("flag_pub", { publicationName: "file_pub" }, shown), { message: "the publication is named twice: --publication flag_pub, and publication: in mason/sources/app.yml (file_pub)",
+    code: "refused", why: "the replicated tables are read through one publication",
+    fix: "keep publication: in mason/sources/app.yml and start without --publication (it goes in the next release), or write publication: flag_pub there",
+    next: [["mason start", "the replicated tables read through the file's publication"]] });
+  assert.equal(R.publicationConflict("flag_pub", { publicationName: null }, shown), null);
+  assert.equal(R.publicationConflict(null, { publicationName: "file_pub" }, shown), null);
+});
 
 test("the file read: one source per project, its URL from .env.local, .env or the shell — or what to write", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-sources-"));
@@ -231,7 +314,7 @@ test("a key: must tell the rows apart as the database enforces it: NOT NULL colu
   const logs = table({ table: "logs", key: [], columns: [col("tenant_id", "bigint", true), col("id", "bigint", true), col("seq", "bigint"), col("note")],
     uniqueKeys: [{ name: "logs_tenant_id_id_key", columns: ["tenant_id", "id"], constraint: true, nullsNotDistinct: false }] });
   const bare = table({ table: "bare", key: [], columns: [col("a", "bigint", true), col("b")] });
-  const added = (entries: string): unknown => S.addedTables(parse(`kind: postgres\nurl: x\ntables:\n${entries}`) as Sources.SourceFile, [logs, bare], "shop", "/app", { replication: false });
+  const added = (entries: string): unknown => S.addedTables(parse(`kind: postgres\nurl: x\ntables:\n${entries}`) as Sources.SourceFile, [logs, bare], "shop", "/app");
   assert.ok(Array.isArray(added("  logs: { key: [tenant_id, id] }\n")), "the unique index's own columns");
   assert.ok(Array.isArray(added("  logs: { key: [id, tenant_id] }\n")), "in any order");
   const wrong = added("  logs: { key: [id] }\n  bare: { key: [a] }\n") as Failure;
@@ -247,23 +330,23 @@ test("the file read again while the run is up: a mistake keeps the tables read b
   const ok = parse("kind: postgres\nurl: postgres://me@localhost:5432/shop\ntables:\n  customers: {}\n") as Sources.SourceFile;
   const read = (text: string, resolved = "postgres://me@localhost:5432/shop"): Sources.ProjectSource | Failure => {
     const p = parse(text);
-    return "problems" in p ? S.sourceFailure(FILE, "/app", p.problems) : { ...p, resolved, from: "mason/sources/app.yml" };
+    return "problems" in p ? S.sourceFailure(FILE, "/app", p.problems) : { ...p, resolved, from: "mason/sources/app.yml", publicationName: null };
   };
   const RUN = "postgres://me@localhost:5432/shop";
-  const first = S.addedTables(ok, CATALOG, "shop", "/app", { replication: false }) as Sources_AddedTable[];
+  const first = S.addedTables(ok, CATALOG, "shop", "/app") as Sources_AddedTable[];
   let now: Sources.RunSources = { file: ok, tables: first, problem: null };
   // the file stops parsing: the tables kept, said once
-  const broken = S.rereadSources(now, read("kind: postgres\nurl: x\ntables:\n  customers: {\n"), RUN, CATALOG, "shop", "/app", { replication: false });
+  const broken = S.rereadSources(now, read("kind: postgres\nurl: x\ntables:\n  customers: {\n"), RUN, CATALOG, "shop", "/app");
   assert.deepEqual([broken.tables, broken.file], [first, ok], "the tables read before, kept");
   assert.match(broken.said ?? "", /^the sources file cannot be read as it is now, so the tables read before are kept: mason\/sources\/app\.yml: it is not YAML/);
   now = broken;
-  assert.equal(S.rereadSources(now, read("kind: postgres\nurl: x\ntables:\n  customers: {\n"), RUN, CATALOG, "shop", "/app", { replication: false }).said, null, "the same problem is not said again");
+  assert.equal(S.rereadSources(now, read("kind: postgres\nurl: x\ntables:\n  customers: {\n"), RUN, CATALOG, "shop", "/app").said, null, "the same problem is not said again");
   // a url: that names another database (a .env edited): the run's catalog is the old one's — kept, and the way out said
-  const moved = S.rereadSources(now, read("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n", "postgres://me:pw@elsewhere:5432/other"), RUN, CATALOG, "shop", "/app", { replication: false });
+  const moved = S.rereadSources(now, read("kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n", "postgres://me:pw@elsewhere:5432/other"), RUN, CATALOG, "shop", "/app");
   assert.deepEqual(moved.tables, first);
   assert.equal(moved.problem, "mason/sources/app.yml: url: now names postgres://me:****@elsewhere:5432/other (mason/sources/app.yml), and this run copies postgres://me@localhost:5432/shop: mason stop && mason start copies from the new one");
   // fixed: the file's tables now, nothing wrong
-  const fixed = S.rereadSources(moved, read("kind: postgres\nurl: x\ntables:\n  orders: {}\n"), RUN, CATALOG, "shop", "/app", { replication: false });
+  const fixed = S.rereadSources(moved, read("kind: postgres\nurl: x\ntables:\n  orders: {}\n"), RUN, CATALOG, "shop", "/app");
   assert.deepEqual([fixed.tables.map((t) => t.source), fixed.problem, fixed.said], [["public.orders"], null, null]);
 });
 
@@ -321,7 +404,7 @@ test("an INVALID unique index (a failed CREATE UNIQUE INDEX CONCURRENTLY, its du
     const logs = facts.tables.find((t) => t.source === "public.logs")!;
     assert.deepEqual(logs.uniqueKeys?.map((u) => u.name), ["logs_tenant_id_id"], "the invalid index is not read, so the catalog never declares it");
     // a key: over the invalid index's column alone is refused; over the valid one's columns accepted
-    const add = (key: string): unknown => S.addedTables(parse(`kind: postgres\nurl: x\ntables:\n  logs: { key: [${key}] }\n`) as Sources.SourceFile, [logs], "shop", "/app", { replication: false });
+    const add = (key: string): unknown => S.addedTables(parse(`kind: postgres\nurl: x\ntables:\n  logs: { key: [${key}] }\n`) as Sources.SourceFile, [logs], "shop", "/app");
     assert.match((add("id") as Failure).why ?? (add("id") as Failure).message, /no unique index of public\.logs is over \(id\)/);
     assert.ok(Array.isArray(add("tenant_id, id")), JSON.stringify(add("tenant_id, id")));
   } finally { await db.close(); }
@@ -350,11 +433,11 @@ test("sync: one grammar — off, poll 5s, poll 5m, poll 1h — at the top as eve
   assert.deepEqual(read(`${head}tables:\n  orders: {}\n`), { top: null, entries: [["orders", null, { sync: OFF, from: "default" }]] });
   // and the tables the run copies carry each one's effective sync
   const f = parse(`${head}sync: poll 5m\ntables:\n  orders: { sync: off }\n  customers: {}\n`) as Sources.SourceFile;
-  const added = S.addedTables(f, CATALOG, "shop", "/app", { replication: false }) as Array<{ source: string; sync?: unknown }>;
+  const added = S.addedTables(f, CATALOG, "shop", "/app") as Array<{ source: string; sync?: unknown }>;
   assert.deepEqual(added.map((t) => [t.source, t.sync]), [["public.orders", OFF], ["public.customers", poll("5m", 300)]]);
 });
 
-test("sync: every mistake on one report, at its key, with the line to write — a short interval, poll alone, a misspelt mode or key, replication not yet", () => {
+test("sync: every mistake on one report, at its key, with the line to write — a short interval, poll alone, a misspelt mode or key, an interval on replication", () => {
   const one = (v: string, at = "sync"): string => {
     const p = at === "sync" ? problems(`${head}sync: ${v}\ntables: {}\n`) : problems(`${head}tables:\n  orders:\n    sync: ${v}\n`);
     assert.equal(p.length, 1, JSON.stringify(p));
@@ -363,9 +446,9 @@ test("sync: every mistake on one report, at its key, with the line to write — 
   assert.equal(one("poll 500ms"), "sync: 500ms is under the shortest interval, 1s (a poll scans the table whole on your database): write poll 1s or longer");
   assert.equal(one("poll 0s"), "sync: 0s is under the shortest interval, 1s: write poll 1s or longer");
   assert.equal(one("poll"), "sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)");
-  assert.equal(one("polling 5s"), "sync: polling is not a sync — did you mean `poll 5s`? Write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
-  assert.equal(one("Off"), "sync: Off is not a sync — did you mean `off`? Write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
-  assert.equal(one("replication"), "sync: replication is not in this release yet: mason start --replication keeps every table current (write off or poll <interval> here)");
+  assert.equal(one("polling 5s"), "sync: polling is not a sync — did you mean `poll 5s`? Write off, poll <interval> (poll 5s, poll 5m or poll 1h) or replication");
+  assert.equal(one("Off"), "sync: Off is not a sync — did you mean `off`? Write off, poll <interval> (poll 5s, poll 5m or poll 1h) or replication");
+  assert.equal(one("replication 5m"), "sync: replication takes no interval: write replication, or poll 5m");
   assert.equal(one("poll 5 minutes"), 'sync: "5 minutes": write poll 5m');
   assert.equal(one("poll 1.5h"), "sync: 1.5h: an interval is a whole number — write poll 90m");
   assert.equal(one("poll 2d"), "sync: 2d: d is not a unit of an interval — days are hours: write poll 48h");
@@ -377,16 +460,16 @@ test("sync: every mistake on one report, at its key, with the line to write — 
   assert.equal(one("poll 9999999999999s"), "sync: 9999999999999s is over the longest interval, 24h: write poll 24h, or off with mason sync <table> run by a scheduler");
   assert.equal(one("poll 05s"), 'sync: "05s": write poll 5s');
   assert.deepEqual((parse(`${head}sync: poll 24h\ntables: {}\n`) as Sources.SourceFile).sync, poll("24h", 86_400), "a day is the longest, and taken");
-  assert.equal(one("5"), "sync: is the number 5: write off, or poll <interval> (poll 5s, poll 5m or poll 1h)");
+  assert.equal(one("5"), "sync: is the number 5: write off, poll <interval> (poll 5s, poll 5m or poll 1h) or replication");
   // on an entry, at the entry's key
   assert.equal(one("poll", "entry"), "tables.orders.sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)");
   // the key misspelt, at the top and on an entry: did you mean
-  assert.deepEqual(problems(`${head}synk: off\ntables: {}\n`), ["unexpected key synk — did you mean `sync`? — a source file takes kind, url, sync, tables"]);
+  assert.deepEqual(problems(`${head}synk: off\ntables: {}\n`), ["unexpected key synk — did you mean `sync`? — a source file takes kind, url, sync, publication, tables"]);
   assert.deepEqual(problems(`${head}tables:\n  orders:\n    Sync: off\n`), ["tables.orders: unexpected key Sync — did you mean `sync`? — a table takes columns, exclude, key and sync"]);
   // all of a file's mistakes on ONE report
   assert.deepEqual(problems(`${head}sync: poll\ntables:\n  orders: { sync: polling 5s }\n  customers: { sync: poll 500ms }\n`), [
     "sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)",
-    "tables.orders.sync: polling is not a sync — did you mean `poll 5s`? Write off, or poll <interval> (poll 5s, poll 5m or poll 1h)",
+    "tables.orders.sync: polling is not a sync — did you mean `poll 5s`? Write off, poll <interval> (poll 5s, poll 5m or poll 1h) or replication",
     "tables.customers.sync: 500ms is under the shortest interval, 1s (a poll scans the table whole on your database): write poll 1s or longer",
   ]);
 });
@@ -441,7 +524,7 @@ test("mason add's sync: --sync writes the entry's sync: alone, comments kept; a 
   const file = path.join(folder, "sources", "app.yml");
   const big = table({ table: "events_big", rows: 22_000_000 });
   const huge = table({ table: "huge", rows: 50_000_000 });
-  const db = { tables: [...CATALOG, big, huge], database: "shop", replication: false };
+  const db = { tables: [...CATALOG, big, huge], database: "shop" };
   const edit = (text: string) => { fs.writeFileSync(file, text); return E.sourceToEdit(folder, root, () => S.readSource(folder, root, {})); };
   const top = "kind: postgres\nurl: postgres://me@localhost/shop\nsync: poll 5m   # every table\ntables:   # copied\n  customers: {}   # every column\n  orders:\n    columns: [id, status]   # not the payload\n";
   try {
@@ -461,7 +544,7 @@ test("mason add's sync: --sync writes the entry's sync: alone, comments kept; a 
     assert.deepEqual([b.sync, b.bigOff], [{ value: "off", from: "entry" }, true]);
     const commands = await import("../src/cli/commands.ts");
     assert.equal(commands.addedLines(b, "mason/sources/app.yml").notes[0], "sync: off written on its entry: it has more than 1,000,000 rows, and each poll scans it whole on your database — " +
-      "mason add events_big --sync \"poll 1h\" polls it hourly; mason sync events_big syncs it once, now; mason start --replication keeps every table current from the change log");
+      "mason add events_big --sync \"poll 1h\" polls it hourly; mason sync events_big syncs it once, now; mason add events_big --sync replication keeps it current from the change log");
     // under a file whose default is off, a big table follows it (nothing to write); with --sync it is what was asked
     const offTop = top.replace("sync: poll 5m", "sync: off");
     assert.deepEqual([E.addEntry(edit(offTop), db, "public.events_big").bigOff, fs.readFileSync(file, "utf8").endsWith("  events_big: {}\n")], [false, true]);
@@ -469,11 +552,25 @@ test("mason add's sync: --sync writes the entry's sync: alone, comments kept; a 
     const h = E.addEntry(edit(top), db, "public.huge", ["*"], null, { sync: { mode: "poll", every: "30s", seconds: 30 } });
     assert.equal(h.pollCost, "huge has about 50,000,000 rows, and each poll scans it whole on your database: about 28 s a poll, from the catalog's 50,000,000 rows at an assumed " +
       "1,800,000 rows a second of scan (nothing of it measured yet). sync: poll 30s is stretched to a poll every 2 min at most (a poll waits four times its own time), one backend of " +
-      "your database busy 25 % of the time — a longer interval (--sync \"poll 1h\"), or mason start --replication, costs it less");
+      "your database busy 25 % of the time — a longer interval (--sync \"poll 1h\"), or --sync replication (the change log), costs it less");
     // measured by the run: its last poll first, else its copy's read rate a reader
     assert.match(E.pollCost(huge, { mode: "poll", every: "10s", seconds: 10 }, { lastPollMs: 40_000, copyRowsPerSecond: 500_000 })!, /about 40 s a poll, from its last poll, measured\./);
     assert.match(E.pollCost(huge, { mode: "poll", every: "10s", seconds: 10 }, { lastPollMs: null, copyRowsPerSecond: 500_000 })!, /about 2 min a poll, from its copy's read rate, 500,000 rows a second a reader/);
     assert.equal(E.pollCost(huge, { mode: "poll", every: "1m", seconds: 60 }, null), null, "every minute or slower: no warning");
     assert.equal(E.pollCost(table({ table: "mid", rows: 5_000_000 }), { mode: "poll", every: "5s", seconds: 5 }, null), null, "under ten million rows: none");
+    // UNDER A FILE WHOSE DEFAULT IS REPLICATION, a table it cannot replicate is written sync: poll 5m, and why: a key:
+    // table (no primary key), and one with REPLICA IDENTITY NOTHING; one that can follows the file
+    const replTop = "kind: postgres\nurl: postgres://me@localhost/shop\nsync: replication\ntables:\n  customers: {}\n";
+    const keyed = E.addEntry(edit(replTop), { tables: [...CATALOG], database: "shop" }, "public.events", ["*"], ["tenant_id", "id"]);
+    assert.ok(fs.readFileSync(file, "utf8").endsWith("  events:\n    key: [tenant_id, id]\n    sync: poll 5m\n"), fs.readFileSync(file, "utf8"));
+    assert.deepEqual([keyed.sync, keyed.notReplicated], [{ value: "poll 5m", from: "entry" }, "it has no primary key, so logical replication cannot apply its changes by its key:"]);
+    const nothing = E.addEntry(edit(replTop), { tables: [...CATALOG, table({ table: "audit", replicaIdentity: "n" })], database: "shop" }, "public.audit");
+    assert.deepEqual([nothing.sync, nothing.notReplicated?.startsWith("it has REPLICA IDENTITY NOTHING")], [{ value: "poll 5m", from: "entry" }, true]);
+    const follows = E.addEntry(edit(replTop), db, "billing.invoices");
+    assert.deepEqual([follows.sync, follows.notReplicated], [{ value: "replication", from: "file" }, null]);
+    assert.ok(fs.readFileSync(file, "utf8").endsWith("  billing.invoices: {}\n"));
+    // asked for by --sync, it is what was asked: refused at its entry, the line to write
+    assert.throws(() => E.addEntry(edit(replTop), { tables: [...CATALOG], database: "shop" }, "public.events", ["*"], ["tenant_id", "id"], { sync: { mode: "replication" } }),
+      /public\.events has no primary key, so logical replication cannot apply its changes by its key: \(sync: replication\) — give its entry sync: poll <interval> \(poll 5m\), or sync: off/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

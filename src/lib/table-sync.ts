@@ -6,16 +6,19 @@
  *
  *   off               nothing after the first copy until `mason sync <table>`, which polls it once, now (the default)
  *   poll <interval>   the xmin poll every <interval>: <n>s, <n>m or <n>h, a whole number, at least 1s, at most 24h
+ *   replication       the database's change log, through the project's ONE slot and publication (src/duck/stream.ts):
+ *                     the publication carries the replicated tables only, and the polled ones are polled beside it
  *
- * `replication` is a word of the grammar but not of this release: logical replication is still the project's
- * (`mason start --replication`), and the value is refused with that way out. The engine never decides how a table is
- * kept current by its size: the row count matters only to `mason add`, which writes `sync: off` for a table over
- * `BIG_TABLE_ROWS` when the file's default polls (src/cli/source-edit.ts).
+ * The engine never decides how a table is kept current by its size: the row count matters only to `mason add`, which
+ * writes `sync: off` for a table over `BIG_TABLE_ROWS` when the file's default polls (src/cli/source-edit.ts).
  */
 import { closest } from "./did-you-mean.ts";
 
-/** a table's sync as the sources file says it: `off`, or polled every `seconds` (`every` as written: `30s`, `5m`, `1h`) */
-export type TableSync = { mode: "off" } | { mode: "poll"; every: string; seconds: number };
+/** a table's sync as the sources file says it: `off`, polled every `seconds` (`every` as written: `30s`, `5m`, `1h`), or
+ *  streamed from the change log (`replication`) */
+export type TableSync = { mode: "off" } | { mode: "poll"; every: string; seconds: number } | { mode: "replication" };
+/** a sync the poll keeps: `off` or `poll <interval>` (a `replication` table is the stream's) */
+export type PolledSync = Exclude<TableSync, { mode: "replication" }>;
 
 /** the sync a table has when neither its entry nor the file says one: `off` (issue 33: Mason reads each table once,
  *  then only what you tell it to) */
@@ -50,11 +53,11 @@ const UNIT_WORDS: Record<string, keyof typeof UNIT_SECONDS> = {
 };
 const EXAMPLES = "poll 5s, poll 5m or poll 1h";
 /** what a sync is, said where one is wrong */
-export const SYNC_FORMS = `off, or poll <interval> (${EXAMPLES})`;
+export const SYNC_FORMS = `off, poll <interval> (${EXAMPLES}) or replication`;
 
 /** the value as the file writes it: `off`, `poll 30s` */
 export function syncText(s: TableSync): string {
-  return s.mode === "off" ? "off" : `poll ${s.every}`;
+  return s.mode === "poll" ? `poll ${s.every}` : s.mode;
 }
 
 /** a span of seconds as an interval is written, in the largest unit it is a whole number of: 90 is `90s`, 120 `2m` */
@@ -87,8 +90,8 @@ function parseInterval(v: string): { every: string; seconds: number } | { proble
 
 /**
  * A `sync:` VALUE READ, or what is wrong with it in the words a person fixes it from (the key is the caller's to say):
- * the line to write, a `did you mean` for a misspelt mode, the floor for a short interval, and for `replication` that
- * it is not in this release yet and what keeps every table current meanwhile.
+ * the line to write, a `did you mean` for a misspelt mode, the floor for a short interval. Whether a table CAN be
+ * replicated (a primary key, a replica identity) is the catalog's, said at the entry (src/cli/sources.ts entryProblems).
  */
 export function parseSync(v: unknown): TableSync | { problem: string } {
   if (typeof v !== "string" || v.trim() === "") {
@@ -98,9 +101,7 @@ export function parseSync(v: unknown): TableSync | { problem: string } {
   const words = v.trim().split(/\s+/);
   const mode = words[0]!, rest = words.slice(1).join(" ");
   if (mode === "off") return rest === "" ? { mode: "off" } : { problem: `off takes no interval: write off, or poll ${rest}` };
-  if (mode === "replication") {
-    return { problem: "replication is not in this release yet: mason start --replication keeps every table current (write off or poll <interval> here)" };
-  }
+  if (mode === "replication") return rest === "" ? { mode: "replication" } : { problem: `replication takes no interval: write replication, or poll ${rest}` };
   if (mode === "poll") {
     if (rest === "") return { problem: `poll needs its interval: write ${EXAMPLES} (at least ${MIN_POLL_SECONDS}s)` };
     const i = parseInterval(rest);
@@ -113,9 +114,9 @@ export function parseSync(v: unknown): TableSync | { problem: string } {
   return { problem: meant !== null ? `${mode} is not a sync — did you mean \`${meant}\`? Write ${SYNC_FORMS}` : `${mode} is not a sync: write ${SYNC_FORMS}` };
 }
 
-/** a sync for a person: `off`, `polled every 30s` */
+/** a sync for a person: `off`, `polled every 30s`, `replicated` */
 export function syncWords(s: TableSync): string {
-  return s.mode === "off" ? "off" : `polled every ${s.every}`;
+  return s.mode === "off" ? "off" : s.mode === "replication" ? "replicated" : `polled every ${s.every}`;
 }
 
 /** how long ago an instant was, as a status line reads: `4 s ago`, `12 min ago`, `5 h ago`, `3 days ago` */
