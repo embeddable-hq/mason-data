@@ -425,9 +425,10 @@ for its evidence than it must, the safe side, until the rate of a key's fill of 
 fill is another function's, and its rate is never read for a key's).
 
 **Equality under libc is the C key.** The `GROUP BY j` row above is C's and ICU's: under a libc collation an
-equality (GROUP BY, DISTINCT, =, PARTITION BY) reads the C key computed per row, because the stored key is the libc
-order's, which refuses a string holding a character the measured order does not cover where equality needs no order
-at all (the review found the first form keying equality by the collation, and refusing).
+equality (GROUP BY, DISTINCT, =, PARTITION BY) reads the C key (stored as a column of its own since 2026-10-29,
+below), because the order's stored key is the libc order's, which refuses a string holding a character the measured
+order does not cover where equality needs no order at all (the review found the first form keying equality by the
+collation, and refusing).
 
 **A mark written after the count (the review, 2026-10-28).** The stream and the poll write a libc-uncovered document
 (an NFD `café`, e + U+0301) at any time, and its key is the mark; the plans read the key alone until the detector
@@ -438,6 +439,31 @@ statement is refused by the gap's name, as the statement's own key refuses it, u
 **What it does not cover.** A statement that lists a copy's columns without naming them (`SELECT * … ORDER BY j`)
 reads no stored column at all (`hideKept`), so its sort is the function's: 23.2 s (C) and 84.3 s (libc) on the same
 rows.
+
+#### Under libc, the C key stored for equality (2026-10-29)
+
+**Decision.** Under a libc collation the C key is a second stored read beside the order's (`EQUAL_STEPS`,
+src/duck/kept-route.ts), stored as `equal:` and the C order's id (`equalId`: `KEY_VERSION` and `DUCKDB_VERSION`, never
+the libc order, which the C key does not read). GROUP BY, DISTINCT, count(DISTINCT), PARTITION BY, =, IN and a join on
+`=` record it (`equalKey`), and it is weighed, filled, swept, marked, dropped and read exactly as the order's key. It
+marks no libc-uncovered string (the C key covers every string), so its mark is a Mason bug, never the gap. Under C and
+ICU the order's key equates, so an equality read is the order's (`own`) and a C key is dropped at `orderBy`: one column
+serves both there, never two.
+
+**Why.** Measured on a laptop (10 cores, NVMe, the file in the page cache, the machine shared with other work: load
+average 9–18, so the wall times are high and the CPU times the steadier figure) over 20 M synthetic rows of four shapes
+(objects of three keys with an array, arrays of four members, numbers, strings; 500 values each, 2,000 distinct, and a
+sixth NULL), under en_US.utf8 (the libc container), through the rewrite's plan and the keeper:
+
+| | by the C key's function, per row | from the stored C key |
+|---|---|---|
+| `SELECT j, count(*), min(id) … GROUP BY j ORDER BY 3 LIMIT 10` | 34–77 s wall, 32–45 s CPU | 0.15–0.23 s wall, ~1.1 s CPU |
+| `SELECT DISTINCT j` | 26–53 s wall, 27–39 s CPU | 0.14–0.19 s wall, ~1.0 s CPU |
+| `SELECT count(DISTINCT j)` | 21–22 s wall, 23–24 s CPU | 0.09–0.11 s wall, ~0.6 s CPU |
+
+(Two runs each, of two processes; the very first computed GROUP BY after the build took 188 s wall for the same 45 s
+of CPU, the machine's other work, and is left out.) The fill (the keeper's chunks of 50,000 rows) took 29 s, 1.4 µs a
+row: about one computed GROUP BY, once. Each answer from the stored key equalled the computed one.
 
 ### What DuckDB is sent: the form it computes fastest, where that is Postgres's answer
 
