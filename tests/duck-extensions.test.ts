@@ -21,8 +21,10 @@ const ENGINE = `v${version().replace(/^v/, "")}`;
 // imported when the tests run: at a commit without the modules the file still loads, and each test fails by name
 type X = typeof import("../src/duck/extensions.ts");
 type B = typeof import("../cli/extensions.ts");
-const x = await import("../src/duck/extensions.ts" as string).catch(() => null) as X | null;
-const b = await import("../cli/extensions.ts" as string).catch(() => null) as B | null;
+// only a module that is not there is absent: any other failure to load it is thrown
+const absent = (e: unknown): null => { if ((e as NodeJS.ErrnoException).code === "ERR_MODULE_NOT_FOUND") return null; throw e; };
+const x = await import("../src/duck/extensions.ts" as string).catch(absent) as X | null;
+const b = await import("../cli/extensions.ts" as string).catch(absent) as B | null;
 const mod = (): X => { assert.ok(x, "src/duck/extensions.ts exists"); return x; };
 const build = (): B => { assert.ok(b, "cli/extensions.ts exists"); return b; };
 

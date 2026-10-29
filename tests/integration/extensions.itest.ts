@@ -52,9 +52,11 @@ const T: AddedTable = {
 };
 
 test("with the platform package present, the copy and an inet cast work and nothing is downloaded", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
-  // imported when the test runs: at a commit without the module the file still loads, and this test fails by name
-  const x = await import("../../src/duck/extensions.ts" as string).catch(() => null) as typeof import("../../src/duck/extensions.ts") | null;
-  const b = await import("../../cli/extensions.ts" as string).catch(() => null) as typeof import("../../cli/extensions.ts") | null;
+  // imported when the test runs: at a commit without the module the file still loads, and this test fails by name;
+  // only a module that is not there is absent, any other failure to load it is thrown
+  const absent = (e: unknown): null => { if ((e as NodeJS.ErrnoException).code === "ERR_MODULE_NOT_FOUND") return null; throw e; };
+  const x = await import("../../src/duck/extensions.ts" as string).catch(absent) as typeof import("../../src/duck/extensions.ts") | null;
+  const b = await import("../../cli/extensions.ts" as string).catch(absent) as typeof import("../../cli/extensions.ts") | null;
   assert.ok(x && b, "src/duck/extensions.ts and cli/extensions.ts exist");
   const key = x.hostKey(x.thisHost());
   assert.ok(key in x.EXTENSION_PLATFORMS, `a package is built for this machine (${key})`);
