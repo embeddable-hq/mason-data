@@ -97,7 +97,7 @@ ${codes}
     mason logs --requests --failed --json     every statement a tool sent that was not answered, with its SQLSTATE and message
     mason logs --events --failed --json       the sync's failures: a copy, a poll, the stream, the database out of reach, a restart
     mason logs --running --json               the statements running now, one per session
-    mason cancel <session> --json             stops that session's statement, as a client's cancel does (the client is told 57014)
+    mason cancel <session> --json             stops that session's statement, as a client's cancel does (its client gets a "canceling statement" error)
     mason usage --since 7d --step 1h --json  the statements, the copy's size and age, the memory over time, a sample a minute
   With no database to hand, in a new folder: mason init demo --json && mason start --json — a demo database Mason
   hosts itself (${DEMO_TABLES.join(", ")}), changed every few seconds, read by polling only. Init adds

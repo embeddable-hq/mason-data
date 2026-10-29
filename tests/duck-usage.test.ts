@@ -270,3 +270,28 @@ test("a samples table a run before a column made gains it, and a sample is writt
     fs.rmSync(d, { recursive: true, force: true });
   }
 });
+
+test("a copy's size is read from the copy's own database: an in-memory catalog attached beside it (block size 0) never makes it 0 bytes", async () => {
+  const { UsageSampler } = await usage();
+  const clock = Date.parse("2026-10-28T13:00:00.000Z");
+  await store.writer.run(`ATTACH ':memory:' AS aaa_visible`);
+  await store.writer.run(`CREATE SCHEMA IF NOT EXISTS app`);
+  await store.writer.run(`CREATE TABLE app.small AS SELECT i AS id, 'row ' || i::VARCHAR AS note FROM range(50) t(i)`);
+  await store.writer.run("CHECKPOINT");
+  const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: NEVER, sizeEveryMs: 1 });
+  try {
+    u.start(async () => ({ ...facts, copied: ["app.small"] }));
+    await u.sample();
+    const [s] = await u.copySizes();
+    assert.equal(s?.table, "app.small");
+    assert.ok(s!.bytes >= 65_536, `a small copy is its blocks, never 0: ${s?.bytes}`);
+    // a 0 an earlier run stored is not a measure either
+    await store.writer.run(`INSERT INTO _mason.copy_sizes VALUES ('2026-10-28T14:00:00Z', 'app.small', 0)`);
+    assert.equal((await u.copySizes())[0]!.bytes, s!.bytes, "a stored 0 is skipped: the latest real measure is read");
+  } finally {
+    await u.close();
+    await store.writer.run(`DROP TABLE app.small`);
+    await store.writer.run(`DELETE FROM _mason.copy_sizes`);
+    await store.writer.run(`DETACH aaa_visible`);
+  }
+});

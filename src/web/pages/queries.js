@@ -38,7 +38,7 @@ const keyOf = (session, statement) => `${session}:${statement}`;
 /** What a cancel answered, as `mason cancel` says it: its headline, or the refusal as the Failure. */
 function outcomeHtml(o) {
   if (o.failure) return renderFailure(o.failure);
-  return `<p class="done" role="status"><span class="headline">Cancelled session ${o.cancelled.session}'s statement: it ends now, and its client is told so (57014).</span></p>`;
+  return `<p class="done" role="status"><span class="headline" title="SQLSTATE 57014">Cancelled session ${o.cancelled.session}'s statement: it ends now, and its client gets a "canceling statement" error.</span></p>`;
 }
 
 /**
@@ -117,7 +117,7 @@ export function renderRunning(running, asking = null, outcome = null) {
   const rows = running.map((r) => {
     const key = keyOf(r.session, r.statement);
     const ask = asking === key
-      ? `<tr class="under"><td colspan="8"><span class="confirm">Cancel session ${r.session}'s statement ${r.statement}? Its client is told so (57014).</span> ` +
+      ? `<tr class="under"><td colspan="8"><span class="confirm" title="SQLSTATE 57014">Cancel session ${r.session}'s statement ${r.statement}? Its client gets a "canceling statement" error.</span> ` +
         `<button type="button" class="danger small" data-confirm-cancel="${esc(key)}">Cancel statement ${r.statement}</button> <button type="button" class="small" data-dismiss-cancel>Keep it running</button></td></tr>` : "";
     return `<tr><td>${r.session}</td><td>${r.statement}</td><td>${esc(r.user)}</td><td>${esc(clientText(r.applicationName))}</td>` +
       `<td class="num"><time datetime="${esc(r.startedAt)}" title="started ${esc(utcText(r.startedAt))} UTC">${esc(spanText(r.runningMs / 1000))}</time></td><td class="num">${esc(plural(r.rows, "row"))} sent</td>` +
@@ -140,10 +140,10 @@ export function renderRunning(running, asking = null, outcome = null) {
 export function renderUnsupported(b, span = RANGES[DEFAULT_RANGE].span) {
   const days = `${b.keptDays} day${b.keptDays === 1 ? "" : "s"}`;
   if (!b.unsupported.length) return empty(`No statement refused for unsupported SQL in ${span} (the request log keeps ${days}: MASON_REQUEST_LOG_DAYS).`);
-  return `<p class="lead">The statements refused in ${esc(span)} by the SQL they used that Mason does not support, the most first; docs/SQL-SUPPORT.md has each one's way out.</p>` +
+  return `<p class="lead">The statements refused in ${esc(span)} by the SQL they used that Mason does not support, the most first.</p>` +
     panel(`<ul class="unsupported">${b.unsupported.map((g) => {
       const e = unsupportedEntry(g);
-      return `<li><p class="headline">${esc(e.headline)}</p><p class="dim">${esc(e.last)} — <code class="clip" title="${esc(clip(g.example, TITLE_MAX))}">${esc(e.example)}</code></p></li>`;
+      return `<li><p class="headline" title="docs/SQL-SUPPORT.md entry ${esc(e.id)}">${esc(e.headline)}</p><p class="dim">${esc(e.last)} — <code class="clip" title="${esc(clip(g.example, TITLE_MAX))}">${esc(e.example)}</code></p><p class="dim">${esc(e.how)}</p></li>`;
     }).join("")}</ul>`);
 }
 
@@ -184,7 +184,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
   const rows = list.map((r) => {
     const key = `request:${r.requestId}`;
     const open = isOpen(key);
-    const error = r.sqlstate === null && !r.message ? "" : `<div class="err"><code>${esc(r.sqlstate ?? "")}</code> <span title="${esc(clip(r.message ?? "", TITLE_MAX))}">${esc(clip(firstLine(r.message ?? ""), 300))}</span></div>`;
+    const error = r.sqlstate === null && !r.message ? "" : `<div class="err"${r.sqlstate ? ` title="SQLSTATE ${esc(r.sqlstate)}"` : ""}><span title="${esc(clip(r.message ?? "", TITLE_MAX))}">${esc(clip(firstLine(r.message ?? ""), 300))}</span></div>`;
     const row = `<tr class="s-${esc(r.status)}"><td>${status(undefined, STATUS[r.status] ?? r.status)}</td>` +
       `<td class="id">${details(key, r.requestId.slice(0, 8), "", open)}</td>` +
       `<td class="when"><time datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td>` +

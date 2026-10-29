@@ -282,7 +282,11 @@ export function requestCells(r) {
     oneLine(r.query, 120) || "(no statement)", r.message ? firstLine(r.message) : ""];
 }
 
-const cellsRow = (cells) => `<tr><th scope="row">${esc(cells[0])}</th>${cells.slice(1).map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`;
+/** A row of cells; `outcomeAt` is the column that says `refused 42P01`: the word is shown, the SQLSTATE is its title (`--json` and the CLI's line keep it). */
+const cellsRow = (cells, outcomeAt = -1) => `<tr><th scope="row">${esc(cells[0])}</th>${cells.slice(1).map((c, i) => {
+  const m = i + 1 === outcomeAt ? /^(\S+) (\S+)$/.exec(c) : null;
+  return m ? `<td title="SQLSTATE ${esc(m[2])}">${esc(m[1])}</td>` : `<td>${esc(c)}</td>`;
+}).join("")}</tr>`;
 
 /**
  * THE UNSUPPORTED SQL OF THE LAST DAY in one line, as mason status heads it (`/api/unsupported`'s body, its default day):
@@ -294,7 +298,7 @@ export function renderUnsupportedLine(u) {
   if ("failure" in u) return `<p class="count">Unsupported SQL: could not read it (${esc(firstLine(u.failure.message))}; ${code("mason logs")} has the detail)</p>`;
   const [top, ...rest] = u.unsupported;
   if (top === undefined) return "";
-  return `<p class="unsupported-line"><strong>Unsupported SQL, the last day:</strong> ${esc(unsupportedEntry(top).headline)}` +
+  return `<p class="unsupported-line"><strong>Unsupported SQL, the last day:</strong> <span title="docs/SQL-SUPPORT.md entry ${esc(top.gap)}">${esc(unsupportedEntry(top).headline)}</span>` +
     `${rest.length ? ` (and ${n(rest.length)} other${rest.length === 1 ? "" : "s"})` : ""} <a class="see" href="${LINKS.queries}">See all</a></p>`;
 }
 
@@ -305,13 +309,13 @@ export function renderUnsupportedLine(u) {
  * (`renderUnsupportedLine`). Each argument is the body, or `{ failure }`.
  */
 export function renderRecentErrors(events, requests, unsupported) {
-  const part = (title, r, list, head, cells, more, href) => r === undefined ? ""
+  const part = (title, r, list, head, cells, more, href, outcomeAt) => r === undefined ? ""
     : "failure" in r ? `<h3>${title}</h3><p class="count">Could not read them (${esc(firstLine(r.failure.message))}; ${code("mason logs")} has the detail)</p>`
     : !list(r).length ? `<h3>${title}</h3><p class="dim">None.</p>`
     : `<table class="errors"><caption>${title} (the latest, newest last; ${code(more)} lists each) <a class="see" href="${href}">See all</a></caption><thead><tr>${head.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
-      `<tbody>${list(r).map((x) => cellsRow(cells(x))).join("")}</tbody></table>`;
+      `<tbody>${list(r).map((x) => cellsRow(cells(x), outcomeAt)).join("")}</tbody></table>`;
   return part("Sync errors", events, (r) => r.events, ["At (UTC)", "What", "Table", "Why"], (e) => Object.values(eventCells(e)), "mason logs --events", LINKS.failedEvents) +
-    part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed", LINKS.failedQueries) +
+    part("Query errors", requests, (r) => r.requests, ["Started (UTC)", "Outcome", "Took", "Rows", "Who", "Statement", "Error"], requestCells, "mason logs --requests --failed", LINKS.failedQueries, 1) +
     renderUnsupportedLine(unsupported);
 }
 

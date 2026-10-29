@@ -287,14 +287,18 @@ test("mason status's unsupported SQL: an entry a line — how many, what they us
     { gap: "quote-ident", title: "quote_ident()", runs: 1, users: [], clients: [], last: "2026-10-26T09:00:00.000Z", example: "SELECT quote_ident(\n name) FROM t" },
     { gap: "a-renamed-entry", title: null, runs: 2, users: [], clients: ["psql"], last: "2026-10-26T08:00:00.000Z", example: "SELECT 1" },
   ], PLAIN), [
-    "\nUnsupported SQL (the last day's refused statements by what they used, the most first; docs/SQL-SUPPORT.md has each one's way out):",
-    "  1,200 statements used json_agg / jsonb_agg (DISTINCT …) — docs/SQL-SUPPORT.md json-agg-distinct",
-    `    last 2026-10-26 10:01 as alice, bob from Metabase — ${long.slice(0, 99)}…`,
-    "  1 statement used quote_ident() — docs/SQL-SUPPORT.md quote-ident",
+    "\nUnsupported SQL (the last day's refused statements by what they used, the most first):",
+    "  json_agg / jsonb_agg (DISTINCT …): 1,200 statements as alice, bob from Metabase",
+    `    last 2026-10-26 10:01 — ${long.slice(0, 99)}…`,
+    "    How to rewrite it: see docs/SQL-SUPPORT.md › json_agg / jsonb_agg (DISTINCT …)",
+    "  quote_ident(): 1 statement",
     "    last 2026-10-26 09:00 — SELECT quote_ident( name) FROM t",
-    "  2 statements used what this Mason no longer lists — docs/SQL-SUPPORT.md a-renamed-entry",
-    "    last 2026-10-26 08:00 from psql — SELECT 1",
+    "    How to rewrite it: see docs/SQL-SUPPORT.md › quote_ident()",
+    "  SQL this Mason no longer lists: 2 statements from psql",
+    "    last 2026-10-26 08:00 — SELECT 1",
+    "    How to rewrite it: see docs/SQL-SUPPORT.md › SQL this Mason no longer lists",
   ]);
+  assert.ok(!unsupportedLines([{ gap: "quote-ident", title: "quote_ident()", runs: 1, users: [], clients: [], last: "2026-10-26T09:00:00.000Z", example: "SELECT 1" }], PLAIN).join("\n").includes("quote-ident"), "the registry id is for --json, never a line");
   assert.deepEqual(unsupportedLines([], PLAIN), [], "nothing refused by an entry: no section");
   assert.deepEqual(unsupportedLines({ error: "the run answered 500\nstack" }, PLAIN), ["\nUnsupported SQL: could not read it (the run answered 500; mason logs has the detail)"]);
   assert.ok(STATUS.json?.includes("unsupported"), "mason status --json declares unsupported");
@@ -679,7 +683,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     const done = await run(["cancel", "4", "--json"]);
     assert.equal(done.code, 0, done.stderr);
     assert.deepEqual(JSON.parse(done.stdout).cancelled, running);
-    assert.match((await run(["cancel", "4"])).stdout, /^Cancelled session 4's statement: it ends now, and its client is told so \(57014\)\.\n/);
+    assert.match((await run(["cancel", "4"])).stdout, /^Cancelled session 4's statement: it ends now, and its client gets a "canceling statement" error\.\n/);
     // its running time is the line of mason logs --running's renderer (spanText), not a second one
     assert.match((await run(["cancel", "6"])).stdout, /Running +2 min, 12 rows sent\n/);
     const idle = await run(["cancel", "5"]);

@@ -187,7 +187,7 @@ export function renderTables(s, ui = {}) {
       (synced?.table !== t.table ? "" : under("failure" in synced ? renderFailure(synced.failure) : renderSynced(synced.synced, t.table, s)));
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td>${state}</td>${cell(rows, "num")}${cell(f.key, "mono")}${last}` +
-      `${t.added && y?.syncSeconds != null ? cell(tookText(y), "num", tookTitle(y)) : cell("", "num")}${cell(t.added && sizeOf.has(t.table) ? bytesText(sizeOf.get(t.table)) : "", "num")}` +
+      `${t.added && y?.syncSeconds != null ? cell(tookText(y), "num", tookTitle(y)) : cell("", "num")}${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a copy's size is measured every 10 min")) : cell("", "num")}` +
       `${stream ? cell(t.added ? stream.get(t.table) ?? "" : "", "stream") : ""}<td class="what">${note}</td><td class="act">${act}</td></tr>` +
       (choosing === t.table && !t.added ? under(pickForm(t, ticked)) : "") + said;
   };

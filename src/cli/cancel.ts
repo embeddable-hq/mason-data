@@ -64,7 +64,7 @@ export async function cancel(argv: string[]): Promise<number> {
     const next: NextStep[] = [[`mason logs --requests --outcome cancelled -n 5`, "the statements cancelled, this one among them once it ended"], running];
     if (json) { out(jsonText(CANCEL, { cancelled: c }, next)); return 0; }
     out(reportText({
-      headline: `Cancelled session ${c.session}'s statement: it ends now, and its client is told so (57014).`,
+      headline: `Cancelled session ${c.session}'s statement: it ends now, and its client gets a "canceling statement" error.`,
       details: [["Statement", oneLine(c.query) || "(no statement)"], ["Client", `${c.applicationName || "(no application_name)"}${c.user ? ` (user ${c.user})` : ""}`],
         ["Running", `${spanText(c.runningMs / 1000)}, ${c.rows.toLocaleString("en-US")} row${c.rows === 1 ? "" : "s"} sent`]],
       next,
