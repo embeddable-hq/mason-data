@@ -28,7 +28,7 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | `#observability/logs` | Observability › Logs; `?failures=1` ticks Failures only |
 
 The hashes of before the Observability group still land on their view: `#status` is the Overview, `#queries`, `#usage` and
-`#logs` the Observability views. At the top of each Observability view is **the time range the three share**: a segmented control — Last hour · 24 hours · 7 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`)
+`#logs` the Observability views. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — Last hour · 24 hours · 7 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`)
 — kept in the hash, so a link carries it (the sidebar's links to the three keep it too). Queries reads the request log since then, Usage the samples of that span (a
 minute a point for the hour, an hour for the day, six hours for the week), Logs the sync's events since then; each
 view's own filters compose with it. Only the view shown asks Mason anything, each read at the rate its data changes,

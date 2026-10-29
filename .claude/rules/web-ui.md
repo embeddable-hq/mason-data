@@ -23,7 +23,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   sidebar (always shown, the current page the view itself, `aria-current`), and its views share
   `ctx.range()` — `RANGES` in src/web/shared.js (Last hour · 24 hours · 7 days, 24 hours by default), each its `since`
   for every endpoint and its usage step — kept in the hash (`?range=`), never in storage, and in the group's links;
-  the range control is at the top of the view (`renderSubnav`), never in the sidebar. A view builds its paths from
+  the range control is in the view's header row, right of its title (`renderSubnav`, its section's `range-<id>`), never in the sidebar. A view builds its paths from
   it, so a change of range is a new read of the view shown alone.
 
 - **A page is a module of its own, registered in three places** (the contract is at the top of src/web/app.js): its

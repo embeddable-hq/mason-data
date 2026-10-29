@@ -827,13 +827,17 @@ test("the shell: a sidebar nav — Overview · Tables · Users, the Observabilit
   const staticNav = html.match(/<nav id="nav" class="nav" aria-label="Pages">(.*?)<\/nav>/s)?.[1] ?? assert.fail("index.html has the nav");
   assert.deepEqual(links(staticNav), links(renderNav("none")), "index.html's nav is the nav the script writes, but its icons");
   assert.equal(staticNav, renderNav("none").replace(/<span class="icon" aria-hidden="true">.*?<\/svg><\/span>/gs, ""), "the same markup, so nothing moves when it is written");
-  // the head of an Observability view: the group's name, then the range as a segmented control (the views are the sidebar's)
+  // the head of an Observability view is ONE row: its title left, the range right as a segmented control (the group's
+  // name is the sidebar's heading, never a line of its own above the title)
   const renderSubnav = fn<[string, string?], string>("renderSubnav");
   assert.equal(renderSubnav("tables"), "", "a page of its own has none");
   const sub = renderSubnav("usage", "1h");
-  assert.equal(textOf(sub), "Observability Last hour 24 hours 7 days");
-  assert.equal(sub, `<p class="crumb">Observability</p><div class="range" role="group" aria-label="Time range"><a href="#observability/usage?range=1h" aria-current="true">Last hour</a><a href="#observability/usage">24 hours</a><a href="#observability/usage?range=7d">7 days</a></div>`);
-  assert.match(html, /<div id="subnav" class="subnav"><\/div>/);
+  assert.equal(textOf(sub), "Last hour 24 hours 7 days");
+  assert.equal(sub, `<div class="range" role="group" aria-label="Time range"><a href="#observability/usage?range=1h" aria-current="true">Last hour</a><a href="#observability/usage">24 hours</a><a href="#observability/usage?range=7d">7 days</a></div>`);
+  for (const id of ["queries", "usage", "logs"]) {
+    assert.match(html, new RegExp(`<div class="page-head"><div class="head-row"><h2 id="${id}-h">\\w+</h2><div id="range-${id}" class="head-range"></div></div>`), `${id}: its title and its range in one row`);
+  }
+  assert.ok(!html.includes('id="subnav"'), "no head above the view's title");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /\.nav a\[aria-current="page"\] \{[^}]*background: var\(--line\)/, "the page shown is a filled row of the nav");
   assert.match(css, /\.range a\[aria-current="true"\]/, "the range chosen is the raised segment");
@@ -879,7 +883,7 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   assert.deepEqual(shown(), ["status"], "an unknown hash shows the Overview");
   const current = () => [...el("nav").html.matchAll(/<a href="([^"]+)" aria-current="page">/g)].map((m) => m[1]);
   assert.deepEqual(current(), ["#overview"]);
-  assert.equal(el("subnav").html, "");
+  assert.equal(el("range-usage").html, "");
   run.asked.length = 0;
   go("#users"); await settle();
   assert.deepEqual(shown(), ["users"]);
@@ -893,14 +897,14 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   go("#usage"); await settle();
   assert.deepEqual(shown(), ["usage"]);
   assert.deepEqual(current(), ["#observability/usage"], "an old hash: the view it was is the current page of the nav");
-  assert.match(el("subnav").html, /<a href="#observability\/usage" aria-current="true">24 hours<\/a>/);
+  assert.match(el("range-usage").html, /<a href="#observability\/usage" aria-current="true">24 hours<\/a>/);
   // (its 24 hours are the Overview's read too, shared: read a minute ago, not due again)
   // the range followed: the same view, its samples of the week, six hours a point
   run.answers.set("GET /api/usage?since=7d&step=21600", run.answers.get("GET /api/usage?since=24h&step=3600")!);
   run.asked.length = 0;
   go("#observability/usage?range=7d"); await settle();
   assert.deepEqual((run.asked as string[]).filter((a) => a.includes("/api/usage")), ["GET /api/usage?since=7d&step=21600"]);
-  assert.match(el("subnav").html, /<a href="#observability\/usage\?range=7d" aria-current="true">7 days<\/a>/);
+  assert.match(el("range-usage").html, /<a href="#observability\/usage\?range=7d" aria-current="true">7 days<\/a>/);
   assert.deepEqual(current(), ["#observability/usage?range=7d"], "the nav's links keep the range");
   // the sub-tab beside it keeps the range: Logs reads the week's events
   run.answers.set("GET /api/events?limit=500&since=7d", answer(EVENTS));
@@ -2160,7 +2164,7 @@ test("Logs: 'Failures only' narrows the events read, in the page alone; the even
 test("Queries, Usage and Logs: the index.html carries the parts the restyled pages write — a header each, the filter toolbar, the failures toggle", () => {
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   for (const id of ["queries-kpis", "usage-kpis", "usage-charts"]) assert.match(html, new RegExp(`<div id="${id}"></div>`), id);
-  for (const [id, title] of [["queries-h", "Queries"], ["usage-h", "Usage"], ["logs-h", "Logs"]]) assert.match(html, new RegExp(`<div class="page-head"><h2 id="${id}">${title}</h2><p class="desc">`), `${title}'s header`);
+  for (const [id, title] of [["queries-h", "Queries"], ["usage-h", "Usage"], ["logs-h", "Logs"]]) assert.match(html, new RegExp(`<div class="page-head"><div class="head-row"><h2 id="${id}">${title}</h2><div id="range-${title.toLowerCase()}" class="head-range"></div></div><p class="desc">`), `${title}'s header`);
   assert.match(html, /<form id="request-filters" class="toolbar"[^>]*>[\s\S]*<button type="submit" class="primary">Filter<\/button>\s*<button type="button" data-clear-filters>Clear<\/button>/);
   assert.match(html, /<input type="checkbox" id="logs-failures-only"> Failures only/);
   const view = (ids: string[]) => ids.every((id) => html.includes(`id="${id}"`));
