@@ -359,31 +359,31 @@ test("a table ADDED and not yet served is refused with where its copy is, never 
   try {
     copies = [state({ phase: "copying", rowsSoFar: 1200, rowsEstimate: 4800 })];
     assert.equal(await hint("SELECT * FROM customers"),
-      "public.customers is added and being copied (about 1200 of ~4800 rows so far, 25%): it is served once its copy commits; mason wait waits for it (mason status shows how far it is)");
+      "public.customers is added and being synced (about 1200 of ~4800 rows so far, 25%): it is served once its first sync commits; mason wait waits for it (mason status shows how far it is)");
     // past the source's estimate (Postgres's statistics lag the table), with the chunks' progress: the share is of the
     // heap's pages and the count says it is past the estimate; without the progress, the count alone says so — a share
     // that fell to 0 once past it is the bug mason wait's bar had
     copies = [state({ phase: "copying", rowsSoFar: 21_385_158, rowsEstimate: 20_126_276,
       progress: { chunksDone: 9, chunksTotal: 11, reading: 2, readingSeconds: 40, rowsReading: 100_000, rowsPerSecond: 12_000, bytesPerSecond: 1e6, secondsLeft: 100, share: 0.87 } })];
     assert.equal(await hint("SELECT * FROM customers"),
-      "public.customers is added and being copied (87% of its pages read, 21485158 rows so far, past the ~20126276 estimated): it is served once its copy commits; mason wait waits for it (mason status shows how far it is)");
+      "public.customers is added and being synced (87% of its pages read, 21485158 rows so far, past the ~20126276 estimated): it is served once its first sync commits; mason wait waits for it (mason status shows how far it is)");
     copies = [state({ phase: "copying", rowsSoFar: 5000, rowsEstimate: 4800 })];
     assert.equal(await hint("SELECT * FROM customers"),
-      "public.customers is added and being copied (5000 rows so far, past the ~4800 estimated): it is served once its copy commits; mason wait waits for it (mason status shows how far it is)");
+      "public.customers is added and being synced (5000 rows so far, past the ~4800 estimated): it is served once its first sync commits; mason wait waits for it (mason status shows how far it is)");
     // qualified, as a tool writes it; DuckDB's progress not read yet
     copies = [state({ phase: "copying" })];
-    assert.match(await hint("SELECT * FROM public.customers"), /^public\.customers is added and being copied \(its rows are being read\): it is served once its copy commits/);
+    assert.match(await hint("SELECT * FROM public.customers"), /^public\.customers is added and being synced \(its rows are being read\): it is served once its first sync commits/);
     copies = [state({ phase: "waiting" })];
-    assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added and waits its turn to be copied: it is served once its copy commits; mason wait waits for it/);
+    assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added and waits its turn to be synced: it is served once its first sync commits; mason wait waits for it/);
     copies = [state({ phase: "failed", error: "permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …)" })];
     assert.equal(await hint("SELECT * FROM customers"),
-      "public.customers is added, but its copy failed: permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …); mason logs says more");
+      "public.customers is added, but its first sync failed: permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …); mason logs says more");
     // another schema's table of that name is not this one
     copies = [state({ source: "sales.customers", phase: "copying" }), state({ phase: "waiting" })];
     assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added and waits its turn/);
     // a table nobody added is the `mason add` away
     copies = [];
-    assert.match(await hint("SELECT * FROM customers"), /^a table is in Mason once it is added: mason add customers copies it/);
+    assert.match(await hint("SELECT * FROM customers"), /^a table is in Mason once it is added: mason add customers syncs it/);
   } finally { copies = []; await c.end(); }
 });
 
@@ -1698,7 +1698,7 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     assert.deepEqual(p.fields, [["QUERY PLAN", 25]]);
     assert.equal(p.command, "EXPLAIN");
     // no sync here (`copies` is empty): how it is kept current is said unknown, never guessed
-    assert.equal(p.lines[0], "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
+    assert.equal(p.lines[0], "Mason: answered by DuckDB from the synced table public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
     assert.equal(p.lines[1], "  Sent to DuckDB: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
     assert.equal(p.lines[2], "  Computed by Mason after DuckDB: nothing");
     // a preview's late materialization (14a1a831), as DuckDB plans it: the top two by the key, then the other columns
@@ -1739,7 +1739,7 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
   const json = async (): Promise<Record<string, unknown>> =>
     (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>)[0]!.Mason.Copies[0]!;
   const copied = (kept: CopyState["kept"]): CopyState => ({ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 0.1, copiedAt: "2026-10-27 19:00:00+00", error: null, ...(kept ? { kept } : {}) });
-  const head = "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; ";
+  const head = "Mason: answered by DuckDB from the synced table public.orders (about 3 rows; ";
   const streamed = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C4D", lastCommit: "2026-10-29T08:15:02.512Z", notRunning: null } as const;
   const stream = { Slot: "mason_shop", "Applied Through": "0/1A2B3C4D", "Last Change Committed": "2026-10-29T08:15:02.512Z", "Stream Not Running": null };
   /** the JSON says what the text says, and names a mode only for a copy that mode keeps current now */
@@ -1756,8 +1756,8 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     assert.equal(await header(), `${head}streamed by logical replication (slot mason_shop), applied through 0/1A2B3C4D, no change applied this run; NOT kept current now, the stream is not running: the database closed the connection · it starts again after 08:16 UTC)`);
     await jsonSays(null, { ...stream, "Stream State": "streamed", "Last Change Committed": null, "Stream Not Running": "the database closed the connection · it starts again after 08:16 UTC" });
     // a table being caught up, or left out of the publication, is said as status says it, and no mode is said at work
-    copies = [copied({ ...streamed, state: "catching-up", why: "caught up by one poll after its copy" })];
-    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: caught up by one poll after its copy)`);
+    copies = [copied({ ...streamed, state: "catching-up", why: "caught up by one poll after its whole read" })];
+    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: caught up by one poll after its whole read)`);
     await jsonSays(null, { ...stream, "Stream State": "catching-up" });
     copies = [copied({ ...streamed, state: "left-out", why: "the publication mason_pub does not publish public.orders" })];
     assert.equal(await header(), `${head}NOT kept current: left out of logical replication (slot mason_shop): the publication mason_pub does not publish public.orders)`);
@@ -1785,13 +1785,13 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     await jsonSays(null, { Sync: "poll 30s", "Last Synced": daysAgo, "Next Poll": null });
     // a copy under way or failed says so before how it would be kept current
     copies = [{ ...copied(streamed), phase: "copying", rowsSoFar: 1200 }];
-    assert.equal(await header(), `${head}being copied (1,200 rows so far): kept current once copied)`);
+    assert.equal(await header(), `${head}being read whole (1,200 rows so far): kept current once synced)`);
     copies = [{ ...copied(streamed), phase: "failed", error: "permission denied for table orders\n(tried again after 14:05 UTC)" }];
-    assert.equal(await header(), `${head}its last copy failed: permission denied for table orders)`);
+    assert.equal(await header(), `${head}its first sync failed: permission denied for table orders)`);
     // a statement over two copies says each on a line of its own
     copies = [copied(streamed), { ...copied({ by: "poll", sync: every30, syncedAt: null, nextAt: null }), source: "sales.invoices" }];
     const two = (await c.query({ text: "EXPLAIN SELECT o.id FROM orders o JOIN sales.invoices i ON i.id = o.id", rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
-    assert.equal(two[0], "Mason: answered by DuckDB from its copies of");
+    assert.equal(two[0], "Mason: answered by DuckDB from the synced tables");
     assert.ok(two.includes("  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)"), two.join("\n"));
     assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; polled every 30s, not polled yet\)$/.test(l)), two.join("\n"));
   } finally {
@@ -1997,7 +1997,7 @@ test("a source's view is answered by its definition over the copied tables, as P
     await assert.rejects(c.query("SELECT paid_orders FROM paid_orders"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap view-forms/.test(e.detail ?? ""));
     await assert.rejects(c.query("SELECT * FROM lost"), (e: pg.DatabaseError) => e.code === "42P01");
     // one line naming the view and what it reads, never its definition (tests/postgres-api/catalog.test.ts)
-    assert.ok(everLogged.some((l) => l.endsWith("catalog: view public.lost left out: it reads public.nowhere, which is not copied")), everLogged.filter((l) => l.includes("left out")).join("\n"));
+    assert.ok(everLogged.some((l) => l.endsWith("catalog: view public.lost left out: it reads public.nowhere, which is not synced")), everLogged.filter((l) => l.includes("left out")).join("\n"));
   } finally { await c.end(); }
 });
 

@@ -45,9 +45,9 @@ test("a table the publication does not carry is refused ON ITS OWN, with the ADD
   assert.equal(v.refused, null, "the others stream on");
   assert.deepEqual([...v.tables.keys()], ["public.later"]);
   assert.equal(v.tables.get("public.later"), [
-    "publication app_pub does not carry what Mason's copy of the table holds.",
+    "publication app_pub does not carry what Mason's synced table holds.",
     "",
-    "  missing: public.later (read by Mason's copy)",
+    "  missing: public.later (read by Mason's sync)",
     "",
     "Expected (run as the tables' owner, or add it to your migrations):",
     "  ALTER PUBLICATION app_pub ADD TABLE",
@@ -66,7 +66,7 @@ test("a column list without a copied column: the table dropped and added again i
   // the owner publishes `note`, which the copy does not read: it stays in the expected list (the found one plus the gap)
   const v = namedPublicationVerdict(described({ published: { "public.items": ["id", "note"], "public.later": ["id", "v"], "public.audit": ["id", "at"] } }), [ITEMS, LATER], KEYED);
   const m = v.tables.get("public.items")!;
-  assert.match(m, /^ {2}missing: public\.items columns v, n \(read by Mason's copy\)$/m);
+  assert.match(m, /^ {2}missing: public\.items columns v, n \(read by Mason's sync\)$/m);
   assert.match(m, /\n {2}BEGIN;\n {2}ALTER PUBLICATION app_pub DROP TABLE public\.items;\n {2}ALTER PUBLICATION app_pub ADD TABLE\n {4}public\.items \(id, v, n, note\);\n {2}COMMIT;\n/);
   assert.doesNotMatch(m, /SET TABLE/, "never a restatement of the whole list");
   assert.deepEqual([...v.tables.keys()], ["public.items"]);
@@ -81,7 +81,7 @@ test("a row filter on a copied table is refused: a filtered row's delete never a
 
 test("a publication without delete refuses the run, naming it, with the publish list widened and what it published kept", () => {
   const v = namedPublicationVerdict(described({ publish: ["insert", "update", "truncate"] }), [ITEMS, LATER], KEYED);
-  assert.match(v.refused!, /^publication app_pub does not carry what Mason's copy of the table holds\.\n/);
+  assert.match(v.refused!, /^publication app_pub does not carry what Mason's synced table holds\.\n/);
   assert.match(v.refused!, /it publishes insert, update, truncate; the change reader needs insert, update and delete/);
   assert.match(v.refused!, /\n {2}ALTER PUBLICATION app_pub SET \(publish = 'insert, update, delete, truncate'\);\n/);
   assert.equal(v.tables.size, 0);

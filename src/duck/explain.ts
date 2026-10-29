@@ -154,9 +154,9 @@ const UNKNOWN = "how it is kept current is unknown: the sync has no record of it
  */
 export function keptText(f: CopyFacts | null, now: number = Date.now()): string {
   if (f === null) return UNKNOWN;
-  if (f.phase === "waiting") return "waiting for its copy to start";
-  if (f.phase === "copying") return `being copied (${count(f.rowsSoFar ?? 0)} rows so far): kept current once copied`;
-  if (f.phase === "failed") return `its last copy failed: ${(f.error ?? "mason logs says why").split("\n")[0]}`;
+  if (f.phase === "waiting") return "waiting for its first sync to start";
+  if (f.phase === "copying") return `being read whole (${count(f.rowsSoFar ?? 0)} rows so far): kept current once synced`;
+  if (f.phase === "failed") return `its first sync failed: ${(f.error ?? "mason logs says why").split("\n")[0]}`;
   const k = f.kept;
   if (k === undefined) return UNKNOWN;
   if (k.by === "poll") {
@@ -165,7 +165,7 @@ export function keptText(f: CopyFacts | null, now: number = Date.now()): string 
     if (k.sync.mode === "off") return `off: ${synced}; mason sync ${f.source} syncs it now`;
     return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`}`;
   }
-  if (k.by === "recopy") return `kept current by copying it again whole, ${k.copiedAt === null ? "no copy recorded yet" : `last copied ${utc(k.copiedAt)}`}`;
+  if (k.by === "recopy") return `kept current by reading it again whole, ${k.copiedAt === null ? "no sync recorded yet" : `last synced ${utc(k.copiedAt)}`}`;
   const stream = `logical replication (slot ${k.slot})`;
   const where = `applied through ${k.position}, ${k.lastCommit === null ? "no change applied this run" : `last change committed ${utc(k.lastCommit)}`}`;
   if (k.state === "streamed") return k.notRunning === null ? `kept current by ${stream}, ${where}`
@@ -227,8 +227,8 @@ function copyLine(c: Copy): string {
 /** EXPLAIN as Postgres's text format: one line a row */
 export function explainText(e: Explained, o: ExplainOptions): string[] {
   const lines: string[] = [];
-  lines.push(e.copies.length === 0 ? "Mason: answered by DuckDB, reading none of its copies"
-    : e.copies.length === 1 ? `Mason: answered by DuckDB from its copy of ${copyLine(e.copies[0]!)}` : "Mason: answered by DuckDB from its copies of");
+  lines.push(e.copies.length === 0 ? "Mason: answered by DuckDB, reading no synced table"
+    : e.copies.length === 1 ? `Mason: answered by DuckDB from the synced table ${copyLine(e.copies[0]!)}` : "Mason: answered by DuckDB from the synced tables");
   if (e.copies.length > 1) for (const c of e.copies) lines.push(`  ${copyLine(c)}`);
   lines.push(`  Sent to DuckDB: ${e.sql}`);
   lines.push(`  Computed by Mason after DuckDB: ${e.computed.length === 0 ? "nothing" : e.computed.join("; ")}`);

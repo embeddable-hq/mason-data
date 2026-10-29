@@ -1,9 +1,9 @@
 /**
  * WHAT A START SAYS OF ITS TABLES (src/duck/sync.ts `addedText`, `Sync.addedStatus`; the test server: every start
- * logged `added <all four tables>: they are copied at the next pass` while all four were copied and streamed from the
+ * logged `added <all four tables>: they are synced at the next pass` while all four were copied and streamed from the
  * acknowledged position — read as a long re-copy that never came). One line, each table as the sync's records say it
  * is: current (polled every n s / streamed from a position), caught up by one poll first, left out of the polls, or
- * copied at the next pass WITH its reason. Offline: a real Sync over a DuckDB file whose ledger is seeded, stopped
+ * synced at the next pass WITH its reason. Offline: a real Sync over a DuckDB file whose ledger is seeded, stopped
  * before its tables are set, so the pass `setTables` kicks never runs (it would INSTALL the postgres extension over the
  * network and attach a source there is none of).
  */
@@ -29,26 +29,26 @@ const { Sync } = syncModule;
 // EXPLAIN's words for how a copy is kept current (src/duck/explain.ts), read the same way
 const { keptText } = explainModule as unknown as { keptText: (f: unknown, now?: number) => string };
 
-test("tables already copied and current are said as such, in one line, never as copied at the next pass", () => {
+test("tables already synced and current are said as such, in one line, never as synced at the next pass", () => {
   const line = addedText(["public.a", "public.b", "public.c", "public.d"].map((source) => ({ source, kept: "streamed from 0/16B3F28", off: false })));
-  assert.equal(line, "4 tables already copied and streamed from 0/16B3F28: public.a, public.b, public.c, public.d");
+  assert.equal(line, "4 tables already synced and streamed from 0/16B3F28: public.a, public.b, public.c, public.d");
 });
 
-test("each table is grouped by its state, the current first and those copied at the next pass last, each with its reason", () => {
+test("each table is grouped by its state, the current first and those synced at the next pass last, each with its reason", () => {
   const line = addedText([
-    { source: "public.new", copy: "never copied" },
+    { source: "public.new", copy: "never synced" },
     { source: "public.a", kept: "polled every 5s", off: false },
     { source: "public.wide", copy: "its columns changed" },
-    { source: "public.caught", behind: "after its copy" },
-    { source: "public.new2", copy: "never copied" },
+    { source: "public.caught", behind: "after its whole read" },
+    { source: "public.new2", copy: "never synced" },
     { source: "public.off", kept: "sync: off (read again only by mason sync public.off)", off: true },
     { source: "public.hourly", kept: "polled every 1h", off: false },
   ]);
-  assert.equal(line, "1 table already copied and polled every 5s: public.a; 1 table already copied and polled every 1h: public.hourly; " +
-    "1 table already copied, sync: off (read again only by mason sync public.off): public.off; " +
-    "1 table already copied, caught up by one poll first (after its copy): public.caught; " +
-    "2 tables copied at the next pass (never copied): public.new, public.new2; " +
-    "1 table copied at the next pass (its columns changed): public.wide");
+  assert.equal(line, "1 table already synced and polled every 5s: public.a; 1 table already synced and polled every 1h: public.hourly; " +
+    "1 table already synced, sync: off (read again only by mason sync public.off): public.off; " +
+    "1 table already synced, caught up by one poll first (after its whole read): public.caught; " +
+    "2 tables synced at the next pass (never synced): public.new, public.new2; " +
+    "1 table synced at the next pass (its columns changed): public.wide");
 });
 
 const column = (name: string, type = "bigint") => ({ name, type, notNull: true, comment: null });
@@ -61,7 +61,7 @@ type Started = { mode: SyncMode; replication?: SyncReplication; seed: (run: (sql
 
 /** the line a Sync over `file` logs when its tables are set, after `seed` wrote its ledger */
 function startLine(t: Started): Promise<string[]> {
-  return withSync(t, async (_sync, logged) => logged.filter((l) => !/^the catalog could not be rebuilt|: its copy is stored in key order/.test(l)));
+  return withSync(t, async (_sync, logged) => logged.filter((l) => !/^the catalog could not be rebuilt|: it is stored in key order/.test(l)));
 }
 
 /** a Sync over a fresh file whose ledger `seed` wrote, stopped, its tables set: `use` reads it before the file goes */
@@ -101,10 +101,10 @@ test("a start whose four tables are copied and current says so, polled every int
     mode: "poll", tables: names.map((n) => table(n)),
     seed: async (run) => { for (const n of names) { await run(copied(n)); await run(polled(n)); } },
   });
-  assert.deepEqual(lines, ["4 tables already copied and polled every 5s: public.a, public.b, public.c, public.d"]);
+  assert.deepEqual(lines, ["4 tables already synced and polled every 5s: public.a, public.b, public.c, public.d"]);
 });
 
-test("a start names each table copied at the next pass with its reason, from the sync's own records", async () => {
+test("a start names each table synced at the next pass with its reason, from the sync's own records", async () => {
   const lines = await startLine({
     mode: "poll",
     tables: [table("current"), table("never"), table("changed", 10, [column("id"), column("added", "text")]), table("failed"),
@@ -114,20 +114,20 @@ test("a start names each table copied at the next pass with its reason, from the
       await run(copied("failed", [column("id")], "failed", "the source closed the connection"));
       // copied, but a numeric outgrew its DECIMAL: its watermark is gone until it is copied again, wider
       await run(copied("outgrown"));
-      await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its copy', now())`);
+      await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its whole read', now())`);
       // a copy in the older layout carries its primary key (`findRetired`)
       await run("CREATE TABLE public.retired (id BIGINT PRIMARY KEY)");
     },
   });
   // its size decides nothing: a big table is polled unless its sync says off (mason add writes that for one)
-  assert.deepEqual(lines, ["1 table already copied and polled every 5s: public.current; " +
-    "1 table already copied, sync: off (read again only by mason sync public.big): public.big; " +
-    "1 table already copied, caught up by one poll first (after its copy): public.caught; " +
-    "1 table copied at the next pass (never copied): public.never; " +
-    "1 table copied at the next pass (its columns changed): public.changed; " +
-    "1 table copied at the next pass (its last copy failed: the source closed the connection): public.failed; " +
-    "1 table copied at the next pass (its copy is in an older Mason's layout, key order with an index): public.retired; " +
-    "1 table copied at the next pass (a numeric value outgrew its copy's DECIMAL): public.outgrown"]);
+  assert.deepEqual(lines, ["1 table already synced and polled every 5s: public.current; " +
+    "1 table already synced, sync: off (read again only by mason sync public.big): public.big; " +
+    "1 table already synced, caught up by one poll first (after its whole read): public.caught; " +
+    "1 table synced at the next pass (never synced): public.never; " +
+    "1 table synced at the next pass (its columns changed): public.changed; " +
+    "1 table synced at the next pass (its first sync failed: the source closed the connection): public.failed; " +
+    "1 table synced at the next pass (it is in an older Mason's layout, key order with an index): public.retired; " +
+    "1 table synced at the next pass (a numeric value outgrew its synced DECIMAL column): public.outgrown"]);
 });
 
 test("in replication mode a current copy is streamed from the position the copy applied through; under a slot it has no record of, it is caught up first", async () => {
@@ -138,9 +138,9 @@ test("in replication mode a current copy is streamed from the position the copy 
   };
   const tables = [table("a"), table("b", 2_000_000)];
   assert.deepEqual(await startLine({ mode: "replication", replication, tables, seed: seed(true) }),
-    ["2 tables already copied and streamed from 0/16B3F28: public.a, public.b"], "the row limit is the polls', never the stream's");
+    ["2 tables already synced and streamed from 0/16B3F28: public.a, public.b"], "the row limit is the polls', never the stream's");
   assert.deepEqual(await startLine({ mode: "replication", replication, tables, seed: seed(false) }),
-    ["2 tables already copied, caught up by one poll first (slot mason_x is new to this copy): public.a, public.b"]);
+    ["2 tables already synced, caught up by one poll first (slot mason_x is new to the synced data): public.a, public.b"]);
 });
 
 // HOW A COPY IS KEPT CURRENT (src/duck/sync.ts `keptOf`): the sync's one fact, which mason status (`state`'s `kept`,
@@ -161,7 +161,7 @@ test("a project switched to replication is said streamed by EXPLAIN and status a
   const tables = [table("a"), table("big", 2_000_000), table("caught")];
   const seed = (...more: string[]) => async (run: (sql: string) => Promise<unknown>): Promise<void> => {
     for (const n of ["a", "big", "caught"]) { await run(copied(n)); await run(lastPoll(n)); }
-    await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its copy', now())`);
+    await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its whole read', now())`);
     for (const sql of more) await run(sql);
   };
   const { states, stream } = await keptStates({ mode: "replication", replication: replicationX, tables, seed: seed(slotAt) });
@@ -178,8 +178,8 @@ test("a project switched to replication is said streamed by EXPLAIN and status a
     assert.equal(keptText(at(states, name)), "streamed by logical replication (slot mason_x), applied through 0/16B3F28, no change applied this run; NOT kept current now, the stream is not running: Mason is stopping");
   }
   // one owed its catch-up poll (`_mason.catch_up`): catching up, as status says it
-  assert.deepEqual([at(states, "caught").kept?.state, at(states, "caught").kept?.why], ["catching-up", "caught up by one poll after its copy"]);
-  assert.equal(keptText(at(states, "caught")), "logical replication (slot mason_x), not streamed yet: caught up by one poll after its copy");
+  assert.deepEqual([at(states, "caught").kept?.state, at(states, "caught").kept?.why], ["catching-up", "caught up by one poll after its whole read"]);
+  assert.equal(keptText(at(states, "caught")), "logical replication (slot mason_x), not streamed yet: caught up by one poll after its whole read");
 
   // the replication check a pass failed (recorded on each copy's state): its words
   const failed = await keptStates({ mode: "replication", replication: replicationX, tables: [table("a")], seed: async (run) => {
@@ -201,7 +201,7 @@ test("a polled copy says its interval and last poll, an `off` one its age and th
       for (const n of ["a", "big", "changed", "retired", "caught"]) { await run(copied(n)); await run(lastPoll(n)); }
       // copied, but a numeric outgrew its DECIMAL: its watermark is gone until it is copied again, wider
       await run(copied("outgrown"));
-      await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its copy', now())`);
+      await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its whole read', now())`);
       // a copy in the older layout carries its primary key (`findRetired`)
       await run("CREATE TABLE public.retired (id BIGINT PRIMARY KEY)");
     },
@@ -220,7 +220,7 @@ test("a polled copy says its interval and last poll, an `off` one its age and th
     ["changed", "its columns changed: it is read again whole, then caught up by one poll"],
     ["retired", "it is in an older Mason's layout, key order with an index: it is read again whole, then caught up by one poll"],
     ["outgrown", "a numeric value outgrew its synced DECIMAL column: it is read again whole, wider, then caught up by one poll"],
-    ["caught", "it is caught up by one poll after its copy first"],
+    ["caught", "it is caught up by one poll after its whole read first"],
   ];
   for (const [name, why] of pending) {
     const st = at(states, name);
@@ -234,7 +234,7 @@ test("a recopied copy's last copy is the instant the ledger holds, said in UTC w
     await run(`INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.a', 'copied', 10, 0, 1.0, '2026-10-27 19:00:00+00', NULL, '${JSON.stringify([column("id")])}')`);
   } });
   assert.deepEqual(at(states, "a").kept, { by: "recopy", copiedAt: "2026-10-27T19:00:00.000Z" });
-  assert.equal(keptText(at(states, "a")), "kept current by copying it again whole, last copied 2026-10-27 19:00:00 UTC");
+  assert.equal(keptText(at(states, "a")), "kept current by reading it again whole, last synced 2026-10-27 19:00:00 UTC");
 });
 
 
@@ -289,7 +289,7 @@ test("mason status --json says how each table is kept current as the sync derive
   const replTables = [table("a"), table("caught")];
   const repl = await statusOf({ mode: "replication", replication: replicationX, tables: replTables, seed: async (run) => {
     for (const n of ["a", "caught"]) { await run(copied(n)); await run(lastPoll(n)); }
-    await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its copy', now())`);
+    await run(`INSERT INTO ${MASON_SCHEMA}.catch_up VALUES ('public.caught', 'after its whole read', now())`);
     await run(slotAt);
   } }, "replication");
   sameAsTheSync(repl.states, repl.json);
@@ -302,7 +302,7 @@ test("mason status --json says how each table is kept current as the sync derive
     assert.deepEqual([said.state, said.why], k.by === "replication" ? [k.state, k.why] : [], `${t.table}: the stream section says what kept says`);
   }
   assert.deepEqual(repl.json.tables.find((t) => t.table === "public.caught")!.kept,
-    { by: "replication", slot: "mason_x", state: "catching-up", why: "caught up by one poll after its copy", position: "0/16B3F28", lastCommit: null, notRunning: "Mason is stopping" });
+    { by: "replication", slot: "mason_x", state: "catching-up", why: "caught up by one poll after its whole read", position: "0/16B3F28", lastCommit: null, notRunning: "Mason is stopping" });
   assert.match(streamLines(stream).find((l) => l.startsWith("public.caught"))!, /catching up by one poll/);
 });
 
@@ -319,8 +319,8 @@ test("a table not copied now says so in kept itself — waiting for its copy, it
     const { states, json } = await statusOf(t, changes);
     for (const s of states) assert.deepEqual(json.tables.find((x) => x.table === s.source)?.kept, s.kept, `${s.source}: --json's kept is the sync's`);
     // the text is phase-first, as it was
-    assert.equal(keptText(at(states as KeptState[], "waiting")), "waiting for its copy to start");
-    assert.equal(keptText(at(states as KeptState[], "failed")), "its last copy failed: the source closed the connection");
+    assert.equal(keptText(at(states as KeptState[], "waiting")), "waiting for its first sync to start");
+    assert.equal(keptText(at(states as KeptState[], "failed")), "its first sync failed: the source closed the connection");
     return Object.fromEntries(json.tables.map((x) => [x.table.replace(/^public\./, ""), x.kept]));
   };
   const poll = await keptBy({ mode: "poll", tables, seed: seed() }, "poll");
@@ -363,7 +363,7 @@ test("a table being caught up, queued or rebuilt is not due to a pass: the loop 
   await withSync({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }], seed: async (run) => { await run(copied("a")); await run(lastPoll("a")); } }, async (sync) => {
     const s = scheduleOf(sync);
     assert.equal(s.nextPassDelay(), 0, "copied and its interval long past: a pass at once");
-    s.behind.set("public.a", { why: "after its copy" });
+    s.behind.set("public.a", { why: "after its whole read" });
     assert.equal(s.nextPassDelay(), 5_000, "owed its catch-up and nothing queued it: a pass after the interval, to queue it");
     s.queued.set("public.a", { kind: "catch-up" });
     assert.equal(s.nextPassDelay(), null, "its catch-up queued: that polls it, then times the next pass (counted as due, a pass every few ms polled nothing)");
@@ -405,7 +405,7 @@ test("a sync changed is a catch-up by one poll in poll mode alone, said once; un
   const seed = async (run: (sql: string) => Promise<unknown>): Promise<void> => { await run(copied("a")); await run(polledUnder("a", "poll 5m")); };
   const switched = (lines: readonly string[]) => lines.filter((l) => / sync: .* → /.test(l));
   assert.deepEqual(switched(await startLine({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }], seed })),
-    ["public.a: sync: poll 5m → poll 30s: its copy is kept, and caught up by one poll now"], "changed by hand while Mason was down: seen at the start");
+    ["public.a: sync: poll 5m → poll 30s: its synced data is kept, and caught up by one poll now"], "changed by hand while Mason was down: seen at the start");
   assert.deepEqual(switched(await startLine({ mode: "replication", replication: replicationX, tables: [{ ...table("a"), sync: every("30s", 30) }], seed })), [],
     "the stream keeps every table current: no poll is owed, and none is said (at every start, again)");
   assert.deepEqual(switched(await startLine({ mode: "poll", tables: [{ ...table("a", 10, [column("id"), column("added", "text")]), sync: every("30s", 30) }], seed })), [],
@@ -421,7 +421,7 @@ test("a table just copied says its copy's age at once, never 'never synced' unti
     const swap = (sync as unknown as { swap(t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null }): Promise<void> }).swap.bind(sync);
     const kept = () => sync.state().find((x) => x.source === "public.a")!.kept as Kept;
     assert.equal(kept().syncedAt, null, "before its copy: never synced");
-    await swap({ ...table("a"), sync: every("30s", 30) }, "public.a__mason_copy", { snapshot: "100:100:", behind: "after its copy" });
+    await swap({ ...table("a"), sync: every("30s", 30) }, "public.a__mason_copy", { snapshot: "100:100:", behind: "after its whole read" });
     const k = kept();
     assert.ok(typeof k.syncedAt === "string" && Date.now() - Date.parse(k.syncedAt) < 60_000, `synced as of its copy: ${JSON.stringify(k)}`);
     const line = tableLines(runState(runContext([{ ...table("a"), sync: every("30s", 30) }], "poll"), sync.state(), null) as RunState).find((l) => l.startsWith("public.a"))!;

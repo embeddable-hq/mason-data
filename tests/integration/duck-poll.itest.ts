@@ -46,7 +46,7 @@ after(() => {
  * WAITS UNTIL `table`'S ROWS ARE OLDER THAN EVERY SNAPSHOT'S XMIN on the cluster. A copy keeps only the rows written
  * before its first snapshot's xmin and leaves the rest to its catch-up (src/duck/sync.ts `copy`), and on the SHARED test
  * cluster another session's open transaction holds every snapshot's xmin back: a copy started then reads none of a
- * table just written (seen: "copied public.big: 0 row(s)", all 200,000 caught up) — correct, and nothing a test of the
+ * table just written (seen: "synced public.big: 0 row(s)", all 200,000 caught up) — correct, and nothing a test of the
  * copy's chunks or its stop can prove anything with.
  */
 async function rowsOlderThanEverySnapshot(url: string, table: string): Promise<void> {
@@ -153,7 +153,7 @@ test("the copy and the xmin poll keep DuckDB equal to the source through every k
     const before = logged.length;
     sync.setTables([ITEMS, LINES]);
     await same("a restart");
-    assert.ok(!logged.slice(before).some((l) => /^copied /.test(l)), `no table is copied again at a restart:\n${logged.slice(before).join("\n")}`);
+    assert.ok(!logged.slice(before).some((l) => /^synced /.test(l)), `no table is copied again at a restart:\n${logged.slice(before).join("\n")}`);
     assert.ok(logged.some((l) => /^poll: snapshot \d+ ms; public\.items \d+ changed in \d+ ms, counted in \d+ ms/.test(l)), "each poll's cost on the source is logged");
   } finally {
     await sync.stop();
@@ -202,7 +202,7 @@ test("an unconstrained or wide numeric is copied and polled exactly, and copied 
     await same("the first copy", 18);
     // q is a numeric(65,30) whose values use 2 decimals: 12 digits do not fit at 30, they do at 2 (the wire writes 30)
   assert.equal(await typesOf(), "id INTEGER, a DECIMAL(38,18), p DECIMAL(38,30), huge DOUBLE, odd DOUBLE, q DECIMAL(38,2)");
-    assert.ok(logged.some((l) => /public\.amounts\.huge: values of 41 digit\(s\) and 0 decimal\(s\) do not fit DuckDB's DECIMAL\(38\): copied as a double/.test(l)), logged.join("\n"));
+    assert.ok(logged.some((l) => /public\.amounts\.huge: values of 41 digit\(s\) and 0 decimal\(s\) do not fit DuckDB's DECIMAL\(38\): synced as a double/.test(l)), logged.join("\n"));
     assert.ok(logged.some((l) => /public\.amounts\.odd: 1 value\(s\) NaN or Infinity/.test(l)), logged.join("\n"));
     assert.ok(logged.some((l) => /public\.amounts\.a: values of 1 to 18 decimals: Mason answers each with 18, Postgres with its own/.test(l)), logged.join("\n"));
 
@@ -212,7 +212,7 @@ test("an unconstrained or wide numeric is copied and polled exactly, and copied 
     // more decimals than the copy's 18: the poll refuses to round it, and the table is copied again at 22
     psql(url, "UPDATE amounts SET a = 1.1234567890123456789012 WHERE id = 3");
     await sync.once();
-    assert.ok(logged.some((l) => /poll: public\.amounts has a numeric value wider than its copy's DECIMAL: it is copied again at the next pass/.test(l)), logged.slice(-6).join("\n"));
+    assert.ok(logged.some((l) => /poll: public\.amounts has a numeric value wider than its synced DECIMAL column: it is read again whole at the next pass/.test(l)), logged.slice(-6).join("\n"));
     await same("the copy again, wider", 22);
     assert.match(await typesOf(), /a DECIMAL\(38,22\)/);
     psql(url, "UPDATE amounts SET a = a + 1 WHERE id = 1");
@@ -258,7 +258,7 @@ test("a changed column list copies that table again; a source away is an error o
     psql(url, "INSERT INTO a VALUES (4, 'v4', 'w4'); INSERT INTO b VALUES (4, 'b4')");
     sync.setTables([A3, B]);
     await sync.once();
-    assert.ok(logged.some((l) => /public\.a: its columns are not the ones it was copied with: it is copied again/.test(l)), logged.join("\n"));
+    assert.ok(logged.some((l) => /public\.a: its columns are not the ones it was synced with: it is read again whole/.test(l)), logged.join("\n"));
     assert.deepEqual((await store.writer.runAndReadAll("SELECT id, w FROM public.a ORDER BY id")).getRowsJS(), [[1, "w1"], [2, "w2"], [3, "w3"], [4, "w4"]]);
     assert.equal(await count("b"), 4, "b is polled beside a's new copy");
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.a", "copied", null], ["public.b", "copied", null]]);
@@ -286,7 +286,7 @@ test("a changed column list copies that table again; a source away is an error o
     const before = logged.length;
     sync.setTables([A3, B]);
     await sync.once();
-    assert.ok(!logged.slice(before).some((l) => /^copied /.test(l)), logged.slice(before).join("\n"));
+    assert.ok(!logged.slice(before).some((l) => /^synced /.test(l)), logged.slice(before).join("\n"));
     assert.equal(await count("b"), 5);
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.a", "copied", null], ["public.b", "copied", null]]);
   } finally { await sync.stop(); store.close(); }
@@ -317,7 +317,7 @@ test("a stop interrupts a copy in flight: rolled back, said as stopped, never fa
       const from = logged.length;
       sync.setTables([BIG]);
       const deadline = Date.now() + 60_000;
-      while (!logged.slice(from).some((l) => /^copying public\.big as of the source's snapshot /.test(l))) {
+      while (!logged.slice(from).some((l) => /^syncing public\.big as of the source's snapshot /.test(l))) {
         if (Date.now() > deadline) throw new Error(`the copy never said it pinned its snapshot within 60 s\n${logged.slice(from).join("\n")}`);
         await new Promise((r) => setTimeout(r, 5));
       }
@@ -325,9 +325,9 @@ test("a stop interrupts a copy in flight: rolled back, said as stopped, never fa
       await sync.stop();
       const ms = Date.now() - t0;
       const said = logged.slice(from).join("\n");
-      assert.ok(!logged.slice(from).some((l) => /^copied public\.big/.test(l)), `the copy was stopped, not finished\n${said}`);
+      assert.ok(!logged.slice(from).some((l) => /^synced public\.big/.test(l)), `the copy was stopped, not finished\n${said}`);
       assert.ok(ms < 2_000, `stopped in ${ms} ms: the copy was waited for, not interrupted\n${said}`);
-      assert.ok(logged.slice(from).some((l) => l === "copy of public.big stopped: Mason is stopping (rolled back; it is copied at the next start)"), said);
+      assert.ok(logged.slice(from).some((l) => l === "sync of public.big stopped: Mason is stopping (rolled back; it is synced at the next start)"), said);
       assert.ok(!/failed/.test(said), said);
       assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.big", "waiting", null]]);
       assert.deepEqual((await store.writer.runAndReadAll("SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'public'")).getRowsJS(), [[0n]], "no side table is left");
@@ -400,7 +400,7 @@ async function copyStoppedPartWay(suffix: string): Promise<{ url: string; db: st
     const [page, rows] = stoppedAt;
     assert.ok(ms < 2_000, `stopped in ${ms} ms: the chunk in flight was waited for, not interrupted\n${said}`);
     assert.ok(page > 0n && rows >= 25_000n && rows < BigInt(RESUMED_ROWS), `stopped part way: page ${page}, ${rows} rows\n${said}`);
-    const stopLine = new RegExp(`^copy of public\\.big stopped: Mason is stopping \\(the chunks in flight rolled back; it continues at page ${page} of \\d+, ${rows} row\\(s\\) in at the next start\\)$`);
+    const stopLine = new RegExp(`^sync of public\\.big stopped: Mason is stopping \\(the chunks in flight rolled back; it continues at page ${page} of \\d+, ${rows} row\\(s\\) in at the next start\\)$`);
     assert.ok(logged.slice(from).some((l) => stopLine.test(l)), said);
     assert.ok(!/failed/.test(said), said);
     // only the committed chunks are in the side table: the one in flight rolled back whole
@@ -421,7 +421,7 @@ async function resumeToTheEnd(c: Awaited<ReturnType<typeof copyStoppedPartWay>>)
     void sync.setTables([RESUMED]);
     await sync.once();
     const said = c.logged.slice(from);
-    assert.ok(said.some((l) => l === "caught up public.big by one poll after its copy: the poll keeps it current (polled every 1h)"), said.join("\n"));
+    assert.ok(said.some((l) => l === "caught up public.big by one poll after its whole read: the poll keeps it current (polled every 1h)"), said.join("\n"));
     // a digest of every row in key order: 100 MB is past what psql hands back here
     const digest = "count(*) || ' ' || md5(string_agg(id::text || ':' || v, ',' ORDER BY id))";
     assert.equal(String((await store.writer.runAndReadAll(`SELECT ${digest} FROM public.big`)).getRowsJS()[0]![0]), psql(c.url, `SELECT ${digest} FROM big`),
@@ -453,9 +453,9 @@ test("a copy stopped after its first chunks resumes at its page, held to its fir
   assert.ok(Number(psql(url, `SELECT count(*) FROM big WHERE v LIKE 'updated after the stop %' AND ctid >= '(${page},0)'::tid`)) > 0, "an early row's new version is past the stop (else this proves nothing)");
   const said = await resumeToTheEnd(c);
   const text = said.join("\n");
-  assert.ok(said.some((l) => new RegExp(`^resuming the copy of public\\.big at page ${stoppedAt[0]} of \\d+, ${stoppedAt[1]} row\\(s\\) in, held to its first snapshot `).test(l)), text);
-  assert.ok(!said.some((l) => /^copying public\.big|over, from its first page/.test(l)), `not copied again from its first page\n${text}`);
-  assert.ok(said.some((l) => new RegExp(`^copied public\\.big: .*resumed at page ${stoppedAt[0]} of \\d+ with ${stoppedAt[1]} row\\(s\\) in`).test(l)), text);
+  assert.ok(said.some((l) => new RegExp(`^resuming the sync of public\\.big at page ${stoppedAt[0]} of \\d+, ${stoppedAt[1]} row\\(s\\) in, held to its first snapshot `).test(l)), text);
+  assert.ok(!said.some((l) => /^syncing public\.big|over, from its first page/.test(l)), `not copied again from its first page\n${text}`);
+  assert.ok(said.some((l) => new RegExp(`^synced public\\.big: .*resumed at page ${stoppedAt[0]} of \\d+ with ${stoppedAt[1]} row\\(s\\) in`).test(l)), text);
 });
 
 // A COPY THAT CANNOT BE HELD TO ITS FIRST SNAPSHOT STARTS OVER: a rewrite of the source table between the stop and the
@@ -467,8 +467,8 @@ test("a copy whose source table was rewritten since it began starts over from it
   psql(c.url, "VACUUM FULL big");
   const said = await resumeToTheEnd(c);
   const text = said.join("\n");
-  assert.ok(said.some((l) => /^resuming the copy of public\.big at page /.test(l)), text);
-  assert.ok(said.some((l) => l === "starting the copy of public.big over, from its first page: the source rewrote public.big since its copy began (its file changed: a VACUUM FULL, CLUSTER, TRUNCATE or column type change), so its rows moved between pages"), text);
+  assert.ok(said.some((l) => /^resuming the sync of public\.big at page /.test(l)), text);
+  assert.ok(said.some((l) => l === "starting the sync of public.big over, from its first page: the source rewrote public.big since its sync began (its file changed: a VACUUM FULL, CLUSTER, TRUNCATE or column type change), so its rows moved between pages"), text);
 });
 
 // CHUNKS READ N AT A TIME (the load kept on Mason's side; src/duck/sync.ts readChunks, COPY_PARALLEL):
@@ -556,7 +556,7 @@ test("a copy read three chunks at a time, on three backends, ends equal to the s
     assert.ok(said.includes("3 at a time (MASON_COPY_PARALLEL), each a backend on the database"), said);
     assertTiles(committedOf(events), said);
     assert.equal(committedOf(events).length, events.filter((e) => e.phase === "read").length, "every chunk read was committed once");
-    assert.ok(logged.includes("caught up public.big by one poll after its copy: the poll keeps it current (polled every 1h)"), said);
+    assert.ok(logged.includes("caught up public.big by one poll after its whole read: the poll keeps it current (polled every 1h)"), said);
     await assertEqualToSource(store, url, said);
   } finally { await sync.stop(); store.close(); }
 });
@@ -581,7 +581,7 @@ test("a copy projected past the disk's free space fails with the way out, its ch
       const said = logged.join("\n");
       const [state] = sync.state();
       assert.equal(state?.phase, "failed", said);
-      assert.match(state?.error ?? "", /^the copy of public\.big would need about [\d.]+ [KMG]iB more on disk than is free \(1 B free where .*parallel-disk\.db is; \d+ of \d+ pages read, [\d.]+ [KMG]iB added\): free some disk, mason remove public\.big, or mason add public\.big --columns … with fewer columns \(tried again after \d\d:\d\d UTC \(failure 1 in a row\)/, said);
+      assert.match(state?.error ?? "", /^the sync of public\.big would need about [\d.]+ [KMG]iB more on disk than is free \(1 B free where .*parallel-disk\.db is; \d+ of \d+ pages read, [\d.]+ [KMG]iB added\): free some disk, mason remove public\.big, or mason add public\.big --columns … with fewer columns \(tried again after \d\d:\d\d UTC \(failure 1 in a row\)/, said);
       const kept = Number((await reader.runAndReadAll("SELECT count(*) FROM _mason.copy_chunks")).getRowsJS()[0]![0]);
       assert.ok(kept >= 1, `the chunks committed before the projection are kept: ${kept}\n${said}`);
       assert.ok(kept < Math.ceil(PARALLEL_ROWS / 10_000), `the copy stopped before its end: ${kept} chunk(s)\n${said}`);
@@ -598,7 +598,7 @@ test("a copy projected past the disk's free space fails with the way out, its ch
     await sync.once();
     const then = logged.slice(from).join("\n");
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.big", "copied", null]], then);
-    assert.ok(logged.slice(from).some((l) => /^resuming the copy of public\.big at page \d+ of \d+/.test(l)), then);
+    assert.ok(logged.slice(from).some((l) => /^resuming the sync of public\.big at page \d+ of \d+/.test(l)), then);
     await assertEqualToSource(store, url, then);
   } finally { await sync.stop(); store.close(); }
 });
@@ -628,7 +628,7 @@ test("a copy at three readers stopped mid-way resumes with the ranges no chunk c
       const ms = Date.now() - t0;
       const said = logged.slice(from).join("\n");
       assert.ok(ms < 2_000, `stopped in ${ms} ms: the chunks in flight were waited for, not interrupted\n${said}`);
-      assert.ok(logged.slice(from).some((l) => /^copy of public\.big stopped: Mason is stopping \(the chunks in flight rolled back; it continues at page \d+ of \d+/.test(l)), said);
+      assert.ok(logged.slice(from).some((l) => /^sync of public\.big stopped: Mason is stopping \(the chunks in flight rolled back; it continues at page \d+ of \d+/.test(l)), said);
       assert.ok(!/failed/.test(said), said);
       const kept = committedOf(before);
       // only the committed chunks are in the side table and the ledger: those in flight rolled back whole
@@ -647,8 +647,8 @@ test("a copy at three readers stopped mid-way resumes with the ranges no chunk c
     void sync.setTables([PARALLEL]);
     await sync.once();
     const said = logged.slice(from).join("\n");
-    assert.ok(logged.slice(from).some((l) => /^resuming the copy of public\.big at page \d+ of \d+.*, held to its first snapshot /.test(l)), said);
-    assert.ok(!logged.slice(from).some((l) => /^copying public\.big as of|over, from its first page/.test(l)), `not begun again\n${said}`);
+    assert.ok(logged.slice(from).some((l) => /^resuming the sync of public\.big at page \d+ of \d+.*, held to its first snapshot /.test(l)), said);
+    assert.ok(!logged.slice(from).some((l) => /^syncing public\.big as of|over, from its first page/.test(l)), `not begun again\n${said}`);
     // nothing read again: no chunk of the resumed run touches a page a committed chunk of the first held
     for (const r of after_.filter((e) => e.phase === "read")) for (const k of committedOf(before)) assert.ok(!overlaps(r, k), `pages ${r.first}–${r.end} were read again\n${said}`);
     assertTiles([...committedOf(before), ...committedOf(after_)], said);
@@ -690,7 +690,7 @@ test("a reader failing with the others' chunks in flight: none commits after it,
       void sync.setTables([PARALLEL]);
       await sync.once();
       const said = logged.slice(from).join("\n");
-      assert.ok(logged.slice(from).some((l) => /^copy of public\.big failed: a reader's simulated crash; tried again after \d\d:\d\d UTC \(failure 1 in a row\).*; it continues at page \d+ of \d+/.test(l)), said);
+      assert.ok(logged.slice(from).some((l) => /^sync of public\.big failed: a reader's simulated crash; tried again after \d\d:\d\d UTC \(failure 1 in a row\).*; it continues at page \d+ of \d+/.test(l)), said);
       assert.deepEqual(sync.state().map((s) => [s.source, s.phase]), [["public.big", "failed"]]);
       const kept = committedOf(before);
       const { crashed, held } = seen;
@@ -711,7 +711,7 @@ test("a reader failing with the others' chunks in flight: none commits after it,
     void sync.setTables([PARALLEL]);
     await sync.once();
     const said = logged.slice(from).join("\n");
-    assert.ok(logged.slice(from).some((l) => /^resuming the copy of public\.big at page \d+ of \d+/.test(l)), said);
+    assert.ok(logged.slice(from).some((l) => /^resuming the sync of public\.big at page \d+ of \d+/.test(l)), said);
     const read = after_.filter((e) => e.phase === "read");
     for (const r of read) for (const k of committedOf(before)) assert.ok(!overlaps(r, k), `pages ${r.first}–${r.end} were read again\n${said}`);
     for (const c of [seen.crashed!, seen.held!]) assert.ok(read.some((r) => overlaps(r, c)), `pages ${c.first}–${c.end}, uncommitted, were read by the resume\n${said}`);
@@ -880,7 +880,7 @@ test("tables added together are copied smallest first by the catalog's estimate"
     // listed biggest first, and in the order of their names
     void sync.setTables([table("a_big", 5000), table("b_mid", 500), table("c_small", 1)]);
     await sync.once();
-    const copies = logged.flatMap((l) => /^copying public\.(\w+): /.exec(l)?.[1] ?? []);
+    const copies = logged.flatMap((l) => /^syncing public\.(\w+): /.exec(l)?.[1] ?? []);
     assert.deepEqual(copies, ["c_small", "b_mid", "a_big"], logged.join("\n"));
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.rows]).sort(), [["public.a_big", "copied", 5000], ["public.b_mid", "copied", 500], ["public.c_small", "copied", 1]]);
   } finally { await sync.stop(); store.close(); }
@@ -912,8 +912,8 @@ test("a failed copy waits before it is tried again, and a change of its columns 
     let from = logged.length;
     void sync.setTables([T(true)]);
     await sync.once();
-    assert.equal(since(from, /^copying public\.t:/), 1, logged.slice(from).join("\n"));
-    assert.equal(since(from, /^copy of public\.t failed: [\s\S]*; tried again after \d\d:\d\d UTC \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
+    assert.equal(since(from, /^syncing public\.t:/), 1, logged.slice(from).join("\n"));
+    assert.equal(since(from, /^sync of public\.t failed: [\s\S]*; tried again after \d\d:\d\d UTC \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
     const [st] = sync.state();
     assert.equal(st?.phase, "failed");
     assert.match(st?.error ?? "", /\(tried again after \d\d:\d\d UTC \(failure 1 in a row\), or at once when Mason starts again or its columns or key change\)$/);
@@ -932,11 +932,11 @@ test("a failed copy waits before it is tried again, and a change of its columns 
     let from = logged.length;
     void sync.setTables([T(true)]);
     await sync.once();
-    assert.equal(since(from, /^copy of public\.t failed: [\s\S]* \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
+    assert.equal(since(from, /^sync of public\.t failed: [\s\S]* \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
     from = logged.length;
     void sync.setTables([T(false)]);
     await sync.once();
-    assert.equal(since(from, /^copying public\.t:/), 1, logged.slice(from).join("\n"));
+    assert.equal(since(from, /^syncing public\.t:/), 1, logged.slice(from).join("\n"));
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error, s.rows]), [["public.t", "copied", null, 100]]);
   } finally { await sync.stop(); store.close(); }
 });
@@ -965,7 +965,7 @@ test("a failed catch-up waits before it is tried again, said with its time; a ch
   finally { await sync.stop(); store.close(); }
   // stopped between its swap and its catch-up; meanwhile the source's column becomes text no copy of it can hold
   store = await DuckStore.open(file, (l) => logged.push(l));
-  await store.writer.run("INSERT OR REPLACE INTO _mason.catch_up VALUES ('public.t', 'after its copy', now())");
+  await store.writer.run("INSERT OR REPLACE INTO _mason.catch_up VALUES ('public.t', 'after its whole read', now())");
   store.close();
   psql(url, "ALTER TABLE t ALTER COLUMN n TYPE text USING n::text; UPDATE t SET n = 'not a number' WHERE id = 1");
   store = await DuckStore.open(file, (l) => logged.push(l));
@@ -977,7 +977,7 @@ test("a failed catch-up waits before it is tried again, said with its time; a ch
     await sync.once();
     const failed = since(from, /^public\.t: its catch-up poll failed/);
     assert.equal(failed.length, 1, logged.slice(from).join("\n"));
-    assert.match(failed[0]!, /^public\.t: its catch-up poll failed \(the copy serves as it was; it is caught up by one poll again after \d\d:\d\d UTC \(failure 1 in a row\), or at once when Mason starts again or its columns or key change\): \S/);
+    assert.match(failed[0]!, /^public\.t: its catch-up poll failed \(the synced data serves as it was; it is caught up by one poll again after \d\d:\d\d UTC \(failure 1 in a row\), or at once when Mason starts again or its columns or key change\): \S/);
     // in mason status: the table's error says it, with the time
     assert.equal(sync.state()[0]?.error, failed[0]!.slice("public.t: ".length));
     // the next pass: not tried again, it waits its turn
@@ -988,8 +988,8 @@ test("a failed catch-up waits before it is tried again, said with its time; a ch
     from = logged.length;
     void sync.setTables([T("text")]);
     await sync.once();
-    assert.equal(since(from, /^copying public\.t:/).length, 1, logged.slice(from).join("\n"));
-    assert.equal(since(from, /^caught up public\.t by one poll after its copy/).length, 1, logged.slice(from).join("\n"));
+    assert.equal(since(from, /^syncing public\.t:/).length, 1, logged.slice(from).join("\n"));
+    assert.equal(since(from, /^caught up public\.t by one poll after its whole read/).length, 1, logged.slice(from).join("\n"));
     assert.deepEqual(sync.state().map((s) => [s.phase, s.error, s.rows]), [["copied", null, 20]]);
     assert.equal(((await store.writer.runAndReadAll("SELECT n FROM public.t WHERE id = 1")).getRowsJS() as unknown[][])[0]![0], "not a number");
   } finally { await sync.stop(); store.close(); }
@@ -1128,8 +1128,8 @@ test("a copy stored in key order with an index is said as a retired layout and c
   try {
     await sync.open();
     assert.equal(RETIRED, "stored in key order with an index, by an older Mason: read again whole, in heap order");
-    assert.ok(logged.some((l) => l.startsWith(`public.t: its copy is ${RETIRED} — `)), `said by name at the start\n${logged.join("\n")}`);
-    assert.ok(logged.some((l) => l.startsWith("removed old.db.stage-public_t.db: a copy's stage, from an older Mason")), logged.join("\n"));
+    assert.ok(logged.some((l) => l.startsWith(`public.t: it is ${RETIRED} — `)), `said by name at the start\n${logged.join("\n")}`);
+    assert.ok(logged.some((l) => l.startsWith("removed old.db.stage-public_t.db: a sync's stage, from an older Mason")), logged.join("\n"));
     assert.deepEqual(fs.readdirSync(dir).filter((f) => f.startsWith("old.db.stage-")), [], "the old stage is removed");
     // served as it was, and said so on its line, until it is copied again
     void sync.setTables([T]);
@@ -1137,7 +1137,7 @@ test("a copy stored in key order with an index is said as a retired layout and c
     const from = logged.length;
     await sync.once();
     const said = logged.slice(from).join("\n");
-    assert.ok(logged.slice(from).some((l) => l.startsWith(`copying public.t, again (its copy is ${RETIRED}): `)), said);
+    assert.ok(logged.slice(from).some((l) => l.startsWith(`syncing public.t, again (it is ${RETIRED}): `)), said);
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.retired, s.rows, s.error]), [["public.t", "copied", undefined, 100, null]], said);
     // the source's rows in its heap's order, no constraint
     assert.equal(((await store.writer.runAndReadAll("SELECT id, v FROM public.t ORDER BY rowid")).getRowsJS() as unknown[][]).map((r) => r.join("\t")).join("\n"),
@@ -1276,10 +1276,10 @@ test("a table's sync switched off→poll and poll→off keeps its copy and is ca
     // mason add a --sync "poll 1h", mason add b --sync off: each caught up by ONE poll, now
     await sync.setTables([tableOf("a", POLL("1h", 3600)), tableOf("b", OFF)]);
     await until("both caught up by one poll", async () => await count("a") === 6 && await count("b") === 6, 10_000);
-    assert.ok(logged.includes("public.a: sync: off → poll 1h: its copy is kept, and caught up by one poll now"), logged.join("\n"));
-    assert.ok(logged.includes("public.b: sync: poll 1h → off: its copy is kept, and caught up by one poll now"), logged.join("\n"));
+    assert.ok(logged.includes("public.a: sync: off → poll 1h: its synced data is kept, and caught up by one poll now"), logged.join("\n"));
+    assert.ok(logged.includes("public.b: sync: poll 1h → off: its synced data is kept, and caught up by one poll now"), logged.join("\n"));
     assert.deepEqual([copiedAt("a"), copiedAt("b")], copies, "never copied again");
-    assert.equal(logged.filter((l) => /^copied public\.[ab]\b/.test(l)).length, 2, `one copy each, the first:\n${logged.join("\n")}`);
+    assert.equal(logged.filter((l) => /^synced public\.[ab]\b/.test(l)).length, 2, `one copy each, the first:\n${logged.join("\n")}`);
     // then each kept as it now says: neither due (poll 1h, off), so a change waits
     psql(url, "INSERT INTO a VALUES (7, 'y'); INSERT INTO b VALUES (7, 'y')");
     await new Promise((r) => setTimeout(r, 2_500));
@@ -1295,10 +1295,10 @@ test("a table's sync switched off→poll and poll→off keeps its copy and is ca
     await sync.setTables([tableOf("a", OFF), tableOf("b", OFF)]);
     sync.start();
     await until("a caught up at the start", async () => await count("a") === 7, 10_000);
-    assert.ok(logged.slice(seen).includes("public.a: sync: poll 1h → off: its copy is kept, and caught up by one poll now"), logged.slice(seen).join("\n"));
+    assert.ok(logged.slice(seen).includes("public.a: sync: poll 1h → off: its synced data is kept, and caught up by one poll now"), logged.slice(seen).join("\n"));
     await new Promise((r) => setTimeout(r, 1_500));
     assert.equal(await count("b"), 6, "b's sync did not change: off, not polled at the start");
-    assert.equal(logged.slice(seen).filter((l) => /^copied public\./.test(l)).length, 0, "nothing copied again");
+    assert.equal(logged.slice(seen).filter((l) => /^synced public\./.test(l)).length, 0, "nothing copied again");
   } finally { await sync.stop(); store.close(); }
 });
 
@@ -1409,16 +1409,16 @@ test("a table copies beside the polls: the other table is polled meanwhile, and 
     assert.equal(await read("SELECT id, v FROM public.small ORDER BY 1"), "1\ta\n2\tduring the copy", "small's change is in DuckDB");
     // the sync's own lines, in order: big's copy began, a pass polled small's change, and big's copy had not ended
     const during = logged.slice(from);
-    const pinned = during.findIndex((l) => /^copying public\.big as of the source's snapshot /.test(l));
+    const pinned = during.findIndex((l) => /^syncing public\.big as of the source's snapshot /.test(l));
     const polled = during.findIndex(smallPolled);
-    const copied = during.findIndex((l) => /^copied public\.big/.test(l));
+    const copied = during.findIndex((l) => /^synced public\.big/.test(l));
     assert.ok(pinned >= 0 && polled > pinned && copied === -1, `small's change was polled by a pass after big's copy began and before it ended (the passes went on beside it)\n${during.join("\n")}`);
-    assert.ok(during.some((l) => /^copying public\.big: .*beside the other tables' polls/.test(l)), "the copy's start says the polls go on");
+    assert.ok(during.some((l) => /^syncing public\.big: .*beside the other tables' polls/.test(l)), "the copy's start says the polls go on");
 
     big.release();
     await until(() => logged.slice(from).some((l) => /^caught up public\.big /.test(l)), "big caught up");
     const said = logged.slice(from).join("\n");
-    assert.ok(logged.slice(from).some((l) => l.startsWith("caught up public.big by one poll after its copy: the poll keeps it current (polled every ")), said);
+    assert.ok(logged.slice(from).some((l) => l.startsWith("caught up public.big by one poll after its whole read: the poll keeps it current (polled every ")), said);
     assert.equal(await read("SELECT id, v FROM public.big WHERE id IN (0, 7, 8) ORDER BY 1"), "0\tnew during its copy\n7\tchanged during its copy", `the changes made during its copy\n${said}`);
     assert.equal(await read("SELECT count(*), count(DISTINCT id) FROM public.big"), `${ROWS}\t${ROWS}`);
     // and polled by the passes from then on

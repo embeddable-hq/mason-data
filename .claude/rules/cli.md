@@ -253,6 +253,6 @@ file and the key, says what is wrong in their words, and gives the way out, on O
 - the exact line to add when something is missing (a join's other side);
 - the step in the developer's words ("its first sync failed", not "failed at copy"), and what Mason does to a table's data
   is *sync* — the first sync, the synced table, the synced data — never "copy" (CLAUDE.md "Vocabulary";
-  `tests/conventions.test.ts` reads every literal in src/cli/ and src/web/ for it).
+  `tests/conventions.test.ts` reads every literal in src/ for it).
 
 A new refusal a developer can meet gets a test asserted on its whole text (`tests/cli-project.test.ts`, `tests/cli-commands.test.ts`).

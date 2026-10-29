@@ -7,7 +7,7 @@
  * a transaction open while others commit, a TRUNCATE, a restart (the slot resumes; nothing is copied again), a table
  * added while streaming, and a project that polled before (caught up by one poll, never copied again). Every type of
  * the copy arrives through the stream as the copy stores it: a table of them streamed is held equal, value for value,
- * to a fresh copy of it. A numeric wider than its copy's DECIMAL copies the table again, wider.
+ * to a fresh copy of it. A numeric wider than its synced DECIMAL column copies the table again, wider.
  *
  * What it needs: IT_POSTGRES_URL with wal_level = logical, psql on PATH, DuckDB's postgres extension. It writes only
  * inside databases it creates, `it_dstream_<random>*`, and drops them and its slots at the end.
@@ -134,7 +134,7 @@ test("the copy and the stream keep DuckDB equal to the source through every kind
     sync.setTables([ITEMS!, LINES!]);
     await sync.once();
     await same("a restart");
-    assert.ok(!logged.slice(before).some((l) => /^(copied|caught up) /.test(l)), `nothing is copied or caught up at a restart:\n${logged.slice(before).join("\n")}`);
+    assert.ok(!logged.slice(before).some((l) => /^(synced|caught up) /.test(l)), `nothing is copied or caught up at a restart:\n${logged.slice(before).join("\n")}`);
 
     // A TABLE ADDED while streaming: the publication carries it before it is copied, and its changes follow
     before = logged.length;
@@ -179,7 +179,7 @@ test("a project that polled is caught up by one poll when it starts replicating:
     await sync.caughtUp();
     assert.equal(await rowsOf(store, "SELECT id, v FROM public.t ORDER BY 1"), psql(url, "SELECT id, v FROM t ORDER BY 1"), logged.slice(before).join("\n"));
     assert.ok(logged.slice(before).some((l) => /^caught up public\.t by one poll after the slot was made: it joins the stream at [0-9A-F]+\/[0-9A-F]+, which carries what follows$/.test(l)), logged.slice(before).join("\n"));
-    assert.ok(!logged.slice(before).some((l) => /^copied /.test(l)), "not copied again");
+    assert.ok(!logged.slice(before).some((l) => /^synced /.test(l)), "not copied again");
     psql(url, "UPDATE t SET v = 'streamed' WHERE id = 3");
     await sync.caughtUp();
     assert.equal(await rowsOf(store, "SELECT id, v FROM public.t ORDER BY 1"), psql(url, "SELECT id, v FROM t ORDER BY 1"));
@@ -232,10 +232,10 @@ test("every type arrives through the stream as the copy stores it; a numeric wid
     psql(url, "UPDATE typed SET nu = 1.123456 WHERE id = 2");
     // the stream stops on it, and the copy again runs as a pass of its own: waited for, then the stream again
     const until = Date.now() + 30_000;
-    const recopied = (): boolean => { const w = logged.findIndex((x) => /wider than its copy's DECIMAL/.test(x)); return w >= 0 && logged.slice(w).some((l) => /^copied public\.typed/.test(l)); };
+    const recopied = (): boolean => { const w = logged.findIndex((x) => /wider than its synced DECIMAL column/.test(x)); return w >= 0 && logged.slice(w).some((l) => /^synced public\.typed/.test(l)); };
     while (!recopied() && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
     await sync.caughtUp();
-    assert.ok(logged.some((l) => l === "replication: public.typed has a numeric value wider than its copy's DECIMAL: it is copied again, then streamed"), logged.slice(-10).join("\n"));
+    assert.ok(logged.some((l) => l === "replication: public.typed has a numeric value wider than its synced DECIMAL column: it is read again whole, then streamed"), logged.slice(-10).join("\n"));
     assert.equal(await rowsOf(store, "SELECT nu::VARCHAR FROM public.typed WHERE id = 2"), "1.123456");
     psql(url, "UPDATE typed SET vc = 'still streamed' WHERE id = 3");
     await sync.caughtUp();
@@ -331,20 +331,20 @@ test("a table copies beside the stream: the others stay current and the slot mov
     const from = logged.length;
     void sync.setTables([SMALL!, BIG!]);
     // the copy's snapshot is pinned, so what changes now is after it, and its scan of several seconds is ahead
-    await until(() => logged.slice(from).some((l) => /^copying public\.big as of the source's snapshot /.test(l)), "big's snapshot pinned", logged);
+    await until(() => logged.slice(from).some((l) => /^syncing public\.big as of the source's snapshot /.test(l)), "big's snapshot pinned", logged);
     const before = flushed();
     psql(url, "INSERT INTO small VALUES (2, 'during the copy'); UPDATE big SET v = 'changed during its copy' WHERE id = 7; DELETE FROM big WHERE id = 8; INSERT INTO big VALUES (0, 'new during its copy')");
     await sync.caughtUp();
-    const copied = logged.slice(from).some((l) => /^copied public\.big/.test(l));
+    const copied = logged.slice(from).some((l) => /^synced public\.big/.test(l));
     assert.equal(await read("SELECT id, v FROM public.small ORDER BY 1"), "1\ta\n2\tduring the copy", `small is current while big copies\n${logged.slice(from).join("\n")}`);
     assert.ok(!copied, `the change to small was in DuckDB BEFORE big's copy ended (the stream went on beside it)\n${logged.slice(from).join("\n")}`);
     assert.ok(flushed() > before, "the slot's confirmed position moved during the copy: it does not hold the database's WAL for it");
-    assert.ok(logged.slice(from).some((l) => /^copying public\.big: .*beside the stream, which goes on keeping the other tables current/.test(l)), "the copy's start says the stream goes on");
+    assert.ok(logged.slice(from).some((l) => /^syncing public\.big: .*beside the stream, which goes on keeping the other tables current/.test(l)), "the copy's start says the stream goes on");
 
     big.release();
     await sync.once();
     await sync.caughtUp();
-    assert.ok(logged.slice(from).some((l) => /^caught up public\.big by one poll after its copy: it joins the stream at [0-9A-F]+\/[0-9A-F]+, which carries what follows$/.test(l)), logged.slice(from).join("\n"));
+    assert.ok(logged.slice(from).some((l) => /^caught up public\.big by one poll after its whole read: it joins the stream at [0-9A-F]+\/[0-9A-F]+, which carries what follows$/.test(l)), logged.slice(from).join("\n"));
     assert.equal(await read(`SELECT ${duckSum} FROM public.big`), psql(url, `SELECT ${sum} FROM big`), `big equals the source once caught up\n${logged.slice(from).join("\n")}`);
     assert.equal(await read("SELECT id, v FROM public.big WHERE id IN (0, 7, 8) ORDER BY 1"), "0\tnew during its copy\n7\tchanged during its copy", "the changes made during its copy");
     // streamed from then on, and the stream started once in the whole run
@@ -395,7 +395,7 @@ test("a NAMED publication is read as it is, never altered: a table it lacks is r
     await same("the first copy");
     assert.equal(definition(), defined, "no ALTER PUBLICATION ran at the first pass: the definition is byte-equal");
     assert.equal(psql(url, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${repl.slot}'`), "1", "the slot is made");
-    assert.equal(logged.filter((l) => /^publication app_pub does not publish truncate: a TRUNCATE on the database does not reach the copy/.test(l)).length, 1, logged.join("\n"));
+    assert.equal(logged.filter((l) => /^publication app_pub does not publish truncate: a TRUNCATE on the database does not reach the synced data/.test(l)).length, 1, logged.join("\n"));
     psql(url, "INSERT INTO a VALUES (11, 'new', 'y'); UPDATE b SET v = 'changed' WHERE id = 2; DELETE FROM a WHERE id = 3");
     await same("an insert, an update, a delete");
 
@@ -405,7 +405,7 @@ test("a NAMED publication is read as it is, never altered: a table it lacks is r
     await sync.once();
     const c = sync.state().find((s) => s.source === "public.c")!;
     assert.equal(c.phase, "failed");
-    assert.match(c.error!, /^replication: publication app_pub does not carry what Mason's copy of the table holds\.\n\n {2}missing: public\.c \(read by Mason's copy\)\n/);
+    assert.match(c.error!, /^replication: publication app_pub does not carry what Mason's synced table holds\.\n\n {2}missing: public\.c \(read by Mason's sync\)\n/);
     assert.match(c.error!, /\n {2}ALTER PUBLICATION app_pub ADD TABLE\n {4}public\.c \(id, v\);\n\nFound: publication app_pub \(publish = 'insert, update, delete'\)\n {4}public\.a \(id, v, extra\),\n {4}public\.b \(id, v\)\n/);
     assert.match(c.error!, /never altering it/);
     assert.equal(await rowsOf(store, "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'c'"), "0", "not copied");
@@ -452,7 +452,7 @@ test("a named publication that cannot carry the copy is refused in the developer
   const narrow = await run("narrow", "q1");
   const a = narrow.states.find((s) => s.source === "public.a")!;
   assert.equal(a.phase, "failed");
-  assert.match(a.error!, /\n {2}missing: public\.a columns extra \(read by Mason's copy\)\n/);
+  assert.match(a.error!, /\n {2}missing: public\.a columns extra \(read by Mason's sync\)\n/);
   assert.match(a.error!, /\n {2}BEGIN;\n {2}ALTER PUBLICATION narrow DROP TABLE public\.a;\n {2}ALTER PUBLICATION narrow ADD TABLE\n {4}public\.a \(id, v, extra\);\n {2}COMMIT;\n/);
   assert.deepEqual(narrow.states.filter((s) => s.source === "public.b").map((s) => [s.phase, s.error]), [["copied", null]], "the other table is copied and streamed");
 
@@ -460,7 +460,7 @@ test("a named publication that cannot carry the copy is refused in the developer
   const nodel = await run("nodel", "q2");
   for (const s of nodel.states) {
     assert.equal(s.phase, "failed");
-    assert.match(s.error!, /^replication: publication nodel does not carry what Mason's copy of the table holds\./);
+    assert.match(s.error!, /^replication: publication nodel does not carry what Mason's synced table holds\./);
     assert.match(s.error!, /it publishes insert, update; the change reader needs insert, update and delete/);
     assert.match(s.error!, /\n {2}ALTER PUBLICATION nodel SET \(publish = 'insert, update, delete'\);\n/);
   }
@@ -501,7 +501,7 @@ test("the stream says where it is: a table joins and leaves on a line with its p
     await sync.once();
     await sync.caughtUp();
     // THE JOIN, after the catch-up, with the position it joins at
-    assert.ok(logged.some((l) => new RegExp(`^caught up public\\.a by one poll after its copy: it joins the stream at ${LSN}, which carries what follows$`).test(l)), logged.join("\n"));
+    assert.ok(logged.some((l) => new RegExp(`^caught up public\\.a by one poll after its whole read: it joins the stream at ${LSN}, which carries what follows$`).test(l)), logged.join("\n"));
     const s0 = await status();
     assert.equal(s0.running, true);
     assert.deepEqual([table(s0, "public.a").state, table(s0, "public.a").applied], ["streamed", { inserts: 0, updates: 0, deletes: 0, truncates: 0 }]);
@@ -529,7 +529,7 @@ test("the stream says where it is: a table joins and leaves on a line with its p
     sync.setTables([A!, B!]);
     await sync.once();
     await sync.caughtUp();
-    assert.ok(logged.some((l) => new RegExp(`^caught up public\\.b by one poll after its copy: it joins the stream at ${LSN}, which carries what follows$`).test(l)), logged.join("\n"));
+    assert.ok(logged.some((l) => new RegExp(`^caught up public\\.b by one poll after its whole read: it joins the stream at ${LSN}, which carries what follows$`).test(l)), logged.join("\n"));
     psql(url, "TRUNCATE b; INSERT INTO b VALUES (1, 'again')");
     await sync.caughtUp();
     assert.deepEqual(table(await status(), "public.b").applied, { inserts: 1, updates: 0, deletes: 0, truncates: 1 });
@@ -633,8 +633,8 @@ test("a table's columns changed in the sources file while its table copies: copi
     // restored while the narrowed copy is held: it cannot have ended first
     void sync.setTables(await pick(parsed.source, folder, [["public.t", FULL]]));
     copyOfT.release();
-    await until(() => since(from, /^caught up public\.t by one poll after its copy/) > 0, "copied again and caught up", logged, 120_000);
-    assert.equal(since(from, /^copied public\.t:/), 2, `the narrowed copy, then the restored one at once\n${logged.slice(from).join("\n")}`);
+    await until(() => since(from, /^caught up public\.t by one poll after its whole read/) > 0, "copied again and caught up", logged, 120_000);
+    assert.equal(since(from, /^synced public\.t:/), 2, `the narrowed copy, then the restored one at once\n${logged.slice(from).join("\n")}`);
     assert.equal(since(from, /could not be applied|failed/), 0, logged.slice(from).join("\n"));
     psql(url, "INSERT INTO stop_writing VALUES (1)");
     await trickled;
@@ -651,7 +651,7 @@ test("a table's columns changed in the sources file while its table copies: copi
       `UPDATE t SET dropme = 'only the dropped column ${n}' WHERE id = ${n}; UPDATE t SET v = 'changed ${n}' WHERE id = ${n + 1}; DELETE FROM t WHERE id = ${n + 2}`;
     psql(url, changes(3));
     copyOfT.release();
-    await until(() => since(from, /^caught up public\.t by one poll after its copy/) > 0, "the narrowed copy caught up", logged, 120_000);
+    await until(() => since(from, /^caught up public\.t by one poll after its whole read/) > 0, "the narrowed copy caught up", logged, 120_000);
     await same(NARROW, "narrowed, the changes during its copy caught up", from);
     psql(url, changes(7));
     await same(NARROW, "narrowed, the next batch", from);
@@ -695,7 +695,7 @@ test("a column dropped on the database while streaming refuses that table by nam
     await until(async () => await read("SELECT v FROM public.b WHERE id = 11") === "b after the drop", "b is current", logged, 20_000);
     const refused = logged.slice(from).filter((l) => l.startsWith("public.a: replication: the stream no longer carries"));
     assert.equal(refused.length, 1, logged.slice(from).join("\n"));
-    assert.match(refused[0]!, /^public\.a: replication: the stream no longer carries public\.a's x, which its copy holds \(a column dropped or renamed on the database, or the publication's column list narrowed\), so its changes are not applied: it is caught up by one poll again after \d\d:\d\d UTC \(failure 1 in a row\), or at once when Mason starts again or its columns or key change\. The way out: remove x from its columns in the sources file \(mason add public\.a --columns … picks the columns it has; it is copied again at once\), or publish it again \(ALTER PUBLICATION app_pub …\)$/);
+    assert.match(refused[0]!, /^public\.a: replication: the stream no longer carries public\.a's x, which its synced table holds \(a column dropped or renamed on the database, or the publication's column list narrowed\), so its changes are not applied: it is caught up by one poll again after \d\d:\d\d UTC \(failure 1 in a row\), or at once when Mason starts again or its columns or key change\. The way out: remove x from its columns in the sources file \(mason add public\.a --columns … picks the columns it has; it is copied again at once\), or publish it again \(ALTER PUBLICATION app_pub …\)$/);
     assert.ok(logged.slice(from).some((l) => /^public\.a leaves the stream at /.test(l)), logged.slice(from).join("\n"));
     // mason status: its error, and its catch-up's next attempt
     assert.equal(sync.state().find((x) => x.source === "public.a")?.error, refused[0]!.slice("public.a: ".length));
@@ -708,7 +708,7 @@ test("a column dropped on the database while streaming refuses that table by nam
 
     // THE WAY OUT: the sources file without x — copied again at once, caught up, streamed
     void sync.setTables(await pick(parsed.source, folder, [["public.a", ["id", "v"]], ["public.b", null]]));
-    await until(() => logged.slice(from).some((l) => /^caught up public\.a by one poll after its copy/.test(l)), "a copied again and caught up", logged, 60_000);
+    await until(() => logged.slice(from).some((l) => /^caught up public\.a by one poll after its whole read/.test(l)), "a copied again and caught up", logged, 60_000);
     psql(url, "UPDATE a SET v = 'streamed again' WHERE id = 1");
     await sync.caughtUp();
     assert.equal(await read("SELECT id, v FROM public.a ORDER BY id"), psql(url, "SELECT id, v FROM a ORDER BY id"));

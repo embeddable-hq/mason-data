@@ -211,7 +211,7 @@ export function storeJsonPathsOf(env: NodeJS.ProcessEnv): boolean {
   if (v === "" || v === "on") return true;
   if (v === "off") return false;
   throw new Error(`${STORE_JSON_PATHS_SETTING}=${JSON.stringify(env[STORE_JSON_PATHS_SETTING])} is not a setting: on (the default) stores the JSON paths statements keep reading ` +
-    "as columns of the copy, off stores none (and drops those stored, at this start)");
+    "as columns of the synced table, off stores none (and drops those stored, at this start)");
 }
 
 const ident = (name: string): string => `"${name.replaceAll('"', '""')}"`;
@@ -512,7 +512,7 @@ export class KeptJsonPaths implements KeptRoutes {
     }
     for (const p of this.paths.values()) {
       if (p.state === "dropped" || p.state === "waiting" || named.has(`${p.source}\u0000${p.name}`)) continue;
-      await this.drop(w, p, "its column is not in the copy");
+      await this.drop(w, p, "its column is not in the synced table");
     }
     // a jsonb's stored key is its collation's, told after this (`orderBy`): until then a write leaves it unset and no
     // plan reads it, so a ready one is filled again where unset first — the backfill's sweep alone (its ranges are done)
@@ -603,7 +603,7 @@ export class KeptJsonPaths implements KeptRoutes {
   async swapping(c: DuckConnection, source: string, columns: readonly string[]): Promise<void> {
     this.gone = [];
     for (const p of this.physical(source).filter((x) => !columns.includes(x.column))) {
-      const why = `${p.column} is no longer a column of the copy of ${source}`;
+      const why = `${p.column} is no longer a column of the synced ${source}`;
       await c.run(`UPDATE ${PATHS_TABLE} SET state = 'dropped', why = ${literal(why)} WHERE name = ${literal(p.name)}`);
       this.gone.push({ p, why });
     }
@@ -758,7 +758,7 @@ export class KeptJsonPaths implements KeptRoutes {
         void this.fills();
         if (++this.reviews % CHECK_EVERY === 0) for (const p of [...this.paths.values()].filter((x) => x.state === "ready")) await this.check(p);
       } catch (e) {
-        this.host.log(`stored JSON paths: the review failed, and runs again in ${Math.round(this.reviewMs / 1000)} s (the copies serve as they were): ${e instanceof Error ? e.message : String(e)}`);
+        this.host.log(`stored JSON paths: the review failed, and runs again in ${Math.round(this.reviewMs / 1000)} s (the synced tables serve as they were): ${e instanceof Error ? e.message : String(e)}`);
       } finally { this.reviewing = null; }
     })();
     return this.reviewing;
@@ -813,10 +813,10 @@ export class KeptJsonPaths implements KeptRoutes {
     if (isKeyRead(read) && !this.current(read)) return false;
     const name = hiddenName(read);
     const col = cols.find((c) => c.name === read.column);
-    const why = col === undefined ? `${read.column} is not a column of the copy`
+    const why = col === undefined ? `${read.column} is not a column of the synced table`
       : !/^jsonb?$/.test(col.type) ? `${read.column} is a ${col.type}, not a json or jsonb`
       : isKeyRead(read) && col.type !== "jsonb" ? `${read.column} is a ${col.type}, which has no order or equality (a jsonb's is stored)`
-      : cols.some((c) => c.name.toLowerCase() === name) ? `the copy has a column named ${name} of its own` : null;
+      : cols.some((c) => c.name.toLowerCase() === name) ? `the synced table has a column named ${name} of its own` : null;
     if (why === null) return true;
     const key = pathKey(read);
     if (!this.refusedSaid.has(key)) { this.refusedSaid.add(key); this.host.log(`${read.source}: ${pathText(read)} is not stored: ${why}`); }

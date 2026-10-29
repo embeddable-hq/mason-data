@@ -81,7 +81,7 @@ function sessionStatement(stmt: Node): Translation {
     case "InsertStmt": case "UpdateStmt": case "DeleteStmt": case "MergeStmt": case "CopyStmt": case "TruncateStmt":
     case "CreateStmt": case "DropStmt": case "AlterTableStmt": case "CreateTableAsStmt": case "ViewStmt": case "IndexStmt":
     case "GrantStmt": case "CreateRoleStmt": case "CreateFunctionStmt": case "CreateSchemaStmt": case "VacuumStmt":
-      throw new Unsupported(`${kind.replace(/Stmt$/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toUpperCase()}: this is a read-only copy of the database's tables; only SELECT, SET, SHOW and the transaction no-ops are accepted`, null, "25006");
+      throw new Unsupported(`${kind.replace(/Stmt$/, "").replace(/([a-z])([A-Z])/g, "$1 $2").toUpperCase()}: these are the database's tables, synced and read-only; only SELECT, SET, SHOW and the transaction no-ops are accepted`, null, "25006");
     case "PrepareStmt": case "ExecuteStmt": throw new Unsupported(`${kind === "PrepareStmt" ? "PREPARE" : "EXECUTE"} is not supported: use the protocol's prepared statements (every driver does)`, null);
     default:
       throw new Unsupported(`${kind.replace(/Stmt$/, "")}: not a statement this listener answers (SELECT, EXPLAIN, a catalog query, SET, SHOW, BEGIN/COMMIT)`, null);

@@ -799,16 +799,20 @@ test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through 
 /**
  * WHAT MASON DOES TO A TABLE'S DATA IS "SYNC", NEVER "COPY" (CLAUDE.md "Vocabulary"): the README says "the first sync",
  * "the synced data", "each synced table", and a command that printed "the copy" beside it named one thing two ways. So
- * every literal a person or an agent may read in src/cli/ and src/web/ is held to it; what is not the data's words is
+ * every literal of src/ is held to it — a command's words, the log, a refusal on the wire, EXPLAIN's text — and
+ * upper-case COPY (SQL, the wire's COPY protocol) is not the word; what is not the data's words is
  * listed below by its phrase: a value of a declared --json shape (the field `copy`, the phase "copying"), and a copy of
  * something else (the clipboard's Copy button, the password Mason keeps none of).
  */
-const COPY_WORD = /\bcop(?:y|ies|ied|ying)\b/i;
+const COPY_WORD = /\b[Cc]op(?:y|ies|ied|ying)\b/;
 const NOT_THE_DATA = [
   /\bdata-copy="[^"]*">Copy<\/button>/g, /\bdata-copy\b/g, /^Copied$/g, /Select and copy it/g, /I have copied it/g, // the clipboard
   /no copy of the password/g,                                                            // mason user add / the Users page
   /\{ table, copy, error/g, /\(copy: \{ phase/g, /addedColumns, copy, error/g,           // the --json field `copy`, by its name
   /^(?:copy|copying|copied)$/g,                                                         // the field, and a phase's value
+  /^copy again$/g,                                                                      // a rebuild's verdict (src/duck/sync.ts)
+  /^copying again$/g,                                                                   // EXPLAIN's JSON "Kept Current By"
+  /\bphase = 'copied'/g,                                                                // SQL over _mason.copy_state
 ];
 
 /** Every string and template literal of a JS/TS source, as `{ line, text }`: a template's `${…}` read as code (its own
@@ -861,8 +865,8 @@ export function copyWords(name: string, src: string): string[] {
   return texts.filter((l) => COPY_WORD.test(NOT_THE_DATA.reduce((t, re) => t.replace(re, ""), l.text))).map((l) => `${name}:${l.line}: ${l.text}`);
 }
 
-test("what Mason does to a table's data is sync in every word the CLI and the web page say, never copy", () => {
-  const hits = scannedFiles(["src/cli", "src/web"]).flatMap((f) => copyWords(f.name, f.src));
+test("what Mason does to a table's data is sync in every word Mason says, never copy", () => {
+  const hits = scannedFiles(["src"]).flatMap((f) => copyWords(f.name, f.src));
   assert.deepEqual(hits, [], "say sync, synced, the synced data or the synced table (CLAUDE.md \"Vocabulary\"); a copy of something else " +
     "(the clipboard, a file) goes on NOT_THE_DATA by its phrase");
 });

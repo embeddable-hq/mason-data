@@ -222,7 +222,7 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   RESPONSE (what Mason does when it fires)**; a rule that stays prose is one the next change forgets.
 - **Vocabulary**: the *sources file* names what is synced, one *entry* per table; what Mason does to a table's data is
   *sync*: a user reads *the first sync* (the chunked copy, in the code), *the synced table* and *the synced data*, never
-  "copy" (`tests/conventions.test.ts` holds src/cli/ and src/web/ to it; identifiers, `--json` keys and
+  "copy" (`tests/conventions.test.ts` holds every literal of src/ to it: the commands, the log, the wire; identifiers, `--json` keys and
   `MASON_COPY_PARALLEL` keep the code's word); changes
   arrive by *the poll* (SELECTs on xmin) or *the stream* (logical replication); a *user* is what `mason user` makes (never "token" or "credentials" in what it
   prints); the *request log* is `_mason.requests`. Name the engine only in code and docs.

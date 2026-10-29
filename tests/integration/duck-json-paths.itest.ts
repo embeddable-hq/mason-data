@@ -168,7 +168,7 @@ test("a stored path equals Postgres's read after the copy, every poll, and a cop
     const noK = { ...DOCS!, columns: DOCS!.columns.filter((c) => c.name !== "k") };
     sync.setTables([noK]);
     await sync.once();
-    assert.ok(logged.some((l) => /^copying public\.docs/.test(l)), "copied again");
+    assert.ok(logged.some((l) => /^syncing public\.docs/.test(l)), "copied again");
     const states = new Map(sync.kept.status().map((p) => [`${p.column} ${p.steps}`, p.state]));
     assert.deepEqual(READS.map((r) => states.get(`${r.read.column} ${r.read.steps}`)), READS.map((r) => r.read.column === "k" ? "dropped" : "ready"));
     psql(url, `UPDATE docs SET j = '{"s": "after the copy"}' WHERE id = 7; ${SEED(4000, 4010)}`);

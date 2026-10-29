@@ -50,7 +50,7 @@ const abortWith = (c: AbortController, reason: { fields?: StatementError["fields
 
 /** a connection's call, held in `connCalls` until it settles */
 function onConn<T>(n: number, f: (c: DuckDBConnection) => Promise<T>): Promise<T> {
-  if (stopping) return Promise.reject(new Error("the copy is closing: no statement starts on it any more"));
+  if (stopping) return Promise.reject(new Error("the synced data is closing: no statement starts on it any more"));
   const p = f(need(conns, n, "connection"));
   const calls = connCalls.get(n) ?? new Set<Promise<unknown>>();
   connCalls.set(n, calls);
@@ -73,7 +73,7 @@ function closeRunner(n: number): Promise<void> {
 
 const need = <T>(m: Map<number, T>, n: number, what: string): T => {
   const v = m.get(n);
-  if (v === undefined) throw new Error(`no ${what} ${n} on the copy's thread (Mason bug: report it)`);
+  if (v === undefined) throw new Error(`no ${what} ${n} on the engine's thread (Mason bug: report it)`);
   return v;
 };
 
@@ -90,7 +90,7 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       return { value: null };
     }
     case "connect": {
-      if (instance === null) throw new Error("the copy is not open (Mason bug: report it)");
+      if (instance === null) throw new Error("the synced data is not open (Mason bug: report it)");
       const n = nextConn++;
       conns.set(n, await instance.connect());
       return { value: n };
@@ -114,14 +114,14 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       const c = conns.get(Number(m.conn));
       conns.delete(Number(m.conn));
       try { c?.closeSync(); }
-      catch (e) { log(`closing a connection of the copy failed: ${(e as Error).message}`); }
+      catch (e) { log(`closing a connection of the synced data failed: ${(e as Error).message}`); }
       return undefined;
     }
     case "libc": registerLibcOrder(need(conns, 0, "connection"), m.order as Parameters<typeof registerLibcOrder>[1]); return { value: null };
     case "calls": return { value: Object.fromEntries(FUNCTION_CALLS) };
     case "function rows": return { value: Object.fromEntries(FUNCTION_ROWS) };
     case "runner.open": {
-      if (instance === null) throw new Error("the copy is not open (Mason bug: report it)");
+      if (instance === null) throw new Error("the synced data is not open (Mason bug: report it)");
       const n = nextRunner++;
       runners.set(n, await SessionRunner.open(instance, log, Number(m.slot), cancels));
       return { value: n };
@@ -208,7 +208,7 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       return { value: null };
     }
   }
-  throw new Error(`the copy's thread was asked ${JSON.stringify(m.op)}, which it does not know (Mason bug: report it)`);
+  throw new Error(`the engine's thread was asked ${JSON.stringify(m.op)}, which it does not know (Mason bug: report it)`);
 }
 
 port.on("message", (m: Request) => {

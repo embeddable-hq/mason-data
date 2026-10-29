@@ -74,7 +74,7 @@ test("MASON_COPY_PARALLEL is a number of readers from 1 to 8, 3 when unset, and 
   assert.equal(copyParallelOf({ MASON_COPY_PARALLEL: "8" }), 8);
   for (const bad of ["0", "9", "2.5", "-1", "three", "1e1"]) {
     assert.throws(() => copyParallelOf({ MASON_COPY_PARALLEL: bad }), (e: Error) => e.message === `MASON_COPY_PARALLEL=${JSON.stringify(bad)} is not a number of readers from 1 to 8: ` +
-      "each reads a copy's chunks on a backend of the database's own, so set it to 1 (one at a time, the lightest on the database) up to 8, or unset it for 3", bad);
+      "each reads a first sync's chunks on a backend of the database's own, so set it to 1 (one at a time, the lightest on the database) up to 8, or unset it for 3", bad);
   }
 });
 
@@ -276,7 +276,7 @@ test("a copy in progress from the Mason of one reader becomes its committed chun
       [["public.part", 0n, 4300n, 30100n, 16384n], ["public.whole", 0n, null, 900n, 16385n]]);
     assert.deepEqual((await store.writer.runAndReadAll(`SELECT column_name FROM duckdb_columns() WHERE schema_name = '_mason' AND table_name = 'copy_progress' ORDER BY column_index`)).getRowsJS().flat(),
       ["source", "snapshot", "columns", "exact", "pages", "updated_at"]);
-    assert.ok(logged.includes("2 copy(ies) in progress were begun by a Mason that read one chunk at a time: each continues where it was"), logged.join("\n"));
+    assert.ok(logged.includes("2 sync(s) in progress were begun by a Mason that read one chunk at a time: each continues where it was"), logged.join("\n"));
   } finally {
     await sync.stop(); store.close();
     fs.rmSync(dir, { recursive: true, force: true });

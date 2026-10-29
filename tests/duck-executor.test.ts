@@ -231,7 +231,7 @@ await import(${JSON.stringify(fileURLToPath(new URL("../src/duck/executor-worker
     const running = c.query("SELECT count(*) AS held FROM gen").then(() => null, (e: pg.DatabaseError) => e);
     for (const t = Date.now(); !ownLog.some((l) => l.startsWith("held: ")); await sleep(20)) if (Date.now() - t > 20_000) throw new Error(`the statement did not reach the copy's thread within 20 s\n${ownLog.join("\n")}`);
     await (own as unknown as { executor: { worker: Worker } }).executor.worker.terminate();
-    const gone = (e: pg.DatabaseError | null): boolean => e !== null && e.code === "57P02" && /the copy's engine stopped/.test(e.message) &&
+    const gone = (e: pg.DatabaseError | null): boolean => e !== null && e.code === "57P02" && /the engine stopped/.test(e.message) &&
       /exited with code 1/.test(e.detail ?? "") && /reconnect/.test(e.hint ?? "");
     const e = await running;
     assert.ok(gone(e), `the statement in flight: ${JSON.stringify(e && { code: e.code, message: e.message, detail: e.detail, hint: e.hint })}`);
@@ -489,7 +489,7 @@ parentPort.on("message", (m) => {
   const outcome = (p: Promise<unknown>): Promise<string> => Promise.race([p.then(() => "answered", (e: { fields?: { code: string }; message: string }) => e.fields?.code ?? e.message), sleep(10_000).then(() => "no answer within 10 s")]);
   const [session, statement] = await Promise.all([outcome(ex.runner()), outcome(ex.writer().run("SELECT 1"))]);
   const ms = performance.now() - t0;
-  assert.equal(session, "57P02", "a session asking the silent thread is told the copy's engine stopped");
+  assert.equal(session, "57P02", "a session asking the silent thread is told the engine stopped");
   assert.match(statement, /answered nothing for 1 s/, "a connection's statement is told why");
   assert.ok(ms < 3_000, `told after ${Math.round(ms)} ms (silent 1 s, pinged every 250 ms)`);
   assert.equal(crashed.length, 1, "the run is told, once");
@@ -546,7 +546,7 @@ test("a copy closed past its grace under a function-calling statement, or a proc
   assert.equal(closed.signal, null, `the copy closed under a call: the process did not end by itself (${closed.signal})\n${closed.stderr}`);
   assert.equal(closed.status, 0, `the copy closed under a call: exit ${closed.status} (134: the thread ended under a call)\n${closed.stderr}`);
   assert.doesNotMatch(closed.stderr, /Napi::Error|FATAL ERROR/);
-  assert.equal(closed.stdout.trim(), "closed; told 57P02", "the statement is told the copy's engine stopped, and the process waited for the thread");
+  assert.equal(closed.stdout.trim(), "closed; told 57P02", "the statement is told the engine stopped, and the process waited for the thread");
   const left = run("leave", `
     const a = await r.run({ text: "SELECT " + call + " FROM t", functions: ["__mason_json_get"] }, [], S, new AbortController().signal);
     const rows = await a.fetch([], { timeZone: "UTC" });

@@ -123,7 +123,7 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
     const again = await healthUntil(health, second, (status, b) => status === 200 && (b.tables as { copied: number }).copied === 1);
     assert.deepEqual(again.tables, { total: 1, copied: 1, copying: 0, waiting: 0, failed: 0 });
     assert.match(second.out(), /the synced data in .*\.mason, resumed/);
-    assert.doesNotMatch(second.out(), /copied public\.items/, "the copy was kept, not made again");
+    assert.doesNotMatch(second.out(), /synced public\.items/, "the copy was kept, not made again");
   } finally {
     second.child.kill("SIGTERM");
   }

@@ -382,7 +382,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const syncMode = changes === "replication" ? "replication" : syncModeOf(process.env);
   // each table is polled at its own sync: (the sources file's); the sync's interval is how soon a failed pass is tried
   // again (and replication mode's, and MASON_DUCK_SYNC=recopy's whole copies)
-  const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^copied |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
+  const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^synced |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
     syncMode === "replication" ? repl : null, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths } });
   await sync.open();
   // the tables this copy already holds, before this start copies anything: an upgrade from a Mason that polled every

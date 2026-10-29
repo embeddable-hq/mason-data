@@ -208,7 +208,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
     lastBatch: { appliedAt: "2026-10-26T12:00:05.300Z", committedAt: "2026-10-26T12:00:05.000Z" },
     tables: [
       { table: "public.orders", state: "streamed", why: null, applied: { inserts: 1_000, updates: 200, deletes: 4, truncates: 0 } },
-      { table: "shop.lines", state: "catching-up", why: "caught up by one poll after its copy",
+      { table: "shop.lines", state: "catching-up", why: "caught up by one poll after its whole read",
         catchUp: { phase: "polling", from: "2026-10-26T11:58:02.000Z", startedAt: "2026-10-26T12:00:07.000Z", held: 12, retryAt: null }, applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },
       { table: "public.events", state: "left-out", why: "publication app_pub does not carry public.events: ALTER PUBLICATION app_pub ADD TABLE public.events", applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },
       { table: "public.big", state: "waiting", why: "it is being read whole: it joins once synced and caught up by one poll", applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },

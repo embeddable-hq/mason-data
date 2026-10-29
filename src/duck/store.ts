@@ -127,7 +127,7 @@ export async function openDuck(file: string, settings: Record<string, string>): 
     const m = (e as Error).message;
     throw new Error(/lock/i.test(m)
       ? `DuckDB could not open ${file}: another process holds it (${m}). Is another mason start running for this project? mason status says`
-      : `DuckDB could not open ${file}: ${m}. mason destroy deletes the copy, and the next mason start copies again`);
+      : `DuckDB could not open ${file}: ${m}. mason destroy deletes the synced data, and the next mason start syncs again`);
   }
   const writer = await instance.connect();
   await writer.run(`CREATE SCHEMA IF NOT EXISTS ${MASON_SCHEMA}`);
@@ -168,7 +168,7 @@ export class DuckStore {
     const before = opened.get(where);
     if (before !== undefined && before.closed === null) throw new Error(`DuckDB could not open ${file}: this process has it open already (Mason bug: report it)`);
     // a copy whose thread was given up on may still hold the file: a second instance of it would lose writes
-    if (before?.abandoned != null) throw new Error(`DuckDB could not open ${file}: this process gave up on the copy's thread before (${before.abandoned}), which may still hold it; start mason again (a new process opens it)`);
+    if (before?.abandoned != null) throw new Error(`DuckDB could not open ${file}: this process gave up on the engine's thread before (${before.abandoned}), which may still hold it; start mason again (a new process opens it)`);
     const mine = { closed: null as Promise<void> | null, abandoned: null as string | null };
     opened.set(where, mine);
     let executor: Executor;

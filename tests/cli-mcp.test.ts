@@ -438,7 +438,7 @@ test("query: rows and Postgres's types for a GROUP BY, an enum by its name, trun
     assert.equal(ex.isError, undefined, ex.text);
     assert.ok((ex.structured.plan as string).includes(`public.orders (about 5 rows; ${POLLED})`), ex.structured.plan as string);
     assert.equal(ex.text, ex.structured.plan, "EXPLAIN's lines as text, as psql prints them");
-    assert.match((await c.call("explain", { sql: 'SELECT * FROM "x; y"' })).text, /from its copy of public\."x; y" \(about 1 rows?; polled every 5s, last 2 h ago/);
+    assert.match((await c.call("explain", { sql: 'SELECT * FROM "x; y"' })).text, /from the synced table public\."x; y" \(about 1 rows?; polled every 5s, last 2 h ago/);
     // a refusal's position is the statement's, not the EXPLAIN's this server put around it
     for (const analyze of [false, true]) {
       const pos = await c.call("explain", { sql: "SELECT nope FROM orders", analyze });

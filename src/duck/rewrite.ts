@@ -728,7 +728,7 @@ class Rewriter {
     const alias = String(bodyOf(fields[0]!).sval);
     const table = this.rowTypes.get(t.type);
     if (table !== undefined) return table.map((c) => ({ name: c.name, value: this.typedRef([alias, c.name], c.type, c.typmod), type: c.type }));
-    if (t.type !== RECORD) throw new Unrewritable(`a row of ${this.userTypes.get(t.type)?.replace(/^rowtype:/, "") ?? "a table"} is not supported by Mason: Mason copied the table in part`, "name its columns instead", "row-value");
+    if (t.type !== RECORD) throw new Unrewritable(`a row of ${this.userTypes.get(t.type)?.replace(/^rowtype:/, "") ?? "a table"} is not supported by Mason: Mason synced the table in part`, "name its columns instead", "row-value");
     const source = this.fromSources(select).filter((q) => q.alias === alias);
     if (source.length !== 1) throw new Unrewritable("a row of this FROM item is not supported by Mason", "name its columns instead", "row-value");
     let q = bodyOf(source[0]!.query);

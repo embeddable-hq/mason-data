@@ -335,7 +335,7 @@ export function leftOutLine(r: { statement: string; message: string }): string {
   if (view === null) return `catalog: a source default left out (${r.message}): ${r.statement}`;
   const missing = /^relation "([^"]+)" does not exist$/.exec(r.message)?.[1];
   const name = `${unquote(view[1]!)}.${unquote(view[2]!)}`;
-  return missing !== undefined ? `catalog: view ${name} left out: it reads ${missing}, which is not copied` : `catalog: view ${name} left out (${r.message})`;
+  return missing !== undefined ? `catalog: view ${name} left out: it reads ${missing}, which is not synced` : `catalog: view ${name} left out (${r.message})`;
 }
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
