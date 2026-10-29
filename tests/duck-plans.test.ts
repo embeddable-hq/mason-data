@@ -99,7 +99,9 @@ const schema: PgSchema = {
   database: "app",
   tables: [
     { name: "tenants", primaryKey: ["id"], joins: [], columns: [text("id"), text("name"), text("plan"), int8("changed_seq")] },
-    { name: "customers", primaryKey: ["id"], joins: [], columns: [int8("id"), text("tenant_id"), text("name"), text("email"), tstz("created_at"), int8("changed_seq")] },
+    // email UNIQUE in the catalog, as a source declares it: not the key the copy is written by (KEY_COUNTS' contrasts)
+    { name: "customers", primaryKey: ["id"], joins: [], columns: [int8("id"), text("tenant_id"), text("name"), text("email"), tstz("created_at"), int8("changed_seq")],
+      uniqueKeys: [{ name: "customers_email_key", columns: ["email"], constraint: true, nullsNotDistinct: false }] },
     { name: "orders", primaryKey: ["id"], joins: [],
       columns: [int8("id"), text("tenant_id"), int8("customer_id"), text("status"), { name: "amount", type: "numeric", spelled: "numeric(12,2)" }, tstz("created_at"),
         { name: "shipped_at", type: "timestamptz", spelled: "timestamp" }, text("notes"), int8("changed_seq"), { name: "meta", type: "jsonb" }] },
@@ -276,8 +278,9 @@ const JSONB_SHAPES: Shape[] = [
  * A COUNT OF DISTINCT KEYS (src/duck/distinct-key.ts): a BI tool's "count of entities" is `count(DISTINCT t.id)` of
  * the table's primary key, often grouped by a dimension joined on ITS key, which DuckDB computed as a hash aggregate of
  * every id (a 197 M-row table grouped by a 780-row dimension: two levels of hash aggregate, 1.5 GB spilled, 120 s,
- * against 9 s for `count(t.id)`). Where the column is unique on the source and the FROM repeats no row of its table it
- * is sent as `count(id)`; each other shape keeps its DISTINCT (the contrasts). The invariant below holds both by the SQL
+ * against 9 s for `count(t.id)`). Where the column is its table's primary key and the FROM repeats no row of its table
+ * (every join on the other table's primary key) it is sent as `count(id)`; each other shape keeps its DISTINCT (the
+ * contrasts, a UNIQUE column that is not the key among them, counted and joined on). The invariant below holds both by the SQL
  * sent and by the plan's aggregates.
  */
 const KEY_COUNTS: Shape[] = [
@@ -290,6 +293,10 @@ const KEY_COUNTS: Shape[] = [
   { name: "count distinct key: a column that is not a key (not rewritten)", sql: "SELECT o.tenant_id, count(DISTINCT o.customer_id) AS n FROM orders o GROUP BY 1 ORDER BY 1" },
   { name: "count distinct key: a derived table in FROM (not rewritten)", sql: "SELECT count(DISTINCT s.id) FROM (SELECT o.id FROM orders o WHERE o.status = 'paid') s" },
   { name: "count distinct key: a column of a composite key (not rewritten)", sql: "SELECT count(DISTINCT g.order_id) FROM order_tags g" },
+  // a UNIQUE column that is not the primary key, counted and on a join's other side: the copy is not written by it, so
+  // it may hold one value twice for a moment the source never showed
+  { name: "count distinct key: a UNIQUE column that is not the key, counted (not rewritten)", sql: "SELECT c.tenant_id, count(DISTINCT c.email) AS n FROM customers c GROUP BY 1 ORDER BY 1" },
+  { name: "count distinct key: a join on a UNIQUE column that is not the key (not rewritten)", sql: "SELECT c.tenant_id, count(DISTINCT o.id) AS n FROM orders o JOIN customers c ON c.email = o.status GROUP BY 1 ORDER BY 1" },
 ];
 
 const SHAPES: Shape[] = [...REWRITTEN, ...KEY_COUNTS, ...HELD_BI.map((name) => {

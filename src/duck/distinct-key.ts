@@ -3,18 +3,22 @@
  * `count(DISTINCT t.id)` with `id` the table's primary key, and DuckDB computes it as a hash aggregate of every id to
  * find the duplicates — over a 197 M-row table grouped by a joined dimension, a two-level hash aggregate that spilled
  * 1.5 GB and took 120 s, where `count(t.id)` took 9 s. Postgres's answer is the same for both when no two of the rows
- * counted can hold one value: the column is unique on the SOURCE and the FROM cannot repeat a row of its table. So the
+ * counted can hold one value: the column is the table's KEY and the FROM cannot repeat a row of its table. So the
  * rewrite drops the DISTINCT there (src/duck/rewrite.ts `funcCall`), and only there; this module decides where, from
  * POSTGRES'S ANALYSIS of the statement and the CATALOG Postgres's own pg_index — never by a column's name:
  *
- * - UNIQUE: the catalog Postgres (src/api/postgres/catalog.ts) declares exactly the source's primary key and its unique
- *   indexes over plain columns (src/cli/preflight.ts TABLES_SQL reads none partial, none of an expression, none with
- *   INCLUDE columns); a table copied by a sources file's `key:` (it has no primary key) declares none for it, so that
- *   key — verified to hold a unique index's columns, never declared — is never read here (src/cli/sources.ts
- *   `addedTables`). A column counts when ONE index is over it alone, its equality the operator the DISTINCT compares
- *   by (its btree family's `=`) under the index's collation. A composite key's column is not unique.
+ * - THE KEY, AND ONLY THE PRIMARY KEY: a column that is, alone, the table's PRIMARY KEY in the catalog Postgres
+ *   (src/api/postgres/catalog.ts declares the source's primary key, read valid at `mason start` and at `mason add` /
+ *   `remove`; a table copied by a sources file's `key:` has none, src/cli/sources.ts `addedTables`) — the key the copy
+ *   is WRITTEN by, so the copy never holds it twice (a write by key deletes before it inserts, a batch is folded per
+ *   key, the swap checks as many distinct keys as rows). Never a UNIQUE index that is not the key, though the catalog
+ *   declares those too: a column the copy is not written by may hold one value twice for a moment the source never
+ *   showed (a large transaction applied in pieces, a row refetched as it is now), and the catalog's indexes are the
+ *   source's as of the start (a unique constraint dropped since is still declared). A composite key's column is not a
+ *   key. The equality is the key's btree family's `=` under its collation (the catalog declares the type's default
+ *   opclass and collation, not the source index's: the same equality for a scalar column).
  * - NOT MULTIPLIED: the counted column's table is the FROM's one item, or joined (INNER, LEFT, RIGHT or FULL) only to
- *   base tables each on a conjunction holding an equality of the OTHER table's unique column with a column of the
+ *   base tables each on a conjunction holding an equality of the OTHER table's primary key with a column of the
  *   counted side: each row of that side then meets at most one row of the other, so it is in at most one row of the join
  *   (a row the join leaves unmatched is in exactly one, and a NULL-extended one counts no value). Any other conjunct only
  *   filters. A second FROM item (a comma join), a derived table, a CTE, a function (a LATERAL `jsonb_each`), a VALUES
@@ -34,7 +38,7 @@ const RTE_RELATION = 0;
 /** JoinType: INNER, LEFT, FULL, RIGHT (nodes.h); the planner's SEMI / ANTI never reach a parse tree */
 const JOINS = new Set([0, 1, 2, 3]);
 
-/** a column unique on the source, as the catalog Postgres declares it: by `relid.attno` */
+/** a column that is its table's primary key alone, as the catalog Postgres declares it: by `relid.attno` */
 export interface UniqueColumn {
   /** the index's collation (0 for a type with none): an equality under another (a COLLATE in the statement) is not its */
   collation: number;
@@ -71,26 +75,27 @@ export function distinctCountTables(tree: TreeValue): number[] {
 }
 
 /**
- * The catalog Postgres's single-column unique indexes of `relids` — a primary key's among them — with each one's
- * collation and the equality operators of its btree family. Partial, expression and INCLUDE indexes are left out (the
- * catalog has none: preflight reads none; left out here too, so the rule is this query's and not a reader's memory).
+ * The catalog Postgres's single-column PRIMARY KEYS of `relids` (never another unique index: the module's doc), with
+ * each one's collation and the equality operators of its btree family. A primary key is valid, unique and over a plain
+ * column; the conditions are written out all the same, so the rule is this query's and not a reader's memory.
  */
 export function uniqueColumnsSql(relids: readonly number[]): string {
   return "SELECT i.indrelid::text, i.indkey[0]::text, i.indcollation[0]::text, coalesce(string_agg(o.amopopr::text, ' ' ORDER BY o.amopopr), '') " +
     "FROM pg_index i JOIN pg_opclass c ON c.oid = i.indclass[0] JOIN pg_am m ON m.oid = c.opcmethod AND m.amname = 'btree' " +
     "LEFT JOIN pg_amop o ON o.amopfamily = c.opcfamily AND o.amopmethod = c.opcmethod AND o.amopstrategy = 3 " +
-    `WHERE i.indrelid IN (${relids.map((r) => String(Math.trunc(r))).join(", ")}) AND i.indisunique AND i.indisvalid AND i.indnatts = 1 AND i.indnkeyatts = 1 ` +
+    `WHERE i.indrelid IN (${relids.map((r) => String(Math.trunc(r))).join(", ")}) AND i.indisprimary AND i.indisunique AND i.indisvalid AND i.indnatts = 1 AND i.indnkeyatts = 1 ` +
     "AND i.indkey[0] > 0 AND i.indpred IS NULL AND i.indexprs IS NULL GROUP BY 1, 2, 3";
 }
 
-/** `uniqueColumnsSql`'s rows, as the decision reads them (two indexes over one column: their equalities together) */
+/** `uniqueColumnsSql`'s rows, as the decision reads them (a table has one primary key; the merge is for a second row
+ *  of one column, which no catalog writes) */
 export function uniqueColumnsOf(rows: ReadonlyArray<ReadonlyArray<string | null>>): Map<string, UniqueColumn> {
   const out = new Map<string, UniqueColumn>();
   for (const [relid, attno, collation, ops] of rows) {
     const key = columnKey(Number(relid), Number(attno));
     const equalities = new Set((ops ?? "").split(" ").filter((x) => x !== "").map(Number));
     const had = out.get(key);
-    // two unique indexes over one column under two collations: either's equality, under its own collation, is unique;
+    // two rows for one column under two collations (none today): either's equality, under its own collation, is the key's;
     // kept as the first (the decision then asks that one's), which is conservative
     if (had === undefined) out.set(key, { collation: Number(collation ?? 0), equalities });
     else if (had.collation === Number(collation ?? 0)) out.set(key, { collation: had.collation, equalities: new Set([...had.equalities, ...equalities]) });
@@ -137,7 +142,7 @@ function baseTable(rtable: readonly TreeValue[], ref: TreeValue | undefined): { 
 
 /**
  * Whether a join's condition matches each row of its `side` with at most ONE row of `other`, a base table: a conjunct
- * that is an equality, by the operator of one of `other`'s single-column unique indexes and under its collation, of that
+ * that is an equality, by the operator of `other`'s single-column primary key and under its collation, of that
  * column (bare) with a column of `side` (bare).
  */
 function atMostOne(quals: TreeValue | undefined, side: ReadonlySet<number>, other: { rtindex: number; relid: number }, unique: UniqueColumns): boolean {
@@ -157,7 +162,7 @@ function atMostOne(quals: TreeValue | undefined, side: ReadonlySet<number>, othe
 
 /**
  * Whether the FROM of `query` holds each row of the table at `rtindex` at most once: its one item, that table or a
- * join tree whose every join on the way down to it joins one base table on that table's unique column (`atMostOne`).
+ * join tree whose every join on the way down to it joins one base table on that table's primary key (`atMostOne`).
  */
 export function notMultiplied(query: TreeNode, rtindex: number, unique: UniqueColumns): boolean {
   const jt = query.jointree;

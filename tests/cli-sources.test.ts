@@ -299,3 +299,30 @@ test("a file written with CRLF line endings is edited in them: what mason add an
   assert.equal((S.withoutTable(added.text, "public.customers") as { text: string }).text, "kind: postgres\r\nurl: x\r\ntables:\r\n  orders:\r\n    columns: [id]\r\n");
   assert.equal((S.withoutTable("kind: postgres\r\nurl: x\r\ntables:\r\n  orders: {}\r\n", "public.orders") as { text: string }).text, "kind: postgres\r\nurl: x\r\ntables: {}\r\n");
 });
+
+test("an INVALID unique index (a failed CREATE UNIQUE INDEX CONCURRENTLY, its duplicates still there) is neither read, declared to the catalog, nor a key: Mason accepts", async () => {
+  const { PGlite } = await import("@electric-sql/pglite");
+  const { readSourceFacts } = await import("../src/cli/preflight.ts");
+  const db = new PGlite();
+  try {
+    // logs: no primary key, (tenant_id, id) unique by a valid index and (id) by an INVALID one, as a failed concurrent
+    // build leaves it; the duplicate ids that failed it are in the table
+    await db.exec("CREATE TABLE public.logs (tenant_id bigint NOT NULL, id bigint NOT NULL, note text); " +
+      "CREATE UNIQUE INDEX logs_tenant_id_id ON public.logs (tenant_id, id); CREATE UNIQUE INDEX logs_id ON public.logs (id); " +
+      // not valid, and (as a build that failed before it was ready) not maintained: the duplicate goes in after it
+      "UPDATE pg_index SET indisvalid = false, indisready = false WHERE indexrelid = 'public.logs_id'::regclass; " +
+      "INSERT INTO public.logs VALUES (1, 7, 'a'), (2, 7, 'b')");
+    // the source read through PGlite: each statement's rows as text (the last statement's, of a text of several)
+    const pg = { query: async (sql: string) => {
+      const last = (await db.exec(sql, { rowMode: "array" })).at(-1)!;
+      return { rows: (last.rows as unknown as unknown[][]).map((r) => r.map((v) => v === null || v === undefined ? null : typeof v === "object" ? JSON.stringify(v) : String(v))) };
+    } };
+    const facts = await readSourceFacts(pg as unknown as Parameters<typeof readSourceFacts>[0], new Map());
+    const logs = facts.tables.find((t) => t.source === "public.logs")!;
+    assert.deepEqual(logs.uniqueKeys?.map((u) => u.name), ["logs_tenant_id_id"], "the invalid index is not read, so the catalog never declares it");
+    // a key: over the invalid index's column alone is refused; over the valid one's columns accepted
+    const add = (key: string): unknown => S.addedTables(parse(`kind: postgres\nurl: x\ntables:\n  logs: { key: [${key}] }\n`) as Sources.SourceFile, [logs], "shop", "/app", { replication: false });
+    assert.match((add("id") as Failure).why ?? (add("id") as Failure).message, /no unique index of public\.logs is over \(id\)/);
+    assert.ok(Array.isArray(add("tenant_id, id")), JSON.stringify(add("tenant_id, id")));
+  } finally { await db.close(); }
+});

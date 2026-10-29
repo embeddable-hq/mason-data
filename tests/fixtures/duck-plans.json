@@ -697,6 +697,52 @@
       "full_sort": false
     },
     {
+      "name": "count distinct key: a UNIQUE column that is not the key, counted (not rewritten)",
+      "sql": "SELECT c.tenant_id, count(DISTINCT c.email) AS n FROM customers c GROUP BY 1 ORDER BY 1",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                HASH_GROUP_BY",
+        "                  PROJECTION",
+        "                    PROJECTION",
+        "                      TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "count distinct key: a join on a UNIQUE column that is not the key (not rewritten)",
+      "sql": "SELECT c.tenant_id, count(DISTINCT o.id) AS n FROM orders o JOIN customers c ON c.email = o.status GROUP BY 1 ORDER BY 1",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                HASH_GROUP_BY",
+        "                  PROJECTION",
+        "                    PROJECTION",
+        "                      HASH_JOIN",
+        "                        TABLE_SCAN public.orders",
+        "                        TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
       "name": "BI shape: cast: ::varchar(n) (truncates)",
       "sql": "SELECT o.id, o.notes::varchar(12) AS head, c.name::varchar(3) AS initials FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 20",
       "plan": [

@@ -1,8 +1,9 @@
 /**
  * A COUNT OF DISTINCT KEYS IS A COUNT (src/duck/distinct-key.ts, src/duck/rewrite.ts `funcCall`; docs/DESIGN.md "A count
- * of distinct keys"): `count(DISTINCT x)` is sent to DuckDB as `count(x)` where x is a column the SOURCE holds unique
- * and the FROM repeats no row of its table — decided over Postgres's analysis and the catalog Postgres's own pg_index,
- * which declares the source's primary key and plain unique indexes and nothing a sources file's `key:` names.
+ * of distinct keys"): `count(DISTINCT x)` is sent to DuckDB as `count(x)` where x is its table's PRIMARY KEY (the key
+ * the copy is written by: never another UNIQUE column, which a copy may hold twice for a moment) and the FROM repeats
+ * no row of its table — decided over Postgres's analysis and the catalog Postgres's own pg_index, which declares the
+ * source's primary key and nothing a sources file's `key:` names.
  *
  * Offline: the catalog is a PGlite holding the DDL `catalogDdl` makes of a schema shaped as the sync makes it
  * (src/duck/sync.ts: a table's `primaryKey ?? key`, its unique keys), so the uniqueness read is the catalog's.
@@ -52,6 +53,8 @@ before(async () => {
       { name: "orders", primaryKey: ["id"], joins: [], columns: [int8("id"), text("tenant_id"), int8("customer_id"), text("status"), { name: "meta", type: "jsonb" }] },
       // a composite primary key: neither column is unique
       { name: "lines", primaryKey: ["order_id", "line"], joins: [], columns: [int8("order_id"), { name: "line", type: "int4" }, text("product")] },
+      // a varchar primary key: joined from a text column, its side is read through a RELABELTYPE to text
+      { name: "codes", primaryKey: ["code"], joins: [], columns: [{ name: "code", type: "text", spelled: "character varying(10)" }, text("label")] },
       { name: "events", primaryKey: events.primaryKey ?? events.key, joins: [], columns: events.columns.map((c) => ({ name: c.name, type: c.type === "bigint" ? "int8" as const : "text" as const })),
         ...(events.uniqueKeys ? { uniqueKeys: events.uniqueKeys } : {}) },
     ],
@@ -71,36 +74,39 @@ async function dropped(sql: string): Promise<boolean[]> {
   return [...sql.matchAll(/\bcount\(/g)].map((m) => at.has(m.index));
 }
 
-test("the uniqueness is the catalog's pg_index: the source's primary key and single-column unique indexes, never a key: entry's, never a composite key's column", async () => {
+test("the uniqueness is the catalog's primary key alone: never a UNIQUE index that is not the key, never a key: entry's, never a composite key's column", async () => {
   const { distinctCountTables, uniqueColumnsOf, uniqueColumnsSql } = await import("../src/duck/distinct-key.ts");
   const a = await analyze(catalog, "SELECT count(DISTINCT o.id), count(DISTINCT c.email), count(DISTINCT l.order_id), count(DISTINCT e.id), count(DISTINCT t.id) " +
     "FROM orders o, customers c, lines l, events e, tenants t", []);
   assert.ok(!("refused" in a));
   const unique = uniqueColumnsOf(await catalogRows(catalog, uniqueColumnsSql(distinctCountTables(a.tree))));
   const names = new Map((await catalogRows(catalog, "SELECT c.oid::text || '.' || a.attnum::text, c.relname || '.' || a.attname FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' AND a.attnum > 0")).map(([k, n]) => [k!, n!]));
-  assert.deepEqual([...unique.keys()].map((k) => names.get(k)).sort(), ["customers.email", "customers.id", "orders.id", "tenants.id"]);
+  // customers.email is UNIQUE in the catalog too, and not the key the copy is written by: not read
+  assert.ok((await catalogRows(catalog, "SELECT 1 FROM pg_index WHERE indrelid = 'customers'::regclass AND indisunique AND NOT indisprimary")).length === 1, "the catalog declares the UNIQUE email");
+  assert.deepEqual([...unique.keys()].map((k) => names.get(k)).sort(), ["customers.id", "orders.id", "tenants.id"]);
   // each with its btree family's equality: int8 = int8 and the cross-type integer ones, text's =
   const int8eq = 410, int48eq = 15, texteq = 98;
   const orders = [...unique].find(([k]) => names.get(k) === "orders.id")![1];
   assert.ok(orders.equalities.has(int8eq) && orders.equalities.has(int48eq), JSON.stringify([...orders.equalities]));
-  const email = [...unique].find(([k]) => names.get(k) === "customers.email")![1];
-  assert.ok(email.equalities.has(texteq) && email.collation === 100, JSON.stringify({ ...email, equalities: [...email.equalities] }));
+  const tenants = [...unique].find(([k]) => names.get(k) === "tenants.id")![1];
+  assert.ok(tenants.equalities.has(texteq) && tenants.collation === 100, JSON.stringify({ ...tenants, equalities: [...tenants.equalities] }));
   // a statement with no count(DISTINCT …) asks the catalog nothing
   const plain = await analyze(catalog, "SELECT count(o.id), count(*) FROM orders o", []);
   assert.ok(!("refused" in plain));
   assert.deepEqual(distinctCountTables(plain.tree), []);
 });
 
-test("a count(DISTINCT x) of a unique column over its table alone is count(x): filtered, grouped, in HAVING, with a FILTER, in a subquery", async () => {
+test("a count(DISTINCT x) of a primary key over its table alone is count(x): filtered, grouped, in HAVING, with a FILTER, in a subquery", async () => {
   assert.deepEqual(await dropped("SELECT count(DISTINCT o.id) FROM orders o"), [true]);
   assert.deepEqual(await dropped("SELECT o.tenant_id, count(DISTINCT o.id) FROM orders o WHERE o.status = 'paid' GROUP BY o.tenant_id HAVING count(DISTINCT o.id) > 1"), [true, true]);
   assert.deepEqual(await dropped("SELECT count(DISTINCT o.id) FILTER (WHERE o.status = 'paid') FROM orders o"), [true]);
-  assert.deepEqual(await dropped("SELECT count(DISTINCT c.email) FROM customers c"), [true], "a UNIQUE column that admits NULLs: both forms ignore them");
+  assert.deepEqual(await dropped("SELECT count(DISTINCT k.code) FROM codes k"), [true], "a varchar key");
   assert.deepEqual(await dropped("SELECT * FROM (SELECT count(DISTINCT o.id) AS n FROM orders o) s"), [true], "decided in the query it belongs to");
   assert.deepEqual(await dropped("SELECT o.tenant_id, count(DISTINCT o.id) FROM orders o GROUP BY ROLLUP (o.tenant_id)"), [true]);
 });
 
-test("what is not a unique column keeps its DISTINCT: another column, an expression of the key, a composite key's column, a key: entry's, a COLLATE", async () => {
+test("what is not a primary key keeps its DISTINCT: a UNIQUE column that is not the key, another column, an expression of the key, a composite key's column, a key: entry's, a COLLATE", async () => {
+  assert.deepEqual(await dropped("SELECT count(DISTINCT c.email) FROM customers c"), [false], "a UNIQUE column the copy is not written by");
   assert.deepEqual(await dropped("SELECT count(DISTINCT o.status), count(DISTINCT o.customer_id) FROM orders o"), [false, false]);
   assert.deepEqual(await dropped("SELECT count(DISTINCT o.id / 2), count(DISTINCT o.id::text) FROM orders o"), [false, false]);
   assert.deepEqual(await dropped("SELECT count(DISTINCT l.order_id), count(DISTINCT l.line) FROM lines l"), [false, false]);
@@ -109,19 +115,23 @@ test("what is not a unique column keeps its DISTINCT: another column, an express
   assert.deepEqual(await dropped("SELECT sum(DISTINCT o.id), count(o.id) FROM orders o"), [false]);
 });
 
-test("a join on the OTHER table's unique column repeats no row of the counted one: LEFT, INNER, RIGHT, FULL, a chain, a further conjunct", async () => {
+test("a join on the OTHER table's primary key repeats no row of the counted one: LEFT, INNER, RIGHT, FULL, a chain, a further conjunct", async () => {
   assert.deepEqual(await dropped("SELECT t.name, count(DISTINCT o.id) FROM orders o LEFT JOIN tenants t ON o.tenant_id = t.id GROUP BY t.name"), [true]);
   assert.deepEqual(await dropped("SELECT t.name, count(DISTINCT o.id) FROM orders o JOIN tenants t ON t.id = o.tenant_id GROUP BY t.name"), [true]);
   assert.deepEqual(await dropped("SELECT t.name, count(DISTINCT o.id) FROM tenants t RIGHT JOIN orders o ON o.tenant_id = t.id GROUP BY t.name"), [true]);
   assert.deepEqual(await dropped("SELECT t.name, count(DISTINCT o.id) FROM tenants t FULL JOIN orders o ON o.tenant_id = t.id GROUP BY t.name"), [true]);
   assert.deepEqual(await dropped("SELECT count(DISTINCT o.id) FROM orders o LEFT JOIN tenants t ON o.tenant_id = t.id AND t.name <> ''"), [true]);
   assert.deepEqual(await dropped("SELECT t.name, count(DISTINCT o.id) FROM orders o LEFT JOIN customers c ON o.customer_id = c.id LEFT JOIN tenants t ON c.tenant_id = t.id GROUP BY t.name"), [true]);
-  assert.deepEqual(await dropped("SELECT count(DISTINCT o.id) FROM orders o JOIN customers c ON o.status = c.email"), [true], "a unique index that is not the primary key");
+  const relabelled = "SELECT k.label, count(DISTINCT o.id) FROM orders o LEFT JOIN codes k ON k.code = o.status GROUP BY 1";
+  const analysed = await analyze(catalog, relabelled, []);
+  assert.ok(!("refused" in analysed) && /"_node":"RELABELTYPE"/.test(JSON.stringify((analysed.tree as unknown as { jointree: unknown }).jointree)), "the varchar key is read through a RELABELTYPE in the join");
+  assert.deepEqual(await dropped(relabelled), [true], "a varchar key read through a RELABELTYPE");
   assert.deepEqual(await dropped("SELECT count(DISTINCT a.id) FROM orders a JOIN orders b ON a.customer_id = b.id"), [true], "the table joined to itself on its key");
 });
 
 test("a FROM that may repeat a row of the counted table keeps the DISTINCT: a non-key join, the counted side's own key, an OR, a composite key, a lateral, a cross or comma join, a derived table, a CTE", async () => {
   assert.deepEqual(await dropped("SELECT count(DISTINCT o.id) FROM orders o JOIN tenants t ON o.tenant_id = t.name"), [false]);
+  assert.deepEqual(await dropped("SELECT count(DISTINCT o.id) FROM orders o JOIN customers c ON o.status = c.email"), [false], "a UNIQUE column that is not the key, on the join's other side");
   assert.deepEqual(await dropped("SELECT count(DISTINCT o.id) FROM orders o JOIN customers c ON c.tenant_id = o.tenant_id"), [false]);
   assert.deepEqual(await dropped("SELECT count(DISTINCT o.id) FROM orders o JOIN customers c USING (tenant_id)"), [false], "a USING join on a column no unique index is over");
   // a customer is in as many rows as it has orders: the equality is on the ORDERS' customer_id, not their key

@@ -379,11 +379,12 @@ shop a jsonb's order is spread over the row groups like a text column's (`meta` 
 would skip one anyway, where a table whose documents follow insertion time could. The gain is the calls ("The key
 stored" below: 19.2–26.1 s by the function against 0.13–0.31 s from the stored key, 20 M rows under C).
 
-**A count of distinct keys (2026-10-29).** Nine statements (`KEY_COUNTS`, over the shop and a composite-keyed
-`order_tags` beside it): `count(DISTINCT id)` of the orders alone, grouped by a dimension LEFT or INNER joined on its
-key, with a FILTER — each sent as `count(id)` and planned with one aggregate (none for the ungrouped count, answered
-from DuckDB's statistics) — and the contrasts that keep their DISTINCT and their two aggregates: a join on a non-key, a
-LATERAL `jsonb_each` beside it, a column that is no key, a derived table, a composite key's column. An invariant holds
+**A count of distinct keys (2026-10-29).** Eleven statements (`KEY_COUNTS`, over the shop, its customers' email
+declared UNIQUE, and a composite-keyed `order_tags` beside it): `count(DISTINCT id)` of the orders alone, grouped by a
+dimension LEFT or INNER joined on its primary key, with a FILTER — each sent as `count(id)` and planned with one
+aggregate (none for the ungrouped count, answered from DuckDB's statistics) — and the contrasts that keep their
+DISTINCT and their two aggregates: a join on a non-key, a LATERAL `jsonb_each` beside it, a column that is no key, a
+derived table, a composite key's column, and a UNIQUE column that is not the primary key, counted and joined on. An invariant holds
 both the SQL sent and the number of aggregates for each, so a rewrite that drops a DISTINCT too far fails as surely as
 one that loses it ("A count of distinct keys" below).
 **Where.** `tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`.
@@ -759,14 +760,14 @@ prune (a third here), a time column nearly everything; not measured there yet.
 #### A count of distinct keys (2026-10-29)
 
 **Decision.** `count(DISTINCT x)` is sent to DuckDB as `count(x)` (its FILTER kept) where no two of the rows it counts
-can hold one value of x (`src/duck/distinct-key.ts`, applied in `funcCall`): x is a plain column of a base table that
-ONE single-column unique index covers in the catalog Postgres — the source's primary key or one of its unique indexes
-(`catalogDdl` declares exactly those: preflight reads none partial, of an expression or with INCLUDE columns, and a
-table copied by a sources file's `key:` declares no key, so a key Mason was told and only verified to hold a unique
-index's columns is never trusted for this) — under the equality and collation the DISTINCT compares by (the index's
-btree family); and the FROM repeats no row of x's table: it is that table, or a join tree whose every join on the way
-down to it joins ONE base table (INNER, LEFT, RIGHT or FULL) on a conjunction holding an equality of the other table's
-unique column with a bare column of x's side. Each row of x's side then meets at most one row of the other, so it is in
+can hold one value of x (`src/duck/distinct-key.ts`, applied in `funcCall`): x is a plain column that is, alone, its
+table's PRIMARY KEY in the catalog Postgres — the source's primary key, the key the copy is written by (a table copied
+by a sources file's `key:` declares none: a key Mason was told and only verified to hold a unique index's columns is
+never trusted for this) — under the equality and collation the DISTINCT compares by (the key's btree family); and the
+FROM repeats no row of x's table: it is that table, or a join tree whose every join on the way down to it joins ONE
+base table (INNER, LEFT, RIGHT or FULL) on a conjunction holding an equality of the other table's PRIMARY KEY with a
+bare column of x's side. Never a UNIQUE index that is not the primary key, in either role, though the catalog declares
+those too (next paragraph). Each row of x's side then meets at most one row of the other, so it is in
 at most one row of the join whatever the join's kind (one unmatched row is one row; a NULL-extended one counts no
 value), and every other conjunct only filters. A comma join, a derived table, a CTE, a function (a LATERAL
 `jsonb_each`), a join of joins on the other side, an OR at the condition's top, an expression on either side of the key
@@ -795,13 +796,37 @@ JOIN a 780-row dimension on its key, GROUP BY the dimension's name, best of five
 The gap widens as the distinct values outgrow the memory, which the server's 197 M uuids on a 15 GiB machine did by
 far (the 1.5 GB spill); a laptop whose page cache holds the table never shows the server's 120 s.
 
-**What it rests on.** Uniqueness is the source's, as the catalog declares it NOW (it is rebuilt from the source's
-catalog read every poll), and the copy is the source's rows (the swap checks a copy's key holds as many distinct values
-as rows; the oracle holds every copy to its source). A copy one poll behind a source that removed duplicates and added
-the unique index within that poll could hold a duplicate the index never checked: the one window, said here.
+**Why the primary key alone (the review of PR #25).** The first version trusted any single-column unique index the
+catalog declares, and three things made that a wrong answer waiting to happen:
+- the catalog's keys and indexes are the source's as of `mason start` and `mason add` / `remove` ONLY: `Sync.setTables`
+  carries them into the catalog's schema, and nothing else calls it — the run's 10-second catalog read
+  (`refreshFacts`, src/cli/dev.ts) refreshes the commands' facts, not the sync's tables. A migration that replaces
+  `UNIQUE (code)` with `UNIQUE (tenant_id, code)`, then two tenants inserting `'a'`, made `count(DISTINCT code)` count
+  N+1 for N, and a join on `code` count a row twice. (Feeding the refreshed facts to `setTables` was left out: it would
+  also hand the sync every column change of every table, which re-copies a table, and a change of its key mid-run —
+  a change of what a run does, not of this rewrite.)
+- an INVALID unique index (a `CREATE UNIQUE INDEX CONCURRENTLY` that failed leaves one, the duplicates that failed it
+  still in the table) was read as unique by preflight and declared VALID in the empty catalog; preflight now reads only
+  valid indexes (`TABLES_SQL`, which `key:`'s check reads too: an invalid index is no key Mason accepts either);
+- a column the copy is NOT written by can hold one value twice for a moment no source snapshot shows: a large
+  transaction applied in pieces (a stream batch over its piece size, a poll over its piece rows), or a row refetched as
+  it is now. The copy's OWN key cannot: a write by key deletes before it inserts, a batch is folded per key, pieces are
+  disjoint, and the swap checks as many distinct keys as rows.
+The primary key closes the last two and the common form of the first (a unique constraint dropped or replaced). What it
+costs: a unique column that is not the key (a product's sku beside its id, an email) keeps its DISTINCT; the measured
+shape — a fact table's primary key counted over a dimension joined on ITS primary key — is unchanged.
+
+**What it rests on, and the case left open.** The copy is the source's rows under the key it is written by (the swap's
+check; the oracle holds every copy to its source), and the catalog's primary key is the source's as of the start or the
+last `mason add` / `remove`. A source that DROPS its primary key mid-run is the case left open: the catalog still
+declares it and the copy is still written by it, so two staged rows of one id would both be inserted and counted; under
+logical replication that migration also breaks the source's own UPDATE and DELETE on the published table. The source
+index's opclass and collation are not read either (`catalogDdl` declares the type's default), which for a scalar
+column is the same equality.
 **Where.** `src/duck/distinct-key.ts`, `src/duck/rewrite.ts` (`keyCounts`, `repeatedKeyCounts`), `src/duck/plan.ts`
 (`distinctKeys`); `tests/duck-distinct-key.test.ts`, `tests/duck-plans.test.ts` (`KEY_COUNTS`), the oracle's
-`count of distinct keys` BI shapes and the type matrix's `keyed` and `pairs`.
+`count of distinct keys` BI shapes and the type matrix's `keyed`, `pairs` and `vkeys`; `tests/cli-sources.test.ts`
+(an invalid index).
 
 ### A query cannot take the run down
 
