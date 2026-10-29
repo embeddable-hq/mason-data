@@ -12,7 +12,7 @@
  * What it needs: IT_POSTGRES_URL with wal_level = logical, psql on PATH, DuckDB's postgres extension. It writes only
  * inside databases it creates, `it_dstream_<random>*`, and drops them and its slots at the end.
  */
-import { test, after } from "node:test";
+import { test, after, afterEach } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -37,6 +37,17 @@ function psql(url: string, sql: string): string {
   return r.stdout.trim();
 }
 const urlOf = (db: string): string => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); };
+
+// A TEST LEAVES NO SLOT for the next one: CI's Postgres keeps max_replication_slots = 10, and this file's tests make
+// more than that between them. After each, once its sync stopped and the walsender let go, its slots are dropped,
+// VERIFIED gone
+afterEach(async () => {
+  if (!adminUrl || !logical) return;
+  const held = (): string => psql(adminUrl, `SELECT count(*) FILTER (WHERE active) FROM pg_replication_slots WHERE slot_name LIKE '${tag}%'`);
+  for (const until = Date.now() + 10_000; held() !== "0" && Date.now() < until;) await new Promise((r) => setTimeout(r, 100));
+  psql(adminUrl, `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE '${tag}%' AND NOT active`);
+  assert.equal(psql(adminUrl, `SELECT string_agg(slot_name, ', ') FROM pg_replication_slots WHERE slot_name LIKE '${tag}%'`), "", "every slot a test made is dropped after it");
+});
 
 after(() => {
   fs.rmSync(dir, { recursive: true, force: true });
