@@ -14,6 +14,7 @@ same JSON; the web page and the managed service read those endpoints, never a se
 | `GET /api/state` | `mason status`, `mason wait` (with `?columns=1`) | each copy's rows, state and last sync (`tables[].sync`), the totals, the readiness; each table's columns only with `?columns=1` |
 | `GET /api/tables/<table>/columns` | `mason tables <table>` `columns` | one table's columns (`{ table, columns }`): the Tables page's form reads it as it opens |
 | `GET /api/queries` | `mason status` | the last day's and week's statements: outcomes, time (average, p50, p95), rows and bytes sent; read at most once every 30 s, so up to 30 s old |
+| `GET /api/activity?since=` | (the Usage page's) | one time range of the request log: `{ since, window, clients, slowest, keptDays }` — its statements as the summary counts a day, who sent them (a row per user and client: statements, failed, sessions, last), the 10 slowest that completed |
 | `GET /api/slow`, `GET /api/refused` | `mason status` | the slow statements; the refused and failed ones, each distinct one once |
 | `GET /api/unsupported?since=&limit=` | `mason status` `unsupported` | the refused statements grouped by the registry entry (docs/SQL-SUPPORT.md) that refused them: `[{ gap, title, runs, users, clients, last, example }]`, the most refused first; a day and 10 entries by default |
 | `GET /api/requests?limit=&failed=&outcome=&since=&until=&user=&client=&slow=&search=&before=` | `mason logs --requests` | the request log, filtered and paged; `slow=1` (`--slow`) the ones that took `SLOW_MS` (1 s) or more, `search` (`--search`) a piece of the statement's text, any case |
@@ -59,15 +60,17 @@ the same endpoints its own way.
 Built: the shell and every page (src/web/app.js, src/web/pages/).
 
 - **The shell**: `index.html` with a left sidebar — Overview · Tables · Users, then the Observability group's three
-  views, Queries · Usage · Logs (modelled on Vercel's, Neon's and PlanetScale's) — and one section per page, chosen
+  views, Queries · Usage · Syncs (modelled on Vercel's, Neon's and PlanetScale's) — and one section per page, chosen
   by the URL's hash (`#overview`, the default; `#observability/queries`; the old `#status`, `#queries`, `#usage` and
-  `#logs` land on their view). Each page is an ES module of its own, a route of `PAGE_ROUTES`. ONLY THE PAGE SHOWN
+  `#logs` land on their view; `#observability/logs` is Syncs). Each page is an ES module of its own, a route of `PAGE_ROUTES`. ONLY THE PAGE SHOWN
   polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.
-- **Observability's time range**: Last hour · 24 hours · 7 days · 30 days · 90 days (24 hours unless `?range=` says; 30
+- **Observability's time range**: Now · Last hour · 24 hours · 7 days · 30 days · 90 days (Now unless `?range=` says;
+  Now is the last 15 minutes and LIVE — its reads every few seconds — and every other range is read once when chosen,
+  with when and Refresh beside it; 30
   and 90 days only where the run keeps them, `/api/state` `engine.keptDays`, MASON_REQUEST_LOG_DAYS — else shown
   disabled, saying so), shared by its three views and kept in the hash: Queries' request log `since`, Usage's samples
   (`since`, and a step of 60 s, 1 h, 6 h or a day — 90 days, 129,600 samples, re-bucket in ~15 ms),
-  Logs' events `since`. Each view's filters compose with it.
+  Usage's `/api/activity`, Syncs' events `since`. Each view's filters compose with it.
 - **Overview** (`#overview`): one word, `mason status`'s (Ready / Under way / Failed: `readinessWord` of `readiness`, said
   by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); cards that each link
   into the view that lists what they count (the failed tables, Queries — the slow ones from the p95 —, Usage); ONE table
@@ -82,30 +85,33 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   `/api/requests?failed=1`, `/api/unsupported` (30 s).
 - **Tables** (`#tables`, `#tables?show=failed`): ONE table of the database's tables. An added one shows its state
   (Synced / Syncing / Failed / Waiting), rows, last sync and its age, how long it took (`<0.1 s` under a tenth), the
-  copy's own size, in replication mode its stream state, its error, **Sync** (`POST /api/sync`) and Remove; one not added
+  copy's own size, in replication mode its stream state, its error, **View syncs** (Syncs narrowed to it), **Sync now**
+  (`POST /api/sync`) and Remove; one not added
   its rows and key and why it cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
   (2 s, lean: no table's columns), `/api/usage` `copySizes` (60 s), and a table's columns once as its form opens
   (`/api/tables/<table>/columns`).
 - **Users** (`#users`): today's add form and Remove, and each user's status (Active / Removed), when it was added, its
   last use, and its URL without the password (**Copy**). Reads `/api/users?lastUsed=1` (on opening, then 30 s).
-- **Observability › Queries** (`#observability/queries`): who is connected now (`sessions` of `/api/state`: the 10
-  clients with the most sessions, then one row for the others), the statements running now, each with **Cancel** (asks
-  first; `POST /api/cancel`), and the request log as a table, newest first — the first 8 characters of the id, started,
-  duration, status, user, client, rows, the statement (two lines at most), its error's first line — with a per-row
-  details (the whole id, ended, bytes sent, the statement and error, the first 16 KiB of each), filtered by status, slow
-  (1 s or more), the statement's text, time (the range unless Since says), user and client, paged by **Older**, its page
-  sorted by Started, Duration or Rows. Rows scanned is not a column: decide later, it may add cost to every statement.
-  The unsupported SQL of the range, grouped by its entry of docs/SQL-SUPPORT.md (`/api/unsupported?since=`, 60 s), in
-  `mason status`'s lines. Reads `/api/running` (2 s), `/api/requests` (5 s on the newest page, 30 s while a search
-  is set — said under the log — never on an older one),
-  `/api/state` (5 s).
-- **Observability › Usage** (`#observability/usage`): the statements of the range's window of `/api/queries` (the week
-  for 7 days and longer, else the day), the range's samples (`/api/usage?since=<range>&step=<60|3600|21600|86400>`, newest first, the
-  process's memory in a closed details), four charts of them, and each copy's own size (60 s).
-- **Observability › Logs** (`#observability/logs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s),
-  newest first, narrowed by Failures only, a kind (every kind) and a table (every added table, from `/api/state`, whether the range has an event of it or not). The run's raw log (`/api/logs`, 5 s) is debugging output
-  with internal tags and paths: it is behind a closed details, newest first, and read only while that is open.
+- **Observability › Queries** (`#observability/queries`): the request log as a table, newest first — the first 8
+  characters of the id, started, duration, status, user, client, rows, the statement (two lines at most), its error's
+  first line — with a per-row details (the whole id, ended, bytes sent, the statement and error, the first 16 KiB of
+  each), filtered by status, slow (1 s or more), the statement's text, time (the range unless Since says), user and
+  client (Usage's rows lead here with them), paged by **Older**, its page sorted by Started, Duration or Rows. Rows
+  scanned is not a column: decide later, it may add cost to every statement. Reads `/api/requests` (under Now 5 s on
+  the newest page, 30 s while a search is set — said under the log; once for any other range; never on an older page),
+  `/api/state` (30 s, for Connect while the log is empty).
+- **Observability › Usage** (`#observability/usage`): the range's cards, who is connected and what runs (Now:
+  `/api/state` `sessions`, 5 s; `/api/running`, 2 s, each with **Cancel**, `POST /api/cancel`) or who sent statements
+  and the slowest (any other range: `/api/activity`), the unsupported SQL of the range (`/api/unsupported?since=`), the
+  range's samples (`/api/usage?since=<range>&step=<60|3600|21600|86400>`, newest first, the process's memory in a closed
+  details), four charts of them, and each copy's own size. A client, a slow statement and a statement card lead to
+  Queries filtered. Under Now `/api/activity` every 5 s and the rest every 60 s; any other range, each once.
+- **Observability › Syncs** (`#observability/syncs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s
+  under Now, else once), newest first, narrowed by Failures only, a kind (every kind) and a table (every added table,
+  from `/api/state`, whether the range has an event of it or not; Tables' View syncs chooses it). The run's raw log
+  (`/api/logs`, 5 s) is debugging output with internal tags and paths: it is behind a closed details, newest first, and
+  read only while that is open.
 
 ## Who reads it
 

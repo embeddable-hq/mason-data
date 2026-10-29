@@ -1,7 +1,7 @@
 # The web page (`mason ui`)
 
 `mason start` serves a web page beside the commands, in a browser tab: a left sidebar of pages (Overview, Tables,
-Users, and the Observability group's three views: Queries, Usage and Logs) over the state `mason status`, `mason tables`,
+Users, and the Observability group's three views: Queries, Usage and Syncs) over the state `mason status`, `mason tables`,
 `mason user`, `mason usage` and `mason logs` read.
 
 ```bash
@@ -13,7 +13,7 @@ mason ui --json       # { url, port, next }
 ## What it shows
 
 The page has a sidebar on the left — the project (the database, a **demo** badge when it is the demo database), a nav of
-**Overview · Tables · Users** and, under the **Observability** heading, **Queries · Usage · Logs**, each a link with its
+**Overview · Tables · Users** and, under the **Observability** heading, **Queries · Usage · Syncs**, each a link with its
 icon, the one shown a filled row; at its foot how long ago Mason last answered and the version — and shows one view at a
 time beside it, chosen by
 the address's hash, so a view can be bookmarked and Back goes to the one before:
@@ -23,14 +23,17 @@ the address's hash, so a view can be bookmarked and Back goes to the one before:
 | `#overview` (none, or one it does not know) | the Overview |
 | `#tables`, `#tables?show=failed` | Tables (filtered to the failed copies) |
 | `#users` | Users |
-| `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=failed` set those filters |
+| `#observability/queries` (`#observability`) | Observability › Queries; `?slow=1`, `?status=failed`, `?user=`, `?client=` set those filters |
 | `#observability/usage` | Observability › Usage |
-| `#observability/logs` | Observability › Logs; `?failures=1` ticks Failures only |
+| `#observability/syncs` | Observability › Syncs; `?failures=1` ticks Failures only, `?table=` chooses the table |
 
-The hashes of before the Observability group still land on their view: `#status` is the Overview, `#queries`, `#usage` and
-`#logs` the Observability views. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — Last hour · 24 hours · 7 days · 30 days · 90 days, 24 hours unless the hash says (`?range=1h`, `?range=7d`, `?range=90d`); 30 and 90 days only where Mason keeps that much history (`MASON_REQUEST_LOG_DAYS`, 7 by default), else shown disabled with that setting as the reason
-— kept in the hash, so a link carries it (the sidebar's links to the three keep it too). Queries reads the request log since then, Usage the samples of that span (a
-minute a point for the hour, an hour for the day, six hours for the week, a day for 30 and 90 days; the cards of 30 and 90 days say the last 7 days, by name, as the request log's summary has a day and a week), Logs the sync's events since then; each
+The hashes of before still land on their view: `#status` is the Overview, `#queries` and `#usage` their views, `#logs`
+and `#observability/logs` Syncs. In each Observability view's header row, right of its title, is **the time range the three share**: a segmented control — **Now** · Last hour · 24 hours · 7 days · 30 days · 90 days, Now unless the hash says (`?range=1h`, `?range=7d`, `?range=90d`); 30 and 90 days only where Mason keeps that much history (`MASON_REQUEST_LOG_DAYS`, 7 by default), else shown disabled with that setting as the reason
+— kept in the hash, so a link carries it (the sidebar's links to the three keep it too). **Now is live**: the last 15
+minutes, read every few seconds, said **Live** beside the control. **Every other range is read once**, when it is
+chosen, and stays as it was then: beside it, when it was read and **Refresh**. Queries reads the request log since then,
+Usage the range's statements, clients and samples (a minute a point for Now and the hour, an hour for the day, six hours
+for the week, a day for 30 and 90 days), Syncs the sync's events since then; each
 view's own filters compose with it. Only the view shown asks Mason anything, each read at the rate its data changes,
 and nothing while the tab is hidden. How long ago Mason last answered is at the sidebar's foot.
 
@@ -70,7 +73,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   current, moving while it copies, a shimmer while it waits — its rows, its last sync over how long it took, and the
   copy's size. What is said at length (the words `mason wait` prints after a bar not yet full, an error, why a table
   cannot be added, its stream state) is its note, a line of its own under the row, across every column — written for
-  every row, empty when it says nothing, so a note that comes or goes moves no row. **Sync** runs `mason sync` for it
+  every row, empty when it says nothing, so a note that comes or goes moves no row. **View syncs** opens Syncs narrowed
+  to that table; **Sync now** runs `mason sync` for it
   (its button says Syncing…, then Synced ✓, in one width); **Remove** asks first, then runs `mason remove`. **Nothing a
   click does moves another row or a column**: the columns are fixed widths, a question (Remove's), a form (Columns…) and
   what an action answered are popovers beside the button, over the rows and never between them — an answer goes by
@@ -83,15 +87,8 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   Copy buttons, with a link to Queries, where its statements will show; Mason keeps no copy, so they are never shown again.
 - **Users**, the list: each user's status (Active or Removed), when added, when last used, and its URL with **Copy**. A
   user that no longer connects is flagged with why. **Remove** asks first; a removed user stays listed, muted.
-- **Observability › Queries** (`#observability/queries`): cards for sessions open, statements running, and the
-  statements, failed and p95 of the range (the request log's summary has a day and a week: the hour's cards say the
-  day, by name), then who is connected now — a row per user and client, the 10 with the most sessions and one row for
-  the others.
-- **Queries**, running now: each statement with how long it has run (moving with each poll; when it started is its title) and **Cancel**, which asks first and stops that one statement, as
-  `mason cancel` does.
-- **Queries**, unsupported SQL: the statements of the range Mason refused for SQL it does not support, grouped by their
-  entry of `docs/SQL-SUPPORT.md` (named, as the page cannot link into the repository), the most refused first — how
-  many, when the latest was, who sent them and the latest statement on a line, as `mason status` says them.
+- **Observability › Queries** (`#observability/queries`): the request log, and only that — who is connected, what runs
+  and the range's numbers are on Usage.
 - **Queries**, the request log empty and unfiltered: its sentence, then Connect your first tool (as the Overview's).
 - **Queries**, the request log: newest first, with a status dot per row. Filter by status, **Slow (1 s or more)**, a
   piece of the statement's text (**Statement has**), since (`2h`, `7d`, or a date: used instead of the range), user and
@@ -102,17 +99,26 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   answered without the copy and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
   page says so, as `mason logs --requests` does when it lists none; while nothing is listed, Connect offers a first
   statement that is (`select count(*) from <a copied table>;`).
-- **Observability › Usage** (`#observability/usage`): cards for the range (statements, failed, p95, rows sent, bytes
-  sent), each with a sparkline.
+- **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: under Now, the sessions
+  connected and the statements running; under any other range, the clients that sent statements in it; then the
+  range's statements, failed, p95 and what was sent (bytes, and rows under it), each with a sparkline — the statement
+  cards lead to Queries filtered to what they count (all, failed, slow).
+- **Usage**, connected: under Now, who is connected now — a row per user and client, the 10 with the most sessions and
+  one row for the others; under any other range, who sent statements in it, the most first, with their failed ones,
+  sessions and last statement. Each row's **Queries** opens the request log filtered to that user and client.
+- **Usage**, running: under Now, each statement running with how long it has run (moving with each poll; when it started is its title) and **Cancel**, which asks first and stops that one statement, as
+  `mason cancel` does; under any other range, the slowest statements that completed in it, each with **Queries**.
+- **Usage**, unsupported SQL: the statements of the range Mason refused for SQL it does not support, grouped by their
+  entry of `docs/SQL-SUPPORT.md` (named, as the page cannot link into the repository), the most refused first — how
+  many, when the latest was, who sent them and the latest statement on a line, as `mason status` says them.
 - **Usage**, charts and tables: four charts over the range (statements, p95, the copy's size, rows in the copy), their
   time axis in minutes, hours or days by the range, their values compact (`1.2K`, `3.4 MiB`, `512 ms`) and exact on
-  hover; a series with one sample says its value instead. Then the last day and week side by side, and each copy's own
-  size, measured every 10 minutes. The samples, newest first (**Time** sorts them), sit behind a closed details, and
-  the process's memory behind another.
-- **Observability › Logs** (`#observability/logs`): the sync's events of the range, newest first (**When** turns it
+  hover; a series with one sample says its value instead. Then each copy's own size, measured every 10 minutes. The
+  samples, newest first (**Time** sorts them), sit behind a closed details, and the process's memory behind another.
+- **Observability › Syncs** (`#observability/syncs`): the sync's events of the range, newest first (**When** turns it
   round), with when, kind, table and reason. **Failures only**, a **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are
   written at once, then **Show more**.
-- **Logs**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
+- **Syncs**, the run's raw log: behind a closed details, for debugging (it has internal tags and paths), newest first. Mason
   is asked for it only while the details is open.
 
 When something is refused, or Mason stops answering, the page says it as the commands do: what is wrong, why, the way

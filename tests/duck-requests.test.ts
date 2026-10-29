@@ -292,6 +292,30 @@ test("the query summary: the last day's and week's statements, each outcome, the
   await store.writer.run(`DELETE FROM ${REQUESTS_TABLE}`);
 });
 
+test("one time range of the log (window, clients, slowest): its statements folded as the summary folds a day; who sent them, the most first; the slowest completed; nothing before since", async () => {
+  const ledger = await RequestLedger.open(store, () => undefined, { days: 7 });
+  const now = Date.now();
+  const since = new Date(now - 15 * 60_000).toISOString();
+  const at = new Date(now - 60_000);
+  for (const [i, ms] of [10, 20, 30].entries()) ledger.record(row({ requestId: `a${i}`, at, durationMs: ms, rows: 1, bytesSent: 10, user: "alice", session: 1 }));
+  ledger.record(row({ requestId: "a3", at, durationMs: 900, user: "alice", session: 2, payload: "SELECT slow" }));
+  ledger.record(row({ requestId: "b0", at, durationMs: 5, user: "bob", client: "postgres:psql", session: 3, status: 400, sqlstate: "42P01", error: "no" }));
+  // before the range, and a refused login: neither is in it
+  ledger.record(row({ requestId: "old", at: new Date(now - 3_600_000), durationMs: 5000, user: "alice", session: 9 }));
+  ledger.record(row({ requestId: "login", at, method: "CONNECT", status: 401, sqlstate: "28P01", error: "password authentication failed", user: "carol" }));
+  await ledger.flush();
+  const w = await ledger.window(since, now);
+  assert.deepEqual({ ...w, days: Math.round(w.days * 96), covered: Math.round(w.covered * 96) }, { days: 1, covered: 1, statements: 5, completed: 4, refused: 1, failed: 0, cancelled: 0, rows: 3, bytesSent: 30,
+    durationMs: { avg: 240, p50: 25, p95: 769 } }, "the summary's fold over the range: a quarter of an hour is 1/96 of a day, all of it kept");
+  assert.deepEqual(await ledger.clients(since), [
+    { user: "alice", tokenName: "", client: "Metabase", statements: 4, failed: 0, sessions: 2, last: at.toISOString() },
+    { user: "bob", tokenName: "", client: "psql", statements: 1, failed: 1, sessions: 1, last: at.toISOString() }], "the most statements first; the refused login and the hour-old one are not in it");
+  const slowest = await ledger.slowest(since, 2);
+  assert.deepEqual(slowest.map((r) => [r.requestId, r.durationMs]), [["a3", 900], ["a2", 30]], "the completed ones, slowest first, within the range: the hour-old 5 s one is not");
+  await ledger.close();
+  await store.writer.run(`DELETE FROM ${REQUESTS_TABLE}`);
+});
+
 test("a ledger made before the bytes were counted gains the column; its old rows' bytes are null, never 0", async () => {
   const d2 = fs.mkdtempSync(path.join(os.tmpdir(), "mason-requests-old-"));
   const old = await DuckStore.open(path.join(d2, "duck.db"), () => undefined);

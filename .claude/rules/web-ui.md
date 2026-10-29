@@ -21,11 +21,15 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   `ALIASES` of the view they were: a bookmark lands where it did (`tests/web-page.test.ts` holds each).
 - **A page with a `parent` is in its group** (`observability`, `GROUPS`): its link is under the group's heading in the
   sidebar (always shown, the current page the view itself, `aria-current`), and its views share
-  `ctx.range()` — `RANGES` in src/web/shared.js (Last hour · 24 hours · 7 days · 30 days · 90 days, 24 hours by default), each its `since`
+  `ctx.range()` — `RANGES` in src/web/shared.js (Now · Last hour · 24 hours · 7 days · 30 days · 90 days, Now by default), each its `since`
   for every endpoint and its usage step; a range past the week is offered only when the run keeps it (`rangeOffered`, from
   `/api/state` `engine.keptDays`), else shown disabled with MASON_REQUEST_LOG_DAYS as its reason — kept in the hash (`?range=`), never in storage, and in the group's links;
   the range control is in the view's header row, right of its title (`renderSubnav`, its section's `range-<id>`), never in the sidebar. A view builds its paths from
-  it, so a change of range is a new read of the view shown alone.
+  it, so a change of range is a new read of the view shown alone. **Now is the only live range**: a read bound to the
+  range takes its rate from `rangeEvery(range, everyMs)` — that rate under Now, `Infinity` under any other — so a past
+  range is read once when chosen (`show` marks every read stale) and again only on its Refresh; the control says Live,
+  or when it was read. Why: a person comparing a past hour wants it to hold still; one watching wants it to move.
+  Detector: tests/web-page.test.ts (the reads due under Now and under a past range).
 
 - **A page is a module of its own, registered in three places** (the contract is at the top of src/web/app.js): its
   `page = { id, title, hash?, parent?, create(ctx) }` in `PAGES`, its route `/pages/<id>.js` in `PAGE_ROUTES`, its
@@ -158,7 +162,7 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   window's resize), its title inside the card over it (never set into the frame: "Statements an hour" floated out).
 - **A `<details>` a poll rewrites stays open**: whether it is open is the page's state (`createOpenSet`), keyed by a
   stable id (a request's id, a table's name), written into the HTML by `details(key, …)` — never the element's own,
-  which a rewrite replaces. (The raw log's details is the Logs page's own state, as before.)
+  which a rewrite replaces. (The raw log's details is the Syncs page's own state, as before.)
 - **A fact is in ONE place on the Overview**: the cards carry the copies in all, their rows, the last sync and the copy's file,
   and the facts table no longer does; the last day's statements and p95 cards are the request log's summary at a
   glance, its table the day and the week in full.
@@ -211,7 +215,7 @@ adds pages, not endpoints.
 | Each table's sync, the copies in all | `GET /api/state` `tables[].sync`, `totals` | `mason status --json` |
 | The slow statements | `GET /api/requests?slow=1` (Queries' Slow filter; `GET /api/slow` groups them for `mason status`) | `mason logs --requests --slow --json`; `mason status --json` `slowQueries` |
 | The refused statements (the same) | `GET /api/refused` | `mason status --json` `refusedQueries`, `refusedTotal` |
-| The unsupported SQL (Queries' panel, over the range; the Overview's line, the last day) | `GET /api/unsupported?since=&limit=` | `mason status --json` `unsupported` (`unsupportedLines`) |
+| The unsupported SQL (Usage's panel, over the range; the Overview's line, the last day) | `GET /api/unsupported?since=&limit=` | `mason status --json` `unsupported` (`unsupportedLines`) |
 | The copy's progress | `GET /api/state` `tables[].copy.progress`, `readiness` | `mason wait --json` (`tableLine`, `copyingText` already render it) |
 | Sync on demand | `POST /api/sync` `{ tables }` | `mason sync --json` |
 | A table's columns (the Columns… form) | `GET /api/tables/<table>/columns` (`{ table, columns }`; never in the polled `GET /api/state`, whose `?columns=1` has every table's) | `mason tables <table> --json` `columns` |

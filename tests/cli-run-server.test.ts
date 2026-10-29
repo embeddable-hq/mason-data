@@ -89,11 +89,17 @@ const lastUsedAsks: Array<{ name: string; since: string; until: string | null }>
 const unsupportedAsks: Array<{ since: string; limit: number }> = [];
 const unsupportedSql = { gap: "quote-ident", title: "quote_ident()", runs: 2, users: ["alice"], clients: ["Metabase"], last: "2026-10-24T10:04:00.000Z", example: "SELECT quote_ident(name) FROM orders" };
 let summaryReads = 0;
+// one time range's statements, who sent them and the slowest (src/duck/requests.ts window, clients, slowest)
+const activityAsks: Array<[string, string]> = [];
+const client = { user: "metabase", tokenName: "", client: "Metabase", statements: 3, failed: 1, sessions: 2, last: "2026-10-24T10:04:00.000Z" };
 const requests = {
   days: 7,
   lastUsed: async (u: Array<{ name: string; since: string; until: string | null }>) => { lastUsedAsks.push(...u); return u.map((x) => x.name === "metabase" ? "2026-10-24T10:04:00.000Z" : null); },
   page: async (q: RequestQuery) => { asks.push(q); return { requests: [request], before: q.limit === 1 ? "2026-10-24T10:04:00.000Z~3" : null }; },
   summary: async () => { summaryReads++; return summary; },
+  window: async (since: string) => { activityAsks.push(["window", since]); return window(1); },
+  clients: async (since: string) => { activityAsks.push(["clients", since]); return [client]; },
+  slowest: async (since: string) => { activityAsks.push(["slowest", since]); return [request]; },
   slow: async () => [{ route: "postgres" as const, payload: "SELECT count(*) FROM orders", runs: 2, medianMs: 1500, maxMs: 2000, latestMs: 2000, last: "2026-10-24T10:03:00.000Z" }],
   refused: async () => ({ total: 3, refused: [{ route: "postgres" as const, payload: "SELECT * FROM nope", runs: 3, last: "2026-10-24T10:04:00.000Z", code: "42P01", message: 'relation "nope" does not exist' }] }),
   unsupported: async (q: { since: string; limit: number }) => { unsupportedAsks.push(q); return [unsupportedSql]; },
@@ -283,7 +289,7 @@ test("mason remove: the table's entry goes, every other byte of the file as it w
 
 test("the web page: /, /app.js, /app.css, /shared.js and each page's module from src/web/, with their types and the security headers; any other path is the 404 it was", async () => {
   const web = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "src", "web");
-  const pages = ["status", "tables", "queries", "users", "usage", "logs"].map((p) => [`/pages/${p}.js`, `pages/${p}.js`, "text/javascript; charset=utf-8"] as const);
+  const pages = ["status", "tables", "queries", "users", "usage", "syncs"].map((p) => [`/pages/${p}.js`, `pages/${p}.js`, "text/javascript; charset=utf-8"] as const);
   for (const [p, file, type] of [["/", "index.html", "text/html; charset=utf-8"], ["/app.js", "app.js", "text/javascript; charset=utf-8"], ["/app.css", "app.css", "text/css; charset=utf-8"],
     ["/shared.js", "shared.js", "text/javascript; charset=utf-8"], ...pages] as const) {
     const r = await call("GET", p);
@@ -392,6 +398,18 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     const badSince = await get("/api/unsupported?since=yesterday");
     assert.equal(badSince.status, 400);
     assert.match(String(badSince.body.error), /since "yesterday" is not a time/, "the time grammar's own words");
+    // one time range of the request log, for Usage: an hour by default, since by the one time grammar, each read given it
+    const act = await get("/api/activity?since=15m");
+    assert.equal(act.status, 200);
+    assert.deepEqual([act.body.window, act.body.clients, act.body.slowest, act.body.keptDays], [window(1), [client], [request], 7]);
+    const fifteen = Date.parse(String(act.body.since));
+    assert.ok(Math.abs(fifteen - (Date.now() - 15 * 60_000)) < 5000, `15m is a quarter of an hour ago: ${String(act.body.since)}`);
+    assert.deepEqual(activityAsks.splice(0).map(([k, at]) => [k, at === act.body.since]), [["window", true], ["clients", true], ["slowest", true]]);
+    const hour = await get("/api/activity");
+    assert.ok(Math.abs(Date.parse(String(hour.body.since)) - (Date.now() - 3_600_000)) < 5000, "an hour unless since says");
+    const badActivity = await get("/api/activity?since=yesterday");
+    assert.equal(badActivity.status, 400);
+    assert.match(String(badActivity.body.error), /since "yesterday" is not a time/);
     assert.deepEqual((await get("/api/requests?limit=5&failed=1")).body, { requests: [request], keptDays: 7, before: null });
     assert.deepEqual((await get("/api/requests")).body.requests, [request]);
     assert.deepEqual(asks, [{ limit: 5, failed: true }, { limit: 40 }], "-n and --failed reach the ledger; 40 by default");
