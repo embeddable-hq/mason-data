@@ -28,11 +28,13 @@ import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure } from "./command.ts";
 import { readiness } from "./readiness.ts";
-import { addedNext, addUser, listUsers, removeUser, REMOVED_NEXT } from "./user.ts";
+import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
+import { addedNext, addUser, roleToAdd, listUsers, removeUser, REMOVED_NEXT } from "./user.ts";
 import { postgresLink } from "./pg-url.ts";
 import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
-import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
-import { PollRefused, type CopyState, type PolledTable, type StreamStatus } from "../duck/sync.ts";
+import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
+import { PollRefused, type CopyState, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
+import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 import type { RequestLedger } from "../duck/requests.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 
@@ -60,6 +62,9 @@ export interface RunContext {
    *  the list (.mason/users.json), the API key their passwords are made with, the database a user connects to, and
    *  where the Postgres API listens (the run's recorded URL), for the URL an added user is shown */
   users: { file: string; apiKey: string; database: string; postgresUrl: string };
+  /** the project's roles as the listener holds them now (src/cli/roles.ts LiveRoles): what `mason user add --role`
+   *  is checked against while the run is up, and what `/api/state` says of them; absent: a run with no roles file */
+  roles?: () => RolesLive;
   /** the project's folder (sources/, mason.yml) */
   folder: () => string | null;
   /** the project's root (where .mason/ is): what messages name files from */
@@ -73,12 +78,15 @@ export interface RunContext {
   /** the database's URL the run copies from, as the sources file resolved it at the start */
   runUrl: string;
   log: (m: string) => void;
-  /** the run's copy: each added table's copy as the sync has it, the file it is in, how often it polls */
-  duck: { copies: () => CopyState[]; file: string; pollSeconds: number;
-    /** a poll of exactly these tables, now (mason sync; src/duck/sync.ts pollNow) */
-    poll: (sources: string[]) => Promise<{ at: string; tables: PolledTable[] }>;
+  /** the run's copy: each added table's copy as the sync has it (how each is kept current: its `kept`), the file it is in */
+  duck: { copies: () => CopyState[]; file: string;
+    /** a poll of exactly these tables, now (mason sync; src/duck/sync.ts pollNow); in replication mode none, and where the
+     *  stream is (`streamed`) */
+    poll: (sources: string[]) => Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }>;
     /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode */
     stream: () => Promise<StreamStatus | null>;
+    /** what the run measured of a table, for mason add's estimate of a poll's cost (src/duck/sync.ts measured) */
+    measured?: (table: string) => PollMeasure | null;
     /** the Postgres listener's requests (src/duck/requests.ts, `_mason.requests`): mason status and mason logs --requests */
     requests: Pick<RequestLedger, "recent" | "slow" | "refused" | "days">;
     /** the JSON paths stored as columns of the copies, and how far each is (src/duck/kept.ts): mason status */
@@ -119,10 +127,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
         ...(c.phase === "copying" && c.progress !== undefined ? { progress: c.progress } : {}),
         ...(c.phase === "copied" && c.retired !== undefined ? { retired: c.retired } : {}) } : null,
       error: c?.phase === "failed" ? c.error : null,
-      // copied and served, but not kept current by the poll (src/duck/sync.ts POLL_ROW_LIMIT): mason status and wait say so
-      ...(c?.unsynced ? { unsynced: c.unsynced } : {}),
-      // how the run keeps the copy current NOW, as the sync derives it once (src/duck/sync.ts KeptCurrent, `keptOf`):
-      // what `unsynced` and the stream's tables say for mason status, and EXPLAIN says over the wire, as data
+      // how the run keeps the copy current NOW, as the sync derives it once (src/duck/sync.ts KeptCurrent, `keptOf`): its
+      // sync and when it was last synced, what mason status and the stream's tables say, and EXPLAIN says over the wire
       ...(c?.kept ? { kept: c.kept } : {}),
       ...(c ? { duck: { rows: c.rows, bytes: c.bytes, seconds: c.seconds, copiedAt: c.copiedAt, error: c.error } } : {}),
     };
@@ -135,12 +141,17 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     ui: ctx.page,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
       version: facts.versionText, standby: facts.standby, changes: ctx.changes, name: sources.file?.name ?? null, file: sources.file?.file ?? null,
+      // every table's sync unless its entry says its own: the file's top `sync:`, or the default when it writes none
+      sync: { default: syncText(sources.file?.sync ?? DEFAULT_SYNC), written: sources.file?.sync != null },
       ...(ctx.publication ? { replication: { slot: ctx.slot, publication: ctx.publication.name, owned: ctx.publication.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
     warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason copies the tables it read before; mason start reads the file again)`] : [])],
     folder, project, tables,
-    engine: { name: "duckdb", file: ctx.duck.file, bytes: fileBytes(ctx.duck.file), pollSeconds: ctx.duck.pollSeconds },
+    engine: { name: "duckdb", file: ctx.duck.file, bytes: fileBytes(ctx.duck.file) },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
+    // the roles file as the listener reads it now: its roles by name, and what is wrong with it (every statement of a
+    // session with a role is refused while there is)
+    ...(ctx.roles ? { roles: rolesState(ctx.roles()) } : {}),
     // replication mode: where the stream is, its lag and what it applied (mason status and wait render it, streamLines)
     ...(stream !== null ? { stream } : {}),
   };
@@ -150,6 +161,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
 function fileBytes(file: string): number | null {
   try { return fs.statSync(file).size; } catch { return null; }   // a size is a nicety of mason status: unknown, not an error
 }
+
+/** `RunState.roles` (src/cli/commands.ts): the file, the roles it names and what is wrong with it now */
+export const rolesState = (r: RolesLive): { file: string | null; roles: string[]; problem: string | null } => ({ file: r.file, roles: [...r.grants.keys()], problem: r.problem });
 
 async function state(ctx: RunContext): Promise<unknown> {
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream());
@@ -167,14 +181,15 @@ function sourceOnDisk(ctx: RunContext): EditTarget {
 }
 
 /** The database this run copies, as an edit is checked against it: the catalog it last read, and how it reads changes. */
-const catalogOf = (ctx: RunContext): EditCatalog => ({ tables: ctx.facts().tables, database: ctx.source.database, replication: ctx.changes === "replication" });
+const catalogOf = (ctx: RunContext): EditCatalog => ({ tables: ctx.facts().tables, database: ctx.source.database, replication: ctx.changes === "replication",
+  ...(ctx.duck.measured ? { measured: ctx.duck.measured } : {}) });
 
 /**
  * ADD A TABLE: the check-and-write every entrance shares (src/cli/source-edit.ts addEntry), against the file on disk and
  * this run's catalog; the caller tells the run the file changed, and the sync starts the copy.
  */
-export function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null): PickResult {
-  return addEntry(sourceOnDisk(ctx), catalogOf(ctx), table, columns, key);
+export function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null, o: { sync?: TableSync; keep?: boolean } = {}): PickResult {
+  return addEntry(sourceOnDisk(ctx), catalogOf(ctx), table, columns, key, o);
 }
 
 /** REMOVE TABLES: the check-and-write every entrance shares (src/cli/source-edit.ts removeEntries); the run then drops their copies. */
@@ -252,12 +267,15 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (!Number.isInteger(limit) || limit < 1 || limit > 10_000) throw new Refusal(400, "limit is a whole number of requests, 1 to 10000");
           sendJson(res, 200, { requests: await ctx.duck.requests.recent({ limit, failed: url.searchParams.get("failed") === "1" }), keptDays: ctx.duck.requests.days });
         } else if (req.method === "POST" && url.pathname === "/api/pick") {
-          const body = JSON.parse(await readBody(req, 64 * 1024)) as { table?: unknown; picked?: unknown; columns?: unknown; key?: unknown };
-          if (typeof body.table !== "string" || typeof body.picked !== "boolean") throw new Refusal(400, "send { table, picked, columns?, key? }");
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { table?: unknown; picked?: unknown; columns?: unknown; key?: unknown; sync?: unknown; keep?: unknown };
+          if (typeof body.table !== "string" || typeof body.picked !== "boolean") throw new Refusal(400, "send { table, picked, columns?, key?, sync?, keep? }");
+          // a sync by the sources file's own grammar (src/lib/table-sync.ts), as mason add --sync reads it
+          const sync = body.sync === undefined ? undefined : parseSync(body.sync);
+          if (sync !== undefined && "problem" in sync) throw new Refusal(400, `sync ${JSON.stringify(body.sync)}: ${sync.problem}`);
           if (body.columns !== undefined && !(Array.isArray(body.columns) && body.columns.every((c) => typeof c === "string"))) throw new Refusal(400, "columns is a list of column names, or [\"*\"]");
           if (body.key !== undefined && !(Array.isArray(body.key) && body.key.length > 0 && body.key.every((c) => typeof c === "string"))) throw new Refusal(400, "key is a list of column names");
           if (body.picked) {
-            const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null);
+            const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null, { ...(sync !== undefined ? { sync } : {}), keep: body.keep === true });
             if (!r.already) ctx.log(`added ${r.table} to ${r.file}`);
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });
@@ -269,14 +287,18 @@ export function createRunServer(ctx: RunContext): http.Server {
           }
         } else if (req.method === "GET" && url.pathname === "/api/users") {
           // mason user list --json's shape: the users, and whether each connects
-          const r = listUsers(ctx.users.file, ctx.users.apiKey);
+          const r = listUsers(ctx.users.file, ctx.users.apiKey, ctx.roles?.() ?? NO_ROLES);
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           sendJson(res, 200, { ...r, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
         } else if (req.method === "POST" && url.pathname === "/api/users") {
-          const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown };
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown; role?: unknown };
           if (typeof body.name !== "string") throw new Refusal(400, "send { name }: the user's name");
+          if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "send { name, role }: the role's name, a string");
+          // the role must be one the roles file names NOW (src/cli/user.ts roleToAdd): refused before anything is written
+          const roleProblem = body.role === undefined ? null : roleToAdd(body.role, ctx.roles?.() ?? NO_ROLES);
+          if (roleProblem !== null) { sendFailure(res, statusOf(roleProblem), roleProblem); return; }
           // mason user add --json's shape: its password, once, and the URL to paste (this run is up, so it has one)
-          const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database });
+          const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database, ...(typeof body.role === "string" ? { role: body.role } : {}) });
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           const { replaced, ...added } = r;
           ctx.log(`user ${added.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}`);

@@ -43,7 +43,7 @@ order is only roughly time order, so pruning by time is good, not exact.
 **Writes by key**: a poll piece or stream batch deletes its keys by ONE join against the key column, then inserts; an
 unchanged-TOAST update is ONE `UPDATE … FROM` per set of carried columns. Each scans the key column: 10,000 changes into
 1 M uuid rows 4 ms, 10 M 20 ms, 195 M 0.35–0.86 s to delete and 1.5–1.8 s to update (laptop NVMe); on the test server
-the 3 GB key column is read from EBS, tens of seconds. So a stream batch touching a table over `POLL_ROW_LIMIT` is
+the 3 GB key column is read from EBS, tens of seconds. So a stream batch touching a table over `BIG_TABLE_ROWS` (1,000,000) is
 applied at most every 5 s in pieces of up to 50,000 (`BIG_APPLY_MS`, `BIG_PIECE_CHANGES`): a 12 M-row migration is 240
 scans, not 1,200, and the batch's other tables wait seconds with it. A bigserial key prunes (its zonemaps are in order).
 
@@ -164,9 +164,8 @@ under another transaction's write fails its commit, hence swaps on the writer's 
 **Decision.** Each table is polled by ONE DuckDB transaction over ONE source snapshot: rows whose `xmin` is at or past the
 watermark are written by key, an anti-join deletes what the source lacks only when the counts differ, and the watermark
 commits WITH the rows. Over `POLL_PIECE_ROWS` (50,000) changed rows the deletes go first and the rows 50,000 to a commit,
-the watermark moving with the last. The interval stretches to four times the last poll (`nextPollDelayMs`). Only tables
-of at most 1,000,000 rows by the estimate are polled (`POLL_ROW_LIMIT`); a bigger one serves as of its copy, said on its
-line, and `mason sync <table>` polls it now.
+the watermark moving with the last. Which tables are polled, and how often, is the sources file's `sync:` (next
+section); a table's next poll is its interval after its last, stretched to four times that poll's time (`nextPollAt`).
 
 **Why.** At 64 MB on 1 M uuid keys (while copies had a key) one upsert of 600,000 changed rows ran out of memory; in
 pieces of 50,000 all 1 M went in, in 1.5 s; 8,000 deletes after 720,000 upserts ran out where before them they did not.
@@ -174,6 +173,32 @@ A poll is a full scan of every polled table (no index covers `xmin`): 13–17 s 
 5 s interval stretches to about a minute; a stretch once capped at 60 s capped an hourly interval too (a 10 GB table
 polled every 74 s for seven hours). On the test server one 22 M-row table cost the replica 12 s of scan and 2 s of count
 per poll. **Where.** `src/duck/sync.ts`, `src/cdc/poll.ts`; `tests/integration/duck-poll.itest.ts`.
+
+### Each table's sync (issue 33)
+
+**Decision** (2026-10-29). How a copy stays current after its first copy is the sources file's `sync:`, at the top of
+the file for every table and on an entry for that one: `off` (the default) reads it again only at `mason sync <table>`,
+`poll <interval>` (`<n>s|m|h`, 1 s to 24 h) polls it at that interval. One grammar (`parseSync`, src/lib/table-sync.ts)
+read by the file's reader and by `mason add --sync`; `replication` is a word of it, refused until a table can be
+streamed alone (`mason start --replication` keeps every table current meanwhile). The run is ONE pass loop that polls
+the tables due (`Sync.dueAt`), never a timer a table: a pass also queues copies, drops removed tables and attaches the
+source once. Two bounds on what the polls cost the source: a table's own (`nextPollAt`, four times its last poll) and
+the passes' (`passDelayMs`, four times the last pass). The sync each table was last polled or copied under is a column
+of `_mason.poll_state`, so a change made by hand while Mason was down is seen at the next start; a change keeps the
+copy and catches it up by one poll. The row limit moved from the run to `mason add`: a table over `BIG_TABLE_ROWS`
+(1,000,000) added under a file whose default polls is written `sync: off` on its entry and said, and a poll of more than
+`COSTLY_POLL_ROWS` (10 M) more often than every minute is warned of with an estimate and its basis (the table's last
+poll measured, else the copy's read rate a reader, else the catalog's rows at an assumed 1.8 M rows a second).
+`MASON_POLL_MS` is no longer read, and refuses the start naming the line to write.
+
+**Why.** The project-wide interval and the run's row limit made one decision for every table, and the second was found
+only by its effect: a table over the limit was copied, served and never polled, said only as "NOT kept current" on its
+line, and an operator who wanted a small table every 5 s and a big one hourly could not say so. A poll is a full scan
+(above), so the cost of polling is the table's size times its frequency: the file is where the developer weighs it,
+table by table, and `off` by default means Mason reads nothing it was not told to. The copy's age is said wherever a
+copy is read (`mason status`, `wait`, `sync`, EXPLAIN, the MCP tools), since an `off` table is as old as its last sync.
+**Where.** `src/lib/table-sync.ts`, `src/duck/sync.ts`, `src/cli/source-edit.ts`; `tests/cli-sources.test.ts`,
+`tests/duck-sync-schedule.test.ts`, `tests/integration/duck-poll.itest.ts`.
 
 ### Logical replication
 
@@ -1041,6 +1066,34 @@ statement (28000), no restart; an unreadable file refuses every user (57P03); ro
 **Why.** A BI tool stores ONE password; the day-long token killed its connection the next day. A file, because `mason
 user` runs beside the process holding DuckDB's lock. Named as Postgres names it (`CREATE USER … WITH PASSWORD`).
 **Where.** `src/duck/users.ts`, `src/cli/user.ts`; `tests/duck-users.test.ts`, `tests/duck-users-wire.test.ts`.
+
+### Roles: tables and columns per user (2026-10-29, GitHub issue 30, stage 1a)
+
+**Decision.** A roles file beside the sources file (`mason/roles.yml`, `src/cli/roles.ts`) names what each role may
+read: tables, and `columns:` or `exclude:` of each, in the sources file's own words; `mason user add <name> --role
+<role>` puts a role on a user (`role` in `.mason/users.json`). A role is enforced in `src/duck/plan.ts` on the tree
+Postgres analysed, after the views are expanded and before the rewrite (`src/duck/grants.ts`): every
+`RTEPERMISSIONINFO` of a copied table, its `selectedCols` mapped through `pg_attribute` (bit − 7 = attnum; bit 7 the
+whole row; a lower bit a system column, which needs the whole table; none, a `count(*)`, any column). The refusal is
+Postgres's: `42501 permission denied for table <name>` — measured on Postgres 18, which never names the column under
+column grants — with the role and the column in the DETAIL and what the role reads in the HINT. The catalog Postgres
+holds one role per Mason role with the same GRANTs and runs a role's session's catalog statements under `SET ROLE …
+RESET ROLE` in one request, so `information_schema`, `has_*_privilege` and `mason mcp` answer for the role;
+`pg_catalog` is left unfiltered (Postgres filters it no more than Mason does). Fail closed everywhere: a role the
+file lost refuses its users by name, a file that cannot be read refuses 57P03 and keeps the last good grants for the
+catalog. The role travels with the user's token, re-read before every statement, and a plan carries its reads so an
+Execute is held to the role of that moment; the plan cache is keyed by role.
+
+**Why on the tree.** A text match misses a CTE, a `USING` join, a lateral's argument and a `*`; Postgres has already
+resolved every one of them by the time the planner sees the tree, and its own permission check reads the same node.
+**Why the catalog has real roles.** `information_schema` is a view over `has_*_privilege`: filtering it by hand would
+be a second implementation of Postgres's rules; a real role makes PGlite answer as Postgres does, for every
+introspection a tool sends. Views are granted to every role (the grant rides in the view's own statement, since the
+view must exist first) and checked on their base tables: stricter than Postgres, said in the docs.
+**Not in this stage.** `pg_catalog` filtered by role; row filters (stage 2); limits (stage 3).
+**Where.** `src/duck/grants.ts`, `src/cli/roles.ts`, `src/api/postgres/catalog.ts` (`catalogRoles`, `asRole`),
+`src/api/postgres/server.ts` (`Session.grants`, `heldToRole`, `catalogAs`); `tests/duck-roles-wire.test.ts`,
+`tests/postgres-api/catalog.test.ts`, the oracle's `roleCases`.
 
 ### An MCP server (2026-10-29)
 

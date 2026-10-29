@@ -44,7 +44,12 @@ export interface MasonUser {
   addedAt: string;
   /** the API key's fingerprint when it was added (`keyFingerprint`): another one means the key was rotated since */
   key: string;
+  /** the role it reads as (the project's roles file, src/cli/roles.ts); absent: every copied table, as before */
+  role?: string | undefined;
 }
+
+/** A role's name as the users file may carry it (src/cli/roles.ts ROLE_NAME_RE, which the roles file holds it to). */
+const ROLE_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 const PASSWORD_RE = /^mason_([0-9a-f]{16})_([0-9a-f]{32})$/;
 
@@ -90,10 +95,10 @@ function parseUsers(file: string, text: string): UsersRead {
   for (const [i, u] of list.entries()) {
     const o = u as Record<string, unknown> | null;
     if (typeof o !== "object" || o === null || typeof o.name !== "string" || !USER_NAME_RE.test(o.name) || typeof o.id !== "string" || !/^[0-9a-f]{16}$/.test(o.id) ||
-      typeof o.addedAt !== "string" || typeof o.key !== "string") {
-      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key } as mason user add writes it` };
+      typeof o.addedAt !== "string" || typeof o.key !== "string" || (o.role !== undefined && (typeof o.role !== "string" || !ROLE_RE.test(o.role)))) {
+      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key, role? } as mason user add writes it` };
     }
-    users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key });
+    users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key, ...(typeof o.role === "string" ? { role: o.role } : {}) });
   }
   return { users };
 }
@@ -191,15 +196,23 @@ export class LiveUsers {
     // another user's password: refused as a wrong one is. Saying whose it is handed the name — which, with the password,
     // is the login — to anyone holding only the password (found on the test server)
     if (found.name !== user) throw refusal(401, "not a password of this project's users: mason user list shows them", user);
-    return { filters: [], subject: undefined, user: found.name, jti: found.id };
+    return { filters: [], subject: undefined, user: found.name, jti: found.id, ...(found.role !== undefined ? { role: found.role } : {}) };
   }
 
-  /** A held session's user, asked again before a statement: throws as `login` does when it is no longer live. */
-  recheck(token: PgToken): void {
-    if (token.user === undefined) return;
+  /**
+   * A held session's user, asked again before a statement: throws as `login` does when it is no longer live; else the
+   * token as the file has the user NOW — its role as `mason user add --role` wrote it, so a role given or taken
+   * applies at the user's next statement, without a restart.
+   */
+  recheck(token: PgToken): PgToken {
+    if (token.user === undefined) return token;
     const now = this.now();
     if ("problem" in now) throw refusal(503, `the list of users cannot be read: ${now.problem}`, token.user);
-    if (!now.users.some((u) => u.id === token.jti && u.name === token.user)) throw refusal(401, `the user "${token.user}" was removed`, token.user);
+    const found = now.users.find((u) => u.id === token.jti && u.name === token.user);
+    if (found === undefined) throw refusal(401, `the user "${token.user}" was removed`, token.user);
+    if (found.role === token.role) return token;
+    const { role: _was, ...rest } = token;
+    return { ...rest, ...(found.role !== undefined ? { role: found.role } : {}) };
   }
 }
 
@@ -216,7 +229,7 @@ export function listenerLogins(users: LiveUsers, apiKey: string): Pick<PgApiOpti
       if (problem !== null) throw new Error(problem);
       return { filters: [], subject: undefined };
     },
-    recheck: async (t) => { users.recheck(t); },
+    recheck: async (t) => users.recheck(t),
     recheckMs: 0,
   };
 }

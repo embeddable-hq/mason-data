@@ -29,7 +29,7 @@ async function upProject(page: boolean): Promise<{ root: string; port: number; c
     port: 0, token: TOKEN, page, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
     folder: () => null, root, sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined, log: () => undefined,
     readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
-    duck: { copies: () => [], file: path.join(root, "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => null,
+    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null,
       requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);

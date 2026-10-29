@@ -13,8 +13,9 @@
  * a metric as a column (Metabase's fingerprinting and its derived tables name every column the catalog listed) are
  * taken out of the statements they were in. What a tool sends is otherwise as recorded.
  *
- * DBeaver was driven by a person at the screen (its navigator has no headless mode) under the same trace. Tableau and
- * Power BI are not recorded.
+ * DBeaver was driven by a person at the screen (its navigator has no headless mode) under the same trace.
+ * Postico's entry is the exception: one statement (SHOW ALL), taken from the refusal line Mason's log wrote at its
+ * connect, no trace, its version not recorded. Tableau and Power BI are not recorded.
  */
 
 export interface ToolCorpus {
@@ -247,6 +248,17 @@ export const TOOLS: ToolCorpus[] = [
       "SELECT pg_backend_pid()",
       "SELECT\n  status AS status,\n  COUNT(*) AS count\nFROM public.orders\nGROUP BY\n  status\nORDER BY\n  count DESC\nLIMIT 1000",
       "SELECT\n  DATE_TRUNC('DAY', created_at) AS created_at,\n  COUNT(*) AS count\nFROM public.orders\nWHERE\n  created_at >= TO_TIMESTAMP('2026-01-01 00:00:00.000000', 'YYYY-MM-DD HH24:MI:SS.US')\n  AND created_at < TO_TIMESTAMP('2027-01-01 00:00:00.000000', 'YYYY-MM-DD HH24:MI:SS.US')\nGROUP BY\n  DATE_TRUNC('DAY', created_at)\nLIMIT 1000",
+    ],
+  },
+  {
+    // ONLY THIS STATEMENT IS RECORDED SO FAR: not a trace of a session, but the refusal line Mason's log wrote at every
+    // Postico connection (`refused: 0A000 SHOW ALL is not supported`, before SHOW ALL was answered). What else Postico
+    // sends when it lists the catalog and opens a table is to be recorded under MASON_PG_TRACE=1, as the tools above were
+    tool: "Postico",
+    version: "not recorded (the refusal line names no version)",
+    recorded: "its connect, as Mason's log said it (a simple Query)",
+    statements: [
+      "SHOW ALL",
     ],
   },
 ];

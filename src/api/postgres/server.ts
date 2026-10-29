@@ -56,7 +56,8 @@ import type { RawStmt } from "libpg-query";
 import { ApiError } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
-import { databaseNameSql, PgCatalog } from "./catalog.ts";
+import { grantRefusal, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
+import { asRole, databaseNameSql, PgCatalog, unwrapRole } from "./catalog.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
 import { parseSql, PostgresSyntaxError, stopParser } from "./parser.ts";
@@ -65,7 +66,7 @@ import {
   closeComplete, commandComplete, dataRow, emptyQueryResponse, errorResponse, noData, noticeResponse, parameterDescription,
   parameterStatus, parseComplete, portalSuspended, readyForQuery, rowDescription, sslResponse, type ErrorFields,
   type FieldDescription, type FrontendMessage,
-  cstr, int16, int32, frame, decodeNoticeFrame, splitFrames, MAX_MESSAGE_LENGTH,
+  cstr, int16, int32, frame, decodeBackend, decodeNoticeFrame, splitFrames, MAX_MESSAGE_LENGTH,
 } from "./protocol.ts";
 import { typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
 import { Unsupported, duckTranslate, type Translation } from "./translate.ts";
@@ -185,6 +186,9 @@ export interface DuckPlan {
   /** how long Postgres's analysis took (its catalog reads with it) and Mason's rewrite (with its read-back), ms: an
    *  EXPLAIN ANALYZE's Planning Time */
   timing?: { analysisMs: number; rewriteMs: number };
+  /** the copied tables and columns Postgres's analysis says it reads (src/duck/grants.ts), where roles exist: what an
+   *  Execute is held to under the session's role of that moment */
+  reads?: readonly ResolvedRead[];
 }
 /** the DuckDB halves the listener calls: a session's connection, and a statement's plan */
 export interface DuckOptions {
@@ -194,8 +198,10 @@ export interface DuckOptions {
   /** `timeZone`: the session's, which Postgres parses a literal under (a plan holds the values it parsed) */
   /** `wireBound`: the statement's rows are bounded by an Execute's row count (PlannedSql.unboundedLateral): planned as
    *  a LIMIT over its outermost SELECT would be, with no LIMIT in its SQL */
+  /** `grants`: the session's role, held after Postgres's analysis (src/duck/grants.ts): a 42501 StatementError where
+   *  it reads what the role may not; null for a session with no role beside roles; undefined where no roles exist */
   plan(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: NonNullable<RawStmt["stmt"]>, base: number, paramOids: readonly number[], searchPath: string,
-    timeZone: string, userTypes: ReadonlyMap<string, number>, wireBound?: boolean): Promise<DuckPlan>;
+    timeZone: string, userTypes: ReadonlyMap<string, number>, wireBound?: boolean, grants?: RoleGrants | null): Promise<DuckPlan>;
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], timeZone: string): Promise<(string | null)[]>;
@@ -235,10 +241,11 @@ export function versionText(product: string, version: string): string {
 
 /**
  * Who a session runs as: `user` a `mason user`'s name and `jti` its id (src/duck/users.ts), asked again before its
- * statements; a token's session is neither. Every session reads every copied table: there is no scope.
+ * statements; a token's session is neither. `role`: the user's role (the project's roles file, src/duck/grants.ts),
+ * which every statement over a table and every catalog read is held to; a session with none reads every copied table.
  * (`filters` and `subject` are always empty: src/duck/users.ts still writes them.)
  */
-export interface PgToken { filters?: readonly []; subject?: undefined; jti?: string | undefined; user?: string | undefined }
+export interface PgToken { filters?: readonly []; subject?: undefined; jti?: string | undefined; user?: string | undefined; role?: string | undefined }
 
 /**
  * How often a user's session asks again whether its user is still live (`PgApiOptions.recheck`) when `recheckMs` is
@@ -269,8 +276,12 @@ export interface PgApiOptions {
   authenticate(password: string, user: string): PgToken | Promise<PgToken>;
   /** asked again of a `mason user`'s session before a statement, at most every `recheckMs`: throws as authenticate does
    *  when the user was removed (the session ends), an ApiError 503 when it could not tell (the statement is refused, the
-   *  session kept) */
-  recheck?(token: PgToken): Promise<void>;
+   *  session kept); answers the token as the user is NOW (its role given or taken since), which the session keeps */
+  recheck?(token: PgToken): Promise<PgToken | void>;
+  /** the roles (src/duck/grants.ts RolesLive; the project's roles file, src/cli/roles.ts), the SAME object until they
+   *  change: a session with a role is held to its grants at every statement, its catalog reads run under the role,
+   *  and the catalog is rebuilt with the roles when they move. Absent: no roles, every session reads every copied table */
+  roles?: () => RolesLive;
   /** how long a user's answer to `recheck` holds, in ms (DEFAULT_RECHECK_MS when absent): the run's users
    *  are a stat away, so 0 — every statement asks */
   recheckMs?: number | undefined;
@@ -815,12 +826,12 @@ class Session {
   }
 
   private reportedParameters(): Array<[string, string]> {
-    return [
-      ["application_name", this.vars.applicationName], ["client_encoding", "UTF8"], ["DateStyle", "ISO, MDY"],
-      ["default_transaction_read_only", "on"], ["in_hot_standby", "on"], ["integer_datetimes", "on"], ["IntervalStyle", "postgres"],
-      ["is_superuser", "off"], ["search_path", this.vars.searchPath], ["server_encoding", "UTF8"], ["server_version", SERVER_VERSION],
-      ["session_authorization", this.user], ["standard_conforming_strings", "on"], ["TimeZone", this.vars.timeZone],
-    ];
+    // each value `sessionSetting`'s, the one SHOW and SHOW ALL answer: a reported value and a shown one never part
+    return [...REPORTED].sort().map((name): [string, string] => {
+      const value = this.sessionSetting(name);
+      if (value === null) throw new PgError({ code: "XX000", message: `the reported parameter ${name} has no value of this session's (Mason bug: report it)` }, 500);
+      return [spell(name), value];
+    });
   }
 
   // ---------------------------------------------------------------- session parameters
@@ -974,11 +985,13 @@ class Session {
     // a refusal's statement is the one refuse() names (a simple Query's own statement, an Execute's portal's)
     const stored = storedPayload(sql ?? asked?.sql ?? "");
     const user = this.token?.user ?? refusedUser;
+    const role = this.token?.role;
     this.server.options.record({
       requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs: Date.now() - startedAt,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
       caller: hashCaller(this.presented),
       ...(user !== undefined ? { user } : {}),
+      ...(role !== undefined ? { role } : {}),
       ...(asked?.jsonReads !== undefined && asked.jsonReads.length > 0 ? { jsonReads: asked.jsonReads } : {}),
       ...(answer instanceof PgError
         ? { status: answer.status, sqlstate: answer.fields.code, error: answer.fields.message,
@@ -1009,7 +1022,7 @@ class Session {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
         const e = await this.explaining(raw, whole, t, []);
-        if (e.plan === null) return catalogExplained(await this.forwardSimple(text), e.options);
+        if (e.plan === null) return catalogExplained(await this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user)), e.options);
         const controller = new AbortController();
         const disarm = this.armTimeout(controller);
         try {
@@ -1018,7 +1031,7 @@ class Session {
           return [rowDescription([field]), ...rows, commandComplete("EXPLAIN")];
         } finally { disarm(); }
       }
-      case "catalog": return this.forwardSimple(text);
+      case "catalog": return this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user));
       case "set": return this.setStatement(t);
       case "show": return this.showStatement(t.name);
       case "transaction": return [...this.transaction(t.tag)];
@@ -1042,16 +1055,77 @@ class Session {
     }
   }
 
-  /** A DuckDB statement's plan (Postgres's analysis and the DuckDB SQL), kept per text, search_path, TimeZone and
-   *  declared parameter types until the schema changes. Every statement DuckDB runs has one: never its text as written. */
+  /** A DuckDB statement's plan (Postgres's analysis and the DuckDB SQL), kept per text, search_path, TimeZone,
+   *  declared parameter types and the session's role until the schema or the roles change. Every statement DuckDB
+   *  runs has one: never its text as written. */
   private async duckPlan(raw: RawStmt, whole: string, paramOids: readonly number[], under: { searchPath: string; timeZone: string } = this.vars, wireBound = false): Promise<DuckPlan> {
     const stmt = raw.stmt!;
     const bytes = Buffer.from(whole, "utf8");
     const base = raw.stmt_location ?? 0;
     const text = bytes.subarray(base, raw.stmt_len ? base + raw.stmt_len : bytes.length).toString("utf8");
     const { searchPath, timeZone } = under;
-    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, () =>
-      this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound));
+    const grants = this.grants();
+    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, grants?.name ?? "", () =>
+      this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound, grants));
+  }
+
+  /**
+   * THE SESSION'S ROLE NOW (src/duck/grants.ts; docs/POSTGRES-API.md "Roles"): what its user's role may read, asked at
+   * every plan, every Execute and every catalog read — the user's role is re-read with the user before each statement
+   * (`stillLive`), the roles file whenever it changes (`PgApiOptions.roles`), so a role given, taken or edited applies at
+   * the next statement, with no restart. undefined: no roles anywhere (nothing to hold, and no reads to record);
+   * null: a session with no role beside roles (its plan still names its reads). FAIL CLOSED: a role the file no
+   * longer names, or a file that cannot be read as it is now, refuses the statement by name, never widens.
+   */
+  private grants(): RoleGrants | null | undefined {
+    const live = this.server.rolesNow();
+    const role = this.token?.role;
+    if (role === undefined) return live.grants.size === 0 ? undefined : null;
+    const user = this.token?.user ?? this.user;
+    if (live.problem !== null) {
+      throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the role ${role}'s statements are refused: ${live.problem}`,
+        hint: `fix ${live.file ?? "the roles file"}: the role ${role} is the user ${JSON.stringify(user)}'s (a user with no role is not held to the file)` }, 503);
+    }
+    const g = live.grants.get(role);
+    if (g === undefined) {
+      const named = [...live.grants.keys()];
+      throw new PgError({ code: "42501", message: `permission denied: the role ${role} of the user ${JSON.stringify(user)} is not in ${live.file ?? "the project's roles file (mason/roles.yml)"}`,
+        detail: `the user keeps the role it was added with; a role the file no longer names reads nothing until it is added again or the user is made again${named.length ? ` (the roles: ${named.join(", ")})` : " (the file names no role)"}`,
+        hint: `add the role ${role} to ${live.file ?? "mason/roles.yml"}, or mason user remove ${user} and mason user add ${user}${named.length ? ` --role ${named[0]}` : ""}` }, 403);
+    }
+    return g;
+  }
+
+  /** a plan's reads held to the session's role of THIS moment (a role given or taken since the Parse): refused as the
+   *  Parse would have refused it; a plan made before any role existed has no reads, and is planned again at its next Parse */
+  private heldToRole(plan: DuckPlan): void {
+    const grants = this.grants();
+    if (grants === null || grants === undefined) return;
+    if (plan.reads === undefined) {
+      throw new PgError({ code: "42501", message: `permission denied: the statement was prepared before the user ${JSON.stringify(this.token?.user ?? this.user)} had the role ${grants.name}`,
+        hint: "prepare the statement again: its reads are then held to the role" }, 403);
+    }
+    const refused = grantRefusal(plan.reads, grants);
+    if (refused !== null) throw refused;
+  }
+
+  /**
+   * A CATALOG REQUEST OF THIS SESSION, AS ITS ROLE (src/api/postgres/catalog.ts asRole): a session with a role runs its
+   * catalog statements under `SET ROLE`, RESET after, in the one request the catalog runs whole, so `information_schema`,
+   * `has_table_privilege` and `has_column_privilege` answer for the role and no other session's request meets it. A
+   * role the catalog has not made yet (its rebuild a moment behind the file) refuses the statement, said; a role the
+   * file no longer names is refused before it reaches the catalog (`grants`).
+   */
+  private async catalogAs(message: Buffer): Promise<Array<{ type: string; frame: Buffer }>> {
+    const role = this.token?.role;
+    if (role === undefined) return splitFrames(await this.server.catalog.run(message));
+    this.grants();
+    const { frames, setRoleRefused } = unwrapRole(splitFrames(await this.server.catalog.run(asRole(message, role))));
+    if (setRoleRefused !== null) {
+      const e = relayedError(setRoleRefused);
+      throw new PgError({ code: "42501", message: `permission denied: the catalog has no role ${role} yet (${e.message})`, hint: "run the statement again: the catalog is rebuilt with the roles as the roles file changes" }, 403);
+    }
+    return frames;
   }
 
   /**
@@ -1110,7 +1184,7 @@ class Session {
     let plan: DuckPlan;
     try {
       plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), found.text, t.query, base + Buffer.byteLength(text.slice(0, found.offset)), paramOids,
-        this.vars.searchPath, this.vars.timeZone, this.server.userTypes());
+        this.vars.searchPath, this.vars.timeZone, this.server.userTypes(), false, this.grants());
     } catch (e) {
       // a refusal of the statement explained is placed as Postgres places it: in the whole text, past `EXPLAIN …`
       if (!(e instanceof StatementError) || e.fields.position === undefined) throw e;
@@ -1123,6 +1197,7 @@ class Session {
   /** an EXPLAIN of a DuckDB statement, run: its QUERY PLAN rows (ANALYZE runs the statement and sends none of its rows) */
   private async duckExplain(e: { options: ExplainOptions; plan: DuckPlan }, params: readonly (string | null)[], resultFormats: number[], clock: { parse: number; exec: number },
     controller: AbortController): Promise<{ field: FieldDescription; rows: Buffer[] }> {
+    this.heldToRole(e.plan);
     await this.readAside();
     const runner = await this.duck();
     this.running = controller;
@@ -1158,6 +1233,7 @@ class Session {
   private async duckAnswer(plan: DuckPlan, params: readonly (string | null)[], resultFormats: number[], clock: { parse: number; exec: number },
     controller: AbortController): Promise<{ fields: FieldDescription[]; cursor: DuckCursor }> {
     this.readsOf(plan);
+    this.heldToRole(plan);
     await this.readAside();
     const runner = await this.duck();
     this.running = controller;
@@ -1277,7 +1353,7 @@ class Session {
   private dropPortals(): void { for (const name of [...this.portals.keys()]) this.dropPortal(name); }
 
   private async forwardSimple(text: string): Promise<Buffer[]> {
-    const reply = splitFrames(await this.server.catalog.run(frame("Q", cstr(text))));
+    const reply = await this.catalogAs(frame("Q", cstr(text)));
     const err = reply.find((f) => f.type === "E");
     if (err !== undefined) throw relayedError(err.frame);
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
@@ -1286,6 +1362,14 @@ class Session {
   private async setStatement(t: Extract<Translation, { kind: "set" }>): Promise<Buffer[]> {
     if (t.name === "all") { this.vars = { ...defaultVars(), applicationName: this.vars.applicationName }; return [commandComplete("RESET")]; }
     const tag = t.value === null ? "RESET" : "SET";
+    // SET ROLE and SET SESSION AUTHORIZATION: a session is its user and becomes no one else — RESET, NONE and its own
+    // name are Postgres's no-ops, any other name Postgres's refusal. Never the catalog's to validate: that is one
+    // superuser connection, which accepted `SET ROLE postgres` silently (a review finding of #35)
+    if (t.name === "role" || t.name === "session_authorization") {
+      const own = t.value === null || t.value === this.user || (t.name === "role" && t.value.toLowerCase() === "none");
+      if (!own) throw new PgError({ code: "42501", message: `permission denied to set ${t.name === "role" ? "role" : "session authorization"} "${t.value}"` }, 403);
+      return [commandComplete(tag)];
+    }
     if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
     const status = this.setParameter(t.name, t.value);
     return [...status, commandComplete(tag)];
@@ -1297,9 +1381,20 @@ class Session {
       "default_transaction_read_only", "transaction_read_only"].includes(name);
   }
 
+  /**
+   * WHAT THIS SESSION ANSWERS FOR ONE PARAMETER, by its name in any case: `SHOW <name>`, SHOW ALL's row of that name and
+   * the ParameterStatus the startup reports all read it, so a tool reads ONE string however it asks. The TLS parameters
+   * first (`tlsParameters`), then those this server fixes (`fixedParameter`), then the session's own SETs (`vars.other`);
+   * null for one the catalog Postgres answers as its own.
+   */
+  private sessionSetting(name: string): string | null {
+    const n = name.toLowerCase();
+    return tlsParameters(this.socket instanceof tls.TLSSocket)[n] ?? fixedParameter(n, this.vars, this.user) ?? this.vars.other.get(n) ?? null;
+  }
+
   private async showStatement(name: string): Promise<Buffer[]> {
-    if (name === "all") throw new PgError({ code: "0A000", message: "SHOW ALL is not supported: SHOW one parameter" });
-    const value = tlsParameters(this.socket instanceof tls.TLSSocket)[name] ?? fixedParameter(name, this.vars, this.user) ?? this.vars.other.get(name) ?? null;
+    if (name === "all") return this.showAll();
+    const value = this.sessionSetting(name);
     if (value === null) {
       const reply = splitFrames(await this.server.catalog.run(frame("Q", cstr(`SHOW ${quoteIdent(name)}`))));
       const err = reply.find((f) => f.type === "E");
@@ -1307,6 +1402,30 @@ class Session {
       return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
     }
     return [rowDescription([fieldOf(spell(name), "text", 0)]), dataRow([Buffer.from(value, "utf8")]), commandComplete("SHOW")];
+  }
+
+  /**
+   * SHOW ALL (Postico sends it at every connection): the catalog Postgres's own answer — its RowDescription relayed as it
+   * is (name, setting, description: text, as Postgres's), a row per parameter in its order — with the setting of each row
+   * this session decides replaced by `sessionSetting`'s, so the row and `SHOW <name>` are one string. Mason's settings,
+   * never the source database's (Mason gap show-all). A parameter Postgres's SHOW ALL leaves out is left out here too,
+   * though the session set it or reports it: a placeholder (`SET myapp.x`), session_authorization, is_superuser, role
+   * (GUC_NO_SHOW_ALL) — the catalog, a Postgres, lists exactly the names Postgres lists.
+   */
+  private async showAll(): Promise<Buffer[]> {
+    const reply = splitFrames(await this.server.catalog.run(frame("Q", cstr("SHOW ALL"))));
+    const err = reply.find((f) => f.type === "E");
+    if (err !== undefined) throw relayedError(err.frame);
+    return reply.filter((f) => f.type !== "Z").map((f) => {
+      if (f.type !== "D") return f.frame;
+      const [row] = decodeBackend(f.frame);
+      const name = row?.type === "DataRow" && row.values.length === 3 ? row.values[0] : null;
+      if (row?.type !== "DataRow" || name === null || name === undefined) {
+        throw new PgError({ code: "XX000", message: "the catalog Postgres answered SHOW ALL with a row other than name, setting, description (Mason bug: report it)" }, 500);
+      }
+      const value = this.sessionSetting(name.toString("utf8"));
+      return value === null ? f.frame : dataRow([name, Buffer.from(value, "utf8"), row.values[2] ?? null]);
+    });
   }
 
   /** a SHOW's RowDescription, for a Describe: the frame its answer starts with (the column is named by the parameter) */
@@ -1376,7 +1495,7 @@ class Session {
 
   /** runs frames in the sidecar; throws the first ErrorResponse; returns the rest, less ReadyForQuery */
   private async catalogRun(...parts: Buffer[]): Promise<Buffer[]> {
-    const reply = splitFrames(await this.server.catalog.run(Buffer.concat(parts)));
+    const reply = await this.catalogAs(Buffer.concat(parts));
     // the sidecar answered NOTHING to a batch: it is ignoring everything until a Sync (an earlier error nobody synced)
     // — a protocol state this server must never leave it in; said, never relayed as an empty answer
     if (reply.length === 0) throw new PgError({ code: "XX000", message: "the catalog Postgres answered nothing: report it (its extended-protocol state is out of step)" }, 500);
@@ -1384,8 +1503,9 @@ class Session {
     if (err !== undefined) {
       // AFTER AN ERROR IN THE EXTENDED PROTOCOL POSTGRES IGNORES EVERY MESSAGE UNTIL A SYNC (ignore_till_sync), and the
       // sidecar is one connection every session shares: without this Sync one refused Parse silenced the catalog for
-      // every session until a restart (review of #480). The Sync's own ReadyForQuery is consumed here.
-      if (!parts.some((p) => p[0] === 0x53 /* S */)) await this.server.catalog.run(frame("S"));
+      // every session until a restart (review of #480). The Sync's own ReadyForQuery is consumed here. (A request run
+      // as a role carries its own Sync, catalog.ts asRole: the RESET ROLE after it must run)
+      if (this.token?.role === undefined && !parts.some((p) => p[0] === 0x53 /* S */)) await this.server.catalog.run(frame("S"));
       throw relayedError(err.frame);
     }
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
@@ -1416,7 +1536,8 @@ class Session {
         const own = this.statements.get(m.name);
         // the unnamed statement is replaced by a Parse; the sidecar's must be closed first
         const close = own?.catalogName !== null && own !== undefined ? [frame("C", Buffer.from("S"), cstr(own.catalogName))] : m.name === "" ? [frame("C", Buffer.from("S"), cstr(statement.catalogName))] : [];
-        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(m.sql), int16(m.paramTypes.length), ...m.paramTypes.map(int32)));
+        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(sessionUserSpliced(m.sql, raw.stmt, raw.stmt_location ?? 0, this.user)),
+          int16(m.paramTypes.length), ...m.paramTypes.map(int32)));
         this.statements.set(m.name, statement);
         // the CloseComplete of the close this server added is not the client's
         return reply.slice(close.length);
@@ -1621,7 +1742,9 @@ class Session {
     const now = this.server.now();
     if (now - this.verifiedAt < (this.server.options.recheckMs ?? DEFAULT_RECHECK_MS)) return null;
     try {
-      await recheck(this.token!);
+      // the user as the file has it NOW: its role given or taken since applies to this statement
+      const fresh = await recheck(this.token!);
+      if (fresh !== undefined && this.token !== null) this.token = fresh;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // could not tell: this statement is refused, the session kept, and the next statement asks again
@@ -1655,6 +1778,40 @@ const isUtf8 = (encoding: string): boolean => /^(utf-?8|unicode)$/i.test(encodin
 
 const quoteIdent = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 const quoteLiteral = (text: string): string => `'${text.replaceAll("'", "''")}'`;
+
+/**
+ * `session_user` IN A STATEMENT THE CATALOG ANSWERS IS THIS SESSION'S USER, never the catalog's superuser (it answered
+ * `postgres` for every session while `SHOW session_authorization` said the user's name: a review finding of #35). The
+ * keyword cannot be overridden as `version()` and `current_setting` are, so each SESSION_USER of the parse tree is
+ * spliced in the text with a scalar subquery named as the keyword names its column, `(SELECT 'agent'::name AS
+ * session_user)`: the name, the type and every expression around it stay Postgres's. (`current_user` is the catalog's
+ * role: the session's role under SET ROLE, src/api/postgres/catalog.ts asRole.) `base`: the statement's offset in the
+ * text the parse tree's locations count from.
+ */
+function sessionUserSpliced(text: string, stmt: unknown, base: number, user: string): string {
+  const at: number[] = [];
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) { for (const x of n) walk(x); return; }
+    if (typeof n !== "object" || n === null) return;
+    const f = (n as { SQLValueFunction?: { op?: string; location?: number } }).SQLValueFunction;
+    if (f !== undefined && f.op === "SVFOP_SESSION_USER" && typeof f.location === "number") at.push(f.location);
+    for (const v of Object.values(n)) walk(v);
+  };
+  walk(stmt);
+  if (at.length === 0) return text;
+  const bytes = Buffer.from(text, "utf8");
+  const parts: Buffer[] = [];
+  let end = bytes.length;
+  for (const loc of [...new Set(at)].sort((a, b) => b - a)) {
+    const from = loc - base;
+    if (from < 0 || !/^session_user$/i.test(bytes.subarray(from, from + 12).toString("utf8"))) continue;
+    parts.unshift(bytes.subarray(from + 12, end));
+    parts.unshift(Buffer.from(`(SELECT ${quoteLiteral(user)}::name AS session_user)`, "utf8"));
+    end = from;
+  }
+  parts.unshift(bytes.subarray(0, end));
+  return Buffer.concat(parts).toString("utf8");
+}
 
 /** the text of one statement of a simple query, from the parser's byte offsets */
 function statementText(sql: string, raw: RawStmt): string {
@@ -1722,6 +1879,7 @@ class Server {
   private duckPlans = new Map<string, DuckPlan>();
   private duckPlansOf: PgSchema | null = null;
   private duckPlansAt = 0;
+  private duckPlansRoles: RolesLive | null = null;
 
   /** the source's OIDs for the types an extension made, by name (a copied citext column's), from the schema */
   userTypes(): ReadonlyMap<string, number> {
@@ -1751,17 +1909,19 @@ class Server {
    * analysis starts the instance with the new DDL. A plan whose schema or generation moved while it was made is
    * returned to its caller and not kept.
    */
-  async duckPlan(text: string, paramOids: readonly number[], searchPath: string, timeZone: string, wireBound: boolean, make: () => Promise<DuckPlan>): Promise<DuckPlan> {
+  async duckPlan(text: string, paramOids: readonly number[], searchPath: string, timeZone: string, wireBound: boolean, role: string, make: () => Promise<DuckPlan>): Promise<DuckPlan> {
     const schema = this.schema();
+    const roles = this.rolesNow();
     const generation = this.options.duck?.generation?.() ?? 0;
-    if (schema !== this.duckPlansOf || generation !== this.duckPlansAt) { this.duckPlans.clear(); this.duckPlansOf = schema; this.duckPlansAt = generation; }
+    if (schema !== this.duckPlansOf || generation !== this.duckPlansAt || roles !== this.duckPlansRoles) { this.duckPlans.clear(); this.duckPlansOf = schema; this.duckPlansAt = generation; this.duckPlansRoles = roles; }
     // the zone too: a plan holds the values Postgres parsed its literals to, under the session's zone
     // and the bound: an Execute's row count plans a LEFT lateral of a list otherwise (Session.boundOnWire), kept beside
-    const key = `${searchPath}\u0000${timeZone}\u0000${paramOids.join(",")}\u0000${wireBound ? "wire" : ""}\u0000${text}`;
+    // and the role: a plan is held to it as it is made (src/duck/grants.ts), so a role's plans are its own
+    const key = `${searchPath}\u0000${timeZone}\u0000${paramOids.join(",")}\u0000${wireBound ? "wire" : ""}\u0000${role}\u0000${text}`;
     const hit = this.duckPlans.get(key);
     if (hit !== undefined) return hit;
     const plan = await make();
-    if (this.duckPlansOf !== schema || this.duckPlansAt !== generation) return plan;
+    if (this.duckPlansOf !== schema || this.duckPlansAt !== generation || this.duckPlansRoles !== roles) return plan;
     // bounded: a tool that inlines its values sends a new text per value
     if (this.duckPlans.size >= 2000) this.duckPlans.delete(this.duckPlans.keys().next().value!);
     this.duckPlans.set(key, plan);
@@ -1770,13 +1930,16 @@ class Server {
   readonly tls: tls.SecureContext | null;
   readonly catalog: PgCatalog;
   private lastSchema: PgSchema;
+  private lastRoles: RolesLive;
   options: PgApiOptions;
   constructor(options: PgApiOptions) {
     this.options = options;
     this.tls = options.tls === null ? null : tls.createSecureContext({ cert: options.tls.cert, key: options.tls.key });
     this.lastSchema = options.schema();
+    this.lastRoles = options.roles?.() ?? NO_ROLES;
     const version = versionText(options.product ?? "Mason", options.masonVersion);
     this.catalog = new PgCatalog(this.lastSchema, {
+      roles: this.lastRoles.grants,
       log: (line) => this.log(line),
       setup: [
         // `version()` says whose Postgres this is; search_path lists pg_catalog AFTER public so the override wins
@@ -1795,14 +1958,22 @@ class Server {
   now(): number { return (this.options.clock ?? Date.now)(); }
   log(line: string): void { (this.options.log ?? ((l: string) => console.log(l)))(`[postgres] ${line}`); }
 
-  /** the schema as of now; the catalog Postgres is replaced when it changed */
+  /** the schema as of now; the catalog Postgres is replaced when it changed (or the roles did: `rolesNow`) */
   schema(): PgSchema {
     const s = this.options.schema();
-    if (s !== this.lastSchema) {
+    const r = this.options.roles?.() ?? NO_ROLES;
+    if (s !== this.lastSchema || r !== this.lastRoles) {
       this.lastSchema = s;
-      void this.catalog.replace(s).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
+      this.lastRoles = r;
+      void this.catalog.replace(s, r.grants).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
     }
     return s;
+  }
+
+  /** the roles as of now (src/duck/grants.ts RolesLive); the catalog is replaced when they changed, as for the schema */
+  rolesNow(): RolesLive {
+    this.schema();
+    return this.lastRoles;
   }
 
   forget(s: Session): void { this.sessions.delete(s.id); }

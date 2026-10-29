@@ -112,7 +112,7 @@ test("a file that cannot be read is a problem, never an empty list; a change ref
   const file = fileIn();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   for (const [text, why] of [["{\"users\": [", /is not valid JSON/], ["[]", /is not \{ "users": \[ … \] \}/],
-    ["{\"users\": [{\"name\": \"Metabase\", \"id\": \"0123456789abcdef\", \"addedAt\": \"x\", \"key\": \"y\"}]}", /users\[0\] is not \{ name, id, addedAt, key \}/]] as const) {
+    ["{\"users\": [{\"name\": \"Metabase\", \"id\": \"0123456789abcdef\", \"addedAt\": \"x\", \"key\": \"y\"}]}", /users\[0\] is not \{ name, id, addedAt, key, role\? \}/]] as const) {
     fs.writeFileSync(file, text);
     const r = u.readUsers(file);
     assert.ok("problem" in r && why.test(r.problem), `${text}: ${JSON.stringify(r)}`);

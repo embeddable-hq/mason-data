@@ -19,7 +19,13 @@ export type Decided = {
   /** its truth depends on the machine's floating-point arithmetic (its libm, its build's): where the two machines'
    *  last digits agree, it differs nowhere, and that is not stale */
   machineFloat?: true;
+  /** what must STILL be alike where the rest differs (SHOW ALL: its fields, and the rows the session sets): a problem
+   *  said, or null. With it, the rest may differ in any kind (`kind` says the one expected); without it, in `kind` only */
+  holds?: (want: Answered, got: Answered) => string | null;
 };
+
+/** an answer with rows, as the oracle reads one */
+export type Answered = { names: string[]; oids: number[]; rows: (string | null)[][] };
 
 /**
  * The stale entries of a whole run, each said with the way out: one that differed in none of the statements it decides,

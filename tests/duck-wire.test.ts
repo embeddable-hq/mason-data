@@ -660,8 +660,9 @@ test("the BI-tools test: a sum over a CASE has the scale of the arms its rows to
   } finally { await c.end(); }
 });
 
-/** One session over a raw socket, its reading in the test's hands (`pg` reads every reply as it comes). */
-async function rawSession(port = api.port): Promise<{ socket: net.Socket; pid: number; secret: number; untilReady(): Promise<BackendMessage[]>; end(): void }> {
+/** One session over a raw socket, its reading in the test's hands (`pg` reads every reply as it comes); `startup` adds
+ *  to its startup packet, and `reported` is the ParameterStatus the startup answered. */
+async function rawSession(port = api.port, startup: Record<string, string> = {}): Promise<{ socket: net.Socket; pid: number; secret: number; reported: Map<string, string>; untilReady(): Promise<BackendMessage[]>; end(): void }> {
   const socket = net.connect(port, "127.0.0.1");
   await new Promise<void>((r) => socket.once("connect", () => r()));
   let chunks: Buffer[] = [];
@@ -675,12 +676,14 @@ async function rawSession(port = api.port): Promise<{ socket: net.Socket; pid: n
     chunks = []; tail = Buffer.alloc(0);
     return ms;
   };
-  socket.write(wire.startup({ user: "mason", database: "app" }));
+  socket.write(wire.startup({ user: "mason", database: "app", ...startup }));
   while (chunks.length === 0) await new Promise<void>((r) => { wake = r; });
   chunks = [];
   socket.write(wire.password(mintToken(API_KEY, 600).token));
-  const key = (await untilReady()).find((m) => m.type === "BackendKeyData") as Extract<BackendMessage, { type: "BackendKeyData" }>;
-  return { socket, pid: key.pid, secret: key.secret, untilReady, end: () => { socket.destroy(); } };
+  const started = await untilReady();
+  const key = started.find((m) => m.type === "BackendKeyData") as Extract<BackendMessage, { type: "BackendKeyData" }>;
+  const reported = new Map(started.flatMap((m) => m.type === "ParameterStatus" ? [[m.name, m.value] as const] : []));
+  return { socket, pid: key.pid, secret: key.secret, reported, untilReady, end: () => { socket.destroy(); } };
 }
 const dataRows = (ms: BackendMessage[]): Array<Extract<BackendMessage, { type: "DataRow" }>> => ms.filter((m) => m.type === "DataRow") as Array<Extract<BackendMessage, { type: "DataRow" }>>;
 const finished = (word: string): boolean => logged.some((l) => l.startsWith("statement:") && l.includes(word));
@@ -1762,31 +1765,35 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     copies = [copied({ ...streamed, state: "waiting", why: "its columns changed: it is copied again, then caught up by one poll" })];
     assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: its columns changed: it is copied again, then caught up by one poll)`);
     await jsonSays(null, { ...stream, "Stream State": "waiting" });
-    // a polled project keeps today's words, from the sync's last poll
-    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z" })];
-    assert.equal(await header(), `${head}kept current by polling, last poll 2026-10-27 19:58:39 UTC)`);
-    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Kept Current": "kept current by polling, last poll 2026-10-27 19:58:39 UTC", "Last Poll": "2026-10-27T19:58:39.000Z" });
-    copies = [copied({ by: "poll", polledAt: null })];
-    assert.equal(await header(), `${head}kept current by polling, no poll recorded yet)`);
-    // over the poll's row limit: NOT kept current, as status says it, with the command that polls it
-    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z", unsynced: "over the 1,000,000-row sync limit" })];
-    assert.equal(await header(), `${head}NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-27 19:58:39 UTC): mason sync public.orders polls it now)`);
-    await jsonSays(null, { "Last Poll": "2026-10-27T19:58:39.000Z" });
+    // a polled table: its interval and how long ago its last poll was, from the sync's (issue 33: the age is never hidden)
+    const minutesAgo = new Date(Date.now() - 12 * 60_000 - 5_000).toISOString(), daysAgo = new Date(Date.now() - 3 * 86_400_000 - 3_600_000).toISOString();
+    const utc = (iso: string): string => `${iso.slice(0, 19).replace("T", " ")} UTC`;
+    const every30 = { mode: "poll" as const, every: "30s", seconds: 30 };
+    copies = [copied({ by: "poll", sync: every30, syncedAt: minutesAgo, nextAt: "2026-10-27T19:59:09.000Z" })];
+    assert.equal(await header(), `${head}polled every 30s, last 12 min ago (${utc(minutesAgo)}))`);
+    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Kept Current": `polled every 30s, last 12 min ago (${utc(minutesAgo)})`,
+      Sync: "poll 30s", "Last Synced": minutesAgo, "Next Poll": "2026-10-27T19:59:09.000Z" });
+    copies = [copied({ by: "poll", sync: every30, syncedAt: null, nextAt: null })];
+    assert.equal(await header(), `${head}polled every 30s, not polled yet)`);
+    // sync: off: nothing keeps it current, and its age and the command that syncs it are said, as status says them
+    copies = [copied({ by: "poll", sync: { mode: "off" }, syncedAt: daysAgo, nextAt: null })];
+    assert.equal(await header(), `${head}off: last synced 3 days ago (${utc(daysAgo)}); mason sync public.orders syncs it now)`);
+    await jsonSays(null, { Sync: "off", "Last Synced": daysAgo, "Next Poll": null });
     // served as copied and skipped by the passes until copied again: NOT kept current, and why
-    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z", pending: "its columns changed: it is copied again, then caught up by one poll" })];
-    assert.equal(await header(), `${head}NOT kept current (as of 2026-10-27 19:58:39 UTC): its columns changed: it is copied again, then caught up by one poll)`);
-    await jsonSays(null, { "Last Poll": "2026-10-27T19:58:39.000Z" });
+    copies = [copied({ by: "poll", sync: every30, syncedAt: daysAgo, nextAt: null, pending: "its columns changed: it is copied again, then caught up by one poll" })];
+    assert.equal(await header(), `${head}NOT kept current (last synced 3 days ago (${utc(daysAgo)})): its columns changed: it is copied again, then caught up by one poll)`);
+    await jsonSays(null, { Sync: "poll 30s", "Last Synced": daysAgo, "Next Poll": null });
     // a copy under way or failed says so before how it would be kept current
     copies = [{ ...copied(streamed), phase: "copying", rowsSoFar: 1200 }];
     assert.equal(await header(), `${head}being copied (1,200 rows so far): kept current once copied)`);
     copies = [{ ...copied(streamed), phase: "failed", error: "permission denied for table orders\n(tried again after 14:05 UTC)" }];
     assert.equal(await header(), `${head}its last copy failed: permission denied for table orders)`);
     // a statement over two copies says each on a line of its own
-    copies = [copied(streamed), { ...copied({ by: "poll", polledAt: null }), source: "sales.invoices" }];
+    copies = [copied(streamed), { ...copied({ by: "poll", sync: every30, syncedAt: null, nextAt: null }), source: "sales.invoices" }];
     const two = (await c.query({ text: "EXPLAIN SELECT o.id FROM orders o JOIN sales.invoices i ON i.id = o.id", rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
     assert.equal(two[0], "Mason: answered by DuckDB from its copies of");
     assert.ok(two.includes("  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)"), two.join("\n"));
-    assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; kept current by polling, no poll recorded yet\)$/.test(l)), two.join("\n"));
+    assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; polled every 30s, not polled yet\)$/.test(l)), two.join("\n"));
   } finally {
     copies = [];
     await store.writer.run("DELETE FROM _mason.poll_state WHERE source = 'public.orders'");
@@ -2071,6 +2078,83 @@ test("a ->> of a computed jsonb reads a key held twice as Postgres does, and a c
     }
     assert.deepEqual(wrong, []);
   } finally { await c.end(); }
+});
+
+// SHOW ALL (Postico sends it at every connection, and it was refused by a bare PgError no gap named): Postgres's shape —
+// the catalog Postgres's own RowDescription — and a row per setting Postgres lists, in its order, each this session's
+// value where the session decides it. ONE reader (server.ts `sessionSetting`) answers SHOW <name>, SHOW ALL's row and
+// the startup's ParameterStatus, so the three never part. The values are Mason's, never the source's (Mason gap show-all)
+test("SHOW ALL is Postgres's three text columns, a row per setting in Postgres's order, each the string SHOW <name> answers in the session (Mason gap show-all)", async () => {
+  const described = (ms: BackendMessage[]): BackendMessage | undefined => ms.find((m) => m.type === "RowDescription");
+  const text = (r: Extract<BackendMessage, { type: "DataRow" }>, i: number): string | null => r.values[i]?.toString("utf8") ?? null;
+  const errors = (ms: BackendMessage[]): BackendMessage[] => ms.filter((m) => m.type === "ErrorResponse");
+  const want = wire.replies(await truth.execProtocolRaw(wire.query("SHOW ALL")));
+  const s = await rawSession(api.port, { application_name: "postico-at-startup" });
+  try {
+    // what the startup reported is what SHOW ALL lists before any SET
+    s.socket.write(wire.query("SHOW ALL"));
+    const atStart = new Map(dataRows(await s.untilReady()).map((r) => [text(r, 0) ?? "", text(r, 1)]));
+    assert.ok(s.reported.has("TimeZone") && s.reported.has("DateStyle"), "the startup reported its parameters");
+    for (const [name, value] of s.reported) if (atStart.has(name)) assert.equal(atStart.get(name), value, `${name} as reported`);
+    s.socket.write(wire.query("SET TimeZone = 'Europe/Berlin'; SET search_path = sales, public; SET work_mem = '64MB'; SET myapp.flag = 'on'"));
+    assert.deepEqual(errors(await s.untilReady()), []);
+    s.socket.write(wire.query("SHOW ALL"));
+    const simple = await s.untilReady();
+    assert.deepEqual(errors(simple), []);
+    // the RowDescription is Postgres's, field for field: name, setting, description, each text (25), of no table, typmod -1
+    assert.deepEqual(described(simple), described(want));
+    const fields = described(simple);
+    assert.deepEqual(fields?.type === "RowDescription" ? fields.fields.map((f) => [f.name, f.tableOid, f.typeOid, f.typeModifier, f.format]) : null,
+      [["name", 0, 25, -1, 0], ["setting", 0, 25, -1, 0], ["description", 0, 25, -1, 0]]);
+    assert.deepEqual(simple.find((m) => m.type === "CommandComplete"), { type: "CommandComplete", tag: "SHOW" });
+    const rows = dataRows(simple);
+    const names = rows.map((r) => text(r, 0) ?? "");
+    // every name Postgres lists, each once, in Postgres's order (by name without regard to case: guc_name_compare)
+    assert.deepEqual(names, dataRows(want).map((r) => text(r, 0)));
+    assert.equal(new Set(names.map((n) => n.toLowerCase())).size, names.length, "no name twice");
+    assert.deepEqual(names, [...names].sort((a, b) => { const x = a.toLowerCase(), y = b.toLowerCase(); return x < y ? -1 : x > y ? 1 : 0; }));
+    // left out as Postgres leaves them out, though the session set or reports them: a placeholder, the GUC_NO_SHOW_ALL ones
+    for (const hidden of ["myapp.flag", "session_authorization", "is_superuser", "role"]) assert.ok(!names.includes(hidden), `${hidden} is not listed`);
+    const setting = new Map(rows.map((r) => [text(r, 0) ?? "", text(r, 1)]));
+    assert.equal(setting.get("TimeZone"), "Europe/Berlin", "the session's SET");
+    assert.equal(setting.get("search_path"), "sales, public", "the session's SET");
+    assert.equal(setting.get("application_name"), "postico-at-startup", "the startup packet's");
+    assert.equal(setting.get("DateStyle"), "ISO, MDY");
+    assert.equal(setting.get("work_mem"), "64MB", "a SET the catalog Postgres validated, kept by the session");
+    assert.equal(setting.get("ssl"), "off", "a plain session on loopback");
+    // a row's setting is the string SHOW <name> answers in the same session: every one the session decides, and every
+    // 20th of the catalog's own (each SHOW of those is a round trip to the catalog Postgres, ~15 ms)
+    const decided = new Set(["TimeZone", "search_path", "application_name", "DateStyle", "IntervalStyle", "work_mem", "ssl", "server_version", "server_version_num",
+      "client_encoding", "server_encoding", "extra_float_digits", "transaction_isolation", "default_transaction_isolation", "default_transaction_read_only",
+      "transaction_read_only", "in_hot_standby", "integer_datetimes", "standard_conforming_strings", "max_identifier_length"]);
+    const asked = names.filter((n, i) => decided.has(n) || i % 20 === 0);
+    assert.equal(asked.filter((n) => decided.has(n)).length, decided.size, "every decided name is listed");
+    s.socket.write(wire.query(asked.map((n) => `SHOW "${n}"`).join("; ")));
+    const shown = await s.untilReady();
+    assert.deepEqual(errors(shown), []);
+    assert.deepEqual(dataRows(shown).map((r) => text(r, 0)), asked.map((n) => setting.get(n)));
+    // the extended protocol (Parse, Bind, Describe the portal, Execute): the same RowDescription and rows
+    s.socket.write(wire.extended("SHOW ALL", [], [0]));
+    const extended = await s.untilReady();
+    assert.deepEqual(errors(extended), []);
+    assert.deepEqual(described(extended), described(want));
+    assert.deepEqual(dataRows(extended), rows);
+  } finally { s.end(); }
+});
+
+// THE STARTUP'S ParameterStatus, pinned: made from the REPORTED set through sessionSetting (no longer a literal list),
+// each name in Postgres's spelling, in this order, with the session's values (a change-detector: read the diff)
+test("the startup reports the fourteen parameters Postgres reports, in Postgres's spelling and order, with the session's values", async () => {
+  const version = (await truth.query<{ server_version: string }>("SHOW server_version")).rows[0]!.server_version;
+  const s = await rawSession();
+  try {
+    assert.deepEqual([...s.reported], [
+      ["application_name", ""], ["client_encoding", "UTF8"], ["DateStyle", "ISO, MDY"], ["default_transaction_read_only", "on"],
+      ["in_hot_standby", "on"], ["integer_datetimes", "on"], ["IntervalStyle", "postgres"], ["is_superuser", "off"],
+      ["search_path", '"$user", public'], ["server_encoding", "UTF8"], ["server_version", version], ["session_authorization", "mason"],
+      ["standard_conforming_strings", "on"], ["TimeZone", "UTC"],
+    ]);
+  } finally { s.end(); }
 });
 
 // A `#>` PATH ELEMENT IS AN INDEX AS POSTGRES'S strtoint READS IT (jsonfuncs.c): white space before it and a sign are
