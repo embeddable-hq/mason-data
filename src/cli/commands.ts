@@ -85,7 +85,7 @@ export interface RunState {
   /** the copies in all (src/cli/readiness.ts syncTotals); a run from before it has none */
   totals?: SyncTotals;
   /** the run's copy: its file and how often it polls */
-  engine: { name: "duckdb"; file: string; bytes: number | null; pollSeconds: number;
+  engine: { file: string; bytes: number | null; pollSeconds: number;
     /** the run's version, when it started (ISO), and how long it has been up; a run from before them has none */
     version?: string; startedAt?: string; uptimeSeconds?: number;
     /** its supervisor's restarts (src/cli/supervise.ts restartsFact): how many, and the last one */
@@ -662,7 +662,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
     out(jsonText(STATUS, { running: false, ...(hung === null ? {} : { hung: { pid: hung.run.pid, problem: hung.problem.problem, why: hung.problem.why } }),
       project: { name: project.config.name, folder: project.folder },
       source: { name: "message" in src ? null : src.name, file: "message" in src ? null : src.file, url: database, error: "message" in src ? errorJson(src) : null },
-      engine: { name: "duckdb", file: duckFile, bytes, restarts }, tables: tables.map((table) => ({ table })),
+      engine: { file: duckFile, bytes, restarts }, tables: tables.map((table) => ({ table })),
       lastRun: project.config.lastRun ?? null, lastStop }, next));
     return hung === null ? 0 : 1;
   }
@@ -1507,7 +1507,7 @@ export async function stop(argv: string[]): Promise<number> {
     if (isProject(recorded)) { recorded.config.running = null; recorded.config.lastStop = { at: new Date().toISOString(), how: `${killed ? "killed by mason stop (SIGKILL)" : "stopped by mason stop (SIGTERM)"}: ${how.replace(/, so it was killed$/, "")}` }; writeConfig(recorded.dir, recorded.config); }
     if (json) { out(jsonText(STOP, { stopped: [hung.name], killed, supervisor: sup }, next)); return 0; }
     out(reportText({ headline: `Stopped ${hung.name}`, details: [["how", `${how}${sup === null ? "" : `; its supervisor (pid ${sup}) will not start it again`}`],
-      ["kept", "its copy of the data and its state (DuckDB recovers from its write-ahead log at the next start)"], ["log", "mason logs shows what it was doing"]] }));
+      ["kept", "its copy of the data and its state (the copy recovers from its write-ahead log at the next start)"], ["log", "mason logs shows what it was doing"]] }));
     out(endText({ next }));
     return 0;
   }

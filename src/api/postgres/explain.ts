@@ -73,7 +73,7 @@ export function explainOptions(options: readonly unknown[]): ExplainOptions {
         break;
       }
       case "generic_plan":
-        if (booleanOf(name, b.arg, at)) throw new Unsupported(`EXPLAIN (GENERIC_PLAN) is not supported by Mason (${gapMark("explain-option")})`, at, "0A000", "bind the parameters' values and EXPLAIN that: DuckDB plans the statement with them", "explain-option");
+        if (booleanOf(name, b.arg, at)) throw new Unsupported(`EXPLAIN (GENERIC_PLAN) is not supported by Mason (${gapMark("explain-option")})`, at, "0A000", "bind the parameters' values and EXPLAIN that: Mason plans the statement with them", "explain-option");
         break;
       case "format": {
         const v = stringOf(name, b.arg, at);

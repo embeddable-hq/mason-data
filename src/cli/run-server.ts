@@ -171,7 +171,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     totals: syncTotals(tables.filter((t) => t.added).length, copies),
     // the run itself: its version, since when it is up, and its supervisor's restarts (ONE reader, restartsFact, which
     // mason status reads with Mason stopped too)
-    engine: { name: "duckdb", file: ctx.duck.file, bytes, pollSeconds: ctx.duck.pollSeconds,
+    engine: { file: ctx.duck.file, bytes, pollSeconds: ctx.duck.pollSeconds,
       version: ctx.version, startedAt: new Date(ctx.startedAt).toISOString(), uptimeSeconds: Math.max(0, Math.round((now - ctx.startedAt) / 1000)),
       restarts: restartsFact(ctx.home, ctx.duck.restarts) },
     // the disk under the copy: free where its file is (the sync's own measure, the one a copy is held to), the file

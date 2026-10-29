@@ -232,7 +232,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
     const names = await describeKeys((sql) => catalogRows(catalog, sql), unverified);
     const listed = unverified.map((k) => names.get(k) ?? k);
     throw gapRefusal("unverified",
-      `Mason cannot yet answer this statement on DuckDB exactly as Postgres would: it uses ${listed.slice(0, 5).join("; ")}${listed.length > 5 ? ` and ${listed.length - 5} more` : ""}, which Mason has not verified`,
+      `Mason cannot yet answer this statement exactly as Postgres would: it uses ${listed.slice(0, 5).join("; ")}${listed.length > 5 ? ` and ${listed.length - 5} more` : ""}, which Mason has not verified`,
       "write the statement without it (docs/SQL-SUPPORT.md lists what is verified), or report it: a statement Mason has not verified is refused rather than answered differently",
       text, `: ${unverified.join(", ")}`);
   }
@@ -244,8 +244,8 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const back = (await parseSql(sql)).stmts?.[0]?.stmt;
   const difference = back === undefined ? "nothing" : treeDifference(back, tree);
   if (difference !== null) {
-    throw new StatementError({ code: "0A000", message: "Mason cannot run this statement on DuckDB exactly: its rewritten form does not read back as itself (a Mason gap: report it, with the statement)",
-      detail: `read back: ${difference}; DuckDB SQL: ${sql}` }, text);
+    throw new StatementError({ code: "0A000", message: "Mason cannot run this statement exactly: its rewritten form does not read back as itself (a Mason gap: report it, with the statement)",
+      detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
   const planned = { text: sql, functions: masonCalls(tree) } as unknown as PlannedSql;
   return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, dropLast, ...(exact.length > 0 ? { exact } : {}), resolved: keys,

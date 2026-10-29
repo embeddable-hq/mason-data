@@ -79,7 +79,7 @@ interface ExplainTranslation { kind: "explain"; query: NonNullable<RawStmt["stmt
 interface Explaining { options: ExplainOptions; plan: DuckPlan | null }
 
 /** what an EXPLAIN of a catalog statement says first: whose plan it is */
-const CATALOG_EXPLAINED = "Mason: answered by the catalog Postgres (Mason's own, PGlite), not DuckDB: a statement of pg_catalog or information_schema, or of no table, is the catalog's, and this is its plan";
+const CATALOG_EXPLAINED = "Mason: answered by the catalog Postgres (Mason's own, PGlite), not the copy: a statement of pg_catalog or information_schema, or of no table, is the catalog's, and this is its plan";
 
 /** an EXPLAIN's one column, Postgres's: text, or json for FORMAT JSON (ExplainResultDesc) */
 const explainField = (o: ExplainOptions, format: 0 | 1): FieldDescription => ({ name: "QUERY PLAN", typeOid: o.format === "json" ? 114 : 25, typeSize: -1, typeModifier: -1, format });
@@ -104,7 +104,7 @@ function catalogExplained(frames: Buffer[], o: ExplainOptions): Buffer[] {
   const value = dataRowValues(frames[first]!)[0];
   if (value === null || value === undefined) return frames;
   const doc = JSON.parse(value.toString("utf8")) as Array<Record<string, unknown>>;
-  if (doc[0] !== undefined) doc[0].Mason = { "Answered By": "the catalog Postgres (Mason's own, PGlite), not DuckDB", Why: "a statement of pg_catalog or information_schema, or of no table, is the catalog's" };
+  if (doc[0] !== undefined) doc[0].Mason = { "Answered By": "the catalog Postgres (Mason's own, PGlite), not the copy", Why: "a statement of pg_catalog or information_schema, or of no table, is the catalog's" };
   return [...frames.slice(0, first), dataRow([Buffer.from(JSON.stringify(doc, null, 2))]), ...frames.slice(first + 1)];
 }
 /** a statement DuckDB answers as written: its text (the parser's slice of the message) */
@@ -599,7 +599,7 @@ class Session {
     if (this.duckRunner === null) return;
     const runner = this.duckRunner;
     this.duckRunner = null;
-    runner.close().catch((e: unknown) => { this.server.log(`session ${this.id}: closing its DuckDB connection failed: ${e instanceof Error ? e.message : String(e)}`); });
+    runner.close().catch((e: unknown) => { this.server.log(`session ${this.id}: closing its connection to the copy failed: ${e instanceof Error ? e.message : String(e)}`); });
   }
 
   /** A statement ended, however: the session's next one may run, and a session closed meanwhile closes its connection now. */
@@ -1593,7 +1593,7 @@ class Session {
     // each Execute of a paged portal is a message of its own: the last one's row in the request log carries the reads
     if (statement.duck !== undefined) this.readsOf(statement.duck);
     if (portal.cursor === undefined) {
-      if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a DuckDB statement without its plan: report it (Mason's Postgres listener)" });
+      if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a statement without its plan: report it (Mason's Postgres listener)" });
       const exec = this.txNow ??= this.server.now();
       const answer = await this.duckAnswer(statement.duck, portal.params, portal.resultFormats, { parse: statement.parsedNow ?? exec, exec }, controller);
       portal.cursor = answer.cursor;

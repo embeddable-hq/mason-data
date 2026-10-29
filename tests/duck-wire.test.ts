@@ -960,9 +960,9 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     const p = await plan("EXPLAIN SELECT id, status FROM orders ORDER BY id LIMIT 2");
     assert.deepEqual(p.fields, [["QUERY PLAN", 25]]);
     assert.equal(p.command, "EXPLAIN");
-    assert.equal(p.lines[0], "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; kept current by polling, no poll recorded yet)");
-    assert.equal(p.lines[1], "  Sent to DuckDB: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
-    assert.equal(p.lines[2], "  Computed by Mason after DuckDB: nothing");
+    assert.equal(p.lines[0], "Mason: answered from its copy of public.orders (about 3 rows; kept current by polling, no poll recorded yet)");
+    assert.equal(p.lines[1], "  Sent to the copy: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
+    assert.equal(p.lines[2], "  Computed by Mason after the copy: nothing");
     // a preview's late materialization (14a1a831), as DuckDB plans it: the top two by the key, then the other columns
     // read for those rows only
     assert.ok(p.lines.some((l) => /^ +->  Hash Join {2}\(rows=3\)$/.test(l)) && p.lines.some((l) => /^ +Join Type: SEMI$/.test(l)), p.lines.join("\n"));
@@ -975,16 +975,16 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     const v = await plan("EXPLAIN (VERBOSE, COSTS false, BUFFERS) SELECT id FROM orders WHERE status = $1", ["paid"]);
     assert.ok(v.lines.some((l) => /^\s+Projections: /.test(l)) && v.lines.some((l) => /^\s+Filters: /.test(l)), v.lines.join("\n"));
     assert.ok(!v.lines.some((l) => /rows=/.test(l)), v.lines.join("\n"));
-    assert.ok(v.lines.includes("  Note: BUFFERS has no DuckDB meaning: ignored"), v.lines.join("\n"));
+    assert.ok(v.lines.includes("  Note: BUFFERS has no meaning to the copy: ignored"), v.lines.join("\n"));
     // what Mason computes after DuckDB, and its functions DuckDB calls
     const x = await plan("EXPLAIN SELECT sum(amount) / 7 FROM orders");
-    assert.match(x.lines[2]!, /^ {2}Computed by Mason after DuckDB: column 1 "\?column\?": Postgres's exact numeric, from \d of DuckDB's value\(s\)$/);
+    assert.match(x.lines[2]!, /^ {2}Computed by Mason after the copy: column 1 "\?column\?": Postgres's exact numeric, from \d of the copy's value\(s\)$/);
     // a function is what DuckDB calls, never the cells Mason computes from (`__mason_cell_0` is a column's name)
-    const called = (await plan("EXPLAIN SELECT sum(amount::text::numeric) FROM orders")).lines.find((l) => /^ {2}Mason's functions DuckDB calls: /.test(l));
+    const called = (await plan("EXPLAIN SELECT sum(amount::text::numeric) FROM orders")).lines.find((l) => /^ {2}Mason's functions the copy calls: /.test(l));
     assert.ok(called !== undefined && /__mason_numeric_exact/.test(called) && !/__mason_cell_/.test(called), called);
     // a catalog statement is the catalog Postgres's, said so first
     const k = await plan("EXPLAIN SELECT relname FROM pg_class WHERE relname = 'orders'");
-    assert.match(k.lines[0]!, /^Mason: answered by the catalog Postgres \(Mason's own, PGlite\), not DuckDB/);
+    assert.match(k.lines[0]!, /^Mason: answered by the catalog Postgres \(Mason's own, PGlite\), not the copy/);
     assert.ok(k.lines.length > 1);
     assert.match((await plan("EXPLAIN SELECT relname FROM pg_class", [])).lines[0]!, /^Mason: answered by the catalog Postgres/);
   } finally { await c.end(); }
@@ -1001,10 +1001,10 @@ test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's
     assert.ok(lines.some((l) => /^ {2}->  Order By {2}\(rows=\d+\) \(actual rows=2, thread time=\d+\.\d{3} ms\)$/.test(l)), lines.join("\n"));
     assert.ok(lines.some((l) => /->  Table Scan on public\.orders {2}\(rows=\d+\) \(actual rows=2, thread time=\d+\.\d{3} ms\)$/.test(l)), lines.join("\n"));
     // the time is DuckDB's thread time, said so once: never Postgres's elapsed `actual time` (the Fable review of #517)
-    assert.ok(lines.includes("  Note: an operator's thread time is DuckDB's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time"), lines.join("\n"));
+    assert.ok(lines.includes("  Note: an operator's thread time is the copy's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time"), lines.join("\n"));
     assert.ok(!lines.some((l) => /actual time=/.test(l)), lines.join("\n"));
-    assert.match(lines.at(-2)!, /^Planning Time: \d+\.\d{3} ms \(Postgres's analysis \d+\.\d{3}, Mason's rewrite \d+\.\d{3}, DuckDB's planning \d+\.\d{3}\)$/);
-    assert.match(lines.at(-1)!, /^Execution Time: \d+\.\d{3} ms \(DuckDB \d+\.\d{3}, Mason's conversion and exact numerics \d+\.\d{3}\)$/);
+    assert.match(lines.at(-2)!, /^Planning Time: \d+\.\d{3} ms \(Postgres's analysis \d+\.\d{3}, Mason's rewrite \d+\.\d{3}, the copy's planning \d+\.\d{3}\)$/);
+    assert.match(lines.at(-1)!, /^Execution Time: \d+\.\d{3} ms \(the copy \d+\.\d{3}, Mason's conversion and exact numerics \d+\.\d{3}\)$/);
     // it ran, through the same runner (its log line), and the plan's rows are all the client got
     assert.ok(finished("2 row(s)"), logged.join("\n"));
 
@@ -1027,11 +1027,11 @@ test("EXPLAIN (FORMAT JSON) is Postgres's plan document, DuckDB's operators in i
     const [doc] = JSON.parse(String((r.rows as unknown[][])[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown>; "Planning Time": number; "Execution Time": number }>;
     assert.equal(doc!.Plan["Node Type"], "Top N");
     assert.equal(doc!.Plan["Actual Rows"], 2);
-    assert.equal(typeof doc!.Plan["DuckDB Thread Time"], "number");
+    assert.equal(typeof doc!.Plan["Copy Thread Time"], "number");
     assert.equal(doc!.Plan["Actual Total Time"], undefined, "a plan viewer draws Actual Total Time as elapsed: DuckDB's is thread time");
     const scan = (doc!.Plan.Plans as Array<Record<string, unknown>>)[0]!;
     assert.deepEqual([scan["Node Type"], scan["Relation Name"], scan["Schema"], scan["Plan Rows"]], ["Table Scan", "orders", "public", 3]);
-    assert.equal(doc!.Mason["Answered By"], "DuckDB");
+    assert.equal(doc!.Mason["Answered By"], "the copy");
     assert.deepEqual(doc!.Mason.Copies, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Last Poll": null }]);
     assert.ok(typeof doc!["Planning Time"] === "number" && typeof doc!["Execution Time"] === "number");
     // FORMAT XML and YAML are refused by name; Postgres's own errors for an option it does not have, or one that needs ANALYZE

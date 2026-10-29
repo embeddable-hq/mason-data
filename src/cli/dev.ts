@@ -327,13 +327,13 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let store: DuckStore;
   // its memory bounded (src/duck/store.ts DEFAULT_MEMORY_LIMIT): past it a statement spills, or fails alone
   const memoryLimit = process.env.MASON_DUCKDB_MEMORY || undefined;
-  try { store = await DuckStore.open(duckFile, (l) => logLine(`[duckdb] ${l}`), memoryLimit === undefined ? {} : { memoryLimit }); }
+  try { store = await DuckStore.open(duckFile, (l) => logLine(`[copy] ${l}`), memoryLimit === undefined ? {} : { memoryLimit }); }
   catch (e) { fail("Opening the copy"); say(`  ${(e as Error).message}`); return 1; }
   // THE COPY'S THREAD DYING (src/duck/executor.ts: V8 out of heap there, an uncaught error) ends the run, said, for its
   // supervisor to start it again: every session's statement in flight was told 57P02, and nothing can be answered after
   let crash: ((reason: string) => void) | null = null;
   store.onCrash((reason) => {
-    logLine(`[duckdb] the copy's thread stopped: ${reason}`);
+    logLine(`[copy] the copy's thread stopped: ${reason}`);
     if (crash !== null) crash(reason);
     else say(`  ! the copy's thread stopped: ${reason}`);
   });
@@ -406,7 +406,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let duckListener;
   try { duckListener = await store.listener(facts.collation, undefined, libc, () => sync.state(), sync.kept.enabled ? sync.kept : undefined); }
   catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
-  logLine(`[duckdb] text sorts as the source's collation does: ${JSON.stringify(duckListener.collation)}`);
+  logLine(`[copy] text sorts as the source's collation does: ${JSON.stringify(duckListener.collation)}`);
   // THE USERS (src/duck/users.ts): `mason user` edits the file beside this process; the listener re-reads it at every
   // connection and before every statement of a user's session, so a removal takes effect without a restart
   const users = new LiveUsers(path.join(home, USERS_FILE), cfg.apiKey);
