@@ -454,6 +454,7 @@ function scalar(conn: DuckDBConnection, name: string, params: Array<typeof VARCH
     specialHandling: true,
     mainFunction: (info, input, out) => {
       FUNCTION_CALLS.set(name, (FUNCTION_CALLS.get(name) ?? 0) + 1);
+      FUNCTION_ROWS.set(name, (FUNCTION_ROWS.get(name) ?? 0) + input.rowCount);
       const all = Array.from({ length: input.columnCount }, (_, c) => input.getColumnVector(c));
       if (cancelled(info, all, input.rowCount)) return;
       const vectors = all.slice(1);
@@ -615,6 +616,9 @@ export const CANCELLED = "mason[57014]: canceling statement due to user request"
 /** how many vectors each function was called with (a call is a hop to the main thread): what a test or a measurement
  *  reads to know whether a statement reached a function at all (the rewrite answers a `->>` natively where it can) */
 export const FUNCTION_CALLS = new Map<string, number>();
+/** how many rows each function was handed, across its calls: what a plan's cost in function calls is measured by,
+ *  whatever the chunking (tests/duck-plans.test.ts) */
+export const FUNCTION_ROWS = new Map<string, number>();
 
 /** the cancel table the calls read: the executor's, shared with the listener (`useCancelTable`), else one of this thread's own */
 let cancels: Int32Array = cancelTable();

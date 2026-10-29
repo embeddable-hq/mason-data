@@ -221,6 +221,113 @@
       "full_sort": false
     },
     {
+      "name": "LEFT lateral, the nulls idiom on a table column, LIMIT 100",
+      "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY (q.created_at) IS NULL, q.created_at DESC LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  TOP_N",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        UNNEST",
+        "          TABLE_SCAN public.orders [top-N filter: created_at]"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral sorted by a jsonb column, LIMIT 100 (not rewritten)",
+      "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY q.meta, q.id LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  TOP_N",
+        "    PROJECTION calls __mason_jsonb_key",
+        "      CTE",
+        "        TABLE_SCAN public.orders",
+        "        HASH_JOIN",
+        "          CTE_SCAN",
+        "          PROJECTION",
+        "            UNNEST",
+        "              HASH_GROUP_BY",
+        "                PROJECTION",
+        "                  CTE_SCAN"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values",
+        "__mason_jsonb_key"
+      ],
+      "sends": [],
+      "delim_join": true,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral in a CTE another CTE reads, through a derived table, LIMIT 100 outside",
+      "sql": "WITH a AS (SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE), b AS (SELECT a.key, a.id FROM a) SELECT * FROM (SELECT * FROM b) s LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  PROJECTION",
+        "    LIMIT",
+        "      UNNEST",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral in a CTE both arms of a UNION ALL read, LIMIT 100 outside",
+      "sql": "WITH s AS (SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE) SELECT s.id, s.key FROM s UNION ALL SELECT s.id, s.key FROM s LIMIT 100 OFFSET 999950",
+      "plan": [
+        "LIMIT",
+        "  UNION",
+        "    PROJECTION",
+        "      UNNEST",
+        "        TABLE_SCAN public.orders",
+        "    PROJECTION",
+        "      UNNEST",
+        "        TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "LEFT lateral under string_agg with no ORDER BY",
+      "sql": "SELECT q.id, string_agg(d.key, ',') FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE WHERE q.id < 1000 GROUP BY q.id ORDER BY q.id",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        PERFECT_HASH_GROUP_BY",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                UNNEST",
+        "                  TABLE_SCAN public.orders [zone-map filter: id < constant]"
+      ],
+      "calls": [
+        "__mason_json_keys",
+        "__mason_json_values"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
       "name": "LEFT lateral sorted by its own key, LIMIT 100 (not rewritten)",
       "sql": "SELECT q.id, d.key FROM orders q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta END) d ON TRUE ORDER BY d.key, q.id LIMIT 100",
       "plan": [

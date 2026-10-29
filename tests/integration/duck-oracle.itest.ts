@@ -178,7 +178,10 @@ const KNOWN: Decided[] = [
   { sql: /^SELECT x \* 2 FROM \(SELECT 7 \/ 3\.0 AS x/, kind: "text", gap: "nested-exact-numeric", why: "the subquery's 7 / 3.0 is DuckDB's double where the outer query computes with it" },
   { sql: /^SELECT upper\('\u{10D70}'\)/u, kind: "value", gap: "unicode-16-case", why: "a Garay letter (Unicode 16): DuckDB's ICU predates it" },
   { sql: /^SELECT l\.id, \(l\.j ->> 'n'\)::int, c\.name FROM late l LEFT JOIN late_c c ON c\.id = l\.c ORDER BY l\.k DESC LIMIT 3$/, kind: "answered", gap: "limit-errors", why: "row 2000's 'x' is no integer, and the limit leaves it out: Postgres sorts every row (no index on k) and raises, Mason computes the list for the kept rows" },
-  { sql: /^SELECT x\.id, x\.e FROM \(SELECT s\.id, s\.e::text AS e FROM \(SELECT q\.id, e FROM docs q LEFT JOIN jsonb_array_elements\(.*\) e ON TRUE\) s WHERE s\.id > \$1\) x LIMIT/, kind: "value", gap: "limit-lateral-parameter", why: "a parameter in the filter around the lateral: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows (the same statement with the literal keeps Postgres's)" },
+  { sql: /^SELECT x\.id, x\.e FROM \(SELECT s\.id, s\.e::text AS e FROM \(SELECT q\.id, e FROM docs q LEFT JOIN jsonb_array_elements\(.*\) e ON TRUE\) s WHERE s\.id > \$1\) x LIMIT/, kind: "value", gap: "limit-lateral-filter", why: "a parameter in the filter around the lateral: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows (the same statement with the literal keeps Postgres's)" },
+  { sql: /\), b AS \(SELECT \* FROM a WHERE a\.id > 3\) SELECT \* FROM b LIMIT 40 OFFSET 23$/, kind: "value", gap: "limit-lateral-filter", why: "a filter in the CTE that reads the lateral's CTE: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows" },
+  { sql: /^SELECT q\.id, d\.key FROM docs q LEFT JOIN jsonb_each\(.*\) d ON TRUE WHERE d\.key <> 'n' LIMIT 40$/, kind: "value", gap: "limit-lateral-filter", why: "a filter on the lateral's own column: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows" },
+  { sql: /^SELECT q\.id, d\.key, row_number\(\) OVER (\(PARTITION BY q\.id\)|w) AS r/, kind: "value", gap: "window-partition-order", why: "row_number / lag / first_value over PARTITION BY with no ORDER BY: DuckDB's partitioning hands a partition's rows back in its own order, streamed lateral or not" },
   { sql: /^SELECT s FROM coll WHERE id BETWEEN 50 AND 59 ORDER BY s$/, kind: "rows", gap: "libc-symbol-punctuation", why: "glibc's 1-X < 1x: punctuation after a digit outranks the case; Mason's 1x < 1-X" },
 ];
 
@@ -331,12 +334,14 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         shaped++;
         const [sw, sg] = [await ask(source, s.sql, s.values), await ask(mason, s.sql, s.values)];
         const sv = verdict(sw, sg, s.inOrder);
+        // a decided difference a shape alone meets (a filter's literal sent as a parameter: limit-lateral-filter),
+        // decided before an agreement so one that no longer differs is said so (staleDecisions)
+        const sk = KNOWN.find((x) => x.sql.test(s.sql));
+        if (sk) decided.add(sk);
         if (sv === null) continue;
         const sgap = namedGap(sg);
         if (sgap !== null) { meet(sgap); continue; }
-        // a decided difference a shape alone meets (a filter's literal sent as a parameter: limit-lateral-parameter)
-        const sk = KNOWN.find((x) => x.sql.test(s.sql));
-        if (sk && sv.kind === sk.kind) { decided.add(sk); known.add(sk); meet(sk.gap); continue; }
+        if (sk && sv.kind === sk.kind) { known.add(sk); meet(sk.gap); continue; }
         differences.push({ phase, group: `${q.group} [${s.shape}]`, kind: sv.kind, name: `${q.name} [${s.shape}]`, detail: sv.detail,
           sql: s.values === undefined ? s.sql : `${s.sql} -- with ${JSON.stringify(s.values)}` });
       }
