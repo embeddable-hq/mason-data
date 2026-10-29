@@ -21,16 +21,16 @@ A drop-in replacement for a Postgres read replica, built for exceptionally fast 
   - [Polling](#polling)
   - [Logical replication](#logical-replication)
 - [Performance vs Postgres](#performance-vs-postgres)
-  - [What Mason is for, and what stays on Postgres](#what-mason-is-for-and-what-stays-on-postgres)
-  - [How it is fast](#how-it-is-fast)
+  - [When to use Mason](#when-to-use-mason)
+  - [Why it's fast](#why-its-fast)
 - [Postgres compatibility](#postgres-compatibility)
-  - [Postgres decides, DuckDB computes](#postgres-decides-duckdb-computes)
-  - [The oracle](#the-oracle)
+  - [How a query is answered](#how-a-query-is-answered)
+  - [How compatibility is tested](#how-compatibility-is-tested)
 - [For AI agents](#for-ai-agents)
   - [Access control](#access-control)
   - [The MCP server](#the-mcp-server)
   - [Observability](#observability)
-  - [A CLI an agent can drive](#a-cli-an-agent-can-drive)
+  - [A CLI for coding agents](#a-cli-for-coding-agents)
 - [Documentation](#documentation) · [Community](#community) · [Contributing](#contributing) · [License](#license)
 
 [Website](https://masondata.ai) · [Issues](https://github.com/embeddable-hq/mason-data/issues)
@@ -272,7 +272,7 @@ The benchmark runs a dashboard's queries, such as a sum by status over every ord
 Mason is for scans and aggregates. A lookup through an index is faster on Postgres ([docs/DESIGN.md](docs/DESIGN.md) "Heap order, no index"). Each p95 is over a mix of 6 dashboard queries. It was measured on m7g.xlarge, 4 vCPU, 15 GiB RAM, EBS gp3, against PostgreSQL 18.6, Docker (postgres:18) on the same machine. [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every measurement and how it was taken.
 <!-- END GENERATED -->
 
-### What Mason is for, and what stays on Postgres
+### When to use Mason
 
 Use Mason for scans and aggregates: the queries that get slower as your data grows. On a replica, these queries
 compete with each other and with everything else. Typical examples are dashboards, reports, BI tools, AI agents and
@@ -281,7 +281,7 @@ customer-facing analytics.
 Keep your application's own queries on Postgres: fetching a row by its primary key, inserts and updates. Postgres is
 faster at point lookups, and Mason is read-only.
 
-### How it is fast
+### Why it's fast
 
 - **A columnar copy.** DuckDB stores each column separately and compresses it. A query reads only the columns it
   uses, and it processes them in batches on every CPU core. Postgres, by contrast, reads each whole row. In the
@@ -306,7 +306,7 @@ If Mason can't answer a query exactly, it refuses it. The error says what isn't 
 In a few cases, Mason answers differently from Postgres on purpose. Each of these cases is listed, with the reason.
 Mason never gives a different answer silently.
 
-### Postgres decides, DuckDB computes
+### How a query is answered
 
 Each query goes through four steps:
 
@@ -320,7 +320,7 @@ Each query goes through four steps:
 4. **DuckDB runs it** on the copy. The answer comes back with the column names, type OIDs and text that Postgres would
    send. Exact `numeric` arithmetic stays exact: it is never rounded through a floating-point number.
 
-### The oracle
+### How compatibility is tested
 
 The allowlist is not written by hand. An oracle runs tens of thousands of queries on a real Postgres and on Mason, and
 compares the answers. Only queries that come back identical, or that differ by a listed decision, are allowed. Every
@@ -412,7 +412,7 @@ tool, and shows the setup for Claude Desktop.
 | `mason ui` | The status, the slow and refused counts, and the users, in your browser. |
 | `EXPLAIN` | For each copy a query reads: its rows and how up to date it is, next to the SQL Mason runs. |
 
-### A CLI an agent can drive
+### A CLI for coding agents
 
 You and a coding agent (Claude Code, Codex, …) use the same commands. Each command prints output for a person. With
 `--json`, it prints one JSON object with a documented shape instead. Its exit code says whether it worked, and it
