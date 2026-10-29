@@ -24,7 +24,7 @@ after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 const SESSION = { timeZone: "UTC", searchPath: "public" };
 const SQL = { text: "SELECT 1 AS one", functions: [] } as never;   // see the header: the runner's signal handling, not the planner
 const TIMEOUT = { code: "57014", message: "canceling statement due to statement timeout" };
-const HOW = (analyze: boolean) => ({ options: explainOptions(analyze ? [{ DefElem: { defname: "analyze" } }] : []), fields: null, exact: [], planning: { analysisMs: 0, rewriteMs: 0 } });
+const HOW = (analyze: boolean) => ({ options: explainOptions(analyze ? [{ DefElem: { defname: "analyze" } }] : []), fields: null, exact: [], planning: { analysisMs: 0, rewriteMs: 0 }, copies: [] });
 
 const aborted = (reason?: unknown): AbortSignal => { const c = new AbortController(); c.abort(reason); return c.signal; };
 const is = (want: { code: string; message: string }) => (e: unknown): boolean =>

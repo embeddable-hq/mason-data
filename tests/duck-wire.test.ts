@@ -1209,7 +1209,8 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     const p = await plan("EXPLAIN SELECT id, status FROM orders ORDER BY id LIMIT 2");
     assert.deepEqual(p.fields, [["QUERY PLAN", 25]]);
     assert.equal(p.command, "EXPLAIN");
-    assert.equal(p.lines[0], "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; kept current by polling, no poll recorded yet)");
+    // no sync here (`copies` is empty): how it is kept current is said unknown, never guessed
+    assert.equal(p.lines[0], "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
     assert.equal(p.lines[1], "  Sent to DuckDB: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
     assert.equal(p.lines[2], "  Computed by Mason after DuckDB: nothing");
     // a preview's late materialization (14a1a831), as DuckDB plans it: the top two by the key, then the other columns
@@ -1237,6 +1238,61 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     assert.ok(k.lines.length > 1);
     assert.match((await plan("EXPLAIN SELECT relname FROM pg_class", [])).lines[0]!, /^Mason: answered by the catalog Postgres/);
   } finally { await c.end(); }
+});
+
+test("EXPLAIN says how a copy is kept current as the sync says it to mason status: a streamed table by logical replication, never its last poll", async () => {
+  // a project switched to logical replication still holds its last poll in the poll's ledger: EXPLAIN read that, and
+  // said "kept current by polling, last poll <two days ago>" of a table status said was streamed
+  await store.writer.run("CREATE SCHEMA IF NOT EXISTS _mason");
+  await store.writer.run("CREATE TABLE IF NOT EXISTS _mason.poll_state (source VARCHAR PRIMARY KEY, snapshot VARCHAR, polled_at TIMESTAMPTZ)");
+  await store.writer.run("INSERT OR REPLACE INTO _mason.poll_state VALUES ('public.orders', '100:100:', '2026-10-27 19:58:39+00')");
+  const c = await client();
+  const header = async (sql = "EXPLAIN SELECT id FROM orders"): Promise<string> => String((await c.query({ text: sql, rowMode: "array" })).rows[0]![0]);
+  const json = async (): Promise<Record<string, unknown>> =>
+    (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>)[0]!.Mason.Copies[0]!;
+  const copied = (kept: CopyState["kept"]): CopyState => ({ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 0.1, copiedAt: "2026-10-27 19:00:00+00", error: null, ...(kept ? { kept } : {}) });
+  const head = "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; ";
+  const streamed = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C4D", lastCommit: "2026-10-29T08:15:02.512Z", running: true, failure: null } as const;
+  try {
+    copies = [copied(streamed)];
+    let h = await header();
+    assert.equal(h, `${head}kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)`);
+    assert.doesNotMatch(h, /polling|last poll/);
+    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "logical replication", "Kept Current": h.slice(head.length, -1),
+      Slot: "mason_shop", "Stream State": "streamed", "Applied Through": "0/1A2B3C4D", "Last Change Committed": "2026-10-29T08:15:02.512Z" });
+    // the stream down, nothing applied yet this run: said, still never the poll
+    copies = [copied({ ...streamed, lastCommit: null, running: false, failure: "the database closed the connection" })];
+    assert.equal(await header(), `${head}kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, no change applied this run; the stream is not running now: the database closed the connection)`);
+    // a table being caught up, or left out of the publication, is said as status says it
+    copies = [copied({ ...streamed, state: "catching-up", why: "caught up by one poll after its copy" })];
+    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: caught up by one poll after its copy)`);
+    copies = [copied({ ...streamed, state: "left-out", why: "the publication mason_pub does not publish public.orders" })];
+    assert.equal(await header(), `${head}NOT kept current: left out of logical replication (slot mason_shop): the publication mason_pub does not publish public.orders)`);
+    // a polled project keeps today's words, from the sync's last poll
+    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z" })];
+    assert.equal(await header(), `${head}kept current by polling, last poll 2026-10-27 19:58:39 UTC)`);
+    assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Kept Current": "kept current by polling, last poll 2026-10-27 19:58:39 UTC", "Last Poll": "2026-10-27T19:58:39.000Z" });
+    copies = [copied({ by: "poll", polledAt: null })];
+    assert.equal(await header(), `${head}kept current by polling, no poll recorded yet)`);
+    // over the poll's row limit: NOT kept current, as status says it
+    copies = [copied({ by: "poll", polledAt: "2026-10-27T19:58:39.000Z", unsynced: "over the 1,000,000-row sync limit" })];
+    assert.equal(await header(), `${head}NOT kept current (over the 1,000,000-row sync limit; as of 2026-10-27 19:58:39 UTC): mason sync polls it now)`);
+    // a copy under way or failed says so before how it would be kept current
+    copies = [{ ...copied(streamed), phase: "copying", rowsSoFar: 1200 }];
+    assert.equal(await header(), `${head}being copied (1,200 rows so far): kept current once copied)`);
+    copies = [{ ...copied(streamed), phase: "failed", error: "permission denied for table orders\n(tried again after 14:05 UTC)" }];
+    assert.equal(await header(), `${head}its last copy failed: permission denied for table orders)`);
+    // a statement over two copies says each on a line of its own
+    copies = [copied(streamed), { ...copied({ by: "poll", polledAt: null }), source: "sales.invoices" }];
+    const two = (await c.query({ text: "EXPLAIN SELECT o.id FROM orders o JOIN sales.invoices i ON i.id = o.id", rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
+    assert.equal(two[0], "Mason: answered by DuckDB from its copies of");
+    assert.ok(two.includes("  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)"), two.join("\n"));
+    assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; kept current by polling, no poll recorded yet\)$/.test(l)), two.join("\n"));
+  } finally {
+    copies = [];
+    await store.writer.run("DELETE FROM _mason.poll_state WHERE source = 'public.orders'");
+    await c.end();
+  }
 });
 
 test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's rows and time, and where the time went", async () => {
@@ -1318,7 +1374,7 @@ test("EXPLAIN (FORMAT JSON) is Postgres's plan document, DuckDB's operators in i
     const scan = (doc!.Plan.Plans as Array<Record<string, unknown>>)[0]!;
     assert.deepEqual([scan["Node Type"], scan["Relation Name"], scan["Schema"], scan["Plan Rows"]], ["Table Scan", "orders", "public", 3]);
     assert.equal(doc!.Mason["Answered By"], "DuckDB");
-    assert.deepEqual(doc!.Mason.Copies, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": "polling", "Last Poll": null }]);
+    assert.deepEqual(doc!.Mason.Copies, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": null, "Kept Current": "how it is kept current is unknown: the sync has no record of it" }]);
     assert.ok(typeof doc!["Planning Time"] === "number" && typeof doc!["Execution Time"] === "number");
     // FORMAT XML and YAML are refused by name; Postgres's own errors for an option it does not have, or one that needs ANALYZE
     await assert.rejects(c.query("EXPLAIN (FORMAT XML) SELECT id FROM orders"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap explain-option/.test(e.message));

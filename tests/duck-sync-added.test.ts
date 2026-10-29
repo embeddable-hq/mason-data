@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DuckStore, MASON_SCHEMA } from "../src/duck/store.ts";
 import * as syncModule from "../src/duck/sync.ts";
+import * as explainModule from "../src/duck/explain.ts";
 import type { AddedTable, Sync as SyncClass, SyncMode, SyncReplication } from "../src/duck/sync.ts";
 import type { Source } from "../src/cli/preflight.ts";
 
@@ -21,6 +22,8 @@ import type { Source } from "../src/cli/preflight.ts";
 type Status = { source: string } & ({ copy: string } | { behind: string } | { refused: string } | { unsynced: boolean });
 const { addedText } = syncModule as unknown as { addedText: (tables: readonly Status[], kept: string) => string };
 const { Sync } = syncModule;
+// EXPLAIN's words for how a copy is kept current (src/duck/explain.ts), read the same way
+const { keptText } = explainModule as unknown as { keptText: (f: unknown) => string };
 
 test("tables already copied and current are said as such, in one line, never as copied at the next pass", () => {
   const line = addedText(["public.a", "public.b", "public.c", "public.d"].map((source) => ({ source, unsynced: false })), "streamed from 0/16B3F28");
@@ -49,8 +52,15 @@ const table = (name: string, rows = 10, columns = [column("id")]): AddedTable =>
 // a source nothing listens on: never reached, the sync is stopped before anything would connect
 const source = { url: "postgresql://x@127.0.0.1:1/x", remote: false, host: "127.0.0.1", port: 1, database: "x", user: "x", password: "", sslmode: "disable" } as unknown as Source;
 
+type Started = { mode: SyncMode; replication?: SyncReplication; seed: (run: (sql: string) => Promise<unknown>) => Promise<void>; tables: AddedTable[] };
+
 /** the line a Sync over `file` logs when its tables are set, after `seed` wrote its ledger */
-async function startLine(t: { mode: SyncMode; replication?: SyncReplication; seed: (run: (sql: string) => Promise<unknown>) => Promise<void>; tables: AddedTable[] }): Promise<string[]> {
+function startLine(t: Started): Promise<string[]> {
+  return withSync(t, async (_sync, logged) => logged.filter((l) => !/^the catalog could not be rebuilt|: its copy is stored in key order/.test(l)));
+}
+
+/** a Sync over a fresh file whose ledger `seed` wrote, stopped, its tables set: `use` reads it before the file goes */
+async function withSync<T>(t: Started, use: (sync: SyncClass, logged: string[]) => Promise<T>): Promise<T> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-duck-added-"));
   const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined, { memoryLimit: "256MB" });
   try {
@@ -66,7 +76,7 @@ async function startLine(t: { mode: SyncMode; replication?: SyncReplication; see
     const sync = await open((l) => logged.push(l));
     await sync.stop();
     await sync.setTables(t.tables);
-    return logged.filter((l) => !/^the catalog could not be rebuilt|: its copy is stored in key order/.test(l));
+    return await use(sync, logged);
   } finally {
     store.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -122,4 +132,36 @@ test("in replication mode a current copy is streamed from the position the copy 
     ["2 tables already copied and streamed from 0/16B3F28: public.a, public.b"], "the row limit is the polls', never the stream's");
   assert.deepEqual(await startLine({ mode: "replication", replication, tables, seed: seed(false) }),
     ["2 tables already copied, caught up by one poll first (slot mason_x is new to this copy): public.a, public.b"]);
+});
+
+test("how a copy is kept current is the sync's one fact, read by EXPLAIN and mason status alike: a project switched to replication is streamed, never its last poll", async () => {
+  // the ledger as a project polled until 2026-10-27 leaves it, then started with --replication: its last poll stays
+  const lastPoll = (n: string): string => `INSERT INTO ${MASON_SCHEMA}.poll_state VALUES ('public.${n}', '100:100:', '2026-10-27 19:58:39+00')`;
+  const seed = async (run: (sql: string) => Promise<unknown>): Promise<void> => {
+    for (const n of ["a", "big"]) { await run(copied(n)); await run(lastPoll(n)); }
+    await run(`INSERT INTO ${MASON_SCHEMA}.stream_state VALUES ('mason_x', '0/16B3F28', now())`);
+  };
+  const tables = [table("a"), table("big", 2_000_000)];
+  type Kept = { by: string; state?: string; position?: string; polledAt?: string | null; unsynced?: string };
+  const streamed = await withSync({ mode: "replication", replication: { slot: "mason_x", publication: "mason_x", owned: true }, tables, seed }, async (sync) => {
+    const states = sync.state() as Array<{ source: string; phase: string; kept?: Kept; unsynced?: unknown }>;
+    return { states, stream: await sync.streamStatus() };
+  });
+  assert.equal(streamed.states.length, 2);
+  for (const st of streamed.states) {
+    assert.deepEqual([st.kept?.by, st.kept?.state, st.kept?.position], ["replication", "streamed", "0/16B3F28"], JSON.stringify(st));
+    // mason status's stream section says the same of it: one derivation
+    assert.equal(streamed.stream?.tables.find((t) => t.table === st.source)?.state, st.kept?.state);
+    assert.equal(st.unsynced, undefined, "the row limit is the polls', never the stream's");
+    const text = keptText(st);
+    assert.match(text, /^kept current by logical replication \(slot mason_x\), applied through 0\/16B3F28, no change applied this run/);
+    assert.doesNotMatch(text, /polling|last poll/);
+  }
+  // the same ledger polled: its last poll, and the big table left as copied, as status says it
+  const polled = await withSync({ mode: "poll", tables, seed }, async (sync) => sync.state() as Array<{ source: string; kept?: Kept; unsynced?: { reason: string; asOf: string | null } }>);
+  const [a, big] = polled;
+  assert.deepEqual(a!.kept, { by: "poll", polledAt: "2026-10-27T19:58:39.000Z" });
+  assert.equal(keptText(a), "kept current by polling, last poll 2026-10-27 19:58:39 UTC");
+  assert.deepEqual(big!.kept, { by: "poll", polledAt: "2026-10-27T19:58:39.000Z", unsynced: "over the 1,000,000-row sync limit" });
+  assert.deepEqual(big!.unsynced, { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-27T19:58:39.000Z" });
 });
