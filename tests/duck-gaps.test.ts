@@ -32,11 +32,12 @@ const KINDS: Array<[string, string]> = [
 ];
 
 /**
- * THE README'S TABLE (a table at its end listing which Postgres features are supported and which are known
- * differences): what a reader deciding whether to point a tool at Mason needs on one screen — the shapes of
- * SQL answered, every type, the counts of what the oracle verified (docs/SQL-SUPPORT.md names each), what is refused,
- * then every known difference and limit as the registry has them. The feature rows are written here; the types, the
- * counts and the differences come from the code, so the table cannot say more than the oracle holds.
+ * DOCS/SQL-SUPPORT.MD'S "AT A GLANCE" (a table listing which Postgres features are supported, and the oracle's
+ * comparison with DuckDB alone): what a reader deciding whether to point a tool at Mason needs on one screen — the
+ * shapes of SQL answered, every type, the counts of what the oracle verified (named further down the doc), what is
+ * refused. The feature rows are written here; the types, the counts and the tallies come from the code and the
+ * oracle's fixture, so the table cannot say more than the oracle holds. The README carries the counts alone
+ * (`renderReadmeSupport`), in its body, and links the doc.
  */
 /** the oracle's DuckDB-alone tallies (tests/integration/duck-oracle.itest.ts `duckdbAlone`), as the fixture holds them */
 export interface AloneTallies {
@@ -47,7 +48,26 @@ export interface AloneTallies {
 export const ALONE_FIXTURE = path.join(ROOT, "tests/fixtures/oracle-duckdb-alone.json");
 const readAlone = (): AloneTallies => JSON.parse(fs.readFileSync(ALONE_FIXTURE, "utf8")) as AloneTallies;
 
+/** the counts the README and the doc both say, from the registry, the verified list and the oracle's tallies */
+const percentOf = (alone: AloneTallies) => (n: number): string => `${Math.round(100 * n / alone.statements)}%`;
+
+/** the README's block, in its body ("What of Postgres is answered"): the oracle's verdict and the registry's counts, and where each is named */
 export function renderReadmeSupport(gaps: Record<string, Gap>, verified: ReadonlyMap<string, string>, alone: AloneTallies = readAlone()): string {
+  const of = (kind: Gap["kind"]): number => Object.values(gaps).filter((g) => g.kind === kind).length;
+  const pct = percentOf(alone);
+  const m = alone.mason;
+  const wrong = m.differs === 0 ? "none was answered with a wrong value" : `${m.differs.toLocaleString("en-US")} were answered with a wrong value`;
+  return `${README_START}
+Of the oracle's ${alone.statements.toLocaleString("en-US")} statements, Mason answers ${pct(m.exact)} exactly as Postgres does, ${pct(m.decided)} differently by a decision
+it lists, and refuses ${pct(m.refused)} by name, saying what to write instead; ${wrong}. A plain DuckDB
+connection over the same tables answers ${pct(alone.duckdb.exact)} of them exactly. [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md), rendered from the code,
+names the ${verified.size.toLocaleString("en-US")} pieces verified (types, functions, operators, aggregates, casts, constructs), the ${of("refused")} shapes
+refused, the ${of("differs")} known differences and the ${of("limit")} limits, each with what to write instead.
+`;
+}
+
+/** docs/SQL-SUPPORT.md's first sections: what is answered, at a glance, and why not DuckDB by itself */
+function renderAtAGlance(gaps: Record<string, Gap>, verified: ReadonlyMap<string, string>, alone: AloneTallies): string {
   const of = (kind: Gap["kind"]): Array<[string, Gap]> => Object.entries(gaps).filter(([, g]) => g.kind === kind);
   const count = (prefix: string): number => [...verified.keys()].filter((k) => k.startsWith(`${prefix}:`)).length;
   const typeNames = [...verified].filter(([k]) => k.startsWith("type:")).map(([, v]) => v.replace(/^a value of type /, ""));
@@ -57,27 +77,25 @@ export function renderReadmeSupport(gaps: Record<string, Gap>, verified: Readonl
     ["A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN",
       `answered exactly as Postgres answers it: ${count("node")} constructs and ${count("field")} forms of them verified`],
     [`The types: ${scalars.join(", ")}; arrays of ${arrays.join(", ")}; the source's enums and citext; a table's row`, `answered (${count("type")} types verified)`],
-    ["Functions, operators, aggregates, window functions and casts", `answered exactly: ${count("function")} functions, ${count("operator")} operators, ${count("aggregate")} aggregates, ${count("window")} window functions and ${count("cast")} casts verified; [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) names each`],
+    ["Functions, operators, aggregates, window functions and casts", `answered exactly: ${count("function")} functions, ${count("operator")} operators, ${count("aggregate")} aggregates, ${count("window")} window functions and ${count("cast")} casts verified; "What is verified" below names each`],
     ["Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses", "answered: what a BI tool asks at connection and before a query"],
-    [`Anything else: ${of("refused").length} shapes known not to answer as Postgres does (SQL-SUPPORT.md "Refused"), and any function, operator or cast the oracle has not verified`, "refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently"],
+    [`Anything else: ${of("refused").length} shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified`, "refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently"],
   ];
   const cell = (s: string): string => s.replace(/\|/g, "\\|");
-  const known = (kind: Gap["kind"]): string => ["| What | Postgres | Mason | Instead |", "|---|---|---|---|",
-    ...of(kind).map(([, g]) => `| ${cell(g.what)} | ${cell(g.postgres)} | ${cell(g.mason)} | ${cell(g.wayOut)} |`)].join("\n");
-  const pct = (n: number): string => `${Math.round(100 * n / alone.statements)}%`;
+  const pct = percentOf(alone);
   const m = alone.mason, d = alone.duckdb;
-  return `${README_START}
-> **The list is the code; the sentences are a template.** \`tests/duck-gaps.test.ts\` renders this section from
-> \`src/duck/gaps.ts\` and \`src/duck/verified.ts\`, and CI holds it equal to what they render, so it is as current as the
-> commit you are reading. To change the wording, edit the renderer; to change what is answered or refused, change the
-> source; an edit made here is undone by the next \`UPDATE_FIXTURE=1 npm test\`.
+  return `## At a glance
 
 Mason is a drop-in replacement for a Postgres read replica: the SQL a tool sends Postgres is answered as Postgres
 answers it — the same columns, types, values, text and order — or refused by name, never answered differently. Every
-piece a statement is made of is verified against a real Postgres by the oracle ([docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md),
-rendered from the code, names each). The copy is read-only.
+piece a statement is made of is verified against a real Postgres by the oracle ("What is verified" below names
+each). The copy is read-only.
 
-### Why not DuckDB by itself
+| Postgres | Mason |
+|---|---|
+${rows.map(([p, m]) => `| ${cell(p)} | ${cell(m)} |`).join("\n")}
+
+## Why not DuckDB by itself
 
 DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's ${alone.statements.toLocaleString("en-US")} statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
@@ -85,7 +103,7 @@ each sent as written to Mason and to a plain DuckDB connection over the same cop
 | Of ${alone.statements.toLocaleString("en-US")} statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | ${pct(m.exact)} | ${pct(d.exact)} |
-| answered differently by a decision the registry lists (the known differences below) | ${pct(m.decided)} | — |
+| answered differently by a decision the registry lists ("Answered differently" below) | ${pct(m.decided)} | — |
 | refused, naming what to write instead (SQLSTATE 0A000, \`Mason gap <id>\`) | ${pct(m.refused)} | — |
 | the right rows under DuckDB's own column names (\`count_star()\` for \`count\`, the expression's text for an unnamed column) | — | ${pct(d.name)} |
 | refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | ${pct(d.refused)} |
@@ -97,26 +115,10 @@ each sent as written to Mason and to a plain DuckDB connection over the same cop
 A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
 statement. The oracle's statements are adversarial by design (NULL beside '', ties, every type's edge values), so
 plain reports fare better on DuckDB alone than this table says — and still not as Postgres.
-
-| Postgres | Mason |
-|---|---|
-${rows.map(([p, m]) => `| ${cell(p)} | ${cell(m)} |`).join("\n")}
-
-### Known differences (${of("differs").length})
-
-Answered, but not as Postgres answers: each is a decided difference the oracle checks still differs.
-
-${known("differs")}
-
-### Limits (${of("limit").length})
-
-Not about one statement: what Mason does not do yet.
-
-${known("limit")}
 `;
 }
 
-export function renderGaps(gaps: Record<string, Gap>, verified: ReadonlyMap<string, string>): string {
+export function renderGaps(gaps: Record<string, Gap>, verified: ReadonlyMap<string, string>, alone: AloneTallies = readAlone()): string {
   const of = (kind: Gap["kind"]): Array<[string, Gap]> => Object.entries(gaps).filter(([, g]) => g.kind === kind);
   const groups = KINDS.map(([prefix, title]) => {
     const names = [...verified].filter(([k]) => k.startsWith(`${prefix}:`)).map(([, v]) => v).sort();
@@ -141,6 +143,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (\`Mason gap <id>\`) and
 says what to write instead in its hint.
 
+${renderAtAGlance(gaps, verified, alone)}
 ## Refused (${of("refused").length})
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
@@ -164,17 +167,32 @@ ${table(of("limit"))}
 ${groups.join("\n")}`;
 }
 
-/** the README's section between these lines is rendered (`renderReadmeSupport`), the rest of the README written by hand */
+/** the README's block between these lines is rendered (`renderReadmeSupport`), the rest of the README written by hand */
 export const README_START = "<!-- GENERATED by tests/duck-gaps.test.ts from src/duck/gaps.ts and src/duck/verified.ts, to the END line: never edit by hand; UPDATE_FIXTURE=1 npm test rewrites it -->";
 export const README_END = "<!-- END GENERATED -->";
 
-test("README.md's table of what is answered and the known differences is what the registry renders", () => {
+test("README.md's counts of what is answered, refused and known to differ are what the registry renders", () => {
   const was = fs.readFileSync(README, "utf8");
   const a = was.indexOf(README_START), z = was.indexOf(README_END, a);
   assert.ok(a >= 0 && z > a, `README.md has the lines ${README_START} … ${README_END}`);
   const out = was.slice(0, a) + renderReadmeSupport(GAPS, VERIFIED) + was.slice(z);
   if (UPDATE) { fs.writeFileSync(README, out); console.log(`UPDATE_FIXTURE=1: wrote ${README}`); return; }
-  assert.equal(was, out, "README.md's table is not what the registry renders: regenerate with `UPDATE_FIXTURE=1 npm test` and read the diff");
+  assert.equal(was, out, "README.md's block is not what the registry renders: regenerate with `UPDATE_FIXTURE=1 npm test` and read the diff");
+});
+
+test("the README's block is in its body, before License, and says each count docs/SQL-SUPPORT.md lists in full", () => {
+  const readme = fs.readFileSync(README, "utf8");
+  const block = readme.indexOf(README_START), license = readme.indexOf("\n## License\n");
+  assert.ok(block >= 0 && license > block, "the block comes before ## License");
+  assert.doesNotMatch(readme.slice(license + 1), /\n## /, "nothing follows License");
+  const text = renderReadmeSupport(GAPS, VERIFIED).replace(/\s+/g, " ");
+  const doc = renderGaps(GAPS, VERIFIED);
+  const kinds = ["refused", "differs", "limit"] as const;
+  const n = Object.fromEntries(kinds.map((k) => [k, Object.values(GAPS).filter((g) => g.kind === k).length]));
+  assert.ok(text.includes(`the ${VERIFIED.size.toLocaleString("en-US")} pieces verified (types, functions, operators, aggregates, casts, constructs), the ${n.refused} shapes refused, the ${n.differs} known differences and the ${n.limit} limits`), text);
+  for (const heading of [`## What is verified (${VERIFIED.size})`, `## Refused (${n.refused})`, `## Answered differently (${n.differs})`, `## Limits of the prototype (${n.limit})`, "## At a glance", "## Why not DuckDB by itself"]) {
+    assert.ok(doc.includes(`\n${heading}\n`), `docs/SQL-SUPPORT.md has ${heading}`);
+  }
 });
 
 test("docs/SQL-SUPPORT.md is what src/duck/gaps.ts and src/duck/verified.ts render", () => {

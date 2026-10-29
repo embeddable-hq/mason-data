@@ -17,6 +17,42 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
+## At a glance
+
+Mason is a drop-in replacement for a Postgres read replica: the SQL a tool sends Postgres is answered as Postgres
+answers it — the same columns, types, values, text and order — or refused by name, never answered differently. Every
+piece a statement is made of is verified against a real Postgres by the oracle ("What is verified" below names
+each). The copy is read-only.
+
+| Postgres | Mason |
+|---|---|
+| A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 85 forms of them verified |
+| The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 241 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
+| Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
+| Anything else: 46 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+
+## Why not DuckDB by itself
+
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 2,998 statements,
+each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
+
+| Of 2,998 statements | Mason | DuckDB alone |
+|---|---|---|
+| answered exactly as Postgres: the rows, their text, the column names | 95% | 31% |
+| answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
+| refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 4% | — |
+| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 23% |
+| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 18% |
+| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 11% |
+| wrong rows, or the rows in another order | — | 7% |
+| the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 5% |
+| another error than Postgres's, or answered where Postgres refuses | — | 5% |
+
+A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
+statement. The oracle's statements are adversarial by design (NULL beside '', ties, every type's edge values), so
+plain reports fare better on DuckDB alone than this table says — and still not as Postgres.
+
 ## Refused (46)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.

@@ -1124,7 +1124,7 @@ A tuned Postgres would close part of the gap, not 23×.
 **Decision.** `scripts/bench-replica.ts` sweeps each axis until Postgres's p95 of a six-statement mix reaches a target
 (`--target-postgres-seconds`; a minute for a published run): rows at 8 clients about √10 a step (`nextSize`), then
 clients at the largest size under the target, doubling (`clientSteps`) to 1,024. Each engine is measured with the other
-stopped. The README's "When is Mason faster?" is rendered from its fixture; `docs/BENCHMARK.md` has the method
+stopped. docs/MEASUREMENTS.md ("When is Mason faster?") and the README's headline numbers are rendered from its fixture; `docs/BENCHMARK.md` has the method
 in full (a replica's settings and indexes for the container's memory, answers compared before timing, the median of
 runs).
 
@@ -1143,7 +1143,7 @@ a real database's rows.
 ### DuckDB alone against the oracle
 
 **Decision.** Every oracle run asks each statement, as written, of a plain DuckDB connection over the same copy
-(`duckdbAlone`); `tests/fixtures/oracle-duckdb-alone.json` holds the tallies, rendered in the README's table, and a move of
+(`duckdbAlone`); `tests/fixtures/oracle-duckdb-alone.json` holds the tallies, rendered in docs/SQL-SUPPORT.md's table (the README says the headline), and a move of
 over a percentage point fails until it is rewritten. **Why.** It measures what Mason adds over its engine: of 2,753
 statements Mason answers 94.7 % exactly (1.0 % a decided difference, 4.3 % refused by name, no wrong value); DuckDB alone
 30.9 % exactly, 25.0 % the right rows under its own names, 16.2 % refused with its error, 12.6 % a wrong value, 6.1 % wrong
