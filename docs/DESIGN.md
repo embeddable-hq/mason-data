@@ -312,11 +312,13 @@ oracle several times while iterating, and one built a 20 M-row dataset twice.
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
-63 statements (27 of PR #13's shapes, their controls, a count by a column and a table's previews, each in the tool's
-spelling; 36 of `oracle/bi-shapes.ts`, one of each structure) explained through the
+80 statements (27 of PR #13's shapes, their controls, a count by a column and a table's previews, each in the tool's
+spelling; 36 of `oracle/bi-shapes.ts`, one of each structure; 17 of a jsonb sorted, grouped, made DISTINCT and
+compared, below) explained through the
 listener over the shop with a million orders in nine row groups, each reduced to a coarse skeleton — the operators in
 tree order, each scan's table and whether a top-N dynamic filter or a zone-map filter is attached (and whether that
-filter compares a bare column with a constant), the Mason functions called, the time functions the SQL sent calls, a
+filter compares a bare column with a constant), the Mason functions called, the time functions the SQL sent calls,
+what it sorts or compares by beyond a value (ICU's key, a stored column: `keys`, printed only where there is one), a
 delimiter join, a full sort; no cost, estimate or row count, so a DuckDB upgrade that keeps the plan keeps the
 fixture. Five invariants are measured with DuckDB's EXPLAIN ANALYZE, where a skeleton cannot show the gain: a 100-row
 page by a column reads at most 6 of the 9 row groups in each scan (1–3 measured; loose, since the count is how many
@@ -352,6 +354,25 @@ such a column gains only the fetch of the winners' columns. DuckDB's EXPLAIN nam
 cost of an expression — ICU's date_trunc against the instant's arithmetic — is not in the operators (at 3ad6493 the
 histogram's are the same); the skeleton reads it from the SQL sent, the time functions it calls, which is what
 `truncInstant` changes.
+
+**A jsonb's plans (2026-10-29).** Nothing held the plans of PRs #12 and #14 (jsonb's order, and that order stored),
+and a BI tool's page by a jsonb took 17 s over 22 M rows computing the key per row. 17 statements now do — a page by a
+jsonb DESC and ASC, the nulls idiom over one, a count per document, a DISTINCT, an equality with a document — each with
+the key computed and with it stored, over two more copies of the shop: one whose keeper stored `meta`'s order key under
+C, one under a libc order (its page with the key computed, its page with it stored, and its three equalities, which
+read the C key, computed per row whether or not the order key is stored: a stored C key changes those three). With
+`src/` at b71bc3c (main before PR #12) all 17 fail by name, the computed ones on Mason's refusal to order a jsonb, the
+stored ones on the keeper storing no order key; at cd74a4f (main before PR #14) the 10 that read a stored key fail and
+the 7 that compute it pass, PR #12's plans unchanged since. Eight invariants count what the plans cost (the function
+counter came with this fixture, so they prove nothing against those commits): the page by a jsonb with its key not
+stored hands `__mason_jsonb_key` 1,000,100 rows — every row, a NULL document's included, under the top N, and the 100
+winners' again where the late-materialized page sorts them — and each statement over a stored key hands no function a
+row (an equality its constant's key once), its top N's scan reading the stored column and never the documents. What
+storing the key does not buy: DuckDB 2.0 pushes no top N's filter into a scan of the BLOB column, through the exact
+read's CASE (the mark's check) or with the bare column sorted (both measured: 9 of 9 row groups, 1,000,000 rows), and a
+jsonb's order is spread over the row groups like a text column's, so no zone map would skip one anyway. The gain is the
+calls alone — a page over the million rows in 45–150 ms from the stored key, 6–23 s by the function (a laptop, across
+runs).
 **Where.** `tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`.
 
 ### EXPLAIN
