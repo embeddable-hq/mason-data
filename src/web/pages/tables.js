@@ -9,6 +9,7 @@
  * an ellipsis, its whole the title. Reads `/api/state` every poll and `/api/usage`'s `copySizes` every minute.
  */
 import { button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, POLL_MS } from "../shared.js";
+import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
 const SIZES_PATH = "/api/usage?since=1m";
@@ -126,7 +127,7 @@ export function renderTablesCards(s) {
   const added = s.tables.filter((x) => x.added).length;
   return cards([
     card("Tables added", `${n(added)} of ${n(s.tables.length)}`, "in the database"),
-    card("Synced", n(t.copied), `of ${n(added)} added`),
+    card("Synced", n(t.copied), `of ${n(added)} added${copyingCount(s) ? `, ${n(copyingCount(s))} copying` : ""}`),
     card("Failed", n(t.failed), `of ${n(added)} added`, "", t.failed ? "bad" : ""),
     card("Rows", n(t.rows), "in the copies"),
   ]);
@@ -146,7 +147,7 @@ export function renderTablesCards(s) {
  * search box's text and `ui.show` the state filter (a key of SHOWS).
  */
 export function renderTables(s, ui = {}) {
-  const { removing = null, choosing = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], synced = null, open = () => false, limit = TABLE_ROWS } = ui;
+  const { removing = null, choosing = null, outcome = null, ticked = null, filter = "", show = "all", sizes, syncing = [], adding = [], shares = new Map(), synced = null, open = () => false, limit = TABLE_ROWS } = ui;
   if (!s.tables.length) return empty(`${s.source.database} has no table this user can read.`);
   const stream = s.stream ? new Map(streamRows(s.stream, ui.now ?? Date.now()).tables) : null;
   const head = [["Table", ""], ["State", ""], ["Rows", "num"], ["Key", ""], ["Last sync", "num"], ["Took", "num"], ["Size of the copy", "num"], ...(stream ? [["Stream", ""]] : []), ["Note", ""], ["", ""]];
@@ -157,7 +158,8 @@ export function renderTables(s, ui = {}) {
     const f = tableFacts(t);
     const name = entryName(t.table);
     const y = t.sync;
-    const act = t.added
+    const adding_ = adding.includes(t.table);
+    const act = adding_ ? `<button type="button" class="primary small" disabled>Adding…</button>` : t.added
       ? (syncing.includes(t.table) ? `<button type="button" class="small" disabled>Syncing…</button>` : button("Sync", { syncTable: t.table }, "small")) + " " +
         (removing === t.table
           ? `<span class="confirm">Remove ${esc(name)}? ${esc(removedReport([t.table], "").tips[0])}.</span> ` +
@@ -168,10 +170,13 @@ export function renderTables(s, ui = {}) {
         : t.key.length ? "" : button("Name its key…", { choose: t.table }, "small");
     // a failed copy's rows so far are none: the copy it serves meanwhile is said by its error and mason status
     const rows = t.added && t.copy && t.copy.phase !== "failed" ? n(t.copy.rowsCopied) : f.size;
-    const state = t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
+    const state = adding_ ? status("warn", "Adding…") : t.added ? (y ? status(undefined, SYNC_WORDS[y.state]) : "") : status("unknown", "Not added");
+    // a copy under way or waiting to start shows its bar and the words `mason wait` prints (the Overview's renderer), until it is served
+    const l = t.added ? tableLine(t) : null;
+    const bar = l && (l.state === "copying" || l.state === "waiting") ? `<span class="copyline t-${l.state}">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction)} <span class="what-copy">${esc(l.what)}</span></span>` : "";
     const last = t.added && y?.syncedAt && y?.ageSeconds != null ? cell(`${duration(y.ageSeconds)} ago`, "num", `${utcText(y.syncedAt)} UTC`) : cell("", "num");
-    const note = t.added
-      ? t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : ""
+    const note = adding_ ? `<span class="dim">adding it to the sources file…</span>` : t.added
+      ? bar ? bar : t.error ? `<span class="err">${esc(firstLine(t.error))}</span>${t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, open(`error:${t.table}`)) : ""}` : ""
       : `<span class="dim">${esc(f.state ?? "")}</span>`;
     const said = (outcome?.table !== t.table ? "" : under("failure" in outcome ? renderFailure(outcome.failure) : "added" in outcome ? renderTableAdded(outcome.added, shownFileOf(s, outcome.added.file)) : renderTablesRemoved(outcome.removed, shownFileOf(s, outcome.removed.file)))) +
       (synced?.table !== t.table ? "" : under("failure" in synced ? renderFailure(synced.failure) : renderSynced(synced.synced, t.table, s)));
@@ -202,8 +207,9 @@ export const page = {
   id: "tables",
   title: "Tables",
   create(ctx) {
-    const m = { removing: null, choosing: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], synced: null, limit: TABLE_ROWS };
+    const m = { removing: null, choosing: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], adding: [], synced: null, limit: TABLE_ROWS };
     const state = () => ctx.read("/api/state")?.body ?? null;
+    const monotone = createMonotone();
     // the details open (a copy's whole error), by key: a poll rewrites the part, and they stay open
     const opened = createOpenSet();
     // WHILE A FORM IS OPEN OR A REMOVE ASKS, THE TABLES ARE RENDERED FROM THE STATE THEY WERE OPENED OVER (`held`): the
@@ -222,7 +228,11 @@ export const page = {
     const actions = {
       /** Add a table (`mason add`): the answer under its line, then the state read again — the Overview shows its copy starting. */
       async addTable(table, columns = [], key = []) {
+        if (m.adding.includes(table)) return false;
+        // from the click: the row says Adding… (the page paints before the answer), then the state read again shows the copy
+        m.adding = [...m.adding, table];
         const r = await ctx.ask("/api/pick", json("POST", pickBody(table, columns, key)));
+        m.adding = m.adding.filter((x) => x !== table);
         // refused: said under the form, which is written again with the boxes the person had ticked
         if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
         m.outcome = { table, added: r.body }; m.choosing = null; hold();
@@ -282,7 +292,7 @@ export const page = {
         return {
           "tables-cards": latest ? renderTablesCards(latest) : "",
           tables: s ? renderTables(s, { removing: m.removing, choosing: m.choosing, outcome: m.outcome, ticked: m.ticked, now: ctx.now().getTime(),
-            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, synced: m.synced, open: opened.has, limit: m.limit,
+            filter: m.held ? m.heldFilter : m.filter, show: m.held ? m.heldShow : m.show, syncing: m.syncing, adding: m.adding, shares: monotone.of(latest ?? s), synced: m.synced, open: opened.has, limit: m.limit,
             sizes: sizes === undefined ? undefined : sizes.failure ? { failure: sizes.failure } : sizes.body }) : "",
         };
       },

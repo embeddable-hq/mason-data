@@ -243,7 +243,7 @@ test("running: the database masked, each table copied with its rows, the counts,
 test("copying: the bar's share, the rows, the chunks, the rate and the time left; one waiting; Under way", () => {
   const html = fn<[unknown, unknown?], string>("renderStatus")(COPYING, {});
   const text = textOf(html);
-  assert.match(html, /<tr class="t-copying"><th scope="row"><code>public\.orders<\/code><\/th><td class="bar"><progress max="100" value="15"><\/progress>/);
+  assert.match(html, /<tr class="t-copying"><th scope="row"><code>public\.orders<\/code><\/th><td class="bar"><progress class="copybar" max="100" value="15" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="15"/);
   assert.match(text, /public\.orders 15% copying 321,000 of ~2,000,000 rows · 2 chunks reading \(14 s\), 3 of ~20 in · 52,300 rows\/s · ~6 min left/);
   assert.match(text, /public\.events 0% waiting for its copy to start/);
   assert.match(text, /^Under way .* Copies not finished \(2 of 3 added\) Table Copy public\.orders 15% /);
@@ -502,7 +502,7 @@ test("the app: Add sends POST /api/pick, says what was added under its table, an
   assert.deepEqual(run.asked, [`POST /api/pick ${JSON.stringify({ table: "public.accounts", picked: true })}`, "GET /api/state"],
     "every column, as mason add accounts asks; then the state again (the page's own read: nothing else)");
   const v = app.view();
-  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id Sync Remove Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
+  assert.match(textOf(v.tables!), /public\.accounts Waiting ~300 rows key id 0% waiting for its copy to start Sync Remove Added public\.accounts to mason\/sources\/shop\.yml: every column but password_hash left out password_hash: it looks like a secret/);
   assert.match(textOf(v.status!), /public\.accounts 0% waiting for its copy to start/, "the Overview shows the copy starting");
   app.dismissOutcome();
   assert.ok(!/Added public\.accounts/.test(app.view().tables!));
@@ -665,7 +665,7 @@ test("in the browser: the tables are written when they change, never at every po
   const { el, on, tick, settle } = fakeBrowser(run, "#tables");
   await settle();
   const tables = el("tables");
-  assert.match(textOf(tables.html), /public\.orders Syncing 280,000 key id Sync Remove/);
+  assert.match(textOf(tables.html), /public\.orders Syncing 280,000 key id 15% copying .* Sync Remove/);
   await on.get("click")!({ target: { closest: () => ({ dataset: { removeTable: "public.orders" } }) } });
   assert.match(textOf(tables.html), /Remove orders\? Mason stops copying it and drops its copy\. Remove orders Cancel/);
   let writes = tables.writes;
@@ -677,7 +677,7 @@ test("in the browser: the tables are written when they change, never at every po
   run.answers.set("GET /api/state", rowsOf(350));
   tick(); await settle();
   assert.equal(tables.writes, writes, "rows that moved while a Remove asks do not write the tables again: the confirm stays the one clicked");
-  assert.match(textOf(tables.html), /public\.orders Syncing 280,000 key id Sync Remove orders\? .* public\.audit Not added ~50 rows key id Add Columns… /);
+  assert.match(textOf(tables.html), /public\.orders Syncing 280,000 key id 15% copying .* Sync Remove orders\? .* public\.audit Not added ~50 rows key id Add Columns… /);
   await on.get("click")!({ target: { closest: () => ({ dataset: { cancelRemoveTable: "" } }) } });
   assert.match(textOf(tables.html), /public\.audit Not added ~350 rows key id/, "Cancel writes the rows as they are now");
   await on.get("click")!({ target: { closest: () => ({ dataset: { choose: "public.audit" } }) } });
@@ -2396,4 +2396,99 @@ test("the Overview: the last day's unsupported SQL is one line of the recent err
   await app.poll();
   assert.ok(run.asked.includes("GET /api/unsupported?limit=100"), "the Overview reads the last day's, the endpoint's default");
   assert.match(textOf(app.view().status!), /Query errors .* Unsupported SQL, the last day: 12 statements used a window frame in GROUPS mode — docs\/SQL-SUPPORT\.md frame-groups \(and 1 other\) See all$/);
+});
+
+// ------------------------------------------------------------------ a table just added shows its copy at once
+
+/** The state with public.accounts added and its copy as given (null: not started). */
+const accountsCopy = (c: Partial<CopyState> | null, more: CopyState[] = []): RunState => stateOf([...THREE_COPIED(), ...(c ? [{ source: "public.accounts", phase: "copying", rows: null, bytes: null, seconds: null, copiedAt: null, error: null, ...c } as CopyState] : []), ...more],
+  { tables: CATALOG, sources: withAccounts });
+const withShare = (share: number, o: Partial<CopyProgressView> = {}): Partial<CopyState> => ({ rowsSoFar: Math.round(300 * share), rowsEstimate: 300, progress: { ...progress, share, ...o } });
+const accountsRow = (html: string): string => html.split("<tr").find((r) => r.includes("<code class=\"name\" title=\"public.accounts\">")) ?? "";
+
+test("Add: the row says Adding… from the click, then waiting for its copy, then the bar with the % and mason wait's words, never backwards, until served", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(CATALOG_STATE));
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const app = fn<[unknown], App>("createApp")(async (p: string, init?: { method?: string; body?: string }) => {
+    if (init?.method === "POST" && p === "/api/pick") await gate;
+    return run.fetch(p, init);
+  });
+  app.show("tables");
+  await app.poll();
+  run.answers.set("POST /api/pick", () => { run.answers.set("GET /api/state", answer(accountsCopy(null))); return answer(PICKED.secret)(); });
+  const adding = app.addTable("public.accounts");
+  // asked, not yet answered: the row says so and its button is disabled
+  let row = accountsRow(app.view().tables!);
+  assert.match(textOf(row), /^.*public\.accounts Adding… .* Adding…/);
+  assert.match(row, /<button type="button" class="primary small" disabled>Adding…<\/button>/);
+  assert.ok(!/data-add-table/.test(row), "no second Add while the first is asked");
+  assert.equal(await app.addTable("public.accounts"), false, "a second click while asking does nothing");
+  release();
+  assert.equal(await adding, true);
+  // answered: the state is read again and the row shows the copy waiting to start, an indeterminate bar
+  row = accountsRow(app.view().tables!);
+  assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id 0% waiting for its copy to start/);
+  assert.match(row, /<progress class="copybar indeterminate" max="100" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.accounts: its copy" aria-valuetext="waiting for its copy to start"><\/progress>/);
+  assert.ok(!/aria-valuenow/.test(row), "waiting: no value, an indeterminate bar");
+  // copying 37%: the bar's value, the aria, and the words mason wait prints (copyingText, held equal)
+  const at37 = accountsCopy(withShare(0.37));
+  run.answers.set("GET /api/state", answer(at37));
+  await app.poll();
+  row = accountsRow(app.view().tables!);
+  const c37 = at37.tables.find((t) => t.table === "public.accounts")!;
+  const words = `copying ${commands.copyingText(c37.copy!.rowsCopied, c37.rows, c37.copy!.progress as CopyProgressView).text}`;
+  assert.match(row, /<progress class="copybar" max="100" value="37" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="37" aria-label="public\.accounts: its copy" aria-valuetext="37%, /);
+  assert.match(textOf(row), /37% copying 41,111 rows · past the ~300 estimated · 2 chunks reading \(14 s\), 3 of ~20 in · 52,300 rows\/s · ~6 min left/);
+  assert.ok(textOf(row).includes(words), "the words are copyingText's, held equal to the CLI's");
+  // the Overview draws the same bar from the same renderer
+  const bar = row.match(/<progress[^>]*><\/progress> <span class="pct">37%<\/span>/)![0];
+  assert.ok(app.view().status!.includes(bar), "one renderer: the Overview's bar is the Tables row's");
+  // a state that says less (a share that went back) is not drawn backwards
+  run.answers.set("GET /api/state", answer(accountsCopy(withShare(0.2))));
+  await app.poll();
+  assert.match(accountsRow(app.view().tables!), /value="37" .*37%/, "never backwards");
+  // further on, it moves again, only with the server's data
+  run.answers.set("GET /api/state", answer(accountsCopy(withShare(0.8))));
+  await app.poll();
+  assert.match(accountsRow(app.view().tables!), /value="80" .*80%/);
+  assert.match(textOf(app.view()["tables-cards"]!), /Synced 3 of 4 added, 1 copying/);
+  // served: its normal sync state, no bar
+  run.answers.set("GET /api/state", answer(accountsCopy({ phase: "copied", rows: 300, bytes: 1, seconds: 2, copiedAt: "2026-10-27T09:06:00.000Z", synced: { at: "2026-10-27T09:06:00.000Z", seconds: 2, by: "copy" } } as Partial<CopyState>)));
+  await app.poll();
+  row = accountsRow(app.view().tables!);
+  assert.ok(!/<progress/.test(row), "served: the bar is gone");
+  assert.match(textOf(row), /public\.accounts Synced 300 key id/);
+  // a copy that fails shows its error as the other failures do, no bar
+  run.answers.set("GET /api/state", answer(accountsCopy({ phase: "failed", error: "could not read the next chunk: connection reset" })));
+  await app.poll();
+  row = accountsRow(app.view().tables!);
+  assert.match(row, /<span class="err">could not read the next chunk: connection reset<\/span>/);
+  assert.ok(!/<progress/.test(row));
+  // after a failure its next copy begins at its own share, not the last one's
+  run.answers.set("GET /api/state", answer(accountsCopy(withShare(0.05))));
+  await app.poll();
+  assert.match(accountsRow(app.view().tables!), /value="5" .*5%/);
+});
+
+test("Add: several tables in a row each show their own state; a refused add leaves no Adding…; the cards count the copying", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/state", answer(CATALOG_STATE));
+  const app = fn<[unknown], App>("createApp")(run.fetch);
+  app.show("tables");
+  await app.poll();
+  const both = stateOf([...THREE_COPIED(), { source: "public.accounts", phase: "copying", rows: null, bytes: null, seconds: null, copiedAt: null, error: null, ...withShare(0.5) } as CopyState],
+    { tables: CATALOG, sources: parseSourceText("kind: postgres\nurl: x\ntables:\n  customers: {}\n  orders: {}\n  events: {}\n  accounts: {}\n  audit: {}\n", "shop", "/app/mason/sources/shop.yml") as typeof sourceFile });
+  run.answers.set("POST /api/pick", () => { run.answers.set("GET /api/state", answer(both)); return answer(PICKED.secret)(); });
+  await app.addTable("public.accounts");
+  await app.addTable("public.audit");
+  const v = app.view();
+  assert.match(textOf(accountsRow(v.tables!)), /50% copying/);
+  assert.match(textOf(v["tables-cards"]!), /Synced 3 of 5 added, 1 copying/);
+  assert.match(textOf(v.status!), /1 copying/, "the Overview's cards say it too");
+  // refused: no Adding… stays
+  run.answers.set("POST /api/pick", answer({ error: "no", failure: { code: "refused", message: "no", next: [] } }, 409));
+  assert.equal(await app.addTable("public.staging"), false);
+  assert.ok(!/Adding…/.test(app.view().tables!));
 });

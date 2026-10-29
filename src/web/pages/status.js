@@ -71,6 +71,43 @@ export function tableLine(t) {
   return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}` };
 }
 
+/**
+ * A COPY'S BAR, the one renderer of the Overview's "copies not finished" and the Tables page's rows: a native `<progress>`
+ * with an explicit `role="progressbar"` and `aria-valuemin/max/now` (and a text label, `aria-valuetext`, the line's words).
+ * `l` is `tableLine`'s, `fraction` the share to draw (`monotone`'s; the line's own by default). A table waiting for its
+ * copy has no value: the bar is indeterminate (the stylesheet's shimmer), `aria-valuenow` left out. The % beside it is
+ * `percent` of the same share. The bar moves only with the server's data: nothing is animated by the page.
+ */
+export function copyBar(table, l, fraction = l.fraction) {
+  const waiting = l.state === "waiting";
+  const value = Math.floor(Math.max(0, Math.min(1, fraction)) * 100);
+  return `<progress class="copybar${waiting ? " indeterminate" : ""}" max="100"${waiting ? "" : ` value="${value}"`} role="progressbar" aria-valuemin="0" aria-valuemax="100"` +
+    `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: its copy`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}"></progress> <span class="pct">${percent(fraction)}</span>`;
+}
+
+/**
+ * THE SHARES A PAGE DRAWS, NEVER BACKWARDS: for each added table that is copying, the most its share has been since the
+ * copy began (the server's share is of pages and does not go back within a copy; this holds it so across a reconnect or
+ * a re-read, too). A table that stops copying (done, failed, waiting) is forgotten, so its next copy begins at its own.
+ * `of(s)` → Map(table → share) for the tables copying in the state `s`.
+ */
+export function createMonotone() {
+  const seen = new Map();
+  return {
+    of(s) {
+      const now = new Map();
+      for (const t of s.tables) {
+        if (!t.added) continue;
+        const l = tableLine(t);
+        if (l.state === "copying") now.set(t.table, Math.max(seen.get(t.table) ?? 0, l.fraction));
+      }
+      seen.clear();
+      for (const [k, v] of now) seen.set(k, v);
+      return now;
+    },
+  };
+}
+
 /** `mason status`'s rows for the database (src/cli/commands.ts `sourceRows`): its sources file (from the project's root:
  *  the page never shows an absolute path), its URL as the run masked it, how its changes arrive. */
 export function sourceRows(s) {
@@ -112,6 +149,9 @@ export function sparkSpecs(usage) {
   return Object.fromEntries(Object.entries(SPARKS).map(([key, [field, label]]) => [key, { kind: "spark", label, ...seriesOf(samples, field) }]).filter(([, spec]) => drawable(spec)));
 }
 
+/** How many added tables are copying now (tableLine's word), the cards' "N copying". */
+export const copyingCount = (s) => s.tables.filter((t) => t.added && tableLine(t).state === "copying").length;
+
 /**
  * THE KPI CARDS: the copies in all (synced of added, the failed), their rows, the last sync (how long ago, and when),
  * the copy's file (its size, or why it is unknown), and the last day's statements and their p95 from the request log
@@ -127,7 +167,7 @@ export function renderKpis(s, o = {}) {
   // as renderStatus judges it: a table added (the totals count what the sources file names)
   const added = Boolean(t) && s.tables.some((x) => x.added);
   if (added) list.push(
-    card("Tables synced", `${n(t.copied)} of ${n(t.added)}`, `added${t.failed ? `, ${n(t.failed)} failed` : ""}`, "", t.failed ? "bad" : "", t.failed ? LINKS.failedTables : LINKS.tables),
+    card("Tables synced", `${n(t.copied)} of ${n(t.added)}`, `added${t.failed ? `, ${n(t.failed)} failed` : ""}${copyingCount(s) ? `, ${n(copyingCount(s))} copying` : ""}`, "", t.failed ? "bad" : "", t.failed ? LINKS.failedTables : LINKS.tables),
     card("Rows", n(t.rows), "", line("rows"), "", LINKS.tables),
     t.syncedAt === null ? card("Last sync", "none yet", "", "", "", LINKS.tables) : card("Last sync", `${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`, `${utcText(t.syncedAt)} UTC`, "", "", LINKS.tables));
   const d = s.disk;
@@ -191,7 +231,7 @@ export function renderFacts(s, now = Date.now()) {
  * failed, or copied but not kept current — and nothing once every copy is done. With no table added, the commands'
  * sentence and what adds one.
  */
-function renderProgress(s, isOpen = () => false) {
+function renderProgress(s, isOpen = () => false, shares = new Map()) {
   const picked = s.tables.filter((t) => t.added);
   if (!picked.length) {
     return `<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>` +
@@ -205,7 +245,7 @@ function renderProgress(s, isOpen = () => false) {
   return `<h3>Copies not finished (${lines.length} of ${picked.length} added)</h3>` +
     `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Copy</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
       `<tr class="t-${l.state}"><th scope="row">${code(t.table)}</th>` +
-      `<td class="bar"><progress max="100" value="${Math.floor(Math.max(0, Math.min(1, l.fraction)) * 100)}"></progress> <span class="pct">${percent(l.fraction)}</span></td>` +
+      `<td class="bar">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction)}</td>` +
       `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, isOpen(`error:${t.table}`)) : ""}</td></tr>`).join("")}</tbody></table>`;
 }
 
@@ -280,7 +320,7 @@ export function renderRecentErrors(events, requests, unsupported) {
 export function renderStatus(s, o = {}) {
   const now = o.now ?? Date.now();
   const added = s.tables.some((t) => t.added);
-  return renderHealth(s) + renderKpis(s, { ...o, now }) + renderProgress(s, o.open) + renderFacts(s, now) + renderStream(s, now) +
+  return renderHealth(s) + renderKpis(s, { ...o, now }) + renderProgress(s, o.open, o.shares) + renderFacts(s, now) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }
 
@@ -302,6 +342,7 @@ export const page = {
   create(ctx) {
     // the details open (a copy's whole error), by key: a poll rewrites the section, and they stay open
     const opened = createOpenSet();
+    const monotone = createMonotone();
     return {
       model: { open: opened.open },
       reads: () => [{ path: "/api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }],
@@ -310,7 +351,7 @@ export const page = {
         const st = ctx.read("/api/state");
         if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
         const [queries, events, requests, unsupported] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, usage: ctx.read(HOURLY)?.body, open: opened.has }) };
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body) }) };
       },
       toggle: (target) => opened.toggle(target),
       charts: () => sparkSpecs(ctx.read(HOURLY)?.body),

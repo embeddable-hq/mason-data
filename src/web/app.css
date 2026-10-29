@@ -410,3 +410,12 @@ ul.unsupported .headline { font-weight: 500; }
 ul.unsupported .clip { max-width: min(40em, 100%); }
 .unsupported-line { margin: var(--space-4) 0 0; overflow-wrap: anywhere; }
 .unsupported-line a.see { margin-left: var(--space-2); font-size: var(--text-sm); }
+
+/* a table's copy on the Tables page: the Overview's bar (copyBar) and the words mason wait prints, in the Note cell;
+   a table waiting for its copy has an indeterminate bar that pulses quietly (the only motion: the % moves with the data) */
+.copyline { display: inline-flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.copyline .what-copy { color: var(--muted); }
+progress.copybar.indeterminate { background: var(--line-strong); animation: copybar-wait 1.6s ease-in-out infinite; }
+progress.copybar.indeterminate::-webkit-progress-bar { background: transparent; }
+@keyframes copybar-wait { 50% { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { progress.copybar.indeterminate { animation: none; } }
