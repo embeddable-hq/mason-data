@@ -341,7 +341,7 @@ test("the users: a row each, active first then removed without Remove; Remove as
   const NOW_U = Date.parse("2026-10-28T09:15:59.000Z");
   const html = renderUsers(list, null, NOW_U);
   assert.match(textOf(html), /User Status Added Last used URL metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC 60 min ago postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove grafana id fedcba9876543210 Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC not used in the last 7 days postgres:\/\/grafana@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC/);
-  assert.match(html, /<code id="user-url-metabase">postgres:\/\/metabase@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="user-url-metabase">Copy<\/button>/);
+  assert.match(html, /<code id="user-url-metabase" title="postgres:\/\/metabase@127\.0\.0\.1:5433\/shop">postgres:\/\/metabase@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="user-url-metabase">Copy<\/button>/);
   // the last use is an age with its UTC time in a title (mason user list's words); status is a dot and a word
   assert.match(html, /<td class="num"><span title="2026-10-28 08:15 UTC">60 min ago<\/span><\/td>/);
   assert.deepEqual([...html.matchAll(/<span class="indicator (\w+)"><span class="dot" aria-hidden="true"><\/span>([^<]*)<\/span>/g)].map((m) => `${m[1]} ${m[2]}`),
@@ -2666,17 +2666,44 @@ test("Queries, an empty request log: how to connect under its sentence — never
   assert.match(textOf(app.view()["request-log"]!), /^No request in the last 24 hours .* Connect your first tool .* URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy /);
 });
 
-test("a Copy button, on any page: its code's text to the clipboard and Copied; refused, the text selected and why", async () => {
-  const copyClick = fn<[Record<string, string>, { textContent: string }, unknown], Promise<void> | null>("copyClick");
+test("a Copy button, on any page: its code's text to the clipboard, Copied for 2 s then Copy; with no clipboard, the text selected and copied as a selection, else what to press", async () => {
+  const copyClick = fn<[Record<string, string>, { textContent: string; dataset?: Record<string, string> }, unknown], Promise<void> | null>("copyClick");
+  assert.equal((page as Record<string, unknown>).COPIED_MS, 2000);
   const code = { textContent: SHOP_PG.psql };
-  const doc = { getElementById: (id: string) => id === "connect-psql" ? code : null };
+  const timers: Array<[() => void, number]> = [];
+  const setTimeout = (f: () => void, ms: number) => { timers.push([f, ms]); };
   const wrote: string[] = [];
-  const b = { textContent: "Copy" };
-  await copyClick({ copy: "connect-psql" }, b, { doc, win: { navigator: { clipboard: { writeText: async (t: string) => { wrote.push(t); } } } } });
-  assert.deepEqual([wrote, b.textContent], [[SHOP_PG.psql], "Copied"]);
+  const b = { textContent: "Copy", dataset: {} as Record<string, string> };
+  const doc = { getElementById: (id: string) => id === "connect-psql" ? code : null };
+  await copyClick({ copy: "connect-psql" }, b, { doc, win: { setTimeout, navigator: { clipboard: { writeText: async (t: string) => { wrote.push(t); } } } } });
+  assert.deepEqual([wrote, b.textContent, "copied" in b.dataset], [[SHOP_PG.psql], "Copied", true]);
+  assert.deepEqual(timers.map(([, ms]) => ms), [2000], "it says Copied for 2 s");
+  timers[0]![0]();
+  assert.deepEqual([b.textContent, "copied" in b.dataset], ["Copy", false], "then Copy again");
+  // the clipboard refused (no permission): the text selected and copied as a person's own Copy would
   const selected: unknown[] = [];
-  const r = { textContent: "Copy" };
-  await copyClick({ copy: "connect-psql" }, r, { doc, win: { navigator: { clipboard: { writeText: async () => { throw new Error("denied"); } } }, getSelection: () => ({ selectAllChildren: (n: unknown) => selected.push(n) }) } });
-  assert.deepEqual([selected, r.textContent], [[code], "Select and copy it (denied)"]);
+  const execs: string[] = [];
+  const r = { textContent: "Copy", dataset: {} as Record<string, string> };
+  const refused = { setTimeout, getSelection: () => ({ selectAllChildren: (x: unknown) => selected.push(x) }), navigator: { platform: "MacIntel", clipboard: { writeText: async () => { throw new Error("denied"); } } } };
+  await copyClick({ copy: "connect-psql" }, r, { doc: { ...doc, execCommand: (c: string) => { execs.push(c); return true; } }, win: refused });
+  assert.deepEqual([selected, execs, r.textContent], [[code], ["copy"], "Copied"]);
+  // and no clipboard at all (navigator.clipboard undefined on an insecure origin), the selection's copy refused too: what to press
+  const q = { textContent: "Copy", dataset: {} as Record<string, string> };
+  await copyClick({ copy: "connect-psql" }, q, { doc: { ...doc, execCommand: () => false }, win: { ...refused, navigator: { platform: "Linux x86_64" } } });
+  assert.equal(q.textContent, "Selected: press Ctrl+C");
+  await copyClick({ copy: "connect-psql" }, q, { doc: { ...doc, execCommand: () => { throw new Error("no"); } }, win: refused });
+  assert.equal(q.textContent, "Selected: press ⌘C");
   assert.equal(copyClick({ sync: "x" }, b, { doc, win: {} }), null, "not a Copy: the page's own click goes on");
+});
+
+test("the Users table's URL: one line, cut with an ellipsis in its cell, its whole the title; Copy copies the whole", () => {
+  const copyable = fn<[string, string, { clip?: boolean }?], string>("copyable");
+  const url = "postgres://metabase@127.0.0.1:5433/a-long-project-name";
+  assert.equal(copyable("u", url, { clip: true }), `<span class="copyrow clipped"><code id="u" title="${url}">${url}</code> <button type="button" class="small" data-copy="u">Copy</button></span>`);
+  assert.equal(copyable("u", url), `<span class="copyrow"><code id="u">${url}</code> <button type="button" class="small" data-copy="u">Copy</button></span>`, "elsewhere, the whole on its line");
+  const html = fn<[unknown, string | null, number], string>("renderUsers")({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", removedAt: null, live: true, lastUsedAt: null, url }],
+    lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, NOW);
+  assert.match(html, /<span class="copyrow clipped"><code id="user-url-metabase" title="[^"]+">/);
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.copyrow\.clipped code \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);
 });

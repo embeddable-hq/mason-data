@@ -41,7 +41,7 @@ export function renderUsers(list, confirming = null, now = Date.now()) {
     return `<tr${active ? "" : ` class="removed"`}><th scope="row">${code(u.name)} <span class="dim">id ${esc(u.id)}</span></th>` +
       `<td>${active ? status("ok", "Active") : status("unknown", `Removed ${stamp(u.removedAt)} UTC`)}${active && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
-      `<td>${active && u.url ? copyable(`user-url-${u.name}`, u.url) : ""}</td>` +
+      `<td>${active && u.url ? copyable(`user-url-${u.name}`, u.url, { clip: true }) : ""}</td>` +
       `<td class="act">${!active ? "" : confirming === u.name
         ? `<span class="confirm">Remove ${esc(u.name)}? It connects no more, and the sessions it holds end at their next statement.</span> ` +
           `${button(`Remove ${u.name}`, { confirmRemove: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "" }, "small")}`

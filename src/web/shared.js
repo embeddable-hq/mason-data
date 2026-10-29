@@ -332,20 +332,37 @@ export function button(label, data = {}, variant = "") {
   return `<button type="button"${variant ? ` class="${esc(variant)}"` : ""}${attrs}>${esc(label)}</button>`;
 }
 
-/** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. */
-export const copyable = (id, text) => `<span class="copyrow"><code id="${esc(id)}">${esc(text)}</code> ${button("Copy", { copy: id }, "small")}</span>`;
+/** A text with its Copy button (`copyClick` copies what the `<code id>` holds): a URL, a psql line, a password. `clip`:
+ *  one line, cut by the stylesheet with an ellipsis in a narrow cell (a table's URL column), its whole the title —
+ *  Copy copies the whole either way. */
+export const copyable = (id, text, { clip = false } = {}) =>
+  `<span class="copyrow${clip ? " clipped" : ""}"><code id="${esc(id)}"${clip ? ` title="${esc(text)}"` : ""}>${esc(text)}</code> ${button("Copy", { copy: id }, "small")}</span>`;
+
+/** How long a Copy button says Copied (or what to press) before it says Copy again. */
+export const COPIED_MS = 2000;
 
 /**
  * A COPY BUTTON CLICKED (`data-copy`, a `copyable`'s), on whichever page: its code's text to the clipboard, the button
- * then saying Copied; when the clipboard refuses (a browser setting), the text is selected for the reader's own copy and
- * the button says why. null for a button that is no Copy, so a page's `click` asks it first.
+ * then saying Copied for COPIED_MS and Copy again. When the clipboard refuses (no permission, an insecure origin, a
+ * browser setting), the text is selected and copied as a selection is (`execCommand("copy")`); when that fails too, it
+ * stays selected and the button says what to press. null for a button that is no Copy, so a page's `click` asks it first.
  */
 export function copyClick(d, button, { doc, win }) {
   if (d.copy === undefined) return null;
-  const text = doc.getElementById(d.copy)?.textContent ?? "";
-  return Promise.resolve().then(() => win.navigator.clipboard.writeText(text)).then(() => { button.textContent = "Copied"; }, (err) => {
-    win.getSelection()?.selectAllChildren(doc.getElementById(d.copy));
-    button.textContent = `Select and copy it (${err?.message ?? err})`;
+  const el = doc.getElementById(d.copy);
+  const text = el?.textContent ?? "";
+  const say = (word) => {
+    button.textContent = word;
+    if (button.dataset) button.dataset.copied = "";
+    win.setTimeout?.(() => { button.textContent = "Copy"; if (button.dataset) delete button.dataset.copied; }, COPIED_MS);
+  };
+  return Promise.resolve().then(() => win.navigator.clipboard.writeText(text)).then(() => say("Copied"), () => {
+    // no clipboard: the text selected, and copied as a selection is (what a person's own Copy would do)
+    const selection = win.getSelection?.();
+    if (el && selection) selection.selectAllChildren(el);
+    let copied = false;
+    try { copied = doc.execCommand?.("copy") === true; } catch { copied = false; }   // refused outright: said below, the text left selected
+    say(copied ? "Copied" : `Selected: press ${/Mac|iPhone|iPad/.test(win.navigator.platform ?? win.navigator.userAgent ?? "") ? "⌘C" : "Ctrl+C"}`);
   });
 }
 
