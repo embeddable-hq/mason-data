@@ -190,7 +190,7 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
     port: 0, token, page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     folder: () => folder, root, sourcesChanged: () => undefined, log: () => undefined, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
     sources: () => ({ file: { name: "shop", file, kind: "postgres", url: { env: "DATABASE_URL" }, tables: ["orders", "events", "fresh"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null }),
-    duck: { copies: () => copies, file: path.join(root, ".mason", "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => stream,
+    duck: { copies: () => copies, file: path.join(root, ".mason", "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => stream,
       requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);
@@ -208,8 +208,8 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
 test("mason status and mason wait --json, Mason up: each added table says how its copy is kept current (kept), in poll and in replication mode", async () => {
   const copied = (source: string, kept: KeptCurrent, extra: Partial<CopyState> = {}): CopyState =>
     ({ source, phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-29T09:00:00.000Z", error: null, kept, ...extra });
-  const polled: KeptCurrent = { by: "poll", polledAt: "2026-10-29T09:30:00.000Z" };
-  const over: KeptCurrent = { by: "poll", polledAt: "2026-10-29T09:00:00.000Z", unsynced: "over the 1,000,000-row sync limit" };
+  const polled: KeptCurrent = { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: "2026-10-29T09:30:00.000Z", nextAt: "2026-10-29T09:30:30.000Z" };
+  const over: KeptCurrent = { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-29T09:00:00.000Z", nextAt: null };
   const streamed: KeptCurrent = { by: "replication", slot: "mason_matrix", state: "streamed", why: null, position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null };
   const leftOut: KeptCurrent = { by: "replication", slot: "mason_matrix", state: "left-out", why: "publication mason_matrix does not carry public.events",
     position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null };
@@ -220,7 +220,7 @@ test("mason status and mason wait --json, Mason up: each added table says how it
   // kept is the sync's, never the sources file's: `fresh`, just added, has no copy until the run reads the file again
   // (no kept); `logs`, just removed, is still held by the sync until then (its kept, though the file no longer adds it)
   const modes = [
-    { changes: "poll" as const, copies: [copied("public.orders", polled), copied("public.events", over, { unsynced: { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-29T09:00:00.000Z" } }),
+    { changes: "poll" as const, copies: [copied("public.orders", polled), copied("public.events", over),
       copied("public.logs", polled)], stream: null, kept: { "public.orders": polled, "public.events": over, "public.logs": polled } },
     { changes: "replication" as const, copies: [copied("public.orders", streamed), copied("public.events", leftOut), copied("public.logs", streamed)], stream,
       kept: { "public.orders": streamed, "public.events": leftOut, "public.logs": streamed } },

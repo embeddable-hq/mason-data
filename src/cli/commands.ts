@@ -35,6 +35,7 @@ import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest } from "../duck/requests.ts";
 import { countsText } from "../duck/stream.ts";
+import { agoText, BIG_TABLE_ROWS, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const err = (m: string): void => { process.stderr.write(`${m}\n`); };
@@ -54,9 +55,7 @@ export interface TableState extends CatalogTable {
     retired?: string } | null;
   /** why its copy failed (the sync tries again by itself, src/duck/sync.ts copyRetryDelayMs); null otherwise */
   error: string | null;
-  /** copied and served, but not kept current by the poll, and why (src/duck/sync.ts POLL_ROW_LIMIT) */
-  unsynced?: { reason: string; asOf: string | null };
-  /** how the run keeps the copy current now, the sync's one derivation (src/duck/sync.ts KeptCurrent): absent for a
+  /** how the run keeps the copy current now — its sync, when it was last synced — the sync's one derivation (src/duck/sync.ts KeptCurrent): absent for a
    *  table the sync does not hold, and from a run before it was said */
   kept?: KeptCurrent;
 }
@@ -69,6 +68,8 @@ export interface RunState {
     name: string | null;
     /** the sources file the run copies from, absolute */
     file: string | null;
+    /** every table's sync unless its entry says its own: the file's top `sync:` (`written`), else the default, off */
+    sync?: { default: string; written: boolean };
     /** replication mode: its slot and publication (`owned`: Mason's own; else named, only read) */
     replication?: { slot: string; publication: string; owned: boolean } };
   warnings: string[];
@@ -76,8 +77,8 @@ export interface RunState {
   /** the project folder's fingerprint (src/lib/project-files.ts projectFingerprint) */
   project: string | null;
   tables: TableState[];
-  /** the run's copy: its file and how often it polls */
-  engine: { name: "duckdb"; file: string; bytes: number | null; pollSeconds: number };
+  /** the run's copy: its file */
+  engine: { name: "duckdb"; file: string; bytes: number | null };
   /** replication mode: where the stream is, its lag, what it applied (src/duck/sync.ts streamStatus) */
   stream?: StreamStatus;
   /** the JSON paths stored as columns of the copies (src/duck/kept.ts): a run from before them has none */
@@ -155,7 +156,8 @@ export function addSteps(tables: readonly CatalogTable[], from: "tables" | null 
 
 export { copyingText, copyProgress, duration, readiness, type Readiness };
 
-/** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work. */
+/** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work
+ *  (a table whose sync is off is copied as it asked: green). */
 export function paintBar(line: string, s: Style): string {
   const colour = / its copy failed: /.test(line) ? s.red : / NOT kept current /.test(line) ? s.yellow : / 100%  [\d,]+ rows · copied( · |$)/.test(line) ? s.green : s.cyan;
   return line.replace(/(█+)(░*)|(░+)/, (_m, full: string | undefined, empty: string | undefined, none: string | undefined) =>
@@ -171,22 +173,20 @@ const bar = (fraction: number): string => { const full = Math.round(Math.max(0, 
  * b; it shows a line for each table, 100% for those up to date and a progress bar for those still at work, in order of
  * last processed, so the ones at work are at the bottom): its bar, its percent and what it is doing. The finished
  * first, in the order they finished (`copy.updatedAt`: a finished copy's state is written once, when it finishes), then
- * the failed, the copying and the waiting.
+ * the failed, the copying and the waiting. A copied table says how it is kept current and how old its copy is
+ * (`keptAge`): a copy's age is never hidden.
  */
-export function tableLines(s: RunState): string[] {
+export function tableLines(s: RunState, now: number = Date.now()): string[] {
   const picked = s.tables.filter((t) => t.added);
   // 0 done, 1 failed, 2 copying, 3 waiting for its copy
   const rank = (t: TableState): number => t.error ? 1 : t.copy?.phase === "copying" ? 2 : !t.copy ? 3 : 0;
   const rows = picked.map((t) => {
     const r = rank(t);
     let fraction: number, what: string;
-    // a table over the poll's row limit is served as copied, and said so on its line (src/duck/sync.ts POLL_ROW_LIMIT)
-    if (r === 0 && t.unsynced) {
+    if (r === 0) {
       fraction = 1;
-      what = `${n(t.copy?.rowsCopied ?? 0)} rows · copied, NOT kept current (${t.unsynced.reason}${t.unsynced.asOf ? `; as of ${t.unsynced.asOf.slice(0, 16).replace("T", " ")} UTC` : ""}) — mason sync ${tableArg(t.table)}, or mason start --replication`;
-    } else if (r === 0) {
-      fraction = 1;
-      what = `${n(t.copy?.rowsCopied ?? 0)} rows · copied${t.copy?.retired ? ` · ${t.copy.retired}` : ""}`;
+      const age = keptAge(t, now);
+      what = `${n(t.copy?.rowsCopied ?? 0)} rows · copied${t.copy?.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
     }
     else if (r === 1) { fraction = 1; what = `its copy failed: ${firstLine(t.error!)}`; }
     else if (r === 2) {
@@ -200,6 +200,20 @@ export function tableLines(s: RunState): string[] {
   rows.sort((a, b) => a.r - b.r || a.at.localeCompare(b.at) || a.t.table.localeCompare(b.t.table));
   const w = Math.max(0, ...rows.map((x) => x.t.table.length));
   return rows.map((x) => `${x.t.table.padEnd(w)}  ${x.line}`);
+}
+
+/**
+ * HOW A COPIED TABLE IS KEPT CURRENT, AND HOW OLD ITS COPY IS, on its line (issue 33: a copy days old answers today's
+ * count(*) wrongly, and nothing else tells): `sync: off, last synced 3 days ago — mason sync orders`, `polled every
+ * 30s, last 4 s ago`. Replication's is the Stream section's; a table being caught up or copied again says its pending.
+ */
+export function keptAge(t: Pick<TableState, "table" | "kept">, now: number = Date.now()): string | null {
+  const k = t.kept;
+  if (k?.by !== "poll") return null;
+  const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`;
+  if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
+  if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${tableArg(t.table)} syncs it now`;
+  return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)}`}`;
 }
 
 /** A span of seconds as the stream's lines say it: `0.3 s` under ten seconds, then as a wait reads (`duration`). */
@@ -247,7 +261,8 @@ const STATUS_USAGE = `usage: mason status [--json]
 
   Status: running, not running, or hung — then this project's facts, one a line: its folder, its database and how
   its changes are read, the run and its copy's file, the Postgres API and how it listens. Then each added table as
-  mason wait shows it; the statements the Postgres API answered slowly in the last day; and the ones it refused or
+  mason wait shows it, with how it is kept current and how old its copy is (sync: off, last synced 3 days ago;
+  polled every 30s, last 4 s ago); the statements the Postgres API answered slowly in the last day; and the ones it refused or
   failed, each with the reason (mason logs --requests lists every one). With Mason stopped, the same rows say "not
   running", how the last run ended, and the tables are the ones the sources file names. Hung is a run that is alive and does
   not answer its commands (a statement may be holding its main thread): the same rows, and mason stop ends it (exit 1).
@@ -258,15 +273,16 @@ const STATUS_USAGE = `usage: mason status [--json]
   --json   as data: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), listener:
            { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
            source's: its sources file's), file (the sources file), url, database, remote, version, standby, changes,
-           replication, demo (the demo database this run hosts) }, warnings, folder, project, tables: [{ table, rows,
-           bytes, key, added, addedColumns, copy, error, unsynced: { reason, asOf } (copied and served, not kept
-           current by the poll), kept, … }], engine: { file, bytes, pollSeconds, restarts (each time its supervisor
+           replication, demo (the demo database this run hosts), sync: { default (every table's sync unless its entry
+           says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
+           bytes, key, added, addedColumns, copy, error, kept, … }], engine: { file, bytes, restarts (each time its supervisor
            started the run again: { at, reason, upSeconds }) }, slowQueries, refusedQueries, refusedTotal (how many in
            all), readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }.
            Each table's kept is how its copy is kept current now (absent for a table the sync does not hold):
-           { by: poll, polledAt (its last copy or poll), unsynced (only when it applies: why the passes leave it as
-           copied, mason sync polls it), pending (only when it applies: why the copy is not kept current now, its
-           phase included: waiting for its copy, being copied, its copy failed, to be copied again, caught up first) }
+           { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
+           else off), syncedAt (its last copy or poll), nextAt (when its next poll is due; null: off, or not polled
+           now), pending (only when it applies: why the copy is not kept current now, its phase included: waiting for
+           its copy, being copied, its copy failed, to be copied again, caught up first) }
            or { by: recopy, copiedAt, pending (only when it applies, as the poll's) }
            or { by: replication, slot, state (streamed, catching-up, waiting, left-out), why, position, lastCommit,
            notRunning (why the stream is not running, null when it is) }; with Mason stopped: { running: false, project, source: { name,
@@ -383,14 +399,15 @@ export async function status(argv: string[]): Promise<number> {
  * mason status's rows for the database the run copies: its sources file, its URL (masked by the run), and how its changes
  * arrive. The web page (src/web/app.js `sourceRows`) says the same rows, held equal by tests/web-page.test.ts.
  */
-export function sourceRows(s: Pick<RunState, "source" | "engine">): Array<[string, string]> {
+export function sourceRows(s: Pick<RunState, "source">): Array<[string, string]> {
   return [
     ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`] as [string, string]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     ["Changes", s.source.replication ? `logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
         `(${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll goes back to polling`
-      : `polling with SELECTs (xmin), every ${s.engine.pollSeconds} s · ${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
+      : `each table as its sync: says, polled with SELECTs (xmin)${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
+        `${s.source.demo ? "the demo database is read by polling only" : "mason start --replication reads the database's change log instead"}`],
   ];
 }
 
@@ -708,7 +725,7 @@ async function viaRun<T>(run: DevRun, route: "/api/pick" | "/api/remove", body: 
 
 // ------------------------------------------------------------------ mason add
 
-const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--include <column>,…] [--key <column>,…] [--json]
+const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--include <column>,…] [--key <column>,…] [--sync <sync>] [--json]
 
   Copies tables into Mason: each one is added to the project's sources file (mason/sources/<name>.yml), under tables:
     mason add orders                                    every column:            orders: {}
@@ -716,8 +733,17 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
     mason add orders customers                          several tables, every column of each
     mason add users --include password_hash             every column, and one that looks like a secret
     mason add event_log --key tenant_id,id              a table with no primary key, copied by those columns
+    mason add orders --sync "poll 30s"                  polled every 30 seconds:  orders: { sync: poll 30s }
   A table is its name (orders) or schema.table (billing.invoices). Its primary key is always copied. The rest of the
   file — your comments, other tables — stays as it was.
+
+  After its first copy, a table is kept current as the file's sync: says — at the top for every table (mason init
+  writes sync: off: read again only by mason sync <table>), or on its own entry. --sync writes the table's own:
+  off, or poll <interval> (poll 5s, poll 5m, poll 1h; at least 1s). On a table already added, --sync alone changes
+  its sync: line and nothing else; its copy is kept and caught up by one poll. Without --sync a new entry follows the
+  file's — but a table of more than ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows under a file that polls is written sync: off and said,
+  since each poll scans a table whole on your database. A table of tens of millions of rows set to poll more often than
+  every minute is warned of, with an estimate of what each poll costs your database.
 
   A column that looks like a secret (password, token, api_key, private_key, …) is left out unless named, and said:
   it is written as exclude: [password_hash], since anyone with a user's password can read every copied column. Name
@@ -732,8 +758,12 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   --include <a,b,…>   these columns as well as every other one — a column that looks like a secret, named on purpose
   --key <a,b,…>       for a table with no primary key: the columns that tell its rows apart, which it is copied by (one
                       table at a time; polling only: logical replication cannot apply a change by them)
+  --sync <sync>       how it is kept current after its first copy, written on its entry: off, or "poll 30s"
   --json              as data: { added: [{ table, entry, columns (null: every one), exclude, key, addedKey (key columns
-                      added to --columns), skippedSecrets, already (the file said so already) } or { table, error }],
+                      added to --columns), skippedSecrets, already (the file said so already), sync: { value (off, poll
+                      30s), from (entry: its own sync:, file: the file's, default: off, as the file writes none) },
+                      bigOff (it is over ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows and its entry was written sync: off), pollCost (an estimate of
+                      what a frequent poll of a big table costs your database, or null) } or { table, error }],
                       file (the sources file), error (when a table was not added: { code, message, why }), next };
                       exit 1 when a table could not be added
 `;
@@ -744,9 +774,16 @@ export const ADD: CommandSpec & { needs: "project" } = {
   name: "add",
   summary: "copy tables into Mason, adding them to the sources file: mason add orders (--columns id,status: those only)",
   usage: ADD_USAGE,
-  options: { json: { type: "boolean" }, columns: { type: "string" }, include: { type: "string" }, key: { type: "string" } },
+  options: { json: { type: "boolean" }, columns: { type: "string" }, include: { type: "string" }, key: { type: "string" }, sync: { type: "string" } },
   json: ["added", "file", "error", "next"],
 };
+
+/** `--sync`, read by the sources file's own grammar (src/lib/table-sync.ts parseSync): a sync, or the usage's problem */
+export function addSync(v: string | undefined): TableSync | undefined | string {
+  if (v === undefined) return undefined;
+  const s = parseSync(v);
+  return "problem" in s ? `--sync ${JSON.stringify(v)}: ${s.problem}` : s;
+}
 
 /**
  * The tables and the columns each one's entry copies (add takes --columns, not a DSL):
@@ -776,6 +813,11 @@ export async function add(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   const specs = addSpecs(f.positionals, f.values.columns as string | undefined, f.values.include as string | undefined, f.values.key as string | undefined);
   if (typeof specs === "string") return failed("add", { message: specs, code: "usage", usage: ADD_USAGE }, { json });
+  const sync = addSync(f.values.sync as string | undefined);
+  if (typeof sync === "string") return failed("add", { message: sync, code: "usage", usage: ADD_USAGE }, { json });
+  // --sync alone: a table already added keeps its columns and key, and only its sync: line is written
+  const keep = sync !== undefined && f.values.columns === undefined && f.values.include === undefined && f.values.key === undefined;
+  const how = { ...(sync !== undefined ? { sync } : {}), keep };
   const where = await reach(ADD, json);
   // (a state with no project never meets the need: reach said it)
   if (where === null || where.project === null) return 1;
@@ -785,7 +827,7 @@ export async function add(argv: string[]): Promise<number> {
     return guarded("add", json, async () => {
       const s = await readState(run);
       return addTables({ tables: s.tables, file: s.source.file ?? null,
-        pick: (table, columns, key) => viaRun<PickResult>(run, "/api/pick", { table, picked: true, columns, ...(key ? { key } : {}) }),
+        pick: (table, columns, key) => viaRun<PickResult>(run, "/api/pick", { table, picked: true, columns, ...(key ? { key } : {}), ...(sync ? { sync: syncText(sync) } : {}), keep }),
         next: (n) => [["mason wait", `until ${n === 1 ? "its copy finishes" : "their copies finish"} (the copy has started)`], READY_STEPS[0]!] }, specs, json);
     });
   }
@@ -793,7 +835,7 @@ export async function add(argv: string[]): Promise<number> {
   const down = await withoutRun("add", where.project, json);
   if (down === null) return 1;
   return addTables({ tables: down.tables, file: down.file,
-    pick: async (table, columns, key) => edited(() => addEntry(down.edit(), down.db, table, columns, key)),
+    pick: async (table, columns, key) => edited(() => addEntry(down.edit(), down.db, table, columns, key, how)),
     next: () => [["mason start", "Mason in the background, for this project: the copy of every added table begins"],
       ["mason wait", "then, until every added table is copied and served"]] }, specs, json);
 }
@@ -834,7 +876,8 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
     }
     const b = r.ok;
     file = b.file;
-    results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already });
+    results.push({ table: b.table, entry: b.entry, columns: b.columns, exclude: b.exclude, key: b.key, addedKey: b.addedKey, skippedSecrets: b.skippedSecrets, already: b.already,
+      sync: b.sync, bigOff: b.bigOff, pollCost: b.pollCost });
     added.push(b.table);
     if (json) continue;
     const l = addedLines(b, shown(b.file));
@@ -864,7 +907,17 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
 export function addedLines(b: PickResult, file: string): { line: string; notes: string[] } {
   const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
   const s = b.skippedSecrets;
+  const name = tableArg(b.table);
+  // HOW IT IS KEPT CURRENT, always said (issue 33: the default is never met by surprise): the sync: it follows, where it
+  // is said, and the one line that changes it — a big table written off, with the alternatives
+  const sync = b.bigOff ? `sync: off written on its entry: it has more than ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows, and each poll scans it whole on your database — ` +
+      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason start --replication keeps every table current from the change log`
+    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first copy it is read again only by mason sync ${name} — ` +
+      `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
+    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first copy — mason add ${name} --sync off stops that`;
   return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+    sync,
+    ...(b.pollCost !== null ? [b.pollCost] : []),
     ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a copy always has its key)`] : []),
     // a secret is readable by anyone with a user's password: left out, and said, with the way to include one
     ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
@@ -945,8 +998,8 @@ export function removedReport(removed: readonly string[], file: string, o: { run
 
 /** An added table as mason wait --json says it: its copy, its error, and how it is kept current, as the run's state has
  *  them (mason status --json's own fields, never derived again here) */
-export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "error" | "unsynced" | "kept"> {
-  return { table: t.table, copy: t.copy, error: t.error, ...(t.unsynced ? { unsynced: t.unsynced } : {}), ...(t.kept ? { kept: t.kept } : {}) };
+export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "error" | "kept"> {
+  return { table: t.table, copy: t.copy, error: t.error, ...(t.kept ? { kept: t.kept } : {}) };
 }
 
 const WAIT_USAGE = `usage: mason wait [--timeout <seconds>] [--json]
@@ -959,9 +1012,10 @@ const WAIT_USAGE = `usage: mason wait [--timeout <seconds>] [--json]
 
   --timeout <seconds>   how long to wait (default 600); the copy goes on after, and mason wait again picks it up
   --json                as data, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
-                        unsynced, kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how
-                        long, the rate, the seconds left, while its chunks are read }; unsynced: { reason, asOf }
-                        and kept as mason status --json says them — kept's pending, when it applies, says why the
+                        kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how long, the
+                        rate, the seconds left, while its chunks are read }; kept as mason status --json says it —
+                        { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its last copy or
+                        poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why the
                         copy is not kept current now, its phase included),
                         stream (replication mode: where the stream is, as mason status --json says it), error (on a
                         failure or a timeout: { code, message, next }), next }

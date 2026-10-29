@@ -120,7 +120,8 @@ that needs a migration, a column, a backfill or a write-path change on the sourc
 user needs REPLICATION), and its own publication only when none is named (a named one is read and verified, never
 created, altered or dropped). **Keep the load on Mason's side** (overloading the source Postgres is the last thing
 Mason may do): a copy reads `MASON_COPY_PARALLEL` chunks at once, one backend each, never the attached scan's ten; the
-poll is a full scan of every polled table, so only tables under `POLL_ROW_LIMIT` are polled; a SELECT on the source
+poll is a full scan of the table, so a table is polled only when its `sync:` says so, and `mason add` writes `sync: off` for
+a big one; a SELECT on the source
 never carries an `ORDER BY`. `.claude/rules/duckdb.md` "The copy" has the rules and the numbers.
 
 **A real database's data and structures are confidential.** No real table, column or dataset name, and no row, from

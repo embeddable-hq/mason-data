@@ -15,6 +15,7 @@
  */
 import type { ExplainOptions } from "../api/postgres/explain.ts";
 import type { CopyState, KeptCurrent } from "./sync.ts";
+import { agoText, syncText } from "../lib/table-sync.ts";
 
 type Body = Record<string, unknown>;
 
@@ -144,12 +145,14 @@ const UNKNOWN = "how it is kept current is unknown: the sync has no record of it
 
 /**
  * HOW A COPY IS KEPT CURRENT, in EXPLAIN's words, from the sync's one derivation (src/duck/sync.ts `KeptCurrent`, which
- * `mason status` renders too): a copy not yet copied or whose copy failed says so first; then polled with its last
- * poll, served as copied and skipped by the passes (to be copied again, caught up first, over the poll's row limit),
- * copied again whole, or, in replication mode, its part in the stream, how far the stream has applied and why it is
- * not running. "kept current" is said only of a copy that is (`keptCurrentBy`).
+ * `mason status` renders too): a copy not yet copied or whose copy failed says so first; then its sync and its age —
+ * `off: last synced 3 days ago (…)` with the command that syncs it, `polled every 30s, last 4 s ago (…)` — or served as
+ * copied and skipped by the passes (to be copied again, caught up first), copied again whole, or, in replication mode,
+ * its part in the stream, how far the stream has applied and why it is not running. A copy's age is never left out:
+ * a BI tool or an agent reading a stale count cannot tell it is one. "kept current" is said only of a copy that is
+ * (`keptCurrentBy`).
  */
-export function keptText(f: CopyFacts | null): string {
+export function keptText(f: CopyFacts | null, now: number = Date.now()): string {
   if (f === null) return UNKNOWN;
   if (f.phase === "waiting") return "waiting for its copy to start";
   if (f.phase === "copying") return `being copied (${count(f.rowsSoFar ?? 0)} rows so far): kept current once copied`;
@@ -157,10 +160,10 @@ export function keptText(f: CopyFacts | null): string {
   const k = f.kept;
   if (k === undefined) return UNKNOWN;
   if (k.by === "poll") {
-    const asOf = k.polledAt === null ? "no poll recorded yet" : `as of ${utc(k.polledAt)}`;
-    if (k.pending !== undefined) return `NOT kept current (${asOf}): ${k.pending}`;
-    if (k.unsynced !== undefined) return `NOT kept current (${k.unsynced}; ${asOf}): mason sync ${f.source} polls it now`;
-    return `kept current by polling, ${k.polledAt === null ? "no poll recorded yet" : `last poll ${utc(k.polledAt)}`}`;
+    const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`;
+    if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
+    if (k.sync.mode === "off") return `off: ${synced}; mason sync ${f.source} syncs it now`;
+    return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`}`;
   }
   if (k.by === "recopy") return `kept current by copying it again whole, ${k.copiedAt === null ? "no copy recorded yet" : `last copied ${utc(k.copiedAt)}`}`;
   const stream = `logical replication (slot ${k.slot})`;
@@ -172,12 +175,12 @@ export function keptText(f: CopyFacts | null): string {
 }
 
 /** what keeps a copy current NOW, as FORMAT JSON's `Kept Current By` says it: null for a copy nothing does (not copied
- *  yet, skipped by the passes, over the poll's row limit, not streamed, the stream down), so a reader keying on it is
+ *  yet, skipped by the passes, its sync off, not streamed, the stream down), so a reader keying on it is
  *  never told of a mode that is not at work on it */
 export function keptCurrentBy(f: CopyFacts | null): "polling" | "copying again" | "logical replication" | null {
   const k: KeptCurrent | undefined = f?.phase === "copied" ? f.kept : undefined;
   if (k === undefined) return null;
-  if (k.by === "poll") return k.pending === undefined && k.unsynced === undefined ? "polling" : null;
+  if (k.by === "poll") return k.pending === undefined && k.sync.mode === "poll" ? "polling" : null;
   if (k.by === "recopy") return "copying again";
   return k.state === "streamed" && k.notRunning === null ? "logical replication" : null;
 }
@@ -187,7 +190,7 @@ function keptJson(f: CopyFacts | null): Record<string, unknown> {
   const k: KeptCurrent | undefined = f?.phase === "copied" ? f.kept : undefined;
   return {
     "Kept Current By": keptCurrentBy(f), "Kept Current": keptText(f),
-    ...(k?.by === "poll" ? { "Last Poll": k.polledAt } : {}),
+    ...(k?.by === "poll" ? { Sync: syncText(k.sync), "Last Synced": k.syncedAt, "Next Poll": k.nextAt } : {}),
     ...(k?.by === "replication" ? { Slot: k.slot, "Stream State": k.state, "Applied Through": k.position, "Last Change Committed": k.lastCommit, "Stream Not Running": k.notRunning } : {}),
   };
 }

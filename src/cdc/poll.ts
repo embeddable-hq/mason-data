@@ -64,11 +64,11 @@ export function xminBeforeHolds(current: bigint, watermark: bigint): boolean {
 }
 
 /**
- * The wait before the next poll: MASON_POLL_MS, or four times what the last poll took when that is longer, so a
- * source whose tables take a while to read spends at most a fifth of its time on polls. Never sooner than either
- * (the test server: a cap of a minute polled a 22 M-row production table every 74 s for 6.5 hours under
- * MASON_POLL_MS=3600000, and a poll of 20 s every 60 s is a third of the source's time): the database's load decides,
- * and a slow poll's freshness is said by its own timing line.
+ * The wait before the next poll: the table's interval (its sync:, src/lib/table-sync.ts), or four times what the last
+ * poll took when that is longer, so a table that takes a while to read costs at most a fifth of the source's time.
+ * Never sooner than either (the test server: a cap of a minute polled a 22 M-row production table every 74 s for 6.5
+ * hours under an hourly interval, and a poll of 20 s every 60 s is a third of the source's time): the database's load
+ * decides, and a slow poll's freshness is said by its own timing line.
  */
 export function nextPollDelayMs(pollMs: number, lastPollMs: number): number {
   return Math.max(pollMs, 4 * lastPollMs);

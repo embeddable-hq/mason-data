@@ -36,11 +36,14 @@ test("the settings: every one missing or wrong said at once, each with what to s
   assert.equal(none.message, "2 settings are missing or wrong: DATABASE_URL is not set, and the project folder (/srv/mason) has no sources file to name " +
     "the database another way; MASON_API_KEY is not set: what the users' passwords are made with (mason user add; openssl rand -hex 24 makes one)");
   const wrong = serveSettings({ DATABASE_URL: "mysql://x", MASON_API_KEY: "short", MASON_NAME: "Big Name", MASON_CHANGES: "cdc",
-    MASON_PG_SELF_SIGNED_TLS: "yes", MASON_HEALTH_PORT: "99999" }, "/srv");
+    MASON_PG_SELF_SIGNED_TLS: "yes", MASON_HEALTH_PORT: "99999", MASON_POLL_MS: "30000" }, "/srv");
   assert.ok("message" in wrong);
   for (const said of [/DATABASE_URL: the URL's scheme is mysql/, /MASON_API_KEY is 5 characters: at least 32/, /MASON_NAME="Big Name" is not a project name/,
     /MASON_CHANGES="cdc": poll or replication/, /MASON_PG_SELF_SIGNED_TLS="yes": 1, or 0/, /MASON_HEALTH_PORT="99999": a port number/]) assert.match(wrong.message, said);
-  assert.match(wrong.message, /^6 settings are missing or wrong/);
+  // a setting that is no longer read refuses the start, naming the line to write instead (never runs a default)
+  assert.ok(wrong.message.includes("MASON_POLL_MS=30000 is no longer read: how often each table is polled is the sources file's sync: — " +
+    "write sync: poll 30s at its top (every table) or on a table's entry, then unset MASON_POLL_MS"), wrong.message);
+  assert.match(wrong.message, /^7 settings are missing or wrong/);
 
   const s = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY }, "/srv");
   assert.ok(!("message" in s));

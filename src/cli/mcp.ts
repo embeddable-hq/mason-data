@@ -236,7 +236,8 @@ export const TOOLS = [
     name: "tables",
     title: "The tables Mason serves",
     description: "The tables Mason serves, each a copy of a table of the application's Postgres database: about how many rows each holds, " +
-      "and how its copy is kept current (polled, streamed by logical replication, or not current, with when it last was). " +
+      "and how its copy is kept current and when it was last synced (sync: off — read again only when someone runs mason sync — or polled " +
+      "every so often, or streamed by logical replication). A copy last synced days ago answers as of then: say so with the answer. " +
       "Start here: a statement can read only these, named as listed.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, openWorldHint: false },
@@ -244,7 +245,8 @@ export const TOOLS = [
   {
     name: "describe",
     title: "One table's columns",
-    description: "One table's columns with their Postgres types, its primary key and foreign keys, about how many rows it holds and how its copy is kept current.",
+    description: "One table's columns with their Postgres types, its primary key and foreign keys, about how many rows it holds, how its copy is kept current " +
+      "and when it was last synced.",
     inputSchema: { type: "object", properties: { table: { type: "string", description: "the table as tables lists it (public.orders), or a bare name in public (orders)" } },
       required: ["table"], additionalProperties: false },
     annotations: { readOnlyHint: true, openWorldHint: false },
@@ -628,13 +630,17 @@ class ToolAnswerError extends ToolError {
 function rpcError(id: Id | null, code: number, message: string): unknown { return { jsonrpc: "2.0", id, error: { code, message } }; }
 
 /** A copy as EXPLAIN (FORMAT JSON) says it (src/duck/explain.ts `keptJson`): `Table` as qualifiedName writes it. */
-interface CopyRow { Table: string; "Estimated Rows": number | null; "Kept Current By": string | null; "Kept Current": string }
+interface CopyRow { Table: string; "Estimated Rows": number | null; "Kept Current By": string | null; "Kept Current": string;
+  /** in the poll's mode: the table's sync (off, poll 30s) and its last copy or poll */
+  Sync?: string; "Last Synced"?: string | null }
 
-/** A copy's facts as the tools say them: about how many rows, how it is kept current, and what keeps it current now. */
+/** A copy's facts as the tools say them: about how many rows, how it is kept current, what keeps it current now, and —
+ *  polled or off — its sync and when it was last synced (a copy's age is never hidden: issue 33). */
 function copyFacts(c: CopyRow | { error: string } | undefined): Record<string, unknown> {
   if (c === undefined) return { rows_about: null, kept: "how it is kept current is unknown: Mason has no copy of it" };
   if ("error" in c) return { rows_about: null, kept: `how it is kept current could not be read: ${c.error}` };
-  return { rows_about: c["Estimated Rows"], kept: c["Kept Current"], kept_current_by: c["Kept Current By"] };
+  return { rows_about: c["Estimated Rows"], kept: c["Kept Current"], kept_current_by: c["Kept Current By"],
+    ...(c.Sync !== undefined ? { sync: c.Sync, last_synced: c["Last Synced"] ?? null } : {}) };
 }
 
 /** A refusal as the model reads it: Postgres's fields, as psql prints them, and the same as structured content.

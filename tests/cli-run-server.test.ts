@@ -81,7 +81,7 @@ const ctx: RunContext = {
   // the file as the run reads it: its URL resolved from no environment (the test's file writes it whole)
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
   runUrl: "postgres://me@localhost:5432/app",
-  duck: { copies: () => copies, file: duckFile, pollSeconds: 5, poll: pollNow, stream: async () => null, requests },
+  duck: { copies: () => copies, file: duckFile, poll: pollNow, stream: async () => null, requests },
 };
 const server = createRunServer(ctx);
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -196,7 +196,7 @@ test("the commands' way in: the run's token as a Bearer header, no cookie and no
   fs.writeFileSync(sourceFile, good.replace("customers: {}", "customers: { colums: [id] }"));
   const refused = await bearer("POST", "/api/pick", { table: "public.orders", picked: true });
   assert.equal(refused.status, 409);
-  assert.match(JSON.parse(refused.text).error, /^mason\/sources\/app\.yml: tables\.customers: unexpected key colums — did you mean `columns`\? — a table takes columns, exclude and key — fix it first$/);
+  assert.match(JSON.parse(refused.text).error, /^mason\/sources\/app\.yml: tables\.customers: unexpected key colums — did you mean `columns`\? — a table takes columns, exclude, key and sync — fix it first$/);
   fs.writeFileSync(sourceFile, good);
   assert.equal((await bearer("POST", "/api/pick", { table: "public.customers", picked: false })).status, 200);
 });
@@ -279,7 +279,7 @@ test("mason serve's run serves no page: / is the 404 it was, and the users are s
 test("the state: a copy under way says its rows so far, one not reached is waiting, a copied one is done; the sync and the request log answer through it", async () => {
   copies = [
     { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null,
-      unsynced: { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-24T10:01:00.000Z" } },
+      kept: { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-24T10:01:00.000Z", nextAt: null } },
     // its chunks being read (src/duck/sync.ts copyProgressNow): passed through for mason wait and status to render
     { source: "public.orders", phase: "copying", rows: 3, bytes: 8192, seconds: null, copiedAt: null, error: null, rowsSoFar: 2, rowsEstimate: 9,
       progress: { chunksDone: 2, chunksTotal: 5, reading: 3, readingSeconds: 7.5, rowsReading: 3, rowsPerSecond: 0.4, bytesPerSecond: 900, secondsLeft: 12, share: 0.4 } },
@@ -301,9 +301,11 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.equal(by.get("public.logs")!.copy, null, "a table the sync has not reached is waiting, never copying 0 of N");
     assert.deepEqual(by.get("public.Shouty")!.copy, { phase: "failed", rowsCopied: 0, updatedAt: "" });
     assert.equal(by.get("public.Shouty")!.error, "it broke");
-    // over the poll's row limit: served, and its state says why it is not kept current
-    assert.deepEqual((by.get("public.customers") as unknown as { unsynced?: unknown }).unsynced, { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-24T10:01:00.000Z" });
-    assert.equal("unsynced" in by.get("public.orders")!, false, "a table the poll keeps current carries no unsynced");
+    // its sync off: served, and its state says so and when it was last synced (kept), never an unsynced of the run's own
+    assert.deepEqual((by.get("public.customers") as unknown as { kept?: unknown }).kept, { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-24T10:01:00.000Z", nextAt: null });
+    assert.equal("unsynced" in by.get("public.customers")!, false, "no table carries the run's old row-limit verdict");
+    // the sources file's default sync, for every table without its own: said with whether the file writes it
+    assert.deepEqual((s.body.source as { sync?: unknown }).sync, { default: "off", written: false });
     const post = async (p: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> => {
       const r = await fetch(`http://127.0.0.1:${ctx.port}${p}`, { method: "POST", headers: { Authorization: "Bearer t0ken-of-this-run", "Content-Type": "application/json" }, body: JSON.stringify(body) });
       return { status: r.status, body: await r.json() as Record<string, unknown> };
@@ -315,7 +317,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.match(String(refused.body.error), /public\.logs is not copied yet/);
     assert.equal((await post("/api/sync", { tables: [] })).status, 400);
     assert.deepEqual(asked, [["public.customers"], ["public.logs"]]);
-    assert.deepEqual(s.body.engine, { name: "duckdb", file: duckFile, bytes: 10, pollSeconds: 5 });
+    assert.deepEqual(s.body.engine, { name: "duckdb", file: duckFile, bytes: 10 });
     // the slow and refused statements are the request log's, in the shapes mason status renders
     assert.deepEqual((await get("/api/slow")).body, { slow: await requests.slow(), slowMs: 1000 });
     assert.deepEqual((await get("/api/refused")).body, await requests.refused());
@@ -333,14 +335,13 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
 test("the state says how each copy is kept current, as the sync's state has it (src/duck/sync.ts KeptCurrent); a table the sync holds none of says nothing", async () => {
   // the run server once mapped a copy's fields one by one, and kept was not among them: mason status --json could not
   // say how a table was kept current, or why it was not, though its text and EXPLAIN did
-  const polled = { by: "poll" as const, polledAt: "2026-10-24T10:01:00.000Z", unsynced: "over the 1,000,000-row sync limit" };
+  const polled = { by: "poll" as const, sync: { mode: "poll" as const, every: "30s", seconds: 30 }, syncedAt: "2026-10-24T10:01:00.000Z", nextAt: "2026-10-24T10:01:30.000Z" };
   const streamed = { by: "replication" as const, slot: "mason_app", state: "left-out" as const, why: "publication app_pub does not carry public.orders",
     position: "0/16B3F28", lastCommit: null, notRunning: null };
   const recopied = { by: "recopy" as const, copiedAt: "2026-10-24T10:00:00.000Z" };
-  const waiting = { by: "poll" as const, polledAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" };
+  const waiting = { by: "poll" as const, sync: { mode: "off" as const }, syncedAt: null, nextAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" };
   copies = [
-    { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null,
-      unsynced: { reason: polled.unsynced, asOf: polled.polledAt }, kept: polled },
+    { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: polled },
     { source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: streamed },
     { source: "public.Shouty", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: recopied },
     // a copy not made yet, as the sync says it (src/duck/sync.ts keptOf): kept says why it is not kept current, itself

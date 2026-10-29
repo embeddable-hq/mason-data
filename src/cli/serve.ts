@@ -26,6 +26,7 @@ import { parseSource } from "./preflight.ts";
 import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
+import { pollMsRetired } from "../lib/table-sync.ts";
 import { version } from "./version.ts";
 import type { CopyState } from "../duck/sync.ts";
 
@@ -57,7 +58,6 @@ export const SERVE: CommandSpec = {
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
     MASON_DUCKDB_MEMORY     the copy's memory, 4GB or 512MiB (default half the container's memory limit, else half the
                             machine's RAM; mason doctor says it); a statement past it fails alone with 53200
-    MASON_POLL_MS           how often the poll reads the tables' changes, in ms (default 5000)
     MASON_STATEMENT_TIMEOUT   each statement's limit, as Postgres's statement_timeout (default 5min; 0 for none)
     MASON_REQUEST_LOG_DAYS  how long the request log keeps a statement, in days (default 7)
     MASON_STORE_JSON_PATHS  on (the default) stores the JSON paths statements keep reading as columns; off stores none
@@ -102,6 +102,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   if (!NAME_RE.test(name)) wrong.push(`MASON_NAME=${JSON.stringify(name)} is not a project name: lower case letters, digits, - and _, at most 48`);
   const changes = env.MASON_CHANGES || null;
   if (changes !== null && changes !== "poll" && changes !== "replication") wrong.push(`MASON_CHANGES=${JSON.stringify(changes)}: poll or replication`);
+  // how often a table is polled is the sources file's sync: now, per table (src/lib/table-sync.ts)
+  const pollMs = pollMsRetired(env);
+  if (pollMs !== null) wrong.push(pollMs);
   const selfSigned = env.MASON_PG_SELF_SIGNED_TLS || "0";
   if (selfSigned !== "0" && selfSigned !== "1") wrong.push(`MASON_PG_SELF_SIGNED_TLS=${JSON.stringify(selfSigned)}: 1, or 0 (the default)`);
   const portText = env.MASON_HEALTH_PORT || "4140";

@@ -74,8 +74,9 @@ Not on npm yet: until the first release, run it from a checkout (Node ≥ 23.6):
 The demo is a small shop (`customers`, `products`, `orders`, `order_items`) in a Postgres that `mason start` runs in
 its own process, kept in `.mason/demo/` and served on a port of this machine. Three of the four tables are added
 already; the fourth is yours, so the first thing you do is a real `mason add` and you watch its copy begin. A new order
-lands every few seconds, so `mason status` shows the copy keeping up. Mason reads it as it reads yours, over the
-Postgres protocol, by polling (the demo database has no change log, so `--replication` does not apply).
+lands every few seconds, and the demo's sources file polls every table every 5 seconds (`sync: poll 5s`), so `mason
+status` shows the copy keeping up. Mason reads it as it reads yours, over the Postgres protocol, by polling (the demo
+database has no change log, so `--replication` does not apply).
 
 ### On your app's database
 
@@ -104,10 +105,12 @@ the variable:
 # mason/sources/app.yml — the database this project copies from. Yours to commit; the URL stays out of it.
 kind: postgres
 url: ${DATABASE_URL}          # a variable from .env.local, .env or the shell; a literal URL is allowed for local dev
+sync: off                     # every table's, unless its entry says its own (mason init writes it)
 tables:
   orders:                     # a bare name is in `public`; `billing.invoices` names its schema
     columns: [id, customer_id, status, amount, created_at, payload]
-  customers: {}               # every column
+    sync: poll 30s            # this table polled every 30 seconds
+  customers: {}               # every column, and the file's sync
   events:
     exclude: [raw_body]       # every column but these
   sessions:
@@ -119,6 +122,25 @@ A column that looks like a secret (`password`, `token`, `api_key`, …) is left 
 `mason add` starts the copy at once and the table is served the moment it lands (before `mason start`, the copy
 begins at the start); `mason add` and `mason remove` keep the rest of the file as it was, comments included. An entry
 you edit by hand is applied at the next `mason start`, and a mistake in it is refused with the key and the way out.
+
+**How each copy stays current is its `sync:`**, at the top of the file for every table and on an entry for that one:
+
+- **`sync: off`, the default**: after its first copy, Mason reads the table again only when you run `mason sync
+  orders`, which polls the tables you name once, right away — before a report, from cron, at the end of a deploy.
+  Between syncs Mason does not touch your database for it. A file that writes no `sync:` is `off`, and `mason start`
+  says so.
+- **`sync: poll <interval>`** (`5s`, `5m`, `1h`; at least `1s`): the table is polled at that interval — its changed
+  rows found by `xmin` in one transaction over one snapshot. Postgres has no index on `xmin`, so each poll reads the
+  whole table: every few seconds suits a small table, every hour a big one. Mason waits at least four times as long as
+  a poll took before that table's next.
+- `mason add orders --sync "poll 30s"` writes a table's own; on a table already added, `--sync` alone changes that
+  line and nothing else. A table over a million rows added under a file that polls is written `sync: off` and said,
+  and a poll of tens of millions of rows more often than every minute is warned of with an estimate of its cost.
+- Changing a table's `sync:` keeps its copy: it is caught up by one poll, never copied again.
+- `mason status`, `mason wait`, the MCP tools and EXPLAIN say each table's sync and when it was last synced, so a
+  copy's age is never hidden.
+- Logical replication is the project's for now, never a table's: `mason start --replication` keeps every table current
+  from the change log (below), whatever its entry says.
 
 **2. Connect a tool.** `mason user add` makes a user of Mason's Postgres API and prints its password once, with the
 URL to paste into the tool's datasource form:
@@ -168,10 +190,10 @@ your Postgres  ──SELECTs (or its change log)──▶  the copy, kept curren
   refused by name, never answered differently: the allowlist is regenerated from what the
   oracle (every statement run on a real Postgres and on Mason, and diffed) verified
   ([`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) is the list).
-- **Read-only on your database.** By default Mason polls with `SELECT`s: no `wal_level`, slot
-  or publication is needed or made, and it works on a read replica. A table over a million
-  rows is copied and served but kept current only by `mason sync <table>` or by logical
-  replication (`mason start --replication`), which reads the change log the way production does.
+- **Read-only on your database.** By default Mason reads with `SELECT`s: each table once, then
+  as its `sync:` says — `off`, read again by `mason sync <table>`, or polled at its interval. No
+  `wal_level`, slot or publication is needed or made, and it works on a read replica. Logical
+  replication (`mason start --replication`) reads the change log the way production does.
 - **A copy is chunks that resume.** Each table is read a range of heap pages at a time, a few
   chunks in parallel, one Postgres backend each; a copy that stops (a crash, `mason stop`)
   continues with the ranges it did not commit. Small tables are copied first, and a copy runs
