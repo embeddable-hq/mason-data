@@ -144,15 +144,17 @@ export interface CopyState {
  * the poll's ledger alone (`_mason.poll_state`), and a project switched to logical replication was said to be "kept
  * current by polling, last poll" two days before, while status said streamed.
  * - `poll`: polled every interval, `polledAt` its last copy or poll; `unsynced` (a table over POLL_ROW_LIMIT) is why the
- *   passes leave it as copied, polled only when asked (`mason sync`); `pending` why the passes skip a copy that is
- *   served as copied (to be copied again, or caught up by one poll first: `notStreamedWhy`'s words);
- * - `recopy`: copied again whole every interval (every table, whatever its state: `pass`);
+ *   passes leave it as copied, polled only when asked (`mason sync`); `pending` why the copy is not kept current now,
+ *   its phase included — waiting for its copy, being copied, its copy failed, to be copied again, or caught up by one
+ *   poll first (`notStreamedWhy`'s words) — so `kept` read alone never says a table not copied is polled;
+ * - `recopy`: copied again whole every interval (every table, whatever its state: `pass`); `pending` as the poll's, for
+ *   a table not copied now (waiting, being copied, its copy failed);
  * - `replication`: its part in the stream (`StreamTableStatus`'s state and why), where the stream is (`position`, the
  *   status's), the commit time of the newest change applied this run, and why the stream is not running (null: it is).
  */
 export type KeptCurrent =
   | { by: "poll"; polledAt: string | null; unsynced?: string; pending?: string }
-  | { by: "recopy"; copiedAt: string | null }
+  | { by: "recopy"; copiedAt: string | null; pending?: string }
   | { by: "replication"; slot: string; state: StreamTableStatus["state"]; why: string | null; position: string; lastCommit: string | null;
     notRunning: string | null };
 
@@ -974,12 +976,15 @@ export class Sync {
     const st = this.states.get(t.source);
     if (this.mode === "poll") {
       const polledAt = this.polledAt.get(t.source) ?? null;
-      // a copy served as copied that the passes skip (`pass`'s `polled`, and a table not yet caught up on the writer's
-      // turn): to be copied again (its columns changed, a numeric outgrew it, a retired layout) or caught up first
-      const pending = st?.phase === "copied" && (this.needsCopy(t) || this.behind.has(t.source)) ? this.notStreamedWhy(t.source) : null;
+      // a copy the passes do not keep current now, and why: not copied (waiting, being copied, its copy failed:
+      // `needsCopy` holds for every phase but copied), to be copied again (its columns changed, a numeric outgrew it, a
+      // retired layout), or caught up first (`pass`'s `polled`, and a table not yet caught up on the writer's turn)
+      const pending = this.needsCopy(t) || this.behind.has(t.source) ? this.notStreamedWhy(t.source) : null;
       return { by: "poll", polledAt, ...(overPollLimit(t) ? { unsynced: OVER_POLL_LIMIT } : {}), ...(pending !== null ? { pending } : {}) };
     }
-    if (this.mode === "recopy") return { by: "recopy", copiedAt: st?.copiedAt ?? null };
+    // copied again whole every pass, whatever its watermark: only a table not copied now (waiting, being copied, its copy
+    // failed) is not kept current
+    if (this.mode === "recopy") return { by: "recopy", copiedAt: st?.copiedAt ?? null, ...(st?.phase !== "copied" ? { pending: this.notStreamedWhy(t.source) } : {}) };
     const s = this.stream;
     const part = this.streamTable(t, now, s);
     return { by: "replication", slot: this.replication!.slot, state: part.state, why: part.why, position: formatLsn(s?.position() ?? this.appliedLsn),
@@ -1473,11 +1478,13 @@ export class Sync {
     if (this.copiedAs.has(source) && this.copiedAs.get(source) !== columnsKey(t.columns)) return "its columns changed: it is copied again, then caught up by one poll";
     if (st?.phase === "copied" && !this.snapshots.has(source)) return "a numeric value outgrew its copy's DECIMAL: it is copied again, wider, then caught up by one poll";
     if (st?.phase === "copied" && this.retired.has(source)) return "its copy is in an older Mason's layout, key order with an index: it is copied again, then caught up by one poll";
-    if (st?.phase === "copying" || this.rebuildingNow?.source === source && this.rebuildingNow.kind === "copy") return "it is being copied: it joins once copied and caught up by one poll";
-    if (st?.phase === "failed") return `its copy failed (${(st.error ?? "").split("\n")[0]}): it joins once copied and caught up by one poll`;
+    // what follows the copy: a catch-up poll, then the stream or the polls; copied again whole, nothing (`keptOf`'s recopy)
+    const joins = this.mode === "recopy" ? "it is kept current once copied" : "it joins once copied and caught up by one poll";
+    if (st?.phase === "copying" || this.rebuildingNow?.source === source && this.rebuildingNow.kind === "copy") return `it is being copied: ${joins}`;
+    if (st?.phase === "failed") return `its copy failed (${(st.error ?? "").split("\n")[0]}): ${joins}`;
     const b = this.behind.get(source);
     if (!this.needsCopy(t) && b !== undefined) return `it is caught up by one poll ${b.why} first`;
-    return "it waits for its copy: it joins once copied and caught up by one poll";
+    return `it waits for its copy: ${joins}`;
   }
 
   /**

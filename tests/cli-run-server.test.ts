@@ -337,13 +337,14 @@ test("the state says how each copy is kept current, as the sync's state has it (
   const streamed = { by: "replication" as const, slot: "mason_app", state: "left-out" as const, why: "publication app_pub does not carry public.orders",
     position: "0/16B3F28", lastCommit: null, notRunning: null };
   const recopied = { by: "recopy" as const, copiedAt: "2026-10-24T10:00:00.000Z" };
+  const waiting = { by: "poll" as const, polledAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" };
   copies = [
     { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null,
       unsynced: { reason: polled.unsynced, asOf: polled.polledAt }, kept: polled },
     { source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: streamed },
     { source: "public.Shouty", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: recopied },
-    // a copy from a sync before kept was said: nothing is made up for it
-    { source: "public.logs", phase: "waiting", rows: 3, bytes: 8192, seconds: null, copiedAt: null, error: null },
+    // a copy not made yet, as the sync says it (src/duck/sync.ts keptOf): kept says why it is not kept current, itself
+    { source: "public.logs", phase: "waiting", rows: 3, bytes: 8192, seconds: null, copiedAt: null, error: null, kept: waiting },
   ];
   try {
     const r = await fetch(`http://127.0.0.1:${ctx.port}/api/state`, { headers: { Authorization: "Bearer t0ken-of-this-run" } });
@@ -352,8 +353,8 @@ test("the state says how each copy is kept current, as the sync's state has it (
     assert.deepEqual(by.get("public.customers")!.kept, polled);
     assert.deepEqual(by.get("public.orders")!.kept, streamed);
     assert.deepEqual(by.get("public.Shouty")!.kept, recopied);
-    assert.equal("kept" in by.get("public.logs")!, false, "a copy the sync says nothing of: no kept");
-    assert.equal("kept" in by.get("public.events")!, false, "a table the sync holds no copy of: no kept");
+    assert.deepEqual(by.get("public.logs")!.kept, waiting, "a copy waiting: its kept, with why it is not kept current");
+    assert.equal("kept" in by.get("public.events")!, false, "a table the sync does not hold: no kept");
   } finally { copies = []; }
 });
 

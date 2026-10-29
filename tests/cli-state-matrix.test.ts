@@ -170,7 +170,8 @@ test("mason status --json, Mason stopped: source is the database — its name, i
 /**
  * A PROJECT WHOSE RUN IS UP, in `changes` mode: this test's own command server (src/cli/run-server.ts), named in the
  * project's config with this process's pid, so `mason status` and `mason wait` — real processes — find Mason up and
- * read its state. The copies are the sync's, faked: `orders` and `events` added and copied, `logs` in the database only.
+ * read its state. The copies are the sync's, faked (`copies`); the sources file adds `orders`, `events` and `fresh`, and
+ * the database also has `logs`.
  */
 async function upProject(changes: "poll" | "replication", copies: CopyState[], stream: StreamStatus | null): Promise<{ root: string; close: () => void }> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `mason-matrix-up-${changes}-`));
@@ -179,7 +180,7 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
   const parsed = parseSource("postgres://mason:secret@127.0.0.1:1/shop");
   if (!("source" in parsed)) throw new Error(parsed.problem);
   const col = (name: string, type = "bigint") => ({ name, type, notNull: name === "id", comment: null });
-  const catalog: SourceTable[] = ["orders", "events", "logs"].map((table) => ({ source: `public.${table}`, schema: "public", table, key: ["id"], rows: 3, bytes: 8192,
+  const catalog: SourceTable[] = ["orders", "events", "fresh", "logs"].map((table) => ({ source: `public.${table}`, schema: "public", table, key: ["id"], rows: 3, bytes: 8192,
     comment: null, columns: [col("id"), col("note", "text")], foreignKeys: [] }));
   const folder = path.join(root, "mason");
   const file = path.join(folder, "sources", "shop.yml");
@@ -188,7 +189,7 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
     slot: changes === "replication" ? "mason_matrix" : "", changes, ...(changes === "replication" ? { publication: { name: "mason_matrix", owned: true } } : {}),
     port: 0, token, page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     folder: () => folder, root, sourcesChanged: () => undefined, log: () => undefined, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
-    sources: () => ({ file: { name: "shop", file, kind: "postgres", url: { env: "DATABASE_URL" }, tables: ["orders", "events"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null }),
+    sources: () => ({ file: { name: "shop", file, kind: "postgres", url: { env: "DATABASE_URL" }, tables: ["orders", "events", "fresh"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null }),
     duck: { copies: () => copies, file: path.join(root, ".mason", "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => stream,
       requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
   } as unknown as RunContext;
@@ -197,7 +198,7 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
   const port = ctx.port = (server.address() as { port: number }).port;
   fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, SOURCE.replace("  orders: {}\n", "  orders: {}\n  events: {}\n"));
+  fs.writeFileSync(file, SOURCE.replace("  orders: {}\n", "  orders: {}\n  events: {}\n  fresh: {}\n"));
   fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: `matrix-up-${changes}`, folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null,
     running: { pid: process.pid, controlUrl: `http://127.0.0.1:${port}`, token, postgresUrl: "postgresql://127.0.0.1:1/shop", postgresListener: { host: "127.0.0.1", tls: null } },
     lastRun: null, ...(changes === "replication" ? { changes } : {}) }), { mode: 0o600 });
@@ -216,10 +217,13 @@ test("mason status and mason wait --json, Mason up: each added table says how it
   const stream: StreamStatus = { slot: "mason_matrix", publication: "mason_matrix", running: true, failure: null, position: "0/16B3F28", applied: "0/16B3F28",
     database: { lsn: "0/16B3F28", at: "2026-10-29T09:30:00.000Z" }, lag: { bytes: 0, seconds: 1 }, lastBatch: { appliedAt: "2026-10-29T09:30:00.000Z", committedAt: "2026-10-29T09:29:59.000Z" },
     tables: [{ table: "public.orders", state: "streamed", why: null, applied: zero }, { table: "public.events", state: "left-out", why: leftOut.why, applied: zero }] };
+  // kept is the sync's, never the sources file's: `fresh`, just added, has no copy until the run reads the file again
+  // (no kept); `logs`, just removed, is still held by the sync until then (its kept, though the file no longer adds it)
   const modes = [
-    { changes: "poll" as const, copies: [copied("public.orders", polled), copied("public.events", over, { unsynced: { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-29T09:00:00.000Z" } })],
-      stream: null, kept: { "public.orders": polled, "public.events": over } },
-    { changes: "replication" as const, copies: [copied("public.orders", streamed), copied("public.events", leftOut)], stream, kept: { "public.orders": streamed, "public.events": leftOut } },
+    { changes: "poll" as const, copies: [copied("public.orders", polled), copied("public.events", over, { unsynced: { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-29T09:00:00.000Z" } }),
+      copied("public.logs", polled)], stream: null, kept: { "public.orders": polled, "public.events": over, "public.logs": polled } },
+    { changes: "replication" as const, copies: [copied("public.orders", streamed), copied("public.events", leftOut), copied("public.logs", streamed)], stream,
+      kept: { "public.orders": streamed, "public.events": leftOut, "public.logs": streamed } },
   ];
   for (const m of modes) {
     const p = await upProject(m.changes, m.copies, m.stream);
@@ -229,13 +233,16 @@ test("mason status and mason wait --json, Mason up: each added table says how it
       const s = JSON.parse(status.stdout) as { running: boolean; source: { changes: string }; tables: Array<{ table: string; added: boolean; kept?: unknown }> };
       assert.deepEqual([s.running, s.source.changes], [true, m.changes]);
       const keptOf = (tables: ReadonlyArray<{ table: string; kept?: unknown }>) => Object.fromEntries(tables.filter((t) => "kept" in t).map((t) => [t.table, t.kept]));
-      assert.deepEqual(keptOf(s.tables), m.kept, `${m.changes}: mason status --json, each added table's kept as the run's state has it`);
-      assert.equal("kept" in s.tables.find((t) => t.table === "public.logs")!, false, `${m.changes}: a table not added says nothing of it`);
-      const waited = await runMason(p.root, ["wait", "--json", "--timeout", "5"], matrixEnv());
-      assert.equal(waited.code, 0, waited.stdout + waited.stderr);
+      assert.deepEqual(keptOf(s.tables), m.kept, `${m.changes}: mason status --json, each table the sync holds with its kept as the run's state has it`);
+      const fresh = s.tables.find((t) => t.table === "public.fresh")!;
+      assert.deepEqual([fresh.added, "kept" in fresh], [true, false], `${m.changes}: added, not held by the sync yet: no kept`);
+      assert.deepEqual([s.tables.find((t) => t.table === "public.logs")!.added], [false], `${m.changes}: removed, still held by the sync: its kept`);
+      // mason wait lists the added tables, so it waits for fresh's copy and times out, saying each one's kept as status does
+      const waited = await runMason(p.root, ["wait", "--json", "--timeout", "1"], matrixEnv());
+      assert.equal(waited.code, 124, waited.stdout + waited.stderr);
       const w = JSON.parse(waited.stdout) as { ready: boolean; tables: Array<{ table: string; kept?: unknown }> };
-      assert.equal(w.ready, true);
-      assert.deepEqual(keptOf(w.tables), m.kept, `${m.changes}: mason wait --json says the same`);
+      assert.deepEqual(w.tables.map((t) => t.table), ["public.orders", "public.events", "public.fresh"]);
+      assert.deepEqual(keptOf(w.tables), { "public.orders": m.kept["public.orders"], "public.events": m.kept["public.events"] }, `${m.changes}: mason wait --json says the same`);
     } finally { p.close(); }
   }
 });

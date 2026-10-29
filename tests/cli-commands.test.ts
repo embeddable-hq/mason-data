@@ -257,12 +257,25 @@ test("mason status and wait --json say how each table is kept current (kept, src
   // every field of each way a copy is kept current
   for (const spec of [STATUS, WAIT]) {
     const line = spec.usage.slice(spec.usage.indexOf("--json"));
+    // each table's unsynced is an object ({ reason, asOf }), kept's a string: the tables' list declares the object
     assert.match(line, /\bkept\b/, `mason ${spec.name}'s usage names kept`);
+    assert.match(line, /unsynced: \{ reason, asOf \}/, `mason ${spec.name}'s usage declares a table's unsynced`);
   }
-  const line = STATUS.usage.slice(STATUS.usage.indexOf("--json"));
-  for (const k of [...new Set(kepts.flatMap((k) => Object.keys(k)))]) assert.match(line, new RegExp(`\\b${k}\\b`), `mason status's usage names kept's ${k}`);
-  for (const by of ["poll", "recopy", "replication"]) assert.match(line, new RegExp(`by: ${by}\\b`), `mason status's usage names kept by ${by}`);
-  for (const state of ["streamed", "catching-up", "waiting", "left-out"]) assert.match(line, new RegExp(`\\b${state}\\b`));
+  // kept's own declaration, from where it starts to the stopped shape: none of its fields borrowed from the stream's or
+  // the tables' declarations
+  const from = STATUS.usage.indexOf("Each table's kept");
+  const to = STATUS.usage.indexOf("with Mason stopped", from);
+  assert.ok(from >= 0 && to > from, "mason status's usage declares kept, before the stopped shape");
+  const decl = STATUS.usage.slice(from, to).replace(/\s+/g, " ");
+  assert.match(decl, /absent for a table the sync does not hold/);
+  for (const k of [...new Set(kepts.flatMap((k) => Object.keys(k)))]) assert.match(decl, new RegExp(`\\b${k}\\b`), `kept's declaration names ${k}`);
+  for (const by of ["poll", "recopy", "replication"]) assert.match(decl, new RegExp(`\\{ by: ${by}\\b`), `kept's declaration names by: ${by}`);
+  for (const state of ["streamed", "catching-up", "waiting", "left-out"]) assert.match(decl, new RegExp(`\\b${state}\\b`));
+  // unsynced and pending are present only when they apply; pending says why the copy is not kept current, phase included
+  assert.match(decl, /unsynced \(only when it applies/);
+  assert.match(decl, /pending \(only when it applies: why the copy is not kept current now, its phase included/);
+  assert.match(decl, /by: recopy, copiedAt, pending \(only when it applies/);
+  assert.match(WAIT.usage.replace(/\s+/g, " "), /pending, when it applies, says why the copy is not kept current now, its phase included/);
 });
 
 test("what to run next over the tables: mason status points at mason tables first; mason tables itself never does", () => {

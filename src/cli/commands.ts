@@ -259,14 +259,17 @@ const STATUS_USAGE = `usage: mason status [--json]
            { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
            source's: its sources file's), file (the sources file), url, database, remote, version, standby, changes,
            replication, demo (the demo database this run hosts) }, warnings, folder, project, tables: [{ table, rows,
-           bytes, key, added, addedColumns, copy, error, unsynced, kept, … }], engine: { file, bytes, pollSeconds, restarts (each time its supervisor started the
-           run again: { at, reason, upSeconds }) }, slowQueries, refusedQueries, refusedTotal (how many in all),
-           readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }. Each added
-           table's kept is how its copy is kept current now (absent for a table not added): { by: poll, polledAt (its
-           last copy or poll), unsynced (why the passes leave it as copied: mason sync polls it), pending (why the
-           passes skip it for now) } or { by: recopy, copiedAt } or { by: replication, slot, state (streamed,
-           catching-up, waiting, left-out), why, position, lastCommit, notRunning (why the stream is not running, null
-           when it is) }; with Mason stopped: { running: false, project, source: { name,
+           bytes, key, added, addedColumns, copy, error, unsynced: { reason, asOf } (copied and served, not kept
+           current by the poll), kept, … }], engine: { file, bytes, pollSeconds, restarts (each time its supervisor
+           started the run again: { at, reason, upSeconds }) }, slowQueries, refusedQueries, refusedTotal (how many in
+           all), readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }.
+           Each table's kept is how its copy is kept current now (absent for a table the sync does not hold):
+           { by: poll, polledAt (its last copy or poll), unsynced (only when it applies: why the passes leave it as
+           copied, mason sync polls it), pending (only when it applies: why the copy is not kept current now, its
+           phase included: waiting for its copy, being copied, its copy failed, to be copied again, caught up first) }
+           or { by: recopy, copiedAt, pending (only when it applies, as the poll's) }
+           or { by: replication, slot, state (streamed, catching-up, waiting, left-out), why, position, lastCommit,
+           notRunning (why the stream is not running, null when it is) }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
            { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
            exit 1. In replication mode stream: { slot, publication, running, failure, position,
@@ -957,8 +960,9 @@ const WAIT_USAGE = `usage: mason wait [--timeout <seconds>] [--json]
   --timeout <seconds>   how long to wait (default 600); the copy goes on after, and mason wait again picks it up
   --json                as data, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
                         unsynced, kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how
-                        long, the rate, the seconds left, while its chunks are read }; unsynced and kept as mason
-                        status --json says them),
+                        long, the rate, the seconds left, while its chunks are read }; unsynced: { reason, asOf }
+                        and kept as mason status --json says them — kept's pending, when it applies, says why the
+                        copy is not kept current now, its phase included),
                         stream (replication mode: where the stream is, as mason status --json says it), error (on a
                         failure or a timeout: { code, message, next }), next }
 

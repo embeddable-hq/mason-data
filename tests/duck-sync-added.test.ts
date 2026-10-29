@@ -299,3 +299,39 @@ test("mason status --json says how each table is kept current as the sync derive
     { by: "replication", slot: "mason_x", state: "catching-up", why: "caught up by one poll after its copy", position: "0/16B3F28", lastCommit: null, notRunning: "Mason is stopping" });
   assert.match(streamLines(stream).find((l) => l.startsWith("public.caught"))!, /catching up by one poll/);
 });
+
+test("a table not copied now says so in kept itself — waiting for its copy, its copy failed — in poll, recopy and replication mode, never polled", async () => {
+  // kept read alone (mason status --json) must never tell an agent that a table whose copy failed is polled: every text
+  // reader checks the phase first, an agent reading kept may not
+  const tables = [table("a"), table("waiting"), table("failed")];
+  const seed = (...more: string[]) => async (run: (sql: string) => Promise<unknown>): Promise<void> => {
+    await run(copied("a")); await run(lastPoll("a"));
+    await run(copied("failed", [column("id")], "failed", "the source closed the connection"));
+    for (const sql of more) await run(sql);
+  };
+  const keptBy = async (t: Started, changes: "poll" | "replication"): Promise<Record<string, unknown>> => {
+    const { states, json } = await statusOf(t, changes);
+    for (const s of states) assert.deepEqual(json.tables.find((x) => x.table === s.source)?.kept, s.kept, `${s.source}: --json's kept is the sync's`);
+    // the text is phase-first, as it was
+    assert.equal(keptText(at(states as KeptState[], "waiting")), "waiting for its copy to start");
+    assert.equal(keptText(at(states as KeptState[], "failed")), "its last copy failed: the source closed the connection");
+    return Object.fromEntries(json.tables.map((x) => [x.table.replace(/^public\./, ""), x.kept]));
+  };
+  const poll = await keptBy({ mode: "poll", tables, seed: seed() }, "poll");
+  assert.deepEqual(poll, {
+    a: { by: "poll", polledAt: "2026-10-27T19:58:39.000Z" },
+    waiting: { by: "poll", polledAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" },
+    failed: { by: "poll", polledAt: null, pending: "its copy failed (the source closed the connection): it joins once copied and caught up by one poll" },
+  });
+  const recopy = await keptBy({ mode: "recopy", tables, seed: seed() }, "poll");
+  assert.deepEqual([recopy.waiting, recopy.failed], [
+    { by: "recopy", copiedAt: null, pending: "it waits for its copy: it is kept current once copied" },
+    { by: "recopy", copiedAt: (recopy.failed as { copiedAt: string | null }).copiedAt, pending: "its copy failed (the source closed the connection): it is kept current once copied" },
+  ]);
+  assert.equal("pending" in (recopy.a as object), false, "a copied table copied again whole is kept current");
+  const repl = await keptBy({ mode: "replication", replication: replicationX, tables, seed: seed(slotAt) }, "replication");
+  assert.deepEqual([repl.waiting, repl.failed].map((k) => { const r = k as { state: string; why: string | null }; return [r.state, r.why]; }), [
+    ["waiting", "it waits for its copy: it joins once copied and caught up by one poll"],
+    ["waiting", "its copy failed (the source closed the connection): it joins once copied and caught up by one poll"],
+  ]);
+});
