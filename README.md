@@ -95,7 +95,7 @@ mason init                           # creates mason/sources/<database>.yml (com
 mason tables                         # lists the tables in your database, with their rows and keys
 mason add orders customers           # adds tables to mason (use --columns id,status,total to copy only some columns)
 mason start                          # starts Mason in the background and begins the sync
-mason wait                           # waits until every added table is copied
+mason wait                           # waits until every added table is synced
 mason sync orders                    # reads the latest changes (by default, Mason syncs only when you ask)
 mason remove customers               # removes a table and deletes its copy
 ```
