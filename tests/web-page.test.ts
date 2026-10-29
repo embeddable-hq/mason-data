@@ -1253,7 +1253,8 @@ test("the request log: a row each, newest first, in the commands' words — held
   }
   assert.match(textOf(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true })), /Failed .* 42P01 relation "nope" does not exist Newest$/);
   assert.match(renderRequests({ requests: [failedRequest], keptDays: 7, before: null }, { paged: true }), /<div class="paging"><button type="button" data-newest>Newest<\/button><\/div>/);
-  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<div class="empty"><p class="empty-title">No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.<\/p><\/div>$/);
+  assert.match(renderRequests({ requests: [], keptDays: 7, before: null }), /^<div class="empty"><p class="empty-title">No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.<\/p><\/div><p class="dim unlisted">A statement that reads no copied table /,
+    "nothing listed and nothing filtered: what the log does not list (a select 1 typed to test the connection), as mason logs --requests says it");
   assert.equal(textOf(renderRequests({ requests: [], keptDays: 1, before: null }, { filtered: true })), "No request that passes the filters in the last 1 day (MASON_REQUEST_LOG_DAYS).");
 });
 
@@ -2634,7 +2635,10 @@ test("the Overview, nothing asked yet: Connect your first tool under the cards �
   assert.equal(SHOP_PG.shown, "postgres://<user>:<password>@127.0.0.1:5433/shop", "the line mason start and mason status print");
   assert.match(text, new RegExp(`Connect your first tool Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL\\. ` +
     `URL ${SHOP_PG.shown.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy psql ${SHOP_PG.psql.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy ` +
+    "Then try select count\\(\\*\\) from customers; Copy it shows on Queries " +
     "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it\\. Mason Source "));
+  assert.match(html, /<code id="connect-try">select count\(\*\) from customers;<\/code> <button type="button" class="small" data-copy="connect-try">Copy<\/button>/,
+    "a first statement that the request log lists: one that reads a copied table (the first copied), never a select 1 it does not");
   // first under the cards, before the facts: the most important thing on a fresh install is how to reach it
   assert.ok(text.indexOf("Connect your first tool") > text.indexOf("p95, last day") && text.indexOf("Connect your first tool") < text.indexOf("Mason Source"));
   assert.match(html, /<code id="connect-url">postgres:\/\/&lt;user&gt;:&lt;password&gt;@127\.0\.0\.1:5433\/shop<\/code> <button type="button" class="small" data-copy="connect-url">Copy<\/button>/);
@@ -2658,7 +2662,9 @@ test("Queries, an empty request log: how to connect under its sentence — never
   const renderRequests = fn<[unknown, Record<string, unknown>], string>("renderRequests");
   const connect = fn<[unknown, unknown], string>("renderConnect")(SHOP_PG, { first: true });
   const empty = { requests: [], keptDays: 7, before: null };
-  assert.match(textOf(renderRequests(empty, { span: "the last 24 hours", connect })), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_REQUEST_LOG_DAYS\)\. Connect your first tool .* Create a user /);
+  assert.match(textOf(renderRequests(empty, { span: "the last 24 hours", connect })), /^No request in the last 24 hours \(the request log keeps 7 days: MASON_REQUEST_LOG_DAYS\)\. A statement that reads no copied table \(select 1, select now\(\), SET, SHOW, the catalog queries a BI tool sends as it connects\) is answered without the copy and not listed: the request log keeps the statements that read your tables\. Connect your first tool .* Create a user /);
+  assert.equal((page as Record<string, unknown>).UNLISTED_STATEMENTS, commands.UNLISTED_STATEMENTS, "the page says what mason logs --requests says");
+  assert.ok(fs.readFileSync(path.join(WEB, "index.html"), "utf8").includes(`${commands.UNLISTED_STATEMENTS}.`), "and the request log's lead says it over a log that has rows");
   assert.ok(!textOf(renderRequests(empty, { span: "the last 24 hours", connect, filtered: true })).includes("Connect"), "a filter that passes none is not a fresh install");
   // the app: the Queries page renders it from /api/state's postgres
   const run = fakeRun();
@@ -2666,7 +2672,7 @@ test("Queries, an empty request log: how to connect under its sentence — never
   const app = fn<[unknown], App>("createApp")(run.fetch);
   app.show("queries");
   await app.poll();
-  assert.match(textOf(app.view()["request-log"]!), /^No request in the last 24 hours .* Connect your first tool .* URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy /);
+  assert.match(textOf(app.view()["request-log"]!), /^No request in the last 24 hours .* Connect your first tool .* URL postgres:\/\/<user>:<password>@127\.0\.0\.1:5433\/shop Copy .* Then try select count\(\*\) from customers; Copy /);
 });
 
 test("a Copy button, on any page: its code's text to the clipboard, Copied for 2 s then Copy; with no clipboard, the text selected and copied as a selection, else what to press", async () => {

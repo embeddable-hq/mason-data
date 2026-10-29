@@ -326,7 +326,7 @@ export function renderStatus(s, o = {}) {
   // how to connect, once a table is added: first under the cards while nothing has asked Mason anything (the last
   // day's and week's statements, read as none), else after the facts, for the next tool
   const first = isFirstConnect(o.queries);
-  const connect = added ? renderConnect(s.postgres, { first }) : "";
+  const connect = added ? renderConnect(s.postgres, { first, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) : "";
   return renderHealth(s) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }

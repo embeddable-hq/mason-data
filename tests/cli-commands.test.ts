@@ -630,6 +630,11 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     assert.equal(slow.code, 0, slow.stdout + slow.stderr);
     assert.deepEqual(asked.at(-1), { limit: 40, minMs: 1000, search: "from orders" });
     assert.equal((JSON.parse(slow.stdout) as { next: Array<{ command: string }> }).next[0]!.command, "mason logs --requests --slow --search 'from orders' --before 2026-10-24T10:00:00.000Z~7");
+    // none listed, nothing filtered: what the log does not list, so a select 1 typed to test the connection is not looked for in vain
+    const none = await run(["logs", "--requests"]);
+    assert.equal(none.code, 0, none.stdout + none.stderr);
+    assert.match(none.stdout, /^No request in the last 7 days \(MASON_REQUEST_LOG_DAYS\)\.\n\nTip: A statement that reads no copied table \(select 1, select now\(\), SET, SHOW, the catalog queries a BI tool sends as it connects\) is answered without the copy\s+and not listed/);
+    assert.ok(!(await run(["logs", "--requests", "--slow"])).stdout.includes("reads no copied table"), "a filter that passes none says nothing of it");
     // a mistake: exit 2, in the flag's name, before the run is asked
     const before = asked.length;
     for (const [argv, words] of [

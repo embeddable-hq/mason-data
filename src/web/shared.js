@@ -366,6 +366,10 @@ export function copyClick(d, button, { doc, win }) {
   });
 }
 
+/** What the request log does not list (src/cli/commands.ts `UNLISTED_STATEMENTS`, held equal by the tests): a statement
+ *  that reads no copied table is the catalog's to answer, and not recorded — so a `select 1` never shows on Queries. */
+export const UNLISTED_STATEMENTS = "A statement that reads no copied table (select 1, select now(), SET, SHOW, the catalog queries a BI tool sends as it connects) is answered without the copy and not listed: the request log keeps the statements that read your tables";
+
 /** The hash of the page that makes a user (src/web/app.js PAGES): where Connect's Create a user leads. */
 export const USERS_HASH = "#users";
 
@@ -376,11 +380,13 @@ export const USERS_HASH = "#users";
  * place. `first` (nothing has asked Mason anything yet) leads with what the URL is for. Nothing from a run that does
  * not say it.
  */
-export function renderConnect(pg, { first = false } = {}) {
+export function renderConnect(pg, { first = false, table = null } = {}) {
   if (!pg || typeof pg.shown !== "string") return "";
+  // a first statement to type that the request log lists (one that reads a copied table: UNLISTED_STATEMENTS)
+  const tryIt = first && table ? `<dt>Then try</dt><dd>${copyable("connect-try", `select count(*) from ${entryName(table)};`)} <span class="dim">it shows on Queries</span></dd>` : "";
   return `<div class="connect${first ? " first" : ""}"><p class="connect-title">${first ? "Connect your first tool" : "Connect"}</p>` +
     (first ? `<p class="lead">Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL.</p>` : "") +
-    `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd></dl>` +
+    `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd>${tryIt}</dl>` +
     `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p></div>`;
 }
 

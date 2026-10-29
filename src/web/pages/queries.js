@@ -12,7 +12,7 @@
  * while the log is empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away.
  */
 import { msText, agoText, bytesText, esc, firstLine, json, n, renderFailure, rowsHtml, spanText, utcText, details, createOpenSet, card, cards, empty, panel, status, skeleton,
-  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText, unsupportedEntry, rangeOf, readPart, renderConnect, copyClick } from "../shared.js";
+  clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, POLL_MS, oneLine, clientText, unsupportedEntry, rangeOf, readPart, renderConnect, copyClick, UNLISTED_STATEMENTS } from "../shared.js";
 
 const RUNNING = "/api/running";
 const STATE = "/api/state";
@@ -176,7 +176,8 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const days = `${page.keptDays} day${page.keptDays === 1 ? "" : "s"}`;
     // nothing asked yet (no filter, the newest page): how to connect, so the first statement is a paste away
     return empty(`No ${filtered ? "request that passes the filters" : "request"} ${span ? `in ${span} (the request log keeps ${days}: MASON_REQUEST_LOG_DAYS)` : `in the last ${days} (MASON_REQUEST_LOG_DAYS)`}.`) +
-      (filtered || paged ? "" : connect) + nav;
+      // a first statement looked for and not there: what the log does not list (a select 1 typed to test the connection)
+      (filtered || paged ? "" : `<p class="dim unlisted">${esc(UNLISTED_STATEMENTS)}.</p>${connect}`) + nav;
   }
   const newest = [...page.requests].reverse();
   const list = sort.key === "started" && sort.dir === "desc" ? newest : sortedBy(newest, REQUEST_SORTS[sort.key] ?? REQUEST_SORTS.started, sort.dir);
@@ -290,7 +291,7 @@ export const page = {
           "running-now": running ? renderRunning(running.running, m.asking, m.outcome) : "",
           unsupported: readPart(ctx, unsupportedPath(ctx.range()), (b) => renderUnsupported(b, (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span), true),
           "request-log": (log?.failure ? renderFailure(log.failure) : "") + (log?.body ? renderRequests(log.body, { paged: m.before !== null, filtered: filtered(), isOpen: opened.has, now: ctx.now().getTime(), sort: m.sort,
-            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(ctx.read(STATE)?.body?.postgres, { first: true }) }) : ""),
+            span: m.filters.since ? "" : (RANGES[ctx.range()] ?? RANGES[DEFAULT_RANGE]).span, connect: renderConnect(ctx.read(STATE)?.body?.postgres, { first: true, table: ctx.read(STATE)?.body?.tables?.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) }) : ""),
         };
       },
       toggle: (target) => opened.toggle(target),

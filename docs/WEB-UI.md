@@ -85,6 +85,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   client; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
   opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.
+  A statement that reads no copied table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
+  answered without the copy and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
+  page says so, as `mason logs --requests` does when it lists none; while nothing is listed, Connect offers a first
+  statement that is (`select count(*) from <a copied table>;`).
 - **Observability › Usage** (`#observability/usage`): cards for the range (statements, failed, p95, rows sent, bytes
   sent), each with a sparkline.
 - **Usage**, charts and tables: four charts over the range (statements, p95, the copy's size, rows in the copy), their

@@ -1319,6 +1319,14 @@ function olderPage(q: RequestQuery, before: string): string {
   return parts.join(" ");
 }
 
+/**
+ * WHAT THE REQUEST LOG DOES NOT LIST, said where a first statement is looked for (`mason logs --requests` with none, the
+ * Queries page; src/web/shared.js, held equal by the tests): a catalog read, a SET or a SHOW is the protocol's chatter —
+ * a BI tool sends hundreds as it connects — and is not recorded (src/api/postgres/server.ts `recordRequest`), so a
+ * `select 1` typed to test the connection is answered and never appears.
+ */
+export const UNLISTED_STATEMENTS = "A statement that reads no copied table (select 1, select now(), SET, SHOW, the catalog queries a BI tool sends as it connects) is answered without the copy and not listed: the request log keeps the statements that read your tables";
+
 /** mason logs --requests: the run's ledger through its command server (one process holds the copy's file) */
 async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
   const r0 = await theRun(process.cwd());
@@ -1340,7 +1348,7 @@ async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
     const st = styleOut();
     if (!requests.length) out(`No ${filtered ? "request that passes the filters" : "request"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS).`);
     for (const r of requests) out(requestLine(r, st));
-    out(endText({ next }, st));
+    out(endText({ next, ...(!requests.length && !filtered ? { tips: [UNLISTED_STATEMENTS] } : {}) }, st));
     return 0;
   });
 }
