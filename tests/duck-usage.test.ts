@@ -65,6 +65,20 @@ test("a sample is the run's facts, the interval's statements by the request log 
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
 });
 
+test("quantile_cont over a histogram (the request log summary's p50 / p95, src/duck/requests.ts summary) is DuckDB's over the values listed out", async () => {
+  const { quantileContOf } = await usage();
+  const cases: Array<Array<[number, number]>> = [[[5, 1]], [[1, 1], [2, 1]], [[7, 4]], [[1, 2], [3, 0], [4, 1], [5, 1], [9, 1]], [[0, 3], [10, 1], [11, 6]],
+    Array.from({ length: 300 }, (_, k): [number, number] => [k * 3, (k * 37) % 11]), [[2, 100_000], [3, 1]]];
+  for (const h of cases) {
+    const listed = h.flatMap(([v, c]) => Array<number>(c).fill(v));
+    const [p50, p95] = (await store.writer.runAndReadAll(`SELECT quantile_cont(x, 0.5), quantile_cont(x, 0.95) FROM (SELECT unnest($1::INTEGER[]) AS x)`, [`[${listed.join(",")}]`]))
+      .getRowsJS()[0]!.map((v) => Math.round(Number(v)));
+    assert.deepEqual([quantileContOf(h, 0.5), quantileContOf(h, 0.95)], [p50, p95], `over ${JSON.stringify(h).slice(0, 80)}`);
+  }
+  assert.equal(quantileContOf([], 0.5), null, "none: null");
+  assert.equal(quantileContOf([[4, 0]], 0.5), null, "values counted 0 times are none");
+});
+
 test("re-bucketed in one query: buckets of the step from since, each count summed, each level at its highest; an empty interval has no duration", async () => {
   const { UsageSampler, USAGE_TABLE } = await usage();
   let clock = Date.parse("2026-10-28T10:00:00.000Z");
