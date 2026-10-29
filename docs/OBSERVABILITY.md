@@ -246,6 +246,57 @@ required**, then **C** for teams that already run Prometheus.
 - **Access** for the managed service (above): three options written, awaiting the owner's choice.
 - **Rows scanned**: deferred (it may add cost to every statement).
 
+## Architecture review (2026-10-29)
+
+Measured, not estimated: a synthetic request log of 30 M rows (a week of a BI tool at 50 statements a second, 2.2 GiB,
+written in time order as the ledger writes it) on a 10-core, 32 GiB laptop; the demo with 804 tables in its database
+and 204 of them copied; the listener against the `main` it branched from. Three runs each.
+
+**The request log's reads at 30 M rows** (what the pages poll; before → after this review):
+
+| Read | Who asks, how often | ms |
+|---|---|---|
+| `summary` (`/api/queries`) | Overview 30 s, Usage, Queries, `mason status` | 707–765 → **146–162** (one GROUP BY; p50 / p95 from the durations' histogram, exact) |
+| `lastUsed` (`/api/users?lastUsed=1`) | Users 30 s, `mason user list` | 6 users 182–185, 66 users 2,155–2,812 → **121–142** for either (one join) |
+| `slow` (`/api/slow`) | `mason status` | 207–251 → **57–67** (only the statements that were ever slow are grouped) |
+| `page` of 50, any filter but `search` | Queries 5 s | 4–10 (`started_at` prunes: insertion order is time order, the zonemaps skip all but the window — 351 k of 30 M rows scanned for 3 h) |
+| `page` with `search`, no match | Queries 5 s | 24 h: 84–89; 7 days: **561–610** (a scan of the statements' text; left) |
+| `unsupported` | Overview 30 s (a day), Queries 60 s (the range) | a day 31–37; 7 days 190–222 |
+| `refused`, events, `max(seq)` at open | `mason status`, Logs, the open | 30–36; 1–2; 1–3 |
+| the retention trim | hourly, and at open | an hour's 179 k rows 4 ms, a day's 4.3 M 15 ms |
+| the open's `ADD COLUMN IF NOT EXISTS` | each start | 5 ms; 210 ms once on a log from `main` missing two columns |
+| `copySizes` (`pragma_storage_info`) | every 10 min | 30 M rows × 19 columns (9,348 segments) 71–84 ms, so ~0.5 s for 200 M × 20; 203 small copies 421 ms |
+
+**The listener**: no per-statement cost measurable — 3,000 small statements, 780–970 µs each on `main` and on this
+branch alike, and a 150,000-row answer 96–126 ms on both (the bytes counted per send, the running list and the
+sessions are read only when asked).
+
+**Spin-up**: `mason init demo` 0.23 s, `mason start` 1.89 s (seeding the demo) and ready 0.26 s later; a restart with
+204 copies 2.25 s, ready +0.31 s; `mason serve` healthy after 0.60 s. The new tables' opens add 5–10 ms.
+
+**The page**: the first load is 23 static requests, 520 KB (uPlot 145 KB and the fonts 141 KB of it; uPlot is
+imported only when a chart is drawn, which the Overview's sparklines do), every request same-origin (the CSP is
+`default-src 'self'`); the load event at 25 ms on loopback. A reload now keeps the pinned vendor files (immutable):
+222 KB. `/api/state` with 804 tables is 590–604 KB (750 B a table not added, most of it its columns), built in 2–16 ms,
+parsed in 1 ms, and polled every 2 s by the Overview and Tables.
+
+**Nothing is fetched at run time**: no URL in src/ is fetched but DuckDB's extension repository; JSON, ICU and Parquet
+are built into DuckDB; the `postgres` extension is installed by the image at build, and DuckDB's autoinstall of any
+other extension is off (src/duck/store.ts). From npm, the first copy on a machine downloads it.
+
+**Left, most worth it first**:
+
+1. `/api/state` carries every catalog table's columns, polled every 2 s: ~0.6 MB at 800 narrow tables, ~4 MB at 800
+   tables of 50 columns. A `?columns=0` for the Overview, or the columns only on Tables' Columns… dialog.
+2. From npm, an offline machine's first copy fails (the extension download); `mason doctor` could say whether it is
+   installed, and `mason init` fetch it while online. Shipping it in the npm package is ~45 MB a platform.
+3. Queries' `search` over 7 days is ~0.6 s every 5 s while it is shown: poll a search less often, or only on asking.
+4. The summary is still a 7-day scan per ask (0.15 s): cache it for the 30 s the Overview waits, or derive the week
+   from the minute samples (whose p95s do not merge exactly).
+5. The three history tables (requests, sync events, usage) each repeat the same frame — two connections, the hourly
+   trim, a failure said once per streak, the close: one module for it. `src/duck/events.ts` adds a third type import
+   from src/cli/ (as requests.ts and sync.ts do): the shapes belong in src/duck/.
+
 ## Decided
 
 - "User", never "credential" (the CLI's word).
