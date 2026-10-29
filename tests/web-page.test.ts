@@ -254,11 +254,11 @@ test("running: the database masked, each table copied with its rows, the counts,
 test("copying: the bar's share, the rows, the chunks, the rate and the time left; one waiting; Under way", () => {
   const html = fn<[unknown, unknown?], string>("renderStatus")(COPYING, {});
   const text = textOf(html);
-  assert.match(html, /<tr class="t-copying"><th scope="row"><code class="name" title="public\.orders">public\.orders<\/code><\/th><td class="bar"><progress class="copybar" max="100" value="15" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="15"/);
+  assert.match(html, /<tr class="t-copying"><th scope="row"><code class="name" title="public\.orders">public\.orders<\/code><\/th><td class="bar"><span class="copybar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="15"/);
   assert.match(text, /public\.orders 15% copying 321,000 of ~2,000,000 rows · 2 chunks reading \(14 s\), 3 of ~20 in · 52,300 rows\/s · ~6 min left/);
   // a copy not begun: its shimmer and its words, never a "0%" beside them (it reads as stuck before it starts)
   assert.match(text, /public\.orders 15% copying .* public\.events waiting for its copy to start/);
-  assert.match(html, /<tr class="t-waiting"><th scope="row"><code class="name" title="public\.events">public\.events<\/code><\/th><td class="bar"><progress class="copybar indeterminate" max="100" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.events: its copy" aria-valuetext="waiting for its copy to start"><\/progress><\/td>/);
+  assert.match(html, /<tr class="t-waiting"><th scope="row"><code class="name" title="public\.events">public\.events<\/code><\/th><td class="bar"><span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.events: its copy" aria-valuetext="waiting for its copy to start"><span class="wall" aria-hidden="true">(?:<i class="[a-z ]+"><\/i>){21}<\/span><\/span><\/td>/);
   assert.match(text, /^Under way .* Copies not finished \(2 of 3 added\) Table Copy public\.orders 15% /);
   assert.ok(!/public\.customers/.test(text), "a copy that is done is not a bar");
 });
@@ -851,7 +851,7 @@ test("the shell: a sidebar nav — Overview · Tables · Users, the Observabilit
   }
   assert.ok(!html.includes('id="subnav"'), "no head above the view's title");
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
-  assert.match(css, /\.nav a\[aria-current="page"\] \{[^}]*background: var\(--line\)/, "the page shown is a filled row of the nav");
+  assert.match(css, /\.nav a\[aria-current="page"\] \{[^}]*background: var\(--fg\)/, "the page shown is the nav's inverted (ink) row");
   assert.match(css, /\.range a\[aria-current="true"\]/, "the range chosen is the raised segment");
   const app = fn<[unknown], App>("createApp")(fakeRun().fetch);
   assert.match(textOf(app.view()["usage-queries"]!), /Asking Mason/);
@@ -1080,7 +1080,7 @@ test("Tables: each added table's state, rows, last sync and its age, how long it
   assert.match(html, /<td class="num">1,200<\/td>/);
   // a failed copy's error is a red line, its whole error in a details
   assert.match(html, /<span class="err">poll: connection reset<\/span><details data-open="error:public\.orders"><summary>the whole error<\/summary><pre>poll: connection reset\nthe sync tries it again in 5 s<\/pre><\/details>/);
-  assert.match(html, /<td class="state"><span class="indicator bad"><span class="dot" aria-hidden="true"><\/span>Failed<\/span><span class="copyline t-failed"><progress /, "a failed copy's bar is red (its line's class)");
+  assert.match(html, /<td class="state"><span class="indicator bad"><span class="dot" aria-hidden="true"><\/span>Failed<\/span><span class="copyline t-failed"><span class="copybar" /, "a failed copy's bar is red (its line's class)");
   assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers">Sync<\/button>/);
   assert.match(html, /<th scope="row" class="name"><code class="name" title="public\.customers">public\.customers<\/code><\/th>/, "a name in mono, cut by the stylesheet, its whole the title");
   // the cells are the commands': the age's and the span's functions, the size's
@@ -1938,7 +1938,7 @@ test("the shell: the sidebar's project and a demo badge, its nav, its foot (upda
   assert.match(css, /@media \(max-width: 640px\) \{\s*\.sidebar \{ position: sticky;/, "a phone: a top bar");
   assert.match(css, /\.sidebar\[data-open\] \.side-body \{ display: flex; \}/, "whose menu opens the nav as a sheet");
   assert.match(css, /@media \(prefers-color-scheme: dark\)/, "a dark theme from the system's");
-  assert.equal([...css.matchAll(/@font-face/g)].length, 2, "Geist Sans and Geist Mono, each its own face");
+  assert.equal([...css.matchAll(/@font-face/g)].length, 3, "Geist Sans, Geist Mono and the Zilla Slab display face, each its own face");
   assert.doesNotMatch(css, /gradient\(/, "no gradient");
 });
 
@@ -1948,17 +1948,19 @@ test("the vendored files: each a route, whole, pinned in its folder's name, with
   assert.deepEqual(vendor, ["vendor/README.md", "vendor/geist-1.7.2/Geist-Variable.woff2", "vendor/geist-1.7.2/GeistMono-Variable.woff2", "vendor/geist-1.7.2/LICENSE.txt",
     "vendor/lucide-1.56.0/LICENSE.txt", "vendor/lucide-1.56.0/chart-column.mjs", "vendor/lucide-1.56.0/layout-dashboard.mjs", "vendor/lucide-1.56.0/logs.mjs",
     "vendor/lucide-1.56.0/menu.mjs", "vendor/lucide-1.56.0/square-terminal.mjs", "vendor/lucide-1.56.0/table.mjs", "vendor/lucide-1.56.0/users.mjs", "vendor/lucide-1.56.0/x.mjs",
-    "vendor/uplot-1.6.32/LICENSE.txt", "vendor/uplot-1.6.32/uPlot.esm.js", "vendor/uplot-1.6.32/uPlot.min.css"]);
+    "vendor/uplot-1.6.32/LICENSE.txt", "vendor/uplot-1.6.32/uPlot.esm.js", "vendor/uplot-1.6.32/uPlot.min.css",
+    "vendor/zilla-slab-5.3.0/LICENSE.txt", "vendor/zilla-slab-5.3.0/zilla-slab-latin-700-normal.woff2"]);
   const types: Record<string, string> = { woff2: "font/woff2", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", txt: "text/plain; charset=utf-8", md: "text/plain; charset=utf-8" };
   for (const f of vendor) assert.deepEqual(PAGE_ROUTES[`/${f}`], [f, types[f.split(".").pop()!]], `${f} is a route of its type`);
   const readme = fs.readFileSync(path.join(WEB, "vendor", "README.md"), "utf8");
   const folders = [...new Set(vendor.filter((f) => f.split("/").length === 3).map((f) => f.split("/")[1]!))];
   for (const d of folders) {
-    assert.match(d, /^[a-z]+-\d+\.\d+\.\d+$/, `${d}: the package and its exact version`);
+    assert.match(d, /^[a-z]+(?:-[a-z]+)*-\d+\.\d+\.\d+$/, `${d}: the package and its exact version`);
     assert.ok(fs.existsSync(path.join(WEB, "vendor", d, "LICENSE.txt")), `${d} carries its licence`);
     assert.ok(readme.includes(`\`${d}/\``), `the README lists ${d}`);
   }
   assert.match(fs.readFileSync(path.join(WEB, "vendor", "geist-1.7.2", "LICENSE.txt"), "utf8"), /SIL Open Font License, Version 1\.1/);
+  assert.match(fs.readFileSync(path.join(WEB, "vendor", "zilla-slab-5.3.0", "LICENSE.txt"), "utf8"), /SIL Open Font License, Version 1\.1/);
   assert.match(fs.readFileSync(path.join(WEB, "vendor", "uplot-1.6.32", "LICENSE.txt"), "utf8"), /The MIT License/);
   assert.match(fs.readFileSync(path.join(WEB, "vendor", "lucide-1.56.0", "LICENSE.txt"), "utf8"), /^ISC License/);
   // each icon, whole as the package built it: its version's licence header, and one SVG in currentColor as its default export
@@ -1972,6 +1974,7 @@ test("the vendored files: each a route, whole, pinned in its folder's name, with
   assert.deepEqual(Object.keys((page as unknown as { ICONS: Record<string, string> }).ICONS).sort(),
     vendor.filter((x) => x.endsWith(".mjs")).map((x) => x.split("/").pop()!.replace(/\.mjs$/, "")).sort(), "every icon vendored is drawn, and only those");
   // a woff2 is a woff2 (its signature), and the module loads under node without a document
+  assert.equal(fs.readFileSync(path.join(WEB, "vendor", "zilla-slab-5.3.0", "zilla-slab-latin-700-normal.woff2")).subarray(0, 4).toString("latin1"), "wOF2");
   for (const f of ["Geist-Variable.woff2", "GeistMono-Variable.woff2"]) assert.equal(fs.readFileSync(path.join(WEB, "vendor", "geist-1.7.2", f)).subarray(0, 4).toString("latin1"), "wOF2");
   const uPlot = (await import(path.join(WEB, "vendor", "uplot-1.6.32", "uPlot.esm.js"))).default as { paths?: { bars?: unknown } };
   assert.equal(typeof uPlot, "function");
@@ -2495,7 +2498,7 @@ test("the buttons: every one has a visible label; a primary, a destructive one a
   const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
   assert.match(css, /button\.small \{ height: 28px;/);
   assert.match(css, /\.confirm ~ button\.danger \{ background: var\(--bad\); color: var\(--surface\)/, "the confirm of a destructive action is filled red");
-  assert.match(css, /button\.primary \{ background: var\(--fg\)/);
+  assert.match(css, /button\.primary \{ background: var\(--cta\)/, "the primary action is the one warm fill");
   assert.match(css, /button:focus-visible \{ outline: 2px solid var\(--accent\)/);
   assert.match(css, /button:disabled \{ opacity: 0\.5; cursor: not-allowed; \}/);
   assert.match(css, /td\.act \{ text-align: right; white-space: nowrap; \}/);
@@ -2606,7 +2609,7 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   // answered: the state is read again and the row shows the copy waiting to start, an indeterminate bar
   row = accountsRow(app.view().tables!);
   assert.match(textOf(row), /public\.accounts Waiting ~300 rows key id — Sync Remove waiting for its copy to start/);
-  assert.match(row, /<progress class="copybar indeterminate" max="100" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.accounts: its copy" aria-valuetext="waiting for its copy to start"><\/progress>/);
+  assert.match(row, /<span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="public\.accounts: its copy" aria-valuetext="waiting for its copy to start"><span class="wall" aria-hidden="true">(?:<i class="[a-z ]+"><\/i>){21}<\/span><\/span>/);
   assert.ok(!/aria-valuenow/.test(row), "waiting: no value, an indeterminate bar");
   // copying 37%: the bar's value, the aria, and the words mason wait prints (copyingText, held equal)
   const at37 = accountsCopy(withShare(0.37));
@@ -2615,37 +2618,91 @@ test("Add: the row says Adding… from the click, then waiting for its copy, the
   row = accountsRow(app.view().tables!);
   const c37 = at37.tables.find((t) => t.table === "public.accounts")!;
   const words = `copying ${commands.copyingText(c37.copy!.rowsCopied, c37.rows, c37.copy!.progress as CopyProgressView).text}`;
-  assert.match(row, /<progress class="copybar" max="100" value="37" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="37" aria-label="public\.accounts: its copy" aria-valuetext="37%, /);
+  assert.match(row, /<span class="copybar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="37" aria-label="public\.accounts: its copy" aria-valuetext="37%, /);
   assert.match(textOf(row), /37% .* copying 41,111 rows · past the ~300 estimated · 2 chunks reading \(14 s\), 3 of ~20 in · 52,300 rows\/s · ~6 min left/);
   assert.ok(textOf(row).includes(words), "the words are copyingText's, held equal to the CLI's");
   // the Overview draws the same bar from the same renderer
-  const bar = row.match(/<progress[^>]*><\/progress> <span class="pct">37%<\/span>/)![0];
+  const bar = row.match(/<span class="copybar"[^>]*><span class="wall" aria-hidden="true">(?:<i class="[a-z ]+"><\/i>){21}<\/span><\/span> <span class="pct">37%<\/span>/)![0];
   assert.ok(app.view().status!.includes(bar), "one renderer: the Overview's bar is the Tables row's");
   // a state that says less (a share that went back) is not drawn backwards
   run.answers.set("GET /api/state", answer(accountsCopy(withShare(0.2))));
   await app.poll();
-  assert.match(accountsRow(app.view().tables!), /value="37" .*37%/, "never backwards");
+  assert.match(accountsRow(app.view().tables!), /aria-valuenow="37" .*37%/, "never backwards");
   // further on, it moves again, only with the server's data
   run.answers.set("GET /api/state", answer(accountsCopy(withShare(0.8))));
   await app.poll();
-  assert.match(accountsRow(app.view().tables!), /value="80" .*80%/);
+  assert.match(accountsRow(app.view().tables!), /aria-valuenow="80" .*80%/);
   assert.match(textOf(app.view()["tables-cards"]!), /Synced 3 of 4 added, 1 copying/);
   // served: its normal sync state, its bar full at 100%
   run.answers.set("GET /api/state", answer(accountsCopy({ phase: "copied", rows: 300, bytes: 1, seconds: 2, copiedAt: "2026-10-27T09:06:00.000Z", synced: { at: "2026-10-27T09:06:00.000Z", seconds: 2, by: "copy" } } as Partial<CopyState>)));
   await app.poll();
   row = accountsRow(app.view().tables!);
-  assert.match(row, /<span class="copyline t-done"><progress class="copybar" max="100" value="100" /, "served: the bar full, as mason status draws it");
+  assert.match(row, /<span class="copyline t-done"><span class="copybar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" /, "served: the bar full, as mason status draws it");
   assert.match(textOf(row), /public\.accounts Synced 100% 300 key id/);
   // a copy that fails shows its error as the other failures do, no bar
   run.answers.set("GET /api/state", answer(accountsCopy({ phase: "failed", error: "could not read the next chunk: connection reset" })));
   await app.poll();
   row = accountsRow(app.view().tables!);
   assert.match(row, /<span class="err">could not read the next chunk: connection reset<\/span>/);
-  assert.match(row, /<span class="copyline t-failed"><progress /, "failed: its bar red, as the other failures'");
+  assert.match(row, /<span class="copyline t-failed"><span class="copybar" /, "failed: its bar red, as the other failures'");
   // after a failure its next copy begins at its own share, not the last one's
   run.answers.set("GET /api/state", answer(accountsCopy(withShare(0.05))));
   await app.poll();
-  assert.match(accountsRow(app.view().tables!), /value="5" .*5%/);
+  assert.match(accountsRow(app.view().tables!), /aria-valuenow="5" .*5%/);
+});
+
+test("a copy's bar is a wall of bricks in running bond: laid left to right within a brick of its share, its %, aria and words the line's; the bricks since the last read drop, once", () => {
+  const copyBar = of<[string, { state: string; fraction: number; what: string }, number?, number?], string>(statusPage, "status.js", "copyBar");
+  const bricks = (html: string) => [...html.matchAll(/<i class="([a-z ]+)"><\/i>/g)].map((m) => m[1]!.split(" "));
+  const t = commands.copyingText(41_111, 300, progress);
+  const line = { state: "copying", fraction: 0.37, what: `copying ${t.text}` };
+  const html = copyBar("public.accounts", line);
+  // the progressbar is the wall's box: its value, its label, its words (the line's, held to the CLI's copyingText); the bricks are drawing
+  assert.match(html, /^<span class="copybar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="37" aria-label="public\.accounts: its copy" aria-valuetext="37%, copying /);
+  assert.ok(html.includes(`aria-valuetext="37%, ${line.what.replace(/'/g, "&#39;")}"`), "its words are the line's");
+  assert.match(html, /<span class="wall" aria-hidden="true">(?:<i class="[a-z ]+"><\/i>){21}<\/span><\/span> <span class="pct">37%<\/span>$/, "21 bricks, then the % as mason wait prints it");
+  // two courses in running bond: ten whole over a half, nine whole and a half
+  const shape = bricks(html).map((c) => c[0]).join("");
+  assert.equal(shape, "bbbbbbbbbb" + "h" + "bbbbbbbbb" + "h");
+  // laid: every brick whose right edge the share has reached, never one past it — and the wall reads within a brick (5%) of the share
+  const BRICKS = statusPage.BRICKS as unknown as Array<{ at: number }>;
+  for (const pct of [0, 3, 5, 14, 37, 50, 64, 95, 99, 100]) {
+    const b = bricks(copyBar("t", { ...line, fraction: pct / 100 }));
+    b.forEach((c, i) => assert.equal(c.includes("on"), BRICKS[i]!.at <= pct, `${pct}%: the brick to ${BRICKS[i]!.at}% ${c.includes("on") ? "laid" : "not laid"}`));
+    const edge = Math.max(0, ...BRICKS.filter((x) => x.at <= pct).map((x) => x.at));
+    assert.ok(pct - edge < 5, `${pct}%: its wall reaches ${edge}%, within a brick`);
+    assert.equal(b.filter((c) => c.includes("next")).length, pct === 100 ? 0 : 1, `${pct}%: the next brick to lay, one, while it copies`);
+  }
+  // waiting: no brick laid, no value, no %; its first brick (the bottom course's half) the one to lay
+  const waiting = copyBar("t", { state: "waiting", fraction: 0, what: "waiting for its copy to start" });
+  assert.match(waiting, /^<span class="copybar indeterminate" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="t: its copy" aria-valuetext="waiting for its copy to start">/);
+  assert.ok(!/aria-valuenow|class="pct"| on/.test(waiting));
+  assert.deepEqual(bricks(waiting).findIndex((c) => c.includes("next")), 10);
+  // done, failed: every brick laid, none to lay
+  for (const state of ["done", "failed", "unsynced"]) assert.ok(bricks(copyBar("t", { state, fraction: 1, what: "" })).every((c) => c.includes("on") && !c.includes("next")), state);
+  // the bricks laid since the last read drop: none when the share did not move, or on a first read (no share before)
+  const drops = (h: string) => bricks(h).filter((c) => c.includes("drop")).length;
+  assert.equal(drops(copyBar("t", line)), 0, "a first read lays without a drop");
+  assert.equal(drops(copyBar("t", line, 0.37, 0.37)), 0, "a re-read of the same share moves nothing");
+  assert.equal(drops(copyBar("t", line, 0.37, 0.24)), 3, "24% → 37%: the bricks at 25, 30 and 35 drop");
+  assert.ok(bricks(copyBar("t", line, 0.37, 0.24)).every((c) => !c.includes("drop") || c.includes("on")), "only a laid brick drops");
+  assert.equal(drops(copyBar("t", { state: "done", fraction: 1, what: "" }, 1, 0.9)), 3, "a copy just finished lays its last bricks: 95 and the two at 100");
+  // the stylesheet: a dropped brick and the next one move only without prefers-reduced-motion; no gradient or image
+  const css = fs.readFileSync(path.join(WEB, "app.css"), "utf8");
+  assert.match(css, /\.copybar i\.drop \{ animation: brick-drop/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.copybar i\.next, \.copybar i\.drop, [^}]*\{ animation: none; \} \}/);
+});
+
+test("the monotone remembers the read before: a page draws the bricks since, and a copy that finished lays its last", () => {
+  const createMonotone = of<[], { of(s: unknown): Map<string, number>; before: Map<string, number> }>(statusPage, "status.js", "createMonotone");
+  const m = createMonotone();
+  const at = (share: number) => accountsCopy(withShare(share));
+  m.of(at(0.2));
+  assert.equal(m.before.get("public.accounts"), undefined, "a first read: nothing before");
+  m.of(at(0.4));
+  assert.equal(m.before.get("public.accounts"), 0.2);
+  m.of(accountsCopy({ phase: "copied", rows: 300, bytes: 1, seconds: 2, copiedAt: "2026-10-27T09:06:00.000Z" } as Partial<CopyState>));
+  assert.equal(m.before.get("public.accounts"), 0.4, "the copy finished: its last share is the read before");
 });
 
 test("Add: several tables in a row each show their own state; a refused add leaves no Adding…; the cards count the copying", async () => {
@@ -2774,6 +2831,8 @@ test("the Overview's first-run checklist: running, a table copied, a user create
   // a fresh install: a table added and copied, no user, nothing asked
   const fresh = renderChecklist(RUNNING, NO_QUERIES, noUser);
   assert.equal(textOf(fresh), "Getting started 2 of 4 done ✓ Mason is running (done) ✓ A table copied (done) ○ A user created (to do) Create a user ○ A first statement answered (to do) Copy the psql line then run a select on a copied table");
+  // the steps drawn as courses of a wall beside its title: a brick a step, laid as it is done (drawing, hidden from a screen reader)
+  assert.match(fresh, /<p class="checklist-title"><span class="courses" aria-hidden="true"><i class="on"><\/i><i class="on"><\/i><i><\/i><i><\/i><\/span>Getting started /);
   assert.match(fresh, /<li class="step-todo"><span class="mark" aria-hidden="true">○<\/span><span class="what">A user created<span class="sr"> \(to do\)<\/span><\/span><a class="btn small primary" href="#users">Create a user<\/a><\/li>/, "the next step is the primary action");
   assert.match(fresh, /<button type="button" class="small" data-copy="connect-psql">Copy the psql line<\/button>/, "Connect's psql line, copied by its own Copy's handler");
   // nothing added: Add a table leads to Tables; nothing to copy the psql line for yet
@@ -2896,7 +2955,7 @@ test("every added table has its bar on the Tables page, as mason status draws on
     for (const t of s.tables.filter((x) => x.added)) {
       const l = tableLine(t);
       const row = html.split("<tr").find((r) => r.includes(`<code class="name" title="${t.table}">`)) ?? assert.fail(t.table);
-      assert.match(row, new RegExp(`<span class="copyline t-${l.state}"><progress class="copybar`), `${t.table}: its bar, the line's state ${l.state}`);
+      assert.match(row, new RegExp(`<span class="copyline t-${l.state}"><span class="copybar`), `${t.table}: its bar, the line's state ${l.state}`);
       if (l.state !== "waiting") assert.ok(row.includes(`<span class="pct">${percent(l.fraction)}</span>`), `${t.table}: the % mason status prints beside it`);
     }
     // the words beside a bar that is not full and current are mason status's line, under the row
@@ -2907,7 +2966,7 @@ test("every added table has its bar on the Tables page, as mason status draws on
       assert.ok(textOf(html).includes(what!), `${table} ${pct}: ${what}`);
     }
   }
-  assert.ok(!/<progress/.test(renderTables(NONE)), "a table not added has no bar");
+  assert.ok(!/class="copybar/.test(renderTables(NONE)), "a table not added has no bar");
 });
 
 test("the time range past a week: 30 and 90 days, a day a point, offered when the run keeps them, shown disabled with why and the setting when it does not", () => {

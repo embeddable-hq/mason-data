@@ -370,6 +370,8 @@ export const PAGE_ROUTES: Readonly<Record<string, readonly [file: string, type: 
   "/vendor/geist-1.7.2/Geist-Variable.woff2": ["vendor/geist-1.7.2/Geist-Variable.woff2", "font/woff2"],
   "/vendor/geist-1.7.2/GeistMono-Variable.woff2": ["vendor/geist-1.7.2/GeistMono-Variable.woff2", "font/woff2"],
   "/vendor/geist-1.7.2/LICENSE.txt": ["vendor/geist-1.7.2/LICENSE.txt", "text/plain; charset=utf-8"],
+  "/vendor/zilla-slab-5.3.0/zilla-slab-latin-700-normal.woff2": ["vendor/zilla-slab-5.3.0/zilla-slab-latin-700-normal.woff2", "font/woff2"],
+  "/vendor/zilla-slab-5.3.0/LICENSE.txt": ["vendor/zilla-slab-5.3.0/LICENSE.txt", "text/plain; charset=utf-8"],
   "/vendor/uplot-1.6.32/uPlot.esm.js": ["vendor/uplot-1.6.32/uPlot.esm.js", "text/javascript; charset=utf-8"],
   "/vendor/uplot-1.6.32/uPlot.min.css": ["vendor/uplot-1.6.32/uPlot.min.css", "text/css; charset=utf-8"],
   "/vendor/uplot-1.6.32/LICENSE.txt": ["vendor/uplot-1.6.32/LICENSE.txt", "text/plain; charset=utf-8"],
