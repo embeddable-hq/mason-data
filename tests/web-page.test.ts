@@ -1372,7 +1372,7 @@ test("the users: read with their last use, every 30 s; Copy puts the URL without
   assert.deepEqual(await asked(), [], "not at the 2 s poll");
   t += 28_000;
   assert.deepEqual(await asked(), [U], "then every 30 s");
-  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC not used in the last 7 days postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC$/);
+  assert.match(textOf(app.view().users!), /metabase id 0123456789abcdef Active 2026-10-27 09:10 UTC never postgres:\/\/metabase@127\.0\.0\.1:5433\/shop Copy Remove old id aaaaaaaaaaaaaaaa Removed 2026-10-02 10:00 UTC 2026-10-01 10:00 UTC$/);
   // Copy: the page's own handler writes the URL as shown, and keeps it nowhere
   const written: string[] = [];
   const doc = { getElementById: (id: string) => id === "user-url-metabase" ? { textContent: "postgres://metabase@127.0.0.1:5433/shop" } : null };
@@ -1607,12 +1607,19 @@ test("Usage and Logs: the index.html has the parts the pages write, the placehol
   assert.doesNotMatch(html, /<div id="usage"><\/div>|<div id="logs"><\/div>/);
 });
 
-test("Users: a user's last use is mason user list's words (lastUsedText, src/cli/user.ts), a time, unknown, or not used within the log's days", async () => {
+test("Users: a user's last use is mason user list's words (lastUsedText, src/cli/user.ts), a time, unknown, never (added within the log's days), or not used within them", async () => {
   const cli = await import("../src/cli/user.ts") as unknown as { lastUsedText?: (at: string | null, note: string | null, days: number | null) => string };
   assert.equal(typeof cli.lastUsedText, "function", "src/cli/user.ts exports lastUsedText");
   const usersPage = await import(path.join(WEB, "pages", "users.js") as string) as { lastUsedText: (u: { lastUsedAt: string | null }, note: string | null, days: number | null) => string };
-  for (const [at, note, days] of [["2026-10-27T09:10:11.000Z", null, 7], [null, "unknown: Mason is not running", null], [null, null, 7], [null, null, null]] as const) {
-    assert.equal(usersPage.lastUsedText({ lastUsedAt: at }, note, days), cli.lastUsedText!(at, note, days), `${at} ${note} ${days}`);
+  const now = Date.parse("2026-10-28T09:00:00.000Z");
+  const cliText = cli.lastUsedText as unknown as (at: string | null, note: string | null, days: number | null, addedAt: string | null, now: number) => string;
+  const pageText = usersPage.lastUsedText as unknown as (u: { lastUsedAt: string | null; addedAt: string }, note: string | null, days: number | null, now: number) => string;
+  const recently = "2026-10-27T09:10:00.000Z", long = "2026-09-01T09:10:00.000Z";
+  const cases = [["2026-10-27T09:10:11.000Z", null, 7, recently, "2026-10-27 09:10 UTC"], [null, "unknown: Mason is not running", null, recently, "unknown"],
+    [null, null, 7, recently, "never"], [null, null, 7, long, "not used in the last 7 days"], [null, null, null, recently, "not used in the last ? days"]] as const;
+  for (const [at, note, days, addedAt, text] of cases) {
+    assert.equal(cliText(at, note, days, addedAt, now), text, `${at} ${note} ${days} ${addedAt}`);
+    assert.equal(pageText({ lastUsedAt: at, addedAt }, note, days, now), cliText(at, note, days, addedAt, now), "the page says what mason user list says");
   }
 });
 
