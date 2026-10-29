@@ -25,7 +25,11 @@ RUN printf '#!/bin/sh\nexec node /app/src/cli/main.ts "$@"\n' > /usr/local/bin/m
 
 USER node
 # DuckDB's postgres extension IN THE IMAGE: the copy reads the source through it, and a server whose egress is
-# closed could never fetch it at its first copy (src/duck/sync.ts attach; ~/.duckdb/extensions)
+# closed could never fetch it at its first copy (src/duck/sync.ts attach; ~/.duckdb/extensions). DuckDB finds it under
+# $HOME, so HOME is the image's whatever user runs it: a platform that runs the container as another uid
+# (`--user 1000:1000`, Kubernetes' runAsUser, OpenShift's random uid) has no passwd entry, and Docker would set HOME to
+# `/`, where there is no extension — and nothing is downloaded at run time (src/duck/store.ts INSTANCE_SETTINGS)
+ENV HOME=/home/node
 RUN node --input-type=module -e "import { DuckDBInstance } from '@duckdb/node-api'; const c = await (await DuckDBInstance.create(':memory:')).connect(); await c.run('INSTALL postgres'); await c.run('LOAD postgres');"
 
 # the release it is (images-publish.yml: `v<version>`, `main-<sha>` for a merge), which `mason --version`, /healthz and

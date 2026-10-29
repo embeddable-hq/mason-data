@@ -1901,7 +1901,8 @@ export class Sync {
   private async attach(): Promise<void> {
     if (!this.attached) {
       // INSTALL fetches the extension from DuckDB's repository the first time on a machine (then ~/.duckdb/extensions):
-      // offline, the first copy fails here saying so — bundling it is the plan's step 3
+      // the image installs it at build (docker/mason-data.Dockerfile); from npm, an offline first copy fails here saying
+      // so. The ONE fetch Mason makes on purpose: no other extension is ever installed at run time (store.ts INSTANCE_SETTINGS)
       if (!this.loaded) {
         try { await this.store.writer.run("INSTALL postgres; LOAD postgres;"); }
         catch (e) {
