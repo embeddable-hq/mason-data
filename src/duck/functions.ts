@@ -10,13 +10,14 @@
  *    binds a lambda MACRO's constant arguments wrongly once its postgres extension is loaded: no macro is used).
  * Every name is `__mason_*`, which no Postgres function has.
  */
-import { BIGINT, BOOLEAN, DATE, DOUBLE, DuckDBDateValue, DuckDBIntervalValue, DuckDBScalarFunction, DuckDBTimestampTZValue, DuckDBTimestampValue, INTEGER, INTERVAL, LIST, TIMESTAMP, TIMESTAMPTZ, VARCHAR, listValue, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
+import { BIGINT, BLOB, BOOLEAN, DATE, DOUBLE, DuckDBBlobValue, DuckDBDateValue, DuckDBIntervalValue, DuckDBScalarFunction, DuckDBTimestampTZValue, DuckDBTimestampValue, INTEGER, INTERVAL, LIST, TIMESTAMP, TIMESTAMPTZ, VARCHAR, listValue, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
 import { pgEvalSync, PgEvalError } from "./pg-eval.ts";
 import { libcKept, libcKey, type LibcOrder } from "./libc-order.ts";
 import { formatFloat } from "../api/postgres/encode.ts";
 import { floatAsNumeric } from "./types.ts";
 import { intervalText } from "./types.ts";
 import { jsonbText, parseJson, writeJson, quoteJson, type Json } from "./jsonb.ts";
+import { jsonbKey, jsonbLibcKept, jsonbStrings } from "./jsonb-order.ts";
 import { compare, div, evaluateText, NumericError, numericText, parseNumeric, type NumericProgram } from "../lib/pg-numeric.ts";
 import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
@@ -405,7 +406,11 @@ function contains(a: Json, b: Json): boolean {
 
 /** `a @> b` on jsonb (jsonb_contains): their roots must both be objects or both not, then JsonbDeepContains */
 export function jsonbContains(a: string, b: string): boolean {
-  const x = root(parseJson(a)), y = root(parseJson(b));
+  const pa = parseJson(a), pb = parseJson(b);
+  const x = root(pa), y = root(pb);
+  // a raw scalar (stored as a one-element array) contains no array: `'1' @> '[1]'` is false, `'[1]' @> '1'` true
+  // (JsonbDeepContains refuses a raw scalar on the left of a real array)
+  if (pa.t !== "arr" && pa.t !== "obj" && pb.t === "arr") return false;
   return (x.t === "obj") === (y.t === "obj") && contains(x, y);
 }
 
@@ -437,7 +442,7 @@ const itemsOf = (v: DuckDBValue): Array<string | null> => (v as { items: DuckDBV
 const text = (v: DuckDBValue | undefined): string | null => v === null || v === undefined ? null : String(v);
 
 /** a scalar function over VARCHAR (and BOOLEAN) arguments, one call per row; a thrown error is the statement's */
-function scalar(conn: DuckDBConnection, name: string, params: Array<typeof VARCHAR | typeof BOOLEAN | typeof INTEGER | typeof DOUBLE | typeof INTERVAL | ReturnType<typeof LIST>>, returns: typeof VARCHAR | typeof BOOLEAN | typeof INTEGER | typeof DOUBLE | typeof INTERVAL | ReturnType<typeof LIST>,
+function scalar(conn: DuckDBConnection, name: string, params: Array<typeof VARCHAR | typeof BOOLEAN | typeof INTEGER | typeof DOUBLE | typeof INTERVAL | ReturnType<typeof LIST>>, returns: typeof VARCHAR | typeof BOOLEAN | typeof INTEGER | typeof DOUBLE | typeof INTERVAL | typeof BLOB | ReturnType<typeof LIST>,
   body: (args: DuckDBValue[]) => unknown, opts: { nulls?: "skip" | "pass"; varargs?: boolean } = {}): void {
   conn.registerScalarFunction(DuckDBScalarFunction.create({
     name, returnType: returns,
@@ -564,6 +569,16 @@ const steps = (json: string, either: boolean): Step[] => (JSON.parse(json) as Ar
 export function registerLibcOrder(conn: DuckDBConnection, order: LibcOrder): void {
   scalar(conn, "__mason_libc_kept", [VARCHAR], VARCHAR, ([s]) => libcKept(order, String(s)));
   scalar(conn, "__mason_libc_key", [VARCHAR, VARCHAR], VARCHAR, ([s, icu]) => libcKey(order, String(s), String(icu)));
+  // jsonb's order under it (src/duck/jsonb-order.ts): the characters of each string ICU's levels read, then the key
+  // from ICU's keys of them (src/duck/rewrite.ts jsonbKey hands them in)
+  scalar(conn, "__mason_jsonb_libc_kept", [VARCHAR], LIST(VARCHAR), ([j]) => listValue(jsonbLibcKept(order, String(j))));
+  scalar(conn, "__mason_jsonb_key_libc", [VARCHAR, LIST(VARCHAR)], BLOB,
+    ([j, keys]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "libc", order, icuKeys: icuKeysOf(keys!) })));
+}
+
+/** the ICU keys DuckDB made of a jsonb's strings (a NULL among them is a Mason bug: every string has one) */
+function icuKeysOf(v: DuckDBValue): string[] {
+  return itemsOf(v).map((k) => { if (k === null) throw new Error("an ICU key of a jsonb's string is NULL: a Mason bug"); return k; });
 }
 
 /**
@@ -631,6 +646,11 @@ export function registerFunctions(conn: DuckDBConnection): void {
   scalar(conn, "__mason_json_values", [VARCHAR, BOOLEAN, BOOLEAN, BOOLEAN], LIST(VARCHAR),
     ([j, canonical, asText, orNull]) => rows(j, orNull, (t) => jsonMembers(t, canonical === true, asText === true).map(([, v]) => v)), { nulls: "pass" });
   scalar(conn, "__mason_jsonb_text", [VARCHAR], VARCHAR, ([j]) => jsonbText(String(j)));
+  // jsonb's order and equality as bytes (src/duck/jsonb-order.ts): under C, and under ICU from ICU's keys of the
+  // document's strings, which the rewrite has DuckDB make of `__mason_jsonb_strings` (src/duck/rewrite.ts jsonbKey)
+  scalar(conn, "__mason_jsonb_key", [VARCHAR], BLOB, ([j]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "bytes" })));
+  scalar(conn, "__mason_jsonb_strings", [VARCHAR], LIST(VARCHAR), ([j]) => listValue(jsonbStrings(String(j))));
+  scalar(conn, "__mason_jsonb_key_icu", [VARCHAR, LIST(VARCHAR)], BLOB, ([j, keys]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "icu", icuKeys: icuKeysOf(keys!) })));
   // jsonb's @>, ?, ?| and ?& (DuckDB's json_contains and json_exists answer otherwise on arrays), json(b)_array_length
   scalar(conn, "__mason_jsonb_contains", [VARCHAR, VARCHAR], BOOLEAN, ([a, b]) => jsonbContains(String(a), String(b)));
   scalar(conn, "__mason_jsonb_exists", [VARCHAR, VARCHAR], BOOLEAN, ([j, k]) => jsonbExists(String(j), String(k)));

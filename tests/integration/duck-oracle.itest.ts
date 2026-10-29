@@ -214,8 +214,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   if ("failure" in conn) throw new Error(`connect: ${JSON.stringify(conn.failure)}`);
   const facts = await readSourceFacts(conn.pg);
   conn.pg.close();
-  const added = facts.tables.filter((t) => [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "instants", "docs", "nullish"].includes(t.table) && t.schema === "public");
-  assert.equal(added.length, TABLES.length + 14, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
+  const added = facts.tables.filter((t) => [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "instants", "docs", "nullish", "jorder"].includes(t.table) && t.schema === "public");
+  assert.equal(added.length, TABLES.length + 15, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
   const log: string[] = [];
   store = await DuckStore.open(path.join(dir, "duck.db"), (l) => log.push(l));
   sync = new Sync(store, parsed.source, tag, (l) => log.push(l), 3_600_000, "poll", null, EAGER_JSON ? { json: { eager: true } } : {});
@@ -271,7 +271,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // ---- every statement, both ways -------------------------------------------------------------------------------
   const tableSql = (t: string): string => `SELECT * FROM public.${t} ORDER BY ${KEY_OF[t] ?? "id"} COLLATE "C"`;
   const all = (): Array<{ group: string; name: string; sql: string; inOrder?: boolean; zone?: string }> => [
-    ...[...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "instants", "docs", "nullish"].map((t) => ({ group: "copy", name: `the table ${t}, whole`, sql: tableSql(t) })),
+    ...[...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "instants", "docs", "nullish", "jorder"].map((t) => ({ group: "copy", name: `the table ${t}, whole`, sql: tableSql(t) })),
     ...CASES.map((c) => ({ group: "dialect", name: c, sql: `SELECT ${c} FROM public.one` })),
     ...QUERY_CASES.map((q) => ({ group: "query case", name: q.slice(0, 80), sql: throughOne(q) })),
     ...REFUSED_CASES.map((q) => ({ group: "refused case", name: q.sql.slice(0, 80), sql: throughOne(q.sql) })),
