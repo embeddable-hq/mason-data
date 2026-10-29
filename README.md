@@ -435,7 +435,7 @@ plain reports fare better on DuckDB alone than this table says — and still not
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
 | Anything else: 46 shapes known not to answer as Postgres does (SQL-SUPPORT.md "Refused"), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
-### Known differences (12)
+### Known differences (13)
 
 Answered, but not as Postgres answers: each is a decided difference the oracle checks still differs.
 
@@ -443,6 +443,7 @@ Answered, but not as Postgres answers: each is a decided difference the oracle c
 |---|---|---|---|
 | text ordered under a libc collation where punctuation or a space follows a digit or a symbol and a later letter differs only in case ('1-X' beside '1x') | the punctuation outranks the case: 1-X < 1x | the case outranks the punctuation: 1x < 1-X | ORDER BY lower(x), x when the case must not decide first |
 | a select-list value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out, where no index gives the ORDER BY | raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers) | answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does | none needed for an answer; filter the bad rows out to have neither raise |
+| a LEFT JOIN of a json document's rows ON TRUE (json_each, jsonb_array_elements, …) under a LIMIT and no ORDER BY, with a filter holding a bound parameter ($1) in a SELECT around the join or on the lateral's own column | the first rows of the base, in its order, each row's members in theirs | DuckDB plans the filter's parameter as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (with the value written in the SQL, or the filter on the base in the join's own SELECT, it keeps Postgres's) | ORDER BY the base's key before the LIMIT, or filter the base in the SELECT that holds the join |
 | a numeric column whose values have several scales: an integer UNION ALL a numeric, lead(x, 1, 0) beside numeric(2,1) values, an unconstrained column holding 1 and 1.50 | each value its own scale: 1, 1.5 | one scale per column: 1.0, 1.5 | cast to numeric(p, s), or round(x, s) |
 | upper / lower of letters added in Unicode 16 | maps them (its own Unicode 16 tables) | leaves them as they are (DuckDB's ICU predates Unicode 16) | none needed for letters before Unicode 16 |
 | stddev / variance of a float, and ln, log, exp, power of a double: the last digit may differ | its algorithm and its machine's libm | DuckDB's and its machine's: alike on some pairs of machines, apart in the 16th–17th digit on others | round(x::numeric, 12), or compare within a tolerance (abs(a - b) <= 1e-12 * abs(b)) |
