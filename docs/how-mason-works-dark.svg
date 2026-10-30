@@ -4,7 +4,7 @@
 <desc id="desc">Mason syncs the tables and columns you choose from a Postgres. Each table stays in sync on demand (mason sync, the default), by polling, or by logical replication. One process holds the synced tables in a columnar engine and answers the Postgres wire protocol. Each connection is a user, and its role limits the tables, columns and rows it can read. A real Postgres resolves each query. A verified query is rewritten into the form the engine runs fastest and run on the columnar tables, and anything not verified exact is refused by name. Every query is logged. An oracle decides what is exact.</desc>
 <rect x="0" y="0" width="1600" height="1060" rx="0" fill="#0b1220"/>
 <text x="800" y="88" font-size="56" fill="#f1f5f9" font-weight="800" text-anchor="middle" letter-spacing="-1">How Mason works</text>
-<text x="800" y="134" font-size="26" fill="#94a3b8" text-anchor="middle">A drop-in replacement for a Postgres read replica, built for exceptionally fast analytical queries</text>
+<text x="800" y="134" font-size="26" fill="#94a3b8" text-anchor="middle">A drop-in replacement for a Postgres read replica — just much, much faster for analytics</text>
 <rect x="24" y="164" width="452" height="136" rx="16" fill="#0f2142" stroke="#24406e" stroke-width="1"/>
 <circle cx="70" cy="208" r="22" fill="#2563eb"/>
 <text x="70" y="217" font-size="24" fill="#ffffff" font-weight="700" text-anchor="middle">1</text>
