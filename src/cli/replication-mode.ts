@@ -157,7 +157,7 @@ export async function dropOwnReplication(source: Source, o: ProjectReplication, 
     if (from?.systemIdentifier) {
       const now = await systemIdentifier(pg);
       if (now !== null && now !== from.systemIdentifier) {
-        throw new Error(`${source.database} on ${source.host} is another server than the copy came from (system identifier ${now}, the copy's ${from.systemIdentifier}), where the slot is: put that server's URL back in the sources file and run mason destroy again, or drop them there by hand`);
+        throw new Error(`${source.database} on ${source.host} is another server than the synced data came from (system identifier ${now}, the synced data's ${from.systemIdentifier}), where the slot is: put that server's URL back in the sources file and run mason destroy again, or drop them there by hand`);
       }
     }
     const dropped: string[] = [];

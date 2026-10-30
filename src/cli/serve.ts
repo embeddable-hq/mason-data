@@ -43,7 +43,7 @@ export const SERVE: CommandSpec = {
   Runs Mason as mason start --attach does, for a server or a container: nothing asked, its settings from the
   environment, its state in one folder (a volume), its log on stdout, GET /healthz for the platform's health check,
   GET /metrics for Prometheus (numbers only: no name, no statement), and a clean stop on SIGTERM. The tables it
-  copies are the ones the project folder's sources file names (sources/<name>.yml): make it with mason init and mason
+  syncs are the ones the project folder's sources file names (sources/<name>.yml): make it with mason init and mason
   add on a laptop and commit it, or with mason add beside the running server. A project folder with no sources file
   gets one, url: \${DATABASE_URL}, with no table yet.
 
@@ -51,26 +51,26 @@ export const SERVE: CommandSpec = {
     docker compose exec mason mason add public.orders     beside it, in its container
 
   Settings (the environment):
-    DATABASE_URL            the database to copy from, as the sources file's url: \${DATABASE_URL} names it (the variable
+    DATABASE_URL            the database to sync from, as the sources file's url: \${DATABASE_URL} names it (the variable
                             the file names is required); read-only: SELECTs, or a replication slot
     PG_PUBLICATION          the publication the tables under sync: replication are read through, the database owner's,
                             never altered: the sources file's publication: first (publication: \${PG_PUBLICATION} reads
                             this one), else this; default none: Mason makes its own
     MASON_API_KEY           what the users' passwords are made with (mason user add), at least 32 characters (required)
     MASON_PROJECT           the project folder: sources/, mason.yml (default ./mason)
-    MASON_DATA              the folder whose .mason/ holds the copy and the state: the volume (default .)
+    MASON_DATA              the folder whose .mason/ holds the synced data and the state: the volume (default .)
     MASON_NAME              the project's name, the database name clients connect to (default mason)
     MASON_HEALTH_PORT       /healthz's and /metrics' port (default 4140), on MASON_HEALTH_HOST (default 0.0.0.0)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
-    MASON_DUCKDB_MEMORY     the copy's memory, 4GB or 512MiB (default half the container's memory limit, else half the
+    MASON_DUCKDB_MEMORY     the engine's memory, 4GB or 512MiB (default half the container's memory limit, else half the
                             machine's RAM; mason doctor says it); a statement past it fails alone with 53200
     MASON_STATEMENT_TIMEOUT   each statement's limit, as Postgres's statement_timeout (default 5min; 0 for none)
     MASON_HISTORY_DAYS      how many days Mason keeps its history: the request log, the sync's events, the usage
-                            samples and the copies' sizes (default 7)
+                            samples and the synced tables' sizes (default 7)
     MASON_STORE_JSON_PATHS  on (the default) stores the JSON paths statements keep reading as columns; off stores none
-    MASON_COPY_PARALLEL     a copy's chunks read at once, each a backend on the database (1 to 8, default 3)
+    MASON_COPY_PARALLEL     a first sync's chunks read at once, each a backend on the database (1 to 8, default 3)
     MASON_COPY_CHUNK_SECONDS   how long each chunk takes to read, at the rate measured (1 to 300, default 12)
 
   --json   a refusal to start as data: { error, next }; once it serves, its output is its log
@@ -158,7 +158,7 @@ function urlSettingProblems(project: string, data: string, env: Readonly<Record<
     variable = parsed.url.env;
   } else return [];
   const found = appEnvValue(data, variable, env as NodeJS.ProcessEnv, { shellFirst: true });
-  if (found === null) return [`${variable} is not set: the database to copy from, as the sources file's url: \${${variable}} names it`];
+  if (found === null) return [`${variable} is not set: the database to sync from, as the sources file's url: \${${variable}} names it`];
   const p = parseSource(found.value);
   return "problem" in p ? [`${variable}: ${p.problem}`] : [];
 }
@@ -173,11 +173,11 @@ export function serveConfig(s: ServeSettings, existing: Project | BrokenProject 
   const dir = path.join(s.data, STATE_DIR);
   if (existing === null) {
     const config = { ...newConfig(s.name, s.project, true), apiKey: s.apiKey, served: true };
-    return { config, said: [`a new copy in ${dir}`] };
+    return { config, said: [`new synced data in ${dir}`] };
   }
   if ("broken" in existing) {
     return { message: `the state in ${dir} cannot be read: ${existing.file}: ${existing.broken}`, code: "bad_config",
-      fix: `MASON_DATA names a folder of its own for mason serve; move ${dir} aside to copy again` };
+      fix: `MASON_DATA names a folder of its own for mason serve; move ${dir} aside to sync again` };
   }
   const was = existing.config;
   if (was.served !== true) {
@@ -186,11 +186,11 @@ export function serveConfig(s: ServeSettings, existing: Project | BrokenProject 
       fix: "point MASON_DATA at an empty folder (the volume), or run mason start here" };
   }
   if (was.name !== s.name) {
-    return { message: `the copy in ${dir} is the project ${was.name}, and MASON_NAME says ${s.name}`, code: "refused",
-      why: "the name is the database name clients connect to and names the replication slot: another name over the same copy is another project",
-      fix: `set MASON_NAME=${was.name} again, or give the new name a new MASON_DATA (an empty volume), which copies again` };
+    return { message: `the synced data in ${dir} is the project ${was.name}, and MASON_NAME says ${s.name}`, code: "refused",
+      why: "the name is the database name clients connect to and names the replication slot: another name over the same synced data is another project",
+      fix: `set MASON_NAME=${was.name} again, or give the new name a new MASON_DATA (an empty volume), which syncs again` };
   }
-  const said: string[] = [`the copy in ${dir}, resumed`];
+  const said: string[] = [`the synced data in ${dir}, resumed`];
   if (was.apiKey !== s.apiKey) said.push("MASON_API_KEY changed: every mason user is removed (mason user add each again)");
   // the source is the sources file's; a database restored elsewhere, or another one, is the run's to see (sourceMove)
   const { source: _old, ...kept } = was as ProjectConfig & { source?: unknown };

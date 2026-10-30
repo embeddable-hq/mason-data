@@ -238,7 +238,7 @@ test("an unconstrained or wide numeric is copied and polled exactly, and copied 
 
 // A COLUMN ADDED TO A TABLE'S LIST copies that table again, and the other tables stay polled (the poll is one
 // transaction over every table: one table's statement failing stalled them all, with nothing in the ledger); A PASS
-// WITH THE SOURCE AWAY leaves every copied table copied, serving and in the catalog, its error said — and when the
+// WITH THE SOURCE AWAY leaves every synced table copied, serving and in the catalog, its error said — and when the
 // source is back the tables are polled, not copied whole again (a review finding).
 test("a changed column list copies that table again; a source away is an error on the copies, never a re-copy", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
   const db = `${tag}_c`;
@@ -1008,7 +1008,7 @@ test("a failed catch-up waits before it is tried again, said with its time; a ch
 });
 
 // AFTER A RESTART THE COPIED TABLES ARE SERVED AT ONCE (the test server: the catalog was empty until the start's
-// first pass ended, hours behind a large copy, and every copied table was "not added"): the catalog is rebuilt when
+// first pass ended, hours behind a large copy, and every synced table was "not added"): the catalog is rebuilt when
 // the project's tables are set, on a connection of its own that a copy's transaction never holds. big's copy is HELD
 // by the test (`heldCopy`) until the catalog is read, so "still copying" holds by construction, not by its size.
 test("after a restart the copied tables are in the catalog at once, while another table is still copying", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
@@ -1139,7 +1139,7 @@ test("a copy stored in key order with an index is said as a retired layout and c
   const RETIRED = (syncModule as unknown as { RETIRED_LAYOUT?: string }).RETIRED_LAYOUT;
   try {
     await sync.open();
-    assert.equal(RETIRED, "stored in key order with an index, by an older Mason: copied again in heap order");
+    assert.equal(RETIRED, "stored in key order with an index, by an older Mason: read again whole, in heap order");
     assert.ok(logged.some((l) => l.startsWith(`public.t: its copy is ${RETIRED} — `)), `said by name at the start\n${logged.join("\n")}`);
     assert.ok(logged.some((l) => l.startsWith("removed old.db.stage-public_t.db: a copy's stage, from an older Mason")), logged.join("\n"));
     assert.deepEqual(fs.readdirSync(dir).filter((f) => f.startsWith("old.db.stage-")), [], "the old stage is removed");

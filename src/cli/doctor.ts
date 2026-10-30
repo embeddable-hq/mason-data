@@ -29,12 +29,12 @@ export const NODE_MIN = "22.13";
 
 export const DOCTOR_USAGE = `usage: mason doctor [--json]
 
-  Says whether this machine is ready for Mason — Node ${NODE_MIN} or later, memory (Mason's copy uses up to half of it by
-  default; MASON_DUCKDB_MEMORY=4GiB sets it), the copy's postgres and inet extensions (installed with Mason for this
-  platform, so nothing is downloaded; else the first copy downloads them), the ports Mason listens on — with the way
+  Says whether this machine is ready for Mason — Node ${NODE_MIN} or later, memory (the engine uses up to half of it by
+  default; MASON_DUCKDB_MEMORY=4GiB sets it), Mason's postgres and inet extensions (installed with Mason for this
+  platform, so nothing is downloaded; else the first sync downloads them), the ports Mason listens on — with the way
   out for anything missing. In a
   project's folder it checks the project's database too; with Mason running for it, the run in a few lines instead: its
-  database, whether every added table is copied, the statements of the last day it refused or answered slowly.
+  database, whether every added table is synced, the statements of the last day it refused or answered slowly.
 
     mason doctor
 
@@ -78,8 +78,8 @@ export function memoryCheck(totalBytes: number = machineMemoryBytes(), env: Node
   const low = totalBytes < 2 * 1024 ** 3;
   return {
     name: "memory", ok: !low,
-    detail: `${gib} GiB; Mason's copy uses up to ${share.trim()}${set !== undefined ? " (MASON_DUCKDB_MEMORY)" : " (half, the default; MASON_DUCKDB_MEMORY sets it)"}` +
-      (low ? ". Under 2 GiB, a large table's copy and a query starve each other: expect statements refused for memory" : ""),
+    detail: `${gib} GiB; the engine uses up to ${share.trim()}${set !== undefined ? " (MASON_DUCKDB_MEMORY)" : " (half, the default; MASON_DUCKDB_MEMORY sets it)"}` +
+      (low ? ". Under 2 GiB, a large table's first sync and a query starve each other: expect statements refused for memory" : ""),
   };
 }
 
@@ -154,7 +154,7 @@ export async function runChecks(run: DevRun): Promise<Check[]> {
   const picked = state.tables.filter((t) => t.added).length;
   if (ready.failed.length) checks.push({ name: "project", ok: false, detail: `${ready.failed.length} problem(s): ${ready.failed.join("; ")} — mason wait prints each with the way out` });
   else if (ready.waiting.length) checks.push({ name: "project", ok: null, detail: `still at work: ${ready.waiting.join("; ")} (mason wait)` });
-  else checks.push({ name: "project", ok: true, detail: picked ? `${picked} table(s) copied and kept current` : "no table added yet (mason tables, then mason add <table>)" });
+  else checks.push({ name: "project", ok: true, detail: picked ? `${picked} table(s) synced and kept current` : "no table added yet (mason tables, then mason add <table>)" });
   const slow = await callRun(run, "GET", "/api/slow"), refused = await callRun(run, "GET", "/api/refused");
   const slowN = slow.status === 200 ? (slow.body.slow as unknown[]).length : null, refusedN = refused.status === 200 ? (refused.body.refused as unknown[]).length : null;
   checks.push(slowN === null || refusedN === null
@@ -169,7 +169,7 @@ export function nextSteps(checks: readonly Check[], run: DevRun | null, project:
   if (bad("node")) return [["mason doctor", `again, once Node ${NODE_MIN} or later is installed`]];
   if (bad("project") && run === null) return [["mason doctor", "again, once .mason/config.json is repaired or moved aside (the detail above says how)"]];
   // the demo database is hosted by the run itself (src/cli/demo.ts): down until mason start makes it
-  if (bad("database") && project?.config.demo === true) return [["mason start", "hosts the demo database, then copies its tables"]];
+  if (bad("database") && project?.config.demo === true) return [["mason start", "hosts the demo database, then syncs its tables"]];
   if (bad("database")) return [["mason start", `once the connection works (the detail above says how; the URL is in ${project ? `${project.dir}/config.json` : ".mason/config.json"})`]];
   if (project === null) return [
     ["mason init", "in your app's folder: the database from MASON_DATABASE_URL or DATABASE_URL in .env.local, .env or the shell"],
@@ -178,7 +178,7 @@ export function nextSteps(checks: readonly Check[], run: DevRun | null, project:
   if (run === null) return [["mason start", "Mason in the background, for this folder"]];
   if (bad("mason start")) return [["mason logs", "why Mason does not answer"], ["mason stop", "then mason start, to start it again"]];
   if (bad("project")) return [["mason wait", "each problem, with the way out"]];
-  if (checks.some((c) => c.name === "project" && /no table added/.test(c.detail))) return [["mason tables", "the database's tables and their columns"], ["mason add <table>", "copy a table into Mason"]];
+  if (checks.some((c) => c.name === "project" && /no table added/.test(c.detail))) return [["mason tables", "the database's tables and their columns"], ["mason add <table>", "sync a table into Mason"]];
   if (bad("queries")) return [["mason status", "the refused and slow statements, each with what to do"]];
   return [["mason user add <name>", "a user for a BI tool or your app: its password and URL, printed once"]];
 }
@@ -239,7 +239,7 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
     const mark = markOf(c, s);
     out(`  ${mark} ${c.name.padEnd(w)}  ${wrap(c.detail, s.width, 2 + 3 + 1 + w + 2)}`);
   }
-  if (run !== null) out(s.dim(`  its copy of the data and its state in ${run.home}. mason status for the details`));
+  if (run !== null) out(s.dim(`  its synced data and its state in ${run.home}. mason status for the details`));
   if (run === null || !ready) out(nextBlock(next));
   return ready ? 0 : 1;
 }

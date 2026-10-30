@@ -34,12 +34,12 @@ const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/shop";
 
 export const MCP: CommandSpec = {
   name: "mcp",
-  summary: "an MCP server on stdio, for Claude Code, Claude Desktop and other agents: the copy's tables, queries, refusals",
+  summary: "an MCP server on stdio, for Claude Code, Claude Desktop and other agents: the synced tables, queries, refusals",
   usage: `usage: mason mcp [--url <postgres://user:password@host:port/database>]
 
   An MCP (Model Context Protocol) server on stdin and stdout, for Claude Code, Claude Desktop and any MCP client.
   Its tools say what an agent would otherwise guess: the tables Mason serves, each one's columns, rows and how
-  current its copy is, and each statement's answer with its Postgres types — or Mason's refusal, with what to write
+  current each is, and each statement's answer with its Postgres types — or Mason's refusal, with what to write
   instead. It connects to the Postgres API as a mason user, by the URL mason user add printed (MASON_URL, else
   --url), so it works beside mason start or against a mason serve elsewhere, and every statement it runs is in
   the request log under application_name mason-mcp/<the client's name>. It serves until the client closes stdin.
@@ -235,9 +235,9 @@ export const TOOLS = [
   {
     name: "tables",
     title: "The tables Mason serves",
-    description: "The tables Mason serves, each a copy of a table of the application's Postgres database: about how many rows each holds, " +
-      "and how its copy is kept current and when it was last synced (sync: off — read again only when someone runs mason sync — or polled " +
-      "every so often, or streamed by logical replication). A copy last synced days ago answers as of then: say so with the answer. " +
+    description: "The tables Mason serves, each synced from a table of the application's Postgres database: about how many rows each holds, " +
+      "and how it is kept current and when it was last synced (sync: off — read again only when someone runs mason sync — or polled " +
+      "every so often, or streamed by logical replication). A table last synced days ago answers as of then: say so with the answer. " +
       "Start here: a statement can read only these, named as listed.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, openWorldHint: false },
@@ -245,7 +245,7 @@ export const TOOLS = [
   {
     name: "describe",
     title: "One table's columns",
-    description: "One table's columns with their Postgres types, its primary key and foreign keys, about how many rows it holds, how its copy is kept current " +
+    description: "One table's columns with their Postgres types, its primary key and foreign keys, about how many rows it holds, how it is kept current " +
       "and when it was last synced.",
     inputSchema: { type: "object", properties: { table: { type: "string", description: "the table as tables lists it (public.orders), or a bare name in public (orders)" } },
       required: ["table"], additionalProperties: false },
@@ -267,7 +267,7 @@ export const TOOLS = [
   {
     name: "explain",
     title: "How Mason answers a statement",
-    description: "How Mason answers one statement, as its EXPLAIN prints it: each copy the statement reads with its rows and how current it is, " +
+    description: "How Mason answers one statement, as its EXPLAIN prints it: each synced table the statement reads with its rows and how current it is, " +
       "the SQL Mason runs for it, and the plan. analyze: true runs the statement too and adds each step's rows and time.",
     inputSchema: { type: "object", properties: {
       sql: { type: "string", description: "one statement, in Postgres's SQL (without EXPLAIN)" },
@@ -284,8 +284,8 @@ export const RESOURCES = [
   { uri: "mason://help/mcp", name: "mcp", title: "mason mcp", description: "mason help mcp: this server's tools, and how to add it to a client", mimeType: "text/plain" },
 ] as const;
 
-const INSTRUCTIONS = "Mason serves read-only copies of tables of an application's Postgres database, for analytical SQL (scans and aggregates). " +
-  "Call tables first, describe a table before querying it, and write Postgres's SQL. Each table says how current its copy is. " +
+const INSTRUCTIONS = "Mason serves read-only tables synced from an application's Postgres database, for analytical SQL (scans and aggregates). " +
+  "Call tables first, describe a table before querying it, and write Postgres's SQL. Each table says how current it is. " +
   "When a statement is refused, its hint says what to write instead.";
 
 /** A relation the catalog lists: a copy, or a view over copies. */
@@ -639,7 +639,7 @@ interface CopyRow { Table: string; "Estimated Rows": number | null; "Kept Curren
 /** A copy's facts as the tools say them: about how many rows, how it is kept current, what keeps it current now, and —
  *  polled or off — its sync and when it was last synced (a copy's age is never hidden: issue 33). */
 function copyFacts(c: CopyRow | { error: string } | undefined): Record<string, unknown> {
-  if (c === undefined) return { rows_about: null, kept: "how it is kept current is unknown: Mason has no copy of it" };
+  if (c === undefined) return { rows_about: null, kept: "how it is kept current is unknown: Mason has not synced it" };
   if ("error" in c) return { rows_about: null, kept: `how it is kept current could not be read: ${c.error}` };
   return { rows_about: c["Estimated Rows"], kept: c["Kept Current"], kept_current_by: c["Kept Current By"],
     ...(c.Sync !== undefined ? { sync: c.Sync, last_synced: c["Last Synced"] ?? null } : {}) };

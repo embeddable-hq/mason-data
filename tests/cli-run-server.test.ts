@@ -63,7 +63,7 @@ let copies: CopyState[] = [];
 const asked: string[][] = [];
 const pollNow = (sources: string[]): Promise<{ at: string; tables: PolledTable[] }> => {
   asked.push(sources);
-  if (sources.includes("public.logs")) return Promise.reject(new PollRefused("nothing_yet", "public.logs is not copied yet (its copy has not finished): mason wait waits for it"));
+  if (sources.includes("public.logs")) return Promise.reject(new PollRefused("nothing_yet", "public.logs is not synced yet (its first sync has not finished): mason wait waits for it"));
   return Promise.resolve({ at: "2026-10-24T10:05:00.000Z", tables: sources.map((table) => ({ table, changed: 2, deleted: 1, rows: 3, ms: 40 })) });
 };
 // the request log's reads (src/duck/requests.ts), as the ledger answers them: the server passes them on, never a copy
@@ -202,7 +202,7 @@ test("an add writes its entry into the sources file and nowhere else; each refus
   const notUnique = await call("POST", "/api/pick", { body: { table: "public.events", picked: true, key: ["id"] } });
   assert.deepEqual([notUnique.status, JSON.parse(notUnique.text).error], [400, "tables.events.key: no unique index of public.events is over (id), so two of its rows may share them and Mason could not tell them apart — name the columns of one: key: [tenant_id, id] (its unique index events_tenant_id_id_key)"]);
   const keyOnPk = await call("POST", "/api/pick", { body: { table: "public.customers", picked: true, key: ["id"] } });
-  assert.deepEqual([keyOnPk.status, JSON.parse(keyOnPk.text).error], [400, "public.customers has a primary key (id), which Mason copies it by: leave --key out"]);
+  assert.deepEqual([keyOnPk.status, JSON.parse(keyOnPk.text).error], [400, "public.customers has a primary key (id), which Mason keys it by: leave --key out"]);
   // a name an older Mason refused (not lower case) is a table like any other now
   assert.equal((await pickIt("public.Shouty")).status, 200);
   assert.match(fs.readFileSync(sourceFile, "utf8"), /\n {2}Shouty: \{\}\n$/);
@@ -287,7 +287,7 @@ test("mason remove: the table's entry goes, every other byte of the file as it w
     fs.writeFileSync(sourceFile, "kind: postgres\nurl: postgres://me@elsewhere:5432/other\ntables:\n  customers: {}\n");
     for (const r of [await remove(["customers"]), await pickIt("public.orders")]) {
       assert.equal(r.status, 409);
-      assert.equal(JSON.parse(r.text).error, "mason/sources/app.yml: url: now names postgres://me@elsewhere:5432/other (mason/sources/app.yml), and this run copies postgres://me@localhost:5432/app: mason stop && mason start copies from the new one, then add or remove the table");
+      assert.equal(JSON.parse(r.text).error, "mason/sources/app.yml: url: now names postgres://me@elsewhere:5432/other (mason/sources/app.yml), and this run syncs postgres://me@localhost:5432/app: mason stop && mason start syncs from the new one, then add or remove the table");
     }
   } finally { fs.writeFileSync(sourceFile, was); }
 });
@@ -364,7 +364,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.deepEqual(by.get("public.orders")!.copy, { phase: "copying", rowsCopied: 2, updatedAt: "",
       progress: { chunksDone: 2, chunksTotal: 5, reading: 3, readingSeconds: 7.5, rowsReading: 3, rowsPerSecond: 0.4, bytesPerSecond: 900, secondsLeft: 12, share: 0.4 } },
       "rows so far, never 0 while it copies, and the chunks reading, for how long, the measured rate: so a copy moves between two commits");
-    assert.equal(by.get("public.logs")!.copy, null, "a table the sync has not reached is waiting, never copying 0 of N");
+    assert.equal(by.get("public.logs")!.copy, null, "a table the sync has not reached is waiting, never syncing 0 of N");
     assert.deepEqual(by.get("public.Shouty")!.copy, { phase: "failed", rowsCopied: 0, updatedAt: "" });
     assert.equal(by.get("public.Shouty")!.error, "it broke");
     // its sync off: served, and its state says so and when it was last synced (kept), never an unsynced of the run's own
@@ -380,7 +380,7 @@ test("the state: a copy under way says its rows so far, one not reached is waiti
     assert.deepEqual([polled.status, polled.body], [200, { at: "2026-10-24T10:05:00.000Z", tables: [{ table: "public.customers", changed: 2, deleted: 1, rows: 3, ms: 40 }] }]);
     const refused = await post("/api/sync", { tables: ["public.logs"] });
     assert.deepEqual([refused.status, refused.body.code], [409, "nothing_yet"], "a refusal keeps the sync's code for the CLI");
-    assert.match(String(refused.body.error), /public\.logs is not copied yet/);
+    assert.match(String(refused.body.error), /public\.logs is not synced yet/);
     assert.equal((await post("/api/sync", { tables: [] })).status, 400);
     assert.deepEqual(asked, [["public.customers"], ["public.logs"]]);
     assert.deepEqual(s.body.sessions, sessionsNow, "the listener's own count, by user and client");
@@ -454,7 +454,7 @@ test("each table's sync: its state in one word, when it was last brought current
     ["syncing", "failed", "syncing", "synced"], "copying, a failed copy, a copy made again (the old one serves), served and kept current");
 });
 
-test("usage over time: /api/usage passes since, until and step to the samples, an hour by default, with the copies' sizes; a bad time or step refused by name", async () => {
+test("usage over time: /api/usage passes since, until and step to the samples, an hour by default, with the synced tables' sizes; a bad time or step refused by name", async () => {
   const get = async (p: string): Promise<{ status: number; body: Record<string, unknown> }> => {
     const r = await fetch(`http://127.0.0.1:${ctx.port}${p}`, { headers: { Authorization: "Bearer t0ken-of-this-run" } });
     return { status: r.status, body: await r.json() as Record<string, unknown> };
@@ -608,7 +608,7 @@ test("the state says how each copy is kept current, as the sync's state has it (
   const streamed = { by: "replication" as const, slot: "mason_app", state: "left-out" as const, why: "publication app_pub does not carry public.orders",
     position: "0/16B3F28", lastCommit: null, notRunning: null, syncedAt: null };
   const recopied = { by: "recopy" as const, copiedAt: "2026-10-24T10:00:00.000Z" };
-  const waiting = { by: "poll" as const, sync: { mode: "off" as const }, syncedAt: null, nextAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" };
+  const waiting = { by: "poll" as const, sync: { mode: "off" as const }, syncedAt: null, nextAt: null, pending: "it waits for its first sync: it joins once synced and caught up by one poll" };
   copies = [
     { source: "public.customers", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: polled },
     { source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-24T10:00:00.000Z", error: null, kept: streamed },
@@ -673,7 +673,7 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.deepEqual(file.users.map((u) => [u.name, u.id]), [["metabase", a.id]]);
   assert.ok(!fs.readFileSync(usersFile, "utf8").includes(a.password as string), "users.json holds no password");
   // the list: removedAt null, last used from the request log, the URL to paste WITHOUT the password (the add's own builder);
-  // roleFrom none: no roles file, every copied table (stage 1b)
+  // roleFrom none: no roles file, every synced table (stage 1b)
   const listed = await list();
   assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, disabledAt: null, live: true, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app", roleFrom: "none" }]);
   assert.deepEqual([listed.lastUsedNote, listed.urlNote, listed.requestLogDays], [null, null, 7]);

@@ -24,7 +24,7 @@ export const UI: CommandSpec & { needs: "run" } = {
   usage: `usage: mason ui [--no-open] [--json]
 
   Opens the running Mason's web page in your browser, refreshed while the tab is open: the Overview (what mason status
-  says: whether the copy is ready, the database, the sync, the statements and the recent errors); the Tables (add,
+  says: whether the synced data is ready, the database, the sync, the statements and the recent errors); the Tables (add,
   remove or sync one, as mason add, remove and sync do); the Users of mason user (add one, its password shown once with
   the URL to paste, or remove one); and Observability: the statements running and that ran (mason logs --requests,
   cancel one), usage over time (mason usage), and the sync's events (mason logs --events).

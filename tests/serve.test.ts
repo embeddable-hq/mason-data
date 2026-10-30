@@ -71,7 +71,7 @@ test("the config: new on an empty volume, resumed over what the runs recorded; a
     assert.equal(fresh.config.remote, true, "a server's database is on another machine, on purpose");
     assert.deepEqual([fresh.config.name, fresh.config.apiKey, fresh.config.folder], ["mason", KEY, "/mason/project"]);
     assert.equal("source" in fresh.config, false, "the database's URL is the sources file's, never the config's");
-    assert.match(fresh.said[0]!, /a new copy in .*\.mason$/);
+    assert.match(fresh.said[0]!, /new synced data in .*\.mason$/);
 
     // what a run recorded stays; the environment's settings are written again
     // (a config an older serve wrote carries the URL: it goes)
@@ -85,7 +85,7 @@ test("the config: new on an empty volume, resumed over what the runs recorded; a
 
     const renamed = serveConfig({ ...s, name: "shop" }, readProject(dir));
     assert.ok("message" in renamed);
-    assert.match(renamed.message, /the copy in .* is the project mason, and MASON_NAME says shop/);
+    assert.match(renamed.message, /the synced data in .* is the project mason, and MASON_NAME says shop/);
     assert.match(renamed.fix!, /set MASON_NAME=mason again, or give the new name a new MASON_DATA/);
 
     // a project mason init made: the developer's, never overwritten from the environment
@@ -120,7 +120,7 @@ test("the sources file: one a folder lacks is written from DATABASE_URL, without
     assert.match(gone.message, /: url: \$\{DATABASE_URL\} is not set — not in the environment, \.env\.local or \.env$/);
     // the settings say it too, with the variable the file names: the platform sets it before the first deploy
     assert.match((serveSettings({ MASON_API_KEY: KEY, MASON_DATA: dir, MASON_PROJECT: path.join(dir, "project") }, "/") as { message: string }).message,
-      /^a setting is missing or wrong: DATABASE_URL is not set: the database to copy from, as the sources file's url: \$\{DATABASE_URL\} names it$/);
+      /^a setting is missing or wrong: DATABASE_URL is not set: the database to sync from, as the sources file's url: \$\{DATABASE_URL\} names it$/);
     // a server is configured by its environment: a .env in its data folder never overrides the platform's DATABASE_URL
     fs.writeFileSync(path.join(dir, ".env"), "DATABASE_URL=postgres://someone@elsewhere:5432/other\n");
     const r = readSource(path.join(dir, "project"), dir, { DATABASE_URL: URL_ }, { shellFirst: true });
@@ -333,7 +333,7 @@ test("MASON_CHANGES set is refused with the other settings, naming the sync: lin
 });
 
 test("a MASON_HISTORY_DAYS that is not a number of days refuses mason serve (on its one report) and mason start (before it spawns, in the run, and --json) in the Failure shape, before anything opens", async () => {
-  const why = "it is how many days Mason keeps its history (the request log, the sync's events, the usage samples and the copies' sizes): a whole number, 1 or more";
+  const why = "it is how many days Mason keeps its history (the request log, the sync's events, the usage samples and the synced tables' sizes): a whole number, 1 or more";
   const fix = "write MASON_HISTORY_DAYS=7 (the default, as when it is unset) or another whole number of days";
   for (const bad of ["abc", "0", "-1"]) {
     const served = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_HISTORY_DAYS: bad }, "/srv");
@@ -366,7 +366,7 @@ test("a MASON_HISTORY_DAYS that is not a number of days refuses mason serve (on 
 });
 
 test("MASON_REQUEST_LOG_DAYS is MASON_HISTORY_DAYS now: set, it refuses mason serve (on its one report) and mason start (before it spawns and in the run), naming the line to write — never runs the default", async () => {
-  const why = "it was renamed MASON_HISTORY_DAYS, since the days it keeps are every history's (the request log, the sync's events, the usage samples and the copies' sizes)";
+  const why = "it was renamed MASON_HISTORY_DAYS, since the days it keeps are every history's (the request log, the sync's events, the usage samples and the synced tables' sizes)";
   const fix = "write MASON_HISTORY_DAYS=30 instead, then unset MASON_REQUEST_LOG_DAYS";
   const served = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_REQUEST_LOG_DAYS: "30" }, "/srv");
   assert.ok("message" in served, "refused");

@@ -8,10 +8,10 @@
  *     argument, a prepared statement's Parse, `SELECT *` and `t.*` on a partly granted table (never narrowed), a system
  *     column, a table the role lacks — each refused 42501 with Postgres's own message (`permission denied for table …`),
  *     the DETAIL naming the role and the column, the HINT what the role may read; `count(*)` over a granted table and a
- *     read of granted columns answered; a statement that reads no copied table untouched;
+ *     read of granted columns answered; a statement that reads no synced table untouched;
  *   - an `exclude:` role and one listing every column explicitly; a user with no role reads as the file's `default:`
  *     (here `everything`, `tables: all`) and a token reads everything;
- *   - stage 1b, THE FILE DECIDES A ROLELESS USER'S ACCESS: `tables: all` grants every copied table, one the sources file
+ *   - stage 1b, THE FILE DECIDES A ROLELESS USER'S ACCESS: `tables: all` grants every synced table, one the sources file
  *     adds later included; `default:` edited under a held session applies at the next statement (the catalog's
  *     information_schema, has_column_privilege and current_user answer for it); a file with no `default:` refuses
  *     every statement of a roleless user that reads a copied table (42501, the two ways out), answers `SELECT 1`, runs
@@ -94,7 +94,7 @@ roles:
       orders:
         columns: [status, amount]
       customers: {}
-  # every copied table and column, those added later included: the default role of a user with none
+  # every synced table and column, those added later included: the default role of a user with none
   everything:
     tables: all
 `;
@@ -310,7 +310,7 @@ test("FAIL CLOSED: a role the file no longer names refuses the user by name, a f
     fs.writeFileSync(rolesFile, `${ROLES}  typo:\n    tables:\n      orders:\n        columns: [id, statuss]\n`);
     const typo = await refused(c, "SELECT count(*) FROM orders");
     assert.equal(typo.code, "57P03");
-    assert.match(typo.message, /roles\.typo\.tables\.orders\.columns: the copy of public\.orders has no column statuss — did you mean `status`\? \(its columns: id, status, amount, notes, meta\)/);
+    assert.match(typo.message, /roles\.typo\.tables\.orders\.columns: the synced public\.orders has no column statuss — did you mean `status`\? \(its columns: id, status, amount, notes, meta\)/);
     // repaired: the same session answers again, with its role
     fs.writeFileSync(rolesFile, ROLES);
     assert.deepEqual((await c.query("SELECT count(*)::int AS n FROM orders")).rows, [{ n: 3 }]);
@@ -453,7 +453,7 @@ test("every statement of a user's session is a row of the request log with its r
 /** the roles file with another default line (or none): the rest as ROLES */
 const withDefault = (role: string | null): string => role === null ? ROLES.replace(/^default: everything\n/, "") : ROLES.replace(/^default: everything\n/, `default: ${role}\n`);
 
-test("tables: all reads every copied table and column, and a table the sources file adds later at the next statement", async () => {
+test("tables: all reads every synced table and column, and a table the sources file adds later at the next statement", async () => {
   await wire();
   // a role of the file whose tables are resolved as the copied tables move: the module's own resolution, by name
   const r = await import("../src/cli/roles.ts");
@@ -528,7 +528,7 @@ test("no default: a user with no role reads nothing — refused 42501 with the t
     assert.equal((await refused(c, "SELECT count(*) FROM orders")).message, "permission denied for table orders", "Postgres's message, the first table read");
     const ex = await refused(c, prepared);
     assert.deepEqual([ex.code, ex.detail], ["42501", `the user "dflt" has no role and ${ROLES_PATH} names no default`], "an Execute of a statement prepared before");
-    assert.deepEqual((await c.query("SELECT 1 AS one")).rows, [{ one: 1 }], "a statement that reads no copied table is answered");
+    assert.deepEqual((await c.query("SELECT 1 AS one")).rows, [{ one: 1 }], "a statement that reads no synced table is answered");
     // THE CATALOG ANSWERS AS FOR A LOGIN WITH NO GRANT (the review of #44): information_schema lists nothing, every
     // privilege function is false, the user names itself, set_config is its session's SET — never the catalog's superuser view
     assert.deepEqual((await c.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")).rows, [], "no table, no view");
@@ -542,7 +542,7 @@ test("no default: a user with no role reads nothing — refused 42501 with the t
     assert.deepEqual((await c.query("SELECT current_user AS who")).rows, [{ who: "dflt" }], "and the catalog's role is unmoved");
     assert.deepEqual((await token.query("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")).rows, [{ n: 3 }], "a token sees every table");
     assert.deepEqual((await token.query("SELECT current_user AS who")).rows, [{ who: "postgres" }], "a token's catalog is the catalog's own");
-    assert.equal((await token.query("SELECT notes FROM orders")).rows.length, 3, "a token reads every copied table in every state");
+    assert.equal((await token.query("SELECT notes FROM orders")).rows.length, 3, "a token reads every synced table in every state");
     // a role of its own is unchanged
     const a = await connect("agent", addUser("agent", "agent"));
     try { assert.deepEqual((await a.query("SELECT count(*)::int AS n FROM orders")).rows, [{ n: 3 }]); } finally { await a.end(); }

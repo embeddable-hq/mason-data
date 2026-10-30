@@ -23,7 +23,7 @@ export const DEFAULT_HISTORY_DAYS = 7;
 /** What is wrong with a history setting, a Failure's fields: what, why, and the line to write. */
 export type HistoryDaysWrong = { message: string; why: string; fix: string };
 
-const KEPT = "the request log, the sync's events, the usage samples and the copies' sizes";
+const KEPT = "the request log, the sync's events, the usage samples and the synced tables' sizes";
 
 /** The days MASON_HISTORY_DAYS keeps, or what is wrong with the text. Unset or empty: the default. */
 export function historyDays(text: string | undefined): number | HistoryDaysWrong {

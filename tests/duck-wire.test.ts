@@ -1772,8 +1772,8 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     copies = [copied({ ...streamed, state: "left-out", why: "the publication mason_pub does not publish public.orders" })];
     assert.equal(await header(), `${head}NOT kept current: left out of logical replication (slot mason_shop): the publication mason_pub does not publish public.orders)`);
     await jsonSays(null, { ...stream, "Stream State": "left-out" });
-    copies = [copied({ ...streamed, state: "waiting", why: "its columns changed: it is copied again, then caught up by one poll" })];
-    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: its columns changed: it is copied again, then caught up by one poll)`);
+    copies = [copied({ ...streamed, state: "waiting", why: "its columns changed: it is read again whole, then caught up by one poll" })];
+    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: its columns changed: it is read again whole, then caught up by one poll)`);
     await jsonSays(null, { ...stream, "Stream State": "waiting" });
     // a polled table: its interval and how long ago its last poll was, from the sync's (issue 33: the age is never hidden)
     const minutesAgo = new Date(Date.now() - 12 * 60_000 - 5_000).toISOString(), daysAgo = new Date(Date.now() - 3 * 86_400_000 - 3_600_000).toISOString();
@@ -1790,8 +1790,8 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     assert.equal(await header(), `${head}off: last synced 3 days ago (${utc(daysAgo)}); mason sync public.orders syncs it now)`);
     await jsonSays(null, { Sync: "off", "Last Synced": daysAgo, "Next Poll": null });
     // served as copied and skipped by the passes until copied again: NOT kept current, and why
-    copies = [copied({ by: "poll", sync: every30, syncedAt: daysAgo, nextAt: null, pending: "its columns changed: it is copied again, then caught up by one poll" })];
-    assert.equal(await header(), `${head}NOT kept current (last synced 3 days ago (${utc(daysAgo)})): its columns changed: it is copied again, then caught up by one poll)`);
+    copies = [copied({ by: "poll", sync: every30, syncedAt: daysAgo, nextAt: null, pending: "its columns changed: it is read again whole, then caught up by one poll" })];
+    assert.equal(await header(), `${head}NOT kept current (last synced 3 days ago (${utc(daysAgo)})): its columns changed: it is read again whole, then caught up by one poll)`);
     await jsonSays(null, { Sync: "poll 30s", "Last Synced": daysAgo, "Next Poll": null });
     // a copy under way or failed says so before how it would be kept current
     copies = [{ ...copied(streamed), phase: "copying", rowsSoFar: 1200 }];

@@ -102,8 +102,8 @@ export function sourceMove(recorded: ProjectConfig["sourceServer"], now: { datab
   { action: "record" | "same" | "reread" } | { refuse: string } {
   if (!recorded) return { action: "record" };
   if (recorded.database !== now.database) {
-    return { refuse: `this project's copy is of the database ${recorded.database}, and .mason/config.json now names ${now.database}. ` +
-      "Its copied rows are not that database's: mason destroy (removes the copy; your files stay), then mason start copies it" };
+    return { refuse: `this project's synced data is of the database ${recorded.database}, and .mason/config.json now names ${now.database}. ` +
+      "Its synced rows are not that database's: mason destroy (removes the synced data; your files stay), then mason start syncs it" };
   }
   if (recorded.systemIdentifier !== null && now.systemIdentifier !== null && recorded.systemIdentifier !== now.systemIdentifier) return { action: "reread" };
   return { action: "same" };
@@ -172,8 +172,8 @@ export function syncDefaultLine(file: SourceFile, shown: string, copiedBefore = 
       `write \`sync: poll 5s\` at the top of ${shown} ` +
       "to keep them current as before, or `mason sync <table>` when you need it";
   }
-  if (d.from === "default") return `sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of ${shown} polls every table, or on an entry that one`;
-  return d.sync.mode === "off" ? `sync: off (${shown}): after its first copy, a table is read again only by mason sync <table>, unless its entry says sync: poll <interval>`
+  if (d.from === "default") return `sync: off (the default): after its first sync, a table is read again only by mason sync <table> — sync: poll 5m at the top of ${shown} polls every table, or on an entry that one`;
+  return d.sync.mode === "off" ? `sync: off (${shown}): after its first sync, a table is read again only by mason sync <table>, unless its entry says sync: poll <interval>`
     : d.sync.mode === "replication" ? `sync: replication (${shown}): every table without a sync: of its own is kept current from the database's change log`
     : `sync: ${syncText(d.sync)} (${shown}): every table without a sync: of its own is polled every ${d.sync.every}`;
 }
@@ -283,7 +283,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     for (const w of warnings.filter((w) => w !== remoteWarning(source))) say(`  ! ${w}`);
     const config = path.join(home, "config.json");
     return failed("start", remoteConfirmation(source.host, { cmd: "mason start",
-      wayOut: `this project was not made with --remote: if you mean to copy from that machine, set "remote": true in ${config} and start again`,
+      wayOut: `this project was not made with --remote: if you mean to sync from that machine, set "remote": true in ${config} and start again`,
       next: [["mason start", `once ${config} says "remote": true`]] }), { json: false });
   }
   if ("exit" in checked) {
@@ -386,28 +386,28 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   try { storeJsonPaths = storeJsonPathsOf(process.env); }
   catch (e) { say(`mason start: ${(e as Error).message}`); return 1; }
 
-  begin("Opening the copy");
+  begin("Opening the synced data");
   const duckFile = path.join(home, DUCK_FILE);
   let store: DuckStore;
   // its memory bounded (src/duck/store.ts DEFAULT_MEMORY_LIMIT): past it a statement spills, or fails alone
   const memoryLimit = process.env.MASON_DUCKDB_MEMORY || undefined;
-  try { store = await DuckStore.open(duckFile, (l) => logLine(`[copy] ${l}`), memoryLimit === undefined ? {} : { memoryLimit }); }
-  catch (e) { fail("Opening the copy"); say(`  ${(e as Error).message}`); return 1; }
+  try { store = await DuckStore.open(duckFile, (l) => logLine(`[engine] ${l}`), memoryLimit === undefined ? {} : { memoryLimit }); }
+  catch (e) { fail("Opening the synced data"); say(`  ${(e as Error).message}`); return 1; }
   // THE COPY'S THREAD DYING (src/duck/executor.ts: V8 out of heap there, an uncaught error) ends the run, said, for its
   // supervisor to start it again: every session's statement in flight was told 57P02, and nothing can be answered after
   let crash: ((reason: string) => void) | null = null;
   store.onCrash((reason) => {
-    logLine(`[copy] the copy's thread stopped: ${reason}`);
+    logLine(`[engine] the engine's thread stopped: ${reason}`);
     if (crash !== null) crash(reason);
-    else say(`  ! the copy's thread stopped: ${reason}`);
+    else say(`  ! the engine's thread stopped: ${reason}`);
   });
-  done(`the copy in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling to ${path.relative(project.root, duckFile)}.tmp`);
+  done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling to ${path.relative(project.root, duckFile)}.tmp`);
   const syncMode = syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
   let events: SyncEvents;
   try { events = await SyncEvents.open(store, logLine, { days: keptDays }); }
-  catch (e) { fail("Opening the copy"); say(`  the sync's events (${EVENTS_TABLE}) could not be opened: ${(e as Error).message}`); await store.close(); return 1; }
+  catch (e) { fail("Opening the synced data"); say(`  the sync's events (${EVENTS_TABLE}) could not be opened: ${(e as Error).message}`); await store.close(); return 1; }
   // each table is kept current as its own sync: says (the sources file's); the sync's interval is how soon a failed pass
   // is tried again (and MASON_DUCK_SYNC=recopy's whole copies). The slot and publication are the run's whenever a table
   // is replicated, now or after a mason add --sync replication (the demo database has no change log: none)
@@ -423,7 +423,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // table says how many are not polled (`syncDefaultLine`)
   const copiedBefore = sync.state().filter((s) => s.phase === "copied" && sources.tables.some((t) => t.source === s.source)).length;
   // a database restored to another server: its transaction ids are not the watermarks', so every table is read again
-  if (move.action === "reread") { await sync.rereadAll(); say(`  ${source.database} is on another server than the copy was taken from: reading its tables again`); }
+  if (move.action === "reread") { await sync.rereadAll(); say(`  ${source.database} is on another server than the data was synced from: reading its tables again`); }
   if (move.action !== "same") { cfg.sourceServer = { systemIdentifier: facts.systemIdentifier, database: source.database }; writeConfig(home, cfg); }
   // the views first: setting the tables rebuilds the catalog, which reads them. The sources file read again: a mistake in it
   // keeps the tables read before (a typo never drops a copy), said in the log and by mason status
@@ -452,7 +452,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         try { return await readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, coll.collate, coll.version ?? null); } finally { c.pg.close(); }
       });
       libc = r.order;
-      if (r.read) done(`Read how ${source.database} orders text (${coll.collate}): kept in the copy, read again only when its collation version moves`);
+      if (r.read) done(`Read how ${source.database} orders text (${coll.collate}): kept with the synced data, read again only when its collation version moves`);
     } catch (e) { fail(reading); say(`  ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }
   }
   begin("Starting the Postgres listener");
@@ -478,7 +478,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let duckListener;
   try { duckListener = await store.listener(facts.collation, undefined, libc, () => sync.state(), sync.kept.enabled ? sync.kept : undefined); }
   catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
-  logLine(`[copy] text sorts as the source's collation does: ${JSON.stringify(duckListener.collation)}`);
+  logLine(`[engine] text sorts as the source's collation does: ${JSON.stringify(duckListener.collation)}`);
   // THE USERS (src/duck/users.ts): `mason user` edits the file beside this process; the listener re-reads it at every
   // connection and before every statement of a user's session, so a removal takes effect without a restart
   const users = new LiveUsers(path.join(home, USERS_FILE), cfg.apiKey);
@@ -580,7 +580,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   writeConfig(home, cfg);
   done(`Mason is up: ${sync.state().length} table(s) added, kept current: ${syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)}` +
       `${sync.streams() ? `; replicated tables streamed as they change (logical replication: slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})` : ""}`
-    : `each table copied again whole every ${PASS_RETRY_MS / 1000} s (MASON_DUCK_SYNC=recopy)`}`);
+    : `each table read again whole every ${PASS_RETRY_MS / 1000} s (MASON_DUCK_SYNC=recopy)`}`);
   // THE FILE'S DEFAULT, SAID ONCE (issue 33: nothing Mason does to your database is a hidden default)
   const defaultLine = syncDefaultLine(sources.file, shownPath(project.root, sources.file.file), syncMode === "poll" ? copiedBefore : 0);
   say(`  ${defaultLine}`);
@@ -596,7 +596,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     crash = (reason: string): void => {
       if (stopping) return;
       stopping = true;
-      say(`FATAL ERROR: Mason: the copy's thread stopped (${reason})`);
+      say(`FATAL ERROR: Mason: the engine's thread stopped (${reason})`);
       clearInterval(refreshFacts);
       hosted.stopChanges?.();
       server.close();
@@ -631,9 +631,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         try { await events.close(); } catch (e) { say(`  closing the sync's events: ${(e as Error).message}`); }
         // the demo database after the sync (nothing reads it any more) and before the copy closes
         await closeDemo(hosted, `closed the demo database (it stays in ${path.join(home, DEMO_DIR)}; mason destroy removes it)`);
-        if (syncStop !== null) say(`  closing the copy: ${syncStop.message}`);
+        if (syncStop !== null) say(`  closing the synced data: ${syncStop.message}`);
         else {
-          try { await store.close(); say(`  closed the copy (it stays in ${duckFile})`); } catch (e) { say(`  closing the copy: ${(e as Error).message}`); }
+          try { await store.close(); say(`  closed the synced data (it stays in ${duckFile})`); } catch (e) { say(`  closing the synced data: ${(e as Error).message}`); }
         }
         if ((cfg.replication ?? null) !== null) say(`  replication slot ${repl.slot} stays on ${source.database}, holding its WAL until the next mason start reads it (mason destroy drops it)` +
           (repl.owned ? "" : `; publication ${repl.publication} is its owner's, left as it is`));
@@ -653,7 +653,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // the web page by its command, never its URL: the URL carries the run's token, and this goes to dev.log
   // its words are mason ui's summary (mason --help's), so the two never drift
   if (o.serve === undefined) say(`  Web UI  mason ui  (${UI.summary})`);
-  if (demoChangeMs !== null) say(`  Demo  a new order lands every ${demoChangeMs / 1000} s: mason status shows the copy keeping up`);
+  if (demoChangeMs !== null) say(`  Demo  a new order lands every ${demoChangeMs / 1000} s: mason status shows the synced data keeping up`);
   const elsewhere = elsewhereTip(pgTls.listener);
   if (elsewhere) say(`  ${elsewhere}`);
   say(READY);
@@ -691,5 +691,5 @@ function listenerTls(listen: PgListenerSettings, selfSigned: boolean, home: stri
 export const READY = READY_LINE;
 
 /** The one sentence of how the pieces fit, printed first by `mason start` and at the top of its help. */
-export const PROJECT_LINE = "A Mason project is your app's folder: mason/sources/ names the database and the tables to copy, yours to commit; " +
-  "this machine's copy of your data and Mason's state are in .mason/, rebuilt from that file.";
+export const PROJECT_LINE = "A Mason project is your app's folder: mason/sources/ names the database and the tables to sync, yours to commit; " +
+  "this machine's synced data and Mason's state are in .mason/, rebuilt from that file.";

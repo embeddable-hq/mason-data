@@ -20,9 +20,9 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
 
   What Mason was and did over time, from a sample it takes every minute and keeps MASON_HISTORY_DAYS days
   (default 7): a line each span — the statements of the Postgres API (how many, how many were refused, failed or
-  cancelled — the errors column —, the completed ones' p95 duration, the rows sent), the copy's size and rows, the
-  tables whose sync is failing, how old the stalest copy was, the stream's lag (a table under sync: replication), and
-  the memory of the process and of the copy against its limit (MASON_DUCKDB_MEMORY). Then each copy's own size, measured every
+  cancelled — the errors column —, the completed ones' p95 duration, the rows sent), the synced data's size and rows, the
+  tables whose sync is failing, how old the stalest table was, the stream's lag (a table under sync: replication), and
+  the memory of the process and of the engine against its limit (MASON_DUCKDB_MEMORY). Then each synced table's own size, measured every
   10 minutes. A span sums its statements and shows each level at its highest. Read through the running Mason.
 
     mason usage                        the last hour, 5 minutes a line
@@ -37,7 +37,7 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
                    tablesFailed, oldestSyncSeconds, statements, statementsRefused, statementsFailed, statementsCancelled,
                    rowsSent, bytesSent, durationP50Ms, durationP95Ms, streamLagBytes, streamLagSeconds, rssBytes,
                    heapUsedBytes, copyMemoryBytes, copyMemoryLimitBytes, slotWalHeldBytes (replication: the WAL the
-                   slot holds on the database), diskFreeBytes (free where the copy is; with a step, the lowest),
+                   slot holds on the database), diskFreeBytes (free where the synced data is; with a step, the lowest),
                    sessionsOpen (the Postgres API's sessions logged in) }],
                    copySizes: [{ table, bytes, at }], next }
 `;
@@ -45,7 +45,7 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
 export const USAGE: CommandSpec & { needs: "run" } = {
   needs: "run",
   name: "usage",
-  summary: "what Mason did over time: statements, the copy's size and age, memory (a sample a minute; --since 7d --step 1h)",
+  summary: "what Mason did over time: statements, the synced data's size and age, memory (a sample a minute; --since 7d --step 1h)",
   usage: USAGE_USAGE,
   options: { since: { type: "string" }, until: { type: "string" }, step: { type: "string" }, json: { type: "boolean" } },
   json: ["since", "until", "stepSeconds", "sampleSeconds", "keptDays", "samples", "copySizes", "next"],
@@ -67,7 +67,7 @@ export function sampleLine(s: UsageSample, withLag: boolean): string {
   const bad = s.statementsRefused + s.statementsFailed + s.statementsCancelled;
   const age = s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds);
   const lag = !withLag ? "" : `  ${(s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds)).padStart(9)}`;
-  const memory = `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (copy ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`;
+  const memory = `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (engine ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`;
   return `${time}  ${n(s.statements).padStart(10)}  ${(bad === 0 ? "" : n(bad)).padStart(7)}  ${p95.padStart(10)}  ${n(s.rowsSent).padStart(11)}  ` +
     `${(s.copyBytes === null ? "–" : fileSize(s.copyBytes)).padStart(10)}  ${n(s.copyRows).padStart(13)}  ${(s.tablesFailed === 0 ? "" : n(s.tablesFailed)).padStart(7)}  ` +
     `${age.padStart(10)}${lag}  ${memory}`;
@@ -76,7 +76,7 @@ export function sampleLine(s: UsageSample, withLag: boolean): string {
 /** The heading over `sampleLine`'s columns. */
 export function sampleHeading(withLag: boolean): string {
   return `${"time (UTC)".padEnd(16)}  ${"statements".padStart(10)}  ${"errors".padStart(7)}  ${"p95".padStart(10)}  ${"rows sent".padStart(11)}  ` +
-    `${"copy".padStart(10)}  ${"rows".padStart(13)}  ${"failing".padStart(7)}  ${"oldest".padStart(10)}${withLag ? `  ${"lag".padStart(9)}` : ""}  memory`;
+    `${"size".padStart(10)}  ${"rows".padStart(13)}  ${"failing".padStart(7)}  ${"oldest".padStart(10)}${withLag ? `  ${"lag".padStart(9)}` : ""}  memory`;
 }
 
 export async function usage(argv: string[], now = Date.now()): Promise<number> {
@@ -112,7 +112,7 @@ export async function usage(argv: string[], now = Date.now()): Promise<number> {
     }
     if (b.copySizes.length) {
       out("");
-      out(st.bold(`Each copy's own size (measured every ${duration(SIZE_EVERY_MS / 1000)}):`));
+      out(st.bold(`Each synced table's own size (measured every ${duration(SIZE_EVERY_MS / 1000)}):`));
       const wide = Math.max(...b.copySizes.map((c) => c.table.length));
       for (const c of b.copySizes) out(`  ${c.table.padEnd(wide)}  ${fileSize(c.bytes).padStart(10)}  ${st.dim(`at ${c.at.slice(11, 16)} UTC`)}`);
     }

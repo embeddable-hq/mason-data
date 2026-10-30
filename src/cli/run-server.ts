@@ -105,7 +105,7 @@ export interface RunContext {
     /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode; `refresh: false`
      *  never reaches the database (the position and the slot as last read) */
     stream: (o?: { refresh?: boolean }) => Promise<StreamStatus | null>;
-    /** the disk the copy's file is on: free, and what the copies running are projected to add (src/duck/sync.ts diskStatus) */
+    /** the disk the copy's file is on: free, and what the first syncs running are projected to add (src/duck/sync.ts diskStatus) */
     disk: () => DiskStatus;
     /** what the run measured of a table, for mason add's estimate of a poll's cost (src/duck/sync.ts measured) */
     measured?: (table: string) => PollMeasure | null;
@@ -179,7 +179,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       sync: { default: syncText(sources.file?.sync ?? DEFAULT_SYNC), written: sources.file?.sync != null },
       ...(repl !== null ? { replication: { slot: repl.slot, publication: repl.publication, owned: repl.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
-    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason copies the tables it read before; mason start reads the file again)`] : [])],
+    warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason syncs the tables it read before; mason start reads the file again)`] : [])],
     folder, project, tables,
     // where a tool connects (the Postgres API's URL, the credentials' place shown, and its psql line): the web page's
     // Connect panel, as mason status --json says it (src/cli/pg-url.ts postgresFacts)
@@ -194,7 +194,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       version: ctx.version, startedAt: new Date(ctx.startedAt).toISOString(), uptimeSeconds: Math.max(0, Math.round((now - ctx.startedAt) / 1000)),
       restarts: restartsFact(ctx.home, ctx.duck.restarts) },
     // the disk under the copy: free where its file is (the sync's own measure, the one a copy is held to), the file
-    // (engine.bytes), and what the copies running are projected to add (copyDiskProjection) — mason status says it
+    // (engine.bytes), and what the first syncs running are projected to add (copyDiskProjection) — mason status says it
     // the sessions logged in now, by user and client (the listener's own, in memory): mason status says how many
     sessions: ctx.listener.openSessions(),
     disk: { path: disk.path, freeBytes: disk.freeBytes, copyBytes: bytes, projectedBytes: disk.projectedBytes, ...(disk.error !== undefined ? { error: disk.error } : {}) },
@@ -375,8 +375,8 @@ export async function events(ctx: RunContext, q: URLSearchParams): Promise<{ eve
 function sourceOnDisk(ctx: RunContext): EditTarget {
   const at = sourceToEdit(ctx.folder(), ctx.root, ctx.readSource);
   if (at.read.resolved !== ctx.runUrl) {
-    throw new Refusal(409, `${shownPath(ctx.root, at.file)}: url: now names ${maskedUrl(at.read.resolved)} (${at.read.from}), and this run copies ${maskedUrl(ctx.runUrl)}: ` +
-      "mason stop && mason start copies from the new one, then add or remove the table");
+    throw new Refusal(409, `${shownPath(ctx.root, at.file)}: url: now names ${maskedUrl(at.read.resolved)} (${at.read.from}), and this run syncs ${maskedUrl(ctx.runUrl)}: ` +
+      "mason stop && mason start syncs from the new one, then add or remove the table");
   }
   return at;
 }

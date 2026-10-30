@@ -31,11 +31,11 @@
 <div id="poll"></div>
 <main>
   <section id="page-status" aria-labelledby="status-h">
-    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason copies the tables you add from your Postgres, keeps them current, and answers analytics SQL at a Postgres URL of its own. Here: whether the copy is ready, how to connect, and what it answered — what <code>mason status</code> says.</p></div>
+    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason syncs the tables you add from your Postgres, keeps them current, and answers analytics SQL at a Postgres URL of its own. Here: whether the synced data is ready, how to connect, and what it answered — what <code>mason status</code> says.</p></div>
     <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
   <section id="page-tables" aria-labelledby="tables-h" hidden>
-    <div class="page-head"><h2 id="tables-h">Tables</h2><p class="desc">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p></div>
+    <div class="page-head"><h2 id="tables-h">Tables</h2><p class="desc">The database's tables, as <code>mason tables</code> lists them. Add one and Mason syncs it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its synced data, as <code>mason remove</code> does.</p></div>
     <div id="tables-cards"></div>
     <!-- each label in a field with its control, as the request filters are: on a phone a field is a row, never a label left at a line's end -->
     <div class="toolbar">
@@ -49,7 +49,7 @@
   <section id="page-queries" aria-labelledby="queries-h" hidden>
     <!-- an Observability view's head is ONE row: its title left, the time range the three share right (src/web/app.js renderSubnav) -->
     <div class="page-head"><div class="head-row"><h2 id="queries-h">Queries</h2><div id="range-queries" class="head-range"></div></div><p class="desc">Every statement the Postgres API answered, refused or cancelled, as <code>mason logs --requests</code> lists them, newest first, over the time range. Who is connected, what runs now and the range's numbers are on <a href="#observability/usage">Usage</a>.</p></div>
-    <p class="lead">Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone. A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed.</p>
+    <p class="lead">Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone. A statement that reads no synced table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed.</p>
     <form id="request-filters" class="toolbar" autocomplete="off">
       <div class="field"><label for="rq-status">Status</label>
         <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="refused">Refused</option><option value="failed">Failed</option><option value="refused-or-failed">Refused or failed</option><option value="cancelled">Cancelled</option></select></div>
@@ -80,7 +80,7 @@
     <div id="users"></div>
   </section>
   <section id="page-usage" aria-labelledby="usage-h" hidden>
-    <div class="page-head"><div class="head-row"><h2 id="usage-h">Usage</h2><div id="range-usage" class="head-range"></div></div><p class="desc">What the Postgres API answered over the time range — who connected, what ran, the SQL it refused as unsupported — and each copy's size, as <code>mason status</code>, <code>mason logs</code> and <code>mason usage</code> say them. A client or a card leads to its statements on <a href="#observability/queries">Queries</a>.</p></div>
+    <div class="page-head"><div class="head-row"><h2 id="usage-h">Usage</h2><div id="range-usage" class="head-range"></div></div><p class="desc">What the Postgres API answered over the time range — who connected, what ran, the SQL it refused as unsupported — and each synced table's size, as <code>mason status</code>, <code>mason logs</code> and <code>mason usage</code> say them. A client or a card leads to its statements on <a href="#observability/queries">Queries</a>.</p></div>
     <div id="usage-kpis"></div>
     <div id="usage-charts"></div>
     <h3 id="usage-connected-h">Connected now</h3>
@@ -92,11 +92,11 @@
     <div id="unsupported"></div>
     <h3>Over time</h3>
     <div id="usage-hourly"></div>
-    <h3>Each copy's own size</h3>
+    <h3>Each synced table's own size</h3>
     <div id="usage-sizes"></div>
   </section>
   <section id="page-syncs" aria-labelledby="syncs-h" hidden>
-    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">The sync's events — each copy made, each failure and recovery, each sync asked by hand — as <code>mason logs --events</code> lists them, and the run's own log behind a details. A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).</p></div>
+    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">The sync's events — each first sync, each failure and recovery, each sync asked by hand — as <code>mason logs --events</code> lists them, and the run's own log behind a details. A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).</p></div>
     <div class="toolbar"><div id="syncs-filters" class="fields"></div><label class="check" for="syncs-failures-only"><input type="checkbox" id="syncs-failures-only"> Failures only</label></div>
     <div id="syncs-events"></div>
     <div id="syncs-run"></div>

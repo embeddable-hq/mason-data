@@ -81,7 +81,7 @@ export const END_GRACE_MS = 15_000;
 export function notAnswering(p: Project, run: DevRun): Problem {
   return { problem: `Mason for ${p.config.name} is running (pid ${run.pid}) but does not answer its commands (${run.control.url}, 3 s)`, code: "not_answering",
     why: "a statement may be holding its main thread",
-    next: [["mason stop", `end it (SIGTERM, then SIGKILL after ${END_GRACE_MS / 1000} s); its copy stays and the next mason start resumes`], ["mason logs", "what it was doing"]] };
+    next: [["mason stop", `end it (SIGTERM, then SIGKILL after ${END_GRACE_MS / 1000} s); its synced data stays and the next mason start resumes`], ["mason logs", "what it was doing"]] };
 }
 
 /** Whether `pid` is a Mason run, by its command line (`mason start … --attach`, src/cli/background.ts). ps exits 1 for a pid that is gone. */

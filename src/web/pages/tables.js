@@ -80,7 +80,7 @@ const failedTable = (t) => t.added && (t.sync?.state === "failed" || Boolean(t.e
 
 /** What brought a copy current, in a web developer's words (`/api/state` `tables[].sync.syncedBy` keeps the mechanism's
  *  name for an operator: copy, poll, catch-up, stream). */
-export const SYNCED_BY = { copy: "copied whole", poll: "changes checked", "catch-up": "changes checked", stream: "streamed" };
+export const SYNCED_BY = { copy: "read whole", poll: "changes checked", "catch-up": "changes checked", stream: "streamed" };
 /** How long a sync took, as the commands say it (`spanText`) but for one under a tenth of a second, which is not worth a
  *  digit: `<0.1 s`; what did it is the cell's title (`tookTitle`: the column stays narrow enough for Sync and Remove). */
 export const tookText = (y) => y.syncSeconds < 0.1 ? "<0.1 s" : spanText(y.syncSeconds);
@@ -103,15 +103,15 @@ export function addedLines(b, file) {
       `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason add ${name} --sync replication keeps it current from the change log`
     : b.notReplicated ? `sync: poll 5m written on its entry, not the file's replication: ${b.notReplicated} — ` +
       `mason add ${name} --sync "poll 1h" polls it hourly; mason add ${name} --sync off reads it only by mason sync ${name}`
-    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first copy it is read again only by mason sync ${name} — ` +
+    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first sync it is read again only by mason sync ${name} — ` +
       `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
-    : b.sync.value === "replication" ? `sync: replication (${b.sync.from === "entry" ? "its entry's" : "the file's"}): kept current from the database's change log after its first copy — ` +
+    : b.sync.value === "replication" ? `sync: replication (${b.sync.from === "entry" ? "its entry's" : "the file's"}): kept current from the database's change log after its first sync — ` +
       `mason add ${name} --sync "poll 5m" polls it instead`
-    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first copy — mason add ${name} --sync off stops that`;
-  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first sync — mason add ${name} --sync off stops that`;
+  return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, keyed by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
     sync,
     ...(b.pollCost !== null ? [b.pollCost] : []),
-    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a copy always has its key)`] : []),
+    ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a synced table always has its key)`] : []),
     ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
       `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
   ] };
@@ -120,7 +120,7 @@ export function addedLines(b, file) {
 /** What `mason remove` prints for the tables removed (src/cli/commands.ts `removedReport`). */
 export function removedReport(removed, file) {
   return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
-    tips: [`Mason stops copying ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its copy" : "their copies"}`] };
+    tips: [`Mason stops syncing ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its synced data" : "their synced data"}`] };
 }
 
 /**
@@ -175,9 +175,9 @@ export function renderTablesCards(s) {
   const added = s.tables.filter((x) => x.added).length;
   return cards([
     card("Tables added", `${n(added)} of ${n(s.tables.length)}`, "in the database"),
-    card("Synced", n(t.copied), `of ${n(added)} added${copyingCount(s) ? `, ${n(copyingCount(s))} copying` : ""}`),
+    card("Synced", n(t.copied), `of ${n(added)} added${copyingCount(s) ? `, ${n(copyingCount(s))} syncing` : ""}`),
     card("Failed", n(t.failed), `of ${n(added)} added`, "", t.failed ? "bad" : ""),
-    card("Rows", n(t.rows), "in the copies"),
+    card("Rows", n(t.rows), "in the synced tables"),
   ]);
 }
 
@@ -270,7 +270,7 @@ export function renderTables(s, ui = {}) {
     }
     return `<tr class="${t.added ? `c-added s-${y?.state ?? "unknown"}` : t.reason ? "c-cannot" : "c-not"}${said_ ? " has-note" : ""}"><th scope="row" class="name"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td class="state">${state}${bar}</td>${cell(rows, "num")}${cell(f.key, "mono", f.key)}${last}` +
-      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a copy's size is measured every 10 min")) : cell("", "num")}` +
+      `${t.added ? (sizeOf.has(t.table) ? cell(bytesText(sizeOf.get(t.table)), "num") : cell("—", "num", "not measured yet: a synced table's size is measured every 10 min")) : cell("", "num")}` +
       `<td class="act" id="${esc(anchor)}">${act}</td></tr>` + note;
   };
   const added = s.tables.filter((t) => t.added).length;
@@ -282,13 +282,13 @@ export function renderTables(s, ui = {}) {
   // at most `limit` rows written (the one a form or a confirm is open on always): a database of 800 tables costs 100 rows
   const written = shown.filter((t, i) => i < limit || t.table === choosing || t.table === removing);
   const matching = filter.trim() ? `<p class="count dim">${n(shown.length)} with “${esc(filter.trim())}” in the name</p>` : "";
-  const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The copies' own sizes: could not read them (${esc(firstLine(sizes.failure.message))}; ${code("mason usage")} has them)</p>` : "";
+  const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The synced tables' own sizes: could not read them (${esc(firstLine(sizes.failure.message))}; ${code("mason usage")} has them)</p>` : "";
   const rowsHtml_ = written.map(line).join("");
   return stray + (added ? "" : empty("No table added yet", `Add one from the list, as ${code("mason add <table>")} does.`)) + matching +
     panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +
       `<tbody>${rowsHtml_}</tbody></table>`) + pops.join("") + moreRows("tables", Math.min(limit, shown.length), shown.length, TABLE_ROWS) +
     (!shown.length ? `<p class="dim">No ${show === "added" ? "added " : show === "failed" ? "failed " : show === "not-added" ? "table that is not added, " : ""}table${filter.trim() ? `'s name has “${esc(filter.trim())}”` : ""}.</p>` : "") + sizesFailed +
-    (added ? `<p class="dim">A copy's own size is measured every 10 minutes (${code("mason usage")}).</p>` : "");
+    (added ? `<p class="dim">A synced table's own size is measured every 10 minutes (${code("mason usage")}).</p>` : "");
 }
 
 export const page = {

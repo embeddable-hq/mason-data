@@ -17,8 +17,8 @@
  *  - THE TYPE MATRIX (oracle/type-matrix.ts): every common column type sorted, grouped, compared, computed, cast and
  *    aggregated, over edge values (NaN, infinities, -0, a bigint past 2^53);
  *  - THE GAP CASES (oracle/gap-cases.ts): one statement for each entry of src/duck/gaps.ts nothing else meets;
- *  - every copied table, whole, as text: the copy itself is held to the source;
- * after the first copy, and again after each round of changes (oracle/data.ts `mutations`) the poll carries. After
+ *  - every synced table, whole, as text: the copy itself is held to the source;
+ * after the first sync, and again after each round of changes (oracle/data.ts `mutations`) the poll carries. After
  * the copy, each statement both answered alike is asked again in THE SHAPES a tool wraps it in (oracle/shapes.ts: a
  * subquery, a CTE, a UNION ALL, its filter's values as parameters, its columns by Postgres's names, its ORDER BY
  * outside the derived table; `IT_ORACLE_SHAPES=0` leaves them out).

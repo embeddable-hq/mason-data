@@ -63,10 +63,10 @@ test("mason --help lists the commands; a misspelt one is answered with the close
   assert.equal(bare.status, 0);
   assert.notEqual(bare.stdout, topUsage());
   // what Mason is, in the words its reader was told it: a drop-in read replica, for analytics
-  assert.ok(bare.stdout.startsWith("Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, copied, kept current and served to psql, BI tools and your app.\n  Project   "), bare.stdout);
+  assert.ok(bare.stdout.startsWith("Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, synced, kept current and served to psql, BI tools and your app.\n  Project   "), bare.stdout);
   // and --help opens with the same line, then how to try it with nothing installed
   const lines = topUsage().split("\n");
-  assert.equal(lines[2], "  Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, copied, kept current and served to psql, BI tools and your app. " +
+  assert.equal(lines[2], "  Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, synced, kept current and served to psql, BI tools and your app. " +
     "Make your app's folder a project (mason init), add tables (mason add, before or after the start), start Mason (mason start), connect a tool (mason user add). It needs Node 22.13 or later; mason doctor checks.");
   assert.equal(lines[3], "  Try it first with nothing to install: mason init demo, then mason start and mason ui (a demo shop database, hosted by Mason itself).");
   assert.match(bare.stdout, /\n {2}mason help {36}every command, and the guides\n$/);
@@ -196,8 +196,8 @@ test("mason add and mason remove need the project, not the run: their help says 
   // the sources file is the list: mason init && mason add orders && mason start is a natural order
   const c = (name: string) => COMMANDS.find((x) => x.name === name)!;
   assert.deepEqual(["tables", "add", "remove"].map((n) => c(n).needs), ["project", "project", "project"]);
-  assert.match(c("add").usage, /Before\s+mason start \(mason init && mason add orders && mason start\) the entry is written, checked against the database as\s+the run checks it, and the copy begins at mason start/);
-  assert.match(c("remove").usage, /with Mason\s+stopped, a copy an earlier run made is dropped at the next mason start/);
+  assert.match(c("add").usage, /Before\s+mason start \(mason init && mason add orders && mason start\) the entry is written, checked against the database as\s+the run checks it, and the first sync begins at mason start/);
+  assert.match(c("remove").usage, /with Mason\s+stopped, what an earlier run synced is dropped at the next mason start/);
   assert.match(topUsage(PLAIN), /a project \(mason init\), add tables \(mason add, before or after the start\), start Mason \(mason start\), connect a tool/);
 });
 
@@ -250,7 +250,7 @@ test("a failure to stderr is styled as stderr is, with a red ✘ and a bold mess
 test("mason init --help says the demo adds three of its tables and leaves order_items for the first mason add", () => {
   const r = mason("init", "--help");
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /\n {2}orders, order_items\): mason start makes it in \.mason\/demo\/ and changes it every few seconds\. Three of its tables are\n {2}added; the fourth is yours to add after mason start \(mason add order_items\), to watch its copy begin\.\n/);
+  assert.match(r.stdout, /\n {2}orders, order_items\): mason start makes it in \.mason\/demo\/ and changes it every few seconds\. Three of its tables are\n {2}added; the fourth is yours to add after mason start \(mason add order_items\), to watch its first sync begin\.\n/);
 });
 
 test("mason serve --help lists GET /metrics beside /healthz, on MASON_HEALTH_PORT's line, and says it is numbers only", () => {

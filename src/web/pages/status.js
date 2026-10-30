@@ -45,7 +45,7 @@ export function copyingText(copied, rowsEstimate, p) {
   const chunks = (k) => `${k} chunk${k === 1 ? "" : "s"}`;
   if (p.rowsPerSecond === null) {
     const first = p.reading === 0 ? "about to read the first chunk" : `reading the first ${p.reading === 1 ? "chunk" : chunks(p.reading)}${since}`;
-    return { fraction, text: copied === 0 ? `${first}${estimate === null ? "" : ` · ~${n(estimate)} rows to copy`}` : `${rowsText(copied)} · resumed, ${first}` };
+    return { fraction, text: copied === 0 ? `${first}${estimate === null ? "" : ` · ~${n(estimate)} rows to sync`}` : `${rowsText(copied)} · resumed, ${first}` };
   }
   const parts = [rowsText(shown)];
   const allIn = p.reading === 0 && p.chunksDone >= p.chunksTotal;
@@ -62,18 +62,18 @@ export function copyingText(copied, rowsEstimate, p) {
  * current and how old its copy is (`keptAge`).
  */
 export function tableLine(t, now = Date.now()) {
-  if (t.error) return { state: "failed", fraction: 1, what: `its copy failed: ${firstLine(t.error)}` };
+  if (t.error) return { state: "failed", fraction: 1, what: `its first sync failed: ${firstLine(t.error)}` };
   if (t.copy?.phase === "copying") {
     const c = copyingText(t.copy.rowsCopied, t.rows, t.copy.progress);
-    return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `copying ${c.text}` : c.text };
+    return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `syncing ${c.text}` : c.text };
   }
-  if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its copy to start" };
+  if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its first sync to start" };
   const age = keptAge(t, now);
   // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
   if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && (t.kept.state !== "streamed" || t.kept.notRunning !== null))) {
-    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
+    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
   }
-  return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
+  return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
 }
 
 /** How long ago a table was synced, as `mason status` says it on its line (src/lib/table-sync.ts `agoText`, which
@@ -116,7 +116,7 @@ export function copyBar(table, l, fraction = l.fraction, _from) {
   const waiting = l.state === "waiting";
   const value = Math.floor(Math.max(0, Math.min(1, fraction)) * 100);
   return `<span class="copybar${waiting ? " indeterminate" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100"` +
-    `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: its copy`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}">` +
+    `${waiting ? "" : ` aria-valuenow="${value}"`} aria-label="${esc(`${table}: its first sync`)}" aria-valuetext="${esc(waiting ? l.what : `${value}%, ${l.what}`)}">` +
     `<span class="track" aria-hidden="true"><span class="fill"${waiting ? "" : ` style="width: ${value}%"`}></span></span></span>` +
     // a copy not begun has no share yet: no "0%" at its end (its line says it waits)
     (waiting ? "" : ` <span class="pct">${percent(fraction)}</span>`);
@@ -174,7 +174,7 @@ export function readinessWord(r) {
 /** The copies in all, as mason status's `Copies` row says them (src/cli/commands.ts `totalsText`). */
 export function totalsText(t, now = Date.now()) {
   const last = t.syncedAt === null ? "" : `, the last synced ${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`;
-  return `${n(t.copied)} of ${n(t.added)} added copied, ${n(t.rows)} row${t.rows === 1 ? "" : "s"}${t.failed ? `, ${n(t.failed)} failed` : ""}${last}`;
+  return `${n(t.copied)} of ${n(t.added)} added synced, ${n(t.rows)} row${t.rows === 1 ? "" : "s"}${t.failed ? `, ${n(t.failed)} failed` : ""}${last}`;
 }
 
 /** The word at the top of the page: the run's readiness ("" with no table added: `renderStatus` says so, and what adds one). */
@@ -185,7 +185,7 @@ export function renderHealth(s) {
 }
 
 /** The sparklines the cards draw, by holder key: a usage sample's field each (src/web/charts.js specs). */
-const SPARKS = { rows: ["copyRows", "Rows copied"], "copy-bytes": ["copyBytes", "The copy's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
+const SPARKS = { rows: ["copyRows", "Rows synced"], "copy-bytes": ["copyBytes", "The synced data's file"], statements: ["statements", "Statements"], p95: ["durationP95Ms", "p95"] };
 
 /** The sparklines' specs from the usage answer (`/api/usage`'s body; anything else draws none): what `charts()` returns. */
 export function sparkSpecs(usage) {
@@ -211,12 +211,12 @@ export function renderKpis(s, o = {}) {
   // as renderStatus judges it: a table added (the totals count what the sources file names)
   const added = Boolean(t) && s.tables.some((x) => x.added);
   if (added) list.push(
-    card("Tables synced", `${n(t.copied)} of ${n(t.added)}`, `added${t.failed ? `, ${n(t.failed)} failed` : ""}${copyingCount(s) ? `, ${n(copyingCount(s))} copying` : ""}`, "", t.failed ? "bad" : "", t.failed ? LINKS.failedTables : LINKS.tables),
+    card("Tables synced", `${n(t.copied)} of ${n(t.added)}`, `added${t.failed ? `, ${n(t.failed)} failed` : ""}${copyingCount(s) ? `, ${n(copyingCount(s))} syncing` : ""}`, "", t.failed ? "bad" : "", t.failed ? LINKS.failedTables : LINKS.tables),
     card("Rows", n(t.rows), "", line("rows"), "", LINKS.tables),
     t.syncedAt === null ? card("Last sync", "none yet", "", "", "", LINKS.tables) : card("Last sync", `${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`, `${utcText(t.syncedAt)} UTC`, "", "", LINKS.tables));
   const d = s.disk;
   const copyBytes = s.engine.bytes ?? (d && typeof d.copyBytes === "number" ? d.copyBytes : null);
-  if (added || copyBytes !== null) list.push(copyBytes === null ? card("The copy's file", "unknown", "its size could not be read", "", "", LINKS.usage) : card("The copy's file", fileSize(copyBytes), "", line("copy-bytes"), "", LINKS.usage));
+  if (added || copyBytes !== null) list.push(copyBytes === null ? card("The synced data's file", "unknown", "its size could not be read", "", "", LINKS.usage) : card("The synced data's file", fileSize(copyBytes), "", line("copy-bytes"), "", LINKS.usage));
   const q = o.queries;
   if (added && q !== undefined) {
     if ("failure" in q) list.push(card("Statements, last day", "unknown", `could not read them: ${firstLine(q.failure.message)}`, "", "", LINKS.queries));
@@ -279,15 +279,15 @@ function renderProgress(s, isOpen = () => false, shares = new Map(), before = ne
   const picked = s.tables.filter((t) => t.added);
   if (!picked.length) {
     return `<p class="readiness">No table added yet (${n(s.tables.length)} in the database).</p>` +
-      `<p class="dim">${code("mason tables")} lists them; ${code("mason add <table>")} copies one.</p>`;
+      `<p class="dim">${code("mason tables")} lists them; ${code("mason add <table>")} syncs one.</p>`;
   }
   // as tableLines orders them: the finished first, in the order they finished, then the failed, the copying, the waiting
   const rank = { done: 0, unsynced: 0, failed: 1, copying: 2, waiting: 3 };
   const lines = picked.map((t) => ({ t, l: tableLine(t) })).filter(({ l }) => l.state !== "done")
     .sort((a, b) => rank[a.l.state] - rank[b.l.state] || (a.t.copy?.updatedAt ?? "").localeCompare(b.t.copy?.updatedAt ?? "") || a.t.table.localeCompare(b.t.table));
   if (!lines.length) return "";
-  return `<h3>Copies not finished (${lines.length} of ${picked.length} added)</h3>` +
-    `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Copy</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
+  return `<h3>Tables not synced yet (${lines.length} of ${picked.length} added)</h3>` +
+    `<table class="tables"><thead><tr><th scope="col">Table</th><th scope="col">Sync</th><th scope="col"></th></tr></thead><tbody>${lines.map(({ t, l }) =>
       `<tr class="t-${l.state}"><th scope="row"><code class="name" title="${esc(t.table)}">${esc(t.table)}</code></th>` +
       `<td class="bar">${copyBar(t.table, l, shares.get(t.table) ?? l.fraction, before.get(t.table))}</td>` +
       `<td class="what">${esc(l.what)}${t.error && t.error.includes("\n") ? details(`error:${t.table}`, "the whole error", `<pre>${esc(t.error)}</pre>`, isOpen(`error:${t.table}`)) : ""}</td></tr>`).join("")}</tbody></table>`;
@@ -378,10 +378,10 @@ export function renderChecklist(s, queries, users) {
   const copying = added && !copied && copyingCount(s) > 0;
   const steps = [
     ["Mason is running", true, ""],
-    ["A table copied", copied, copying ? `<span class="dim">copying now</span>` : added ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
+    ["A table synced", copied, copying ? `<span class="dim">syncing now</span>` : added ? "" : `<a class="btn small primary" href="${LINKS.tables}">Add a table</a>`],
     ["A user created", user, `<a class="btn small${copied ? " primary" : ""}" href="#users">Create a user</a>`],
     // the psql line is Connect's (rendered under the checklist once a table is added): its Copy copies it
-    ["A first statement answered", answered, copied ? `${`<button type="button" class="small${user ? " primary" : ""}" data-copy="connect-psql">Copy the psql line</button>`} <span class="dim">then run a select on a copied table</span>` : ""],
+    ["A first statement answered", answered, copied ? `${`<button type="button" class="small${user ? " primary" : ""}" data-copy="connect-psql">Copy the psql line</button>`} <span class="dim">then run a select on a synced table</span>` : ""],
   ];
   const done = steps.filter(([, ok]) => ok).length;
   return `<div class="checklist" role="group" aria-label="Getting started"><p class="checklist-title"><span class="courses" aria-hidden="true">${steps.map(([, ok]) => `<i${ok ? ' class="on"' : ""}></i>`).join("")}</span>Getting started <span class="dim">${done} of ${steps.length} done</span></p><ol>` +

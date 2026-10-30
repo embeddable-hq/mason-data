@@ -165,7 +165,7 @@ export function countsText(c) {
 export function slotText(w, since) {
   if ("error" in w) return `the WAL it holds could not be read: ${w.error.split("\n")[0]}`;
   const read = `(read ${spanText(since(w.at))} ago)`;
-  if (w.walStatus === "lost") return `lost: Postgres invalidated it (it held more WAL than max_slot_wal_keep_size), so Mason makes it again and catches the copies up by one poll ${read}`;
+  if (w.walStatus === "lost") return `lost: Postgres invalidated it (it held more WAL than max_slot_wal_keep_size), so Mason makes it again and catches the synced tables up by one poll ${read}`;
   const cap = w.safeWalSizeBytes === null
     ? "max_slot_wal_keep_size is unset, so nothing caps it: while nothing reads the slot it holds WAL for ever, until the database's disk fills (set max_slot_wal_keep_size on the database)"
     : w.safeWalSizeBytes <= 0 ? "past max_slot_wal_keep_size: Postgres invalidates it at its next checkpoint, and Mason makes it again"
@@ -195,9 +195,9 @@ export function sessionsRows(s) {
  *  it says "where the copy is" for ` in <path>` (the tests hold the rest equal). */
 export function diskRows(d) {
   if (d === undefined) return [];
-  const adds = d.projectedBytes === null ? "" : ` · the copies running are projected to add about ${fileSize(d.projectedBytes)} more`;
+  const adds = d.projectedBytes === null ? "" : ` · the first syncs running are projected to add about ${fileSize(d.projectedBytes)} more`;
   if (d.freeBytes === null) return [["Disk", `${d.error ?? "the free space could not be read"}${adds}`]];
-  return [["Disk", `${fileSize(d.freeBytes)} free where the copy is${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the copy stops before the disk fills" : ""}`]];
+  return [["Disk", `${fileSize(d.freeBytes)} free where the synced data is${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the sync stops before the disk fills" : ""}`]];
 }
 
 /** `Restarts` in mason status (src/cli/commands.ts `restartsRows`; its `ago` is `agoText`): none, no row. */
@@ -453,8 +453,8 @@ export function copyClick(d, button, { doc, win }) {
 }
 
 /** What the request log does not list (src/cli/commands.ts `UNLISTED_STATEMENTS`, held equal by the tests): a statement
- *  that reads no copied table is the catalog's to answer, and not recorded — so a `select 1` never shows on Queries. */
-export const UNLISTED_STATEMENTS = "A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed";
+ *  that reads no synced table is the catalog's to answer, and not recorded — so a `select 1` never shows on Queries. */
+export const UNLISTED_STATEMENTS = "A statement that reads no synced table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed";
 
 /** The hash of the page that makes a user (src/web/app.js PAGES): where Connect's Create a user leads. */
 export const USERS_HASH = "#users";

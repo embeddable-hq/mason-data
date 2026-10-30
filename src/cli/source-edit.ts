@@ -59,7 +59,7 @@ export function pollCost(t: Pick<SourceTable, "source" | "rows">, sync: TableSyn
   if (sync.mode !== "poll" || sync.seconds >= COSTLY_POLL_SECONDS || t.rows === null || t.rows < COSTLY_POLL_ROWS) return null;
   const rows = t.rows.toLocaleString("en-US");
   const [seconds, basis] = m?.lastPollMs != null ? [m.lastPollMs / 1000, "its last poll, measured"]
-    : m?.copyRowsPerSecond ? [t.rows / m.copyRowsPerSecond, `its copy's read rate, ${Math.round(m.copyRowsPerSecond).toLocaleString("en-US")} rows a second a reader (a poll sends only the rows that changed, so it is at most that)`]
+    : m?.copyRowsPerSecond ? [t.rows / m.copyRowsPerSecond, `its first sync's read rate, ${Math.round(m.copyRowsPerSecond).toLocaleString("en-US")} rows a second a reader (a poll sends only the rows that changed, so it is at most that)`]
     : [t.rows / ASSUMED_SCAN_ROWS_PER_SECOND, `the catalog's ${rows} rows at an assumed ${ASSUMED_SCAN_ROWS_PER_SECOND.toLocaleString("en-US")} rows a second of scan (nothing of it measured yet)`];
   const every = Math.max(sync.seconds, 4 * seconds);
   const s = (x: number): string => x < 90 ? `${Math.round(x)} s` : x < 5400 ? `${Math.round(x / 60)} min` : `${(x / 3600).toFixed(1)} h`;
@@ -103,13 +103,13 @@ export interface PickResult {
   file: string;
   /** the entry's key (`orders`, `billing.invoices`), and what it copies */
   entry: string; columns: string[] | null; exclude: string[]; key: string[] | null;
-  /** the key's columns added to a --columns list (a copy always has its key) */
+  /** the key's columns added to a --columns list (a synced table always has its key) */
   addedKey: string[];
   /** secret-looking columns every-column left out (sources.ts looksSecret) */
   skippedSecrets: string[];
   /** the file named it so already: nothing was written */
   already: boolean;
-  /** how it is kept current after its first copy (src/lib/table-sync.ts syncText), and where that is said: its entry's
+  /** how it is kept current after its first sync (src/lib/table-sync.ts syncText), and where that is said: its entry's
    *  own `sync:` (written by --sync, or `off` for a big table), the file's top `sync:`, or the default (`off`) */
   sync: { value: string; from: "entry" | "file" | "default" };
   /** the table is over BIG_TABLE_ROWS and the file's default polls: its entry was written `sync: off`, said */
@@ -139,7 +139,7 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   o: { sync?: TableSync; keep?: boolean } = {}): PickResult {
   const t = db.tables.find((x) => x.source === table);
   if (!t) throw new Refusal(404, `${table} is not a table of ${db.database} that this user can read`);
-  if (key !== null && t.key.length) throw new Refusal(400, `${table} has a primary key (${t.key.join(", ")}), which Mason copies it by: leave --key out`);
+  if (key !== null && t.key.length) throw new Refusal(400, `${table} has a primary key (${t.key.join(", ")}), which Mason keys it by: leave --key out`);
   if (key === null && !t.key.length) throw new Refusal(409, `${table} cannot be added: ${unaddableReason(t)}`);
   const was = at.parsed.tables.find((e) => e.table === table);
   const keep = o.keep === true && was !== undefined;

@@ -35,19 +35,19 @@ export const DEV: CommandSpec & { needs: "project" } = {
   summary: "start Mason for this folder's project, in the background (mason init makes the project)",
   usage: `usage: mason start [--attach] [--self-signed-tls] [--port <n>] [--json]
 
-  Starts Mason for the project of this folder (mason init made it): one process, which copies the tables you add
+  Starts Mason for the project of this folder (mason init made it): one process, which syncs the tables you add
   (mason add) from the project's database into its own file, keeps them current as the sources file says, and answers
   the Postgres protocol for BI tools and your app. It only reads the database (SELECT, and a table's change log when
   its sync: says replication). It returns once Mason is up; run it again any time (it says so when Mason is
-  already running). The copy and Mason's state stay between runs: the next start resumes.
+  already running). The synced data and Mason's state stay between runs: the next start resumes.
 
-  After its first copy, each table is kept current as the sources file's sync: says — at the top for every table, or
+  After its first sync, each table is kept current as the sources file's sync: says — at the top for every table, or
   on a table's entry: off (the default, which mason init writes) reads it again only when you run mason sync <table>;
   poll <interval> (poll 5s, poll 5m, poll 1h) polls it with SELECTs at that interval; replication reads its changes
   from the database's change log, as they are made. Each poll scans its table whole
   on your database, and the next waits at least four times as long as that poll took, so the polls never take more
   than a fifth of your database's time. The start says the file's default once; mason status says how each table is
-  kept current and when it was last synced. A table whose sync: changed keeps its copy and is caught up by one poll.
+  kept current and when it was last synced. A table whose sync: changed keeps its synced data and is caught up by one poll.
 
   A table under sync: replication needs wal_level = logical, a user that may replicate, and a primary key (a key:
   table is polled): Mason makes one replication slot for the project and its own publication, carrying the replicated
@@ -171,7 +171,7 @@ export const COMMANDS: readonly Command[] = STEPS.flatMap(([, commands]) => comm
  */
 /** WHAT MASON IS, in one line: the first `mason` alone and `mason --help` print, in the words its reader was told it
  *  in ("a drop-in read replica for analytics"). */
-export const TAGLINE = "Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, copied, kept current and served to psql, BI tools and your app.";
+export const TAGLINE = "Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, synced, kept current and served to psql, BI tools and your app.";
 
 export async function orientation(cwd: string, s: Style = styleOut()): Promise<string> {
   const t = theProject(cwd);

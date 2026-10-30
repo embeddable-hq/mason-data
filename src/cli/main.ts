@@ -30,11 +30,11 @@ async function main(argv: string[]): Promise<number> {
     dev: { message: "mason dev is now mason start", next: [["mason init <postgres url>", "once, in your app's folder"], ["mason start", "Mason in the background"]] },
     docs: { message: "mason docs is now mason help", next: [["mason help agent", "driving Mason from a coding agent"], ["mason help production", "running Mason on a server"]] },
     // named for what it does to the copy, never for the mechanism
-    poll: { message: "mason poll is now mason sync", next: [["mason sync <table>", "make the copy of a table current now"], ["mason status", "each table's copy, and which the sync leaves out"]] },
-    purge: { message: "mason purge is now mason destroy", next: [["mason destroy", "this folder's project: its copy and state, never its files"]] },
+    poll: { message: "mason poll is now mason sync", next: [["mason sync <table>", "bring a synced table up to date now"], ["mason status", "each synced table, and which the sync leaves out"]] },
+    purge: { message: "mason purge is now mason destroy", next: [["mason destroy", "this folder's project: its synced data and state, never its files"]] },
     // mason rm read as the opposite of mason add: it removed a project's copy and state, never a table;
     // the opposite of mason add is mason remove, so both are offered
-    rm: { message: "mason rm is gone: mason remove takes a table out of the project, mason destroy removes the project's copy", next: [["mason remove <table>", "a table, and its copy"], ["mason destroy", "this folder's project: its copy and state, never its files"]] },
+    rm: { message: "mason rm is gone: mason remove takes a table out of the project, mason destroy removes the project's synced data", next: [["mason remove <table>", "a table, and its synced data"], ["mason destroy", "this folder's project: its synced data and state, never its files"]] },
     // a user's password does not expire, so mason user is enough and mason connect was dropped
     connect: { message: "mason connect is gone: mason user add <name> makes a user whose password does not expire, and prints the URL to paste", next: [["mason user add <name>", "a user for a BI tool or your app"], ["mason status", "where the Postgres API listens"]] },
     // a project is its folder (mason list was dropped): nothing on the machine lists them
