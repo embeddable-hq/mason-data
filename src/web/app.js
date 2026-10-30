@@ -35,7 +35,10 @@
  *       input?(target)  an input changed: null when not its
  *       toggle?(target)  a <details> opened or closed: null when not its, else a value or a promise (as `click`);
  *                      a details that must stay open across a refresh is `details(key, …)` of shared.js, its open set
- *                      `createOpenSet()` in the page's state, whose `toggle` this is
+ *                      `createOpenSet()` in the page's state, whose `toggle` this is. `target` is the element (its
+ *                      toggle event) or, for a click on its summary, `{ id, dataset, open, clicked: true }`: `open`
+ *                      what the click asks for, BEFORE the element changes; clicked, a details the page keeps is
+ *                      answered (true) even when its state already says so, the shell writing it again
  *       charts?()      { <holder key>: spec }: the charts drawn in its holders after each write (src/web/charts.js; a
  *                      progressive addition: every number a chart draws is also text)
  *       route?(params, { doc })  the hash showed it with these parameters (`#tables?show=failed`: { show: "failed" }):
@@ -60,6 +63,11 @@ import { page as syncsPage } from "./pages/syncs.js";
 
 /** What the shell itself reads when the page shown does not: the state (the sidebar's project, badge and version). */
 const SHELL_STATE = { path: "/api/state", everyMs: 60_000 };
+
+/** A text that moves with the clock (an age, a running time), and a part's HTML without them: `paint` sets those
+ *  texts in place when nothing else changed. */
+const TICK = /(<time data-tick[^>]*>)([^<]*)(<\/time>)/g;
+const steady = (html) => html.replace(TICK, "$1$3");
 
 /** The longest a pointer's press holds the page's writes (a click is well under it): see `pressedAt`. */
 export const PRESS_HOLD_MS = 2000;
@@ -276,9 +284,17 @@ export function start(doc, win) {
     for (const p of PAGES) { const section = doc.getElementById(`page-${p.id}`); if (section) section.hidden = p.id !== app.model.shown; }
     for (const [id, html] of Object.entries(app.view())) {
       const el = doc.getElementById(id);
-      if (el === null || written.get(id) === html) continue;
-      el.innerHTML = html;
+      const was = written.get(id);
+      if (el === null || was === html) continue;
       written.set(id, html);
+      // only the clock moved (an age, a running time: `<time data-tick>`): those texts set where they are, the part
+      // not replaced — a rewrite each second dropped what the reader had in it (a selection, the focus, a details' click)
+      if (was !== undefined && steady(was) === steady(html) && typeof el.querySelectorAll === "function") {
+        const texts = [...html.matchAll(TICK)].map((m) => m[2]);
+        const times = [...el.querySelectorAll("time[data-tick]")];
+        if (times.length === texts.length) { times.forEach((t, i) => { t.innerHTML = texts[i]; }); continue; }
+      }
+      el.innerHTML = html;
     }
     if (charts !== null) void charts.mount(app.pages.get(app.model.shown).charts?.() ?? {});
     place();
@@ -310,6 +326,9 @@ export function start(doc, win) {
     if (again) { again = false; await poll(); }
   };
   const shownPage = () => app.pages.get(app.model.shown);
+  // what a page answered an event with: the page written at once (what the action set before it asked: Syncing…), and
+  // again when it is answered
+  const act = async (r) => { paint(); await r; paint(); };
   // THE PHONE'S MENU: the sidebar's nav as a sheet, opened by its button (shown below 640 px only). Open, the focus is
   // on its first link; Escape, a click outside it, the focus leaving it or a link followed close it, the focus back on
   // the button (but when the focus left by itself, to where it went)
@@ -334,27 +353,25 @@ export function start(doc, win) {
     const r = shownPage().submit?.(e.target, win.FormData) ?? null;
     if (r === null) return;
     e.preventDefault();
-    // written at once (what the action set before it asked: Syncing…), and again when it is answered
-    paint();
-    await r;
-    paint();
+    await act(r);
   });
   doc.addEventListener("click", async (e) => {
     const b = e.target.closest?.("button");
     if (b?.dataset.menu !== undefined) { setMenu(!menuOpen, true); return; }
     if (menuOpen && !inMenu(e.target)) { setMenu(false, true); return; }
     // A DETAILS' SUMMARY: opened or closed by the click itself, never by the toggle event the browser fires after it —
-    // a repaint between the two (a pointerup's, the ages of a live log moving every second) replaced the element, and
-    // the event, fired on the old one, never reached this document: a request's + took several clicks to open
-    const summary = b ? null : e.target.closest?.("summary");
+    // a repaint between the two (a pointerup's, a new row of a live log) replaced the element, and the event, fired on
+    // the old one, never reached this document: a request's + took several clicks to open. A link or a box inside a
+    // summary keeps its own click
+    const summary = b || e.target.closest?.("a, input, select, textarea, label") ? null : e.target.closest?.("summary");
     const det = summary?.parentElement;
     if (det?.tagName === "DETAILS") {
-      const r = shownPage().toggle?.({ id: det.id, dataset: det.dataset, open: !det.open }) ?? null;
+      const r = shownPage().toggle?.({ id: det.id, dataset: det.dataset, open: !det.open, clicked: true }) ?? null;
       if (r === null) return;   // a details the page keeps no state of: the browser opens it, as ever
       e.preventDefault?.();
-      paint();
-      await r;
-      paint();
+      // what was written there is no proof of what is shown (the element may disagree with the page's state): written again
+      for (const id of [...written.keys()]) if (doc.getElementById(id)?.contains?.(det)) written.delete(id);
+      await act(r);
       return;
     }
     if (!b) return;
@@ -362,9 +379,7 @@ export function start(doc, win) {
     if (b.dataset.refreshRange !== undefined) { app.markStale(); await poll(); return; }
     const r = shownPage().click?.(b.dataset, b, { doc, win }) ?? null;
     if (r === null) return;
-    paint();
-    await r;
-    paint();
+    await act(r);
   });
   doc.addEventListener("input", (e) => {
     if ((shownPage().input?.(e.target) ?? null) !== null) paint();
@@ -373,9 +388,7 @@ export function start(doc, win) {
   doc.addEventListener("toggle", async (e) => {
     const r = shownPage().toggle?.(e.target) ?? null;
     if (r === null) return;
-    paint();
-    await r;
-    paint();
+    await act(r);
   }, true);
   doc.addEventListener("pointerdown", () => { pressedAt = Date.now(); });
   for (const type of ["pointerup", "pointercancel"]) doc.addEventListener(type, () => { pressedAt = null; win.setTimeout(paint, 0); });

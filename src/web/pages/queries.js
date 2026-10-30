@@ -66,7 +66,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const [kind, word] = OUTCOME[r.outcome] ?? [undefined, String(r.outcome)];
     const row = `<tr class="s-${esc(word.toLowerCase())}"><td>${status(kind, word)}</td>` +
       `<td class="id">${details(key, r.requestId.slice(0, 8), "", open)}</td>` +
-      `<td class="when"><time datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td>` +
+      `<td class="when"><time data-tick datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td>` +
       `<td class="num">${esc(msText(r.durationMs))}</td><td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td>` +
       `<td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num">${r.rows === null ? "" : esc(n(r.rows))}</td><td class="stmt-cell">${statementCell(r.query)}${error}</td></tr>`;
