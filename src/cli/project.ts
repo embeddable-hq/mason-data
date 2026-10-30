@@ -20,7 +20,7 @@ import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Failure, Problem } from "./command.ts";
 import { connectDatabase, databaseSettingRefusal } from "../lib/database-name.ts";
-import { pollMsRetired } from "../lib/table-sync.ts";
+import { changesRetired, pollMsRetired } from "../lib/table-sync.ts";
 import { readSource, sourcesTop, writtenDatabase, type ProjectSource } from "./sources.ts";
 
 export const STATE_DIR = ".mason";
@@ -57,11 +57,13 @@ export interface ProjectConfig {
   /** the server the copy was taken from, recorded at the first start: a database moved to another server is read again */
   sourceServer?: { systemIdentifier: string | null; database: string } | null;
   /** how an OLDER Mason read the whole project's changes (its `mason start --replication` / `--poll`, both gone): never
-   *  written now, read only so a start whose sources file replicates nothing drops that older run's slot and says why,
-   *  and so mason destroy drops it; deleted by the first start (src/cli/dev.ts) */
+   *  written now, read so a start under a sources file silent on sync: is refused (src/cli/replication-mode.ts
+   *  recordRefusal), one whose file says otherwise drops that older run's slot and says why, and mason destroy drops it;
+   *  deleted by the first start that gets past that (src/cli/dev.ts) */
   changes?: "poll" | "replication";
-  /** replication: the publication an operator named (the sources file's `publication:`, or PG_PUBLICATION), read as it
-   *  is and never altered; absent or null when the run reads Mason's own (src/cli/replication-mode.ts) */
+  /** replication: the publication an operator named (the sources file's `publication:`, or PG_PUBLICATION; an older
+   *  Mason's --publication), read as it is and never altered; absent or null when the run reads Mason's own. Never read
+   *  for a start's publication: a start the file and PG_PUBLICATION name none for is refused (recordRefusal) */
   publication?: string | null;
   /** replication mode: the slot this copy reads and its publication (`owned`: Mason's own, which it drops with the slot),
    *  as the start that made them named them — what a start replicating no table and `mason destroy` drop, never recomputed
@@ -244,6 +246,8 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   const top = () => sourcesTop(p.root, p.folder);
   const pollMs = pollMsRetired(env, top);
   if (pollMs !== null) return { code: "refused", ...pollMs };
+  const changes = changesRetired(env, top);
+  if (changes !== null) return { code: "refused", ...changes };
   const database = o.serve ? null : databaseSettingRefusal(env, top().shown);
   return database === null ? null : { code: "refused", ...database };
 }

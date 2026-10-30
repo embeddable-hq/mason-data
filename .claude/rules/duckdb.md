@@ -554,7 +554,7 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   A sync change keeps the copy in every direction: into replication it is marked behind in `_mason.catch_up` and caught
   up by one poll while the stream holds its changes; out of it, it leaves the stream and is caught up by one poll.
   `mason start --replication` / `--poll` / `--publication` and `MASON_CHANGES` are gone: each answers with the line to
-  write in the sources file, starting nothing (`removedStartFlags`, `changesRetired`, src/lib/table-sync.ts). **A table set to `replication` while the run is
+  write in the sources file, starting nothing (`removedStartFlags`, `changesRetired` at `mason start` and `mason serve`, src/lib/table-sync.ts). **A table set to `replication` while the run is
   up, in a run that never checked the database for it, is held to the start's own checks first** (`checkReplication`,
   src/cli/dev.ts; `liveReadinessFailure`): refused with what the database lacks and the line that polls it, the file put
   back byte for byte — a review finding: on `wal_level = replica` the add said success and the table, polled until then,
@@ -562,13 +562,17 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   DETECTOR: `tests/integration/duck-stream.itest.ts` (a mixed project, the publication's list, a switch each way held to
   the ledger), `tests/cli-run-server.test.ts` (the live refusal). ("Each table's sync")
 - **The slot outlives `mason stop` and holds the source's WAL** (said at the stop); it is dropped, with Mason's own
-  publication, VERIFIED gone, when no table's sync is `replication` any more (`retireReplication`: at the start, and live
-  when the last one leaves) and at `mason destroy`, from what the config records (`config.replication`).
+  publication, VERIFIED gone, when the file says no table's sync is `replication` any more (`retireReplication`: at the start, and live
+  when the last one leaves) and at `mason destroy`, from what the config records (`config.replication`). A project with
+  a slot recorded (or an older Mason's `config.changes`) under a file naming tables with no `sync:` anywhere is refused
+  instead, nothing dropped (`recordRefusal`), and a run up keeps the tables read before (`silentOverSlot`,
+  `rereadSources`): the drop is a full scan of every table to undo, and a silent file is no decision.
 - **A NAMED publication is read and verified, never created, altered or dropped; Mason makes its own only when none is
   named** (a read replica takes no CREATE PUBLICATION, and on a production primary the slot is the one
   object Mason creates). Named by `publication:` at the top of the sources file (`${PG_PUBLICATION}` allowed, read by
   `readSource`), else `PG_PUBLICATION` (`namedPublication`) — never the one a
-  start recorded, so a file that takes `publication:` out gets Mason's own; Mason's own one left behind by a switch to a
+  start recorded, read silently: a replicating file that names none over a recorded one is refused before anything is
+  made (`recordRefusal`), and the literal `publication: null` asks for Mason's own on purpose (refused beside a set `PG_PUBLICATION`); Mason's own one left behind by a switch to a
   named one is dropped, verified gone, before the record moves (`staleReplication`); verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
   second verifier. A gap in one table refuses that table alone, the others stream on; the way out is the found
   publication plus the gap as `ALTER PUBLICATION … ADD TABLE …`. On a standby a named one is required, refused before
