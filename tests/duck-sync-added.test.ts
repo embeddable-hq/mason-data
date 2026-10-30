@@ -130,7 +130,7 @@ test("a start names each table copied at the next pass with its reason, from the
     "1 table copied at the next pass (its columns changed): public.changed; " +
     "1 table copied at the next pass (its last copy failed: the source closed the connection): public.failed; " +
     "1 table copied at the next pass (its copy is in an older Mason's layout, key order with an index): public.retired; " +
-    "1 table copied at the next pass (a numeric value outgrew its copy's DECIMAL): public.outgrown"]);
+    "1 table copied at the next pass (a numeric value outgrew its synced DECIMAL column): public.outgrown"]);
 });
 
 test("in replication mode a current copy is streamed from the position the copy applied through; under a slot it has no record of, it is caught up first", async () => {
@@ -222,9 +222,9 @@ test("a polled copy says its interval and last poll, an `off` one its age and th
   assert.equal("unsynced" in at(states, "big"), false);
   assert.equal(keptText(at(states, "big"), now), "off: last synced 3 days ago (2026-10-27 19:58:39 UTC); mason sync public.big syncs it now");
   const pending: Array<[string, string]> = [
-    ["changed", "its columns changed: it is copied again, then caught up by one poll"],
-    ["retired", "its copy is in an older Mason's layout, key order with an index: it is copied again, then caught up by one poll"],
-    ["outgrown", "a numeric value outgrew its copy's DECIMAL: it is copied again, wider, then caught up by one poll"],
+    ["changed", "its columns changed: it is read again whole, then caught up by one poll"],
+    ["retired", "it is in an older Mason's layout, key order with an index: it is read again whole, then caught up by one poll"],
+    ["outgrown", "a numeric value outgrew its synced DECIMAL column: it is read again whole, wider, then caught up by one poll"],
     ["caught", "it is caught up by one poll after its copy first"],
   ];
   for (const [name, why] of pending) {
@@ -288,8 +288,8 @@ test("mason status --json says how each table is kept current as the sync derive
   assert.deepEqual(withoutNext(by("a").kept), { by: "poll", sync: every("30s", 30), syncedAt: asOf });
   assert.deepEqual(by("big").kept, { by: "poll", sync: OFF, syncedAt: asOf, nextAt: null });
   const lines = tableLines(poll.json, Date.parse("2026-10-30T20:58:39.000Z"));
-  assert.match(lines.find((l) => l.startsWith("public.big"))!, /copied · sync: off, last synced 3 days ago — mason sync big syncs it now; sync: poll 5m on its entry polls it$/);
-  assert.match(lines.find((l) => l.startsWith("public.a "))!, /copied · polled every 30s, last 3 days ago$/);
+  assert.match(lines.find((l) => l.startsWith("public.big"))!, /synced · sync: off, last synced 3 days ago — mason sync big syncs it now; sync: poll 5m on its entry polls it$/);
+  assert.match(lines.find((l) => l.startsWith("public.a "))!, /synced · polled every 30s, last 3 days ago$/);
 
   // REPLICATION MODE: streamed, and caught up by one poll first — the stream section's state and why are kept's
   const replTables = [table("a"), table("caught")];
@@ -333,21 +333,21 @@ test("a table not copied now says so in kept itself — waiting for its copy, it
   const five = every("5s", 5);
   assert.deepEqual(Object.fromEntries(Object.entries(poll).map(([k, v]) => [k, withoutNext(v as Kept)])), {
     a: { by: "poll", sync: five, syncedAt: "2026-10-27T19:58:39.000Z" },
-    waiting: { by: "poll", sync: five, syncedAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" },
-    failed: { by: "poll", sync: five, syncedAt: null, pending: "its copy failed (the source closed the connection): it joins once copied and caught up by one poll" },
+    waiting: { by: "poll", sync: five, syncedAt: null, pending: "it waits for its first sync: it joins once synced and caught up by one poll" },
+    failed: { by: "poll", sync: five, syncedAt: null, pending: "its first sync failed (the source closed the connection): it joins once synced and caught up by one poll" },
   });
   // a table not kept current now has no next poll
   assert.deepEqual([(poll.waiting as Kept).nextAt, (poll.failed as Kept).nextAt], [null, null]);
   const recopy = await keptBy({ mode: "recopy", tables, seed: seed() }, "poll");
   assert.deepEqual([recopy.waiting, recopy.failed], [
-    { by: "recopy", copiedAt: null, pending: "it waits for its copy: it is kept current once copied" },
-    { by: "recopy", copiedAt: (recopy.failed as { copiedAt: string | null }).copiedAt, pending: "its copy failed (the source closed the connection): it is kept current once copied" },
+    { by: "recopy", copiedAt: null, pending: "it waits for its first sync: it is kept current once synced" },
+    { by: "recopy", copiedAt: (recopy.failed as { copiedAt: string | null }).copiedAt, pending: "its first sync failed (the source closed the connection): it is kept current once synced" },
   ]);
   assert.equal("pending" in (recopy.a as object), false, "a copied table copied again whole is kept current");
   const repl = await keptBy({ mode: "replication", replication: replicationX, tables, seed: seed(slotAt) }, "replication");
   assert.deepEqual([repl.waiting, repl.failed].map((k) => { const r = k as { state: string; why: string | null }; return [r.state, r.why]; }), [
-    ["waiting", "it waits for its copy: it joins once copied and caught up by one poll"],
-    ["waiting", "its copy failed (the source closed the connection): it joins once copied and caught up by one poll"],
+    ["waiting", "it waits for its first sync: it joins once synced and caught up by one poll"],
+    ["waiting", "its first sync failed (the source closed the connection): it joins once synced and caught up by one poll"],
   ]);
 });
 
@@ -378,6 +378,19 @@ test("a table being caught up, queued or rebuilt is not due to a pass: the loop 
     assert.equal(s.nextPassDelay(), null, "its catch-up running: the same");
     s.rebuildingNow = null;
     s.behind.clear();
+  });
+});
+
+test("mason sync of a table being read again says why, never that its first sync has not finished", async () => {
+  await withSync({ mode: "poll", tables: [table("a")], seed: async (run) => { await run(copied("a")); await run(lastPoll("a")); } }, async (sync) => {
+    const s = sync as unknown as { stopped: boolean; copiedAs: Map<string, string>; snapshots: Map<string, unknown> };
+    s.stopped = false;
+    const key = s.copiedAs.get("public.a")!;
+    s.copiedAs.set("public.a", "other columns");
+    await assert.rejects(sync.pollNow(["public.a"]), { message: "public.a is being read again whole (its columns changed): mason wait waits for it" });
+    s.copiedAs.set("public.a", key);
+    s.snapshots.delete("public.a");
+    await assert.rejects(sync.pollNow(["public.a"]), { message: "public.a is being read again whole (a numeric value outgrew its synced DECIMAL column): mason wait waits for it" });
   });
 });
 

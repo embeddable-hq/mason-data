@@ -78,7 +78,7 @@ test("starting or stopping: mason_ready 0 and mason_info alone, each with HELP a
   const { metricsText } = await metrics();
   const text = metricsText({ version: "0.9.1", run: null });
   assert.equal(text, [
-    "# HELP mason_ready 1 once Mason serves the copy; 0 while it starts or stops (/healthz answers 503 then).",
+    "# HELP mason_ready 1 once Mason serves the synced data; 0 while it starts or stops (/healthz answers 503 then).",
     "# TYPE mason_ready gauge",
     "mason_ready 0",
     "# HELP mason_info Mason's version, as a label; the value is always 1.",

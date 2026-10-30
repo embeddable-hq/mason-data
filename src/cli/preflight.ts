@@ -339,7 +339,7 @@ export function serverlessHost(host: string): string | null {
 /** Why a table cannot be picked, or null: no primary key (a row version needs one). Its size is never a reason, here or
  *  on a database elsewhere (the tables worth copying are the big ones). */
 export function unpickableReason(t: SourceTable): string | null {
-  if (t.key.length === 0) return "no primary key: Mason keeps one row per key, so it can only copy a table that has one";
+  if (t.key.length === 0) return "no primary key: Mason keeps one row per key, so it can only sync a table that has one";
   return null;
 }
 
@@ -357,7 +357,7 @@ export function sourceWarnings(s: Source, f: SourceFacts): string[] {
 /** The warning a database on another machine gets at every start: what the copy is and how it is kept current (true of
  *  both modes — the mode is the start's, not known here: a poll scans each table, replication reads the change log). */
 export function remoteWarning(s: Source): string {
-  return `${s.host} is not this machine. mason start will copy the tables you pick to this machine (into its copy's file, ` +
+  return `${s.host} is not this machine. mason start will sync the tables you pick to this machine (into its synced data's file, ` +
     "with no access control beyond this machine's), and keep them current while it runs: a scan of each table at every poll, or its change log for a table whose sync: is replication";
 }
 
@@ -369,8 +369,8 @@ export function remoteWarning(s: Source): string {
  */
 export function remoteConfirmation(host: string, o: { cmd: "mason init" | "mason start"; wayOut: string; next: readonly NextStep[] }): Failure {
   return { code: "failed", exit: 1,
-    message: `stopped before ${o.cmd === "mason init" ? "writing anything" : "starting"}: ${host} is on another machine, and copying from it needs your say-so`,
-    why: "mason start would copy the tables you pick to this machine: a file under .mason/, with no access control beyond this machine's\n" +
+    message: `stopped before ${o.cmd === "mason init" ? "writing anything" : "starting"}: ${host} is on another machine, and syncing from it needs your say-so`,
+    why: "mason start would sync the tables you pick to this machine: a file under .mason/, with no access control beyond this machine's\n" +
       "and keep them current while it runs by reading that database: a scan of each table at every poll, or its change log for a table whose sync: is replication",
     fix: o.wayOut, next: o.next };
 }

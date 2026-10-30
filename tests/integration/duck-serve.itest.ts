@@ -123,7 +123,7 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
   }
   const stopped = await first.exited;
   assert.deepEqual(stopped, { code: 0, signal: null }, first.out());
-  assert.match(first.out(), /closed the copy \(it stays in /);
+  assert.match(first.out(), /closed the synced data \(it stays in /);
   const cfg = JSON.parse(fs.readFileSync(path.join(data, ".mason", "config.json"), "utf8")) as { running: unknown; served: boolean; lastStop: { at: string; how: string } };
   assert.equal(cfg.running, null, "the run recorded stopped");
   assert.equal(cfg.lastStop.how, "stopped by mason stop, or a shutdown (SIGTERM)", "and how, for mason status");
@@ -136,7 +136,7 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
   try {
     const again = await healthUntil(health, second, (status, b) => status === 200 && (b.tables as { copied: number }).copied === 1);
     assert.deepEqual(again.tables, { total: 1, copied: 1, copying: 0, waiting: 0, failed: 0 });
-    assert.match(second.out(), /the copy in .*\.mason, resumed/);
+    assert.match(second.out(), /the synced data in .*\.mason, resumed/);
     assert.doesNotMatch(second.out(), /copied public\.items/, "the copy was kept, not made again");
   } finally {
     second.child.kill("SIGTERM");

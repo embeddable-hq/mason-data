@@ -16,7 +16,7 @@ test("the server under the database: recorded at the first start, the same datab
   assert.deepEqual(sourceMove({ database: "shop", systemIdentifier: "7" }, { database: "shop", systemIdentifier: null }), { action: "same" }, "not readable now: never guessed");
   const refused = sourceMove({ database: "shop", systemIdentifier: "7" }, { database: "shop_staging", systemIdentifier: "7" });
   assert.ok("refuse" in refused);
-  assert.match(refused.refuse, /copy is of the database shop, and \.mason\/config\.json now names shop_staging\. .*mason destroy \(removes the copy; your files stay\), then mason start copies it/);
+  assert.match(refused.refuse, /synced data is of the database shop, and \.mason\/config\.json now names shop_staging\. .*mason destroy \(removes the synced data; your files stay\), then mason start syncs it/);
 });
 
 test("replication's objects are the project's and the source's names", async () => {
@@ -119,7 +119,7 @@ test("mason start says the file's sync once — and LOUDLY when an upgrade stops
   assert.match(line(older, "mason/sources/app.yml", 1), /^sync: off \(the default\): 1 table is not polled \(an older Mason polled every table every 5 s\); /);
   // a new project (nothing copied yet): the default said, how to change it
   assert.equal(line(older, "mason/sources/app.yml", 0),
-    "sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of mason/sources/app.yml polls every table, or on an entry that one");
+    "sync: off (the default): after its first sync, a table is read again only by mason sync <table> — sync: poll 5m at the top of mason/sources/app.yml polls every table, or on an entry that one");
   // a sync: written anywhere is a choice made: never the upgrade's warning
   assert.doesNotMatch(line(file("kind: postgres\nurl: x\nsync: off\ntables:\n  orders: {}\n"), "f", 3), /are not polled|is not polled/);
   assert.doesNotMatch(line(file("kind: postgres\nurl: x\ntables:\n  orders: { sync: poll 30s }\n  events: {}\n"), "f", 3), /are not polled|is not polled/);

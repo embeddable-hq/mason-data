@@ -27,7 +27,7 @@ const newSourceText = (url?: string, sync?: unknown): string =>
 // so the file loads at a commit without it and the tests that need it fail by name
 const rolesModule = await import("../src/cli/roles.ts" as string).catch(absent) as Record<string, unknown>;
 const newRolesText = (): string => (rolesModule.newRolesText as (() => string) | undefined)?.() ?? "(no newRolesText at this commit)";
-const ROLES_WROTE = "✓ Wrote mason/roles.yml: every user reads every copied table (default: everything, tables: all) — narrow it with a second role — commit it";
+const ROLES_WROTE = "✓ Wrote mason/roles.yml: every user reads every synced table (default: everything, tables: all) — narrow it with a second role — commit it";
 /** the demo's sync, as mason init demo writes it at the file's top (src/demo/seed.ts DEMO_SYNC) */
 const DEMO_SYNC = { mode: "poll", every: "5s", seconds: 5 };
 import type { Io } from "../src/cli/command.ts";
@@ -68,7 +68,7 @@ test("the old names answer with the new ones; mason start takes no URL", () => {
   for (const [argv, said] of [
     [["purge"], /mason purge is now mason destroy/],
     [["poll", "orders"], /mason poll is now mason sync/],
-    [["rm"], /mason rm is gone: mason remove takes a table out of the project, mason destroy removes the project's copy\n\nNext:\n {2}mason remove <table> {2}.*a table, and its copy\n {2}mason destroy {2}.*this folder's project/],
+    [["rm"], /mason rm is gone: mason remove takes a table out of the project, mason destroy removes the project's synced data\n\nNext:\n {2}mason remove <table> {2}.*a table, and its synced data\n {2}mason destroy {2}.*this folder's project/],
     [["dev"], /mason dev is now mason start\n\nNext:\n {2}mason init <postgres url> .*once, in your app's folder\n {2}mason start /],
     // mason connect and mason list are gone: mason user is enough, and a project is its folder
     [["connect"], /mason connect is gone: mason user add <name> makes a user whose password does not expire, and prints the URL to paste\n\nNext:\n {2}mason user add <name> /],
@@ -91,11 +91,11 @@ test("a name from the folder; .gitignore gains .mason/ once; the URL from .env.l
   assert.ok(ignoresStateDir("/.mason\n"));
   assert.ok(!ignoresStateDir(".masonry/\n"));
   assert.equal(withIgnored("node_modules\n.mason/\n"), null);
-  assert.deepEqual(withIgnored("node_modules"), { text: "node_modules\n# Mason: this machine's key, copy and state (mason init)\n.mason/\n", added: [".mason/"] });
-  assert.deepEqual(withIgnored(null), { text: "# Mason: this machine's key, copy and state (mason init)\n.mason/\n", added: [".mason/"] });
+  assert.deepEqual(withIgnored("node_modules"), { text: "node_modules\n# Mason: this machine's key, synced data and state (mason init)\n.mason/\n", added: [".mason/"] });
+  assert.deepEqual(withIgnored(null), { text: "# Mason: this machine's key, synced data and state (mason init)\n.mason/\n", added: [".mason/"] });
   // the file the database URL was read from is ignored too (the test server: mason init read .env and left
   // it committable); a line that already covers it — exact, anchored, or the .env* glob — is enough
-  assert.deepEqual(withIgnored(null, [".env"]), { text: "# Mason: this machine's key, copy and state (mason init)\n.mason/\n# the database URL mason/sources/ names (mason init)\n.env\n", added: [".mason/", ".env"] });
+  assert.deepEqual(withIgnored(null, [".env"]), { text: "# Mason: this machine's key, synced data and state (mason init)\n.mason/\n# the database URL mason/sources/ names (mason init)\n.env\n", added: [".mason/", ".env"] });
   assert.deepEqual(withIgnored(".mason/\n", [".env.local"]), { text: ".mason/\n# the database URL mason/sources/ names (mason init)\n.env.local\n", added: [".env.local"] });
   assert.equal(withIgnored(".env\n.mason/\n", [".env"]), null);
   assert.equal(withIgnored("/.env.local\n/.mason\n", [".env.local"]), null);
@@ -142,13 +142,13 @@ test("mason init writes the project — config, the sources file, the URL in .en
     // the source file is yours to commit, and the URL stays out of it — and out of .mason/config.json
     assert.equal(JSON.stringify(p.config).includes("secret"), false, "the config holds no URL");
     assert.equal(fs.readFileSync(path.join(app, "mason", "sources", "shop.yml"), "utf8"), newSourceText());
-    // the roles file: today's access (every user reads every copied table) said in a committed file, byte for byte its one writer's
+    // the roles file: today's access (every user reads every synced table) said in a committed file, byte for byte its one writer's
     assert.equal(fs.readFileSync(path.join(app, "mason", "roles.yml"), "utf8"), newRolesText());
-    assert.match(fs.readFileSync(path.join(app, ".env"), "utf8"), /^# the database Mason copies from .*\nDATABASE_URL=postgres:\/\/me:secret@localhost:5432\/shop\n$/);
+    assert.match(fs.readFileSync(path.join(app, ".env"), "utf8"), /^# the database Mason syncs from .*\nDATABASE_URL=postgres:\/\/me:secret@localhost:5432\/shop\n$/);
     assert.equal(fs.statSync(path.join(app, ".env")).mode & 0o777, 0o600);
     assert.match(fs.readFileSync(path.join(app, ".gitignore"), "utf8"), /^node_modules\n# Mason: .*\n\.mason\/\n# the database URL mason\/sources\/ names \(mason init\)\n\.env\n$/);
     // what it did, as a checklist, then what to run next
-    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to copy, none yet \(mason add\) — commit it\n✓ Wrote mason\/roles\.yml: every user reads every copied table \(default: everything, tables: all\) — narrow it with a second role — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
+    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to sync, none yet \(mason add\) — commit it\n✓ Wrote mason\/roles\.yml: every user reads every synced table \(default: everything, tables: all\) — narrow it with a second role — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
     assert.doesNotMatch(r.out, /secret/, "the password is never printed");
     // again here, or anywhere inside: refused, naming the project and how to point it elsewhere
     fs.mkdirSync(path.join(app, "src"));
@@ -188,9 +188,9 @@ test("mason init writes the project — config, the sources file, the URL in .en
     // a database elsewhere needs --remote, even unchecked
     const remote = await quiet((io) => init(["postgres://u@db.example.com/x", "--skip-check"], three, { io }));
     assert.equal(remote.value, 1);
-    assert.match(remote.err, /^✗ mason init: stopped before writing anything: db\.example\.com is on another machine, and copying from it needs your say-so\n/m);
-    assert.match(remote.err, /\n {2}why {3}mason start would copy the tables you pick to this machine: a file under \.mason\/, with no access control beyond this machine's\n {8}and keep them current while it runs by reading that database/);
-    assert.match(remote.err, /\n {2}fix {3}run the same mason init again with --remote: that says yes, copy from that machine\n/);
+    assert.match(remote.err, /^✗ mason init: stopped before writing anything: db\.example\.com is on another machine, and syncing from it needs your say-so\n/m);
+    assert.match(remote.err, /\n {2}why {3}mason start would sync the tables you pick to this machine: a file under \.mason\/, with no access control beyond this machine's\n {8}and keep them current while it runs by reading that database/);
+    assert.match(remote.err, /\n {2}fix {3}run the same mason init again with --remote: that says yes, sync from that machine\n/);
     assert.match(remote.err, /\nNext:\n {2}mason init --remote <url>/);
     assert.equal(readProject(three), null, "nothing written");
     // the URL read from .env: that file is ignored with .mason/ (and named in the checklist)
@@ -211,7 +211,7 @@ test("mason init writes the project — config, the sources file, the URL in .en
     fs.writeFileSync(path.join(five, ".gitignore"), ".env*\n");
     const envIgnored = await quiet((io) => init(["--skip-check"], five, { io }));
     assert.equal(envIgnored.value, 0, envIgnored.err);
-    assert.equal(fs.readFileSync(path.join(five, ".gitignore"), "utf8"), ".env*\n# Mason: this machine's key, copy and state (mason init)\n.mason/\n");
+    assert.equal(fs.readFileSync(path.join(five, ".gitignore"), "utf8"), ".env*\n# Mason: this machine's key, synced data and state (mason init)\n.mason/\n");
     assert.match(envIgnored.out, /\n✓ Added \.mason\/ to \.gitignore\n/);
     // .env already COMMITTED: ignoring it changes nothing, so init says what to run
     const withCommittedEnv = (name: string): string => {
@@ -394,7 +394,7 @@ test("a bare mason init reads MASON_DATABASE_URL first, then DATABASE_URL, and t
     assert.ok(!fs.existsSync(path.join(both, "mason", "sources", "app_dev.yml")), "not the app's database");
     assert.equal(fs.readFileSync(path.join(both, ".env"), "utf8"), envText, "nothing written to .env");
     assert.match(b.out, /\n✓ Not checking postgres:\/\/mason:\*\*\*\*@localhost:5432\/analytics \(MASON_DATABASE_URL in \.env\) \(--skip-check\): mason start checks it\n/);
-    assert.match(b.out, /\n✓ Wrote mason\/sources\/analytics\.yml: the database \(url: \$\{MASON_DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to copy/);
+    assert.match(b.out, /\n✓ Wrote mason\/sources\/analytics\.yml: the database \(url: \$\{MASON_DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to sync/);
     assert.doesNotMatch(b.out, /to \.env/);
     assert.doesNotMatch(b.out, /secret/);
     // the same as data: the variable read, said where it was found; no .env line
@@ -419,7 +419,7 @@ test("a bare mason init reads MASON_DATABASE_URL first, then DATABASE_URL, and t
     const s = await quiet((io) => init(["--skip-check"], shell, { io, env: { MASON_DATABASE_URL: masonUrl } }));
     assert.equal(s.value, 0, s.err);
     assert.equal(sourceText(shell, "analytics"), newSourceText("${MASON_DATABASE_URL}"));
-    assert.match(fs.readFileSync(path.join(shell, ".env"), "utf8"), new RegExp(`^DATABASE_URL=${appUrl}\\n\\n# the database Mason copies from .*\\nMASON_DATABASE_URL=${masonUrl}\\n$`));
+    assert.match(fs.readFileSync(path.join(shell, ".env"), "utf8"), new RegExp(`^DATABASE_URL=${appUrl}\\n\\n# the database Mason syncs from .*\\nMASON_DATABASE_URL=${masonUrl}\\n$`));
     assert.match(s.out, /\n✓ Not checking postgres:\/\/mason:\*\*\*\*@localhost:5432\/analytics \(MASON_DATABASE_URL in the shell\) \(--skip-check\)/);
     assert.match(s.out, /\n✓ Wrote MASON_DATABASE_URL=postgres:\/\/mason:\*\*\*\*@localhost:5432\/analytics to \.env: the URL the source file names, kept out of git\n/);
 
@@ -428,7 +428,7 @@ test("a bare mason init reads MASON_DATABASE_URL first, then DATABASE_URL, and t
     const d = await quiet((io) => init(["--skip-check"], app, { io, env: { DATABASE_URL: appUrl } }));
     assert.equal(d.value, 0, d.err);
     assert.equal(sourceText(app, "app_dev"), newSourceText("${DATABASE_URL}"));
-    assert.match(fs.readFileSync(path.join(app, ".env"), "utf8"), new RegExp(`^# the database Mason copies from .*\\nDATABASE_URL=${appUrl}\\n$`));
+    assert.match(fs.readFileSync(path.join(app, ".env"), "utf8"), new RegExp(`^# the database Mason syncs from .*\\nDATABASE_URL=${appUrl}\\n$`));
     assert.match(d.out, /\n✓ Not checking postgres:\/\/app:\*\*\*\*@localhost:5432\/app_dev \(DATABASE_URL in the shell\) \(--skip-check\)/);
     assert.match(d.out, /\n✓ Wrote DATABASE_URL=postgres:\/\/app:\*\*\*\*@localhost:5432\/app_dev to \.env/);
     const appEnv = project("app-env", { ".env": `DATABASE_URL=${appUrl}\n` });
@@ -480,7 +480,7 @@ test("a project an older Mason made: refused with the way out — mason init wri
     assert.equal(fs.readFileSync(path.join(root, "mason", "roles.yml"), "utf8"), newRolesText(), "the roles file it had none of");
     const kept = JSON.parse(fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8")) as { name: string; apiKey: string };
     assert.deepEqual([kept.name, kept.apiKey], [config.name, config.apiKey], "the config kept: its key, so its users");
-    assert.match(r.out, /\n✓ Kept \.mason\/config\.json: the project shop, its key and its copy\n/);
+    assert.match(r.out, /\n✓ Kept \.mason\/config\.json: the project shop, its key and its synced data\n/);
     assert.match(r.out, /\n {2}! mason\/models\/ is an older Mason's, which this one does not read: mason add each table again, then remove it\n/);
     assert.ok(fs.existsSync(path.join(root, "mason", "models")), "removing it is the person's");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -499,7 +499,7 @@ test("mason init in a clone: the sources file already there is kept, and its var
     assert.equal(r.value, 0, r.err);
     assert.equal(fs.readFileSync(path.join(root, "mason", "sources", "app.yml"), "utf8"), text, "kept, byte for byte");
     assert.equal(fs.readFileSync(path.join(root, "mason", "roles.yml"), "utf8"), roles, "the roles file kept, byte for byte");
-    assert.match(r.out, /\n✓ Kept mason\/sources\/app\.yml: the database and the tables this project copies\n✓ Kept mason\/roles\.yml: the roles and the default for a user added without --role\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env/);
+    assert.match(r.out, /\n✓ Kept mason\/sources\/app\.yml: the database and the tables this project syncs\n✓ Kept mason\/roles\.yml: the roles and the default for a user added without --role\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -547,7 +547,7 @@ test("mason init in a clone naming ${MASON_DATABASE_URL}: read from the shell an
     assert.equal(s.value, 0, s.err);
     assert.match(s.out, /\n✓ Not checking postgres:\/\/mason:\*\*\*\*@localhost:5432\/analytics \(MASON_DATABASE_URL in the shell\) \(--skip-check\)/);
     assert.match(s.out, /\n✓ Wrote MASON_DATABASE_URL=postgres:\/\/mason:\*\*\*\*@localhost:5432\/analytics to \.env: the URL the source file names, kept out of git\n/);
-    assert.match(fs.readFileSync(path.join(shell.dir, ".env"), "utf8"), new RegExp(`^# the database Mason copies from .*\\nMASON_DATABASE_URL=${masonUrl}\\n$`));
+    assert.match(fs.readFileSync(path.join(shell.dir, ".env"), "utf8"), new RegExp(`^# the database Mason syncs from .*\\nMASON_DATABASE_URL=${masonUrl}\\n$`));
     assert.equal(fs.readFileSync(path.join(shell.dir, "mason", "sources", "app.yml"), "utf8"), shell.text);
 
     // only the app's DATABASE_URL in .env, nothing in the shell: never checked against the app's database, which the
@@ -586,7 +586,7 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     assert.equal((p.config as { demo?: boolean }).demo, true);
     assert.equal(JSON.stringify(p.config).includes("postgres://"), false, "the config holds no URL");
     const env = fs.readFileSync(path.join(app, ".env"), "utf8");
-    const at = /^# the database Mason copies from .*\nDATABASE_URL=postgres:\/\/demo@127\.0\.0\.1:(\d+)\/demo\n$/.exec(env);
+    const at = /^# the database Mason syncs from .*\nDATABASE_URL=postgres:\/\/demo@127\.0\.0\.1:(\d+)\/demo\n$/.exec(env);
     assert.ok(at, env);
     const port = Number(at[1]);
     assert.ok(Number.isInteger(port) && port > 0 && port < 65_536);
@@ -602,12 +602,12 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     assert.match(fs.readFileSync(path.join(app, ".gitignore"), "utf8"), /\.mason\/\n.*\n\.env\n$/);
     // the checklist: no connection, the database made by mason start; then what to run next
     assert.match(r.out, new RegExp(`^Making try-mason a Mason project in .*\\n✓ The demo database will be postgres://demo@127\\.0\\.0\\.1:${port}/demo: mason start makes it in \\.mason/demo/ and seeds it \\(nothing to connect to yet\\)\\n` +
-      "✓ Wrote \\.mason/config\\.json: Mason's key \\(this machine's\\)\\n✓ Wrote mason/sources/demo\\.yml: the database \\(url: \\$\\{DATABASE_URL\\}\\), sync: poll 5s \\(every table polled every 5 s\\) and the tables to copy, the demo's 3 added — mason add order_items adds the fourth — commit it\\n" +
+      "✓ Wrote \\.mason/config\\.json: Mason's key \\(this machine's\\)\\n✓ Wrote mason/sources/demo\\.yml: the database \\(url: \\$\\{DATABASE_URL\\}\\), sync: poll 5s \\(every table polled every 5 s\\) and the tables to sync, the demo's 3 added — mason add order_items adds the fourth — commit it\\n" +
       `${ROLES_WROTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n` +
       `✓ Wrote DATABASE_URL=postgres://demo@127\\.0\\.0\\.1:${port}/demo to \\.env: the URL the source file names, kept out of git\\n✓ Made \\.gitignore, ignoring \\.mason/ and \\.env\\n\\n` +
-      "Tip: The demo database runs inside mason start, read by polling: a new order every few seconds; order_items is left for you to add; mason destroy removes it with the copy\\n\\n" +
-      "Next:\\n {2}mason start +the demo database and Mason, in the background: its tables copied, then kept current\\n" +
-      " {2}mason add order_items +the demo's fourth table, once Mason is up: watch its copy begin\\n {2}mason status +the copy keeping up with the demo's changes\\n {2}mason user add <name> +a user for psql or a BI tool"));
+      "Tip: The demo database runs inside mason start, read by polling: a new order every few seconds; order_items is left for you to add; mason destroy removes it with the synced data\\n\\n" +
+      "Next:\\n {2}mason start +the demo database and Mason, in the background: its tables synced, then kept current\\n" +
+      " {2}mason add order_items +the demo's fourth table, once Mason is up: watch its first sync begin\\n {2}mason status +the synced data keeping up with the demo's changes\\n {2}mason user add <name> +a user for psql or a BI tool"));
     assert.doesNotMatch(r.out, /Connecting|PGlite|DuckDB/i);
     // again in the folder: refused as any second init is
     const again = await quiet((io) => init(["demo"], app, { io }));

@@ -2,7 +2,7 @@
  * THE ROLES FILE, READ (src/cli/roles.ts; GitHub issue 30, stage 1b): `tables: all`, `default:`, the start's roles line
  * and the file `mason init` writes — unit tests, no listener (tests/duck-roles-wire.test.ts holds them over the wire).
  * What it must hold:
- *   - `tables: all` resolves to every copied table, every column, `all: true` on the role and on each table;
+ *   - `tables: all` resolves to every synced table, every column, `all: true` on the role and on each table;
  *   - every refusal of the new keys is at its key, with a did-you-mean where a name is close, on ONE report with the
  *     file's other mistakes: a table keyed `all`, `tables:` another string or a list, `default:` not a name, `default:`
  *     naming a role the file lacks, `default:` beside no `roles:`;
@@ -29,7 +29,7 @@ async function report(text: string): Promise<{ message: string; why?: string }> 
   return { message: f.message, ...(f.why !== undefined ? { why: f.why } : {}) };
 }
 
-test("tables: all resolves to every copied table and every column, all: true on the role and on each table", async () => {
+test("tables: all resolves to every synced table and every column, all: true on the role and on each table", async () => {
   const r = await roles();
   const file = r.parseRolesText("roles:\n  everything:\n    tables: all\n  agent:\n    tables:\n      orders: { columns: [id] }\n", FILE);
   assert.ok(!("problems" in file), JSON.stringify(file));
@@ -75,9 +75,9 @@ test("default: a role of the file, read; the user's role decided by the file (us
 });
 
 test("the new keys' refusals, each at its key with the way out, on ONE report", async () => {
-  const shape = "roles.r.tables: is all (every copied table and column) or one entry per table the role may read, like tables: { orders: {}, customers: { exclude: [email] } }";
+  const shape = "roles.r.tables: is all (every synced table and column) or one entry per table the role may read, like tables: { orders: {}, customers: { exclude: [email] } }";
   assert.deepEqual(await report("roles:\n  r:\n    tables:\n      all: {}\n"),
-    { message: "mason/roles.yml: roles.r.tables.all: all names every table — write tables: all for every copied table, or public.all for a table named all" });
+    { message: "mason/roles.yml: roles.r.tables.all: all names every table — write tables: all for every synced table, or public.all for a table named all" });
   assert.deepEqual(await report("roles:\n  r:\n    tables: alll\n"), { message: `mason/roles.yml: ${shape} — alll is neither — did you mean \`all\`?` });
   assert.deepEqual(await report("roles:\n  r:\n    tables: ALL\n"), { message: `mason/roles.yml: ${shape} — ALL is neither — did you mean \`all\`?` });
   assert.deepEqual(await report("roles:\n  r:\n    tables: everything\n"), { message: `mason/roles.yml: ${shape} — everything is neither` }, "no guess at a different word");
@@ -93,8 +93,8 @@ test("the new keys' refusals, each at its key with the way out, on ONE report", 
     why: "- default: there is no role everything in roles: — add it under roles:\n- roles: missing — write roles: {} and one entry per role: agent: { tables: { orders: {} } }" });
   assert.deepEqual(await report("default: nope\nroles:\n  r:\n    tables: alll\n  s:\n    tables:\n      all: {}\n"), { message: "mason/roles.yml has 3 mistakes",
     why: "- default: there is no role nope in roles: — add it under roles:, or name one of: r, s\n" +
-      "- roles.r.tables: is all (every copied table and column) or one entry per table the role may read, like tables: { orders: {}, customers: { exclude: [email] } } — alll is neither — did you mean `all`?\n" +
-      "- roles.s.tables.all: all names every table — write tables: all for every copied table, or public.all for a table named all" });
+      "- roles.r.tables: is all (every synced table and column) or one entry per table the role may read, like tables: { orders: {}, customers: { exclude: [email] } } — alll is neither — did you mean `all`?\n" +
+      "- roles.s.tables.all: all names every table — write tables: all for every synced table, or public.all for a table named all" });
   // not YAML: the library's own words, its first line, never ending in the colon before the snippet it drops (the review of #44)
   const notYaml = await report("roles: [not a map");
   assert.match(notYaml.message, /^mason\/roles\.yml: it is not YAML: .* at line 1, column \d+$/, notYaml.message);
@@ -108,7 +108,7 @@ test("the start's roles line in the file's three states, and when it cannot be r
   const r = await roles();
   const grants = (names: string[]) => new Map(names.map((n) => [n, { name: n, file: "mason/roles.yml", tables: new Map(), all: false }]));
   assert.equal(r.rolesDefaultLine({ file: null, grants: new Map(), problem: null, default: null }, "mason/roles.yml"),
-    "roles: no mason/roles.yml: every user reads every copied table; mason init writes one");
+    "roles: no mason/roles.yml: every user reads every synced table; mason init writes one");
   assert.equal(r.rolesDefaultLine({ file: "mason/roles.yml", grants: grants(["everything", "agent"]), problem: null, default: "everything" }, "mason/roles.yml"),
     "2 roles from mason/roles.yml (everything, agent); default: everything (a user added without --role)");
   assert.equal(r.rolesDefaultLine({ file: "mason/roles.yml", grants: grants(["agent"]), problem: null, default: null }, "mason/roles.yml"),
@@ -129,8 +129,8 @@ test("newRolesText: the file mason init writes is a valid roles file — default
   assert.deepEqual(file.roles, [{ name: "everything", tables: "all" }], "the narrower role is a comment");
   const g = r.resolveRoles(file, copied, "/p");
   assert.ok(!("message" in g));
-  assert.equal(g.get("everything")!.tables.size, copied.length, "every copied table");
-  assert.match(text, /^# Who may read what of the tables the sources file copies\. Yours to commit, beside sources\/\.\ndefault: everything /);
+  assert.equal(g.get("everything")!.tables.size, copied.length, "every synced table");
+  assert.match(text, /^# Who may read what of the tables the sources file syncs\. Yours to commit, beside sources\/\.\ndefault: everything /);
   // the commented role is one to uncomment: valid once its # are gone
   const uncommented = text.replace(/^ {2}# agent:/m, "  agent:").replace(/^ {2}# {3}tables:/m, "    tables:").replace(/^ {2}# {5}(orders|customers)/gm, "      $1");
   const two = r.parseRolesText(uncommented, FILE);

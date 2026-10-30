@@ -239,7 +239,7 @@ test("streamStatus({ refresh: false }) never reaches the database: the position 
   });
 });
 
-test("the disk under the copy: free where its file is, by the sync's own measure, and what the copies running are projected to add, as their chunks' check computed it", async () => {
+test("the disk under the copy: free where its file is, by the sync's own measure, and what the first syncs running are projected to add, as their chunks' check computed it", async () => {
   await aRun(async ({ store, sync }) => {
     const s = sync as unknown as { diskStatus?: () => unknown; diskFree: (dir: string) => number; copyLive: Map<string, Record<string, unknown>>;
       diskShort: (t: AddedTable, p: unknown, disk: unknown, live: Record<string, unknown>) => string | null };

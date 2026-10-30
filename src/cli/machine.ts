@@ -19,16 +19,16 @@ import { sourceFileNames } from "./sources.ts";
 
 export const DESTROY_USAGE = `usage: mason destroy [--json]
 
-  Removes this folder's project's copy of your data from this machine — its file — and Mason's state in its
+  Removes this folder's project's synced data from this machine — its file — and Mason's state in its
   .mason/ (the logs, the request log). Mason is stopped first if it runs. Your files (mason/sources/), .mason/config.json and
-  the users (mason user) stay: the next mason start copies the tables again, and every tool connects as before.
+  the users (mason user) stay: the next mason start syncs the tables again, and every tool connects as before.
 
     mason destroy                this folder's project
 
-  mason stop keeps the copy and the state, and the next mason start resumes in seconds; mason destroy frees the disk, and
+  mason stop keeps the synced data and the state, and the next mason start resumes in seconds; mason destroy frees the disk, and
   the next mason start begins again. In replication mode the slot (and Mason's own publication) are dropped from the
   database too: they hold its WAL for as long as they exist. A demo project's database (mason init demo, in .mason/demo/)
-  goes with the copy: the next mason start makes and seeds it again.
+  goes with the synced data: the next mason start makes and seeds it again.
 
   --json   as data: { removed: [{ name, removed: [what], error }], next }
 
@@ -38,7 +38,7 @@ export const DESTROY_USAGE = `usage: mason destroy [--json]
 export const DESTROY: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "destroy",
-  summary: "remove this project's copy of the data and Mason's state from this machine (your files and users stay)",
+  summary: "remove this project's synced data and Mason's state from this machine (your files and users stay)",
   usage: DESTROY_USAGE,
   options: { json: { type: "boolean" } },
   json: ["removed", "next"],
@@ -87,7 +87,7 @@ export async function removeProject(p: Project, o: { isAlive?: (pid: number) => 
       // and the real slot goes on holding its WAL (the review of the sources file)
       const from = p.config.sourceServer ?? null;
       if (from !== null && from.database !== parsed.source.database) {
-        throw new Error(`the sources file names ${parsed.source.database} now, and the copy came from ${from.database}, where the slot is: ` +
+        throw new Error(`the sources file names ${parsed.source.database} now, and the synced data came from ${from.database}, where the slot is: ` +
           `put that database's URL back in the sources file and run mason destroy again, or drop them on ${from.database} by hand`);
       }
       for (const d of await (o.dropReplication ?? dropOwnReplication)(parsed.source, own, from)) removed.push(`${d} from ${parsed.source.database}`);
@@ -123,14 +123,14 @@ export async function destroy(argv: string[], deps: { removeProject?: typeof rem
   let result: { name: string; removed: string[]; error?: string };
   try { result = { name, removed: await (deps.removeProject ?? removeProject)(t.project) }; }
   catch (e) { result = { name, removed: [], error: (e as Error).message }; }
-  const next: NextStep[] = result.error ? [] : [["mason start", "copies the tables again"]];
+  const next: NextStep[] = result.error ? [] : [["mason start", "syncs the tables again"]];
   if (json) { out(jsonText(DESTROY, { removed: [result] }, next)); return result.error ? 1 : 0; }
   if (result.error) return failed("destroy", { message: `${name}: ${result.error}`, code: "failed" }, { json: false, io });
   out(withEnd(reportText({
     headline: result.removed.length ? `Removed ${name}` : `Nothing was left of ${name} to remove`,
     details: [...(result.removed.length ? [["removed", result.removed.join(", ")] as const] : []), ["kept", `your files in ${t.project.folder}, .mason/config.json and the users` +
       // the demo database is state like the copy (src/cli/demo.ts): it goes, and config.demo stays to make it again
-      (t.project.config.demo === true ? ` — not the demo database, which went with the copy: the next mason start seeds it again` : "")]],
+      (t.project.config.demo === true ? ` — not the demo database, which went with the synced data: the next mason start seeds it again` : "")]],
   }), { next }));
   return 0;
 }

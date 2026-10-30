@@ -6,7 +6,7 @@
  *   default: everything                                   the role of every user with no role of its own
  *   roles:
  *     everything:
- *       tables: all                                       every copied table and column, those added later included
+ *       tables: all                                       every synced table and column, those added later included
  *     agent:
  *       tables:
  *         orders: { columns: [id, status, amount] }     those columns
@@ -21,7 +21,7 @@
  * is copied at all), a role narrows within it. A `mason user` carries a role (`mason user add <name> --role <role>`,
  * src/cli/user.ts). THE FILE DECIDES WHAT A USER WITH NO ROLE READS (stage 1b, never the code): no file, every copied
  * table; `default: <role>`, that role; a file with no `default:`, nothing — every statement that reads a copied table
- * is refused with the two ways out. A token (no user) reads every copied table. The listener enforces it on the analysed tree
+ * is refused with the two ways out. A token (no user) reads every synced table. The listener enforces it on the analysed tree
  * (src/duck/grants.ts) and the catalog Postgres mirrors it as real roles and GRANTs (src/api/postgres/catalog.ts), so
  * `information_schema` and `mason mcp` list a role only what it may read.
  *
@@ -62,7 +62,7 @@ export interface RoleTable {
   columns: string[] | null;
   exclude: string[];
 }
-/** A role as the file names it: its tables, or `all` (every copied table and column, resolved at every read). */
+/** A role as the file names it: its tables, or `all` (every synced table and column, resolved at every read). */
 export interface RoleEntry { name: string; tables: RoleTable[] | "all" }
 /** `default`: the role of a user with no role of its own; null where the file names none (such a user reads nothing). */
 export interface RolesFile { file: string; roles: RoleEntry[]; default: string | null }
@@ -115,9 +115,9 @@ export function parseRolesText(text: string, file: string): RolesFile | { proble
       if (!isPlain(raw)) { problems.push(`${at}: is { tables: { … } }, the tables the role may read`); continue; }
       const stray = Object.keys(raw).filter((k) => !(ROLE_KEYS as readonly string[]).includes(k));
       for (const k of stray) problems.push(`${at}: unexpected key ${k}${didYouMean(k, ROLE_KEYS)} — a role takes tables`);
-      if (raw.tables === undefined) { problems.push(`${at}.tables: missing — write tables: all (every copied table) or tables: { orders: {} }, the tables the role may read (a role with no table reads nothing: remove it instead)`); continue; }
-      const tablesShape = `${at}.tables: is all (every copied table and column) or one entry per table the role may read, like tables: { orders: {}, customers: { exclude: [email] } }`;
-      // `tables: all`: every copied table and every column, those the sources file adds later included (resolveRoles)
+      if (raw.tables === undefined) { problems.push(`${at}.tables: missing — write tables: all (every synced table) or tables: { orders: {} }, the tables the role may read (a role with no table reads nothing: remove it instead)`); continue; }
+      const tablesShape = `${at}.tables: is all (every synced table and column) or one entry per table the role may read, like tables: { orders: {}, customers: { exclude: [email] } }`;
+      // `tables: all`: every synced table and every column, those the sources file adds later included (resolveRoles)
       if (raw.tables === "all") { if (stray.length === 0) roles.push({ name, tables: "all" }); continue; }
       if (typeof raw.tables === "string") { problems.push(`${tablesShape} — ${raw.tables} is neither${didYouMean(raw.tables, ["all"])}`); continue; }
       if (Array.isArray(raw.tables)) { problems.push(`${tablesShape} — not a list: tables: all, or a key per table`); continue; }
@@ -128,7 +128,7 @@ export function parseRolesText(text: string, file: string): RolesFile | { proble
       for (const [key, entry] of Object.entries(raw.tables)) {
         const tat = `${at}.tables.${key}`;
         // `all` is the file's word for every table: a key of that name is a mistake either way, said with both meanings
-        if (key === "all") { problems.push(`${tat}: all names every table — write tables: all for every copied table, or public.all for a table named all`); ok = false; continue; }
+        if (key === "all") { problems.push(`${tat}: all names every table — write tables: all for every synced table, or public.all for a table named all`); ok = false; continue; }
         const badName = tableNameProblem(key);
         if (badName !== null) { problems.push(`${tat}: ${badName}`); ok = false; continue; }
         const table = sourceOf(key);
@@ -173,7 +173,7 @@ export function readRoles(folder: string, root: string): RolesFile | null | Fail
   try { text = fs.readFileSync(file, "utf8"); }
   catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    return { message: `${shownPath(root, file)} cannot be read: ${(e as Error).message}`, code: "bad_roles", fix: "make it readable, or move it aside (no roles file: every user reads every copied table)" };
+    return { message: `${shownPath(root, file)} cannot be read: ${(e as Error).message}`, code: "bad_roles", fix: "make it readable, or move it aside (no roles file: every user reads every synced table)" };
   }
   const parsed = parseRolesText(text, file);
   return "problems" in parsed ? rolesFailure(file, root, parsed.problems) : parsed;
@@ -196,13 +196,13 @@ export function roleProblems(roles: RolesFile, copied: readonly CopiedTable[]): 
       const at = `roles.${r.name}.tables.${t.name}`;
       const c = copied.find((x) => x.source === t.table);
       if (c === undefined) {
-        problems.push(`${at}: ${t.table} is not a table the sources file copies${nearestEntry(t.name, names)} — a role reads copied tables only (${names.length ? `copied: ${names.join(", ")}` : "none is copied yet"}; mason add ${t.name} copies it)`);
+        problems.push(`${at}: ${t.table} is not a table the sources file syncs${nearestEntry(t.name, names)} — a role reads synced tables only (${names.length ? `synced: ${names.join(", ")}` : "none is synced yet"}; mason add ${t.name} syncs it)`);
         continue;
       }
       if (c.columns === null) continue;
       const have = c.columns.map((x) => x.name);
       for (const [key, list] of [["columns", t.columns ?? []], ["exclude", t.exclude]] as const) {
-        for (const col of list.filter((x) => !have.includes(x))) problems.push(`${at}.${key}: the copy of ${t.table} has no column ${col}${didYouMean(col, have)} (its columns: ${have.join(", ")})`);
+        for (const col of list.filter((x) => !have.includes(x))) problems.push(`${at}.${key}: the synced ${t.table} has no column ${col}${didYouMean(col, have)} (its columns: ${have.join(", ")})`);
       }
       if (t.exclude.length && t.exclude.length >= have.length && have.every((h) => t.exclude.includes(h))) problems.push(`${at}.exclude: leaves no column of ${t.table} to read — remove the table from the role instead`);
     }
@@ -309,7 +309,7 @@ export function usersWithoutRole(users: ReadonlyArray<{ name: string; role?: str
 }
 
 /** How a user's role is decided: its own (`mason user add --role`, "file"), the roles file's `default:` ("default"), or
- *  none ("none": no roles file, where it reads every copied table, or a file with no default, where it reads nothing). */
+ *  none ("none": no roles file, where it reads every synced table, or a file with no default, where it reads nothing). */
 export type RoleFrom = "file" | "default" | "none";
 
 /**
@@ -337,7 +337,7 @@ export function usersWithNoRole(users: ReadonlyArray<{ name: string; role?: stri
  * user added without --role reads, in the file's three states. `shown`: the roles file as messages name it.
  */
 export function rolesDefaultLine(live: RolesLive, shown: string): string {
-  if (live.file === null) return `roles: no ${shown}: every user reads every copied table; mason init writes one`;
+  if (live.file === null) return `roles: no ${shown}: every user reads every synced table; mason init writes one`;
   if (live.problem !== null) return `roles: ${live.file} cannot be read as it is now, so every user's statements are refused until it is fixed: ${live.problem}`;
   const names = [...live.grants.keys()];
   const head = `${names.length} role${names.length === 1 ? "" : "s"} from ${live.file}${names.length ? ` (${names.join(", ")})` : ""}`;
@@ -346,16 +346,16 @@ export function rolesDefaultLine(live: RolesLive, shown: string): string {
 
 /**
  * THE ROLES FILE `mason init` WRITES (the one writer of its first text, as `newSourceText` is the sources file's): one
- * role reading every copied table, the default — today's access, said in a committed file — and a narrower role as a
+ * role reading every synced table, the default — today's access, said in a committed file — and a narrower role as a
  * comment, the shape to copy.
  */
 export function newRolesText(): string {
-  return `# Who may read what of the tables the sources file copies. Yours to commit, beside sources/.
+  return `# Who may read what of the tables the sources file syncs. Yours to commit, beside sources/.
 default: everything   # the role of a user added without --role (mason user add <name>)
 
 roles:
   everything:
-    tables: all       # every copied table and column, tables added to the sources file later included
+    tables: all       # every synced table and column, tables added to the sources file later included
   # A narrower role: mason user add agent --role agent. A bare name is in public, else schema.table;
   # {} every column, columns: [id, status] those, exclude: [email] every column but those.
   # agent:

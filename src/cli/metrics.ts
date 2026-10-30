@@ -96,7 +96,7 @@ export const STATEMENT_OUTCOMES = ["completed", "failed", "refused", "cancelled"
  */
 export function metricsText(f: MetricsFacts): string {
   const lines = [
-    ...metric("mason_ready", "gauge", "1 once Mason serves the copy; 0 while it starts or stops (/healthz answers 503 then).", [{ value: f.run === null ? 0 : 1 }]),
+    ...metric("mason_ready", "gauge", "1 once Mason serves the synced data; 0 while it starts or stops (/healthz answers 503 then).", [{ value: f.run === null ? 0 : 1 }]),
     ...metric("mason_info", "gauge", "Mason's version, as a label; the value is always 1.", [{ labels: { version: f.version }, value: 1 }]),
   ];
   const r = f.run;
@@ -106,10 +106,10 @@ export function metricsText(f: MetricsFacts): string {
     const fresh = (value: number | null, readAt: string | null): number | null => readAt !== null && isFresh(r, readAt) ? value : null;
     lines.push(
       ...metric("mason_uptime_seconds", "gauge", "Seconds since mason serve started.", [{ value: r.uptimeSeconds }]),
-      ...metric("mason_tables", "gauge", "The copies the run holds, by phase (a removed table's copy is held until dropped).",
+      ...metric("mason_tables", "gauge", "The synced tables the run holds, by phase (a removed table's data is held until dropped).",
         TABLE_PHASES.map((phase) => ({ labels: { phase }, value: u.tables[phase] }))),
-      ...metric("mason_copy_bytes", "gauge", "The size of the copy's file on disk, bytes.", [{ value: u.copyBytes }]),
-      ...metric("mason_copy_rows", "gauge", "The rows of the copies served.", [{ value: u.totals.rows }]),
+      ...metric("mason_copy_bytes", "gauge", "The size of the synced data's file on disk, bytes.", [{ value: u.copyBytes }]),
+      ...metric("mason_copy_rows", "gauge", "The rows of the synced tables served.", [{ value: u.totals.rows }]),
       // absent, not NaN, before any added table was synced: nothing has an age yet (see the module's comment)
       ...metric("mason_sync_oldest_age_seconds", "gauge", "Seconds since the stalest added table was last brought current; absent before any sync.",
         [{ value: u.oldestSyncSeconds }]),
@@ -117,13 +117,13 @@ export function metricsText(f: MetricsFacts): string {
       // position under the bytes, and the slot, are as the sampler last read them (a scrape never asks the database):
       // absent when that is more than FRESH_SAMPLES samples old. The seconds are the run's own clock against the last
       // batch's commit time, read from nothing: current at every scrape
-      ...metric("mason_stream_lag_bytes", "gauge", "Replication: WAL bytes between the database's position (as last sampled, at most two samples old) and what the copy has applied; absent when nothing is replicated or not known.",
+      ...metric("mason_stream_lag_bytes", "gauge", "Replication: WAL bytes between the database's position (as last sampled, at most two samples old) and what Mason has applied; absent when nothing is replicated or not known.",
         [{ value: fresh(u.streamLag?.bytes ?? null, u.streamLagReadAt) }]),
       ...metric("mason_stream_lag_seconds", "gauge", "Replication: seconds since the newest change applied was committed on the database; absent when nothing is replicated.",
         [{ value: u.streamLag?.seconds ?? null }]),
       ...metric("mason_slot_wal_held_bytes", "gauge", "Replication: WAL bytes the replication slot holds on the database (as last sampled, at most two samples old); absent when nothing is replicated or not known.",
         [{ value: fresh(u.slotWalHeldBytes, u.slotWalReadAt) }]),
-      ...metric("mason_disk_free_bytes", "gauge", "Bytes free on the disk the copy is on.", [{ value: u.diskFreeBytes }]),
+      ...metric("mason_disk_free_bytes", "gauge", "Bytes free on the disk the synced data is on.", [{ value: u.diskFreeBytes }]),
       ...metric("mason_sessions_open", "gauge", "Sessions logged in to Mason's Postgres API now.", [{ value: u.sessionsOpen }]),
       ...metric("mason_statements_total", "counter", "Statements the listener answered since the process started, whether or not the request log kept each, by outcome (refused: the statement's fault; failed: Mason's or the machine's).",
         STATEMENT_OUTCOMES.map((outcome) => ({ labels: { outcome }, value: outcome === "completed" ? st.completed : st[outcome] }))),

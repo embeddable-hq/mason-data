@@ -37,7 +37,7 @@ export function sampleCells(s) {
     rowsSent: n(s.rowsSent), bytesSent: bytesText(s.bytesSent), p95: s.durationP95Ms === null ? "–" : msText(s.durationP95Ms),
     copy: s.copyBytes === null ? "–" : fileSize(s.copyBytes), rows: n(s.copyRows), failing: s.tablesFailed === 0 ? "" : n(s.tablesFailed),
     oldest: s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds), lag: s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds),
-    memory: `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (copy ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`,
+    memory: `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (engine ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`,
   };
 }
 
@@ -46,8 +46,8 @@ export function sampleCells(s) {
 const CHARTS = [
   ["usage-statements", "Statements", "statements", "bars", n, "count"],
   ["usage-p95", "p95 duration", "durationP95Ms", "line", (v) => msText(v), "ms"],
-  ["usage-copy-bytes", "Size of the copy", "copyBytes", "line", fileSize, "bytes"],
-  ["usage-copy-rows", "Rows in the copy", "copyRows", "line", n, "count"],
+  ["usage-copy-bytes", "Size of the synced data", "copyBytes", "line", fileSize, "bytes"],
+  ["usage-copy-rows", "Rows in the synced data", "copyRows", "line", n, "count"],
 ];
 /** A chart's title at a step: the statements are counted per step, the rest are levels. */
 const chartTitle = (key, title, step) => key === "usage-statements" ? `Statements ${perStep(step ?? 3600)}` : title;
@@ -295,7 +295,7 @@ export function renderUsage(b, isOpen = () => false, sort = { key: "time", dir: 
   if (!b.samples.length) samples = empty("No sample in this time: Mason takes the first a minute after it starts.");
   else {
     const withLag = b.samples.some((s) => s.streamLagBytes !== null || s.streamLagSeconds !== null);
-    const cols = ["Time (UTC)", "Statements", "Errors", "Rows sent", "Bytes sent", "p95", "Copy", "Rows", "Failing", "Oldest", ...(withLag ? ["Lag"] : [])];
+    const cols = ["Time (UTC)", "Statements", "Errors", "Rows sent", "Bytes sent", "p95", "Size", "Rows", "Failing", "Oldest", ...(withLag ? ["Lag"] : [])];
     // newest first unless the time's header turned it round (the charts read left to right, oldest first)
     const ordered = sort.dir === "asc" ? b.samples : [...b.samples].reverse();
     const head = (list) => `<thead><tr>${sortTh("hours", "time", list[0], sort)}${list.slice(1).map((c) => `<th scope="col"${c === "Time (UTC)" ? "" : ` class="num"`}>${esc(c)}</th>`).join("")}</tr></thead>`;
@@ -313,9 +313,9 @@ export function renderUsage(b, isOpen = () => false, sort = { key: "time", dir: 
   return head + samples;
 }
 
-/** Each copy's own size, measured every 10 min (src/cli/usage.ts): table, bytes, when. */
+/** Each synced table's own size, measured every 10 min (src/cli/usage.ts): table, bytes, when. */
 export function renderCopySizes(sizes) {
-  if (!sizes.length) return empty(`No copy measured yet: each is measured every ${duration(SIZE_EVERY_SECONDS)}.`);
+  if (!sizes.length) return empty(`No table measured yet: each is measured every ${duration(SIZE_EVERY_SECONDS)}.`);
   return `<p class="dim">Measured every ${esc(duration(SIZE_EVERY_SECONDS))}.</p>` + panel(`<table class="sizes">${th(["Table", "Size", "Measured at (UTC)"])}<tbody>` +
     sizes.map((c) => `<tr><th scope="row"><code class="name" title="${esc(c.table)}">${esc(c.table)}</code></th>${num(fileSize(c.bytes))}<td>${esc(c.at.slice(11, 16))}</td></tr>`).join("") + "</tbody></table>");
 }

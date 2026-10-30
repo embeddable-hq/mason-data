@@ -527,7 +527,7 @@ test("catalogRoles: one NOLOGIN role per Mason role, USAGE on every table schema
   assert.equal(v, `CREATE SCHEMA IF NOT EXISTS "public"; CREATE VIEW "public"."paid_orders" AS  SELECT id FROM public.orders WHERE paid; GRANT USAGE ON SCHEMA "public" TO "agent"; GRANT SELECT ON "public"."paid_orders" TO "agent"; GRANT USAGE ON SCHEMA "public" TO "ops"; GRANT SELECT ON "public"."paid_orders" TO "ops";`);
 });
 
-test("catalogRoles: a role of tables: all (stage 1b) is granted every copied table whole, a table copied later at the rebuild — per table, never ON ALL TABLES", async () => {
+test("catalogRoles: a role of tables: all (stage 1b) is granted every synced table whole, a table copied later at the rebuild — per table, never ON ALL TABLES", async () => {
   // the role as src/cli/roles.ts reads and resolves it, imported here so a tree without tables: all fails this test by name
   const r = await import("../../src/cli/roles.ts");
   const m = catalogModule as unknown as { catalogRoles: (s: PgSchema, r: ReadonlyMap<string, unknown>) => string[] };
