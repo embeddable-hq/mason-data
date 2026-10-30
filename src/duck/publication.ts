@@ -254,7 +254,7 @@ export function describedOf(answer: PublicationAnswer, publication: string): Des
 
 /** The named publication and the copied tables as the live catalog describes them: read-only, two statements.
  *  (`_project`, the project's name, is unused: the tables are found by their own names.) */
-export async function readNamedPublication(pg: PgConnection, publication: string, tables: readonly CopiedTable[], _project: string): Promise<DescribedPublication> {
+export async function readNamedPublication(pg: PgConnection, publication: string, tables: readonly CopiedTable[]): Promise<DescribedPublication> {
   const one = async (sql: string): Promise<string> => {
     const v = (await pg.query(sql)).rows[0]?.[0];
     if (typeof v !== "string") throw new Error("a catalog query answered no value");

@@ -30,7 +30,7 @@ import { qualifiedName, type TableName } from "../duck/explain.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 
 /** The URL a client is shown in the help: a user's, as mason user add prints it. */
-const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/shop";
+const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/mason";
 
 export const MCP: CommandSpec = {
   name: "mcp",
@@ -126,7 +126,7 @@ function connect(s: Source, applicationName: string): Promise<PgConnection> {
 }
 
 /** Why a connection failed, in the failure shape: nothing listening, a password refused, a database it does not serve. */
-function connectFailure(e: unknown, s: Source): Failure {
+export function connectFailure(e: unknown, s: Source): Failure {
   const where = `${s.host}:${s.port}`;
   if (e instanceof PgError) {
     const hint = e.fields.H;
@@ -136,7 +136,9 @@ function connectFailure(e: unknown, s: Source): Failure {
         next: [["mason user list", "the users, beside the run"], ADD_STEP] };
     }
     return { message: `${where} refused the connection: ${e.fields.M ?? e.message}${e.code ? ` (${e.code})` : ""}`, code: "refused", why: hint ?? e.detail,
-      fix: "the URL mason user add printed: its database is the project's", next: [HELP_STEP] };
+      // a URL from before the name moved is the likely one: the hint is the listener's, and says the right name
+      fix: e.code === "3D000" ? "the last part of the URL is the database: change it to the one the hint names, or use the URL mason user add printed"
+        : "the URL mason user add printed", next: [HELP_STEP] };
   }
   const reason = e instanceof Error ? socketErrorText(e) : String(e);
   const said = /ECONNREFUSED/.test(reason) ? `nothing is listening on ${where}` : reason.replace(/^connecting to \S+: /, "");

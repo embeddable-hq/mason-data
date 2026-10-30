@@ -9,7 +9,7 @@
  *
  * It writes `.mason/config.json` (0600: the project's name and Mason's key), the project's source file
  * (`mason/sources/<database>.yml`, src/cli/sources.ts: `kind: postgres`, `url: ${DATABASE_URL}` — or the variable the
- * URL was read from, `tables: {}`) — the URL itself in `.env`, never in a committed file (the sources file is the
+ * URL was read from, `tables: {}`, and `database: <name>` only under `--database`) — the URL itself in `.env`, never in a committed file (the sources file is the
  * developer's to commit, so the URL stays out of it): nothing more when it came from there, the line added when it came
  * from the argument or the shell — and adds `.mason/` and that .env to the folder's .gitignore. It refuses a folder that
  * is in a project already (here or above) — but for a project with no source file (one an older Mason made), whose
@@ -33,12 +33,13 @@ import { appDatabaseUrl, appEnvValue, appendEnvLine, ENV_FILE } from "../lib/dot
 import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateDir, nameFromFolder, newConfig, writeConfig } from "./project.ts";
 import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_PORT, DEMO_SYNC, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
 import { freePort } from "./ports.ts";
+import { databaseNameProblem, DEFAULT_DATABASE } from "../lib/database-name.ts";
 import { DEFAULT_SYNC, syncText } from "../lib/table-sync.ts";
 import { newRolesText, rolesFile } from "./roles.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 
 
-export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <name>] [--folder <dir>] [--remote] [--skip-check] [--json]
+export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <name>] [--database <name>] [--folder <dir>] [--remote] [--skip-check] [--json]
 
   Makes this folder a Mason project — run it in your app's folder. It checks it can read the database (and writes
   nothing when it cannot), then creates:
@@ -64,13 +65,15 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
     mason init --folder db/mason --name shop-admin      the project's files elsewhere; another name
     mason init postgres://me:secret@db.example.com/shop --remote
 
-  --name <name>     the project's name: the database name a tool connects to on the Postgres API (default: this folder's)
+  --name <name>     the project's name, which its replication slot is named for (default: this folder's)
+  --database <name> the database name a tool connects with, written as database: in the source file (default: none
+                    written, so tools connect with ${DEFAULT_DATABASE}): your database's own, and a tool keeps the name it has
   --folder <dir>    where sources/ goes, relative to this folder (default mason; . for this folder itself)
   --remote          go ahead with a database on another machine (read the warnings mason init prints); not with demo
   --skip-check      write the project without connecting (the database is not up yet); mason start checks it; not with demo
   --json            as data: { name, root, folder, config, demo (true for the demo database's project, else false),
-                    source: { name (the source's: its file's), file, url (as the file writes it), env (the .env line
-                    written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
+                    source: { name (the source's: its file's), file, url (as the file writes it), database (the name
+                    a tool connects with, or null when the file has a mistake), env (the .env line written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
                     database: { url (password masked), from, version, tables }, warnings, next }
 `;
 
@@ -78,11 +81,11 @@ export const INIT: CommandSpec = {
   name: "init",
   summary: "make this folder a Mason project on your Postgres: mason init (its URL from .env), mason init postgres://… or demo",
   usage: INIT_USAGE,
-  options: { name: { type: "string" }, folder: { type: "string" }, remote: { type: "boolean" }, "skip-check": { type: "boolean" }, json: { type: "boolean" } },
+  options: { name: { type: "string" }, database: { type: "string" }, folder: { type: "string" }, remote: { type: "boolean" }, "skip-check": { type: "boolean" }, json: { type: "boolean" } },
   json: ["name", "root", "folder", "config", "demo", "source", "roles", "database", "warnings", "next"],
 };
 
-/** Why `name` cannot be this project's, or null: not a name the Postgres API's database and the slot take. */
+/** Why `name` cannot be this project's, or null: not a name its replication slot takes. */
 export function nameProblem(name: string): string | null {
   if (!NAME_RE.test(name)) return `${JSON.stringify(name)} is not a project name: lower-case letters, digits, - and _, starting with a letter or digit (--name sets it)`;
   return null;
@@ -199,6 +202,9 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   if (fs.existsSync(folder) && !fs.statSync(folder).isDirectory()) return usage(`${folder} is a file, not a folder`, "--folder <dir> chooses another");
   const named = nameProblem(name);
   if (named) return usage(named);
+  const connectName = (f.values.database as string | undefined) ?? null;
+  const badDatabase = connectName === null ? null : databaseNameProblem(connectName);
+  if (badDatabase !== null) return usage(`--database: ${badDatabase}`);
 
   // THE SOURCE FILE: one already here (a clone of the project) is kept; else written, its URL a variable of .env
   const kept = sourceFileNames(folder)[0] ?? null;
@@ -208,6 +214,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
       fix: "run it in a new folder (mkdir mason-demo && cd mason-demo && mason init demo), or mason init here for the database that file names" }, { json, io });
   }
   const keptPath = kept === null ? null : path.join(sourcesDir(folder), kept);
+  if (connectName !== null && keptPath !== null) return usage(`--database writes a new source file, and ${path.relative(root, keptPath)} is here already`, `write database: ${connectName} in it`);
   const keptFile = kept === null || keptPath === null ? null : parseSourceText(fs.readFileSync(keptPath, "utf8"), kept.replace(/\.ya?ml$/, ""), keptPath);
   const keptVar = keptFile !== null && !("problems" in keptFile) && "env" in keptFile.url ? keptFile.url.env : null;
 
@@ -315,8 +322,8 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     } else {
       await steps.step(`Writing ${rel(sourceFile)}`, () => {
         fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
-        fs.writeFileSync(sourceFile, newSourceText(`\${${where.variable}}`, demo ? DEMO_ADDED_TABLES : [], demo ? DEMO_SYNC : DEFAULT_SYNC));
-      }, () => `Wrote ${rel(sourceFile)}: the database (url: \${${where.variable}}), sync: ${syncText(demo ? DEMO_SYNC : DEFAULT_SYNC)} ` +
+        fs.writeFileSync(sourceFile, newSourceText(`\${${where.variable}}`, demo ? DEMO_ADDED_TABLES : [], demo ? DEMO_SYNC : DEFAULT_SYNC, connectName));
+      }, () => `Wrote ${rel(sourceFile)}: the database (url: \${${where.variable}}), ${connectName === null ? "" : `database: ${connectName}, `}sync: ${syncText(demo ? DEMO_SYNC : DEFAULT_SYNC)} ` +
         `(${demo ? "every table polled every 5 s" : "each table read once, then again only by mason sync <table>"}) and the tables to sync, ` +
         `${demo ? `the demo's ${DEMO_ADDED_TABLES.length} added — mason add ${DEMO_TABLE_TO_ADD} adds the fourth` : "none yet (mason add)"} — commit it`);
     }
@@ -376,6 +383,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   if (json) {
     say(jsonText(INIT, { name, root, folder: path.relative(root, folder) || ".", config: path.join(root, STATE_DIR, "config.json"), demo,
       source: { name: path.basename(sourceFile).replace(/\.ya?ml$/, ""), file: sourceFile, url: keptFile !== null && !("problems" in keptFile) ? ("env" in keptFile.url ? `\${${keptFile.url.env}}` : maskedUrl(keptFile.url.literal)) : `\${${where.variable}}`,
+        database: keptFile === null ? connectName ?? DEFAULT_DATABASE : "problems" in keptFile ? null : keptFile.database ?? DEFAULT_DATABASE,
         env: where.line === null ? null : maskedLine(where.line) },
       roles: { file: rolesPath, written: !rolesKept },
       database, warnings: notes }, next));

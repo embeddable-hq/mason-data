@@ -295,12 +295,18 @@ connection that opens with a ClientHello and says why in its log (it has no cert
 **The parts of the URL**, for a driver's form:
 
 ```
-postgres://<user>:<password>@<host>:5433/<project>
+postgres://<user>:<password>@<host>:5433/mason
 ```
 
 - **The password is a `mason user`'s** (above). The project's API key is refused as a password (28P01, saying so).
   `application_name` is logged with every request.
-- **The database is the project's name.** A connection to any other database is refused (3D000) naming the right one.
+- **The database is `mason`**, unless the sources file says another: `database: production` at its top keeps the name a
+  tool already has, so moving a tool to Mason changes only its host and port (with no such line, its database name too).
+  The name is exact, capitals included, as on Postgres, and a name Postgres would take works, `postgres` among them; on a
+  server whose sources file has no such line, `MASON_PG_DATABASE` sets it (the two must agree when both are set). A
+  connection to any other database is refused (3D000), the hint saying the right name and where it is set.
+  `current_database()` and `pg_database` answer the same name. The project's name is not involved: it names the
+  replication slot.
 - **The port is the project's** (above; `MASON_PG_PORT`), the address `MASON_PG_HOST` (default 127.0.0.1).
 - **TLS or a declared private network.** With `MASON_PG_TLS_CERT` and `MASON_PG_TLS_KEY` (PEM files) both set,
   TLS is required: a client that does not ask for it is refused (asked by SSLRequest or by a direct TLS start,
@@ -477,6 +483,7 @@ whatever the session runs at that moment is stopped, as a `CancelRequest` stops 
 | `MASON_PG_PORT` | 5433, then the project's | the listener's port |
 | `MASON_PG_HOST` | 127.0.0.1 | the listener's address |
 | `MASON_PG_TLS_CERT`, `MASON_PG_TLS_KEY` | unset (plain) | PEM files; both or neither; with them TLS is required |
+| `MASON_PG_DATABASE` | `mason` | `mason serve`: the database name a tool connects with, for a sources file with no `database:`; the two must agree when both are set, and `mason start` refuses it (the sources file is what says it on a project) |
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |
 | `MASON_PG_CATALOG_TIMEOUT_MS` | 10000 | how long a catalog statement may take before the embedded Postgres is discarded and the statement refused |
 | `MASON_STATEMENT_TIMEOUT` | 5min | the longest one statement may run (Postgres's units; 0 for none); a session's `statement_timeout` may only shorten it |

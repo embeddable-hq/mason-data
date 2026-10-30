@@ -60,6 +60,7 @@ The sources file is named for the database (`app.yml` above) and lists what Maso
 ```yaml
 kind: postgres
 url: ${DATABASE_URL}          # a variable from .env.local, .env or the shell; a literal URL is allowed for local dev
+database: production          # optional: the database name a tool connects with (none: mason)
 tables:
   orders:                     # a bare name is in `public`; `billing.invoices` names its schema
     columns: [id, customer_id, status, amount, created_at, payload]
@@ -73,6 +74,8 @@ tables:
 - An entry is `{}` (every column), `columns:` (those; the primary key is always synced), `exclude:` (every column but
   those) — never both — and, for a table with no primary key, `key:`: the columns that tell its rows apart, which it is
   keyed by (polling only: logical replication cannot apply a change by them). A table with a primary key refuses `key:`.
+- A tool connects with the database name `mason`. A tool moving from your Postgres changes its host, port and database
+  name, or `database:` keeps the name it has, so it changes only its host and port.
 - Column types are not in the file: Mason reads them from the database at every start.
 - `url:` is `${NAME}`, read from `.env.local`, `.env` or the shell — or a literal URL, for a database on your machine.
 - One source per project for now, and `postgres` is its only kind.
@@ -95,7 +98,7 @@ again and remove `mason/models/`.
 |---|---|
 | `mason help [<command> \| <guide>]` | The commands by step, one command's usage, or one of the guides, offline: `mason help agent` (driving Mason from a coding agent: the commands in order, `--json` and its shapes, exit codes, failures) and `mason help production` (the road from a laptop to production: the image, its settings, Docker Compose, logical replication, upgrades). |
 | `mason doctor` | Checks what Mason needs here — Node 22.13+, memory, Mason's ports — and in a project's folder its database; with Mason running for it, the run itself: whether every added table is synced, the statements refused or slow in the last day. Every failing line says what to do; it ends with the next command. |
-| `mason init [<postgres url>]` | Makes this folder a project: checks it can read the database (nothing is written when it cannot; `--skip-check` writes anyway), writes `.mason/config.json` (Mason's key, never the URL) and `mason/sources/<database>.yml` (keeping a sources file already there), adds the URL to `.env` when it was not there, and adds `.mason/` and that `.env` to `.gitignore`. The URL from the argument, else `MASON_DATABASE_URL`, else `DATABASE_URL`, each in `.env.local`, `.env` or the shell (the sources file names the one read). `--name` sets the project's name (default: the folder's) — the database name a tool connects to — `--folder` where its files go, `--remote` allows a database on another machine. Refuses a folder already in a project, but for one with no sources file (an older Mason's), whose sources file alone it writes. |
+| `mason init [<postgres url>]` | Makes this folder a project: checks it can read the database (nothing is written when it cannot; `--skip-check` writes anyway), writes `.mason/config.json` (Mason's key, never the URL) and `mason/sources/<database>.yml` (keeping a sources file already there), adds the URL to `.env` when it was not there, and adds `.mason/` and that `.env` to `.gitignore`. The URL from the argument, else `MASON_DATABASE_URL`, else `DATABASE_URL`, each in `.env.local`, `.env` or the shell (the sources file names the one read). `--name` sets the project's name (default: the folder's), which its replication slot is named for; `--database` the database name a tool connects with (default `mason`, none written); `--folder` where its files go, `--remote` allows a database on another machine. Refuses a folder already in a project, but for one with no sources file (an older Mason's), whose sources file alone it writes. |
 | `mason start` | Starts Mason for this folder's project in the background and returns once it is up. Run it again any time: it says so when Mason is already running. Each table is kept current as its `sync:` in the sources file says (`off`, `poll <interval>` or `replication`). `--self-signed-tls` serves the Postgres API over TLS; `--attach` stays in the foreground. |
 | `mason tables [<table>…] [--all]` | The tables this user can read against the sources file, one line each: rows, primary key, whether added (and with which columns), and why a table cannot be added yet (no primary key: the `--key` to add it by). Name a table (or pass `--all` for every one) for its columns: each one's type, what it references, and whether `mason add` would leave it out as a secret. It reads the project's database itself, so Mason need not be running. |
 | `mason add <table>… [--columns …] [--include …] [--key …] [--sync …]` | Syncs tables into Mason, each one an entry of the sources file: every column (`orders: {}`), or `--columns id,status,created_at` for those (one table at a time; the key is written with them). Columns that look like secrets (`password`, `token`, `api_key`, `private_key`, …) are left out, named, and written as `exclude:`; `--include password_hash` adds one. `--key tenant_id,id` adds a table with no primary key, keyed by those columns. `--sync "poll 30s"` (or `off`) writes how it is kept current after its first sync on its entry; on a table already added, `--sync` alone changes that line and nothing else. Without it the entry follows the file's `sync:`, but a table over 1,000,000 rows under a file that polls is written `sync: off` and said, and a frequent poll of tens of millions of rows is warned of with an estimate of its cost. Adding a table again with other columns changes its entry. Mason need not be running: the entry is checked against the database as the run checks it, and the first sync begins at `mason start` (with Mason running, at once). |
@@ -216,9 +219,9 @@ comes before `--env`, which takes every value after it):
 
 ```sh
 mason user add claude                    # the URL, printed once
-claude mcp add mason --env MASON_URL="postgres://claude:<password>@127.0.0.1:5433/shop" -- mason mcp
+claude mcp add mason --env MASON_URL="postgres://claude:<password>@127.0.0.1:5433/mason" -- mason mcp
 # or on its command line, where ps shows it to this machine's users and claude mcp add prints it
-claude mcp add mason -- mason mcp --url "postgres://claude:<password>@127.0.0.1:5433/shop"
+claude mcp add mason -- mason mcp --url "postgres://claude:<password>@127.0.0.1:5433/mason"
 ```
 
 Claude Desktop, in `claude_desktop_config.json`. The app often starts a server without your shell's `PATH`, where
@@ -231,7 +234,7 @@ neither `mason` nor the `node` its first line asks for is found: name both by th
     "mason": {
       "command": "/absolute/path/to/node",
       "args": ["/absolute/path/to/mason", "mcp"],
-      "env": { "MASON_URL": "postgres://claude:<password>@127.0.0.1:5433/shop" }
+      "env": { "MASON_URL": "postgres://claude:<password>@127.0.0.1:5433/mason" }
     }
   }
 }

@@ -106,7 +106,7 @@ export interface PgTable {
 }
 
 export interface PgSchema {
-  /** the project's name: what a connection's `database` must be */
+  /** what a connection's `database` must be (src/lib/database-name.ts) */
   database: string;
   tables: PgTable[];
   /** the source's views, created in the catalog after the tables (catalog.ts `catalogViews`) and

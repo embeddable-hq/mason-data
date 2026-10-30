@@ -1156,6 +1156,45 @@ so a TLS proxy had been written beside it. Postgres 17's `sslnegotiation=direct`
 had answered `off` over TLS. **Where.** `src/api/postgres/listener.ts`, `src/cli/pg-tls.ts`; `tests/pg-tls.test.ts`,
 `tests/postgres-api/tls.test.ts`.
 
+### The database name a tool connects with (2026-10-30)
+
+**Decision.** The name is `mason`, unless the sources file says another with `database:`. It was the project's name
+(`mason init --name`, the folder, `MASON_NAME`), which also named the replication slot and publication; the two are now
+apart. `src/lib/database-name.ts` is the one rule, `connectDatabase`: the run derives it once and records it in its
+URL, every command reads that URL, and a command with Mason stopped asks `projectDatabase`.
+
+**Why `mason`.** It shows in every connection string, and a project's folder name was never something a tool should
+carry: a tool's saved connection said `my-app-2` because of where someone ran `mason init`.
+
+**Why the fixed name is not the project's name.** The obvious change, defaulting the project's name to `mason`, would
+give every project on one source the slot `mason_dev_mason_<source>`, so two projects (a laptop and a staging server,
+say) would share one slot and each read away the other's changes, silently. So the slot keeps the project's name
+(`deploymentOf` is unchanged) and the name a tool sees is a separate fact. `tests/cli-dev.test.ts` holds two projects
+answering as `mason` with two slots.
+
+**Why `database:` is the sources file's.** The point of drop-in is a tool keeping what it has, and which name a tool
+uses is a fact about the deployment that should be committed beside the tables it reads, not set per machine. So the
+key takes what Postgres takes: capitals, dashes, dots and spaces are real databases' names, and `postgres` and
+`template1` work (`databaseNameSql` moves PGlite's own aside). Refused: nothing, past 63 bytes (`datname` would cut it
+and a tool's would stop matching), a control character, `.` and `..` (a URL reads them as path steps, even escaped),
+and `${NAME}`, because the name is the same on every machine.
+
+**`MASON_NAME` stays the project's name.** It still names the slot, and renaming it over the same synced data is still
+refused. What it no longer does is name the database, and a platform that writes the sources file to its volume (Fly,
+Railway) has no file a person edits, so `MASON_PG_DATABASE` sets the name there. The setting is `mason serve`'s alone: the
+sources file's name comes first, the two are refused on the settings' one report when they disagree (a second place
+for one fact is only safe if it cannot differ), and `mason start` refuses it rather than ignore it. Beside
+`MASON_PG_PLAIN`, not `MASON_DATABASE`, which reads as `MASON_DATABASE_URL`.
+
+**What a stopped project says.** `mason user add` reads the one key, not the whole file: it needs neither the URL nor
+the tables right, but a file that cannot say the key is refused, because a guessed `mason` would hand a tool a name the
+next run may not answer to. The name is read once at the start, so `mason status` warns while the file disagrees with
+the run. The `3D000` hint never names the sources file's path: a client reads it before any password, and that file is
+named for the source's own database.
+
+**Several sources are not built.** When they are, a second source with no `database:` would clash on `mason`, and is
+refused with the exact line to add.
+
 ### Users
 
 **Decision.** `mason user add <name>` prints a password once: `mason_<id>_<mac>`, 16 random hex digits then 32 of an

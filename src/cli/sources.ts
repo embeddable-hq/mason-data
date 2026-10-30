@@ -5,6 +5,7 @@
  *
  *   kind: postgres
  *   url: ${DATABASE_URL}          an env var from .env.local, .env or the shell; a literal URL for local dev
+ *   database: production          the database name a tool connects with (none: mason; src/lib/database-name.ts)
  *   sync: off                     how each table is kept current after its first sync (src/lib/table-sync.ts): off
  *                                 (the default: until mason sync <table>), poll <interval> or replication; an entry's
  *                                 own overrides it
@@ -30,7 +31,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isMap, isScalar, parseDocument, type Pair, type YAMLMap } from "yaml";
+import { isMap, isScalar, parseDocument, type Document, type Pair, type YAMLMap } from "yaml";
+import { databaseNameProblem, DEFAULT_DATABASE } from "../lib/database-name.ts";
 import { appEnvValue, ENV_FILE } from "../lib/dotenv.ts";
 import { closest, didYouMean } from "../lib/did-you-mean.ts";
 import type { Failure, NextStep } from "./command.ts";
@@ -39,7 +41,7 @@ import type { AddedTable } from "../duck/sync.ts";
 import { DEFAULT_SYNC, parseSync, syncText, type SourcesTop, type TableSync } from "../lib/table-sync.ts";
 
 export const SOURCES_DIR = "sources";
-const KEYS = ["kind", "url", "sync", "publication", "tables"] as const;
+const KEYS = ["kind", "url", "database", "sync", "publication", "tables"] as const;
 const ENTRY_KEYS = ["columns", "exclude", "key", "sync"] as const;
 const ENV_REF = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 
@@ -67,6 +69,8 @@ export interface SourceFile {
   kind: "postgres";
   /** where the URL comes from: `${NAME}` (resolved by `readSource`) or the URL written in the file */
   url: { env: string } | { literal: string };
+  /** the database name a tool connects with, as the file writes it; null: none written (src/lib/database-name.ts `connectDatabase`) */
+  database: string | null;
   /** every table's sync unless its entry says its own, as the file says it at the top (null: not written, so `off`) */
   sync: TableSync | null;
   /** the publication the `replication` tables are read through, its owner's: `${NAME}` (resolved by `readSource`) or
@@ -157,6 +161,24 @@ function nameList(v: unknown, at: string, what: string): string[] | string {
   return v as string[];
 }
 
+/** The file's `database:`: the name it writes, null when it has no such line, or the problem with it (`text`, the file's). */
+function databaseKey(doc: Document, text: string): { database: string | null } | { problem: string } {
+  const node = isMap(doc.contents) ? doc.contents.get("database", true) : undefined;
+  if (node === undefined) return { database: null };
+  const way = `write database: <name>, or take the line out: tools then connect with ${DEFAULT_DATABASE}`;
+  if (!isScalar(node)) return { problem: `database: is one name, not a list or a map — ${way}` };
+  if (node.value === null) return { problem: `database: is empty — ${way}` };
+  if (typeof node.value !== "string") {
+    const written = text.slice(node.range![0], node.range![1]);
+    return { problem: `database: ${yamlRead(node.value).replace(/^\S+/, written)} — quote it: "${written}"` };
+  }
+  const bad = databaseNameProblem(node.value);
+  return bad === null ? { database: node.value } : { problem: `database: ${bad} — ${way}` };
+}
+
+/** A file that is YAML and no mapping, said; `v` is what it read as. */
+const notMapping = (v: unknown): string => `it is ${v === null || v === undefined ? "empty" : "not a mapping"}: a source file is kind: postgres, url: \${DATABASE_URL} and tables: {}`;
+
 /**
  * The file's text read as a source file: its shape, never the database (that is `addedTables`'s). `name` is the
  * source's (the file's name); the problems are each at their key, in the order they are in the file.
@@ -165,7 +187,7 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length) return { problems: [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`] };
   const v: unknown = doc.toJS();
-  if (!isPlain(v)) return { problems: [`it is ${v === null || v === undefined ? "empty" : "not a mapping"}: a source file is kind: postgres, url: \${DATABASE_URL} and tables: {}`] };
+  if (!isPlain(v)) return { problems: [notMapping(v)] };
   const problems: string[] = [];
   for (const k of Object.keys(v)) {
     if (!(KEYS as readonly string[]).includes(k)) problems.push(`unexpected key ${k}${didYouMean(k, KEYS)} — a source file takes ${KEYS.join(", ")}`);
@@ -187,6 +209,10 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
     else if (v.url.includes("${")) problems.push(`url: ${JSON.stringify(v.url)} — write the URL whole, or \${NAME} alone: the whole URL in one variable, like \${DATABASE_URL}`);
     else url = { literal: v.url.trim() };
   }
+
+  // the name a tool connects with: written out, the same on every machine (src/lib/database-name.ts)
+  const named = databaseKey(doc, text);
+  if ("problem" in named) problems.push(named.problem);
 
   // the publication a replicated table is read through: a name, or ${NAME} as url: takes one (resolved by readSource)
   let publication: SourceFile["publication"] = null;
@@ -247,8 +273,8 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
       tables.push({ name: key, table, columns, exclude, key: ownKey, sync: ownSync });
     }
   }
-  if (problems.length || kind === null || url === null) return { problems };
-  return { name, file, kind, url, sync, publication, tables };
+  if (problems.length || kind === null || url === null || "problem" in named) return { problems };
+  return { name, file, kind, url, database: named.database, sync, publication, tables };
 }
 
 /** Where a project's source files are: `<folder>/sources/`. */
@@ -290,13 +316,35 @@ export function sourcesTop(root: string, folder: string): SourcesTop {
   return { shown, sync: at("sync"), publication: at("publication") };
 }
 
+/**
+ * THE `database:` A PROJECT WRITES, from the file alone and only its one key (src/lib/database-name.ts): what `mason user
+ * add` says with Mason stopped, which needs neither the database's URL nor the rest of the file right. No file writes
+ * none. A file it cannot read this key from is refused, in the failure shape: guessing `mason` would hand a tool a name
+ * the run may not answer to.
+ */
+export function writtenDatabase(folder: string, root: string): { database: string | null } | Failure {
+  const names = sourceFileNames(folder);
+  if (names.length === 0) return { database: null };
+  if (names.length > 1) return tooManySources(root, sourcesDir(folder), names);
+  const file = path.join(sourcesDir(folder), names[0]!);
+  const text = fs.readFileSync(file, "utf8");
+  const doc = parseDocument(text, { uniqueKeys: true });
+  if (doc.errors.length) return sourceFailure(file, root, [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`]);
+  if (!isMap(doc.contents)) return sourceFailure(file, root, [notMapping(doc.toJS())]);
+  const named = databaseKey(doc, text);
+  return "problem" in named ? sourceFailure(file, root, [named.problem]) : named;
+}
+
 /** The file `mason init` writes: the database, how its tables are kept current (`sync`: `off`, the default; the demo's
  *  `poll 5s`, so it shows a copy keeping up), then its tables — none yet, but for `mason init demo`'s, which names the
- *  demo database's tables (`tables`, each copied whole: `{}`), so its first start copies them and shows something. */
-export function newSourceText(url = "${DATABASE_URL}", tables: readonly string[] = [], sync: TableSync = DEFAULT_SYNC): string {
+ *  demo database's tables (`tables`, each copied whole: `{}`), so its first start copies them and shows something.
+ *  `database:` only when one is asked for (`--database`): none written, the default stays a default. */
+export function newSourceText(url = "${DATABASE_URL}", tables: readonly string[] = [], sync: TableSync = DEFAULT_SYNC, database: string | null = null): string {
   return "# The database this project syncs from, and which of its tables. Yours to commit; the URL stays out of it.\n" +
+    (database === null ? `# Tools connect with the database name ${DEFAULT_DATABASE}; database: <name> here keeps the name a tool already has.\n` : "") +
     "kind: postgres\n" +
     `url: ${url}${ENV_REF.test(url) ? "   # from .env.local, .env or the shell; a literal postgres:// URL works too" : ""}\n` +
+    (database === null ? "" : `database: ${yamlName(database)}   # the database name a tool connects with\n`) +
     `sync: ${syncText(sync)}${sync.mode === "off" ? "   # after its first sync, a table is read again only by mason sync <table> (poll 5m: every 5 minutes)"
       : sync.mode === "replication" ? "   # each table kept current from the database's change log after its first sync (poll 5m, or off, on an entry)"
       : `   # each table polled every ${sync.every} after its first sync (off: read again only by mason sync <table>)`}\n` +
@@ -316,6 +364,11 @@ export function sourceNameFor(database: string): string {
 
 /** The folder an older Mason listed a project's tables in, one file per table: read by nothing, said by `readSource`. */
 export const OLD_TABLES_DIR = "models";
+
+/** A second source file, refused: one source per project for now. */
+const tooManySources = (root: string, dir: string, names: readonly string[]): Failure => ({
+  message: `${shownPath(root, dir)}/ has ${names.length} source files (${names.join(", ")}): one source per project for now`, code: "bad_source",
+  fix: `keep the one this project syncs from, and move the others out of ${shownPath(root, dir)}/` });
 
 /**
  * THE PROJECT'S SOURCE FILE, read: the one file in `sources/` (a second is refused by name: one source per project for
@@ -338,10 +391,7 @@ export function readSource(folder: string, root: string, env: NodeJS.ProcessEnv 
     return { message: `this project names no database: ${shownPath(root, dir)}/ has no source file`, code: "bad_source",
       fix: `write ${shownPath(root, file)}, with the database's URL in .env as DATABASE_URL:\n${newSourceText().trimEnd()}` };
   }
-  if (names.length > 1) {
-    return { message: `${shownPath(root, dir)}/ has ${names.length} source files (${names.join(", ")}): one source per project for now`, code: "bad_source",
-      fix: `keep the one this project syncs from, and move the others out of ${shownPath(root, dir)}/` };
-  }
+  if (names.length > 1) return tooManySources(root, dir, names);
   const file = path.join(dir, names[0]!);
   const parsed = parseSourceText(fs.readFileSync(file, "utf8"), names[0]!.replace(/\.ya?ml$/, ""), file);
   if ("problems" in parsed) return sourceFailure(file, root, parsed.problems);

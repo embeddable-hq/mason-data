@@ -12,7 +12,7 @@
  *   - THE PASSWORD IS VERIFIED BY `authenticate` (a `mason user`'s password, or a token minted from the API key,
  *     src/duck/users.ts `listenerLogins`): a refused one is `28P01` as a wrong password is; a DISABLED user's (its
  *     password right) is `28000`, as Postgres refuses a role without LOGIN. The database a tool names
- *     must be the project's: a tool connecting to the wrong Mason learns so at once (`3D000`).
+ *     must be the one this Mason answers as (src/lib/database-name.ts): a tool connecting with another learns so at once (`3D000`).
  *   - WHAT A TOOL SETS IS HONOURED OR REFUSED, never silently ignored: `TimeZone` moves every timestamptz the session
  *     sends; `extra_float_digits` below 1 would print a float with FEWER digits than this listener sends and is
  *     refused; a `client_encoding` other than UTF8 is refused; a `DateStyle` other than ISO is refused. A parameter
@@ -60,6 +60,7 @@ import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
 import { asRole, asSession, catalogPolicies, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
+import { wrongDatabaseHint } from "../../lib/database-name.ts";
 import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
@@ -304,7 +305,7 @@ export interface PgApiOptions {
   catalogStatementMs?: number;
   /** PEM cert and key: offered on SSLRequest or a direct TLS start, and required of every connection; null for a plain listener */
   tls: { cert: Buffer; key: Buffer } | null;
-  /** the database a tool must name: the project's name */
+  /** the database a tool must name (src/lib/database-name.ts) */
   database: string;
   /** what `version()` reports beside `PostgreSQL 18.6` (`versionText`): the release, `main-<sha>` or `dev` */
   masonVersion: string;
@@ -849,7 +850,7 @@ class Session {
         this.user = user;
         const database = m.params.database ?? user;
         if (database !== this.server.database) {
-          this.fatal("3D000", `database "${database}" does not exist`, `this Mason serves the project "${this.server.database}": connect with database=${this.server.database}`);
+          this.fatal("3D000", `database "${database}" does not exist`, wrongDatabaseHint(this.server.database));
           return;
         }
         const encoding = m.params.client_encoding;

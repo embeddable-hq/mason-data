@@ -24,7 +24,7 @@ import { ATTRIBUTE_NAME_RE, ATTRIBUTE_NAME_RULE, whereAttributes, whereParts, ty
 import { readSource, shownPath } from "./sources.ts";
 import { readState, type RunState } from "./commands.ts";
 import type { DevRun } from "./runs.ts";
-import type { Project } from "./project.ts";
+import { projectDatabase, type Project } from "./project.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 
@@ -619,10 +619,13 @@ export async function user(argv: string[]): Promise<number> {
     const problem = roleToAdd(role, roles);
     if (problem !== null) return failed("user", problem, { json });
   }
+  // the name it connects with: the run's, or with Mason stopped what the project says it will be
+  const database = link?.database ?? projectDatabase(project);
+  if (typeof database !== "string") return failed("user", database, { json });
   // the attributes the role declares, every one, and none other: refused before writing, as the role is
   const attributes = attributesToAdd(name!, role ?? userRole({}, roles).role, sets, roles);
   if ("refused" in attributes) return failed("user", attributes.refused, { json });
-  const r = addUser(file, apiKey, name!, { link, database: project.config.name, roles, ...(role !== undefined ? { role } : {}), attributes: attributes.values });
+  const r = addUser(file, apiKey, name!, { link, database, roles, ...(role !== undefined ? { role } : {}), attributes: attributes.values });
   if ("message" in r) return failed("user", r, { json });
   const { replaced, ...added } = r;
   const next = addedNext(r.user, link !== null);
