@@ -655,3 +655,4 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     assert.match(nowhere.fix, /mason init demo: a demo database, nothing to install/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+

@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 import { execFileSync } from "node:child_process";
+import ts from "typescript";
 
 const ROOT = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..");
 
@@ -610,6 +611,42 @@ test("the path guard would catch the real thing", () => {
   assert.deepEqual(namedPaths("see `" + "tests/" + "x.test.ts`").length, 1);
   assert.deepEqual(namedPaths("https://www.postgresql.org/docs/" + "current/protocol.html"), [], "a URL's path is not one");
   assert.deepEqual(namedPaths('import { a } from "../src/' + 'lib/a.ts";'), [], "a relative import is not one");
+});
+
+/**
+ * The lines of a TypeScript `src` where a STRING (a message, a log line, a JSON value, a hint) names the engine:
+ * "Nothing a user sees is named for DuckDB" (CLAUDE.md "Who this is for"). Comments, identifiers and imports are the
+ * code's; inside a string, the engine's own names are too when they are PART of one token: SQL it defines
+ * (`duckdb_memory()`), a setting (`MASON_DUCKDB_MEMORY`), a path (`~/.duckdb/extensions`), a package (`@duckdb/node-api`),
+ * a label that is hashed (`mason-duckdb-postgres:`); and the whole string "duckdb" is a tag the code switches on.
+ */
+function engineNamedInStrings(src: string): number[] {
+  const sf = ts.createSourceFile("x.ts", src, ts.ScriptTarget.Latest, true);
+  const lines: number[] = [];
+  const named = (text: string): boolean => text !== "duckdb" && /(?<![A-Za-z0-9_@./-])duck ?db(?![A-Za-z0-9_])/i.test(text);
+  const visit = (n: ts.Node): void => {
+    const text = ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
+    if (text !== null && named(text) && !ts.isImportDeclaration(n.parent) && !ts.isExportDeclaration(n.parent) && !ts.isExternalModuleReference(n.parent)) {
+      lines.push(sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return lines;
+}
+
+test("no string a user can see names the engine: a message, a log line or a JSON value says 'the copy'", () => {
+  const hits = scannedFiles(["src"]).filter((f) => f.name.endsWith(".ts")).flatMap((f) => engineNamedInStrings(f.src).map((l) => `${f.name}:${l}`));
+  // docs/SQL-SUPPORT.md renders src/duck/gaps.ts, and a doc may name the engine: its registry text is not scanned
+  assert.deepEqual(hits.filter((h) => !h.startsWith("src/duck/gaps.ts:")), [], "a string names the engine: say 'the copy' or 'Mason' (CLAUDE.md: nothing a user sees is named for DuckDB)");
+});
+
+test("the engine-name guard catches the real thing, and leaves the engine's own tokens alone", () => {
+  assert.deepEqual(engineNamedInStrings("throw new Error(`DuckDB could not open ${f}`);\nconst a = 1;"), [1]);
+  assert.deepEqual(engineNamedInStrings("const m = \"a sum past DuckDB's 38 digits\";"), [1]);
+  assert.deepEqual(engineNamedInStrings("log(`[duckdb] ${l}`);"), [1]);
+  assert.deepEqual(engineNamedInStrings("a(\"SELECT * FROM duckdb_tables()\"); b(process.env.MASON_DUCKDB_MEMORY); c(\"~/.duckdb/extensions\"); d(\"mason-duckdb-postgres:\"); const k = \"duckdb\";"), []);
+  assert.deepEqual(engineNamedInStrings("import { DuckDBValue } from \"@duckdb/node-api\"; // DuckDB says\n/* DuckDB */ const DuckDBThing = 1;"), []);
 });
 
 /**

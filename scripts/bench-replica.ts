@@ -769,10 +769,10 @@ async function plannedSql(conn: pg.ClientConfig, rows: number, file: string, log
       const params = q.params === "id" ? [String(Math.ceil(rows / 3))] : [];
       const r = await c.query({ text: `EXPLAIN (FORMAT JSON) ${q.sql}`, values: params, rowMode: "array", types: raw } as pg.QueryConfig);
       const json = JSON.parse(String((r.rows[0] as unknown[])[0])) as unknown;
-      const top = (Array.isArray(json) ? json[0] : json) as { Mason?: { "Sent To DuckDB"?: string; "Mason Functions DuckDB Calls"?: unknown } };
-      const duckdb = top.Mason?.["Sent To DuckDB"];
+      const top = (Array.isArray(json) ? json[0] : json) as { Mason?: { "Sent To Copy"?: string; "Mason Functions Copy Calls"?: unknown } };
+      const duckdb = top.Mason?.["Sent To Copy"];
       if (typeof duckdb !== "string") throw new Error(`Mason's EXPLAIN of ${q.name} says no DuckDB SQL: ${JSON.stringify(json).slice(0, 300)}`);
-      out.push({ name: q.name, sql: q.sql, params, duckdb, functions: top.Mason?.["Mason Functions DuckDB Calls"] ?? [] });
+      out.push({ name: q.name, sql: q.sql, params, duckdb, functions: top.Mason?.["Mason Functions Copy Calls"] ?? [] });
     }
     fs.writeFileSync(file, JSON.stringify(out, null, 2) + "\n");
     log(`  wrote the statements' DuckDB SQL, as Mason plans them, to ${file}`);

@@ -1,6 +1,7 @@
 /**
- * `mason ui` — THE WEB PAGE OF THE RUNNING MASON, IN THE BROWSER (src/web/, docs/WEB-UI.md): what `mason status` says,
- * refreshed while the tab is seen, and the users of `mason user`. It prints the page's URL WITH the run's token (src/cli/security.ts: the first request trades it for an HttpOnly cookie and is redirected to a URL without
+ * `mason ui` — THE WEB PAGE OF THE RUNNING MASON, IN THE BROWSER (src/web/, docs/WEB-UI.md): the Overview (what `mason
+ * status` says), the Tables (`mason tables`, `add`, `remove`, `sync`), the Users (`mason user`) and Observability (`mason
+ * logs`, `mason usage`), refreshed while the tab is seen. It prints the page's URL WITH the run's token (src/cli/security.ts: the first request trades it for an HttpOnly cookie and is redirected to a URL without
  * it) and opens the browser. The reader is the person at this terminal, whom `mason user add` already shows a
  * password once; the token is never written anywhere else — not in `mason start`'s output (its log is a file), not in
  * `mason status`, which prints the URL without it.
@@ -19,12 +20,14 @@ const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 export const UI: CommandSpec & { needs: "run" } = {
   needs: "run",
   name: "ui",
-  summary: "the status page and the users, in your browser",
+  summary: "the status, tables, users and statements, in your browser",
   usage: `usage: mason ui [--no-open] [--json]
 
-  Opens the running Mason's web page in your browser: what mason status says (the database, each table's copy and
-  its progress, the slow and refused statements, whether it is ready), refreshed every 2 s while the tab is open, and
-  the users of mason user — add one (its password shown once, with the URL to paste) or remove one.
+  Opens the running Mason's web page in your browser, refreshed while the tab is open: the Overview (what mason status
+  says: whether the copy is ready, the database, the sync, the statements and the recent errors); the Tables (add,
+  remove or sync one, as mason add, remove and sync do); the Users of mason user (add one, its password shown once with
+  the URL to paste, or remove one); and Observability: the statements running and that ran (mason logs --requests,
+  cancel one), usage over time (mason usage), and the sync's events (mason logs --events).
 
   The URL carries this run's token: the page trades it for a cookie at once and drops it from the address
   bar. It is printed for you alone, like a user's password: paste it nowhere else. Every mason start makes a new

@@ -17,6 +17,8 @@ import type { CopyProgressView, KeptCurrent, StreamStatus } from "../src/duck/sy
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { connectSource, parseSource, readSourceFacts } from "../src/cli/preflight.ts";
 import { readSource } from "../src/cli/sources.ts";
+// read from the module's namespace: at a commit without timeOf the file loads, and the test fails by name
+const { timeOf } = await import("../src/cli/request-filter.ts") as unknown as { timeOf: (name: string, text: string, now: number) => string | { message: string } };
 import { DemoSource } from "../src/demo/source.ts";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 
@@ -63,7 +65,7 @@ test("a table is named as the database names it: by its name alone in public, or
 const at = (s: number): string => new Date(Date.UTC(2026, 9, 7, 10, 0, s)).toISOString();
 const state = (o: { tables?: TableState[]; stream?: StreamStatus }): RunState => ({
   source: { url: "postgres://x", database: "shop", remote: false, version: "16", standby: false, changes: "poll", name: "shop", file: "/app/mason/sources/shop.yml" }, warnings: [], folder: "/app/mason",
-  project: "v1", tables: o.tables ?? [], engine: { name: "duckdb", file: "/app/.mason/duck.db", bytes: 10 },
+  project: "v1", tables: o.tables ?? [], engine: { file: "/app/.mason/duck.db", bytes: 10 },
   ...(o.stream ? { stream: o.stream } : {}),
 });
 
@@ -201,7 +203,8 @@ test("mason status and wait in replication mode say where the stream is: its pos
   // the first replication run on a server: one stream line in 35 minutes, and status showed no position, lag or count
   const now = Date.parse("2026-10-26T12:00:10.000Z");
   const stream: StreamStatus = {
-    slot: "mason_shop", publication: "mason_shop", running: true, failure: null,
+    slot: "mason_shop", slotWal: { walHeldBytes: 3 * 2 ** 30, walStatus: "extended", safeWalSizeBytes: 2 ** 30, at: "2026-10-26T12:00:08.000Z" },
+    publication: "mason_shop", running: true, failure: null,
     position: "0/1A2B3C8", applied: "0/1A2B300",
     database: { lsn: "0/1A2B4F0", at: "2026-10-26T12:00:08.000Z" },
     lag: { bytes: 296, seconds: 5 },
@@ -218,6 +221,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
   const { streamLines } = commands;
   assert.deepEqual(streamLines(stream, now), [
     "position       0/1A2B3C8 · the database is at 0/1A2B4F0: 296 bytes behind (read 2.0 s ago)",
+    "slot           holds 3.0 GiB of the database's WAL (extended) · 1.0 GiB more before Postgres invalidates it (max_slot_wal_keep_size) (read 2.0 s ago)",
     "last change    committed 5.0 s ago, applied 0.3 s after its commit",
     "public.orders  streamed · 1,204 changes (1,000 inserts, 200 updates, 4 deletes) this run",
     "shop.lines     catching up by one poll from 2026-10-26 11:58 UTC: polling, for 3.0 s · the stream holds 12 changes of it meanwhile",
@@ -226,11 +230,19 @@ test("mason status and wait in replication mode say where the stream is: its pos
   ]);
   // a stream that failed says why and when it starts again; a database that could not be asked says so, never a lag of 0
   assert.deepEqual(streamLines({ ...stream, running: false, failure: { error: "replication: the slot is in use\nmore", retryAt: "2026-10-26T12:00:40.000Z" },
-    database: { error: "connect ECONNREFUSED" }, lag: { bytes: null, seconds: null }, lastBatch: null, tables: [] }, now), [
+    database: { error: "connect ECONNREFUSED" }, slotWal: { error: "the database could not be reached: connect ECONNREFUSED" }, lag: { bytes: null, seconds: null }, lastBatch: null, tables: [] }, now), [
     "stream       not running: replication: the slot is in use · it starts again in 30 s",
     "position     0/1A2B3C8 · the database's position could not be read: connect ECONNREFUSED",
+    "slot         the WAL it holds could not be read: the database could not be reached: connect ECONNREFUSED",
     "last change  none applied this run",
   ]);
+  // THE SLOT'S WAL, with no cap: said plainly, since a slot nothing reads then holds WAL until the database's disk fills
+  const slotLine = (slotWal: StreamStatus["slotWal"]): string => streamLines({ ...stream, slotWal, tables: [] }, now)[1]!;
+  assert.equal(slotLine({ walHeldBytes: 512 * 2 ** 20, walStatus: "reserved", safeWalSizeBytes: null, at: "2026-10-26T12:00:00.000Z" }),
+    "slot         holds 512.0 MiB of the database's WAL (reserved) · max_slot_wal_keep_size is unset, so nothing caps it: while nothing reads the slot it holds WAL for ever, " +
+    "until the database's disk fills (set max_slot_wal_keep_size on the database) (read 10 s ago)");
+  assert.match(slotLine({ walHeldBytes: 0, walStatus: "lost", safeWalSizeBytes: null, at: "2026-10-26T12:00:00.000Z" }), /^slot +lost: Postgres invalidated it .*Mason makes it again/);
+  assert.match(slotLine({ walHeldBytes: 2 ** 30, walStatus: "unreserved", safeWalSizeBytes: -4096, at: "2026-10-26T12:00:00.000Z" }), /\(unreserved\) · past max_slot_wal_keep_size: Postgres invalidates it at its next checkpoint/);
   // --json: the stream under its declared key, as the run's state has it (jsonText refuses a key its spec does not declare)
   const s: RunState = state({ stream });
   for (const spec of [STATUS, WAIT]) {
@@ -300,7 +312,7 @@ test("mason status's slow and refused statements: each on one line with its time
   assert.deepEqual(slowLines([{ route: "postgres", payload: "SELECT count(*)\n  FROM public.orders\n  GROUP BY status", runs: 1, medianMs: 2500, maxMs: 2500, latestMs: 2500,
     last: "2026-10-26T10:00:05.000Z" }], PLAIN), [
     "\nSlow queries (the last day, still 1 s or more; slowest first):",
-    "  2,500 ms last time (1 run, median 2,500 ms), last 2026-10-26 10:00 UTC",
+    "  2.5 s last time (1 run, median 2.5 s), last 2026-10-26 10:00 UTC",
     "    SELECT count(*) FROM public.orders GROUP BY status",
   ]);
   assert.deepEqual(slowLines([], PLAIN), [], "nothing slow: no section");
@@ -320,22 +332,122 @@ test("mason status's slow and refused statements: each on one line with its time
   assert.deepEqual(refusedLines({ error: "the run answered 500" }, PLAIN), ["\nRefused queries: could not read them (the run answered 500; mason logs has the detail)"]);
 });
 
+test("mason status's unsupported SQL: an entry a line — how many, what they used, its entry of docs/SQL-SUPPORT.md — then when last, who, the latest; none, no section; declared", () => {
+  const { unsupportedLines } = commands as unknown as { unsupportedLines: (u: unknown, st: typeof PLAIN) => string[] };
+  assert.equal(typeof unsupportedLines, "function", "src/cli/commands.ts unsupportedLines");
+  const long = `SELECT ${Array.from({ length: 40 }, (_, i) => `c${i}`).join(", ")} FROM public.orders`;
+  assert.deepEqual(unsupportedLines([
+    { gap: "json-agg-distinct", title: "json_agg / jsonb_agg (DISTINCT …)", runs: 1200, users: ["alice", "bob"], clients: ["Metabase"], last: "2026-10-26T10:01:00.000Z", example: long },
+    { gap: "quote-ident", title: "quote_ident()", runs: 1, users: [], clients: [], last: "2026-10-26T09:00:00.000Z", example: "SELECT quote_ident(\n name) FROM t" },
+    { gap: "a-renamed-entry", title: null, runs: 2, users: [], clients: ["psql"], last: "2026-10-26T08:00:00.000Z", example: "SELECT 1" },
+  ], PLAIN), [
+    "\nUnsupported SQL (the last day's refused statements by what they used, the most first):",
+    "  json_agg / jsonb_agg (DISTINCT …): 1,200 statements as alice, bob from Metabase",
+    `    last 2026-10-26 10:01 — ${long.slice(0, 99)}…`,
+    "    How to rewrite it: see docs/SQL-SUPPORT.md › json_agg / jsonb_agg (DISTINCT …)",
+    "  quote_ident(): 1 statement",
+    "    last 2026-10-26 09:00 — SELECT quote_ident( name) FROM t",
+    "    How to rewrite it: see docs/SQL-SUPPORT.md › quote_ident()",
+    "  SQL this Mason no longer lists: 2 statements from psql",
+    "    last 2026-10-26 08:00 — SELECT 1",
+    "    How to rewrite it: see docs/SQL-SUPPORT.md › SQL this Mason no longer lists",
+  ]);
+  assert.ok(!unsupportedLines([{ gap: "quote-ident", title: "quote_ident()", runs: 1, users: [], clients: [], last: "2026-10-26T09:00:00.000Z", example: "SELECT 1" }], PLAIN).join("\n").includes("quote-ident"), "the registry id is for --json, never a line");
+  assert.deepEqual(unsupportedLines([], PLAIN), [], "nothing refused by an entry: no section");
+  assert.deepEqual(unsupportedLines({ error: "the run answered 500\nstack" }, PLAIN), ["\nUnsupported SQL: could not read it (the run answered 500; mason logs has the detail)"]);
+  assert.ok(STATUS.json?.includes("unsupported"), "mason status --json declares unsupported");
+  assert.match(STATUS.usage, /refusedTotal \(how many in all\), unsupported: \[\{ gap[^]*title[^]*runs[^]*users, clients[^]*last, example/, "and its usage names its fields");
+});
+
+test("mason status's query errors: the latest refused, failed or cancelled statements, a line each (requestLine); none, no section; declared and named in the usage", () => {
+  const { queryErrorLines, requestLine } = commands as unknown as { queryErrorLines: (r: unknown, st: typeof PLAIN) => string[]; requestLine: (r: unknown, st: typeof PLAIN) => string };
+  const refused = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 0,
+    startedAt: "2026-10-26T14:02:12.000Z", applicationName: "psql", tokenName: "", outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist',
+    rows: null, durationMs: 3, query: "SELECT * FROM nope" };
+  assert.deepEqual(queryErrorLines({ queries: [refused], queriesError: null }, PLAIN), [
+    "\nQuery errors (the latest refused, failed or cancelled, newest last; mason logs --requests --failed lists each):", `  ${requestLine(refused, PLAIN)}`]);
+  assert.deepEqual(queryErrorLines({ queries: [], queriesError: null }, PLAIN), [], "none: no section");
+  assert.deepEqual(queryErrorLines({ queries: [], queriesError: "the run answered 500\nstack" }, PLAIN), ["\nQuery errors: could not read them (the run answered 500; mason logs has the detail)"]);
+  assert.match(STATUS.usage, /recentErrors: \{ sync: [^]*queries: \[[^]*queriesError/, "mason status's usage names recentErrors.queries and queriesError");
+});
+
+test("msText: a duration in ms as a person reads it — ms under a second, then tenths of a second, then minutes and seconds, then hours and minutes", () => {
+  const { msText } = commands;
+  const cases: Array<[number, string]> = [[0, "0 ms"], [3, "3 ms"], [512.4, "512 ms"], [999.4, "999 ms"], [999.6, "1.0 s"], [1234, "1.2 s"], [13_703, "13.7 s"],
+    [59_949, "59.9 s"], [59_960, "1 min"], [125_000, "2 min 5 s"], [3_599_400, "59 min 59 s"], [3_599_600, "1 h"], [3_840_000, "1 h 4 min"], [-5, "0 ms"]];
+  for (const [ms, text] of cases) assert.equal(msText(ms), text, `msText(${ms})`);
+});
+
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
-  const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", role: "" };
-  assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", sqlstate: null, message: null,
+  const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", role: "", endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
+  assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", status: "completed", sqlstate: null, message: null,
     rows: 20, durationMs: 1234, query: "SELECT id\n FROM public.orders LIMIT 20" }, PLAIN),
-    "2026-10-26 14:02:11  ok              1,234 ms      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
-  assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:12.000Z", applicationName: "", tokenName: "bi", outcome: "refused", sqlstate: "42P01",
+    "2026-10-26 14:02:11  ok                   1.2 s      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
+  assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:12.000Z", applicationName: "", tokenName: "bi", outcome: "refused", status: "failed", sqlstate: "42P01",
     message: 'relation "nope" does not exist\nsecond', rows: null, durationMs: 3, query: "SELECT * FROM nope" }, PLAIN),
-    '2026-10-26 14:02:12  refused 42P01       3 ms               (no application_name) (token bi)  SELECT * FROM nope — relation "nope" does not exist');
-  assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:13.000Z", applicationName: "psql", tokenName: "", outcome: "failed", sqlstate: "XX000",
+    '2026-10-26 14:02:12  refused 42P01         3 ms               (no application_name) (token bi)  SELECT * FROM nope — relation "nope" does not exist');
+  assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:13.000Z", applicationName: "psql", tokenName: "", outcome: "failed", status: "failed", sqlstate: "XX000",
     message: "it broke", rows: null, durationMs: 0, query: "" }, PLAIN),
-    "2026-10-26 14:02:13  failed XX000        0 ms               psql  (no statement) — it broke");
+    "2026-10-26 14:02:13  failed XX000          0 ms               psql  (no statement) — it broke");
   // a mason user's statement names the user (src/duck/users.ts)
-  assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:14.000Z", applicationName: "Metabase", tokenName: "", user: "metabase", outcome: "ok", sqlstate: null, message: null,
+  assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:14.000Z", applicationName: "Metabase", tokenName: "", user: "metabase", outcome: "ok", status: "completed", sqlstate: null, message: null,
     rows: 1, durationMs: 5, query: "SELECT 1 FROM orders" }, PLAIN),
-    "2026-10-26 14:02:14  ok                  5 ms        1 row  Metabase (user metabase)  SELECT 1 FROM orders");
+    "2026-10-26 14:02:14  ok                    5 ms        1 row  Metabase (user metabase)  SELECT 1 FROM orders");
+});
+
+test("the sync's events: a line each in mason logs --events and mason status's Sync errors; the copies in all on one row; every key declared", () => {
+  // read from the module's namespace: at a commit without them the file loads, and the test fails by name
+  const { eventLine, syncErrorLines, totalsText, LOGS } = commands as unknown as {
+    eventLine: (e: unknown, st: typeof PLAIN) => string; syncErrorLines: (r: unknown, st: typeof PLAIN) => string[];
+    totalsText: (t: unknown, now?: number) => string; LOGS: typeof STATUS };
+  const failedCopy = { at: "2026-10-28T09:00:00.000Z", kind: "copy_failed", failed: true, table: "public.orders", message: "the source closed the connection\nmore detail" };
+  const restart = { at: "2026-10-28T09:05:00.000Z", kind: "restart", failed: true, table: null, message: "the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again" };
+  assert.equal(eventLine(failedCopy, PLAIN), "2026-10-28 09:00:00  copy_failed         public.orders  the source closed the connection");
+  assert.equal(eventLine(restart, PLAIN), "2026-10-28 09:05:00  restart             (the sync)  the run stopped (it crashed (SIGSEGV)) after 42 s up, and its supervisor started it again");
+  assert.deepEqual(syncErrorLines({ sync: [failedCopy, restart], error: null }, PLAIN), [
+    "\nSync errors (the latest, newest last; mason logs --events lists every event):",
+    `  ${eventLine(failedCopy, PLAIN)}`, `  ${eventLine(restart, PLAIN)}`]);
+  assert.deepEqual(syncErrorLines({ sync: [], error: null }, PLAIN), [], "none: no section");
+  assert.deepEqual(syncErrorLines({ sync: [], error: "the run answered 500\nstack" }, PLAIN), ["\nSync errors: could not read them (the run answered 500; mason logs has the detail)"]);
+  const now = Date.parse("2026-10-28T09:10:00.000Z");
+  assert.equal(totalsText({ added: 4, copied: 3, failed: 1, rows: 1_234, syncedAt: "2026-10-28T09:09:55.000Z" }, now), "3 of 4 added copied, 1,234 rows, 1 failed, the last synced 5 s ago");
+  assert.equal(totalsText({ added: 1, copied: 0, failed: 0, rows: 0, syncedAt: null }, now), "0 of 1 added copied, 0 rows");
+  // --json: each key declared, and named in the usage
+  for (const [spec, keys] of [[STATUS, ["totals", "recentErrors"]], [LOGS, ["events"]]] as const) {
+    for (const k of keys) {
+      assert.ok(spec.json?.includes(k), `mason ${spec.name} --json declares ${k}`);
+      assert.match(spec.usage, new RegExp(`\\b${k}\\b`), `mason ${spec.name}'s usage names ${k}`);
+    }
+  }
+  assert.match(LOGS.usage, /--events/);
+  assert.deepEqual(JSON.parse(jsonText(LOGS, { events: [failedCopy], keptDays: 7 }, [["mason status", "x"]])).events, [failedCopy]);
+});
+
+// usage over time (src/cli/usage.ts): read from the module when the tests run, so the file loads at a commit without it
+type UsageCli = typeof import("../src/cli/usage.ts");
+const usageCli = await import("../src/cli/usage.ts" as string).catch(() => ({})) as Partial<UsageCli>;
+const sampleLine = (s: unknown, lag: boolean): string => usageCli.sampleLine?.(s as never, lag) ?? "(no src/cli/usage.ts)";
+const sample = { at: "2026-10-28T09:05:00.000Z", seconds: 300, copyBytes: 5 * 2 ** 30, copyRows: 12_345_678, tablesAdded: 4, tablesCopied: 4, tablesFailed: 1, oldestSyncSeconds: 75,
+  statements: 1_204, statementsRefused: 2, statementsFailed: 1, statementsCancelled: 0, rowsSent: 98_765, bytesSent: 4_567_890, durationP50Ms: 12, durationP95Ms: 1_830, streamLagBytes: null, streamLagSeconds: null,
+  rssBytes: 900 * 2 ** 20, heapUsedBytes: 80 * 2 ** 20, copyMemoryBytes: 300 * 2 ** 20, copyMemoryLimitBytes: 8 * 2 ** 30, slotWalHeldBytes: null, diskFreeBytes: null, sessionsOpen: 2 };
+
+test("mason usage: a span a line under its heading — the statements, their errors, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
+  const { sampleHeading, spanSeconds, USAGE } = usageCli as UsageCli;
+  assert.equal(sampleHeading(false), "time (UTC)        statements   errors         p95    rows sent        copy           rows  failing      oldest  memory");
+  assert.equal(sampleLine(sample, false), "2026-10-28 09:05       1,204        3       1.8 s       98,765     5.0 GiB     12,345,678        1        75 s  900.0 MiB (copy 300.0 MiB of 8.0 GiB)");
+  assert.equal(sampleLine({ ...sample, statements: 0, statementsRefused: 0, statementsFailed: 0, durationP95Ms: null, tablesFailed: 0, oldestSyncSeconds: null, copyMemoryBytes: null, streamLagSeconds: 3, streamLagBytes: 10 }, true),
+    "2026-10-28 09:05           0                    –       98,765     5.0 GiB     12,345,678                    –        3 s  900.0 MiB", "nothing to say is blank or a dash; the lag with replication");
+  assert.equal(sampleHeading(true).endsWith("oldest        lag  memory"), true);
+  assert.deepEqual(["90s", "30m", "6h", "7d", "0", "5", "1w", "-1h"].map(spanSeconds), [90, 1800, 21_600, 604_800, 0, null, null, null]);
+  const now = Date.parse("2026-10-28T10:00:00.000Z");
+  // --since and --until are read by the ONE time grammar of every entrance (timeOf): a time with no zone is refused
+  const times = ["1h", "2026-10-28T09:00:00Z", "2026-10-28", "2026-10-28T09:00:00", "yesterday", "12", "0"].map((t) => timeOf("--since", t, now));
+  assert.deepEqual(times.map((t) => typeof t === "string" ? t : t.message),
+    ["2026-10-28T09:00:00.000Z", "2026-10-28T09:00:00.000Z", "2026-10-28T00:00:00.000Z", '--since "2026-10-28T09:00:00" is not a time', '--since "yesterday" is not a time', '--since "12" is not a time', '--since "0" is not a time']);
+  assert.equal("whenOf" in usageCli, false, "no second parser beside timeOf");
+  for (const k of USAGE.json ?? []) if (k !== "next") assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names ${k}`);
+  for (const k of Object.keys(sample)) assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names a sample's ${k}`);
 });
 
 // ------------------------------------------------------------------ mason add and mason remove before mason start
@@ -420,13 +532,19 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
   // the run's edits read the file through readSource (src/cli/run-server.ts sourceOnDisk): counted, so an answer "up" is
   // known to be the run's
   let runEdits = 0;
+  // usage over time, as the run's samples answer it (src/duck/usage.ts): mason usage asks it
+  const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => facts, warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
-    folder: () => s.folder, root: app, sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
-    readSource: () => { runEdits++; return read(); }, runUrl: s.url,
-    duck: { copies: () => [], file: path.join(s.root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
+    folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
+    readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
+    logs: { capacity: 2000, recent: () => [] },
+    duck: { copies: () => [], file: path.join(s.root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+      requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map([[Date.parse(sample.at), { p50: sample.durationP50Ms, p95: sample.durationP95Ms }]]), 
+        lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
+      usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }] },
+      restarts: () => [] },
   };
   const server = createRunServer(ctx);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -464,7 +582,34 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
     await same(["remove", "customers"], /mason\/sources\/shop\.yml: tables\.orders\.columns: public\.orders has no column gone \(its columns: [^)]*\) — fix it first, then remove customers/);
     // a name the file does not have, with the closest it has
     await same(["remove", "customer"], /shop\.yml names no table customer — did you mean `customers`\?/);
-
+    // MASON USAGE asks the run's /api/usage and prints its answer: as it is under --json, a line a span for a person
+    writeRunning(s.root, { port: ctx.port, token: ctx.token });
+    try {
+      const t0 = Date.now();
+      const person = await runMason(app, ["usage", "--since", "2h", "--step", "10m"], matrixEnv());
+      assert.equal(person.code, 0, person.stderr);
+      assert.deepEqual([usageAsks[0]!.stepSeconds, Math.round((Date.parse(usageAsks[0]!.until) - Date.parse(usageAsks[0]!.since)) / 1000)], [600, 7200]);
+      assert.ok(Date.parse(usageAsks[0]!.until) >= t0 - 1000, "until now");
+      assert.match(person.stdout, /^Usage from \d{4}-\d\d-\d\d \d\d:\d\d to .* UTC, 10 min a line \(a sample every 60 s, kept 7 days\):\n/);
+      assert.ok(person.stdout.includes(`\n${sampleLine(sample, false)}\n`), person.stdout);
+      assert.match(person.stdout, /Each copy's own size \(measured every 10 min\):\n {2}public\.orders {2}\s+3\.0 MiB {2}at 09:10 UTC\n/);
+      assert.match(person.stdout, /\nNext:/);
+      const json = await runMason(app, ["usage", "--step", "0", "--json"], matrixEnv());
+      assert.equal(json.code, 0, json.stderr);
+      const answer = JSON.parse(json.stdout) as Record<string, unknown>;
+      assert.equal(usageAsks[1]!.stepSeconds, undefined, "--step 0: every sample");
+      assert.deepEqual({ ...answer, since: null, until: null, next: null }, { since: null, until: null, stepSeconds: null, sampleSeconds: 60, keptDays: 7, samples: [sample],
+        copySizes: [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }], next: null });
+      // the run's refusal, in its words and the usage code; and one the command refuses itself, before asking
+      const short = await runMason(app, ["usage", "--step", "30s", "--json"], matrixEnv());
+      assert.deepEqual([short.code, (JSON.parse(short.stdout) as { error: { code: string; message: string } }).error.message],
+        [2, "step is a whole number of seconds, 60 (a sample's interval) to 604800 (the 7 days kept), not \"30\""]);
+      const asked = usageAsks.length;
+      const bad = await runMason(app, ["usage", "--since", "yesterday"], matrixEnv());
+      assert.equal(bad.code, 2);
+      assert.match(bad.stderr, /mason usage: --since "yesterday" is not a time/);
+      assert.equal(usageAsks.length, asked, "refused before the run is asked");
+    } finally { writeRunning(s.root, null); }
     // WHAT TO RUN NEXT, Mason up (a review finding): --sync alone on a table already added starts no copy (it is caught up
     // by one poll), so the next step is mason status, never mason wait's "the copy has started"; a new table's is mason wait
     fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n`);
@@ -572,13 +717,19 @@ test("stage 1b, the roles file decides a user added without --role: its default 
   const live = new r.LiveRoles(folder, root, () => [{ source: "public.orders", columns: [{ name: "id" }] }, { source: "public.customers", columns: [{ name: "id" }] }]);
   const parsed = parseSource("postgres://mason:x@127.0.0.1:1/shop");
   assert.ok("source" in parsed);
+  // the run's command server over this project (main's RunContext: its ledgers faked, nothing here reads them), its roles a LiveRoles
   const ctx: RunContext = {
     page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
-    source: parsed.source, facts: () => ({ tables: [], versionText: "PostgreSQL 18.0", standby: false }) as unknown as ReturnType<RunContext["facts"]>, warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
-    folder: () => folder, root, sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
+    source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
+    folder: () => folder, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
     readSource: () => readSource(folder, root, {}), runUrl: "postgres://mason:x@127.0.0.1:1/shop", roles: () => live.now(),
-    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
+    listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session) => ({ unknown: session }) },
+    logs: { capacity: 2000, recent: () => [] },
+    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+      requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }),
+        summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }),
+        slowest: async () => [], durationsBy: async () => new Map(), lastUsed: async (u) => u.map(() => null) },
+      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
   };
   const server = createRunServer(ctx);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
@@ -598,6 +749,178 @@ test("stage 1b, the roles file decides a user added without --role: its default 
     // the listener's roles say which is of tables: all (/api/state's roles.all): the way out names it, as with Mason stopped
     assert.match((await run(["user", "add", "mode"])).stdout, /Tip: Its statements are refused until it has a role: write default: everything at the top of mason\/roles\.yml, or mason user remove mode and mason user add mode --role everything\./);
   } finally { config(null); server.close(); }
+});
+
+test("mason status's queries: the last day and the last week a line each — every outcome, the completed ones' times, rows and bytes; a short log says so", () => {
+  const queryLines = (commands as Record<string, unknown>).queryLines as ((q: unknown, st: typeof PLAIN) => string[]) | undefined;
+  assert.equal(typeof queryLines, "function");
+  const w = (days: number, covered: number) => ({ days, covered, statements: 1204, completed: 1190, refused: 10, failed: 2, cancelled: 2, rows: 52_000, bytesSent: 3 * 1024 * 1024,
+    durationMs: { avg: 120, p50: 40, p95: 13_703 } });
+  assert.deepEqual(queryLines!({ keptDays: 3, day: w(1, 1), week: { ...w(7, 3), durationMs: null } }, PLAIN), [
+    "\nQueries (the completed ones' time: average / p50 / p95; mason logs --requests lists each):",
+    "  last day    1,204 statements: 1,190 completed, 10 refused, 2 failed, 2 cancelled · 120 ms / 40 ms / 13.7 s · 52,000 rows, 3.0 MiB sent",
+    "  last week   1,204 statements: 1,190 completed, 10 refused, 2 failed, 2 cancelled · 52,000 rows, 3.0 MiB sent (the request log keeps 3 days: MASON_HISTORY_DAYS)",
+  ]);
+  assert.deepEqual(queryLines!({ error: "the run answered 500" }, PLAIN), ["\nQueries: could not read them (the run answered 500; mason logs has the detail)"]);
+  assert.ok(STATUS.json?.includes("queries") === true, "mason status --json declares it");
+});
+
+/**
+ * mason logs --requests' filters, mason logs --running and mason cancel, against a run's command server whose ledger and
+ * listener are faked: a filter is read by the one parser before the run is asked (a mistake exit 2, in the flag's own
+ * name), and what the run is asked is what was meant; a cancel the run refuses is said in its own words and code.
+ */
+test("mason logs --requests filters and pages, mason logs --running and mason cancel: one parser, the run's answers in the Failure shape", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-queries-")));
+  const app = path.join(root, "app");
+  fs.mkdirSync(path.join(app, "mason", "sources"), { recursive: true });
+  fs.writeFileSync(path.join(app, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://me@localhost:5432/shop\ntables: {}\n");
+  fs.mkdirSync(path.join(app, ".mason"), { mode: 0o700 });
+  const parsed = parseSource("postgres://me@localhost:5432/shop");
+  assert.ok("source" in parsed);
+  const asked: unknown[] = [];
+  const cancelled: Array<number | [number, number]> = [];
+  const running = { session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY", startedAt: "2026-10-24T10:04:30.000Z", runningMs: 1500, rows: 12,
+    query: "SELECT count(*) FROM orders", queryTruncated: false };
+  const failedQueries = [{ requestId: "r1", startedAt: "2026-10-24T10:04:00.000Z", endedAt: "2026-10-24T10:04:00.003Z", session: 4, applicationName: "psql", tokenName: "", user: "",
+    method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: 'relation "nope" does not exist', detail: null, hint: null, rows: null, bytesSent: 0, durationMs: 3,
+    query: "SELECT * FROM nope", queryTruncated: false }];
+  const unsupportedAsks: Array<{ since: string; limit: number }> = [];
+  const unsupportedSql = { gap: "json-agg-distinct", title: "json_agg / jsonb_agg (DISTINCT …)", runs: 12, users: ["metabase"], clients: ["Metabase"],
+    last: "2026-10-24T10:04:00.000Z", example: "SELECT json_agg(DISTINCT status) FROM orders" };
+  const ctx: RunContext = {
+    page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
+    source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0,
+    token: "t0ken-of-the-run", folder: () => path.join(app, "mason"), root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
+    readSource: () => ({ message: "not read here", code: "bad_source" }), runUrl: "postgres://me@localhost:5432/shop",
+    listener: { openSessions: () => ({ open: 1, byClient: [{ user: "metabase", client: "Metabase", open: 1, running: 1 }] }), running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);
+      return session === 4 && statement !== undefined && statement !== 9 ? { other: running, asked: statement } : session === 4 ? { cancelled: running } : session === 6 ? { cancelled: { ...running, session: 6, runningMs: 125_000 } } : session === 5 ? { idle: 5 } : { unknown: session }; } },
+    logs: { capacity: 2000, recent: () => [] },
+    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+      requests: { days: 7, unsupported: async (q) => { unsupportedAsks.push(q); return [unsupportedSql]; }, page: async (q) => { asked.push(q); return { requests: q.failed === true ? failedQueries as never : [], before: "2026-10-24T10:00:00.000Z~7" }; }, slow: async () => [],
+        refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map(),  lastUsed: async (u) => u.map(() => null) },
+      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
+  };
+  const server = createRunServer(ctx);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  ctx.port = (server.address() as { port: number }).port;
+  fs.writeFileSync(path.join(app, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null,
+    running: { pid: process.pid, controlUrl: `http://127.0.0.1:${ctx.port}`, token: ctx.token, postgresUrl: "postgresql://127.0.0.1:1/shop", postgresListener: { host: "127.0.0.1", tls: null } },
+    lastRun: null }), { mode: 0o600 });
+  const run = (argv: string[]) => runMason(app, argv, matrixEnv());
+  try {
+    // the filters: read here, the times resolved, and the page before named with every filter kept
+    const t0 = Date.now();
+    const page = await run(["logs", "--requests", "-n", "5", "--since", "2h", "--outcome", "cancelled", "--user", "metabase", "--json"]);
+    assert.equal(page.code, 0, page.stdout + page.stderr);
+    const q = asked[0] as { limit: number; outcomes: string[]; since: string; user: string };
+    assert.deepEqual({ ...q, since: "" }, { limit: 5, outcomes: ["cancelled"], since: "", user: "metabase" });
+    assert.ok(Math.abs(Date.parse(q.since) - (t0 - 2 * 3_600_000)) < 60_000, `--since 2h is two hours ago: ${q.since}`);
+    const body = JSON.parse(page.stdout) as { requests: unknown[]; keptDays: number; before: string; next: Array<{ command: string }> };
+    assert.deepEqual([body.requests, body.keptDays, body.before], [[], 7, "2026-10-24T10:00:00.000Z~7"]);
+    assert.equal(body.next[0]!.command, `mason logs --requests -n 5 --outcome cancelled --since ${q.since} --user metabase --before 2026-10-24T10:00:00.000Z~7`);
+    // --slow and --search: the run is asked for SLOW_MS or more and the text, and the page before keeps them
+    const slow = await run(["logs", "--requests", "--slow", "--search", "from orders", "--json"]);
+    assert.equal(slow.code, 0, slow.stdout + slow.stderr);
+    assert.deepEqual(asked.at(-1), { limit: 40, minMs: 1000, search: "from orders" });
+    assert.equal((JSON.parse(slow.stdout) as { next: Array<{ command: string }> }).next[0]!.command, "mason logs --requests --slow --search 'from orders' --before 2026-10-24T10:00:00.000Z~7");
+    // none listed, nothing filtered: what the log does not list, so a select 1 typed to test the connection is not looked for in vain
+    const none = await run(["logs", "--requests"]);
+    assert.equal(none.code, 0, none.stdout + none.stderr);
+    assert.match(none.stdout, /^No request in the last 7 days \(MASON_HISTORY_DAYS\)\.\n\nTip: A statement that reads no copied table \(select 1, SET, SHOW, a BI tool's catalog queries\) is answered but not\s+listed\./);
+    assert.ok(!(await run(["logs", "--requests", "--slow"])).stdout.includes("reads no copied table"), "a filter that passes none says nothing of it");
+    // a mistake: exit 2, in the flag's name, before the run is asked
+    const before = asked.length;
+    for (const [argv, words] of [
+      [["logs", "--requests", "--since", "soon"], /mason logs: --since "soon" is not a time/],
+      [["logs", "--requests", "--outcome", "canceled"], /mason logs: --outcome "canceled" is none of ok, refused, failed, cancelled — did you mean `cancelled`\?/],
+      [["logs", "--requests", "-n", "0"], /mason logs: -n is a whole number of requests, 1 to 10000/],
+      [["logs", "--requests", "--failed", "--outcome", "ok"], /mason logs: --failed is every outcome but ok: name it or --outcome, never both/],
+      [["logs", "--since", "2h"], /mason logs: --since is a filter of --requests/],
+      [["logs", "--slow"], /mason logs: --slow is a filter of --requests/],
+      [["logs", "--requests", "--search", ""], /mason logs: --search is a piece of a statement's text: it is empty/],
+      [["logs", "--running", "--requests"], /mason logs: --running lists the statements running now; --requests is the request log's/],
+      [["usage", "--since", "2026-10-28T09:00:00"], /mason usage: --since "2026-10-28T09:00:00" is not a time/],
+      [["logs", "--events", "-n", "20000"], /mason logs: -n is a whole number of events, 1 to 10000/],
+      [["logs", "--events", "-n", "0"], /mason logs: -n is a whole number of events, 1 to 10000/],
+      [["logs", "--running", "-n", "5"], /mason logs: --running lists every statement running now: -n \(--lines\) does not apply to it/],
+    ] as Array<[string[], RegExp]>) {
+      const a = await run(argv);
+      assert.equal(a.code, 2, `${argv.join(" ")}: ${a.stdout}${a.stderr}`);
+      assert.match(a.stderr, words);
+      const j = await run([...argv, "--json"]);
+      assert.deepEqual([j.code, (JSON.parse(j.stdout) as { error: { code: string } }).error.code], [2, "usage"], argv.join(" "));
+    }
+    assert.equal(asked.length, before, "a refused filter never reaches the run");
+    // mason status reads the latest failed statements from the request log's page, beside the sync's failures (recentErrors.queries)
+    const asks = asked.length;
+    const st = await run(["status", "--json"]);
+    assert.equal(st.code, 0, st.stdout + st.stderr);
+    const recent = (JSON.parse(st.stdout) as { recentErrors: Record<string, unknown> }).recentErrors;
+    assert.deepEqual(recent, { sync: [], error: null, queries: failedQueries, queriesError: null });
+    // and the refused statements grouped by the unsupported SQL they used, beside refusedQueries: the run's /api/unsupported, a day of it
+    assert.deepEqual((JSON.parse(st.stdout) as { unsupported: unknown }).unsupported, [unsupportedSql]);
+    assert.ok(Math.abs(Date.parse(unsupportedAsks[0]!.since) - (Date.now() - 86_400_000)) < 60_000, `the last day: ${unsupportedAsks[0]!.since}`);
+    assert.equal(unsupportedAsks[0]!.limit, 5, "the top few");
+    assert.deepEqual(asked.slice(asks).map((q) => { const { limit, failed } = q as { limit: number; failed?: boolean }; return { limit, failed }; }), [{ limit: 5, failed: true }]);
+    // the statements running now
+    const now = await run(["logs", "--running", "--json"]);
+    assert.equal(now.code, 0, now.stderr);
+    assert.deepEqual(JSON.parse(now.stdout), { running: [running], next: [{ command: "mason cancel 4 --statement 9", what: "stop a session's statement, as a client's cancel does" },
+      { command: "mason logs --requests", what: "the statements answered, refused and cancelled" }] });
+    assert.match((await run(["logs", "--running"])).stdout, /^Running now \(1\):\n {2}session 4 +statement 9 +1\.5 s +12 rows sent {2}Metabase \(user metabase\) {2}SELECT count\(\*\) FROM orders\n/);
+    // a cancel: what it stopped; nothing running, or no such session, said with its code
+    const done = await run(["cancel", "4", "--json"]);
+    assert.equal(done.code, 0, done.stderr);
+    assert.deepEqual(JSON.parse(done.stdout).cancelled, running);
+    assert.match((await run(["cancel", "4"])).stdout, /^Cancelled session 4's statement: it ends now, and its client gets a "canceling statement" error\.\n/);
+    // its running time is the line of mason logs --running's renderer (spanText), not a second one
+    assert.match((await run(["cancel", "6"])).stdout, /Running +2 min, 12 rows sent\n/);
+    const idle = await run(["cancel", "5"]);
+    assert.equal(idle.code, 1);
+    assert.match(idle.stderr, /^✗ mason cancel: session 5 is running no statement: nothing to cancel\n/);
+    const gone = await run(["cancel", "77", "--json"]);
+    assert.deepEqual([gone.code, JSON.parse(gone.stdout).error], [1, { code: "not_found", message: "no session 77 is open", why: "it ended, or never was" }]);
+    const bad = await run(["cancel", "four"]);
+    assert.deepEqual([bad.code, bad.stderr.split("\n")[0]], [2, "✗ mason cancel: four is not a session's number"]);
+    // --statement: sent, and the statement it names cancelled only while the session runs it
+    cancelled.length = 0;
+    const named = await run(["cancel", "4", "--statement", "9", "--json"]);
+    assert.deepEqual([named.code, JSON.parse(named.stdout).cancelled], [0, running]);
+    const moved = await run(["cancel", "4", "--statement", "8"]);
+    assert.equal(moved.code, 1);
+    assert.match(moved.stderr, /^✗ mason cancel: session 4 runs another statement now \(statement 9\), not statement 8: nothing cancelled\n/);
+    assert.match(moved.stderr, /mason cancel 4 --statement 9 stops the one it runs now/);
+    assert.deepEqual(cancelled, [[4, 9], [4, 8]], "the statement is sent with the session");
+    const badStatement = await run(["cancel", "4", "--statement", "nine"]);
+    assert.deepEqual([badStatement.code, badStatement.stderr.split("\n")[0]], [2, "✗ mason cancel: --statement nine is not a statement's number"]);
+    assert.deepEqual(cancelled, [[4, 9], [4, 8]], "a refused --statement never reaches the run");
+  } finally {
+    server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("mason status's Disk line: free where the copy is, and what the copies running add — said as more than is free when it is; an unread free space is its error", async () => {
+  const { diskRows } = await import("../src/cli/commands.ts") as unknown as { diskRows?: (d: unknown) => Array<[string, string]> };
+  assert.equal(typeof diskRows, "function", "src/cli/commands.ts diskRows");
+  assert.deepEqual(diskRows!({ path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 49 * 2 ** 30, projectedBytes: null }), [["Disk", "75.0 GiB free in /data"]]);
+  assert.deepEqual(diskRows!({ path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 49 * 2 ** 30, projectedBytes: 80 * 2 ** 30 }),
+    [["Disk", "75.0 GiB free in /data · the copies running are projected to add about 80.0 GiB more — more than is free: the copy stops before the disk fills"]]);
+  assert.deepEqual(diskRows!({ path: "/data", freeBytes: null, copyBytes: null, projectedBytes: null, error: "the free space where the copy is could not be read: EACCES" }),
+    [["Disk", "the free space where the copy is could not be read: EACCES"]]);
+  assert.deepEqual(diskRows!(undefined), [], "a run from before it: no line");
+});
+
+test("mason status's Sessions line: how many are open and running a statement, and by whom — the three with the most, then how many others", async () => {
+  const { sessionsRows } = await import("../src/cli/commands.ts") as unknown as { sessionsRows?: (s: unknown) => Array<[string, string]> };
+  assert.equal(typeof sessionsRows, "function", "src/cli/commands.ts sessionsRows");
+  assert.deepEqual(sessionsRows!({ open: 0, byClient: [] }), [["Sessions", "none open"]]);
+  assert.deepEqual(sessionsRows!({ open: 7, byClient: [
+    { user: "metabase", client: "Metabase", open: 3, running: 1 }, { user: "", client: "", open: 2, running: 0 },
+    { user: "agent", client: "psql", open: 1, running: 1 }, { user: "grafana", client: "Grafana", open: 1, running: 0 }] }),
+    [["Sessions", "7 open, 2 running a statement · 3 as metabase (Metabase), 2 by a token, 1 as agent (psql), and 1 other client (mason logs --running lists the statements)"]]);
+  assert.deepEqual(sessionsRows!(undefined), [], "a run from before it: no line");
 });
 
 test("mason user add --role with Mason stopped: the role must be one the roles file names, checked against the sources file; list says each user's role, and one the file no longer names", async () => {

@@ -62,7 +62,13 @@ test("mason --help lists the commands; a misspelt one is answered with the close
   const bare = mason();
   assert.equal(bare.status, 0);
   assert.notEqual(bare.stdout, topUsage());
-  assert.match(bare.stdout, /^Mason: your Postgres tables, copied and served to BI tools and your app\.\n {2}Project {3}/);
+  // what Mason is, in the words its reader was told it: a drop-in read replica, for analytics
+  assert.ok(bare.stdout.startsWith("Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, copied, kept current and served to psql, BI tools and your app.\n  Project   "), bare.stdout);
+  // and --help opens with the same line, then how to try it with nothing installed
+  const lines = topUsage().split("\n");
+  assert.equal(lines[2], "  Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, copied, kept current and served to psql, BI tools and your app. " +
+    "Make your app's folder a project (mason init), add tables (mason add, before or after the start), start Mason (mason start), connect a tool (mason user add). It needs Node 22.13 or later; mason doctor checks.");
+  assert.equal(lines[3], "  Try it first with nothing to install: mason init demo, then mason start and mason ui (a demo shop database, hosted by Mason itself).");
   assert.match(bare.stdout, /\n {2}mason help {36}every command, and the guides\n$/);
   assert.equal(mason("help", "version").status, 0, "mason version runs, so mason help version answers");
   const typo = mason("statsu");
@@ -72,7 +78,7 @@ test("mason --help lists the commands; a misspelt one is answered with the close
 
 test("mason --help lists the commands under the steps a first session takes, in that order", () => {
   assert.deepEqual(STEPS.map(([step]) => step), ["Learn", "Set up", "Add your tables", "Connect", "Run", "Go to production"]);
-  assert.deepEqual(COMMANDS.map((c) => c.name), ["help", "doctor", "init", "start", "tables", "add", "remove", "wait", "user", "mcp", "status", "ui", "sync", "logs", "stop", "destroy", "serve"]);
+  assert.deepEqual(COMMANDS.map((c) => c.name), ["help", "doctor", "init", "start", "tables", "add", "remove", "wait", "user", "mcp", "status", "ui", "sync", "logs", "cancel", "usage", "stop", "destroy", "serve"]);
   const help = topUsage();
   let at = -1;
   for (const [step, commands] of STEPS) {

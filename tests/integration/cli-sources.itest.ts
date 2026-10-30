@@ -148,7 +148,7 @@ test("init writes the sources file; tables, add and remove read and edit it; the
   const st = ok(mason("status"), "mason status");
   assert.match(st.stdout, new RegExp(`Web UI +http://127\\.0\\.0\\.1:${pageUrl.port}/  \\(mason ui opens it\\)`));
   assert.ok(!st.stdout.includes(token) && !fs.readFileSync(path.join(root, ".mason", "dev.log"), "utf8").includes(token), "the token is only mason ui's");
-  assert.match(fs.readFileSync(path.join(root, ".mason", "dev.log"), "utf8"), /^ {2}Web UI {2}mason ui {2}\(the status page and the users, in your browser\)$/m);
+  assert.match(fs.readFileSync(path.join(root, ".mason", "dev.log"), "utf8"), /^ {2}Web UI {2}mason ui {2}\(the status, tables, users and statements, in your browser\)$/m);
   assert.deepEqual(psqlWithHeader(api, "SELECT * FROM public.customers ORDER BY id"),
     { columns: "id\tname\temail", rows: psql(dbUrl, "SELECT id, name, email FROM customers ORDER BY id") }, "columns: only those, the key first");
   assert.deepEqual(psqlWithHeader(api, "SELECT * FROM public.orders ORDER BY id"),

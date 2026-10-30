@@ -20,6 +20,7 @@ import { PgConnection, PgError } from "../src/cdc/pg-wire.ts";
 import { checkSource, parseSource, readSourceFacts } from "../src/cli/preflight.ts";
 import { DuckStore } from "../src/duck/store.ts";
 import { Sync } from "../src/duck/sync.ts";
+import * as syncCommand from "../src/cli/sync.ts";
 
 // imported when the tests run: at a commit without the module the file still loads, and each test fails by name
 const demoModule = await import("../src/demo/source.ts" as string).catch(() => ({})) as Record<string, unknown>;
@@ -275,6 +276,42 @@ test("the copy reads the demo database with three readers in parallel chunks, ev
     assert.equal(await copied("orders"), afterChange.orders, "the new order is in the copy");
     assert.equal(await copied("order_items"), afterChange.order_items, "its items too");
     assert.deepEqual((await store.writer.runAndReadAll(`SELECT status FROM public.orders WHERE id = ${id}`)).getRowsJS(), [["pending"]]);
+  } finally {
+    await sync.stop();
+    store.close();
+  }
+});
+
+test("a sync asked by hand (mason sync, the page's Sync now) is a synced event in mason sync's words; a scheduled poll that succeeds records none", async () => {
+  const s = await shared();
+  const dir = tmp("synced");
+  dirs.push(dir);
+  const c = await connect(s);
+  let facts;
+  try { facts = await readSourceFacts(c, new Map()); } finally { c.close(); }
+  const parsed = parseSource(s.url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const logged: string[] = [];
+  const events: Array<{ kind: string; table: string | null; message: string }> = [];
+  const store = await DuckStore.open(path.join(dir, "duck.db"), (l) => logged.push(l), { memoryLimit: "256MB" });
+  const sync = new Sync(store, parsed.source, "demo", (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => { events.push(e); } });
+  try {
+    await sync.open();
+    // orders polled every 5 s: once() is the pass a scheduled poll runs (every polled table due)
+    await sync.setTables(facts.tables.filter((t) => t.source === "public.orders").map((t) => ({ ...t, sync: { mode: "poll" as const, every: "5s", seconds: 5 } })));
+    await sync.once();
+    assert.ok(sync.state().every((x) => x.phase === "copied"), JSON.stringify(sync.state()));
+    events.length = 0;
+    await s.change();
+    await sync.once();
+    assert.deepEqual(events.filter((e) => e.kind === "synced"), [], `a scheduled poll records nothing: ${JSON.stringify(events)}`);
+    await s.change();
+    const asked = await sync.pollNow(["public.orders"]);
+    const synced = events.filter((e) => e.kind === "synced");
+    // the words mason sync prints on the table's line (and the page's Sync now, held equal to it), after "synced by hand"
+    const said = syncCommand.syncedReport(asked, ["public.orders"], []).details[0]![1];
+    assert.deepEqual(synced, [{ kind: "synced", table: "public.orders", message: `synced by hand: ${said}` }], `${JSON.stringify(events)}\n${logged.slice(-6).join("\n")}`);
+    assert.match(synced[0]!.message, /^synced by hand: [\d,]+ changed, [\d,]+ deleted, [\d,]+ rows now · [\d.]+ (ms|s)$/);
   } finally {
     await sync.stop();
     store.close();

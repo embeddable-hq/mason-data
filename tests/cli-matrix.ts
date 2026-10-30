@@ -40,9 +40,22 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   ui: ["--no-open"],
   sync: ["no_such_table"],
   logs: [],
+  // a session that is not open: refused by name in every state with a run, and by the state without one
+  cancel: ["99999"],
+  usage: [],
   stop: [],
   destroy: [],
   serve: [],
+};
+
+/**
+ * MORE LINES of a command whose modes answer from different places (review: `user disable|enable` and `logs --events|
+ * --running|--requests` ran only against a fake run): each run in every state too, with --json alone (the person's
+ * form of each is its command's line above; a line a state runs is a process, and the matrix is the suite's slowest).
+ */
+export const MATRIX_MORE: Readonly<Record<string, ReadonlyArray<readonly string[]>>> = {
+  user: [["disable", "no_such_user"], ["enable", "no_such_user"]],
+  logs: [["--events"], ["--running"], ["--requests"]],
 };
 
 /** Further lines a command is run with in every state, beside MATRIX_ARGS's (a flag of its own that must refuse
