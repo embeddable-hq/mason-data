@@ -67,8 +67,8 @@ investigating, including a bug whose fix is not obvious, gets a GitHub issue say
 what done looks like. An issue is headed as a comment is ("Git workflow"), says a real database's findings in sizes and
 shapes ("The source database is production"), and is filed once, after a look for one that already names the thing.
 Neither waits for the owner to ask, and neither stops at a line in a message, which is forgotten: the task in hand goes
-on, the reply names what was filed or started, and the fix's PR is reviewed like any other and merged on the owner's
-word. A PR that changes nothing under `src/` merges without the owner's word once its Fable review has no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release, merge on the owner's word. GitHub's auto-merge is not used, as `main` has no branch protection. A review's findings are the PR's and go to its author in one message ("How work is done here"), not here.
+on, the reply names what was filed or started, and the fix's PR is reviewed and merged as any PR is ("Local gates"). A
+review's findings are the PR's and go to its author in one message ("How work is done here"), not here.
 
 ## Licensing
 
@@ -130,11 +130,12 @@ reads.
   first push**: `scripts/gate-slot.ts node --test tests/integration/duck-oracle.itest.ts`, with `UPDATE_VERIFIED=1` when
   what is answered changed, because CI holds the allowlist but only a local run writes it. Of the other integration
   files, those nearest the change; the rest is CI's. Detector: `integration` red on the PR.
-- **A heavy gate takes a slot.** `npm run check` and `npm run test:integration` queue for one of `MASON_GATE_SLOTS`
-  machine-wide (`scripts/gate-slot.ts`) and say who they wait for, so a long wait is not a hang: start a gate in the
-  background, because the wait can outlast a tool's foreground limit. Anything else whole goes through it by hand
-  (`scripts/gate-slot.ts <command>`); a bare `npm test` does not queue, so regenerate with `UPDATE_FIXTURE=1 npm run check`.
-  A queue that fails exits non-zero and runs nothing. Detector: `tests/gate-slot.test.ts`, which holds both scripts to it.
+- **A heavy gate takes a slot.** `npm run check`, `npm run gate` and `npm run test:integration` queue for one of
+  `MASON_GATE_SLOTS` machine-wide (`scripts/gate-slot.ts`) and say who they wait for, so a long wait is not a hang: start
+  a gate in the background, because the wait can outlast a tool's foreground limit. Anything else whole goes through it
+  by hand (`scripts/gate-slot.ts <command>`); a bare `npm test` does not queue, so regenerate with
+  `UPDATE_FIXTURE=1 npm run check`. A queue that fails exits non-zero and runs nothing. Detector:
+  `tests/gate-slot.test.ts`, which holds all three scripts to it.
 - **`scripts/fails-without.ts` runs once per PR, on the final tree**, not after each edit: nearly every verdict was
   `PROVED`, so a run before the tree is final buys little. The principle stands ("Watch every test fail before you trust
   it"): a test written before its fix is seen failing then, and the tool's one run is the proof. Detector: its output in
@@ -148,6 +149,9 @@ reads.
 - **CI does not stop a merge by itself.** `main` has no branch protection and no ruleset, so GitHub would merge a red
   PR: whoever merges checks that every job is green on the last commit. Detector: the same `push` run, after the fact;
   a required check would be one before it, which is the owner's call.
+- **Who merges what.** A PR that changes nothing under `src/` merges without the owner's word once its Fable review has
+  no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release,
+  merge on the owner's word. GitHub's auto-merge is not used, as `main` has no branch protection.
 - **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
   to fix, or it is a flake, the next rule. Nothing detects it; the gate could compare the tree's hash, and does not.
 - **A flaky test met during other work is quarantined with an issue, not fixed in that PR**: a flake's fix costs more
@@ -207,7 +211,7 @@ node cli/build.ts                     # the npm package: src/ compiled to cli/di
 node cli/extensions.ts                # its platform packages (the copy's extensions, checksums pinned) in cli/platforms/
 docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; deploy/mason-data/compose.yml runs it
 scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it must fail with src/ as it was at <commit>
-scripts/gate-slot.ts <command>        # runs a command in one of the machine's slots, as the two gates above do
+scripts/gate-slot.ts <command>        # runs a command in one of the machine's slots, as the heavy gates do
 ```
 
 ### Checks and tests

@@ -100,7 +100,7 @@ whose forms are refused by name.
    `tests/integration/oracle/gap-cases.ts`.
 6. **The allowlist:** a new function, operator or cast is `unverified` until the oracle verified it. Add its statements, run
    `UPDATE_VERIFIED=1`, then read the diff of `src/duck/verified.ts`: a piece is as wide as every statement that uses it.
-7. **Fixtures:** `UPDATE_FIXTURE=1` regenerates `docs/SQL-SUPPORT.md` (on `npm test`) and
+7. **Fixtures:** `UPDATE_FIXTURE=1` regenerates `docs/SQL-SUPPORT.md` (on `npm run check`) and
    `tests/fixtures/oracle-duckdb-alone.json` (on the oracle). Read both diffs.
 8. **For speed:** the plan fixture too (`tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`). The oracle is blind to
    the plan.

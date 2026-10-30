@@ -301,9 +301,9 @@ test("no command is a usage error, not a run", () => {
   assert.match(r.stderr, /usage: scripts\/gate-slot\.ts <command>/);
 });
 
-test("the two heavy gates queue, and CI's steps do not need to", () => {
+test("the heavy gates queue, and CI's steps do not need to", () => {
   const { scripts } = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
-  for (const name of ["check", "test:integration"]) assert.match(scripts[name]!, /^node scripts\/gate-slot\.ts /, `${name} takes a slot`);
+  for (const name of ["check", "gate", "test:integration"]) assert.match(scripts[name]!, /^node scripts\/gate-slot\.ts /, `${name} takes a slot`);
   for (const name of ["typecheck", "test"]) assert.doesNotMatch(scripts[name]!, /gate-slot/, `${name} is what CI and a targeted run call: no slot`);
   assert.match(scripts["check"]!, /npm run typecheck && npm test/);
   assert.match(scripts["test:integration"]!, /--test-concurrency=1/);

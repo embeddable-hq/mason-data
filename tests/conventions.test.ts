@@ -1104,6 +1104,11 @@ test("the copy-word guard reads past what only looks like an exception", () => {
 const QUARANTINE_CEILING = 3;
 const isLogical = (n: ts.Node): boolean => ts.isBinaryExpression(n) &&
   [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(n.operatorToken.kind);
+/** A comparison is the run's to decide, but only as a skip's value: unlike `&&`, it does not make what is beside it conditional. */
+const isComparison = (n: ts.Node): boolean => ts.isBinaryExpression(n) && [
+  ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.LessThanToken, ts.SyntaxKind.LessThanEqualsToken, ts.SyntaxKind.GreaterThanToken, ts.SyntaxKind.GreaterThanEqualsToken,
+].includes(n.operatorToken.kind);
 /** What each skip or todo that always applies says, whether or not it is a quarantine. What it cannot read counts. */
 export function quarantines(src: string): string[] {
   const file = ts.createSourceFile("test.ts", src, ts.ScriptTarget.Latest, true);
@@ -1121,7 +1126,7 @@ export function quarantines(src: string): string[] {
     while (ts.isParenthesizedExpression(v) || ts.isAsExpression(v) || ts.isSatisfiesExpression(v)) v = v.expression;
     if (ts.isStringLiteralLike(v)) return [v.text];
     if (v.kind === ts.SyntaxKind.FalseKeyword || v.kind === ts.SyntaxKind.NullKeyword) return [];
-    if (ts.isConditionalExpression(v) || ts.isCallExpression(v) || ts.isPrefixUnaryExpression(v) || isLogical(v)) return [];
+    if (ts.isConditionalExpression(v) || ts.isCallExpression(v) || ts.isPrefixUnaryExpression(v) || isLogical(v) || isComparison(v)) return [];
     if (ts.isIdentifier(v)) {
       const name = v.text, found = initializers.get(name);
       if (name === "undefined") return [];
@@ -1189,6 +1194,8 @@ test("the quarantine guard would catch the real thing", () => {
     ['test("a", { skip: QUARANTINED }, () => {});', ["QUARANTINED"]],
     ['const skip = true; test("a", { skip }, () => {});', ["true"]],
     ['test("a", { skip: `flaky ${why}` }, () => {});', ["`flaky ${why}`"]],
+    ['test("a", { skip: 1 + 1 }, () => {});', ["1 + 1"]],
+    ['test("a", { skip: "flaky" }, () => {}) === undefined;', ["flaky"]],
   ];
   for (const [src, said] of unnamed) {
     assert.deepEqual(quarantines(src), said, src);
@@ -1201,6 +1208,7 @@ test("the quarantine guard would catch the real thing", () => {
     'test("a", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, () => {});',
     'const skip = !adminUrl ? "not set" : false; test("a", { skip }, () => {});',
     'test("a", { skip: !adminUrl }, () => {}); test("b", { skip: !adminUrl && "not set" }, () => {});',
+    'test("a", { skip: adminUrl === undefined }, () => {}); test("b", { skip: major < 16 }, () => {});',
     'test("a", { skip: false, todo: undefined }, () => {});',
     'test("a", async (t) => { if (!h) { t.skip("no IPv6 on this machine"); return; } });',
     'if (skip !== false) test("a", { skip: "said once" }, () => {});',
