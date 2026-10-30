@@ -146,12 +146,15 @@ reads.
   has gained since: when that touches the same area, merge main, and the push starts a new run. Nothing tests the merge
   as it lands; a merge queue would (a `merge_group:` trigger and a ruleset), which is the owner's call. Detector: the
   `push` run on main, red after a merge.
-- **CI does not stop a merge by itself.** `main` has no branch protection and no ruleset, so GitHub would merge a red
-  PR: whoever merges checks that every job is green on the last commit. Detector: the same `push` run, after the fact;
-  a required check would be one before it, which is the owner's call.
+- **CI stops a merge on `main`, unless the owner bypasses it.** A ruleset requires `checks`, `image`,
+  `integration (oracle)` and `integration (rest)` on a PR, not that the PR is up to date with main, and blocks a force
+  push and deleting the branch. The repository's admins can bypass it, so whoever merges still reads every job.
+  Detector: the merge is refused, and the `push` run on main after it.
 - **Who merges what.** A PR that changes nothing under `src/` merges without the owner's word once its Fable review has
   no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release,
-  merge on the owner's word. GitHub's auto-merge is not used, as `main` has no branch protection.
+  merge on the owner's word. Once that is so, `gh pr merge <n> --auto --merge` queues it for the checks still running,
+  and a push after it needs reading again. Auto-merge did not fire on PR 89 with every check green, so confirm the PR
+  landed; merge it by hand if not.
 - **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
   to fix, or it is a flake, the next rule. Nothing detects it; the gate could compare the tree's hash, and does not.
 - **A flaky test met during other work is quarantined with an issue, not fixed in that PR**: a flake's fix costs more
