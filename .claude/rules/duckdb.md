@@ -144,6 +144,11 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   marked cancelled, interrupted, and closed once no call of its session has been answered for `CALLS_QUIET_MS`
   (`SessionRunner.cleanUp`; `lastCallAt`, src/duck/functions.ts). Never a sync close of a calling statement's result
   outside that path. `tests/duck-executor.test.ts` "cancelling a function-calling statement again and again" holds it.
+  **Its log line does not wait for that close** (`say`, src/duck/store.ts): a statement's line is posted before its client
+  is told it ended, in the worker port's order, so a statement's own line is before its answer and no earlier statement
+  it was told of lands after it (a late line entered the next test's window). A calling statement its client closed
+  early (a portal, a session gone) has no end its client hears: its line still comes at its release.
+  `tests/duck-wire.test.ts` "logged before its client is told" holds it.
 - **Nothing is closed under a pending call of DuckDB's** (a stop during a drain aborted the process, exit
   134): a session's connection closes once nothing runs on it (`SessionRunner.close`: an open answer drained, every
   fetch settled), and the worker's shutdown waits for every session close in flight and every connection's call before
