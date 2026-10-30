@@ -623,6 +623,32 @@ test("the path guard would catch the real thing", () => {
 });
 
 /**
+ * A FILE THE RECIPES AND THE FLOW MAPS NAME EXISTS: an agent follows them step by step, so a name gone stale sends it
+ * to read what is not there. The path guard above reads only a path from a root it knows; these documents also name a file
+ * by its bare name (`store.ts`) and under `.claude/` or `cli/`. Whether a name is whole is the reader's: a bare one is any
+ * tracked file of that name.
+ */
+const FILE_NAMING_DOCS = ["docs/RECIPES.md", "docs/FLOWS.md"];
+export function namedFiles(text: string): string[] {
+  return [...text.matchAll(/`([\w./-]+\.(?:ts|js|md|yml|json|html|css))`/g)].map((m) => m[1]!);
+}
+const fileThere = (name: string, tracked: readonly string[]): boolean => fs.existsSync(path.join(ROOT, name)) || tracked.some((f) => f.endsWith(`/${name}`));
+
+test("a file the recipes and the flow maps name exists in this tree", () => {
+  const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean);
+  const missing = FILE_NAMING_DOCS.flatMap((doc) => namedFiles(fs.readFileSync(path.join(ROOT, doc), "utf8")).filter((n) => !fileThere(n, tracked)).map((n) => `${doc}: ${n}`));
+  assert.deepEqual(missing, [], "a file these documents name is gone: name the one that replaced it");
+});
+
+test("the recipes' file guard catches the real thing", () => {
+  assert.deepEqual(namedFiles("read `store.ts`, `.claude/rules/cli.md` and `src/cli/dev.ts`; not `sync`, `/api/state` or `a b.ts`"), ["store.ts", ".claude/rules/cli.md", "src/cli/dev.ts"]);
+  const tracked = ["src/duck/store.ts"];
+  assert.equal(fileThere("store.ts", tracked), true);
+  assert.equal(fileThere("tore.ts", tracked), false, "a name is a whole file name, never the end of one");
+  assert.equal(fileThere("nowhere.ts", tracked), false);
+});
+
+/**
  * The lines of a TypeScript `src` where a STRING (a message, a log line, a JSON value, a hint) names the engine:
  * "Nothing a user sees is named for DuckDB" (CLAUDE.md "Who this is for"). Comments, identifiers and imports are the
  * code's; inside a string, the engine's own names are too when they are PART of one token: SQL it defines

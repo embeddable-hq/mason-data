@@ -23,6 +23,38 @@ store of its own, and two at once double the machine's load and the chance of a 
 jobs, each with a Postgres of its own (`.github/workflows/ci.yml`, `integration`): the oracle, and every other file — a
 new file joins the second by itself.
 
+## The ready local gate
+
+```bash
+npm run gate                                 # typecheck, conventions, the state matrix, what imports the change
+npm run gate -- tests/duck-wire.test.ts      # and files named by hand
+npm run gate -- --oracle '^type matrix: '    # and the oracle's statements that regex names (IT_ORACLE_ONLY)
+npm run gate -- --timeout 900                # another bound, in seconds, on each test file
+```
+
+**It is a subset, and CI is the full gate.** It prints what it chose and why, and exits 0 only when every step did;
+1 when any failed; 2 on a bad argument; 128+n when a signal stopped it. It needs Docker and `psql` only when an
+integration file is chosen, and says what to do on one report when one is missing.
+
+- **Node** is the one CI runs. `.github/workflows/ci.yml` is the one place: its `node-version` and Postgres `image` are
+  read at every run, and a `NODE_PIN` (`scripts/gate.ts`) of another major refuses the gate. The pin adds the exact
+  release and its sha256, fetched once from nodejs.org into `<git common dir>/mason-gate/`, which git ignores and every
+  worktree of the clone shares. Nothing global changes: Node 26 is first on the PATH of the gate's own children only.
+  A tarball, not a container: a Linux Node on a Mac needs a second `node_modules`, and the `node_modules` a Mac has runs
+  on it unchanged. CI's Node is the latest 26 and the pin is one 26, so a release apart is possible; bump the pin as
+  ci.yml moves.
+- **Postgres** is `ci.yml`'s image, only when an integration file is chosen, in a container `mason-gate-<pid>-<random>`
+  on a port Docker picks, with a random password and `wal_level=logical`, held by a probe over that port. It is removed
+  by that exact name on a pass, a failure or a signal, and the removal is checked; one that cannot be confirmed fails
+  the gate with the command to run. A SIGKILL cannot be caught: the container then stops at its own bound (`timeout` is
+  its entrypoint), and stays stopped until `docker rm --volumes <name>`.
+- **Nearest** is one rule: a test file a change touched, or one that imports a changed file directly (`git diff` against
+  the merge base with `origin/main`, untracked files included). A test that reaches a change through another module, or
+  that spawns it, is not near: name it by hand. A change never picks the oracle: it is said left out, `--oracle` takes a
+  subset, and naming its file runs all of it. A regex that names no statement fails: an empty oracle proves nothing.
+- **Every process has a bound**: a file at a time, each in a process group of its own, stopped with SIGTERM and then
+  SIGKILL; the report names the file and keeps its output (a unit file 600 s, an integration file 900 s, the oracle 1800 s).
+
 | file | what it proves |
 |---|---|
 | The copy's extensions (`extensions.itest.ts`) | with this platform's `@mason-data/extensions-<platform>` installed read-only (built by `node cli/extensions.ts`, kept in `cli/platforms/`) and HOME an empty folder, a copy of a table with inet columns and a text cast to inet work, and nothing is downloaded: HOME stays empty, the package unchanged, autoinstall off. Needs `IT_POSTGRES_URL`, and the internet once to build the package |
