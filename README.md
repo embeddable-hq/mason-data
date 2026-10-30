@@ -360,8 +360,6 @@ Most of Mason's speed comes from memory. These are the things that help most, in
 - **Add cores for more users.** One query already uses every core. More cores help when many dashboards query at
   once: the benchmark's 4-core machine answered 12 queries a second with 8 clients and with 32, and the extra clients
   waited in a queue.
-- **Find the slow queries.** `mason status` lists the queries that were slow in the last day. `EXPLAIN` shows the SQL that
-  Mason runs for a query, and how up to date each table it reads is.
 
 ## Postgres compatibility
 
