@@ -190,8 +190,6 @@ AI agents and your own code then connect to Mason as they would to any read repl
 
 - **It only reads.** Mason sends `SELECT` queries and reads the change log. It never writes, never changes a table,
   and never asks your database to sort.
-- **It creates nothing**, except a replication slot (and a publication, if you don't name one) for tables you set to
-  `sync: replication`. Mason drops the slot when no table uses it any more.
 - **It keeps its load small.** The first sync uses at most 3 connections (`MASON_COPY_PARALLEL`), and after a crash it
   resumes where it stopped. A table's polls use at most a fifth of your database's time. By default, Mason reads
   nothing again after the first sync.
