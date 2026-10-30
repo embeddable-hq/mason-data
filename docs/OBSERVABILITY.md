@@ -235,7 +235,9 @@ serves numbers only — `mason_ready`, `mason_info{version}`, `mason_uptime_seco
 `_seconds`, `mason_slot_wal_held_bytes`, `mason_disk_free_bytes`, `mason_sessions_open`,
 `mason_statements_total{outcome}` (a counter since the process started) and `mason_statement_duration_seconds` (a
 summary: the last minute's sample's p50 / p95, the sum and count since the start) — each the number `/api/state` or a
-usage sample already holds (src/cli/run-server.ts `metricsFacts`), a number not known absent rather than 0. It
+usage sample already holds (src/cli/run-server.ts `metricsFacts`), a number not known absent rather than 0. A scrape
+never reaches the source: the stream's position and the slot are as the sampler last read them, absent when that is
+more than two samples old. It
 deliberately serves NO name — no table, column, user, client or host, as a value or a label — and no statement text,
 because it takes no credential and a real database's structure is confidential: per-table or per-user detail, and the
 statements, wait for A (or B) behind a secret. While Mason starts or stops it answers 200 with `mason_ready 0` and

@@ -516,13 +516,35 @@ test("a usage sample reads /api/state's own facts: the copy file's bytes, the to
   assert.deepEqual(facts, { copyBytes: state.engine.bytes, totals: { added: 3, copied: 3, failed: 0, rows: 1_023, syncedAt: at }, oldestSyncSeconds: 3690.5, streamLag: lag,
     copied: ["public.customers", "public.orders", "public.logs"], slotWalHeldBytes: 65_536, diskFreeBytes: 75 * 2 ** 30, sessionsOpen: 3,
     // the sync's copies by phase, every one it holds (the one not added too), as /healthz counts them: what GET /metrics says
-    tables: { total: 4, copied: 3, copying: 1, waiting: 0, failed: 0 } });
+    tables: { total: 4, copied: 3, copying: 1, waiting: 0, failed: 0 },
+    // when the database's position under the lag and the slot were read: what GET /metrics holds a cached number to
+    streamLagReadAt: at, slotWalReadAt: at });
   assert.equal(state.engine.bytes, 10, "the copy file's size, as engine.bytes says it");
   const polled = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => null } }, now) as { streamLag: unknown; slotWalHeldBytes: unknown };
   assert.equal(polled.streamLag, null, "no stream when polling");
   assert.equal(polled.slotWalHeldBytes, null, "no slot when polling");
   const unread = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => ({ ...stream, slotWal: { error: "the database could not be reached: connect ECONNREFUSED" } }) } }, now) as { slotWalHeldBytes: unknown };
   assert.equal(unread.slotWalHeldBytes, null, "a slot that could not be read is unknown, never a 0");
+});
+
+test("GET /metrics' facts never reach the source: the stream is asked with refresh: false (the position and the slot as cached), the sampler's with a refresh", async () => {
+  const runServer = await import("../src/cli/run-server.ts") as unknown as { metricsFacts?: (c: RunContext, now?: number) => Promise<Record<string, unknown>>;
+    usageFacts: (c: RunContext, now?: number) => Promise<unknown> };
+  assert.equal(typeof runServer.metricsFacts, "function", "src/cli/run-server.ts metricsFacts");
+  const asked: unknown[] = [];
+  const at = new Date().toISOString();
+  const stream = { slot: "s", slotWal: { walHeldBytes: 1, walStatus: "reserved" as const, safeWalSizeBytes: null, at }, publication: "p", running: true, failure: null,
+    position: "0/1", applied: "0/1", database: { lsn: "0/2", at }, lag: { bytes: 1, seconds: 1 }, lastBatch: null, tables: [] };
+  const usage = { ...ctx.duck.usage, sampleSeconds: 60, statementTotals: () => ({ completed: 2, refused: 0, failed: 0, cancelled: 0, completedMs: 20 }),
+    lastDurations: () => ({ at, p50Ms: 5, p95Ms: 9 }) };
+  const c: RunContext = { ...ctx, duck: { ...ctx.duck, usage, stream: async (o?: { refresh?: boolean }) => { asked.push(o ?? null); return stream; } } };
+  const now = Date.now();
+  const facts = await runServer.metricsFacts!(c, now);
+  assert.deepEqual(asked, [{ refresh: false }], "a scrape: the cached position, never a connection to the database");
+  assert.deepEqual([facts.at, facts.freshSeconds, facts.statements, facts.durations], [now, 120, usage.statementTotals(), usage.lastDurations()],
+    "the facts' moment, two samples' age allowed, the sampler's counter and last p50 / p95");
+  await runServer.usageFacts(c, now);
+  assert.deepEqual(asked.slice(1), [{ refresh: true }], "the sampler's (and mason status') read refreshes it");
 });
 
 test("the run itself in /api/state: its version, since when it is up, and its supervisor's restarts — how many and the last — or why they could not be read", async () => {

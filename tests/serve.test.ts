@@ -143,7 +143,8 @@ test("/healthz: 503 while it starts and stops, 200 once it answers whatever its 
   assert.deepEqual({ ...starting.body, version: "-" }, { status: "starting", version: "-", uptimeSeconds: 5 });
   assert.equal(healthBody({ phase: "stopping" }, t0, t0).status, 503);
   const copy = (source: string, phase: CopyState["phase"]): CopyState => ({ source, phase, rows: null, bytes: null, seconds: null, copiedAt: null, error: phase === "failed" ? "boom" : null });
-  const ready = healthBody({ phase: "ready", tables: () => [copy("public.orders", "copied"), copy("public.users", "copying"), copy("sales.secret_ledger", "failed")] }, t0, t0 + 60_000);
+  const ready = healthBody({ phase: "ready", tables: () => [copy("public.orders", "copied"), copy("public.users", "copying"), copy("sales.secret_ledger", "failed")],
+    metrics: async () => { throw new Error("/healthz never reads the metrics"); } }, t0, t0 + 60_000);
   assert.equal(ready.status, 200, "a table that failed leaves the rest served");
   assert.deepEqual(ready.body.tables, { total: 3, copied: 1, copying: 1, waiting: 0, failed: 1 });
   assert.doesNotMatch(JSON.stringify(ready.body), /orders|users|secret_ledger|boom/, "the endpoint takes no credential");
@@ -153,7 +154,8 @@ test("GET /metrics on the health port: 200 in Prometheus's text format while it 
   const t0 = Date.now() - 90_000;
   const copy = (source: string, phase: CopyState["phase"]): CopyState => ({ source, phase, rows: null, bytes: null, seconds: null, copiedAt: null, error: null });
   const usage = { copyBytes: 4_096, totals: { added: 2, copied: 1, failed: 0, rows: 10 }, oldestSyncSeconds: 3, streamLag: null, copied: ["public.secret_orders"],
-    slotWalHeldBytes: null, diskFreeBytes: 1_000_000, sessionsOpen: 2, tables: { total: 2, copied: 1, copying: 1, waiting: 0, failed: 0 } };
+    slotWalHeldBytes: null, diskFreeBytes: 1_000_000, sessionsOpen: 2, tables: { total: 2, copied: 1, copying: 1, waiting: 0, failed: 0 },
+    streamLagReadAt: null, slotWalReadAt: null };
   const statements = { completed: 5, refused: 1, failed: 0, cancelled: 0, completedMs: 50 };
   let broken = false;
   type Phase = Parameters<typeof healthBody>[0];
@@ -177,7 +179,7 @@ test("GET /metrics on the health port: 200 in Prometheus's text format while it 
     const health = await get("/healthz");
     assert.deepEqual([health.status, health.type, (JSON.parse(health.body) as { status: string }).status], [503, "application/json", "starting"]);
     state = { phase: "ready", tables: () => [copy("public.secret_orders", "copied"), copy("public.users", "copying")],
-      metrics: async () => { if (broken) throw new Error("the copy of public.secret_orders on db.internal could not be read"); return { usage, statements, durations: null }; } };
+      metrics: async () => { if (broken) throw new Error("the copy of public.secret_orders on db.internal could not be read"); return { usage, statements, durations: null, at: Date.now(), freshSeconds: 120 }; } };
     const ready = await get("/metrics");
     assert.deepEqual([ready.status, ready.type], [200, TYPE]);
     assert.match(ready.body, /^mason_ready 1$/m);

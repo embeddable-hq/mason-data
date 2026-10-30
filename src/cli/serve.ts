@@ -225,9 +225,9 @@ export function serveSource(s: ServeSettings, env: NodeJS.ProcessEnv): { wrote: 
 }
 
 /** Where a serve is: what /healthz and /metrics say. Once ready, `metrics` reads the run's numbers (src/cli/run-server.ts
- *  `metricsFacts`); a test's ready phase may leave it out, and /metrics then says what it would while starting. */
+ *  `metricsFacts`): required, so no ready phase exists where /healthz says ready and /metrics `mason_ready 0`. */
 export type ServePhase = { phase: "starting" }
-  | { phase: "ready"; tables: () => CopyState[]; metrics?: () => Promise<Omit<RunMetrics, "uptimeSeconds">> }
+  | { phase: "ready"; tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">> }
   | { phase: "stopping" };
 
 /** seconds since the serve started: /healthz's `uptimeSeconds` and /metrics' `mason_uptime_seconds`, one number */
@@ -249,7 +249,7 @@ export function healthBody(state: ServePhase, startedAt: number, now = Date.now(
  * /healthz's to say) — `mason_ready 0` and `mason_info` while it starts or stops, the run's numbers once it serves.
  */
 export async function metricsBody(state: ServePhase, startedAt: number, now = Date.now()): Promise<string> {
-  if (state.phase !== "ready" || state.metrics === undefined) return metricsText({ version: version(), run: null });
+  if (state.phase !== "ready") return metricsText({ version: version(), run: null });
   const run = await state.metrics();
   return metricsText({ version: version(), run: { ...run, uptimeSeconds: uptimeSeconds(startedAt, now) } });
 }

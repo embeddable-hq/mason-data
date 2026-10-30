@@ -19,15 +19,20 @@ type Metrics = typeof import("../src/cli/metrics.ts");
 const metrics = (): Promise<Metrics> => import("../src/cli/metrics.ts" as string) as Promise<Metrics>;
 type Usage = typeof import("../src/duck/usage.ts");
 
+// the facts' moment, and what was read 30 s before it (the sampler's last read: fresh)
+const NOW = Date.parse("2026-10-30T09:00:30.000Z");
+const READ = "2026-10-30T09:00:00.000Z";
 const usage = {
   copyBytes: 5 * 2 ** 30, totals: { added: 4, copied: 3, failed: 1, rows: 12_345_678 }, oldestSyncSeconds: 42.5,
   streamLag: { bytes: 2_048, seconds: 1.5 }, copied: ["public.orders", "public.customers", "billing.invoices"],
   slotWalHeldBytes: 65_536, diskFreeBytes: 80 * 2 ** 30, sessionsOpen: 3, tables: { total: 5, copied: 3, copying: 1, waiting: 0, failed: 1 },
+  streamLagReadAt: READ, slotWalReadAt: READ,
 };
 const run: RunMetrics = {
   uptimeSeconds: 3_600, usage,
   statements: { completed: 1_000, refused: 7, failed: 2, cancelled: 1, completedMs: 12_500 },
-  durations: { at: "2026-10-30T09:00:00.000Z", p50Ms: 12, p95Ms: 340 },
+  durations: { at: READ, p50Ms: 12, p95Ms: 340 },
+  at: NOW, freshSeconds: 120,
 };
 const READY: MetricsFacts = { version: "0.9.1", run };
 
@@ -131,7 +136,7 @@ test("a number not known is ABSENT, never 0 or NaN: no stream when polling, no a
     ["mason_statement_duration_seconds_sum", "mason_statement_duration_seconds_count"]);
   // a stream whose lag is not known yet (its position not read): each of its numbers absent alone
   const unread = holdsTheFormat(metricsText({ version: "0.9.1", run: { ...run, usage: { ...usage, streamLag: { bytes: 4_096, seconds: null } },
-    durations: { at: "2026-10-30T09:00:00.000Z", p50Ms: null, p95Ms: null } } }));
+    durations: { at: READ, p50Ms: null, p95Ms: null } } }));
   assert.equal(value(unread, "mason_stream_lag_bytes"), 4_096);
   assert.equal(value(unread, "mason_stream_lag_seconds"), undefined);
   assert.equal(value(unread, "mason_statement_duration_seconds", '{quantile="0.5"}'), undefined, "a minute with none completed has no quantile");
@@ -139,6 +144,43 @@ test("a number not known is ABSENT, never 0 or NaN: no stream when polling, no a
   const odd = holdsTheFormat(metricsText({ version: "0.9.1", run: { ...run, usage: { ...usage, oldestSyncSeconds: Number.NaN, copyBytes: Number.POSITIVE_INFINITY } } }));
   assert.equal(value(odd, "mason_sync_oldest_age_seconds"), undefined);
   assert.equal(value(odd, "mason_copy_bytes"), undefined);
+});
+
+test("a number the sampler read more than two samples ago is ABSENT: the stream's position under the lag, the slot, the last p50 / p95 — never a stale number as current", async () => {
+  const { metricsText, FRESH_SAMPLES } = await metrics();
+  assert.equal(FRESH_SAMPLES, 2);
+  const at = (secondsBefore: number): string => new Date(NOW - secondsBefore * 1000).toISOString();
+  const stale = holdsTheFormat(metricsText({ version: "0.9.1", run: { ...run, usage: { ...usage, streamLagReadAt: at(121), slotWalReadAt: at(500) },
+    durations: { at: at(121), p50Ms: 12, p95Ms: 340 } } }));
+  assert.equal(value(stale, "mason_stream_lag_bytes"), undefined, "the position read 121 s ago: not known now");
+  assert.equal(value(stale, "mason_slot_wal_held_bytes"), undefined);
+  assert.equal(value(stale, "mason_stream_lag_seconds"), 1.5, "the seconds are the run's own clock against the last batch: read from nothing, current");
+  assert.deepEqual(stale.samples.filter((s) => family(stale, s.name) === "mason_statement_duration_seconds").map((s) => s.name + s.labels),
+    ["mason_statement_duration_seconds_sum", "mason_statement_duration_seconds_count"], "a sample that could not be taken: its quantiles absent, sum and count stand");
+  const edge = holdsTheFormat(metricsText({ version: "0.9.1", run: { ...run, usage: { ...usage, streamLagReadAt: at(120), slotWalReadAt: at(120) }, durations: { at: at(120), p50Ms: 12, p95Ms: 340 } } }));
+  assert.deepEqual([value(edge, "mason_stream_lag_bytes"), value(edge, "mason_slot_wal_held_bytes"), value(edge, "mason_statement_duration_seconds", '{quantile="0.95"}')],
+    [2_048, 65_536, 0.34], "two samples old: still said");
+  const never = holdsTheFormat(metricsText({ version: "0.9.1", run: { ...run, usage: { ...usage, streamLagReadAt: null, slotWalReadAt: null } } }));
+  assert.deepEqual([value(never, "mason_stream_lag_bytes"), value(never, "mason_slot_wal_held_bytes")], [undefined, undefined], "never read (or the read failed): unknown");
+});
+
+test("a family is whole or absent: a sample it needs that is not finite (or a count not a whole number) drops every series of it, never one alone", async () => {
+  const { metricsText } = await metrics();
+  const names = (r: RunMetrics): Set<string> => { const p = holdsTheFormat(metricsText({ version: "0.9.1", run: r })); return new Set(p.samples.map((x) => family(p, x.name))); };
+  const has = (r: RunMetrics, f: string): boolean => names(r).has(f);
+  // a counter series that vanished alone would read as a reset
+  for (const completed of [Number.NaN, 1.5, -1]) {
+    const r = { ...run, statements: { ...run.statements, completed } };
+    assert.ok(!has(r, "mason_statements_total"), `completed ${completed}: the whole counter is absent`);
+    assert.ok(!has(r, "mason_statement_duration_seconds"), `completed ${completed}: the summary's _count too, so the summary is absent`);
+  }
+  assert.ok(!has({ ...run, statements: { ...run.statements, refused: Number.POSITIVE_INFINITY } }, "mason_statements_total"));
+  // the summary: never its quantiles without its sum and count
+  const noSum = { ...run, statements: { ...run.statements, completedMs: Number.NaN } };
+  assert.ok(!has(noSum, "mason_statement_duration_seconds") && has(noSum, "mason_statements_total"), "the summary absent whole; the counter stands");
+  assert.ok(!has({ ...run, durations: { at: READ, p50Ms: Number.NaN, p95Ms: 340 } }, "mason_statement_duration_seconds"), "a quantile present but not finite: absent whole");
+  assert.ok(!has({ ...run, usage: { ...usage, tables: { ...usage.tables, copying: Number.NaN } } }, "mason_tables"), "one phase not known: the phases absent whole");
+  assert.ok(has(run, "mason_tables") && has(run, "mason_statements_total") && has(run, "mason_statement_duration_seconds"));
 });
 
 test("mason_statements_total is a COUNTER: counted as the listener records each statement, never reset by a sample, so two scrapes never go down", async () => {
@@ -151,7 +193,7 @@ test("mason_statements_total is a COUNTER: counted as the listener records each 
   const u = await UsageSampler.open(store, () => undefined, { days: 7, now: () => clock, sampleMs: 3_600_000, sizeEveryMs: 3_600_000 });
   u.start(async () => usage);
   const row = (durationMs: number, o: Partial<ApiLogRow> = {}): ApiLogRow => ({ requestId: "r", at: new Date(), method: "QUERY", status: 200, durationMs, ...o });
-  const scrape = (): Parsed => parse(metricsText({ version: "0.9.1", run: { uptimeSeconds: 1, usage, statements: u.statementTotals(), durations: u.lastDurations() } }));
+  const scrape = (): Parsed => parse(metricsText({ version: "0.9.1", run: { uptimeSeconds: 1, usage, statements: u.statementTotals(), durations: u.lastDurations(), at: clock, freshSeconds: 120 } }));
   const counts = (p: Parsed): Record<string, number> => Object.fromEntries(p.samples.filter((s) => s.name === "mason_statements_total" || s.name.startsWith("mason_statement_duration_seconds_"))
     .map((s) => [s.name + s.labels, Number(s.value)]));
   for (const ms of [10, 20, 30]) u.count(row(ms));
@@ -183,10 +225,45 @@ test("mason_statements_total is a COUNTER: counted as the listener records each 
   await u.close();
 });
 
-test("NEVER A NAME: facts that carry a table's, a user's, a client's name, a statement and a host print none of them (the endpoint takes no credential)", async () => {
+/** the facts wrapped so that every property READ is recorded by its path; a read whose value is not an object is a leaf */
+function recorded<T extends object>(facts: T): { facts: T; leaves: Set<string> } {
+  const leaves = new Set<string>();
+  const wrap = (o: object, at: string): object => new Proxy(o, {
+    get(target, key, receiver) {
+      const v: unknown = Reflect.get(target, key, receiver);
+      if (typeof key === "symbol") return v;
+      const p = at ? `${at}.${key}` : key;
+      if (v !== null && typeof v === "object") return wrap(v, p);
+      leaves.add(p);
+      return v;
+    },
+  });
+  return { facts: wrap(facts, "") as T, leaves };
+}
+
+/** EVERY VALUE THE RENDERER MAY READ: numbers, the version, and the times a cached number was read at — never a name */
+const READS = [
+  "version", "run",
+  "run.uptimeSeconds", "run.at", "run.freshSeconds",
+  "run.usage.tables.copied", "run.usage.tables.copying", "run.usage.tables.waiting", "run.usage.tables.failed",
+  "run.usage.copyBytes", "run.usage.totals.rows", "run.usage.oldestSyncSeconds", "run.usage.streamLag.bytes", "run.usage.streamLag.seconds",
+  "run.usage.streamLagReadAt", "run.usage.slotWalHeldBytes", "run.usage.slotWalReadAt", "run.usage.diskFreeBytes", "run.usage.sessionsOpen",
+  "run.statements.completed", "run.statements.failed", "run.statements.refused", "run.statements.cancelled", "run.statements.completedMs",
+  "run.durations.at", "run.durations.p50Ms", "run.durations.p95Ms",
+].sort();
+
+test("NEVER A NAME: the renderer READS only the closed list of numbers (a name field added to the facts and read fails here), and names fed to it print nowhere", async () => {
   const { metricsText } = await metrics();
+  // its reads, over facts where every number is known (so every read happens): exactly the closed list
+  const r = recorded({ version: "0.9.1", run });
+  metricsText(r.facts);
+  // `run` is read as a leaf only when it is null; here it is an object, so it is the path's prefix, never a leaf
+  assert.deepEqual([...r.leaves].sort(), READS.filter((p) => p !== "run"));
+  const starting = recorded({ version: "0.9.1", run: null });
+  metricsText(starting.facts);
+  assert.deepEqual([...starting.leaves].sort(), ["run", "version"], "starting: the version alone");
+  // and the names a run's facts can hold, fed to it, print nowhere
   const secrets = ["public.secret_orders", "secret_orders", "alice_analyst", "Metabase-7", "SELECT ssn FROM", "db.internal.example", "10.0.0.7"];
-  // the facts as a run could hold them: the copies served are named, and fields beside the numbers carry the rest
   const leaky = {
     ...run,
     usage: { ...usage, copied: ["public.secret_orders", "secret_orders"], sessions: [{ user: "alice_analyst", client: "Metabase-7" }] },
@@ -195,8 +272,7 @@ test("NEVER A NAME: facts that carry a table's, a user's, a client's name, a sta
   };
   for (const text of [metricsText({ version: "0.9.1", run: leaky }), metricsText({ version: "0.9.1", run: { ...leaky, durations: null } })]) {
     holdsTheFormat(text);
-    for (const s of secrets) assert.ok(!text.includes(s), `${JSON.stringify(s)} is not in the body`);
-    // and no label but the three closed sets and the version
+    for (const x of secrets) assert.ok(!text.includes(x), `${JSON.stringify(x)} is not in the body`);
     const labels = [...text.matchAll(/\{([^}]*)\}/g)].flatMap((m) => m[1]!.split(",").map((kv) => kv.split("=")[0]));
     for (const l of labels) assert.ok(["outcome", "phase", "quantile", "version"].includes(l!), `the label ${l}`);
   }

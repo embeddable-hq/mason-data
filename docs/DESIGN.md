@@ -1259,8 +1259,14 @@ confidential, and a label is a value too. Per-table and per-user detail, and the
 secret. Every number is one `/api/state` or a usage sample already computes (`metricsFacts`: `usageFacts`, the
 sampler's counter beside its interval's, fed by the one `record` path, and its last p50 / p95), so a scrape and
 `mason status` cannot disagree; the statements are a counter kept in the process, never counted from the request log
-at each scrape, so it never goes down between two scrapes. A number not known is absent, never 0 (a stream's lag
-where nothing streams) and never NaN (which no alert compares true). While Mason starts or stops it answers 200 with
+at each scrape, so it never goes down between two scrapes — it counts every statement the listener answered, so after
+the request log lost rows it could not write (said in the log, `lost` streaks) it exceeds what `mason status` and
+`mason usage` count by those rows. A number not known is absent, never 0 (a stream's lag where nothing streams) and
+never NaN (which no alert compares true): a family is whole or absent. A SCRAPE NEVER REACHES THE SOURCE (the
+review's blocker: the first cut read the stream's position as `mason status` does, a connection and a SELECT on the
+production database per scrape at most every 5 s, from a GET anyone on the health port may loop): the position and
+the slot are read as the sampler last cached them (`streamStatus({ refresh: false })`), and a number cached longer
+ago than two samples, or a p50 / p95 of a sample that could not be taken, is absent rather than stale. While Mason starts or stops it answers 200 with
 `mason_ready 0`: whether it is up is the probe's question, and a scrape that errored during every deploy's first
 seconds would page someone for nothing.
 

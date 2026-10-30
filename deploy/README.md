@@ -38,7 +38,9 @@ what to run and what to decide; what it does not verify, it says.
 Every platform gets `GET /metrics` on the health port (4140), beside `/healthz`: Mason's numbers in Prometheus's text
 format (tables by phase, the copy's size, the stalest copy's age, the stream's lag, disk free, sessions, statements by
 outcome and their p50 / p95). It is numbers only and needs no secret — no table, user, client or host name and no
-statement text, not even as a label — so it can stay on the cluster-only port with no auth. A three-line scrape config:
+statement text, not even as a label — so it can stay on the cluster-only port with no auth. A scrape costs your
+database nothing: it reads what Mason already holds, never a connection or a query on the source, however often it
+is asked. A three-line scrape config:
 
 ```yaml
 scrape_configs:

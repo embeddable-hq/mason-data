@@ -42,7 +42,9 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
 phase, the copy's size, how old the stalest copy is, the stream's lag and the WAL its slot holds, disk free, sessions
 open, statements by outcome (a counter) and their p50 / p95 (`curl -s localhost:4140/metrics` lists each with its
 help). It is **numbers only and needs no secret**: no table, column, user, client or host name and no statement text
-appears in it, not even as a label. While Mason starts it answers 200 with `mason_ready 0`; `/healthz` is the probe.
+appears in it, not even as a label. A scrape costs your database nothing: it reads what Mason already holds (the
+stream's position as last sampled, once a minute), never a connection or a query on the source, however often it is
+asked. While Mason starts it answers 200 with `mason_ready 0`; `/healthz` is the probe.
 A Prometheus beside the container scrapes it with:
 
 ```yaml

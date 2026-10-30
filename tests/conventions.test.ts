@@ -836,11 +836,18 @@ test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through 
 /**
  * GET /metrics TAKES NO CREDENTIAL, SO IT CARRIES NO NAME (.claude/rules/cli.md "mason serve"): every label
  * src/cli/metrics.ts writes is one of a closed set whose values are Mason's own words (a phase, an outcome, a quantile,
- * the version) — never a table's, a user's, a client's or a host's. A label added for one of those fails here; the
- * values are held by tests/cli-metrics.test.ts, which feeds the renderer names and holds them absent.
+ * the version) — never a table's, a user's, a client's or a host's. The first check is the type (src/cli/metrics.ts
+ * `MetricLabel`: a label of another name does not compile); this is the second: EVERY key of every `labels:` the module
+ * writes, and a `labels:` that is not an object literal (a variable, a spread: keys this guard cannot read) refused as
+ * such. The renderer's reads are held to a closed list by tests/cli-metrics.test.ts.
  */
 const METRIC_LABELS = new Set(["phase", "outcome", "quantile", "version"]);
-const metricLabels = (source: string): string[] => [...source.matchAll(/labels: \{ ?([a-z_]+)\b/g)].map((m) => m[1]!);
+const metricLabels = (source: string): string[] => [...source.matchAll(/\blabels:\s*(\{[^}]*\}|[^\s,}]+)/g)].flatMap((m) => {
+  const v = m[1]!;
+  if (!v.startsWith("{")) return [`<not a literal: ${v}>`];
+  return v.slice(1, -1).split(",").map((kv) => kv.trim()).filter(Boolean)
+    .map((kv) => /^([a-z_]+)\s*(?::|$)/.exec(kv)?.[1] ?? `<not a literal: ${kv}>`);
+});
 
 test("GET /metrics labels only by Mason's own words (phase, outcome, quantile, version): never a name, the endpoint takes no credential", () => {
   const labels = metricLabels(fs.readFileSync(path.join(ROOT, "src", "cli", "metrics.ts"), "utf8"));
@@ -850,6 +857,10 @@ test("GET /metrics labels only by Mason's own words (phase, outcome, quantile, v
 
 test("the metrics label guard would catch the real thing", () => {
   assert.deepEqual(metricLabels(`TABLE_PHASES.map((phase) => ({ labels: { phase }, value: 1 })); [{ labels: { table: t.source }, value: t.rows }]`), ["phase", "table"]);
+  assert.deepEqual(metricLabels(`[{ labels: { phase, user: s.user }, value: 1 }, { labels: { quantile: "0.5", ...extra }, value: 2 }]`), ["phase", "user", "quantile", "<not a literal: ...extra>"],
+    "every key, the second beside the first; a spread is refused");
+  assert.deepEqual(metricLabels(`const l = { table: name }; [{ labels: l, value: 1 }]`), ["<not a literal: l>"], "a label object built in a variable is refused");
+  assert.deepEqual(metricLabels(`interface Sample { labels?: Readonly<Partial<Record<MetricLabel, string>>> }`), [], "the type's declaration is no label written");
 });
 
 /**

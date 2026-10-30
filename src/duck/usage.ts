@@ -83,9 +83,16 @@ export interface UsageFacts {
   diskFreeBytes: number | null;
   /** the sessions logged in to the Postgres API (`sessions.open`) */
   sessionsOpen: number;
-  /** the sync's copies by phase, as `/healthz` counts them (src/cli/readiness.ts `phaseCounts`): what `GET /metrics`
-   *  says (src/cli/metrics.ts); a sample keeps `totals` */
+  /** the copies the sync holds by phase, as `/healthz` counts them (src/cli/readiness.ts `phaseCounts`; a removed
+   *  table's copy is held until dropped, so `copied` may exceed `totals.added`): what `GET /metrics` says
+   *  (src/cli/metrics.ts). NO SAMPLE WRITES IT: a sample keeps `totals` */
   tables: { total: number; copied: number; copying: number; waiting: number; failed: number };
+  /** when the database's position under `streamLag.bytes` was read (`stream.database.at`), ISO; null when it never was
+   *  or the last read failed. `GET /metrics` reads the position cached, never asking the database, and says a lag read
+   *  longer ago than two samples as unknown. No sample writes it */
+  streamLagReadAt: string | null;
+  /** when `slotWalHeldBytes` was read (`stream.slotWal.at`), ISO; null as it is. No sample writes it */
+  slotWalReadAt: string | null;
 }
 
 /**

@@ -42,7 +42,7 @@ import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from ".
 import type { PgApiServer } from "../api/postgres/server.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
-import type { RunMetrics } from "./metrics.ts";
+import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
 
 /** A statement answered in this many milliseconds or more is slow (one constant: src/cli/request-filter.ts SLOW_MS, the
  *  request log's `slow` filter's too): what mason status lists (src/duck/requests.ts slow). */
@@ -100,8 +100,9 @@ export interface RunContext {
     /** a poll of exactly these tables, now (mason sync; src/duck/sync.ts pollNow); in replication mode none, and where the
      *  stream is (`streamed`) */
     poll: (sources: string[]) => Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }>;
-    /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode */
-    stream: () => Promise<StreamStatus | null>;
+    /** where the replication stream is (src/duck/sync.ts streamStatus): null outside replication mode; `refresh: false`
+     *  never reaches the database (the position and the slot as last read) */
+    stream: (o?: { refresh?: boolean }) => Promise<StreamStatus | null>;
     /** the disk the copy's file is on: free, and what the copies running are projected to add (src/duck/sync.ts diskStatus) */
     disk: () => DiskStatus;
     /** what the run measured of a table, for mason add's estimate of a poll's cost (src/duck/sync.ts measured) */
@@ -237,24 +238,32 @@ export function tableColumns(ctx: RunContext, table: string): { table: string; c
  * stream's `lag` and its slot's `walHeldBytes`, the bytes free under the copy (`disk.freeBytes`), the sessions open (`sessions.open`), the copies served, and
  * the copies by phase (`phaseCounts`, the count `/healthz` says) for `GET /metrics`.
  */
-export async function usageFacts(ctx: RunContext, now = Date.now()): Promise<UsageFacts> {
+export async function usageFacts(ctx: RunContext, now = Date.now(), { refresh = true }: { refresh?: boolean } = {}): Promise<UsageFacts> {
   const copies = ctx.duck.copies();
-  const s = runState(ctx, copies, await ctx.duck.stream(), now) as { totals: SyncTotals; engine: { bytes: number | null }; disk: { freeBytes: number | null }; sessions: { open: number };
+  const s = runState(ctx, copies, await ctx.duck.stream({ refresh }), now) as { totals: SyncTotals; engine: { bytes: number | null }; disk: { freeBytes: number | null }; sessions: { open: number };
     tables: Array<{ added: boolean; sync?: SyncFacts }>; stream?: StreamStatus };
   const ages = s.tables.flatMap((t) => (t.added && t.sync?.ageSeconds != null ? [t.sync.ageSeconds] : []));
   const slot = s.stream?.slotWal;
   return { copyBytes: s.engine.bytes, totals: s.totals, oldestSyncSeconds: ages.length ? Math.max(...ages) : null, streamLag: s.stream?.lag ?? null,
     copied: copies.filter((c) => c.phase === "copied").map((c) => c.source), slotWalHeldBytes: slot !== undefined && "walHeldBytes" in slot ? slot.walHeldBytes : null,
-    diskFreeBytes: s.disk.freeBytes, sessionsOpen: s.sessions.open, tables: phaseCounts(copies) };
+    diskFreeBytes: s.disk.freeBytes, sessionsOpen: s.sessions.open, tables: phaseCounts(copies),
+    streamLagReadAt: s.stream !== undefined && "lsn" in s.stream.database ? s.stream.database.at : null,
+    slotWalReadAt: slot !== undefined && "walHeldBytes" in slot ? slot.at : null };
 }
 
 /**
  * WHAT `GET /metrics` READS OF THE RUN (src/cli/metrics.ts, `mason serve`'s health port): a usage sample's own facts
  * (`usageFacts`, above: no number computed a second way), the statements since the process started as the sampler counts
  * them as they are recorded (`statementTotals`), and the last sample's p50 / p95 (`lastDurations`).
+ *
+ * A SCRAPE NEVER REACHES THE SOURCE (the review of PR 50: the endpoint takes no credential, so its rate is anyone's):
+ * the stream's position and the slot are read as cached (`refresh: false`), never asked of the database; the sampler
+ * keeps them fresh once a minute, and a number read longer ago than `FRESH_SAMPLES` samples is said as unknown
+ * (`freshSeconds`, src/cli/metrics.ts).
  */
 export async function metricsFacts(ctx: RunContext, now = Date.now()): Promise<Omit<RunMetrics, "uptimeSeconds">> {
-  return { usage: await usageFacts(ctx, now), statements: ctx.duck.usage.statementTotals(), durations: ctx.duck.usage.lastDurations() };
+  return { usage: await usageFacts(ctx, now, { refresh: false }), statements: ctx.duck.usage.statementTotals(), durations: ctx.duck.usage.lastDurations(),
+    at: now, freshSeconds: FRESH_SAMPLES * ctx.duck.usage.sampleSeconds };
 }
 
 /** A `since` / `until` of a query string, read by the one time grammar (src/cli/request-filter.ts timeOf), as an ISO time. */
