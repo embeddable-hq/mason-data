@@ -1381,8 +1381,9 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
                    (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
                    bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
                    or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
-                   catch_up_failed, stream_failed, source_unreachable, restart, copied, recovered, synced (a sync asked by hand)), failed, table
-                   (null: the whole sync), message }], keptDays }; with --running { running: [{ session, user,
+                   catch_up_failed, stream_failed, source_unreachable, restart, copied, recovered, synced (a sync
+                   asked by hand), sync_changed (a table's sync: changed)), failed, table (null: the whole sync),
+                   message }], keptDays }; with --running { running: [{ session, user,
                    applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;
 

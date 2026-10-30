@@ -18,6 +18,7 @@ import * as explainModule from "../src/duck/explain.ts";
 import type { AddedTable, CopyState, StreamStatus, Sync as SyncClass, SyncMode, SyncReplication } from "../src/duck/sync.ts";
 import type { Source } from "../src/cli/preflight.ts";
 import { runState, type RunContext } from "../src/cli/run-server.ts";
+import { EVENT_KINDS, type SyncEventInput } from "../src/duck/events.ts";
 import { STATUS, streamLines, tableLines, WAIT, type RunState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
 import { jsonText } from "../src/cli/command.ts";
@@ -64,13 +65,15 @@ function startLine(t: Started): Promise<string[]> {
   return withSync(t, async (_sync, logged) => logged.filter((l) => !/^the catalog could not be rebuilt|: its copy is stored in key order/.test(l)));
 }
 
-/** a Sync over a fresh file whose ledger `seed` wrote, stopped, its tables set: `use` reads it before the file goes */
-async function withSync<T>(t: Started, use: (sync: SyncClass, logged: string[]) => Promise<T>): Promise<T> {
+/** a Sync over a fresh file whose ledger `seed` wrote, stopped, its tables set: `use` reads it before the file goes
+ *  (with what it logged and the events it recorded, src/duck/events.ts) */
+async function withSync<T>(t: Started, use: (sync: SyncClass, logged: string[], events: SyncEventInput[]) => Promise<T>): Promise<T> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-duck-added-"));
   const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined, { memoryLimit: "256MB" });
   try {
-    const open = async (log: (l: string) => void): Promise<SyncClass> => {
-      const s = new Sync(store, source, "x", log, 5_000, t.mode, t.replication ?? null);
+    const events: SyncEventInput[] = [];
+    const open = async (log: (l: string) => void, onEvent: (e: SyncEventInput) => void = () => undefined): Promise<SyncClass> => {
+      const s = new Sync(store, source, "x", log, 5_000, t.mode, t.replication ?? null, { onEvent });
       await s.open();
       return s;
     };
@@ -78,10 +81,10 @@ async function withSync<T>(t: Started, use: (sync: SyncClass, logged: string[]) 
     await (await open(() => undefined)).stop();
     await t.seed((sql) => store.writer.run(sql));
     const logged: string[] = [];
-    const sync = await open((l) => logged.push(l));
+    const sync = await open((l) => logged.push(l), (e) => { events.push(e); });
     await sync.stop();
     await sync.setTables(t.tables);
-    return await use(sync, logged);
+    return await use(sync, logged, events);
   } finally {
     store.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -417,6 +420,18 @@ test("a sync changed is a catch-up by one poll, said once, beside the stream as 
     ["public.a: sync: poll 5m → replication: its copy is kept, and caught up by one poll now, then streamed"], "poll → replication, changed while Mason was down");
   assert.deepEqual(switched(await startLine({ mode: "poll", tables: [{ ...table("a", 10, [column("id"), column("added", "text")]), sync: every("30s", 30) }], seed })), [],
     "its columns changed too: it is copied again (said as such), never 'its copy is kept'");
+});
+
+test("a sync changed is recorded as the sync's event of its table, in the words its log line says: the history keeps what a table's sync was", async () => {
+  const seed = async (run: (sql: string) => Promise<unknown>): Promise<void> => { await run(copied("a")); await run(polledUnder("a", "poll 5m")); };
+  const changed = (t: Started) => withSync(t, async (_sync, _logged, events) => events.filter((e) => e.kind !== "copied" && e.kind !== "recovered"));
+  assert.deepEqual(await changed({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }], seed }),
+    [{ kind: "sync_changed", table: "public.a", message: "sync: poll 5m → poll 30s: its copy is kept, and caught up by one poll now" }]);
+  assert.deepEqual(await changed({ mode: "replication", replication: replicationX, tables: [{ ...table("a"), sync: { mode: "replication" } }], seed }),
+    [{ kind: "sync_changed", table: "public.a", message: "sync: poll 5m → replication: its copy is kept, and caught up by one poll now, then streamed" }], "into replication");
+  assert.deepEqual(await changed({ mode: "poll", tables: [{ ...table("a"), sync: every("5m", 300) }], seed }), [], "the same sync: no event");
+  // the kind is one the events' readers know: the CLI's --events, the web page's Kind filter (held equal to it)
+  assert.ok((EVENT_KINDS as readonly string[]).includes("sync_changed"));
 });
 
 test("a table just copied says its copy's age at once, never 'never synced' until the next pass reads the ledger again", async () => {

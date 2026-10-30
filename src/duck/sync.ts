@@ -1061,7 +1061,10 @@ export class Sync {
         // next pass polls it from its watermark, which every change since is at or past
         this.switched.add(t.source);
       }
-      this.log(`${t.source}: sync: ${was} → ${now}: its copy is kept, and caught up by one poll now${this.replicated(t) ? ", then streamed" : ""}`);
+      // said, and recorded as the sync's event (src/duck/events.ts): what a table's sync was is history the log alone loses
+      const switched = `sync: ${was} → ${now}: its copy is kept, and caught up by one poll now${this.replicated(t) ? ", then streamed" : ""}`;
+      this.log(`${t.source}: ${switched}`);
+      this.event({ kind: "sync_changed", table: t.source, message: switched });
     }
     // loud: the copy goes with the table's entry, and comes back only by reading the source again (the test server: a 53 GB
     // copy, 21 minutes of a production replica, dropped by a project file moved aside)
