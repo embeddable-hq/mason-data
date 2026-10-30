@@ -237,7 +237,9 @@ CLI lacks).
   `SSH_ASKPASS=true`, forced). **The client's output is not ours**: a time limit, a shape, and a probe of the address
   for the share's own certificate (`probeShare`: `other` is a Failure, `unknown` a tip, "couldn't tell" kept apart
   from "no"). What `--json` prints is one object, once; everything after it is on stderr, so stdout stays one
-  document. `mason serve`'s run refuses it. The vendor's name is in `--via` and the `via` row alone, never a headline.
+  document. **Its roles are the listener's** (`checkRoles`, each row filter read by the catalog), so a filter Postgres
+  refuses stops it at its start, and a role whose filters read an attribute is refused and left out of the choices
+  (`attributesOf`, the rule a session is refused by): a share's login carries no values. `mason serve`'s run refuses it. The vendor's name is in `--via` and the `via` row alone, never a headline.
 - **`mason mcp` is an MCP server on stdio, a client of the Postgres API as a `mason user`** (src/cli/mcp.ts, docs/DESIGN.md
   "An MCP server"): stdout is the protocol's (JSON-RPC frames alone), every log line goes to stderr, and so does a
   failure to start — it takes no `--json` (`CommandSpec.stdout: "protocol"`; tests/cli-help.test.ts); a tool's failure is

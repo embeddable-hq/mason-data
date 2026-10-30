@@ -103,7 +103,9 @@ role held the same way, the same request log, the user named `share_<id>`.
 
 **What it reads is one role.** `--role <role>` names it; a roles file of one role uses that one and says so; with several,
 a person at a terminal is asked, and anything else is refused with the line to run. With no roles file it reads every
-synced table, and says so. `mason status` shows an open share, and `--json` answers one object once the address is known;
+synced table, and says so. A role with a `where:` is held on the share's socket as on any other. A role whose `where:`
+reads an attribute cannot be shared, because a share's login is a password and carries no values: it is refused at the
+start, naming the roles that can be, and so is any role while a row filter is one Postgres refuses. `mason status` shows an open share, and `--json` answers one object once the address is known;
 the end is on stderr with the exit code.
 
 ### Roles
