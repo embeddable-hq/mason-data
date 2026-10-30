@@ -85,10 +85,10 @@ export function matrixEnv(extra: Record<string, string> = {}): Record<string, st
 }
 
 /** One `mason` command as a process: its exit, its two streams, how long it took. Killed after `timeoutMs`. */
-export function runMason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000): Promise<Answer> {
+export function runMason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000, main = MAIN): Promise<Answer> {
   const t0 = Date.now();
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [MAIN, ...argv], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [main, ...argv], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (b: Buffer) => { stdout += b.toString(); });
     child.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });
