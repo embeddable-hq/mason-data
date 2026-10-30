@@ -1375,6 +1375,47 @@ statements in flight, and DuckDB 2.0 has no per-connection thread or priority co
 11. A copy's catch-up is ONE poll, neither chunked nor resumable (a transaction held open on the source moves the rows
     since into it; a copy resumed days later catches up days), and a copy neither pauses for a smaller table nor yields.
 
+### The Node CI runs on (2026-10-30)
+
+**Incident.** From 2026-10-29 CI's `checks` job failed one test file after every test in it had passed, at the file's
+exit: `# Check failed: jit_page_->allocations_.erase(addr) == 1.` in `ThreadIsolation::UnregisterWasmAllocation`, on
+Node 24.22.1. Five runs in two days on five unrelated branches (about one `checks` run in thirteen), always a file that
+loads WebAssembly: `tests/duck-json-columns.test.ts` three times, `tests/postgres-api/catalog.test.ts` twice. It is a
+V8 bug, nodejs/node#66366: V8 13.6 (Node 24) keeps the wasm-to-JS import wrappers in ONE cache for every isolate of a
+process, and a wrapper the wasm code GC is freeing can be looked up by another thread and freed a second time; fixed in
+V8 by 9b8ca54d5a ("Fix lookup of wrappers marked is_dying"), in Node 26's V8 and absent from Node 22's (whose wrappers
+are per isolate), and in no Node 24 release yet (backport nodejs/node#66376, open). Mason meets it by design: PGlite on
+the catalog's worker and the function worker, libpg-query on the parser's, each its own isolate in one process, and a
+worker terminated whenever a catalog stops, is replaced or idles out, or the process ends.
+
+**Decision.** Every workflow runs Node 26 (`ci.yml`, `release.yml`), held by `tests/conventions.test.ts` ("no workflow
+runs Node 24"). Closing every instance before the exit was not it: both files already stop every catalog they start
+and close every PGlite they open (`finally`), and stop the parser in `after`, and the death of an instance is what
+feeds the code GC that races: closing earlier moves the race, it does not remove it.
+`--no-wasm-code-gc` does make the double free unreachable on Node 24 (V8 13.6 frees a wrapper only through the code
+GC's `DecRefOnDeadCode`, which the flag never triggers), but it reaches only the processes `node --test` starts: Node
+refuses it in `NODE_OPTIONS`, so the `mason` children the CLI tests spawn and the integration jobs' `mason serve` would
+still run with the bug. Node 26 removes the code that races, in every process CI starts.
+
+**Measured**, on CI's runner (ubuntu x64, 4 cores), the two files it hit run as three processes at once
+(`duck-json-columns` twice, `catalog` once) beside one CPU-bound process, in a loop for 15 minutes, 15 jobs an arm:
+
+| arm | file processes | the CHECK | jobs it failed |
+|---|---|---|---|
+| Node 24.22.1 | 537 | 9 (5 `duck-json-columns`, 4 `catalog`), the CI frames to the address | 7 of 15 |
+| Node 26.13 | 621 | 0 | 0 of 15 |
+| Node 24.22.1, `--no-wasm-code-gc` | 522 | 0 | 0 of 15 (one timing flake) |
+
+At Node 24's 1.7 %, none in 621 is a chance of about 3 in 100,000. A full suite does not show it on demand: none in 20
+full suites on each of the three arms (the suite is green on 26), none in 120 runs of `duck-json-columns` in an arm64
+container under 1 and 2 CPUs on Node 24 and 26, none in 20 runs of a PGlite and libpg-query worker churn under
+`--stress-wasm-code-gc` there. Upstream's reporter: 0 in 191 processes with the two V8 commits on Node 24, 8 in 149
+without, and none on Node 26.10.
+
+**Still true.** The image (`docker/mason-data.Dockerfile`, `node:24-slim`) and a user's own Node 24 still carry the bug,
+and `mason serve` terminates a catalog worker at every idle stop: there it is a rare abort the supervisor restarts.
+Lift the guard when a Node 24 release carries nodejs/node#66376.
+
 ## Measurements
 
 ### First copy, and the poll's cost on the source
