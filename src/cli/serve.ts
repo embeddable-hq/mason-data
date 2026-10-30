@@ -64,7 +64,7 @@ export const SERVE: CommandSpec = {
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
-    MASON_DUCKDB_MEMORY     Mason's memory, 4GB or 512MiB (default half the container's memory limit, else half the
+    MASON_DUCKDB_MEMORY     the engine's memory, 4GB or 512MiB (default half the container's memory limit, else half the
                             machine's RAM; mason doctor says it); a statement past it fails alone with 53200
     MASON_STATEMENT_TIMEOUT   each statement's limit, as Postgres's statement_timeout (default 5min; 0 for none)
     MASON_HISTORY_DAYS      how many days Mason keeps its history: the request log, the sync's events, the usage

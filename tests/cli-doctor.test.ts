@@ -59,12 +59,12 @@ test("the memory the run may use is the container's limit where one is set, else
 test("memory: the machine's and the share the copy may use, in one short line; under 2 GiB is a warning", () => {
   const big = memoryCheck(32 * 1024 ** 3, {});
   assert.equal(big.ok, true);
-  assert.equal(big.detail, "32.0 GiB; Mason uses up to 16384MiB (half, the default; MASON_DUCKDB_MEMORY sets it)");
+  assert.equal(big.detail, "32.0 GiB; the engine uses up to 16384MiB (half, the default; MASON_DUCKDB_MEMORY sets it)");
   const set = memoryCheck(32 * 1024 ** 3, { MASON_DUCKDB_MEMORY: "12GiB" });
-  assert.equal(set.detail, "32.0 GiB; Mason uses up to 12GiB (MASON_DUCKDB_MEMORY)");
+  assert.equal(set.detail, "32.0 GiB; the engine uses up to 12GiB (MASON_DUCKDB_MEMORY)");
   const small = memoryCheck(1.5 * 1024 ** 3, {});
   assert.equal(small.ok, false);
-  assert.equal(small.detail, "1.5 GiB; Mason uses up to 768MiB (half, the default; MASON_DUCKDB_MEMORY sets it). Under 2 GiB, a large table's first sync and a query starve each other: expect statements refused for memory");
+  assert.equal(small.detail, "1.5 GiB; the engine uses up to 768MiB (half, the default; MASON_DUCKDB_MEMORY sets it). Under 2 GiB, a large table's first sync and a query starve each other: expect statements refused for memory");
   const bad = memoryCheck(32 * 1024 ** 3, { MASON_DUCKDB_MEMORY: "lots" });
   assert.equal(bad.ok, false);
   assert.match(bad.detail, /^MASON_DUCKDB_MEMORY="lots" is not a size/);

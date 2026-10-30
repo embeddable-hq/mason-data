@@ -22,7 +22,7 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
   (default 7): a line each span — the statements of the Postgres API (how many, how many were refused, failed or
   cancelled — the errors column —, the completed ones' p95 duration, the rows sent), the synced data's size and rows, the
   tables whose sync is failing, how old the stalest table was, the stream's lag (a table under sync: replication), and
-  the memory of the process and of the synced data against its limit (MASON_DUCKDB_MEMORY). Then each synced table's own size, measured every
+  the memory of the process and of the engine against its limit (MASON_DUCKDB_MEMORY). Then each synced table's own size, measured every
   10 minutes. A span sums its statements and shows each level at its highest. Read through the running Mason.
 
     mason usage                        the last hour, 5 minutes a line
@@ -67,7 +67,7 @@ export function sampleLine(s: UsageSample, withLag: boolean): string {
   const bad = s.statementsRefused + s.statementsFailed + s.statementsCancelled;
   const age = s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds);
   const lag = !withLag ? "" : `  ${(s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds)).padStart(9)}`;
-  const memory = `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (synced data ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`;
+  const memory = `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (engine ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`;
   return `${time}  ${n(s.statements).padStart(10)}  ${(bad === 0 ? "" : n(bad)).padStart(7)}  ${p95.padStart(10)}  ${n(s.rowsSent).padStart(11)}  ` +
     `${(s.copyBytes === null ? "–" : fileSize(s.copyBytes)).padStart(10)}  ${n(s.copyRows).padStart(13)}  ${(s.tablesFailed === 0 ? "" : n(s.tablesFailed)).padStart(7)}  ` +
     `${age.padStart(10)}${lag}  ${memory}`;

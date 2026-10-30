@@ -99,7 +99,7 @@ A token (minted from the API key, no user) reads every copied table in every sta
 is the role's once its copy is served. A table key `all` under `tables:` is refused (`public.all` names a table called
 `all`).
 
-- **A role names copied tables only**: a table the sources file does not copy, a column the copy lacks, a role with
+- **A role names synced tables only**: a table the sources file does not sync, a column the synced table lacks, a role with
   no table, a column both listed and excluded — each refuses `mason start` (and `mason user add --role`) by its key,
   with the closest name and the way out, before anything opens. The file is read again whenever it changes, with no
   restart; one edited into a mistake while Mason runs refuses every statement of a user with a role (57P03, the

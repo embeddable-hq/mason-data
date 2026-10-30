@@ -1733,7 +1733,7 @@ test("Usage: each hour's cells are mason usage's (sampleLine), no sample yet is 
   assert.doesNotMatch(html.slice(0, html.indexOf("<details")), /Memory|MiB \(copy/, "no memory column in the hours");
   assert.match(html, /<details class="memory" data-open="usage-memory"><summary>Memory<\/summary>/);
   assert.doesNotMatch(html, /<details[^>]* open/);
-  assert.match(text, /Memory Time \(UTC\) Memory 2026-10-28 10:05 900\.0 MiB 2026-10-28 09:05 900\.0 MiB \(synced data 300\.0 MiB of 8\.0 GiB\)/);
+  assert.match(text, /Memory Time \(UTC\) Memory 2026-10-28 10:05 900\.0 MiB 2026-10-28 09:05 900\.0 MiB \(engine 300\.0 MiB of 8\.0 GiB\)/);
   assert.doesNotMatch(text, /Lag/, "no lag column without a stream");
   assert.match(textOf(renderUsage({ ...UL_USAGE, samples: [{ ...SAMPLE, streamLagSeconds: 3, streamLagBytes: 10 }] })), /Oldest Lag 2026-10-28 09:05 .* 75 s 3 s Memory Time \(UTC\) Memory 2026-10-28 09:05 900/);
   assert.match(textOf(renderUsage({ ...UL_USAGE, samples: [] })), /No sample in this time: Mason takes the first a minute after it starts\./);

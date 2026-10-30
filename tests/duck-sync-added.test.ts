@@ -130,7 +130,7 @@ test("a start names each table copied at the next pass with its reason, from the
     "1 table copied at the next pass (its columns changed): public.changed; " +
     "1 table copied at the next pass (its last copy failed: the source closed the connection): public.failed; " +
     "1 table copied at the next pass (its copy is in an older Mason's layout, key order with an index): public.retired; " +
-    "1 table copied at the next pass (a numeric value outgrew its copy's DECIMAL): public.outgrown"]);
+    "1 table copied at the next pass (a numeric value outgrew its synced DECIMAL column): public.outgrown"]);
 });
 
 test("in replication mode a current copy is streamed from the position the copy applied through; under a slot it has no record of, it is caught up first", async () => {
@@ -378,6 +378,19 @@ test("a table being caught up, queued or rebuilt is not due to a pass: the loop 
     assert.equal(s.nextPassDelay(), null, "its catch-up running: the same");
     s.rebuildingNow = null;
     s.behind.clear();
+  });
+});
+
+test("mason sync of a table being read again says why, never that its first sync has not finished", async () => {
+  await withSync({ mode: "poll", tables: [table("a")], seed: async (run) => { await run(copied("a")); await run(lastPoll("a")); } }, async (sync) => {
+    const s = sync as unknown as { stopped: boolean; copiedAs: Map<string, string>; snapshots: Map<string, unknown> };
+    s.stopped = false;
+    const key = s.copiedAs.get("public.a")!;
+    s.copiedAs.set("public.a", "other columns");
+    await assert.rejects(sync.pollNow(["public.a"]), { message: "public.a is being read again whole (its columns changed): mason wait waits for it" });
+    s.copiedAs.set("public.a", key);
+    s.snapshots.delete("public.a");
+    await assert.rejects(sync.pollNow(["public.a"]), { message: "public.a is being read again whole (a numeric value outgrew its synced DECIMAL column): mason wait waits for it" });
   });
 });
 

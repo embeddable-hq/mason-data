@@ -435,7 +435,7 @@ const sample = { at: "2026-10-28T09:05:00.000Z", seconds: 300, copyBytes: 5 * 2 
 test("mason usage: a span a line under its heading — the statements, their errors, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
   const { sampleHeading, spanSeconds, USAGE } = usageCli as UsageCli;
   assert.equal(sampleHeading(false), "time (UTC)        statements   errors         p95    rows sent        size           rows  failing      oldest  memory");
-  assert.equal(sampleLine(sample, false), "2026-10-28 09:05       1,204        3       1.8 s       98,765     5.0 GiB     12,345,678        1        75 s  900.0 MiB (synced data 300.0 MiB of 8.0 GiB)");
+  assert.equal(sampleLine(sample, false), "2026-10-28 09:05       1,204        3       1.8 s       98,765     5.0 GiB     12,345,678        1        75 s  900.0 MiB (engine 300.0 MiB of 8.0 GiB)");
   assert.equal(sampleLine({ ...sample, statements: 0, statementsRefused: 0, statementsFailed: 0, durationP95Ms: null, tablesFailed: 0, oldestSyncSeconds: null, copyMemoryBytes: null, streamLagSeconds: 3, streamLagBytes: 10 }, true),
     "2026-10-28 09:05           0                    –       98,765     5.0 GiB     12,345,678                    –        3 s  900.0 MiB", "nothing to say is blank or a dash; the lag with replication");
   assert.equal(sampleHeading(true).endsWith("oldest        lag  memory"), true);

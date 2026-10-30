@@ -29,7 +29,7 @@ export const NODE_MIN = "22.13";
 
 export const DOCTOR_USAGE = `usage: mason doctor [--json]
 
-  Says whether this machine is ready for Mason — Node ${NODE_MIN} or later, memory (Mason uses up to half of it by
+  Says whether this machine is ready for Mason — Node ${NODE_MIN} or later, memory (the engine uses up to half of it by
   default; MASON_DUCKDB_MEMORY=4GiB sets it), Mason's postgres and inet extensions (installed with Mason for this
   platform, so nothing is downloaded; else the first sync downloads them), the ports Mason listens on — with the way
   out for anything missing. In a
@@ -78,7 +78,7 @@ export function memoryCheck(totalBytes: number = machineMemoryBytes(), env: Node
   const low = totalBytes < 2 * 1024 ** 3;
   return {
     name: "memory", ok: !low,
-    detail: `${gib} GiB; Mason uses up to ${share.trim()}${set !== undefined ? " (MASON_DUCKDB_MEMORY)" : " (half, the default; MASON_DUCKDB_MEMORY sets it)"}` +
+    detail: `${gib} GiB; the engine uses up to ${share.trim()}${set !== undefined ? " (MASON_DUCKDB_MEMORY)" : " (half, the default; MASON_DUCKDB_MEMORY sets it)"}` +
       (low ? ". Under 2 GiB, a large table's first sync and a query starve each other: expect statements refused for memory" : ""),
   };
 }
