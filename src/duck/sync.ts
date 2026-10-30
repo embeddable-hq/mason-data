@@ -822,6 +822,8 @@ export class Sync {
   private readonly held = new Map<string, TableChanges>();
   /** REPLICATION: what the stream applies, by source — the tables joined, and those held — read at each change */
   private readonly streamed = new Map<string, StreamedTable>();
+  /** the last `StreamedTable.stay` given (`refreshStreamed`) */
+  private lastStay = 0;
   /** a NAMED publication's gaps: each added table it does not carry, with the refusal (neither copied nor streamed) */
   private readonly unpublished = new Map<string, string>();
   /** the error each table a named publication did not carry was given (`settlePrepared`): cleared by the pass that finds
@@ -1242,10 +1244,11 @@ export class Sync {
     const sync = this.syncOf(t);
     if (this.mode !== "recopy" && sync.mode !== "replication") {
       const polledAt = this.polledAt.get(t.source) ?? null;
-      // a copy the passes do not keep current now, and why: not copied (waiting, being copied, its copy failed:
-      // `needsCopy` holds for every phase but copied), to be copied again (its columns changed, a numeric outgrew it, a
-      // retired layout), or caught up first (`pass`'s `polled`, and a table not yet caught up on the writer's turn)
-      const pending = this.needsCopy(t) || this.behind.has(t.source) ? this.notStreamedWhy(t.source) : null;
+      // a copy the passes do not keep current now, and why, from what a poll of it asks (`pollable`): not copied (waiting,
+      // being copied, its copy failed: `needsCopy` holds for every phase but copied), to be copied again (its columns
+      // changed, a numeric outgrew it, a retired layout), caught up first, or its rebuild not ended yet: the moment this
+      // says nothing is pending, `mason sync` of it runs
+      const pending = this.pollable(t) ? null : this.notStreamedWhy(t.source);
       const next = pending === null ? this.dueAt(t) : null;
       return { by: "poll", sync, syncedAt: polledAt, nextAt: next === null ? null : new Date(Math.max(next, now)).toISOString(), ...(pending !== null ? { pending } : {}) };
     }
@@ -1839,9 +1842,12 @@ export class Sync {
    * What the stream applies, made again from the tables' state (on the writer's turn, or before the stream exists): a
    * table copied at its present columns and caught up, and a table being caught up (its changes held, `held`). A table
    * that is not — never copied, being copied again, or not caught up — is skipped: its copy's snapshot, or its catch-up,
-   * covers what the stream passes over (src/duck/stream.ts "why replaying is safe").
+   * covers what the stream passes over (src/duck/stream.ts "why replaying is safe"). A table here since the last refresh
+   * keeps its STAY, a table new here gets one, and `swap` ends it: changes decoded in a stay that ended committed before
+   * what came next, so that copy and its catch-up hold them, and only that stay's are applied (`applyStreamed`).
    */
   private refreshStreamed(): string[] {
+    const before = new Map(this.streamed);
     this.streamed.clear();
     const now = new Set<string>();
     for (const t of this.tables.values()) {
@@ -1851,7 +1857,7 @@ export class Sync {
       // in the COPY's columns: a held table's columns may have changed since its copy began (`asCopied`)
       const c = this.asCopied(t).columns;
       if (joined || this.held.has(t.source)) {
-        this.streamed.set(t.source, { columns: c.map((x) => x.name), key: t.key, generated: c.filter((x) => x.generated).map((x) => x.name), big: t.rows !== null && t.rows > BIG_TABLE_ROWS });
+        this.streamed.set(t.source, { stay: before.get(t.source)?.stay ?? ++this.lastStay, columns: c.map((x) => x.name), key: t.key, generated: c.filter((x) => x.generated).map((x) => x.name), big: t.rows !== null && t.rows > BIG_TABLE_ROWS });
       }
       if (joined) now.add(t.source);
     }
@@ -1914,6 +1920,12 @@ export class Sync {
     if (st?.phase === "failed") return `its first sync failed (${(st.error ?? "").split("\n")[0]}): ${joins}`;
     const b = this.behind.get(source);
     if (!this.needsCopy(t) && b !== undefined) return `it is caught up by one poll ${b.why} first`;
+    // synced, caught up, and not yet polled (`pollable`): its rebuild's last writer's turn, or a rebuild still queued
+    if (st?.phase === "copied") {
+      if (this.rebuildingNow?.source === source) return "its sync is ending: it is kept current from then on";
+      const queued = this.queued.get(source)?.kind;
+      if (queued !== undefined) return queued === "copy" ? `it is queued to be read whole: ${joins}` : "it is queued to be caught up by one poll";
+    }
     return `it waits for its first sync: ${joins}`;
   }
 
@@ -2016,10 +2028,10 @@ export class Sync {
       this.refreshStreamed();
       const applied = new Map<string, TableChanges>();
       for (const [name, changes] of batch) {
-        const now = this.streamed.get(name);
-        // decoded in another shape than the copy's now (before it was copied again, a stream left it): what they changed
-        // committed before the new copy's snapshot, so it is in that copy — never written in a shape it does not have
-        if (now === undefined || changes.columns === null || changes.columns.join("\0") !== now.columns.join("\0")) continue;
+        // decoded in a stay that ended (before its table was copied again, or left the stream): what they changed
+        // committed before the next copy's catch-up, so that copy or its catch-up holds it — never written over them, in
+        // a shape the copy may not have, or as an old change after the poll that read a newer one
+        if (this.streamed.get(name)?.stay !== changes.stay) continue;
         const held = this.held.get(name);
         if (held !== undefined) { foldInto(held, changes); continue; }
         applied.set(name, changes);
@@ -2497,6 +2509,9 @@ export class Sync {
         return null;
       }
       if (r.kind === "copy") await this.copy(t);
+      // the whole read is over, whatever comes next: what the table is said to be doing from here (`notStreamedReason`,
+      // `refuseRebuilding`, `state`'s `rebuilding`)
+      this.rebuildingNow = { source: t.source, kind: "catch-up" };
       // a table its copy left behind (`swap`), or one marked so before: one poll, unless a copy of it comes first — the
       // table as it is added NOW, which may have changed while it was copied (then copied again at once: `followUp`)
       const now = this.tables.get(t.source);
@@ -2643,6 +2658,8 @@ export class Sync {
     }
     this.retired.delete(t.source);
     this.duckTypes.delete(t.source);
+    // a new copy, a new stay, whatever the columns: what the stream decoded before this moment is not for it
+    this.streamed.delete(t.source);
     this.refreshStreamed();
   }
 
