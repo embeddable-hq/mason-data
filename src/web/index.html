@@ -22,7 +22,7 @@
   </div>
   <div id="side-body" class="side-body">
     <!-- the pages: one section each, the one shown chosen by the URL's hash; the links work before the script runs, which adds their icons -->
-    <nav id="nav" class="nav" aria-label="Pages"><ul><li><a href="#overview"><span class="label">Overview</span></a></li><li><a href="#tables"><span class="label">Tables</span></a></li><li><a href="#users"><span class="label">Users</span></a></li><li class="group"><p class="group-title" id="nav-observability">Observability</p><ul aria-labelledby="nav-observability"><li><a href="#observability/queries"><span class="label">Queries</span></a></li><li><a href="#observability/usage"><span class="label">Usage</span></a></li><li><a href="#observability/syncs"><span class="label">Syncs</span></a></li></ul></li></ul></nav>
+    <nav id="nav" class="nav" aria-label="Pages"><ul><li><a href="#overview"><span class="label">Overview</span></a></li><li><a href="#tables"><span class="label">Tables</span></a></li><li><a href="#users"><span class="label">Users</span></a></li><li class="group"><p class="group-title" id="nav-observability">Observability</p><ul aria-labelledby="nav-observability"><li><a href="#observability/queries"><span class="label">Queries</span></a></li><li><a href="#observability/usage"><span class="label">Usage</span></a></li><li><a href="#observability/syncs"><span class="label">Sync events</span></a></li></ul></li></ul></nav>
     <div class="side-foot"><p id="updated" class="updated" aria-live="polite"></p><p id="version" class="version"></p></div>
   </div>
 </aside>
@@ -52,7 +52,7 @@
     <p class="lead">Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone. A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed.</p>
     <form id="request-filters" class="toolbar" autocomplete="off">
       <div class="field"><label for="rq-status">Status</label>
-        <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select></div>
+        <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="refused">Refused</option><option value="failed">Failed</option><option value="refused-or-failed">Refused or failed</option><option value="cancelled">Cancelled</option></select></div>
       <div class="field"><label for="rq-since">Since</label>
         <input id="rq-since" name="since" placeholder="2h" spellcheck="false"></div>
       <div class="field"><label for="rq-user">User</label>
@@ -96,7 +96,7 @@
     <div id="usage-sizes"></div>
   </section>
   <section id="page-syncs" aria-labelledby="syncs-h" hidden>
-    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Syncs</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">The sync's events — each copy made, each failure and recovery — as <code>mason logs --events</code> lists them, and the run's own log behind a details.</p></div>
+    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">The sync's events — each copy made, each failure and recovery, each sync asked by hand — as <code>mason logs --events</code> lists them, and the run's own log behind a details. A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).</p></div>
     <div class="toolbar"><div id="syncs-filters" class="fields"></div><label class="check" for="syncs-failures-only"><input type="checkbox" id="syncs-failures-only"> Failures only</label></div>
     <div id="syncs-events"></div>
     <div id="syncs-run"></div>

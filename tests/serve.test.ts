@@ -16,6 +16,7 @@ import * as serveModule from "../src/cli/serve.ts";
 import { newConfig, readProject, writeConfig } from "../src/cli/project.ts";
 import type { CopyState } from "../src/duck/sync.ts";
 import { unassignedPort } from "./test-ports.ts";
+import { matrixEnv, runMason } from "./cli-matrix.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 const { serveSettings, serveConfig, serveSource, healthBody } = serveModule as unknown as typeof import("../src/cli/serve.ts");
@@ -36,11 +37,14 @@ test("the settings: every one missing or wrong said at once, each with what to s
   assert.equal(none.message, "2 settings are missing or wrong: DATABASE_URL is not set, and the project folder (/srv/mason) has no sources file to name " +
     "the database another way; MASON_API_KEY is not set: what the users' passwords are made with (mason user add; openssl rand -hex 24 makes one)");
   const wrong = serveSettings({ DATABASE_URL: "mysql://x", MASON_API_KEY: "short", MASON_NAME: "Big Name", MASON_CHANGES: "cdc",
-    MASON_PG_SELF_SIGNED_TLS: "yes", MASON_HEALTH_PORT: "99999" }, "/srv");
+    MASON_PG_SELF_SIGNED_TLS: "yes", MASON_HEALTH_PORT: "99999", MASON_POLL_MS: "30000" }, "/srv");
   assert.ok("message" in wrong);
   for (const said of [/DATABASE_URL: the URL's scheme is mysql/, /MASON_API_KEY is 5 characters: at least 32/, /MASON_NAME="Big Name" is not a project name/,
     /MASON_CHANGES="cdc": poll or replication/, /MASON_PG_SELF_SIGNED_TLS="yes": 1, or 0/, /MASON_HEALTH_PORT="99999": a port number/]) assert.match(wrong.message, said);
-  assert.match(wrong.message, /^6 settings are missing or wrong/);
+  // a setting that is no longer read refuses the start, naming the line to write instead (never runs a default)
+  assert.ok(wrong.message.includes("MASON_POLL_MS=30000 is no longer read: how often each table is polled is its sync: in the sources file — " +
+    "write sync: poll 30s at its top (every table) or on a table's entry, then unset MASON_POLL_MS"), wrong.message);
+  assert.match(wrong.message, /^7 settings are missing or wrong/);
 
   const s = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY }, "/srv");
   assert.ok(!("message" in s));
@@ -194,4 +198,94 @@ test("a serve answers /healthz before its database does: 503 starting while it c
   assert.equal(v.error.code, "bad_config");
   assert.match(v.error.message, /^2 settings are missing or wrong: DATABASE_URL is not set, .*; MASON_API_KEY is not set/);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("mason start refuses MASON_POLL_MS too, before it spawns and in the run itself, in the Failure shape: the line to write, never a default", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-poll-ms-"));
+  try {
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({
+      name: "shop", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false, apiKey: KEY,
+      sourceServer: null, lastRun: null, running: null,
+    }), { mode: 0o600 });
+    const env = matrixEnv({ HOME: path.join(root, "home"), PATH: path.dirname(process.execPath), MASON_POLL_MS: "30000" });
+    for (const attach of [false, true]) {
+      const p = await runMason(root, ["start", ...(attach ? ["--attach"] : [])], env);
+      assert.equal(p.code, 1, p.stdout + p.stderr);
+      assert.match(p.stderr, /^✗ mason start: MASON_POLL_MS=30000 is no longer read\n {2}why {3}how often each table is polled is its sync: in the sources file\n {2}fix {3}write sync: poll 30s at its top \(every table\) or on a table's entry, then unset MASON_POLL_MS$/m,
+        `${attach ? "the run itself" : "before it spawns"}:\n${p.stdout}${p.stderr}`);
+      assert.doesNotMatch(p.stdout + p.stderr, /Connecting to/, "refused before the database is connected to");
+    }
+    const j = await runMason(root, ["start", "--json"], env);
+    assert.equal(j.code, 1, j.stdout + j.stderr);
+    assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message: "MASON_POLL_MS=30000 is no longer read",
+      why: "how often each table is polled is its sync: in the sources file", fix: "write sync: poll 30s at its top (every table) or on a table's entry, then unset MASON_POLL_MS" });
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a MASON_HISTORY_DAYS that is not a number of days refuses mason serve (on its one report) and mason start (before it spawns, in the run, and --json) in the Failure shape, before anything opens", async () => {
+  const why = "it is how many days Mason keeps its history (the request log, the sync's events, the usage samples and the copies' sizes): a whole number, 1 or more";
+  const fix = "write MASON_HISTORY_DAYS=7 (the default, as when it is unset) or another whole number of days";
+  for (const bad of ["abc", "0", "-1"]) {
+    const served = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_HISTORY_DAYS: bad }, "/srv");
+    assert.ok("message" in served, `${bad}: refused`);
+    assert.equal(served.message, `a setting is missing or wrong: MASON_HISTORY_DAYS=${JSON.stringify(bad)} is not a number of days: ${why} — ${fix}`, bad);
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-history-days-bad-"));
+  try {
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({
+      name: "shop", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false, apiKey: KEY,
+      sourceServer: null, lastRun: null, running: null,
+    }), { mode: 0o600 });
+    const env = matrixEnv({ HOME: path.join(root, "home"), PATH: path.dirname(process.execPath), MASON_HISTORY_DAYS: "abc" });
+    const message = 'MASON_HISTORY_DAYS="abc" is not a number of days';
+    for (const attach of [false, true]) {
+      const p = await runMason(root, ["start", ...(attach ? ["--attach"] : [])], env);
+      assert.equal(p.code, 1, p.stdout + p.stderr);
+      assert.ok(p.stderr.includes(`✗ mason start: ${message}\n  why   ${why}\n  fix   ${fix}\n`),
+        `${attach ? "the run itself" : "before it spawns"}:\n${p.stdout}${p.stderr}`);
+      assert.doesNotMatch(p.stdout + p.stderr, /Connecting to|Opening the copy/, "refused before the database or the copy is touched");
+    }
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "duck.db")), "the copy's file was never opened");
+    const j = await runMason(root, ["start", "--json"], env);
+    assert.equal(j.code, 1, j.stdout + j.stderr);
+    assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message, why, fix });
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("MASON_REQUEST_LOG_DAYS is MASON_HISTORY_DAYS now: set, it refuses mason serve (on its one report) and mason start (before it spawns and in the run), naming the line to write — never runs the default", async () => {
+  const why = "it was renamed MASON_HISTORY_DAYS, since the days it keeps are every history's (the request log, the sync's events, the usage samples and the copies' sizes)";
+  const fix = "write MASON_HISTORY_DAYS=30 instead, then unset MASON_REQUEST_LOG_DAYS";
+  const served = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_REQUEST_LOG_DAYS: "30" }, "/srv");
+  assert.ok("message" in served, "refused");
+  assert.equal(served.message, `a setting is missing or wrong: MASON_REQUEST_LOG_DAYS=30 is no longer read: ${why} — ${fix}`);
+  assert.ok(!("message" in serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_HISTORY_DAYS: "30" }, "/srv")), "the new name is taken");
+  assert.match(serveModule.SERVE.usage, /\n {4}MASON_HISTORY_DAYS {6}how many days Mason keeps its history: the request log, the sync's events, the usage\n/);
+  assert.ok(!serveModule.SERVE.usage.includes("MASON_REQUEST_LOG_DAYS"), "the old name is not offered");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-history-days-"));
+  try {
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({
+      name: "shop", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false, apiKey: KEY,
+      sourceServer: null, lastRun: null, running: null,
+    }), { mode: 0o600 });
+    const env = matrixEnv({ HOME: path.join(root, "home"), PATH: path.dirname(process.execPath), MASON_REQUEST_LOG_DAYS: "30" });
+    for (const attach of [false, true]) {
+      const p = await runMason(root, ["start", ...(attach ? ["--attach"] : [])], env);
+      assert.equal(p.code, 1, p.stdout + p.stderr);
+      assert.ok(p.stderr.includes(`✗ mason start: MASON_REQUEST_LOG_DAYS=30 is no longer read\n  why   ${why}\n  fix   ${fix}\n`),
+        `${attach ? "the run itself" : "before it spawns"}:\n${p.stdout}${p.stderr}`);
+      assert.doesNotMatch(p.stdout + p.stderr, /Connecting to/, "refused before the database is connected to");
+    }
+    const j = await runMason(root, ["start", "--json"], env);
+    assert.equal(j.code, 1, j.stdout + j.stderr);
+    assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message: "MASON_REQUEST_LOG_DAYS=30 is no longer read", why, fix });
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

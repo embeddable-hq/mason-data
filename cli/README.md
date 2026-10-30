@@ -6,7 +6,10 @@ same for you and for a coding agent (Claude Code, Codex, …): it prints for a p
 exit code says how it went ([for coding agents](#for-coding-agents)).
 
 There is nothing to clone or build: install this package and run `mason`. It needs Node 22.13 or later and nothing
-else — no Docker, no database of its own; `mason doctor` checks this machine and says what is missing. On a terminal
+else — no Docker, no database of its own, and nothing downloaded after `npm install`: the copy's postgres and inet
+extensions come with it, as an optional dependency for your platform (`@mason-data/extensions-<platform>`, 17–31 MiB
+to download; installing with `--omit=optional` leaves them out, and the first copy then downloads them).
+`mason doctor` checks this machine and says what is missing. On a terminal
 its output is coloured and wrapped to the window, and a command that takes a moment shows a spinner; piped,
 redirected, with `--json` or with `NO_COLOR` set, it is plain text.
 
@@ -93,17 +96,17 @@ again and remove `mason/models/`.
 | `mason init [<postgres url>]` | Makes this folder a project: checks it can read the database (nothing is written when it cannot; `--skip-check` writes anyway), writes `.mason/config.json` (Mason's key, never the URL) and `mason/sources/<database>.yml` (keeping a sources file already there), adds the URL to `.env` when it was not there, and adds `.mason/` and that `.env` to `.gitignore`. The URL from the argument, else `DATABASE_URL` in `.env.local`, `.env` or the shell. `--name` sets the project's name (default: the folder's) — the database name a tool connects to — `--folder` where its files go, `--remote` allows a database on another machine. Refuses a folder already in a project, but for one with no sources file (an older Mason's), whose sources file alone it writes. |
 | `mason start` | Starts Mason for this folder's project in the background and returns once it is up. Run it again any time: it says so when Mason is already running. `--replication` reads the database's change log as production does (below); `--poll` goes back. `--self-signed-tls` serves the Postgres API over TLS; `--attach` stays in the foreground. |
 | `mason tables [<table>…] [--all]` | The tables this user can read against the sources file, one line each: rows, primary key, whether added (and with which columns), and why a table cannot be added yet (no primary key: the `--key` to add it by). Name a table (or pass `--all` for every one) for its columns: each one's type, what it references, and whether `mason add` would leave it out as a secret. It reads the project's database itself, so Mason need not be running. |
-| `mason add <table>… [--columns …] [--include …] [--key …]` | Copies tables into Mason, each one an entry of the sources file: every column (`orders: {}`), or `--columns id,status,created_at` for those (one table at a time; the key is written with them). Columns that look like secrets (`password`, `token`, `api_key`, `private_key`, …) are left out, named, and written as `exclude:`; `--include password_hash` adds one. `--key tenant_id,id` adds a table with no primary key, copied by those columns. Adding a table again with other columns changes its entry. Mason need not be running: the entry is checked against the database as the run checks it, and the copy begins at `mason start` (with Mason running, at once). |
+| `mason add <table>… [--columns …] [--include …] [--key …] [--sync …]` | Copies tables into Mason, each one an entry of the sources file: every column (`orders: {}`), or `--columns id,status,created_at` for those (one table at a time; the key is written with them). Columns that look like secrets (`password`, `token`, `api_key`, `private_key`, …) are left out, named, and written as `exclude:`; `--include password_hash` adds one. `--key tenant_id,id` adds a table with no primary key, copied by those columns. `--sync "poll 30s"` (or `off`) writes how it is kept current after its first copy on its entry; on a table already added, `--sync` alone changes that line and nothing else. Without it the entry follows the file's `sync:`, but a table over 1,000,000 rows under a file that polls is written `sync: off` and said, and a frequent poll of tens of millions of rows is warned of with an estimate of its cost. Adding a table again with other columns changes its entry. Mason need not be running: the entry is checked against the database as the run checks it, and the copy begins at `mason start` (with Mason running, at once). |
 | `mason remove <table>…` | Takes tables out of the sources file — each one's entry, every other byte as it was — and Mason drops their copies: at once when it is running, else at the next `mason start`. Mason need not be running. |
 | `mason wait [--timeout <s>]` | Waits until every added table is copied and served, showing every added table on a line of its own: 100% for the finished ones, in the order they finished, and a bar for each still copying (rows, %, rate, time left) at the bottom. Exit 0 ready, 1 a copy failed (printed, with what to do), 124 timed out (default 600 s). |
 | `mason user add\|list\|remove <name>` | The users of the Postgres API: a name and a password that does not expire, as a BI tool's datasource form asks for them or an app's `DATABASE_URL` carries them. `add` prints the password once with the URL; `remove` refuses the next connection at once and ends the sessions it holds at their next statement, without a restart. |
 | `mason mcp [--url <url>]` | An MCP server on stdio for Claude Code, Claude Desktop and other agents (below): the tables Mason serves with each copy's rows and how current it is, a table's columns, a statement's rows with their Postgres types or Mason's refusal with its way out, and EXPLAIN — connected as a `mason user` (`MASON_URL`, else `--url`), beside `mason start` or a `mason serve` elsewhere. |
 | `mason ui` | Opens the running Mason's web page in your browser: the Overview (what `mason status` says), the Tables (add, remove or sync one), the Users of `mason user` (add one, its password shown once; disable, enable or remove one) and Observability (the statements, usage over time, the sync's events), refreshed while the tab is open. It prints the URL with the run's token, which the page trades for a cookie on the first visit; `--no-open` prints it only, `--json` is `{ url, port }`. `mason start`'s alone: `mason serve` serves no page. |
 | `mason status` | What Mason is doing: the database and how its changes are read, the project folder, the copy's file, the Postgres API and how it listens, each table's copy, the statements of the last day and week (each outcome, the completed ones' average, p50 and p95 time, the rows and bytes sent), the ones answered slowly in the last day and the ones refused or failed, each with its reason. In replication mode, where the stream is. |
-| `mason sync <table>…` | Makes the copy of these tables current now: a table over the sync's row limit (1,000,000 rows) is copied and served but kept current only so, or by replication. |
-| `mason logs [-n <lines>] [-f] [--start] [--requests [<filters>]] [--events [--failed]] [--running]` | Mason's log: every copy, poll and statement, with warnings and errors and their reasons; `-f` follows it, `--start` shows what `mason start` printed instead. `--requests` is the request log: every statement a tool sent, when, the outcome (ok, refused, failed, cancelled) and SQLSTATE, how long, the rows and bytes sent, the tool and the user; `--failed` only the ones not answered, `--outcome`, `--since` / `--until` (`2h`, `7d`, an ISO time), `--user` and `--client` narrow it, and `--before` reads the page before. `--events` is the sync's events: each copy, poll, catch-up or stream that failed, the database out of reach, a table current again, and each restart of the run (`--failed` only the failures). `--running` lists the statements running now, by session. |
+| `mason sync <table>…` | Makes the copy of these tables current now, by one poll each: a table whose `sync:` is `off` is kept current only so (from cron, before a report), a polled one is polled now as well as at its interval. In replication mode the stream keeps every table current, and it says where the stream is. |
+| `mason logs [-n <lines>] [-f] [--start] [--requests [<filters>]] [--events [--failed]] [--running]` | Mason's log: every copy, poll and statement, with warnings and errors and their reasons; `-f` follows it, `--start` shows what `mason start` printed instead. `--requests` is the request log: every statement a tool sent, when, the outcome (ok, refused, failed, cancelled) and SQLSTATE, how long, the rows and bytes sent, the tool and the user; `--failed` only the ones not answered, `--outcome`, `--since` / `--until` (`2h`, `7d`, an ISO time), `--user` and `--client` narrow it, and `--before` reads the page before. `--events` is the sync's events: each copy, poll, catch-up or stream that failed, the database out of reach, a table current again, each sync asked by hand (mason sync, the page's Sync now), and each restart of the run (`--failed` only the failures). `--running` lists the statements running now, by session. |
 | `mason cancel <session>` | Stops the statement a session of the Postgres API is running, as the client's own cancel would: the client is told 57014, its session goes on, and the request log keeps it as cancelled. `mason logs --running` lists the sessions. |
-| `mason usage [--since 7d] [--step 1h]` | What Mason did over time, from a sample a minute kept `MASON_REQUEST_LOG_DAYS` days: the statements and their p95, the rows and bytes sent, the copy's size and rows, the stalest copy, the stream's lag, the memory; then each copy's own size. |
+| `mason usage [--since 7d] [--step 1h]` | What Mason did over time, from a sample a minute kept `MASON_HISTORY_DAYS` days: the statements and their p95, the rows and bytes sent, the copy's size and rows, the stalest copy, the stream's lag, the memory; then each copy's own size. |
 | `mason stop` | Stops Mason for this project. The copy and the state stay: the next `mason start` resumes in seconds. |
 | `mason destroy` | Removes this project's copy of the data (its file) and Mason's state in `.mason/`, stopping Mason first if it runs — and, for a project started with `--replication`, its slot and publication on the database. Your files, `.mason/config.json` and the users stay: the next `mason start` copies the tables again. |
 | `mason serve` | Mason for a server or a container: `mason start --attach` configured by the environment alone, its state in one folder (a volume), its log on stdout, `GET /healthz`, a clean stop on SIGTERM. `mason serve --help` lists every setting with its default. |
@@ -114,11 +117,15 @@ runs in, or the nearest one above it.
 
 ## What `mason start` does
 
-1. **It only reads the database** — the one the sources file names. Mason polls it with `SELECT` statements. It does not
-   need `wal_level = logical`, a replication slot, a publication or the `REPLICATION` attribute, and it creates none of
-   them. When you stop it, nothing is left behind on the database. A table over 1,000,000 rows is copied and served but
-   kept current only by `mason sync` or by replication, and `mason status` says so on its line. (`--replication` is the
-   exception, said below: it reads the change log, as production does, and makes its own slot.)
+1. **It only reads the database** — the one the sources file names, with `SELECT` statements. It does not need
+   `wal_level = logical`, a replication slot, a publication or the `REPLICATION` attribute, and it creates none of
+   them. When you stop it, nothing is left behind on the database. After its first copy each table is kept current as
+   the sources file's `sync:` says — at the top for every table, on an entry for that one: `off` (the default, and what
+   `mason init` writes) reads it again only at `mason sync <table>`; `poll 30s` polls it every 30 seconds, each poll a
+   scan of the table, the next one at least four times the last one's time later. Changing a table's `sync:` keeps its
+   copy and catches it up by one poll. `mason status` says each table's sync and when it was last synced, on its line.
+   (`--replication` is the exception, said below: it reads the change log, as production does, for every table, and
+   makes its own slot.)
 2. **It copies each added table** into a DuckDB file in `.mason/`, a range of pages at a time, a few in parallel, one
    Postgres backend each, smallest table first; a copy that stops continues with the ranges it did not commit. The table
    is served the moment its copy lands; the copy runs beside the polls, never instead of them.
@@ -130,7 +137,8 @@ runs in, or the nearest one above it.
 4. **It runs in the background**, copying what the sources file names: `mason add` and `mason remove` change it at once,
    a hand edit (or an add or remove made while Mason was stopped) at the next `mason start`.
 
-Mason's own settings (`MASON_POLL_MS`, `MASON_DUCKDB_MEMORY`, `MASON_COPY_PARALLEL`, …) set in your shell reach Mason.
+Mason's own settings (`MASON_DUCKDB_MEMORY`, `MASON_COPY_PARALLEL`, …) set in your shell reach Mason. How often a
+table is polled is its `sync:`, never a setting: `MASON_POLL_MS` set refuses the start, naming the line to write.
 A copy reads `MASON_COPY_PARALLEL` chunks at once (default 3), each sized to take about `MASON_COPY_CHUNK_SECONDS` to
 read (default 12) at the rate it measures on your connection, so `mason wait` moves every few seconds even over a slow
 link, and a copy that stops reads at most those chunks again.
@@ -149,8 +157,8 @@ there (`mason status` lists them); `MASON_STORE_JSON_PATHS=off` turns that off.
 | `--attach` | Stay in the foreground: the terminal shows Mason's progress, and Ctrl-C stops it. |
 
 A database on another machine needs `mason init --remote`, which records that you mean it: the copy leaves the
-database's network, and each added table under the row limit is read whole every few seconds (`--replication` reads only
-its changes). Point it at a read replica, never the primary your app writes to.
+database's network, and each polled table is read whole at its `sync:` interval (`--replication` reads only its
+changes). Point it at a read replica, never the primary your app writes to.
 
 **When the database moves.** Mason records the Postgres server it copied from. The same database on a new server (a
 restore, a move to another host) is read again at the next `mason start`: every row is compared with the copy, and only

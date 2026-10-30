@@ -16,6 +16,50 @@
 import type { DuckConnection } from "./executor.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 
+/** How many days every history table keeps (the request log, the sync's events, the usage samples, the copies'
+ *  sizes) unless MASON_HISTORY_DAYS says. */
+export const DEFAULT_HISTORY_DAYS = 7;
+
+/** What is wrong with a history setting, a Failure's fields: what, why, and the line to write. */
+export type HistoryDaysWrong = { message: string; why: string; fix: string };
+
+const KEPT = "the request log, the sync's events, the usage samples and the copies' sizes";
+
+/** The days MASON_HISTORY_DAYS keeps, or what is wrong with the text. Unset or empty: the default. */
+export function historyDays(text: string | undefined): number | HistoryDaysWrong {
+  if (text === undefined || text.trim() === "") return DEFAULT_HISTORY_DAYS;
+  const days = Number(text);
+  if (!Number.isInteger(days) || days < 1) {
+    return { message: `MASON_HISTORY_DAYS=${JSON.stringify(text)} is not a number of days`,
+      why: `it is how many days Mason keeps its history (${KEPT}): a whole number, 1 or more`,
+      fix: `write MASON_HISTORY_DAYS=${DEFAULT_HISTORY_DAYS} (the default, as when it is unset) or another whole number of days` };
+  }
+  return days;
+}
+
+/**
+ * THE HISTORY'S DAYS, AS THE ENVIRONMENT SETS THEM — read by this one function at every entrance (`mason serve`'s
+ * settings report, `mason start` before it spawns, and the run before anything opens), so a wrong setting is refused
+ * before the copy is touched, in the Failure shape. `MASON_REQUEST_LOG_DAYS` SET IS REFUSED, never run on the default
+ * (CLAUDE.md: a renamed setting refuses the start, naming the line to write): it kept the request log alone once, and
+ * the days kept are every history table's now, so it is MASON_HISTORY_DAYS. Then MASON_HISTORY_DAYS must be a number
+ * of days (`historyDays`).
+ */
+export function historyDaysSetting(env: Readonly<Record<string, string | undefined>>): number | HistoryDaysWrong {
+  const v = env.MASON_REQUEST_LOG_DAYS;
+  if (v !== undefined && v !== "") {
+    return { message: `MASON_REQUEST_LOG_DAYS=${v} is no longer read`,
+      why: `it was renamed MASON_HISTORY_DAYS, since the days it keeps are every history's (${KEPT})`,
+      fix: `write MASON_HISTORY_DAYS=${v.trim()} instead, then unset MASON_REQUEST_LOG_DAYS` };
+  }
+  return historyDays(env.MASON_HISTORY_DAYS);
+}
+
+/** what is wrong, as one line of `mason serve`'s settings report */
+export function historyDaysWrongText(w: HistoryDaysWrong): string {
+  return `${w.message}: ${w.why} — ${w.fix}`;
+}
+
 /** how often the rows past the retention are deleted (and once at open) */
 export const TRIM_EVERY_MS = 60 * 60 * 1000;
 

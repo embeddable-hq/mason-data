@@ -52,6 +52,8 @@ export interface MasonUser {
   removedAt?: string;
   /** ISO 8601 UTC; set by `mason user disable`, cleared by `enable`: absent for a user that is not disabled */
   disabledAt?: string;
+  /** the role it reads as (the project's roles file, src/cli/roles.ts); absent: every copied table, as before */
+  role?: string | undefined;
 }
 
 /** Whether a user has not been removed (it may still not connect: see `underKey`). */
@@ -60,6 +62,8 @@ export const isActive = (u: MasonUser): boolean => u.removedAt === undefined;
 /** Whether a user is disabled (`mason user disable`): kept, its password unchanged, its logins refused until enabled. */
 export const isDisabled = (u: MasonUser): boolean => u.disabledAt !== undefined;
 
+/** A role's name as the users file may carry it (src/cli/roles.ts ROLE_NAME_RE, which the roles file holds it to). */
+const ROLE_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 const PASSWORD_RE = /^mason_([0-9a-f]{16})_([0-9a-f]{32})$/;
 
@@ -105,8 +109,8 @@ function parseUsers(file: string, text: string): UsersRead {
   for (const [i, u] of list.entries()) {
     const o = u as Record<string, unknown> | null;
     if (typeof o !== "object" || o === null || typeof o.name !== "string" || !USER_NAME_RE.test(o.name) || typeof o.id !== "string" || !/^[0-9a-f]{16}$/.test(o.id) ||
-      typeof o.addedAt !== "string" || typeof o.key !== "string") {
-      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key[, removedAt][, disabledAt] } as mason user add writes it` };
+      typeof o.addedAt !== "string" || typeof o.key !== "string" || (o.role !== undefined && (typeof o.role !== "string" || !ROLE_RE.test(o.role)))) {
+      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key, role?[, removedAt][, disabledAt] } as mason user add writes it` };
     }
     if (o.removedAt !== undefined && typeof o.removedAt !== "string") {
       return { problem: `${file}: users[${i}].removedAt is not a timestamp as mason user remove writes it` };
@@ -114,8 +118,8 @@ function parseUsers(file: string, text: string): UsersRead {
     if (o.disabledAt !== undefined && typeof o.disabledAt !== "string") {
       return { problem: `${file}: users[${i}].disabledAt is not a timestamp as mason user disable writes it` };
     }
-    users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key, ...(o.removedAt !== undefined ? { removedAt: o.removedAt } : {}),
-      ...(o.disabledAt !== undefined ? { disabledAt: o.disabledAt } : {}) });
+    users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key, ...(typeof o.role === "string" ? { role: o.role } : {}),
+      ...(o.removedAt !== undefined ? { removedAt: o.removedAt } : {}), ...(o.disabledAt !== undefined ? { disabledAt: o.disabledAt } : {}) });
   }
   return { users };
 }
@@ -221,17 +225,24 @@ export class LiveUsers {
     // disabled: refused only once its password verified (so the state is told to the holder of the login alone), in
     // Postgres's words for a role without LOGIN, 28000 (src/api/postgres/server.ts reads the code)
     if (isDisabled(found)) throw refusal(401, disabledMessage(found.name), user, USER_DISABLED);
-    return { filters: [], subject: undefined, user: found.name, jti: found.id };
+    return { filters: [], subject: undefined, user: found.name, jti: found.id, ...(found.role !== undefined ? { role: found.role } : {}) };
   }
 
-  /** A held session's user, asked again before a statement: throws as `login` does when it is no longer live. */
-  recheck(token: PgToken): void {
-    if (token.user === undefined) return;
+  /**
+   * A held session's user, asked again before a statement: throws as `login` does when it is no longer live; else the
+   * token as the file has the user NOW — its role as `mason user add --role` wrote it, so a role given or taken
+   * applies at the user's next statement, without a restart.
+   */
+  recheck(token: PgToken): PgToken {
+    if (token.user === undefined) return token;
     const now = this.now();
     if ("problem" in now) throw refusal(503, `the list of users cannot be read: ${now.problem}`, token.user);
     const found = now.users.find((u) => u.id === token.jti && u.name === token.user);
     if (found === undefined) throw refusal(401, `the user "${token.user}" was removed`, token.user);
     if (isDisabled(found)) throw refusal(401, `the user "${token.user}" was disabled`, token.user, USER_DISABLED);
+    if (found.role === token.role) return token;
+    const { role: _was, ...rest } = token;
+    return { ...rest, ...(found.role !== undefined ? { role: found.role } : {}) };
   }
 }
 
@@ -252,7 +263,7 @@ export function listenerLogins(users: LiveUsers, apiKey: string): Pick<PgApiOpti
       if (problem !== null) throw new Error(problem);
       return { filters: [], subject: undefined };
     },
-    recheck: async (t) => { users.recheck(t); },
+    recheck: async (t) => users.recheck(t),
     recheckMs: 0,
   };
 }

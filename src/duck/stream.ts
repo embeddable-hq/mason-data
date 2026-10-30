@@ -222,7 +222,7 @@ export function fold(t: TableChanges, key: Array<string | null>, change: KeyChan
 export const PIECE_CHANGES = 10_000;
 
 /**
- * A BATCH THAT CHANGES A BIG TABLE (one over src/duck/sync.ts POLL_ROW_LIMIT, `big` in `StreamTarget.tables`) is
+ * A BATCH THAT CHANGES A BIG TABLE (one over src/lib/table-sync.ts BIG_TABLE_ROWS, `big` in `StreamTarget.tables`) is
  * applied at most every `BIG_APPLY_MS`, and a transaction's piece holds up to `BIG_PIECE_CHANGES`: each application
  * scans that table's key column (`PIECE_CHANGES` says what that costs), so fewer, larger ones — a 12 M-row migration is
  * 240 scans where it would be 1,200. The other tables in such a batch wait with it (seconds of staleness, said in

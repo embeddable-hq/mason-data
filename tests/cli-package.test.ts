@@ -9,12 +9,14 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runnable } from "../src/lib/runnable.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "cli", "package.json"), "utf8")) as {
-  name: string; license: string; bin: Record<string, string>; files: string[]; dependencies: Record<string, string>; scripts: Record<string, string>;
+  name: string; version: string; license: string; bin: Record<string, string>; files: string[]; dependencies: Record<string, string>;
+  optionalDependencies?: Record<string, string>; scripts: Record<string, string>;
 };
 
 test("the package: `mason`, built from src/cli/main.ts, Apache-2.0, with the dependencies the service imports", () => {
@@ -65,4 +67,27 @@ test("the package ships the web page: every file the command server serves is un
   assert.deepEqual(shipped.filter((f) => f.startsWith(`web${path.sep}`)), files, "every file under src/web/ is a route of PAGE_ROUTES");
   assert.ok(shipped.every((f) => !f.endsWith(".ts")), "TypeScript is compiled, never copied");
   assert.match(fs.readFileSync(path.join(ROOT, "cli", "build.ts"), "utf8"), /for \(const f of besideCode\(path\.join\(ROOT, "src"\)\)\) copy\(/, "cli/build.ts copies what the rule names");
+});
+
+test("the copy's extensions reach a user as the package's optional dependencies, one a platform, at its version, never inside it", () => {
+  // the platforms a package is built for (src/duck/extensions.ts EXTENSION_PLATFORMS), each pinned to the CLI's version:
+  // they are published together (.github/workflows/release.yml), and npm installs the one this machine runs
+  const platforms = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64"];
+  assert.deepEqual(pkg.optionalDependencies, Object.fromEntries(platforms.map((p) => [`@mason-data/extensions-${p}`, pkg.version])));
+  // the engine is pinned exactly: a range could install an engine whose extensions the packages do not hold
+  const installed = (JSON.parse(fs.readFileSync(path.join(ROOT, "node_modules", "@duckdb", "node-api", "package.json"), "utf8")) as { version: string }).version;
+  assert.equal(pkg.dependencies["@duckdb/node-api"], installed);
+  // npm would publish dist/, the README and the LICENSE — never an extension, even with the platform packages built
+  // beside it (cli/platforms/, which a decoy stands for when none is)
+  const decoy = path.join(ROOT, "cli", "platforms", `decoy-${process.pid}`, "extensions", "postgres_scanner.duckdb_extension");
+  fs.mkdirSync(path.dirname(decoy), { recursive: true });
+  fs.writeFileSync(decoy, "");
+  try {
+    const packed = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: path.join(ROOT, "cli"), encoding: "utf8" });
+    assert.equal(packed.status, 0, packed.stderr);
+    const [listing] = JSON.parse(packed.stdout) as Array<{ files: Array<{ path: string }> }>;
+    const files = listing!.files.map((f) => f.path);
+    assert.deepEqual(files.filter((f) => f.endsWith(".duckdb_extension") || f.startsWith("platforms/")), []);
+    assert.deepEqual(files.filter((f) => !f.startsWith("dist/")).sort(), ["LICENSE", "README.md", "package.json"]);
+  } finally { fs.rmSync(path.join(ROOT, "cli", "platforms", `decoy-${process.pid}`), { recursive: true, force: true }); }
 });

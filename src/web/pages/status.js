@@ -18,7 +18,7 @@
 // each with the range of what it counts — the statements of the last day, the sync's failures of the days kept — never
 // the Observability views' default, Now: a card that says 12 failed must land on the 12
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
-  slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
+  slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
 import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
@@ -58,19 +58,43 @@ export function copyingText(copied, rowsEstimate, p) {
 
 /**
  * AN ADDED TABLE'S LINE, as `mason status` and `mason wait` print it after its bar (src/cli/commands.ts `tableLines`):
- * its state (done, unsynced, failed, copying, waiting), how full its bar is, and what it says.
+ * its state (done, unsynced, failed, copying, waiting), how full its bar is, and what it says — a copied one with how it is kept
+ * current and how old its copy is (`keptAge`).
  */
-export function tableLine(t) {
+export function tableLine(t, now = Date.now()) {
   if (t.error) return { state: "failed", fraction: 1, what: `its copy failed: ${firstLine(t.error)}` };
   if (t.copy?.phase === "copying") {
     const c = copyingText(t.copy.rowsCopied, t.rows, t.copy.progress);
     return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `copying ${c.text}` : c.text };
   }
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its copy to start" };
-  if (t.unsynced) {
-    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied, NOT kept current (${t.unsynced.reason}${t.unsynced.asOf ? `; as of ${utcMinute(t.unsynced.asOf)} UTC` : ""}) — mason sync ${entryName(t.table)}, or mason start --replication` };
+  const age = keptAge(t, now);
+  // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
+  if (t.kept?.by === "poll" && t.kept.pending !== undefined) {
+    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
   }
-  return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}` };
+  return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
+}
+
+/** How long ago a table was synced, as `mason status` says it on its line (src/lib/table-sync.ts `agoText`, which
+ *  writes `4 s ago`, `3 days ago`; shared.js `agoText` is mason status's `ago`, `4s ago`, for a stream's times). */
+function syncedAgo(iso, now = Date.now()) {
+  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (s < 90) return `${s} s ago`;
+  if (s < 90 * 60) return `${Math.round(s / 60)} min ago`;
+  if (s < 36 * 3600) return `${Math.round(s / 3600)} h ago`;
+  const d = Math.round(s / 86_400);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+
+/** How a copied table is kept current and how old its copy is (src/cli/commands.ts `keptAge`). */
+export function keptAge(t, now = Date.now()) {
+  const k = t.kept;
+  if (k?.by !== "poll") return null;
+  const synced = k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`;
+  if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
+  if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${entryName(t.table)} syncs it now; sync: poll 5m on its entry polls it`;
+  return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${syncedAgo(k.syncedAt, now)}`}`;
 }
 
 /**
@@ -127,10 +151,11 @@ export function sourceRows(s) {
     ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
-    // in a web developer's words first (checked every 5 s, streamed as they happen); the mechanism an operator needs in parentheses
+    // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
     ["Changes", s.source.replication ? `streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
-        `${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll checks every ${s.engine.pollSeconds} s instead`
-      : `checked every ${s.engine.pollSeconds} s (a SELECT of each table's changed rows) · ${s.source.demo ? "the demo database is checked this way only" : "mason start --replication streams them as they happen instead"}`],
+        `${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll checks each table as its sync: says instead`
+      : `each table as its sync: says (a SELECT of its changed rows)${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
+        `${s.source.demo ? "the demo database is checked this way only" : "mason start --replication streams them as they happen instead"}`],
   ];
 }
 
@@ -280,7 +305,7 @@ export function renderQueries(q) {
   return `<div class="table-wrap"><table class="queries"><caption>Statements (the completed ones' time; ${code("mason logs --requests")} lists each)</caption><thead><tr><th scope="col"></th>` +
     ["Statements", "Completed", "Refused", "Failed", "Cancelled", "Average", "p50", "p95", "Rows sent", "Sent"].map((h) => `<th scope="col">${h}</th>`).join("") +
     `</tr></thead><tbody>${row("Last day", w.day)}${row("Last week", w.week)}</tbody></table></div>` +
-    (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_REQUEST_LOG_DAYS.</p>` : "") +
+    (short ? `<p class="dim">The request log keeps ${short.covered} day${short.covered === 1 ? "" : "s"}: MASON_HISTORY_DAYS.</p>` : "") +
     `<p class="dim">The slow and the refused statements, and every other, are on <a href="${esc(LINKS.queries)}">Observability › Queries</a> (${code("mason logs --requests")}).</p>`;
 }
 

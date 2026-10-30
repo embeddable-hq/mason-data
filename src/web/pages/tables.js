@@ -18,7 +18,7 @@ const SIZES_PATH = "/api/usage?since=1m";
 
 /** Where one table's columns are read, when its form opens (src/cli/run-server.ts tableColumns): never with the state,
  *  which is polled every 2 s and would carry every table's (3.4 MB at 800 tables of 50 columns). */
-/** A table's sync events: Observability › Syncs narrowed to it (src/web/pages/syncs.js `route`), over the week (its
+/** A table's sync events: Observability › Sync events narrowed to it (src/web/pages/syncs.js `route`), over the week (its
  *  copy and failures are rarely in the last 15 minutes, Now's). */
 export const syncsHref = (table) => `#observability/syncs?table=${encodeURIComponent(table)}&range=7d`;
 export const columnsPath = (table) => `/api/tables/${encodeURIComponent(table)}/columns`;
@@ -31,16 +31,27 @@ const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(f
 
 /**
  * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (src/cli/sync.ts `syncedReport`, held equal
- * by the tests): the rows written and deleted, a line per table, and that a table the passes do not keep current stays
- * as of this sync.
+ * by the tests): the rows written and deleted, a line per table, and what happens next to each table synced (`syncedTips`:
+ * an `off` one stays as of this sync).
  */
-export function syncedReport(b, picked, unsynced) {
+export function syncedReport(b, picked, tables) {
   const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
   return {
     headline: `Synced ${picked.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted.`,
     details: b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`]),
-    tips: unsynced.filter((t) => t.unsynced !== undefined).map((t) => `${t.table} is ${t.unsynced.reason}: it stays as of this sync until the next mason sync (mason start --replication keeps every table current)`),
+    tips: syncedTips(tables),
   };
+}
+
+/** What happens to each table synced after now, by its sync (src/cli/sync.ts `syncedTips`): an `off` table stays as of
+ *  this sync until the next one, a polled one is polled again after its interval. */
+function syncedTips(tables) {
+  return tables.flatMap((t) => {
+    const k = t.kept;
+    if (k?.by !== "poll") return [];
+    return [k.sync.mode === "off" ? `${t.table}'s sync is off: it stays as of this sync until the next mason sync ${entryName(t.table)}`
+      : `${t.table} is polled every ${k.sync.every}: its next poll is an interval from this one`];
+  });
 }
 
 /** A sync's answer said as `mason sync` says it, with Dismiss. `s`: the state, for the tables not kept current. */
@@ -79,7 +90,15 @@ export function tableFacts(t) {
 export function addedLines(b, file) {
   const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
   const s = b.skippedSecrets;
+  const name = entryName(b.table);
+  const sync = b.bigOff ? `sync: off written on its entry: it has more than 1,000,000 rows, and each poll scans it whole on your database — ` +
+      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason start --replication keeps every table current from the change log`
+    : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first copy it is read again only by mason sync ${name} — ` +
+      `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
+    : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first copy — mason add ${name} --sync off stops that`;
   return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
+    sync,
+    ...(b.pollCost !== null ? [b.pollCost] : []),
     ...(b.addedKey.length ? [`key added: ${b.addedKey.join(", ")} (a copy always has its key)`] : []),
     ...(s.length ? [`left out ${s.join(", ")}: ${s.length === 1 ? "it looks" : "they look"} like ${s.length === 1 ? "a secret" : "secrets"}, ` +
       `which anyone with a user's password could read (--include ${s[0]} adds it)`] : []),
@@ -192,8 +211,8 @@ export function renderTables(s, ui = {}) {
     const syncedNow = synced?.table === t.table && !("failure" in synced) && fresh(synced, now);
     const act = adding_ ? button("Adding…", {}, "primary small", { disabled: true }) : t.added
       // Sync now → Syncing… → Synced ✓ in the one room (ROOMS.sync), so the actions never move
-      // View syncs: its sync events, on Observability › Syncs (a link: it goes to another page)
-      ? `<a class="btn small" href="${esc(syncsHref(t.table))}">View syncs</a> ` +
+      // View events: its sync events, on Observability › Sync events (a link: it goes to another page)
+      ? `<a class="btn small" href="${esc(syncsHref(t.table))}">View events</a> ` +
         (syncing.includes(t.table) ? button("Syncing…", {}, "small", { room: ROOMS.sync, disabled: true }) : button(syncedNow ? "Synced ✓" : "Sync now", { syncTable: t.table }, "small", { room: ROOMS.sync })) + " " +
         // while it asks, Remove stays where it was, held down: the question beside it answers it
         (asking ? button("Remove", {}, "danger small", { disabled: true, expanded: true }) : button("Remove", { removeTable: t.table }, "danger small"))

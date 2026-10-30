@@ -4,7 +4,7 @@
  * Every statement the Postgres listener answered with DuckDB, and every statement it refused or failed, whatever it was,
  * is a row of `_mason.requests` in the run's own DuckDB file: the ClickHouse stack's `ops.api_requests`
  * (src/api/request-log.ts) for the prototype, built from the same `ApiLogRow` the listener builds, kept
- * `MASON_REQUEST_LOG_DAYS` days (default 7). `mason status` and `mason logs --requests` read it through the run's command
+ * `MASON_HISTORY_DAYS` days (default 7). `mason status` and `mason logs --requests` read it through the run's command
  * server (src/cli/run-server.ts), never by opening the file: DuckDB allows one process per file.
  *
  * Written as the ClickHouse stack this was cut from wrote its request log (src/duck/history.ts, the frame the sync's
@@ -36,22 +36,8 @@ export interface RefusedQuery {
 
 export const REQUESTS_TABLE = `${MASON_SCHEMA}.requests`;
 
-/** How many days of requests are kept unless MASON_REQUEST_LOG_DAYS says. */
-export const DEFAULT_REQUEST_LOG_DAYS = 7;
 const FLUSH_MS = 1000;
 const BATCH_ROWS = 1000;
-
-/**
- * The days MASON_REQUEST_LOG_DAYS keeps, or why the text is not a number of days. Unset or empty: the default.
- */
-export function requestLogDays(text: string | undefined): number | { problem: string } {
-  if (text === undefined || text.trim() === "") return DEFAULT_REQUEST_LOG_DAYS;
-  const days = Number(text);
-  if (!Number.isInteger(days) || days < 1) {
-    return { problem: `MASON_REQUEST_LOG_DAYS=${JSON.stringify(text)} is not a number of days: write a whole number, 1 or more (unset, ${DEFAULT_REQUEST_LOG_DAYS})` };
-  }
-  return days;
-}
 
 /** A request's outcome in a word, from its SQLSTATE (src/api/request-log.ts: the listener's refusal line reads it too). */
 export { outcomeOf };
@@ -70,6 +56,8 @@ export interface LedgerRequest {
   /** the `mason user` the session logged in as, or the one a refused login asked for (src/duck/users.ts); '' for a
    *  token's session, whose user name is any the tool sent */
   user: string;
+  /** the role the session read as (the roles file's, src/cli/roles.ts); '' for a session with none */
+  role: string;
   /** QUERY (a simple Query's statement), PARSE, BIND, EXECUTE, CONNECT … */
   method: string;
   /** ok, refused (the statement's own fault), failed (Mason's or the machine's), cancelled (57014: a cancel or a
@@ -96,7 +84,7 @@ export interface LedgerRequest {
 }
 
 const COLUMNS = ["request_id", "started_at", "session", "application_name", "token_name", "user_name", "method", "sqlstate", "message", "detail", "hint",
-  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent", "gap"] as const;
+  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent", "gap", "role"] as const;
 
 /** the ledger's DDL: one row per request, named for a developer who knows pg_stat_activity */
 /** a ledger made before `mason user` gains its column; a column added last is named in every INSERT */
@@ -116,6 +104,9 @@ export const REQUESTS_SEQ_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT
  * `review`: read by several statements, or by a slow one, within the log's retention). A ledger made before gains it.
  */
 export const REQUESTS_JSON_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS json_reads VARCHAR`;
+/** THE ROLE a session read as (src/duck/grants.ts): beside `user_name`, so a refusal (42501) says who was held to what;
+ *  a ledger made before roles gains the column, its old rows NULL (read as '') */
+export const REQUESTS_ROLE_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS role VARCHAR`;
 
 /** THE BYTES SENT for each statement (ApiLogRow.bytesSent): what the answers cost to send. A ledger made before gains it;
  *  its old rows are NULL, never 0. */
@@ -127,7 +118,7 @@ export const REQUESTS_GAP_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT
 
 export const REQUESTS_DDL = `CREATE TABLE IF NOT EXISTS ${REQUESTS_TABLE} (request_id VARCHAR, started_at TIMESTAMPTZ, session INTEGER, ` +
   `application_name VARCHAR, token_name VARCHAR, user_name VARCHAR, method VARCHAR, sqlstate VARCHAR, message VARCHAR, detail VARCHAR, hint VARCHAR, ` +
-  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT, gap VARCHAR)`;
+  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT, gap VARCHAR, role VARCHAR)`;
 
 /** a row as the ledger buffers it: the listener's row and its number in arrival order */
 interface Numbered { row: ApiLogRow; seq: number }
@@ -138,7 +129,7 @@ function valuesOf({ row: r, seq }: Numbered): DuckDBValue[] {
   return [r.requestId, r.at.toISOString(), r.session ?? null, app === "unnamed" ? "" : app, r.tokenName ?? "", r.user ?? "", r.method,
     r.sqlstate ?? null, r.error === undefined || r.error === "" ? null : r.error, r.detail ?? null, r.hint ?? null,
     r.rows === undefined ? null : r.rows, Math.round(r.durationMs), r.payload ?? "", r.payloadTruncated === true, seq,
-    r.jsonReads === undefined || r.jsonReads.length === 0 ? null : JSON.stringify(r.jsonReads), r.bytesSent === undefined ? null : r.bytesSent, r.gap ?? null];
+    r.jsonReads === undefined || r.jsonReads.length === 0 ? null : JSON.stringify(r.jsonReads), r.bytesSent === undefined ? null : r.bytesSent, r.gap ?? null, r.role ?? ""];
 }
 
 /** A ledger row as the commands read it. */
@@ -149,7 +140,7 @@ function requestOf(o: Record<string, unknown>): LedgerRequest {
   const startedAt = new Date(String(o.started_at));
   return {
     requestId: String(o.request_id), startedAt: startedAt.toISOString(), session: o.session === null ? null : Number(o.session),
-    applicationName: String(o.application_name ?? ""), tokenName: String(o.token_name ?? ""), user: String(o.user_name ?? ""), method: String(o.method),
+    applicationName: String(o.application_name ?? ""), tokenName: String(o.token_name ?? ""), user: String(o.user_name ?? ""), role: String(o.role ?? ""), method: String(o.method),
     outcome, status: statusOf(outcome), sqlstate, message: text(o.message), detail: text(o.detail), hint: text(o.hint),
     rows: o.rows === null ? null : Number(o.rows), durationMs: Number(o.duration_ms),
     endedAt: new Date(startedAt.getTime() + Number(o.duration_ms)).toISOString(), bytesSent: o.bytes_sent === null || o.bytes_sent === undefined ? null : Number(o.bytes_sent),
@@ -196,7 +187,7 @@ export function parseRequestCursor(text: string): { at: string; seq: number } | 
 export interface QueryWindow {
   /** the window asked, in days: 1 (the last day) or 7 (the last week) in the summary; a time range's length (a fraction under a day) in `window` */
   days: number;
-  /** the days of it the log keeps (MASON_REQUEST_LOG_DAYS): fewer than `days` when the log keeps fewer */
+  /** the days of it the log keeps (MASON_HISTORY_DAYS): fewer than `days` when the log keeps fewer */
   covered: number;
   /** every statement recorded in it (a refused login is none), and each outcome's count */
   statements: number; completed: number; refused: number; failed: number; cancelled: number;
@@ -229,7 +220,7 @@ export const UNSUPPORTED_EXAMPLE_CHARS = 1000;
 export interface QuerySummary { keptDays: number; day: QueryWindow; week: QueryWindow }
 
 export interface LedgerOptions {
-  /** days kept (MASON_REQUEST_LOG_DAYS) */
+  /** days kept (MASON_HISTORY_DAYS) */
   days: number;
   /** a test's: how long a row waits before its batch is written */
   flushMs?: number;
@@ -291,7 +282,7 @@ export class RequestLedger {
 
   /** The ledger of a store: its table made, the rows past the retention deleted, and a trim every hour. */
   static async open(store: DuckStore, log: (line: string) => void, options: LedgerOptions): Promise<RequestLedger> {
-    const history = await History.open(store, [REQUESTS_DDL, REQUESTS_USER_DDL, REQUESTS_SEQ_DDL, REQUESTS_JSON_DDL, REQUESTS_BYTES_DDL, REQUESTS_GAP_DDL]);
+    const history = await History.open(store, [REQUESTS_DDL, REQUESTS_USER_DDL, REQUESTS_SEQ_DDL, REQUESTS_JSON_DDL, REQUESTS_BYTES_DDL, REQUESTS_GAP_DDL, REQUESTS_ROLE_DDL]);
     const ledger = new RequestLedger(history, log, options);
     ledger.next = Number((await history.reader.runAndReadAll(`SELECT coalesce(max(seq), -1) + 1 FROM ${REQUESTS_TABLE}`)).getRowsJS()[0]![0]);
     await history.keepTrimmed(() => ledger.trim(), (e) => log(`request log: deleting the requests older than ${ledger.days} days failed: ${e.message}`));
@@ -331,7 +322,7 @@ export class RequestLedger {
   async trim(): Promise<number> {
     const r = await this.history.writer.runAndReadAll(`DELETE FROM ${REQUESTS_TABLE} WHERE started_at < now() - INTERVAL (${this.days}) DAY`);
     const n = Number(r.getRowsJS()[0]?.[0] ?? 0);
-    if (n > 0) this.log(`request log: deleted ${n} request(s) older than ${this.days} days (MASON_REQUEST_LOG_DAYS)`);
+    if (n > 0) this.log(`request log: deleted ${n} request(s) older than ${this.days} days (MASON_HISTORY_DAYS)`);
     return n;
   }
 

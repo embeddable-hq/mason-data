@@ -51,7 +51,7 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
   // a Remove's or a Disable's question is a popover beside the user's actions (`pop`), never a row: no row below it moves
   const pops = [];
   const ask = askOf(confirming);
-  return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
+  return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
@@ -65,6 +65,8 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       `<p class="pop-actions">${button(`Disable ${u.name}`, { confirmDisable: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Disable ${u.name}?` }));
     else if (refused?.name === u.name) pops.push(pop(anchor, `${renderFailure(refused.failure)}<p class="pop-actions">${button("Dismiss", { dismissRefused: "", popClose: "" }, "small")}</p>`));
     return `<tr${active ? "" : ` class="removed"`}><th scope="row"><code class="name" title="${esc(u.name)}">${esc(u.name)}</code> <span class="dim">id ${esc(u.id)}</span></th>` +
+      // the user's role (mason user add --role): what it may read; none, every copied table; one the roles file does not name, said
+      `<td>${u.role === undefined ? `<span class="dim">every table</span>` : `${code(u.role)}${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}`}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
       `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +

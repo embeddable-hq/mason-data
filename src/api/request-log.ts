@@ -32,6 +32,8 @@ export interface ApiLogRow {
   tokenName?: string | undefined;
   /** A `mason user`'s name (src/duck/users.ts): the user a session logged in as, or the one a refused login asked for */
   user?: string | undefined;
+  /** the role the session read as (src/duck/grants.ts), when its user carries one */
+  role?: string | undefined;
   /** the session's number, the SQLSTATE, DETAIL and HINT a refusal was sent with, and the rows an answer sent */
   session?: number | undefined;
   sqlstate?: string | undefined;

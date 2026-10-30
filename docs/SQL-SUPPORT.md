@@ -109,7 +109,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `infinite-interval` | an infinite interval read from a text (Postgres 17+) | infinity, -infinity | refused when a row holds one (DuckDB's interval has no infinity) | filter it out first, or read it as text |
 | `relative-time-literal` | a relative time combined with anything else ('today 10:00', 'now'::date + …  written as one literal), or read from a row as a date or a time | the transaction's start (a row's value: when the row is read) | refused (a bare 'now', 'today', 'tomorrow', 'yesterday' literal is answered: the transaction's start at the Parse) | current_date + time '10:00', now(), current_date + 1 |
 
-## Answered differently (15)
+## Answered differently (16)
 
 Answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
@@ -130,6 +130,7 @@ Answered, but not as Postgres answers. Each is a decided difference the oracle c
 | `jsonb-equal-text` | GROUP BY or DISTINCT of jsonb values that are equal but written apart ('1.0' and '1.00', '{"a": 1}' and '{"a": 1.0}') | one group, written as the value its plan reads first | one group, written as the value DuckDB reads first: either may be any of them | GROUP BY j::text where the text must decide |
 | `char-n-minmax` | greatest / least of a char(n) beside a text | compares without the padding, answers the first of equal values | compares the padded text | cast the char(n) to text first |
 | `nested-exact-numeric` | an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …) | exact digits at every step | the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x), it is exact | compute it in the outermost query, or round(…, n) inside |
+| `show-all` | SHOW ALL | every server setting with the source database's values | every setting the listener's catalog Postgres has, with this session's values laid over (search_path, TimeZone, ssl, …): Mason's settings, never your source database's | ask the source database for its settings (SHOW ALL or SHOW <name> there): Mason answers its own |
 
 ## Limits of the prototype (7)
 
@@ -137,7 +138,7 @@ Not about one statement: what the prototype cannot do yet.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
-| `one-token` | access | roles, grants, row-level security | every user (mason user) and token reads every copied table: no per-user or per-tenant scope | copy only the tables every user may read |
+| `roles` | access | roles, grants on tables and columns, row-level security | a role (mason/roles.yml) grants a user tables and columns, held on the analysed tree and refused as Postgres refuses them (42501 permission denied for table …); information_schema and mason mcp list a role what it may read, pg_catalog still lists every copied column; no row filter yet; a token and a user with no role read every copied table | mason user add <name> --role <role>; copy only the tables every user may read where a row filter would be needed |
 | `poll-full-scan` | keeping current by the poll (mason start without --replication) | - | the xmin poll scans every added table whole, every poll (no index covers xmin): ~13–17 s for 13 GiB | logical replication: mason start --replication |
 | `writes` | INSERT, UPDATE, DELETE, DDL, a read-write transaction | answers | refused by name: the copy is read-only (a read-write transaction: 25006) | write to the source database; the copy follows |
 | `numeric-over-38-digits` | a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside Mason's arithmetic or a WHERE | exact | a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact | numeric(p, s) with p ≤ 38 |

@@ -18,6 +18,7 @@ import type { CopyState } from "./sync.ts";
 import { datumText, masonCalls, rewrite, treeDifference, Unrewritable, type DuckCollation, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
 import { distinctCountTables, distinctKeyCounts, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
+import { enforceGrants, type RoleGrants } from "./grants.ts";
 import type { PgAnalysis } from "./analyze.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802;
@@ -154,11 +155,13 @@ export function missingRelationHint(relation: string, copies: readonly CopyState
 }
 
 /** A statement's plan. `wireBound`: its rows are bounded by a row count an Execute sets on the wire, which its SQL
- *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so) */
+ *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so).
+ *  `grants`: the session's role (src/duck/grants.ts), held after the analysis; null for a session with no role where
+ *  roles exist (the plan still names its reads, for an Execute under a role given later); undefined with no roles at all */
 export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: Node, base: number,
   paramOids: readonly number[], searchPath: string, timeZone: string, collation: DuckCollation, verified: ReadonlyMap<string, string> | null,
   userTypes: ReadonlyMap<string, number> = new Map(), copies: () => readonly CopyState[] = () => [], depth = 0, kept: KeptRoutes | null = null,
-  wireBound = false): Promise<DuckPlan> {
+  wireBound = false, grants: RoleGrants | null | undefined = undefined): Promise<DuckPlan> {
   const started = performance.now();
   const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
   if ("refused" in analysis) {
@@ -175,13 +178,18 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const expanded = await expandViews(catalog, stmt, analysis, pathSql(searchPath));
   if (expanded !== null) {
     if (depth >= MAX_VIEW_DEPTH) throw viewRefused(`Mason cannot yet answer views read through more than ${MAX_VIEW_DEPTH} other views`, "read the tables the views read");
-    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound); }
+    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, grants); }
     catch (e) {
       if (!(e instanceof StatementError)) throw e;
       const { position: _p, ...fields } = e.fields;
       throw new StatementError(fields, text, e.gap);
     }
   }
+  // THE ROLE (src/duck/grants.ts): the tables and columns Postgres's analysis says the statement reads, held to the
+  // session's role — after Postgres's own refusal and the views' expansion (the check sees the tables a view reads),
+  // before the rewrite (a role's refusal before a Mason gap's). The reads stay on the plan: an Execute under a role
+  // given or taken since the Parse is held to them again (src/api/postgres/server.ts)
+  const reads = grants === undefined ? undefined : await enforceGrants(catalog, analysis.tree, grants);
   // the catalog's own OIDs for the types an extension made (citext): the rewrite knows a few by name, and the wire sends
   // the SOURCE's OID for them (`userTypes`, from the copy), never the catalog's
   let resolved = resolvedKeys(analysis.tree);
@@ -271,5 +279,6 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   }
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}) } as unknown as PlannedSql;
   return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, dropLast, ...(exact.length > 0 ? { exact } : {}), resolved: keys,
-    ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
+    ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
+    timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
 }

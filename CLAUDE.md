@@ -100,6 +100,10 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   the engine or the listener changed), and merges it. A sub-agent's report is its claim, not the evidence. Two
   implementations of two hours each ran side by side; the review-and-fix round after them was the next hour and a half,
   so the time to land a batch is the slowest implementation plus one review cycle, never the sum.
+- **Implementation runs on Opus 5.5; every review is Fable's.** A sub-agent or a session that writes code is started
+  on Opus 5.5 (`model: "opus"` on the Agent tool, `model: "claude-opus-5-5"` on a session: a session INHERITS the
+  coordinator's model when none is named). The independent review of a PR is done by the coordinating session itself
+  (Fable) or by a Fable agent, never by an Opus one: the reviewer must outread the author (2026-10-29).
 
 ## Git workflow
 
@@ -120,7 +124,8 @@ that needs a migration, a column, a backfill or a write-path change on the sourc
 user needs REPLICATION), and its own publication only when none is named (a named one is read and verified, never
 created, altered or dropped). **Keep the load on Mason's side** (overloading the source Postgres is the last thing
 Mason may do): a copy reads `MASON_COPY_PARALLEL` chunks at once, one backend each, never the attached scan's ten; the
-poll is a full scan of every polled table, so only tables under `POLL_ROW_LIMIT` are polled; a SELECT on the source
+poll is a full scan of the table, so a table is polled only when its `sync:` says so, and `mason add` writes `sync: off` for
+a big one; a SELECT on the source
 never carries an `ORDER BY`. `.claude/rules/duckdb.md` "The copy" has the rules and the numbers.
 
 **A real database's data and structures are confidential.** No real table, column or dataset name, and no row, from
@@ -138,6 +143,7 @@ npm run test:integration              # the real copy, stream, listener, serve a
                                       #   (a throwaway Postgres; tests/integration/README.md)
 node src/cli/main.ts --help           # the mason command from the checkout (every command, by step)
 node cli/build.ts                     # the npm package: src/ compiled to cli/dist/
+node cli/extensions.ts                # its platform packages (the copy's extensions, checksums pinned) in cli/platforms/
 docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; deploy/mason-data/compose.yml runs it
 scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it must fail with src/ as it was at <commit>
 ```
@@ -197,7 +203,8 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   only — never by sniffing an environment variable that names an agent. A failure is one shape for both: what is wrong,
   why, the way out, what to run next (`Failure`, `src/cli/command.ts`).
 - **A refusal on the wire is Postgres's** (SQLSTATE, message, DETAIL, HINT), and every refusal names its registry entry
-  (`src/duck/gaps.ts`): a refusal without one does not compile.
+  (`src/duck/gaps.ts`): a DuckDB-side refusal without one does not compile; a `PgError` 0A000 in src/api/ without one fails
+  `tests/conventions.test.ts` (six older ones are ratcheted there).
 - **Never swallow an error.** No bare `.catch(() => {})`, no empty `catch {}`, no `2>/dev/null` or `|| true` over a failure
   you have not reasoned about. **A step that fails must never report success.** If a failure is genuinely tolerable,
   catch it narrowly, say why in a comment, log it, and — if the operation changed state — VERIFY the outcome afterwards.

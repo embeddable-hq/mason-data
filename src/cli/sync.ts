@@ -1,17 +1,19 @@
 /**
  * `mason sync <table>…`: Mason's poll of exactly these tables, now — named for what it does to the copy
- * (made current, incrementally), never for the mechanism (`poll` was). The passes poll every added table but one over
- * the poll's row limit (src/duck/sync.ts POLL_ROW_LIMIT: each poll scans its table whole on the database), which is
- * copied and served as it was copied; this reads what changed in it since, when asked. The run's `POST /api/sync`
- * (src/cli/run-server.ts) answers it, through the sync's own poll (`Sync.pollNow`).
+ * (made current, incrementally), never for the mechanism (`poll` was). A table whose sources-file entry says `sync:
+ * off` (the default: src/lib/table-sync.ts) is read again only so, and one set to `poll <interval>` is polled now
+ * whatever its interval says, its next poll an interval from this one. In replication mode nothing is polled: the
+ * answer is where the stream is. The run's `POST /api/sync` (src/cli/run-server.ts) answers it, through the sync's own
+ * poll (`Sync.pollNow`).
  */
 import { failed, jsonText, parseCommand, reportText, type CommandSpec, type NextStep } from "./command.ts";
 import { out as styleOut } from "./style.ts";
 import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
-import { findTable, guarded, msText, readState, tableArg } from "./commands.ts";
+import { findTable, guarded, readState, tableArg } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
-import { POLL_ROW_LIMIT, type PolledTable } from "../duck/sync.ts";
+import type { KeptCurrent, PolledTable, StreamedAnswer } from "../duck/sync.ts";
+import { syncedText, syncWords } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const n = (x: number): string => x.toLocaleString("en-US");
@@ -19,38 +21,42 @@ const n = (x: number): string => x.toLocaleString("en-US");
 export const SYNC_USAGE = `usage: mason sync <table>… [--json]
 
   Makes Mason's copy of these tables current now: it reads what changed in your database since Mason last read them —
-  the rows inserted or updated, and the ones deleted. Mason syncs every added table by itself every few seconds, but
-  a table over ${n(POLL_ROW_LIMIT)} rows is copied and served without that (each sync scans a table whole on your
-  database): mason status says which, and this syncs one when you need it current. mason start --replication keeps
-  every table current from the database's change log, whatever its size.
+  the rows inserted or updated, and the ones deleted — in one transaction, as a poll does (each one scans its table
+  whole on your database). After its first copy, a table is read again as its sync: in the sources file says: off
+  (the default) only when you run this — before a report, from cron, at the end of a deploy — and poll <interval> by
+  itself every interval, which this does now too, whatever the interval says. mason status says how each table is
+  kept current and when it was last synced. With mason start --replication, nothing is polled: it answers where the
+  stream of the database's change log is.
 
     mason sync orders
     mason sync orders public.events
 
-  --json   as data: { syncedAt, tables: [{ table, changed, deleted, rows, ms }], next }
+  --json   as data: { syncedAt, tables: [{ table, changed, deleted, rows, ms }], streamed (replication mode: [{ table,
+           position, state, why }], nothing polled), next }
 `;
 
 export const SYNC: CommandSpec & { needs: "run" } = {
   needs: "run",
   name: "sync",
-  summary: "make the copy of these tables current now: mason sync orders (a table over the sync's row limit is synced only so)",
+  summary: "make the copy of these tables current now: mason sync orders (a table whose sync is off is read again only so)",
   usage: SYNC_USAGE,
   options: { json: { type: "boolean" } },
-  json: ["syncedAt", "tables", "next"],
+  json: ["syncedAt", "tables", "streamed", "next"],
 };
 
 /**
  * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (the web page's Sync button says the same,
  * src/web/pages/tables.js; tests/web-page.test.ts holds the two equal): the rows written and deleted, a line per table,
- * and for a table the passes do not keep current (`unsynced`), that it stays as of this sync.
+ * and what happens next to each table synced (`syncedTips`: an `off` one stays as of this sync).
  */
-export function syncedReport(b: { tables: readonly PolledTable[] }, picked: readonly string[], unsynced: ReadonlyArray<{ table: string; unsynced?: { reason: string } }>):
+export function syncedReport(b: { tables: readonly PolledTable[] }, picked: readonly string[], tables: ReadonlyArray<{ table: string; kept?: KeptCurrent }>):
   { headline: string; details: Array<readonly [string, string]>; tips: string[] } {
   const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
   return {
     headline: `Synced ${picked.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted.`,
-    details: b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`] as const),
-    tips: unsynced.filter((t) => t.unsynced !== undefined).map((t) => `${t.table} is ${t.unsynced!.reason}: it stays as of this sync until the next mason sync (mason start --replication keeps every table current)`),
+    details: b.tables.map((t) => [t.table, syncedText(t)] as const),
+    // what happens next to each: an `off` table stays as of now, a polled one is polled again after its interval
+    tips: syncedTips(tables),
   };
 }
 
@@ -87,11 +93,26 @@ export async function sync(argv: string[]): Promise<number> {
       return failed("sync", { message: `${picked.join(", ")} ${picked.length === 1 ? "was" : "were"} not synced`, code, why: String(r.body.error),
         next: [["mason status", "each table's copy"], ["mason logs", "the run's log"]] }, { json });
     }
-    const b = r.body as unknown as { at: string; tables: PolledTable[] };
-    const unsynced = added.filter((t) => picked.includes(t.table) && t.unsynced);
-    const next: NextStep[] = [[`mason sync ${names.join(" ")}`, "sync again, whenever you need it current"], ["mason status", "each table's copy, and which the sync leaves out"]];
-    if (json) { out(jsonText(SYNC, { syncedAt: b.at, tables: b.tables }, next)); return 0; }
-    out(reportText({ ...syncedReport(b, picked, unsynced), next }, styleOut()));
+    const b = r.body as unknown as { at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] };
+    const next: NextStep[] = [[`mason sync ${names.join(" ")}`, "sync again, whenever you need it current"], ["mason status", "how each table is kept current, and when it was last synced"]];
+    if (json) { out(jsonText(SYNC, { syncedAt: b.at, tables: b.tables, ...(b.streamed ? { streamed: b.streamed } : {}) }, next)); return 0; }
+    if (b.streamed) {
+      out(reportText({ headline: `Nothing to sync: logical replication keeps ${picked.join(", ")} current.`,
+        details: b.streamed.map((t) => [t.table, `${t.state}${t.why ? `: ${t.why}` : ""} · the stream has applied the database's changes through ${t.position}`] as const), next }, styleOut()));
+      return 0;
+    }
+    out(reportText({ ...syncedReport(b, picked, added.filter((t) => picked.includes(t.table))), next }, styleOut()));
     return 0;
+  });
+}
+
+/** What happens to each table synced after now, by its sync (src/duck/sync.ts KeptCurrent): an `off` table stays as of
+ *  this sync until the next one, a polled one is polled again after its interval. */
+export function syncedTips(tables: ReadonlyArray<{ table: string; kept?: KeptCurrent }>): string[] {
+  return tables.flatMap((t) => {
+    const k = t.kept;
+    if (k?.by !== "poll") return [];
+    return [k.sync.mode === "off" ? `${t.table}'s sync is off: it stays as of this sync until the next mason sync ${tableArg(t.table)}`
+      : `${t.table} is ${syncWords(k.sync)}: its next poll is an interval from this one`];
   });
 }

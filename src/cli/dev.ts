@@ -30,7 +30,7 @@ import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
 import { createRunServer, usageFacts, type RunContext } from "./run-server.ts";
-import { addedTables, rereadSources, type RunSources } from "./sources.ts";
+import { addedTables, effectiveSync, rereadSources, shownPath, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -38,7 +38,8 @@ import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChanges
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
 import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, SELF_SIGNED_FILES } from "./pg-tls.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
-import { RequestLedger, REQUESTS_TABLE, requestLogDays } from "../duck/requests.ts";
+import { RequestLedger, REQUESTS_TABLE } from "../duck/requests.ts";
+import { historyDaysSetting } from "../duck/history.ts";
 import { EVENTS_TABLE, SyncEvents } from "../duck/events.ts";
 import { USAGE_TABLE, UsageSampler } from "../duck/usage.ts";
 import { withPlaceholders } from "./pg-url.ts";
@@ -50,11 +51,13 @@ import { copyChunkSecondsOf, copyParallelOf, Sync, syncModeOf, type CopyState } 
 import { storeJsonPathsOf } from "../duck/kept.ts";
 import { readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
 import { isLibcCollation } from "../duck/rewrite.ts";
-import { listenerLogins, LiveUsers, USERS_FILE } from "../duck/users.ts";
+import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
+import { LiveRoles, readRoles, resolveRoles, usersWithoutRole } from "./roles.ts";
 import { READY_LINE, readRestarts } from "./supervise.ts";
 import { changesOf, dropOwnReplication, dropStatements, madeReplication, namedPublication, projectReplication, replicationReadiness } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
 import { LogBuffer } from "../lib/log-buffer.ts";
+import { pollMsRetired, syncText, type TableSync } from "../lib/table-sync.ts";
 
 export interface DevOptions {
   /** the port the commands reach the run on (src/cli/run-server.ts), or the next free one */
@@ -142,6 +145,43 @@ async function closeDemo(hosted: Hosted, closed: string | null): Promise<void> {
   else if (closed !== null) say(`  ${closed}`);
 }
 
+/** how soon a pass that failed (the database away) is tried again, and replication mode's pass when a table waits */
+const PASS_RETRY_MS = 5000;
+
+/** the tables by their sync, as the start line says them: ` (2 polled, every 5s and 30s; 1 off)` */
+function syncCounts(tables: ReadonlyArray<{ sync?: TableSync }>): string {
+  const polled = tables.flatMap((t) => t.sync?.mode === "poll" ? [t.sync.every] : []);
+  const off = tables.length - polled.length;
+  const parts = [...(polled.length ? [`${polled.length} polled, every ${[...new Set(polled)].join(" and ")}`] : []), ...(off ? [`${off} off`] : [])];
+  return parts.length ? ` (${parts.join("; ")})` : "";
+}
+
+/**
+ * THE SOURCES FILE'S DEFAULT SYNC, SAID ONCE AT THE START: what every table without its own `sync:` gets — `off` (the
+ * default, said as such when the file writes none) or the file's `poll <interval>` — and how to change it. In
+ * replication mode the stream keeps every table current, and the file's sync: is the poll's.
+ *
+ * AN UPGRADE THAT STOPS THE POLLS IS SAID LOUDLY (issue 33's review): a file an older Mason wrote has no `sync:`
+ * anywhere, and its tables were polled every 5 s; from this release they are `off`. When the copy already holds
+ * `copiedBefore` of its tables and no `sync:` is written at all, the line says how many are not polled, that an older
+ * Mason polled them, and the exact line that keeps them current as before — true too of a hand-written file on a
+ * project that never polled.
+ */
+export function syncDefaultLine(file: SourceFile, shown: string, replication: boolean, copiedBefore = 0): string {
+  const d = effectiveSync(file, undefined);
+  if (replication) return `sync: logical replication keeps every table current; ${shown}'s sync: (${syncText(d.sync)}${d.from === "default" ? ", the default" : ""}) is the poll's, read when mason start --poll goes back to it`;
+  const noneWritten = d.from === "default" && file.tables.every((e) => e.sync === null);
+  if (noneWritten && copiedBefore > 0) {
+    // true of a file an older Mason polled and of one written by hand that never was: "not polled", the old way said
+    return `sync: off (the default): ${copiedBefore === 1 ? "1 table is" : `${copiedBefore} tables are`} not polled (an older Mason polled every table every 5 s); ` +
+      `write \`sync: poll 5s\` at the top of ${shown} ` +
+      "to keep them current as before, or `mason sync <table>` when you need it";
+  }
+  if (d.from === "default") return `sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of ${shown} polls every table, or on an entry that one`;
+  return d.sync.mode === "off" ? `sync: off (${shown}): after its first copy, a table is read again only by mason sync <table>, unless its entry says sync: poll <interval>`
+    : `sync: ${syncText(d.sync)} (${shown}): every table without a sync: of its own is polled every ${d.sync.every}`;
+}
+
 async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // when this run began: the uptime /api/state says (engine.startedAt, a supervisor's restart is a new run)
   const startedAt = Date.now();
@@ -164,6 +204,13 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   }
   const pinned = cliPinProblem(folder, o.version);
   if (pinned) { say(`mason start: ${pinned}`); return 1; }
+  // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
+  const pollMs = pollMsRetired(process.env);
+  if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: false });
+  // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused, named), read
+  // before anything opens (src/duck/history.ts); every history below keeps them
+  const keptDays = historyDaysSetting(process.env);
+  if (typeof keptDays !== "number") return failed("start", { code: "refused", ...keptDays }, { json: false });
   // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
   // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
   // always was (after the listener's checks): a demo project's port is needed first
@@ -308,6 +355,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (!Array.isArray(firstTables)) return failed("start", firstTables, { json: false });
   // what the run copies: the sources file as last read, and what is wrong with it now (an edit the run cannot take)
   let sources: RunSources = { file: src, tables: firstTables, problem: null };
+  // THE ROLES FILE (mason/roles.yml, src/cli/roles.ts): what each role may read, held against the tables the sources
+  // file copies before anything opens — a table it does not copy or a column the copy lacks refuses the start by name;
+  // the listener reads the file again whenever it changes (LiveRoles), no restart
+  const rolesRead = readRoles(folder, project.root);
+  if (rolesRead !== null && "message" in rolesRead) return failed("start", rolesRead, { json: false });
+  if (rolesRead !== null) {
+    const resolved = resolveRoles(rolesRead, firstTables, project.root);
+    if ("message" in resolved) return failed("start", resolved, { json: false });
+  }
 
   // how many of a copy's chunks are read at once, each a backend on the database (src/duck/sync.ts COPY_PARALLEL)
   let copyParallel: number;
@@ -338,18 +394,20 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     else say(`  ! the copy's thread stopped: ${reason}`);
   });
   done(`the copy in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling to ${path.relative(project.root, duckFile)}.tmp`);
-  const pollMs = Number(process.env.MASON_POLL_MS || 5000);
   const syncMode = changes === "replication" ? "replication" : syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
-  const keptDays = requestLogDays(process.env.MASON_REQUEST_LOG_DAYS);
-  if (typeof keptDays !== "number") { fail("Opening the copy"); say(`  ${keptDays.problem}`); await store.close(); return 1; }
   let events: SyncEvents;
   try { events = await SyncEvents.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Opening the copy"); say(`  the sync's events (${EVENTS_TABLE}) could not be opened: ${(e as Error).message}`); await store.close(); return 1; }
-  const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^copied |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, pollMs, syncMode,
+  // each table is polled at its own sync: (the sources file's); the sync's interval is how soon a failed pass is tried
+  // again (and replication mode's, and MASON_DUCK_SYNC=recopy's whole copies)
+  const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^copied |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
     syncMode === "replication" ? repl : null, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths }, onEvent: (e) => events.record(e) });
   await sync.open();
+  // the tables this copy already holds, before this start copies anything: an upgrade from a Mason that polled every
+  // table says how many are not polled (`syncDefaultLine`)
+  const copiedBefore = sync.state().filter((s) => s.phase === "copied" && sources.tables.some((t) => t.source === s.source)).length;
   // a database restored to another server: its transaction ids are not the watermarks', so every table is read again
   if (move.action === "reread") { await sync.rereadAll(); say(`  ${source.database} is on another server than the copy was taken from: reading its tables again`); }
   if (move.action !== "same") { cfg.sourceServer = { systemIdentifier: facts.systemIdentifier, database: source.database }; writeConfig(home, cfg); }
@@ -394,7 +452,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     await sync.stop(); await events.close(); await store.close(); return 1;
   }
   // THE REQUEST LOG (src/duck/requests.ts): every statement the listener answers or refuses, kept in the copy's own file
-  // for MASON_REQUEST_LOG_DAYS (read above, with the sync's events)
+  // for MASON_HISTORY_DAYS (read above, before anything opened)
   let requests: RequestLedger;
   try { requests = await RequestLedger.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Starting the Postgres listener"); say(`  the request log (${REQUESTS_TABLE}) could not be opened: ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }
@@ -410,11 +468,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // THE USERS (src/duck/users.ts): `mason user` edits the file beside this process; the listener re-reads it at every
   // connection and before every statement of a user's session, so a removal takes effect without a restart
   const users = new LiveUsers(path.join(home, USERS_FILE), cfg.apiKey);
+  // THE ROLES (src/cli/roles.ts): the file read again when it or the copied tables change; a session with a role is
+  // held to it at every statement, and the catalog is rebuilt with the roles (src/api/postgres/server.ts)
+  const liveRoles = new LiveRoles(folder, project.root, () => sources.tables);
   let api: PgApiServer;
   try {
     api = await startPostgresApi({
       port: pgAddress.port, host: pgAddress.host, tls: pgTls.tls, database: cfg.name, masonVersion: o.version, product: "mason-data", statementTimeoutMs,
       ...listenerLogins(users, cfg.apiKey),
+      roles: () => liveRoles.now(),
       schema: () => sync.schema(),
       // the one place a request is recorded: the request log's row, and the usage sample's count of it
       record: (row) => { requests.record(row); usage.count(row); },
@@ -424,7 +486,18 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     });
   } catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
   done(`Postgres listener on ${listenerText(pgTls.listener, api.port)}; ${statementTimeoutMs === 0 ? "statements without a time limit" : `each statement at most ${timeoutSetting.trim()}`} (MASON_STATEMENT_TIMEOUT); ` +
-    `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS; mason logs --requests)`);
+    `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS; mason logs --requests)`);
+  {
+    // a user whose role the file no longer names reads nothing until it is added again (fail closed): said here, by name
+    const roles = liveRoles.now();
+    const list = readUsers(path.join(home, USERS_FILE));
+    const orphans = "users" in list ? usersWithoutRole(list.users, new Set(roles.grants.keys())) : [];
+    if (roles.grants.size > 0) done(`${roles.grants.size} role${roles.grants.size === 1 ? "" : "s"} from ${roles.file} (${[...roles.grants.keys()].join(", ")}); a user with none reads every copied table`);
+    for (const u of orphans) {
+      say(`  ! the user ${u.name} has the role ${u.role}, which ${roles.file ?? "no roles file (mason/roles.yml)"} ${roles.file === null ? "exists to name" : "does not name"}: ` +
+        `its statements are refused until the role is in the file, or mason user remove ${u.name} and mason user add ${u.name}${roles.grants.size ? ` --role ${[...roles.grants.keys()][0]}` : ""}`);
+    }
+  }
 
   const setupPort = await freePort(o.port, chosen);
   const token = newToken();
@@ -436,6 +509,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     page: o.serve === undefined,
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database: cfg.name, postgresUrl },
+    roles: () => liveRoles.now(),
     ...(changes === "replication" ? { publication: { name: repl.publication, owned: repl.owned } } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
@@ -443,7 +517,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     logs,
     // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
     listener: api,
-    duck: { copies: () => sync.state(), file: duckFile, pollSeconds: pollMs / 1000, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), disk: () => sync.diskStatus(), requests, events, usage,
+    duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), measured: (table) => sync.measured(table), disk: () => sync.diskStatus(), requests, events, usage,
       restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status() },
   };
   const server = createRunServer(runCtx);
@@ -462,7 +536,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   cfg.lastRun = new Date().toISOString();
   writeConfig(home, cfg);
   done(`Mason is up: ${sync.state().length} table(s) added, kept current: ${syncMode === "replication" ? `changes streamed as they happen (logical replication: slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})`
-    : syncMode === "poll" ? `changes checked every ${pollMs / 1000} s (a SELECT of each table's changed rows)` : `each table copied again whole every ${pollMs / 1000} s (MASON_DUCK_SYNC=recopy)`}`);
+    : syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)} (a SELECT of each table's changed rows)` : `each table copied again whole every ${PASS_RETRY_MS / 1000} s (MASON_DUCK_SYNC=recopy)`}`);
+  // THE FILE'S DEFAULT, SAID ONCE (issue 33: nothing Mason does to your database is a hidden default)
+  const defaultLine = syncDefaultLine(sources.file, shownPath(project.root, sources.file.file), syncMode === "replication", syncMode === "poll" ? copiedBefore : 0);
+  say(`  ${defaultLine}`);
+  logLine(`[sync] ${defaultLine}`);
   // THE DEMO'S WRITER: a round of changes every MASON_DEMO_CHANGE_MS, begun once the run is up, said in the log
   if (demo !== null && demoChangeMs !== null) hosted.stopChanges = demoChanges(demo, demoChangeMs, (l) => logLine(`[demo] ${l}`));
   // the stop is in place BEFORE the ready line: a supervisor or a test signals on reading it, and a SIGTERM that found

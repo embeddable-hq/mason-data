@@ -18,7 +18,7 @@
  * Kept as the request log and the sync's events are (src/duck/history.ts, the frame the three share): written on a connection
  * of the samples' own — never the sync's writer turn (`onWriter`), which a swap or a stream batch may hold for seconds;
  * read on another; a write that fails is said once and again when one succeeds after it, and it NEVER fails anything;
- * kept `MASON_REQUEST_LOG_DAYS` days. A sample is one row a minute, so it is written as it is taken (its batch is one).
+ * kept `MASON_HISTORY_DAYS` days. A sample is one row a minute, so it is written as it is taken (its batch is one).
  * A stop loses at most the last interval's counts (the run's facts are no longer there to sample after the sync stops).
  *
  * THE COPY'S MEMORY is `duckdb_memory()` summed, on the samples' own connection (measured: under 1 ms, a catalog
@@ -191,7 +191,7 @@ export function quantileContOf(histogram: ReadonlyArray<readonly [value: number,
 }
 
 export interface UsageOptions {
-  /** days kept (MASON_REQUEST_LOG_DAYS) */
+  /** days kept (MASON_HISTORY_DAYS) */
   days: number;
   /** a test's: the interval between samples (SAMPLE_SECONDS) and between sizes (SIZE_EVERY_MS) */
   sampleMs?: number;

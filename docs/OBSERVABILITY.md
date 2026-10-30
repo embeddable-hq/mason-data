@@ -61,17 +61,17 @@ the same endpoints its own way.
 Built: the shell and every page (src/web/app.js, src/web/pages/).
 
 - **The shell**: `index.html` with a left sidebar — Overview · Tables · Users, then the Observability group's three
-  views, Queries · Usage · Syncs (modelled on Vercel's, Neon's and PlanetScale's) — and one section per page, chosen
+  views, Queries · Usage · Sync events (modelled on Vercel's, Neon's and PlanetScale's) — and one section per page, chosen
   by the URL's hash (`#overview`, the default; `#observability/queries`; the old `#status`, `#queries`, `#usage` and
-  `#logs` land on their view; `#observability/logs` is Syncs). Each page is an ES module of its own, a route of `PAGE_ROUTES`. ONLY THE PAGE SHOWN
+  `#logs` land on their view; `#observability/logs` is Sync events). Each page is an ES module of its own, a route of `PAGE_ROUTES`. ONLY THE PAGE SHOWN
   polls, each endpoint at the rate its data moves (below), and nothing while the tab is hidden.
 - **Observability's time range**: Now · Last hour · 24 hours · 7 days · 30 days · 90 days (Now unless `?range=` says;
   Now is the last 15 minutes and LIVE — its reads every few seconds — and every other range is read once when chosen,
   with when and Refresh beside it; 30
-  and 90 days only where the run keeps them, `/api/state` `engine.keptDays`, MASON_REQUEST_LOG_DAYS — else shown
+  and 90 days only where the run keeps them, `/api/state` `engine.keptDays`, MASON_HISTORY_DAYS — else shown
   disabled, saying so), shared by its three views and kept in the hash: Queries' request log `since`, Usage's samples
   (`since`, and a step of 60 s, 1 h, 6 h or a day — 90 days, 129,600 samples, re-bucket in ~15 ms),
-  Usage's `/api/activity`, Syncs' events `since`. Each view's filters compose with it.
+  Usage's `/api/activity`, Sync events' `since`. Each view's filters compose with it.
 - **Overview** (`#overview`): one word, `mason status`'s (Ready / Under way / Failed: `readinessWord` of `readiness`, said
   by the CLI and the page alike — the "Healthy / Syncing / Error" asked for, in the commands' words); cards that each link
   into the view that lists what they count (the failed tables, Queries — the slow ones from the p95 —, Usage); ONE table
@@ -86,7 +86,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   `/api/requests?failed=1`, `/api/unsupported` (30 s).
 - **Tables** (`#tables`, `#tables?show=failed`): ONE table of the database's tables. An added one shows its state
   (Synced / Syncing / Failed / Waiting), rows, last sync and its age, how long it took (`<0.1 s` under a tenth), the
-  copy's own size, in replication mode its stream state, its error, **View syncs** (Syncs narrowed to it), **Sync now**
+  copy's own size, in replication mode its stream state, its error, **View events** (Sync events narrowed to it), **Sync now**
   (`POST /api/sync`) and Remove; one not added
   its rows and key and why it cannot be added as it is, with Add / Columns… / Name its key…. A search box over the names
   and All / Added / Failed / Not added; the first 100 that pass written, then Show more / Show all. Reads `/api/state`
@@ -110,9 +110,9 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   range's samples (`/api/usage?since=<range>&step=<60|3600|21600|86400>`, newest first, the process's memory in a closed
   details), four charts of them, and each copy's own size. A client, a slow statement and a statement card lead to
   Queries filtered. Under Now `/api/activity` every 5 s and the rest every 60 s; any other range, each once.
-- **Observability › Syncs** (`#observability/syncs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s
+- **Observability › Sync events** (`#observability/syncs`): the sync's events of the range (`/api/events?limit=500&since=`, 10 s
   under Now, else once), newest first, narrowed by Failures only, a kind (every kind) and a table (every added table,
-  from `/api/state`, whether the range has an event of it or not; Tables' View syncs chooses it). The run's raw log
+  from `/api/state`, whether the range has an event of it or not; Tables' View events chooses it). The run's raw log
   (`/api/logs`, 5 s) is debugging output with internal tags and paths: it is behind a closed details, newest first, and
   read only while that is open.
 
@@ -129,7 +129,7 @@ Built: the shell and every page (src/web/app.js, src/web/pages/).
   any page shows it (`.claude/rules/web-ui.md`). The web page, the managed service and a coding agent read the same JSON.
 - **Mason's words**: a "user" (what `mason user` makes), never "credential" or "token"; "the copy"; never the engine's name.
 - **Kept like the request log**: anything with history lives in the run's own file, written on a connection of its own
-  (never the sync's writer turn), kept `MASON_REQUEST_LOG_DAYS` days.
+  (never the sync's writer turn), kept `MASON_HISTORY_DAYS` days.
 
 Key: ✅ built · ⏸ deferred
 
@@ -296,8 +296,9 @@ imported only when a chart is drawn, which the Overview's sparklines do), every 
 parsed in 1 ms, and polled every 2 s by the Overview and Tables.
 
 **Nothing is fetched at run time**: no URL in src/ is fetched but DuckDB's extension repository; JSON, ICU and Parquet
-are built into DuckDB; the `postgres` extension is installed by the image at build, and DuckDB's autoinstall of any
-other extension is off (src/duck/store.ts). From npm, `mason init` downloads it (else the first copy on a machine).
+are built into DuckDB; the `postgres` and `inet` extensions ship with the CLI and the image, one npm package per
+platform (src/duck/extensions.ts), and with them DuckDB's autoinstall is off. Without a package for the platform, the
+first copy on a machine downloads them once.
 
 **Left, most worth it first**:
 
@@ -305,12 +306,10 @@ other extension is off (src/duck/store.ts). From npm, `mason init` downloads it 
    columns 465 KB → **134 KB**, of 50 columns 3,414 KB → **134 KB** (built and serialised 4.6 → 1.2 ms); a form's
    columns are `GET /api/tables/<table>/columns`, read once as Columns… or Name its key… opens, and `?columns=1` keeps
    them for `mason status --json` (its shape unchanged).
-2. **Done**: from npm, an offline machine's first copy failed (the extension download), said only then. Now `mason
-   init` (and `init demo`) installs it as a checklist step before anything is written — 6–47 ms when it is there, 0.7 s
-   to download (44 MB, osx_arm64) on a fresh home — and, offline, fails in the Failure shape with the way out, writing
-   nothing; `mason doctor` has an `extension` line (read in 6–13 ms, never a download); a copy that cannot load it names
-   `mason doctor`. An air-gapped machine needs the image, `mason init` run once online, or the file copied from a
-   machine of its platform (README "How you use it"). Shipping it in the npm package (~45 MB a platform) was not done.
+2. **Done, by PR 37**: from npm, an offline machine's first copy failed (the extension download), said only then. The
+   copy's `postgres` and `inet` extensions now ship with the CLI as one optional package per platform
+   (`@mason-data/extensions-<platform>`, src/duck/extensions.ts) and in the image; `mason doctor` has an `extensions`
+   line. This branch's own `mason init` install step was dropped for it when main was merged (2026-10-29).
 3. **Done**: Queries' `search` over 7 days was ~0.6 s every 5 s while shown (12 scans, ~7.2 s of a core a minute); a
    search is read every 30 s now (2, ~1.2 s a minute), and the log says "Refreshed every 30 s while searching".
 4. **Done**: the summary was a 7-day scan per ask (146–162 ms at 30 M rows), for each page and `mason status` that
