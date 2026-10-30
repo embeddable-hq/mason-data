@@ -105,7 +105,7 @@ function frameLength(buf: Buffer, off: number, headerLength: 4 | 5, limit: numbe
 
 /** Decodes what a frontend sends. Push every chunk the socket delivers; call `next()` until it returns null. */
 export class FrontendDecoder {
-  /** the bytes of the frame being assembled, once its header has arrived */
+  /** the chunks joined so far: consumed bytes before `#off`, then the frames not yet read, the last perhaps partial */
   #buf: Buffer = Buffer.alloc(0);
   /** where the next frame starts in `#buf`: a frame consumed moves this, never the bytes behind it (BackendDecoder) */
   #off = 0;
@@ -158,7 +158,7 @@ export class FrontendDecoder {
   #take(headerLength: 4 | 5, len: number): Buffer {
     const body = this.#buf.subarray(this.#off + headerLength, this.#off + headerLength - 4 + len);
     this.#off += headerLength - 4 + len;
-    // an idle connection holds no bytes of the statement it last sent
+    // wholly consumed, it is let go: a connection idle on a frame boundary holds no bytes of what it last sent
     if (this.#off === this.#buf.length) { this.#buf = Buffer.alloc(0); this.#off = 0; }
     return body;
   }
@@ -432,8 +432,9 @@ function decodeBackendBody(code: string, body: Buffer): BackendMessage {
 export class BackendDecoder {
   #buf: Buffer = Buffer.alloc(0);
   /** WHERE THE NEXT FRAME STARTS IN `#buf`: `next()` moves this and `push` drops what is behind it. Copying the rest off
-   *  after every message was quadratic in a reply: a 30 MB reply of 150,000 rows took five minutes (issue 77). A new
-   *  buffer is always allocated, never written over, and no decoded message keeps a view of one (BodyReader copies). */
+   *  after every message was quadratic in a reply: a 30 MB reply of 150,000 rows took about six minutes on CI (issue
+   *  77). A new buffer is always allocated, never written over, and no decoded message keeps a view of one (BodyReader
+   *  copies). */
   #off = 0;
 
   push(chunk: Buffer): void {

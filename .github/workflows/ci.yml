@@ -49,7 +49,7 @@ jobs:
       # Where the job's minutes went: the twenty slowest tests of the run above, in seconds.
       - name: slowest tests
         if: ${{ !cancelled() }}
-        run: sed -nE 's/^ *[^ ]+ (.*) \(([0-9.]+)ms\)$/\2 \1/p' "$RUNNER_TEMP/unit-tests.log" | sort -rn | head -20 | awk '{ s = $1 / 1000; sub(/^[^ ]+ /, ""); printf "%8.1f %s\n", s, $0 }'
+        run: sed -nE 's/^ *[^ ]+ (.*) \(([0-9.]+)ms\)$/\2 \1/p' "$RUNNER_TEMP/unit-tests.log" | sort -rn | awk 'NR <= 20 { s = $1 / 1000; sub(/^[^ ]+ /, ""); printf "%8.1f %s\n", s, $0 }'
 
       # The published CLI (@mason-data/cli): src/ compiled to JavaScript (cli/build.ts), because Node strips no types
       # under node_modules. This proves the ARTIFACT runs: the built `mason` answers.
