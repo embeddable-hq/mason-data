@@ -12,16 +12,26 @@
  * running`: a cancel of a statement already past never reaches the next one, a cancel that lands before its statement
  * starts still does, and a statement being drained after its cancel stays cancelled whatever the next one's number.
  * Dependency-free: the listener's thread loads it without DuckDB.
+ *
+ * ONE CELL MORE, THE WORKER'S BEAT: a statement that calls a Mason function holds the worker's event loop for a thousand
+ * calls at a time (minutes over wide documents), so no message can tell whether its JavaScript runs. Every call, and every
+ * row of a call, adds to the cell, and the executor's watch reads it (src/duck/executor.ts SILENT_MS).
  */
 
 /** how many wire sessions may hold a DuckDB connection at once (a slot each) */
 export const CANCEL_SLOTS = 4096;
 
 /** a fresh table (the executor makes one and hands it to its worker) */
-export function cancelTable(): Int32Array { return new Int32Array(new SharedArrayBuffer(CANCEL_SLOTS * 2 * 4)); }
+export function cancelTable(): Int32Array { return new Int32Array(new SharedArrayBuffer((CANCEL_SLOTS * 2 + 1) * 4)); }
 
 const cancelledAt = (slot: number): number => slot * 2;
 const runningAt = (slot: number): number => slot * 2 + 1;
+const BEAT_AT = CANCEL_SLOTS * 2;
+
+/** the worker's JavaScript is running a Mason function (the cell is only ever compared, so its wrap is nothing) */
+export function beat(t: Int32Array): void { Atomics.add(t, BEAT_AT, 1); }
+/** the beat as it stands: what the watch compares with its last look */
+export function beats(t: Int32Array): number { return Atomics.load(t, BEAT_AT); }
 
 /** a slot handed to a new session: nothing cancelled, nothing running */
 export function resetSlot(t: Int32Array, slot: number): void { Atomics.store(t, cancelledAt(slot), 0); Atomics.store(t, runningAt(slot), 0); }

@@ -125,8 +125,8 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   cancelled through its SESSION — the CANCEL TABLE (`src/duck/cancel.ts`, shared memory the listener writes at once,
   never a message to the busy worker; every `__mason_*` call carries `getvariable('__mason_session')` first,
   src/duck/rewrite.ts `fn`): its next call raises, it is interrupted as well (its call-free rest stops at DuckDB's next
-  chunk), and the result is closed only once DuckDB handed it back (`drain`, src/duck/store.ts) AND the session's calls
-  have been quiet 50 ms (`cleanUp`, below). One that calls none is interrupted and closed at once. `tests/duck-executor.test.ts` and `tests/duck-wire.test.ts` "a client
+  chunk), and the result is closed only once DuckDB ended the query off this thread (`cleanUp`, below); one that calls none
+  is interrupted and goes the same way. `tests/duck-executor.test.ts` and `tests/duck-wire.test.ts` "a client
   leaving mid-statement" / "statement_timeout stops a statement that calls a Mason function" hold it.
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
@@ -136,17 +136,25 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
 - **A cancel asked is a cancel answered**: a statement whose cancel or timeout landed after its last call, or as its
   last chunk was computed, is told 57014, never "ok" (the worker reads the cancel table at the end, the listener's
   thread its own signal). A drained statement's own error is logged, never swallowed.
-- **A result that did not end is closed only once its calls have stopped** (under load the suite's process
-  sat at 0 % CPU for good — the worker inside a result's close, DuckDB's `CancelTasks`, waiting for a task that waited
-  inside a Mason function call for the worker): DuckDB hands a failed or cancelled chunk back while another task of
-  the query may still wait for a call, every close is synchronous on the worker, and the node API refuses a second
-  query on a connection with a result open, so a calling statement that failed, was cancelled or closed early is
-  marked cancelled, interrupted, and closed once no call of its session has been answered for `CALLS_QUIET_MS`
-  (`SessionRunner.cleanUp`; `lastCallAt`, src/duck/functions.ts). Never a sync close of a calling statement's result
-  outside that path. `tests/duck-executor.test.ts` "cancelling a function-calling statement again and again" holds it.
+- **The worker's thread never waits for DuckDB's tasks** (under load the suite's process sat at 0 % CPU for good — the
+  worker inside a result's close, DuckDB's `CancelTasks`, waiting for a task that waited inside a Mason function call for
+  the worker; issue 58 made it with no load at all): every close is synchronous on the worker, a close of an open
+  result or of a connection with something running waits for its tasks, and a call-free statement's close holds the
+  thread for the rest of a native vector (17.9 s measured, every session behind it). So a statement that did not run to
+  its end — failed, cancelled, closed early, calling or not — is interrupted and READ ON with an async `fetchChunk` until
+  it fails or ends (`SessionRunner.cleanUp`): every end of a query waits for its tasks on the thread that ends it
+  (`EndQueryInternal`), there libuv's, while this thread answers their calls, and only then is the result closed. A
+  **statement performs no wait**: DuckDB refuses one while a result holds the connection, so `SELECT 1` is the PROOF
+  that nothing is left, never the wait (DETECTOR: a refused probe is logged as a Mason bug; RESPONSE: closed all the
+  same, and the watch below catches a deadlock). Time is no proof: no call for 50 ms proved nothing, a vector's native
+  work outlasts any window. A connection's close (`conn.close`, src/duck/executor-worker.ts) interrupts its own calls and
+  waits for them. A new synchronous call into DuckDB on the worker is read against this rule (`tests/conventions.test.ts`
+  lists the closes). `tests/duck-executor.test.ts` "a vector slower than any quiet window", "a call-free statement closed
+  inside a slow vector", "a connection closed under its own", "cancelling a function-calling statement again and again"
+  hold it. Any statement on a session's connection waits for `releasing` first: DuckDB would refuse it. ("The watch")
   **Its log line does not wait for that close** (`say`, src/duck/store.ts): a statement's line is posted before its client
   is told it ended, in the worker port's order, so a statement's own line is before its answer and no earlier statement
-  it was told of lands after it (a late line entered the next test's window). A calling statement its client closed
+  it was told of lands after it (a late line entered the next test's window). A statement its client closed
   early (a portal, a session gone) has no end its client hears: its line still comes at its release.
   `tests/duck-wire.test.ts` "logged before its client is told" holds it.
 - **Nothing is closed under a pending call of DuckDB's** (a stop during a drain aborted the process, exit
@@ -158,6 +166,14 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   a request pending is given up on — every request told 57P02, the run told (`onCrash`) — and `close` settles within
   5 s whatever the worker does. A thread blocked inside native code is never ended by `terminate` or `process.exit`
   (measured), so a file given up on is never opened again in the process (`abandoned`); its supervisor's SIGKILL ends it.
+- **The watch counts its own ticks and hears a beat, so it fires on nothing but a stuck thread** (issue 58): silence is
+  unanswered pings on the MAIN thread's ticks, never the wall clock, so a main thread blocked or a process frozen counts
+  nothing against a healthy worker, and every Mason function call and row bumps the BEAT (`beat`, src/duck/cancel.ts,
+  shared memory), since a calling statement holds the worker's loop a thousand calls at a time with no pong (a 20 kB
+  document: 999 × 322 ms). What is left is a thread that neither turned its loop nor ran a row of a function for 60 s of
+  main's time. A new long stretch of JavaScript on the worker with no loop turn beats, or the watch calls it stuck. Never
+  a test that blocks the main thread: `nodeProcess` in `tests/duck-executor.test.ts` is an async spawn. "the watch" tests
+  there hold both sides: blocked main and a beating thread must not fire, the silent worker and a spinning thread must.
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a
   Mason function call; a 1 ms grace reproduced it 6 times in 6). A worker given up on (the grace, the silence) is asked
