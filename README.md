@@ -97,7 +97,7 @@ mason tables                         # lists the tables in your database, with t
 mason add orders customers           # adds tables to mason (use --columns id,status,total to sync only some columns)
 mason start                          # starts Mason in the background and begins the sync
 mason wait                           # waits until every added table is synced
-mason sync orders                    # sync the latest rows to mason (auto-replication is off by default)
+mason sync orders                    # syncs the latest rows to mason (auto-sync is off by default)
 mason remove customers               # removes a table from mason
 ```
 
