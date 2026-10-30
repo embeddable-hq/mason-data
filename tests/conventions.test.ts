@@ -1066,7 +1066,7 @@ test("the quarantine guard would catch the real thing", () => {
  * docs/DESIGN.md, and these three files say what to do, never how long it takes.
  */
 export function durationsSaid(src: string): number[] {
-  return src.split("\n").flatMap((l, i) => (/(?<![-\w])minutes?\b/i.test(l) ? [i + 1] : []));
+  return src.split("\n").flatMap((l, i) => (/(?:\b(?:a few|several|about \S+|\d\S*)\s+|\()minutes?\b/i.test(l) ? [i + 1] : []));
 }
 
 test("the rules, the contributor's guide and the CI file state no gate's duration", () => {
@@ -1077,5 +1077,7 @@ test("the rules, the contributor's guide and the CI file state no gate's duratio
 
 test("the duration guard would catch the real thing", () => {
   assert.deepEqual(durationsSaid("ok\nCI is about twelve minutes a run\ntypecheck, a few minutes"), [2, 3]);
+  assert.deepEqual(durationsSaid("the oracle runs every statement\n    # (minutes), then the rest\nabout 12 minutes"), [2, 3]);
   assert.deepEqual(durationsSaid("    timeout-minutes: 30"), [], "a setting's key is not a claim");
+  assert.deepEqual(durationsSaid("# Where the job's minutes went: the slowest tests"), [], "a length stated is the claim, not the word");
 });
