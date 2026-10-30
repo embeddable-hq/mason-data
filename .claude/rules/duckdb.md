@@ -602,8 +602,12 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   swap, the poll's reconciled count at its commit, and after every stream batch the rows its writes inserted less the
   rows they deleted (`rowsChanged`, `writeByKey`) — never a `count(*)` per batch (a write by key's deletes make it a
   scan) — written to `copy_state` IN the batch's transaction. When it was last brought current, and how,
-  is `CopyState.synced` (`Synced`: the swap, a poll's commit, the stream's last batch); `/api/state` derives each
-  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked.
+  is `CopyState.synced` (`Synced`: the swap, a poll's start, the stream's last batch); `/api/state` derives each
+  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked. **That time is ONE
+  value, the ledger's**: taken once before the sync's transaction, written in it (`polled_at`, `applied_at`) and
+  remembered as written (`polledAt`, `synced`), never `now()` in the ledger beside a `new Date()` here — the two stood
+  until `readPolledAt` replaced one with the other, and a table's `syncedAt` went 8 ms backwards under `mason status`.
+  `tests/duck-sync-facts.test.ts` and `tests/integration/duck-poll.itest.ts` hold what the run says to the ledger.
 
 ## Users (`mason user`, src/duck/users.ts)
 

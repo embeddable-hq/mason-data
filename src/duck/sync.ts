@@ -164,15 +164,17 @@ export interface CopyState {
 
 /**
  * WHEN A COPY WAS LAST BROUGHT CURRENT (`CopyState.synced`; mason status, `/api/state` `tables[].sync`). `at` is the
- * moment the copy held everything the database had committed as of the sync that brought it there:
- *  - `copy`: its swap (the whole copy in, as of its first snapshot; its catch-up follows);
- *  - `poll`, `catch-up`: the poll's commit — its rows and its watermark are one transaction (a catch-up is the one poll
- *    that brings a new copy current);
- *  - `stream` (replication mode): the commit of the last batch the stream applied while the table was streamed — the
+ * moment the copy held everything the database had committed as of the sync that brought it there, and ONE VALUE: the
+ * time the ledger holds (`copied_at`, `polled_at`, `applied_at`), taken once, written and remembered alike, never a
+ * second clock read at the commit (`Sync.polledAt`):
+ *  - `copy`: right after its swap (the whole copy in, as of its first snapshot; its catch-up follows);
+ *  - `poll`, `catch-up`: the poll's start, at or before its source snapshot, so it never says more than the rows hold —
+ *    its rows and its watermark are one transaction (a catch-up is the one poll that brings a new copy current);
+ *  - `stream` (replication mode): the start of the last batch the stream applied while the table was streamed — the
  *    position that batch records covers every table streamed, changed in it or not. A database that commits nothing
  *    sends no batch, so this ages while nothing changes, as `stream.lag.seconds` does.
  * `seconds` is how long that sync took: the copy's whole time, THIS table's poll (never the pass's), the batch's apply;
- * null when not known (read back at a start: the ledger keeps when a poll committed, not how long it took). Nothing here
+ * null when not known (read back at a start: the ledger keeps when a poll began, not how long it took). Nothing here
  * is relative to now: a reader derives the age (`ageSeconds`, src/cli/run-server.ts).
  */
 export interface Synced { at: string; seconds: number | null; by: "copy" | "poll" | "catch-up" | "stream" }
@@ -842,7 +844,9 @@ export class Sync {
   private readonly synced = new Map<string, Synced>();
   /** where the sync's failures and notable events go (src/duck/events.ts `SyncEvents.record`): never the writer's turn */
   private readonly onEvent: (e: SyncEventInput) => void;
-  /** when each table was last copied or polled (`_mason.poll_state.polled_at`), its `syncedAt` */
+  /** when each table was last copied or polled, its `syncedAt`: `_mason.poll_state.polled_at` and nothing else — the
+   *  value `pollStateSql` wrote is the one set here once its transaction commits, so `readPolledAt` never moves it (a
+   *  time read at the commit stood until that read replaced it: a `syncedAt` that went backwards) */
   private readonly polledAt = new Map<string, string>();
   /** the store's writer: the stream's batches, the polls, the source's attachment and every swap, one turn at a time */
   private readonly writerLane: Lane;
@@ -1151,8 +1155,6 @@ export class Sync {
    *  times that poll (`nextPollDelayMs`), and its sync now the one recorded (the poll wrote it, `poll`) */
   private polledNow(t: AddedTable, ms: number): void {
     const s = this.syncOf(t);
-    // synced now, said from now: its rows are in before the pass re-reads the ledger's polled_at (`readPolledAt`)
-    this.polledAt.set(t.source, new Date().toISOString());
     this.switched.delete(t.source);
     this.lastPollMs.set(t.source, ms);
     this.recordedSync.set(t.source, syncText(s));
@@ -2041,6 +2043,8 @@ export class Sync {
     // (`rowsChanged`) — never a count(*), which a write by key's deletes make a scan (12 ms on 20 M rows, measured) —
     // written to the ledger IN the batch's transaction, so a run that dies keeps a count equal to its rows
     const rowsAfter = new Map<string, number>();
+    // the batch's time in the ledger and in this run: ONE value (`Synced`)
+    const at = new Date().toISOString();
     await w.run("BEGIN TRANSACTION");
     try {
       for (const [name, changes] of batch) {
@@ -2085,7 +2089,7 @@ export class Sync {
         if (rows !== known) await w.run(`UPDATE ${MASON_SCHEMA}.copy_state SET "rows" = $1 WHERE source = $2`, [rows, name]);
         rowsAfter.set(name, rows);
       }
-      if (lsn !== null) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.stream_state VALUES ($1, $2, now())`, [this.replication!.slot, formatLsn(lsn)]);
+      if (lsn !== null) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.stream_state VALUES ($1, $2, $3::TIMESTAMPTZ)`, [this.replication!.slot, formatLsn(lsn), at]);
       await w.run("COMMIT");
     } catch (e) {
       await w.run("ROLLBACK");
@@ -2124,10 +2128,7 @@ export class Sync {
     }
     // every table the stream keeps current is current as of this batch's position (`Synced`); a piece of a large
     // transaction (no position) and the changes a catch-up held are not a position
-    if (lsn !== null) {
-      const at = new Date().toISOString();
-      for (const source of this.joinedNow) this.synced.set(source, { at, seconds: (Date.now() - started) / 1000, by: "stream" });
-    }
+    if (lsn !== null) for (const source of this.joinedNow) this.synced.set(source, { at, seconds: (Date.now() - started) / 1000, by: "stream" });
   }
 
   /**
@@ -2596,11 +2597,14 @@ export class Sync {
   private async swap(t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null }): Promise<void> {
     const w = this.store.writer;
     const target = `${ident(t.schema)}.${ident(t.table)}`;
+    // the copy's time in the ledger and in this run, ONE value, and before `copied_at`, recorded after the swap
+    // (`readSynced`: a copy recorded at or after its polled_at was last brought current by that copy)
+    const at = new Date().toISOString();
     await w.run("BEGIN TRANSACTION");
     try {
       await w.run(`DROP TABLE IF EXISTS ${target}`);
       await w.run(`ALTER TABLE ${side} RENAME TO ${ident(t.table)}`);
-      if (o.snapshot !== null) await w.run(this.pollStateSql(t, o.snapshot));
+      if (o.snapshot !== null) await w.run(this.pollStateSql(t, o.snapshot, at));
       if (o.behind !== null) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(t.source)}, ${literal(o.behind)}, now())`);
       // the copy is whole: nothing of it is left to continue
       await w.run(`DELETE FROM ${MASON_SCHEMA}.copy_progress WHERE source = ${literal(t.source)}`);
@@ -2616,9 +2620,9 @@ export class Sync {
     await this.kept.swapped(t.source);
     if (o.snapshot !== null) {
       this.snapshots.set(t.source, o.snapshot); this.recordedSync.set(t.source, syncText(this.syncOf(t))); this.switched.delete(t.source); this.due.delete(t.source);
-      // synced as of its copy, said from now (a review finding: until the next pass re-read the ledger, a table just
-      // copied said "never synced"); the ledger's polled_at, written above, replaces it at that read
-      this.polledAt.set(t.source, new Date().toISOString());
+      // synced as of its copy, said at once (a review finding: until the next pass re-read the ledger, a table just
+      // copied said "never synced"), and the value the ledger holds, so that read moves nothing
+      this.polledAt.set(t.source, at);
     }
     // the columns this copy holds, from its swap on: what every write to it is shaped by (`asCopied`)
     this.copiedColumns.set(t.source, [...t.columns]);
@@ -2631,9 +2635,10 @@ export class Sync {
     this.refreshStreamed();
   }
 
-  /** a table's watermark, the time and the sync it is polled or copied under (`recordedSync`): ONE row of `_mason.poll_state` */
-  private pollStateSql(t: AddedTable, snapshot: string): string {
-    return `INSERT OR REPLACE INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at, sync) VALUES (${literal(t.source)}, ${literal(snapshot)}, now(), ${literal(syncText(this.syncOf(t)))})`;
+  /** a table's watermark, the time and the sync it is polled or copied under (`recordedSync`): ONE row of `_mason.poll_state`.
+   *  `at` is the caller's, an ISO instant (`toISOString`, as `copied_at`), the very value it remembers (`polledAt`) */
+  private pollStateSql(t: AddedTable, snapshot: string, at: string): string {
+    return `INSERT OR REPLACE INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at, sync) VALUES (${literal(t.source)}, ${literal(snapshot)}, ${literal(at)}::TIMESTAMPTZ, ${literal(syncText(this.syncOf(t)))})`;
   }
 
   /**
@@ -2685,6 +2690,9 @@ export class Sync {
       return { rows: Number(counts[0]), deleted, countMs };
     };
     let snapshot = "";
+    // THE POLL'S TIME, ONE VALUE: taken before its snapshot, so `syncedAt` never says more than the rows hold, written
+    // with its watermark (`pollStateSql`) and remembered as written once that commits (`committed`, `polledAt`)
+    const polledAt = new Date().toISOString();
     await w.run("BEGIN TRANSACTION");
     try {
       await this.interruptible(lane, async () => {
@@ -2723,7 +2731,7 @@ export class Sync {
           await writeStaged(w, t, target, stage, "", this.kept);
           const c1 = Date.now();
           const { rows, deleted, countMs } = await reconcile(t, target, from);
-          await w.run(this.pollStateSql(t, snapshot));
+          await w.run(this.pollStateSql(t, snapshot, polledAt));
           await w.run(`DROP TABLE ${stage}`);
           timed.push(`${t.source} ${staged} changed in ${c1 - c0} ms, counted in ${countMs} ms${deleted ? `, ${deleted} deleted in ${Date.now() - c1 - countMs} ms` : ""}`);
           found.push({ table: t.source, changed: staged, deleted, rows, ms: Date.now() - c0 });
@@ -2747,12 +2755,13 @@ export class Sync {
       throw named(e);
     }
     // committed: the watermarks and the row counts move together (a pieced table's with its last piece)
-    // and the table's last sync (`Synced`): this poll's commit, and how long THIS table's poll took
+    // and the table's last sync (`Synced`): the poll's time as the ledger now holds it, and how long THIS table's poll took
     const committed = async (source: string, rows: number, ms: number): Promise<void> => {
+      this.polledAt.set(source, polledAt);
       const st = this.states.get(source)!;
       if (st.rows !== rows || st.error !== null) await this.record({ ...st, rows, error: null }, undefined, w);
       this.snapshots.set(source, snapshot);
-      this.synced.set(source, { at: new Date().toISOString(), seconds: ms / 1000, by: lane === this.writerLane ? "poll" : "catch-up" });
+      this.synced.set(source, { at: polledAt, seconds: ms / 1000, by: lane === this.writerLane ? "poll" : "catch-up" });
     };
     try {
       for (const [source, rows] of pending) if (!pieced.some((p) => p.t.source === source)) await committed(source, rows, found.find((f) => f.table === source)?.ms ?? 0);
@@ -2766,7 +2775,7 @@ export class Sync {
             doing = `${t.source}: writing piece ${i + 1} of ${n} of its ${staged} changed row(s) by key`;
             await this.interruptible(lane, () => writeStaged(w, t, target, stage, ` WHERE rowid >= ${i * POLL_PIECE_ROWS} AND rowid < ${(i + 1) * POLL_PIECE_ROWS}`, this.kept));
             if (i === n - 1) {
-              await w.run(this.pollStateSql(t, snapshot));
+              await w.run(this.pollStateSql(t, snapshot, polledAt));
             }
             doing = `${t.source}: committing piece ${i + 1} of ${n}`;
             await w.run("COMMIT");

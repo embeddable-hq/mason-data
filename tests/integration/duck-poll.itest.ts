@@ -1276,6 +1276,60 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
   } finally { await repl.stop(); other.close(); }
 });
 
+// A SYNC'S TIME IS ONE VALUE, THE LEDGER'S: `poll_state.polled_at` was now() (the transaction's start) where the run
+// remembered a `new Date()` of after the commit, until `readPolledAt` replaced the one with the other, so a `syncedAt`
+// read in between moved BACKWARDS at that read (CI: 8 ms, "its syncedAt moves only with its own poll"). Held at the
+// moments that window was open, whatever the machine's timing: right after a swap, and as the run is about to read the
+// ledger again after each poll — what it says by then is already what the ledger holds. Without the fix each differs
+// by the transaction's length, never by luck.
+test("what a sync says of a table right after its copy and after each poll is the time the ledger holds, and a restart reads the same", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const source = ownDatabase("onetime", "CREATE TABLE t (id int PRIMARY KEY, v text); INSERT INTO t SELECT g, 'v' || g FROM generate_series(1, 5) g");
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "onetime.db"), (l) => logged.push(l));
+  const sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+  const ledger = async (): Promise<string> => new Date(Number((await store.writer.runAndReadAll("SELECT epoch_ms(polled_at) FROM _mason.poll_state WHERE source = 'public.t'")).getRowsJS()[0]![0])).toISOString();
+  const lastSync = (s: Sync): { at: string; by: string } | undefined => (s.state().find((x) => x.source === "public.t") as { synced?: { at: string; by: string } } | undefined)?.synced;
+  // the moments: each is on the writer's turn, the ledger committed, the run's next read of it not yet made
+  const said: Array<{ moment: string; syncedAt: string | null; ledger: string; last: { at: string; by: string } | undefined }> = [];
+  const hooks = sync as unknown as { swap: (...a: unknown[]) => Promise<void>; readPolledAt: () => Promise<void> };
+  const swap = hooks.swap.bind(sync), read = hooks.readPolledAt.bind(sync);
+  const look = async (moment: string): Promise<void> => {
+    const at = syncedAt(sync, "public.t");
+    said.push({ moment, syncedAt: at, ledger: at === null ? "" : await ledger(), last: lastSync(sync) });
+  };
+  hooks.swap = async (...a: unknown[]) => { await swap(...a); await look("the copy's swap"); };
+  hooks.readPolledAt = async () => { await look("before the ledger is read again"); await read(); };
+  try {
+    await sync.open();
+    await sync.setTables([tableOf("t", OFF)]);
+    sync.start();
+    await until("the table copied and caught up", settled(sync, ["public.t"]));
+    psql(url, "INSERT INTO t VALUES (6, 'new')");
+    await sync.pollNow(["public.t"]);
+    psql(url, "INSERT INTO t VALUES (7, 'new')");
+    await sync.pollNow(["public.t"]);
+    const moments = said.filter((x) => x.syncedAt !== null);
+    assert.ok(moments.some((x) => x.moment === "the copy's swap"), JSON.stringify(said));
+    assert.ok(moments.filter((x) => x.moment !== "the copy's swap").length >= 3, `the catch-up and two polls at least: ${JSON.stringify(said)}`);
+    for (const m of moments) {
+      assert.equal(m.syncedAt, m.ledger, `${m.moment}: what the run says is what the ledger holds`);
+      if (m.last?.by === "poll" || m.last?.by === "catch-up") assert.equal(m.last.at, m.ledger, `${m.moment}: and its last sync`);
+    }
+    // the last sync is that poll's time, to the millisecond, in UTC, however the ledger's TIMESTAMPTZ is read back
+    const last = await ledger();
+    assert.equal(syncedAt(sync, "public.t"), last);
+    assert.deepEqual([lastSync(sync)?.at, lastSync(sync)?.by], [last, "poll"]);
+    await sync.stop();
+    const again = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+    await again.open();
+    await again.stop();
+    await again.setTables([tableOf("t", OFF)]);
+    assert.equal(syncedAt(again, "public.t"), last, "a restart says the time the run said");
+    assert.equal(lastSync(again)?.at, last, "and the same last sync");
+  } finally { await sync.stop(); store.close(); }
+});
+
 // A CHANGE OF A TABLE'S SYNC KEEPS ITS COPY AND CATCHES IT UP BY ONE POLL, never copies it again — by `mason add --sync`
 // while the run is up (`setTables`), and by hand while it is down (the ledger's record of the sync it was polled under)
 test("a table's sync switched off→poll and poll→off keeps its copy and is caught up by one poll, at once or at the next start", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {

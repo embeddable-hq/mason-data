@@ -105,6 +105,38 @@ test("a copy's last sync is read back at a start and moved by every batch; curre
   });
 });
 
+// A SYNC'S TIME IS ONE VALUE, THE LEDGER'S (`Sync.polledAt`, `Synced`): the ledger's now() beside the run's `new Date()`
+// were two, until a read of the ledger replaced one with the other. Held offline where no source is needed: a swap and a
+// stream batch, in a session zone that is not UTC (the time is an instant, whatever the zone it is read in), the value
+// the run says equal to the ledger's before anything reads the ledger again, and to the millisecond across a restart.
+// A poll's own is held against a real source: tests/integration/duck-poll.itest.ts "right after its copy and after each poll".
+test("the time a swap and a stream batch say is the time the ledger holds, at once, in any session zone, and a restart reads the same", async () => {
+  await aRun(async ({ store, sync, st, apply }) => {
+    await store.writer.run("SET TimeZone = 'Asia/Kathmandu'");
+    const s = sync as unknown as { swap: (t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null }) => Promise<void>; readPolledAt: () => Promise<void>; readSynced: () => Promise<void> };
+    const instant = async (sql: string): Promise<string> => new Date(Number((await store.writer.runAndReadAll(sql)).getRowsJS()[0]![0])).toISOString();
+    const polled = (): Promise<string> => instant(`SELECT epoch_ms(polled_at) FROM ${MASON_SCHEMA}.poll_state WHERE source = 'public.t'`);
+    const applied = (): Promise<string> => instant(`SELECT epoch_ms(applied_at) FROM ${MASON_SCHEMA}.stream_state`);
+    const kept = (): string | null | undefined => (st().kept as { syncedAt?: string | null }).syncedAt;
+    const synced = (): { at: string; by: string } => st().synced as { at: string; by: string };
+
+    const before = Date.now();
+    await store.writer.run("CREATE TABLE public.t__mason_copy AS SELECT * FROM public.t");
+    await s.swap(T, "public.t__mason_copy", { snapshot: "200:200:", behind: null });
+    const ledger = await polled();
+    assert.equal(kept(), ledger, "the swap's time, as written, with nothing having read the ledger since");
+    assert.ok(Date.parse(ledger) >= before && Date.parse(ledger) <= Date.now(), `an instant, not a wall clock of another zone: ${ledger}`);
+    await s.readPolledAt();
+    assert.equal(kept(), ledger, "a read of the ledger moves nothing");
+
+    await apply(batch({ 11: "new" }), 0x20n);
+    assert.deepEqual([synced().by, synced().at], ["stream", await applied()], "a batch's time, as written");
+    const said = synced().at;
+    await s.readSynced();
+    assert.deepEqual([synced().by, synced().at], ["stream", said], "and what a start reads back");
+  });
+});
+
 test("the changes a catch-up held, replayed after its poll, are written but are no position of the stream: no table's last sync, no stream_state", async () => {
   await aRun(async ({ store, sync, st, rows }) => {
     const s = sync as unknown as {
