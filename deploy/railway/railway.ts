@@ -15,7 +15,9 @@ export default defineRailway(() => {
   // "Replicas cannot be used with volumes"). Its region MUST be the region the service runs in (the service's Settings
   // → Region in the dashboard, or the reference's `regions` placement), and a volume does not move: choose the region
   // nearest your database, once. Sizes by plan: 5 GB on Hobby, 50 GB on Pro by default, extendable, never shrunk.
-  const REGION = "europe-west4";
+  // The identifier is the one https://docs.railway.com/deployments/regions lists, here EU West Metal; the reference
+  // links to that page for its options and has no list of its own.
+  const REGION = "europe-west4-drams3a";
   const data = volume("mason-data", { region: REGION, sizeMB: 20480 });
 
   const mason = service("mason", {
