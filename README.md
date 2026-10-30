@@ -457,7 +457,8 @@ mason user remove claude             # blocks its next connection, and ends its 
   sends. The error names the table or column. A `SELECT *` on a table where the role can see only some columns is
   refused too. Mason never quietly returns fewer columns.
 - When a user reads `information_schema` or uses the MCP tools, it sees only what its role can read. `pg_catalog` still
-  lists every synced table and column, as Postgres does for a role with no access: names, never rows.
+  lists every synced table and column, as Postgres does for a role with no access: the schema (names, types, defaults,
+  comments and view definitions), never rows.
 - A user added without `--role` gets the file's `default:` role. `mason init` writes `default: everything`, so at
   first every user can read every synced table. Remove the `default:` line, and a user with no role of its own reads
   nothing: each query is refused with `42501`, and the error says how to give it a role.
