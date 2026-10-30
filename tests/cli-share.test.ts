@@ -25,6 +25,7 @@ import { supervisorOf } from "../src/cli/supervise.ts";
 import { unassignedPort } from "./test-ports.ts";
 import { mintToken } from "../src/duck/token.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive } from "../src/duck/grants.ts";
+import { whereParts } from "../src/duck/row-filter.ts";
 import type { ShareDoor, ShareSocket } from "../src/api/postgres/server.ts";
 // read from the modules when the tests run: the file loads at a commit without them, and each test fails by name
 // (scripts/fails-without.ts)
@@ -107,6 +108,39 @@ test("what a share reads: the one answer used and said, several refused naming e
   assert.equal((shareRole("Not A Role", NO_ROLES) as { failure: { code: string } }).failure.code, "usage");
 });
 
+test("a role whose rows need an attribute is no share's: named, refused saying why, and left out of the choices", () => {
+  const parts = whereParts("tenant_id = :tenant");
+  assert.ok(Array.isArray(parts));
+  const filter = { table: "public.orders", at: "roles.tenant.tables.orders", where: { text: "tenant_id = :tenant", parts } };
+  const tenant: RoleGrants = { ...grant("tenant", ["public.orders"]), filters: new Map([["public.orders", filter]]) };
+  const whereOnly = whereParts("status = 'paid'");
+  assert.ok(Array.isArray(whereOnly));
+  const paid: RoleGrants = { ...grant("paid", ["public.orders"]), filters: new Map([["public.orders", { table: "public.orders", at: "roles.paid.tables.orders", where: { text: "status = 'paid'", parts: whereOnly } }]]) };
+  const sales = grant("sales", ["public.customers"]);
+
+  const named = shareRole("tenant", live([tenant, sales]));
+  assert.ok("failure" in named);
+  assert.deepEqual(named.failure, {
+    message: "a share cannot read as the role tenant: its rows depend on :tenant, and a share's login has no attributes", code: "refused",
+    why: "roles.tenant.tables.orders.where reads :tenant (tenant_id = :tenant)",
+    fix: "--role sales: reads 1 synced table: public.customers",
+    next: [["mason share --role sales", "reads 1 synced table: public.customers"], ["mason user add <name> --role tenant --set tenant=<value>", "a login that carries the values, for a tool that can reach this machine"]],
+  });
+  // a filter that reads no attribute is a share's: only what a password cannot carry is refused
+  assert.deepEqual(shareRole("paid", live([tenant, paid])), { role: "paid", reads: "1 synced table: public.orders" });
+  // left out, the one role left is the one sensible answer
+  assert.deepEqual(shareRole(undefined, live([tenant, sales])), { role: "sales", reads: "1 synced table: public.customers" });
+  const several = shareRole(undefined, live([tenant, sales, paid]));
+  assert.ok("failure" in several);
+  assert.deepEqual(several.choices?.map((c) => c.role), ["sales", "paid"]);
+  assert.match(several.failure.fix ?? "", /^left out, because a share's login has no attributes: tenant$/m);
+  const none = shareRole(undefined, live([tenant]));
+  assert.ok("failure" in none);
+  assert.equal(none.failure.code, "refused");
+  assert.equal(none.failure.message, "no role of mason/roles.yml can be shared: the rows of each depend on an attribute, and a share's login has no attributes");
+  assert.equal(none.failure.fix, "add a role to mason/roles.yml whose rows need no attribute, then mason share --role <role>");
+});
+
 test("a person's answer: a number or a name; anything else is no choice", () => {
   const choices = [{ role: "everything", reads: "", default: true }, { role: "sales", reads: "", default: false }];
   assert.equal(chosenRole("2", choices), "sales");
@@ -122,7 +156,7 @@ function fakeShares(): { shares: InstanceType<typeof RunShares>; door: () => Sha
   const lines: string[] = [], ended: string[] = [], stopped: Array<[number, number]> = [];
   const socket: ShareSocket = { port: 40001, sessions: 0, endSessions: (jti) => { ended.push(jti); return 1; }, close: async () => { closed++; } };
   const shares = new RunShares({
-    listener: { openShare: async (d) => { door = d; return socket; } }, roles: () => NO_ROLES, database: "shop", log: (l) => lines.push(l), stopTunnel: (pid, port) => stopped.push([pid, port]),
+    listener: { openShare: async (d) => { door = d; return socket; }, checkRoles: async () => NO_ROLES }, database: "shop", log: (l) => lines.push(l), stopTunnel: (pid, port) => stopped.push([pid, port]),
     certificate: () => ({ cert: Buffer.from("c"), key: Buffer.from("k"), fingerprint: "AA:BB" }),
   });
   return { shares, door: () => door!, closed: () => closed, lines, ended, stopped };
@@ -210,7 +244,7 @@ test("what the command tells the run arrives in the order it was said: a slow \"
 });
 
 test("the certificate that cannot be made is the command's failure, and leaves no share", async () => {
-  const shares = new RunShares({ listener: { openShare: () => Promise.reject(new Error("never")) }, roles: () => NO_ROLES, database: "shop", log: () => undefined,
+  const shares = new RunShares({ listener: { openShare: () => Promise.reject(new Error("never")), checkRoles: async () => NO_ROLES }, database: "shop", log: () => undefined,
     certificate: () => ({ message: "the self-signed certificate could not be written", code: "failed" }) });
   const r = await shares.open({ secret: shareSecret("a") });
   assert.ok("failure" in r);
@@ -638,6 +672,31 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
       s.child.kill("SIGINT");
       await s.exited;
       await gone(r.port);
+
+      // what a share cannot read as is refused at its start, in the failure's one shape, for both readers
+      fs.writeFileSync(roles, "default: everything\n\nroles:\n  everything:\n    tables: all\n  tenant:\n    attributes: [who]\n    tables:\n      public.customers: { where: \"id = :who\" }\n");
+      await until(async () => ((JSON.parse((await mason(["status", "--json"])).stdout) as { roles?: { roles: string[] } }).roles?.roles.includes("tenant") ?? false), "the listener's roles");
+      const needs = await mason(["share", "--role", "tenant", "--json"]);
+      assert.equal(needs.code, 1, said(needs));
+      const n = JSON.parse(needs.stdout) as { error: { code: string; message: string; why: string }; next: Array<{ command: string }> };
+      assert.equal(n.error.code, "refused");
+      assert.equal(n.error.message, "a share cannot read as the role tenant: its rows depend on :who, and a share's login has no attributes");
+      assert.equal(n.error.why, "roles.tenant.tables.public.customers.where reads :who (id = :who)");
+      assert.deepEqual(n.next.map((x) => x.command), ["mason share --role everything", "mason user add <name> --role tenant --set who=<value>"]);
+      const told = await mason(["share", "--role", "tenant"]);
+      assert.equal(told.code, 1, said(told));
+      assert.match(told.stderr, /^✗ mason share: a share cannot read as the role tenant/m);
+      assert.match(told.stderr, /fix +--role everything: reads every synced table/);
+      assert.equal((await status()).share, null, "nothing opened");
+
+      fs.writeFileSync(roles, "default: everything\n\nroles:\n  everything:\n    tables: all\n  broken:\n    tables:\n      public.customers: { where: \"nope = 1\" }\n");
+      await until(async () => ((JSON.parse((await mason(["status", "--json"])).stdout) as { roles?: { roles: string[] } }).roles?.roles.includes("broken") ?? false), "the listener's roles");
+      const broken = await mason(["share", "--role", "broken", "--json"]);
+      assert.equal(broken.code, 1, said(broken));
+      const b = JSON.parse(broken.stdout) as { error: { code: string; message: string; fix: string } };
+      assert.equal(b.error.code, "bad_roles");
+      assert.match(b.error.message, /roles\.broken\.tables\.public\.customers\.where: column "nope" does not exist/);
+      assert.match(b.error.fix, /^repair .*roles\.yml, then mason share$/);
 
       fs.rmSync(roles);
       await until(async () => ((JSON.parse((await mason(["status", "--json"])).stdout) as { roles?: { file: string | null } }).roles?.file ?? null) === null, "the roles file gone");

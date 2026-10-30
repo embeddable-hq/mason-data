@@ -170,7 +170,7 @@ test("a share's session is a plain session's: the same role held the same way on
   const { RunShares, shareSecret } = await import("../src/cli/share-run.ts");
   const { selfSignedCertificate } = await import("../src/cli/self-signed-cert.ts");
   const pair = selfSignedCertificate("mason-share-roles");
-  const shares = new RunShares({ listener: api, roles: () => wired!.roles() as never, database: "shop", log: () => undefined,
+  const shares = new RunShares({ listener: api, database: "shop", log: () => undefined,
     certificate: () => ({ cert: Buffer.from(pair.cert), key: Buffer.from(pair.key), fingerprint: "AA" }) });
   const opened = await shares.open({ secret: shareSecret("share-password"), role: "agent" });
   assert.ok("user" in opened);

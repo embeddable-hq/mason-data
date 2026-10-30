@@ -533,7 +533,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
 
   // WHAT mason share OPENS (src/cli/share-run.ts): a second socket of this listener, on a run on a laptop alone
   const shares = o.serve !== undefined ? undefined : new RunShares({
-    listener: api, roles: () => liveRoles.now(), database, log: logLine,
+    listener: api, database, log: logLine,
     // the project's own certificate, as --self-signed-tls serves it: made once, and recorded as that flag records it
     certificate: () => {
       try {

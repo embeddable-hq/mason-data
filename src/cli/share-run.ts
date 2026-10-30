@@ -25,6 +25,7 @@ import { didYouMean } from "../lib/did-you-mean.ts";
 import type { Failure } from "./command.ts";
 import type { PgApiServer, PgToken, ShareSocket } from "../api/postgres/server.ts";
 import type { RoleGrants, RolesLive } from "../duck/grants.ts";
+import { missingAttributes } from "../duck/row-filter.ts";
 import { ROLE_NAME_RE, ROLE_NAME_RULE, ROLES_FILE } from "./roles.ts";
 import { sameSecret } from "./security.ts";
 
@@ -84,8 +85,8 @@ export interface ShareState {
 interface Held { user: string; secret: string; role: string | null; reads: string; openedAt: string; tunnel: ShareTunnel; ended: ((why: string) => void) | null }
 
 export interface ShareDeps {
-  listener: Pick<PgApiServer, "openShare">;
-  roles: () => RolesLive;
+  /** `checkRoles`: the roles as the listener holds them, each row filter read by the catalog, as `mason start` says them */
+  listener: Pick<PgApiServer, "openShare" | "checkRoles">;
   /** the project's self-signed certificate (src/cli/pg-tls.ts ensureSelfSigned), made when it has none */
   certificate: () => { cert: Buffer; key: Buffer; fingerprint: string } | Failure;
   database: string;
@@ -101,10 +102,24 @@ function readsText(g: RoleGrants): string {
   return `${names.length} synced table${names.length === 1 ? "" : "s"}: ${names.slice(0, 6).join(", ")}${names.length > 6 ? ` and ${names.length - 6} more` : ""}`;
 }
 
+/** The attributes a role's filters read, by the rule a session is refused by: a share's login is a password and no
+ *  values, so under such a role its every statement would be refused. */
+const attributesOf = (g: RoleGrants): ReturnType<typeof missingAttributes> => g.filters === undefined ? [] : missingAttributes(g.filters.values(), {});
+
 /** The roles a share may read as, the file's default first. */
 function choicesOf(live: RolesLive): ShareChoice[] {
-  return [...live.grants.values()].map((g) => ({ role: g.name, reads: readsText(g), default: g.name === live.default }))
+  return [...live.grants.values()].filter((g) => attributesOf(g).length === 0).map((g) => ({ role: g.name, reads: readsText(g), default: g.name === live.default }))
     .sort((a, b) => Number(b.default) - Number(a.default));
+}
+
+/** Why roles that read attributes cannot be shared: what each reads, the roles that can be, and the login that carries values. */
+function needsAttributes(message: string, roles: readonly RoleGrants[], choices: readonly ShareChoice[], file: string): Failure {
+  const first = roles[0]!;
+  const sets = attributesOf(first).map((m) => `--set ${m.attr}=<value>`).join(" ");
+  return { message, code: "refused", why: roles.flatMap(attributesOf).map((m) => `${m.at} reads :${m.attr} (${m.where})`).join("; "),
+    fix: choices.length > 0 ? choices.map((c) => `--role ${c.role}: reads ${c.reads}`).join("\n") : `add a role to ${file} whose rows need no attribute, then mason share --role <role>`,
+    next: [...choices.map((c): [string, string] => [`mason share --role ${c.role}`, `reads ${c.reads}`]),
+      [`mason user add <name> --role ${first.name} ${sets}`, "a login that carries the values, for a tool that can reach this machine"]] };
 }
 
 /**
@@ -119,11 +134,15 @@ export function shareRole(asked: string | undefined, live: RolesLive): { role: s
     return { failure: { message: `${file} cannot be read as it is now, so nothing is shared: ${live.problem}`, code: "bad_roles", why: "what a share reads is that file's", fix: `repair ${file}, then mason share` } };
   }
   const choices = choicesOf(live);
+  const left = [...live.grants.keys()].filter((r) => !choices.some((c) => c.role === r));
   const lines = choices.map((c): [string, string] => [`mason share --role ${c.role}`, `reads ${c.reads}`]);
   if (asked !== undefined) {
     if (!ROLE_NAME_RE.test(asked)) return { failure: { message: `${JSON.stringify(asked)} is not a role name: ${ROLE_NAME_RULE}`, code: "usage" } };
     const g = live.grants.get(asked);
-    if (g !== undefined) return { role: asked, reads: readsText(g) };
+    if (g !== undefined) {
+      if (attributesOf(g).length === 0) return { role: asked, reads: readsText(g) };
+      return { failure: needsAttributes(`a share cannot read as the role ${asked}: its rows depend on ${attributesOf(g).map((m) => `:${m.attr}`).join(", ")}, and a share's login has no attributes`, [g], choices, file) };
+    }
     if (live.file === null) {
       return { failure: { message: `there is no role ${asked}: this project has no roles file`, code: "not_found", why: `a role is a key of ${file}, beside the sources file, naming the tables (and the columns of each) it may read`,
         fix: `write ${file}:\n  roles:\n    ${asked}:\n      tables:\n        <a synced table>: {}\nthen mason share --role ${asked}`, next: [["mason share", "or share every synced table: this project has no roles file"]] } };
@@ -132,11 +151,14 @@ export function shareRole(asked: string | undefined, live: RolesLive): { role: s
   }
   if (live.file === null) return { role: null, reads: "every synced table" };
   if (choices.length === 1) return { role: choices[0]!.role, reads: choices[0]!.reads };
+  if (choices.length === 0 && live.grants.size > 0) {
+    return { failure: needsAttributes(`no role of ${file} can be shared: the rows of each depend on an attribute, and a share's login has no attributes`, [...live.grants.values()], choices, file) };
+  }
   if (choices.length === 0) {
     return { failure: { message: `${file} names no role, so a share would read nothing`, code: "not_found", why: "what a share reads is one role of that file", fix: `add a role to ${file}, then mason share --role <role>` } };
   }
   return { failure: { message: `${file} names ${choices.length} roles: mason share needs to know which one this address reads as`, code: "usage",
-    why: "anyone with the address and password reads what that role reads", fix: choices.map((c) => `--role ${c.role}: reads ${c.reads}${c.default ? " (the file's default)" : ""}`).join("\n"), next: lines }, choices };
+    why: "anyone with the address and password reads what that role reads", fix: [...choices.map((c) => `--role ${c.role}: reads ${c.reads}${c.default ? " (the file's default)" : ""}`), ...(left.length > 0 ? [`left out, because a share's login has no attributes: ${left.join(", ")}`] : [])].join("\n"), next: lines }, choices };
 }
 
 /** Stops a share's tunnel client once its command is gone: by its pid, and only while that pid is still a process
@@ -167,7 +189,7 @@ export class RunShares {
 
   /** Opens a share: the socket when none is open, and a login of its own. Refused: the failure, with the choices when a role is what is missing. */
   async open(ask: { secret: string; role?: string | undefined }): Promise<OpenedShare | { failure: Failure; choices?: ShareChoice[] }> {
-    const role = shareRole(ask.role, this.deps.roles());
+    const role = shareRole(ask.role, await this.deps.listener.checkRoles());
     if ("failure" in role) return role;
     const user = `share_${crypto.randomBytes(3).toString("hex")}`;
     // in the list before the first wait, so a share ending meanwhile does not close the socket under this one
