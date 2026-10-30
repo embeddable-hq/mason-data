@@ -277,5 +277,8 @@ that implements it, and fix the doc in the same change. This file included.
 - **A read-replica source emits permanent benign WARNs** (`could not send wal heartbeat … during recovery`); not a fault.
 - **Postgres.app 18** guards passwordless `trust` connections with a macOS dialog that hangs clients; use password auth
   for the `postgres` role.
+- **CI runs Node 26, never 24**: Node 24's V8 aborts a process now and then when a WebAssembly instance (PGlite,
+  libpg-query) dies on one thread beside another's (`jit_page_->allocations_.erase(addr) == 1`, nodejs/node#66366), so
+  that crash on Node 24 is the runtime's, not the branch's (docs/DESIGN.md "The Node CI runs on").
 - **The browser and a BI tool cache**: confirm the new code is live (`mason --version`, `/healthz`) before believing a
   measurement.
