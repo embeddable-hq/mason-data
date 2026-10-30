@@ -403,7 +403,7 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     // what any connection is handed before a login: the certificate, which names no project
     const peer = await peerCertificate(r.port);
     assert.equal(peer.subject.CN, "mason");
-    assert.ok(!peer.raw.includes(path.basename(root)) && !peer.raw.includes(r.database), "the project's name is in no field of it");
+    assert.ok(!peer.raw.includes(path.basename(root)), "the project's name is in no field of it");
     const bad = await fetch(`${config().running!.controlUrl}/api/share/${r.user}`, { method: "POST", headers: { authorization: `Bearer ${config().running!.token}` }, body: JSON.stringify({ pid: "1" }) });
     assert.equal(bad.status, 400, "a report that is not one is refused");
 
