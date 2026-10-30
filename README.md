@@ -247,8 +247,8 @@ answered, what was decided and why, what was measured.
 Of the 3,086 statements the oracle also sends to a plain DuckDB connection, Mason answers 95% exactly as Postgres
 does, 1% differently by a decision it lists, and refuses 4% by name, saying what to write instead;
 none was answered with a wrong value. DuckDB alone, over the same tables, answers 30% of them exactly. [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md),
-rendered from the code, names the 993 pieces verified (types, functions, operators, aggregates, window functions,
-casts, constructs and their forms), the 47 shapes refused, the 16 answered differently and the 7 limits, each
+rendered from the code, names the 996 pieces verified (types, functions, operators, aggregates, window functions,
+casts, constructs and their forms), the 48 shapes refused, the 16 answered differently and the 7 limits, each
 with what to write instead.
 <!-- END GENERATED -->
 

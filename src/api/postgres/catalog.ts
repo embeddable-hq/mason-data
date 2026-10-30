@@ -31,6 +31,7 @@
  * The instance's TimeZone is UTC (the API treats every time as UTC, §4.8); its search_path is Postgres's default, so
  * `public."orders"` and `orders` both resolve, as a tool expects.
  */
+import { randomBytes } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { runnable } from "../../lib/runnable.ts";
@@ -50,6 +51,7 @@ export const MIN_START_MS = 30_000;
 
 /** A SQL identifier, double-quoted with an inner quote doubled. */
 const ident = (name: string): string => `"${name.replaceAll('"', '""')}"`;
+const quoteLiteral = (text: string): string => `'${text.replaceAll("'", "''")}'`;
 /** A SQL string literal, single-quoted with an inner quote doubled. */
 const literal = (text: string): string => `'${text.replaceAll("'", "''")}'`;
 /** a table's name in the catalog: its schema (Mason's source schema, else public) and name */
@@ -312,6 +314,58 @@ export function unwrapRole(frames: ReadonlyArray<{ type: string; frame: Buffer }
   const n = inner.length;
   const end = n >= 2 && inner[n - 1]!.type === "Z" && inner[n - 2]!.type === "C" ? n - 2 : n;
   return { frames: inner.slice(0, end), setRoleRefused: null };
+}
+
+/** the placeholder parameter a session's settings ride in, for one request of its (`asSession`): named anew by each
+ *  process, so no name a tool writes is it — `current_setting('mason.session')` answered the carrier's JSON where
+ *  Postgres (and `SHOW`, and the same beside a copied table) answers 42704 (a review finding of #46). A placeholder
+ *  stays defined once SET, so the name, not a RESET, is what keeps it out of reach. */
+export const SESSION_SETTINGS = `mason_${randomBytes(8).toString("hex")}.session`;
+
+/**
+ * THE CATALOG'S `current_setting(name[, missing_ok])` IS THE SESSION'S (GitHub issue 40: after `SET TimeZone` it answered
+ * the catalog's UTC, where `SHOW TimeZone` answered the session's): the value the session holds under that name, from
+ * the request's `SESSION_SETTINGS` (`asSession`: every parameter the listener's `sessionSetting` answers), else
+ * Postgres's own (`block_size`; its 42704, or NULL under missing_ok, for a name nobody knows). The `version()`
+ * override's way: search_path lists pg_catalog after public, so a statement reading no table and calling it is
+ * forwarded as ever; one that writes `pg_catalog.current_setting` is spliced to this one (server.ts
+ * userSpliced: Postgres's built-in runs its C function by OID, so its catalog row cannot be replaced). Plain
+ * SQL (plpgsql would load its library, and SHOW ALL list its `plpgsql.*`); STRICT, as Postgres's.
+ */
+export function currentSettingSql(): string[] {
+  const held = `nullif(pg_catalog.current_setting('${SESSION_SETTINGS}', true), '')::jsonb ->> lower($1)`;
+  return [
+    `CREATE OR REPLACE FUNCTION public.current_setting(text) RETURNS text LANGUAGE sql STABLE STRICT AS $$ SELECT coalesce(${held}, pg_catalog.current_setting($1)) $$`,
+    `CREATE OR REPLACE FUNCTION public.current_setting(text, boolean) RETURNS text LANGUAGE sql STABLE STRICT AS $$ SELECT coalesce(${held}, pg_catalog.current_setting($1, $2)) $$`,
+  ];
+}
+
+/**
+ * A SESSION'S CATALOG REQUEST WITH ITS SETTINGS: `SET <SESSION_SETTINGS> = '<its settings as JSON>'` before the request's
+ * frames and `RESET` after, in ONE message, as `asRole` wraps a role (around it, when the session has one) — the catalog
+ * runs one request at a time and a message whole, so no other session's request reads these settings, and none of this
+ * session's runs without them. A Sync is added before the RESET where the request has none (ignore_till_sync: a
+ * setting left set would be every session's). `settings` are the listener's `sessionSetting`, never read here. The
+ * catalog's search_path is pinned in the same SET (`public, pg_catalog`): the overrides of `current_setting` and
+ * `version()` win only while public comes first, and the request must never depend on what the catalog was left with.
+ */
+export function asSession(message: Uint8Array, settings: ReadonlyMap<string, string>): Uint8Array {
+  const own = Buffer.from(message.buffer, message.byteOffset, message.byteLength);
+  const frames = splitFrames(own);
+  const synced = frames.some((f) => f.type === "S") || frames.at(-1)?.type === "Q";
+  const json = JSON.stringify(Object.fromEntries(settings));
+  return Buffer.concat([frame("Q", cstr(`SET search_path = public, pg_catalog; SET ${SESSION_SETTINGS} = ${quoteLiteral(json)}`)), own, ...(synced ? [] : [frame("S")]), frame("Q", cstr(`RESET ${SESSION_SETTINGS}`))]);
+}
+
+/** The reply to an `asSession` message, less the SETs' and the RESET's own replies (two CommandCompletes and a
+ *  ReadyForQuery first, a CommandComplete and a ReadyForQuery last). A SET the catalog refused is a Mason bug, said. */
+export function unwrapSession(frames: ReadonlyArray<{ type: string; frame: Buffer }>): Array<{ type: string; frame: Buffer }> {
+  const ok = frames[0]?.type === "C" && frames[1]?.type === "C" && frames[2]?.type === "Z";
+  const n = frames.length;
+  if (!ok || n < 5 || frames[n - 1]!.type !== "Z" || frames[n - 2]!.type !== "C") {
+    throw new Error(`the catalog Postgres did not take the session's settings around a request (${frames.map((f) => f.type).join(", ")}): report it`);
+  }
+  return frames.slice(3, n - 2);
 }
 
 export interface PgCatalogOptions {

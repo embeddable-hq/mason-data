@@ -612,6 +612,10 @@ function icuKeysOf(v: DuckDBValue): string[] {
  * it (the writer, a copy's) passes NULL: never cancelled this way.
  */
 export const SESSION_VARIABLE = "__mason_session";
+/** the session's settings, name to value, as `current_setting(name)` answers them (src/api/postgres/server.ts
+ *  `duckSession`): set on a session's connection before each statement that finds them changed (src/duck/store.ts
+ *  `settle`), read by the rewrite's `settingRead` (src/duck/rewrite.ts) */
+export const SETTINGS_VARIABLE = "__mason_settings";
 export const CANCELLED = "mason[57014]: canceling statement due to user request";
 /** how many vectors each function was called with (a call is a hop to the main thread): what a test or a measurement
  *  reads to know whether a statement reached a function at all (the rewrite answers a `->>` natively where it can) */
