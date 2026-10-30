@@ -647,6 +647,122 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
   }
 });
 
+test("stage 1b, the roles file decides a user added without --role: its default (role row, roleFrom default), none (reads nothing, the way out), no file (as before); mason status says the default", async () => {
+  // src/cli/roles.ts userRole, src/cli/user.ts: with Mason stopped the file is read here; with Mason up the listener's
+  // roles (/api/state's roles, default included) — a run's command server over the same project, its roles a LiveRoles
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-user-default-")));
+  opened.push(async () => { fs.rmSync(root, { recursive: true, force: true }); });
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+  const config = (running: { port: number; token: string } | null): void => fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false,
+    apiKey: "k".repeat(48), sourceServer: null, running: running && { pid: process.pid, controlUrl: `http://127.0.0.1:${running.port}`, token: running.token,
+      postgresUrl: "postgresql://127.0.0.1:1/shop", postgresListener: { host: "127.0.0.1", tls: null } }, lastRun: null }), { mode: 0o600 });
+  config(null);
+  fs.writeFileSync(path.join(folder, "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ntables:\n  orders: {}\n  customers: {}\n");
+  const rolesFile = path.join(folder, "roles.yml");
+  const WITH_DEFAULT = "default: everything\nroles:\n  everything:\n    tables: all\n  agent:\n    tables:\n      orders: {}\n";
+  // agent first: the way out names the role of tables: all (everything), never merely the file's first (src/duck/grants.ts exampleRole)
+  const NO_DEFAULT = "roles:\n  agent:\n    tables:\n      orders: {}\n  everything:\n    tables: all\n";
+  const run = (argv: string[]) => runMason(root, argv, matrixEnv());
+  type User = { name?: string; user?: string; role?: string; roleFrom?: string; readsNothing?: boolean; roleKnown?: boolean };
+  const roleOf = (u: User | undefined) => u && { role: u.role, roleFrom: u.roleFrom, readsNothing: u.readsNothing };
+  const listed = async (name: string): Promise<User | undefined> => (JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: User[] }).users.find((u) => u.name === name);
+
+  // A DEFAULT: the user reads as it, said on add and on list
+  fs.writeFileSync(rolesFile, WITH_DEFAULT);
+  const a = await run(["user", "add", "metabase", "--json"]);
+  assert.equal(a.code, 0, a.stdout + a.stderr);
+  assert.deepEqual(roleOf(JSON.parse(a.stdout) as User), { role: "everything", roleFrom: "default", readsNothing: undefined });
+  const person = await run(["user", "add", "grafana"]);
+  assert.match(person.stdout, /^ {2}role +everything \(the file's default: mason\/roles\.yml\)$/m);
+  const own = await run(["user", "add", "bot", "--role", "agent", "--json"]);
+  assert.deepEqual(roleOf(JSON.parse(own.stdout) as User), { role: "agent", roleFrom: "file", readsNothing: undefined });
+  assert.deepEqual(roleOf(await listed("metabase")), { role: "everything", roleFrom: "default", readsNothing: undefined });
+  assert.equal((await listed("metabase"))?.roleKnown, undefined, "roleKnown is a user's own role's");
+  assert.deepEqual(roleOf(await listed("bot")), { role: "agent", roleFrom: "file", readsNothing: undefined });
+  const list = await run(["user", "list"]);
+  assert.match(list.stdout, /^ {2}metabase +role everything \(default\) +id [0-9a-f]{16}/m);
+  assert.match(list.stdout, /^ {2}bot +role agent +id [0-9a-f]{16}/m);
+  assert.doesNotMatch(list.stdout, /has no role/);
+
+  // NO DEFAULT: the add is still written, and says it reads nothing with the way out; list says it by name
+  fs.writeFileSync(rolesFile, NO_DEFAULT);
+  const bare = await run(["user", "add", "superset", "--json"]);
+  assert.equal(bare.code, 0, bare.stdout + bare.stderr);
+  assert.deepEqual(roleOf(JSON.parse(bare.stdout) as User), { role: undefined, roleFrom: "none", readsNothing: true });
+  const barePerson = await run(["user", "add", "dbeaver"]);
+  assert.match(barePerson.stdout, /^ {2}role +none, and mason\/roles\.yml names no default: it reads nothing until one is written$/m);
+  assert.match(barePerson.stdout, /Tip: Its statements are refused until it has a role: write default: everything at the top of mason\/roles\.yml, or mason user remove dbeaver and mason user add dbeaver --role everything\./);
+  assert.deepEqual(roleOf(await listed("metabase")), { role: undefined, roleFrom: "none", readsNothing: true }, "the file decides, at every read");
+  const noDefault = await run(["user", "list"]);
+  assert.match(noDefault.stdout, /^ {2}metabase +id [0-9a-f]{16}.*has no role, and mason\/roles\.yml names no default: its statements are refused$/m);
+  assert.match(noDefault.stdout, /^ {2}bot +role agent +id [0-9a-f]{16}[^\n]*$/m);
+  assert.doesNotMatch(noDefault.stdout, /^ {2}bot .*has no role/m);
+  const tips = noDefault.stdout.split("\n").filter((l) => l.startsWith("Tip: A user with no role"));
+  assert.deepEqual(tips, ["Tip: A user with no role reads nothing while mason/roles.yml names no default: write default: everything at the top of mason/roles.yml, or mason user remove metabase and mason user add metabase --role everything."], "ONE tip");
+
+  // A FILE THAT CANNOT BE READ (the review of #44): the listener refuses every user held to it for the FILE (57P03), so
+  // nothing says "no default" or "not in the roles file" — the file's problem is said once, the way out its repair
+  fs.writeFileSync(rolesFile, "roles: [not a map");
+  const broken = await run(["user", "list"]);
+  assert.equal(broken.code, 0, broken.stdout + broken.stderr);
+  assert.doesNotMatch(broken.stdout, /names no default|not in the roles file/);
+  assert.deepEqual(broken.stdout.split("\n").filter((l) => l.includes("cannot be read as it is now")),
+    [`Tip: mason/roles.yml cannot be read as it is now, so every statement of a user held to it is refused: ${broken.stdout.split("refused: ")[1]?.split("\n")[0] ?? ""}`], "ONE tip");
+  assert.match(broken.stdout, /refused: mason\/roles\.yml: it is not YAML: /, "the file's own mistake");
+  assert.deepEqual(roleOf(await listed("metabase")), { role: undefined, roleFrom: "none", readsNothing: undefined });
+  assert.equal((await listed("bot"))?.roleKnown, undefined, "under a problem roleKnown is left out, never false");
+  const brokenAdd = await run(["user", "add", "redash"]);
+  assert.equal(brokenAdd.code, 0, brokenAdd.stdout + brokenAdd.stderr);
+  assert.doesNotMatch(brokenAdd.stdout, /^ {2}role |reads nothing/m);
+
+  // NO FILE: every user reads every copied table, as before stage 1b: no role, nothing said
+  fs.rmSync(rolesFile);
+  assert.deepEqual(roleOf(await listed("metabase")), { role: undefined, roleFrom: "none", readsNothing: undefined });
+  const noFile = await run(["user", "add", "psql"]);
+  assert.doesNotMatch(noFile.stdout, /^ {2}role /m);
+
+  // MASON UP: the listener's roles (default included) decide the add, and mason status says the default
+  fs.writeFileSync(rolesFile, WITH_DEFAULT);
+  const r = await import("../src/cli/roles.ts");
+  const live = new r.LiveRoles(folder, root, () => [{ source: "public.orders", columns: [{ name: "id" }] }, { source: "public.customers", columns: [{ name: "id" }] }]);
+  const parsed = parseSource("postgres://mason:x@127.0.0.1:1/shop");
+  assert.ok("source" in parsed);
+  // the run's command server over this project (main's RunContext: its ledgers faked, nothing here reads them), its roles a LiveRoles
+  const ctx: RunContext = {
+    page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
+    source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], replication: () => null, port: 0, token: "t0ken-of-the-run",
+    folder: () => folder, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
+    readSource: () => readSource(folder, root, {}), runUrl: "postgres://mason:x@127.0.0.1:1/shop", roles: () => live.now(),
+    listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session) => ({ unknown: session }) },
+    logs: { capacity: 2000, recent: () => [] },
+    duck: { copies: () => [], file: path.join(root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+      requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }),
+        summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }),
+        slowest: async () => [], durationsBy: async () => new Map(), lastUsed: async (u) => u.map(() => null) },
+      events: { days: 7, recent: async () => [] }, usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
+  };
+  const server = createRunServer(ctx);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  ctx.port = (server.address() as { port: number }).port;
+  config({ port: ctx.port, token: ctx.token });
+  try {
+    const status = await run(["status", "--json"]);
+    assert.equal(status.code, 0, status.stdout + status.stderr);
+    assert.deepEqual((JSON.parse(status.stdout) as { roles: unknown }).roles, { file: "mason/roles.yml", roles: ["everything", "agent"], problem: null, default: "everything", all: ["everything"] });
+    assert.match((await run(["status"])).stdout, /^ {2}Roles +everything, agent {2}\(mason\/roles\.yml; default everything for a user added without --role\)$/m);
+    const up = await run(["user", "add", "looker", "--json"]);
+    assert.deepEqual(roleOf(JSON.parse(up.stdout) as User), { role: "everything", roleFrom: "default", readsNothing: undefined });
+    fs.writeFileSync(rolesFile, NO_DEFAULT);
+    assert.equal((JSON.parse((await run(["status", "--json"])).stdout) as { roles: { default: unknown } }).roles.default, null);
+    assert.match((await run(["status"])).stdout, /^ {2}Roles +agent, everything {2}\(mason\/roles\.yml; no default: a user with no role reads nothing\)$/m);
+    assert.deepEqual(roleOf(JSON.parse((await run(["user", "add", "tableau", "--json"])).stdout) as User), { role: undefined, roleFrom: "none", readsNothing: true });
+    // the listener's roles say which is of tables: all (/api/state's roles.all): the way out names it, as with Mason stopped
+    assert.match((await run(["user", "add", "mode"])).stdout, /Tip: Its statements are refused until it has a role: write default: everything at the top of mason\/roles\.yml, or mason user remove mode and mason user add mode --role everything\./);
+  } finally { config(null); server.close(); }
+});
+
 test("mason status's queries: the last day and the last week a line each — every outcome, the completed ones' times, rows and bytes; a short log says so", () => {
   const queryLines = (commands as Record<string, unknown>).queryLines as ((q: unknown, st: typeof PLAIN) => string[]) | undefined;
   assert.equal(typeof queryLines, "function");
@@ -839,8 +955,8 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
   assert.equal(failure(none).fix, "write mason/roles.yml:\n  roles:\n    agent:\n      tables:\n        <a copied table>: {}\nthen mason user add <name> --role agent");
   // the file's mistakes, each at its key: a misspelt top key, a role with no table, a table the sources file does not copy, a column both listed and excluded
   for (const [text, want] of [
-    ["role:\n  agent:\n    tables:\n      orders: {}\n", /unexpected key role — did you mean `roles`\? — a roles file takes roles alone/],
-    ["roles:\n  agent: {}\n", /roles\.agent\.tables: missing — write tables: \{ orders: \{\} \}, the tables the role may read \(a role with no table reads nothing: remove it instead\)/],
+    ["role:\n  agent:\n    tables:\n      orders: {}\n", /unexpected key role — did you mean `roles`\? — a roles file takes default and roles/],
+    ["roles:\n  agent: {}\n", /roles\.agent\.tables: missing — write tables: all \(every copied table\) or tables: \{ orders: \{\} \}, the tables the role may read \(a role with no table reads nothing: remove it instead\)/],
     ["roles:\n  agent:\n    tables:\n      products: {}\n", /roles\.agent\.tables\.products: public\.products is not a table the sources file copies — a role reads copied tables only \(copied: orders, customers, billing\.invoices; mason add products copies it\)/],
     // a bare name of a table copied under its schema: the qualified entry is suggested
     ["roles:\n  agent:\n    tables:\n      invoices: {}\n", /roles\.agent\.tables\.invoices: public\.invoices is not a table the sources file copies — did you mean `billing\.invoices`\? — a role reads copied tables only/],
@@ -880,8 +996,55 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
   assert.match(orphan.stdout, /^ {2}bot +role agent +id [0-9a-f]{16}/m);
   assert.match(orphan.stdout, /^ {2}ops-bot +role ops +id [0-9a-f]{16}.*its role ops is not in the roles file: its statements are refused$/m);
   assert.match(orphan.stdout, /A role the roles file \(mason\/roles\.yml\) does not name reads nothing: add ops to it, or mason user remove ops-bot, then mason user add ops-bot --role <role>\./);
-  // a user with no role is listed as before
+  // a user with no role under a file with no default: no role, and it reads nothing (stage 1b)
   assert.equal((await run(["user", "add", "plain", "--json"])).code, 0);
   const plain = (JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: Array<{ name: string; role?: string }> }).users.find((u) => u.name === "plain");
-  assert.ok(plain !== undefined && !("role" in plain) && !("roleKnown" in plain), JSON.stringify(plain));
+  assert.deepEqual(plain && { role: plain.role, roleKnown: "roleKnown" in plain, roleFrom: (plain as { roleFrom?: string }).roleFrom, readsNothing: (plain as { readsNothing?: boolean }).readsNothing },
+    { role: undefined, roleKnown: false, roleFrom: "none", readsNothing: true }, JSON.stringify(plain));
+});
+
+test("mason start --replication, --poll and --publication are gone: each answers with the line to write in the sources file and exit 2, as a person and with --json, and starts nothing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-start-gone-"));
+  try {
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:secret@127.0.0.1:1/shop\ntables:\n  orders: {}\n");
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "gone", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null }), { mode: 0o600 });
+    const syncWhy = "how each table is kept current is its sync: in the sources file (at the top for every table, on an entry for that one), so what runs is what is committed";
+    const next = [{ command: "mason start", what: "each table kept current as its sync: says" }, { command: "mason help production", what: "sync: and publication:, and what each needs" }];
+    const cases: Array<[string[], { message: string; why: string; fix: string }]> = [
+      [["--replication"], { message: "--replication is gone: the sources file says it now", why: syncWhy,
+        fix: "write sync: replication at the top of mason/sources/shop.yml, then mason start" }],
+      [["--poll"], { message: "--poll is gone: the sources file says it now", why: syncWhy,
+        fix: "write sync: poll 5m at the top of mason/sources/shop.yml (any interval: poll 5s, poll 1h; or sync: off, the default, and mason sync <table> when you need it), then mason start" }],
+      [["--publication", "app_pub"], { message: "--publication is gone: the sources file says it now",
+        why: "the publication replication reads is the sources file's publication:, so what runs is what is committed",
+        fix: "write publication: app_pub at the top of mason/sources/shop.yml, with sync: replication on the entries of the tables it carries, then mason start" }],
+      // a publication goes with replication: one coherent way out, never "poll every table" and "replicate some" at once
+      [["--poll", "--publication", "app_pub"], { message: "--poll and --publication are gone: the sources file says it now",
+        why: `${syncWhy.replace(/, so what runs is what is committed$/, "")}, and the publication replication reads is its publication:, so what runs is what is committed`,
+        fix: "a publication goes with replication: write publication: app_pub at the top of mason/sources/shop.yml, with sync: replication on the entries of the tables it carries " +
+          "and sync: poll 5m (any interval) on the others, then mason start" }],
+      // several on ONE report, --attach or not: never run
+      [["--replication", "--publication=app_pub", "--attach"], { message: "--replication and --publication are gone: the sources file says it now",
+        why: `${syncWhy.replace(/, so what runs is what is committed$/, "")}, and the publication replication reads is its publication:, so what runs is what is committed`,
+        fix: "write sync: replication and publication: app_pub at the top of mason/sources/shop.yml, then mason start" }],
+    ];
+    for (const [flags, want] of cases) {
+      const person = await runMason(root, ["start", ...flags], matrixEnv());
+      assert.equal(person.code, 2, person.stdout + person.stderr);
+      assert.equal(person.stdout, "");
+      assert.equal(person.stderr, `✗ mason start: ${want.message}\n  why   ${want.why}\n  fix   ${want.fix}\n\nNext:\n` +
+        `  mason start                                   each table kept current as its sync: says\n  mason help production                         sync: and publication:, and what each needs\n`);
+      const json = await runMason(root, ["start", ...flags, "--json"], matrixEnv());
+      assert.equal(json.code, 2, json.stdout + json.stderr);
+      assert.deepEqual(JSON.parse(json.stdout), { error: { code: "usage", ...want }, next });
+    }
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8")).running, null, "nothing runs");
+    // outside a project: the file every project has, by its place
+    const away = await runMason(os.tmpdir(), ["start", "--poll", "--json"], matrixEnv());
+    assert.equal(away.code, 2, away.stdout + away.stderr);
+    assert.match((JSON.parse(away.stdout) as { error: { fix: string } }).error.fix, /^write sync: poll 5m at the top of mason\/sources\/<name>\.yml /);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

@@ -109,15 +109,16 @@ before(async () => {
   ledger = await RequestLedger.open(store, () => undefined, { days: 7, flushMs: 60_000 });
   const u = await import("../src/duck/users.ts");
   const logins: Pick<PgApiOptions, "authenticate" | "recheck" | "recheckMs"> = u.listenerLogins(new u.LiveUsers(path.join(home, u.USERS_FILE), API_KEY), API_KEY);
-  // the project's roles file (src/cli/roles.ts), read as mason start reads it: the analyst reads two columns of orders and customers whole
-  fs.writeFileSync(path.join(root, "mason", "roles.yml"), "roles:\n  analyst:\n    tables:\n      orders:\n        columns: [id, status]\n      customers: {}\n");
+  // the project's roles file (src/cli/roles.ts), read as mason start reads it: the analyst reads two columns of orders and customers whole;
+  // a user with no role (claude) reads as the file's default, everything (tables: all), as mason init writes it
+  fs.writeFileSync(path.join(root, "mason", "roles.yml"), "default: everything\nroles:\n  analyst:\n    tables:\n      orders:\n        columns: [id, status]\n      customers: {}\n  everything:\n    tables: all\n");
   // the roles module may not exist where this file proves itself (scripts/fails-without.ts, src at an older commit): then
   // no roles are wired and the role's test below fails by name, the others still run (as tests/duck-users-wire.test.ts does)
   const r = await import("../src/cli/roles.ts").catch((e: unknown) => { if ((e as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw e; return null; });
   const live = r === null ? null : new r.LiveRoles(path.join(root, "mason"), root, () => schema.tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, columns: t.columns.map((c) => ({ name: c.name })) })));
   api = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: "shop", masonVersion: "test", ...logins, recheckMs: 0,
-    roles: () => (live === null ? { file: null, grants: new Map(), problem: null } : live.now()) as never,
+    roles: () => (live === null ? { file: null, grants: new Map(), problem: null, default: null } : live.now()) as never,
     schema: () => schema, record: (row) => ledger.record(row), log: () => undefined,
     duck: await store.listener(undefined, undefined, undefined, copies),
   });
@@ -451,8 +452,9 @@ test("query: rows and Postgres's types for a GROUP BY, an enum by its name, trun
   assert.ok(rows.some((r) => r.query.startsWith("SELECT status, count(*)") && r.outcome === "ok"), "the GROUP BY");
   assert.deepEqual(rows.filter((r) => r.query === "SELECT id FROM orders ORDER BY id").map((r) => [r.outcome, r.rows]).sort(), [["ok", 2], ["ok", 5]], "the truncated query, with the rows it sent");
   assert.ok(rows.some((r) => r.sqlstate === "0A000"), "the refusal");
-  // every row is mason mcp's, as the user it connected as (claude here; analyst in the role's test, its role beside it)
-  assert.ok(rows.every((r) => r.applicationName === "mason-mcp/mason-test" && (r.user === "claude" ? r.role === "" : r.user === "analyst" && r.role === "analyst")),
+  // every row is mason mcp's, as the user it connected as (claude here, under the file's default role everything;
+  // analyst in the role's test, its role beside it)
+  assert.ok(rows.every((r) => r.applicationName === "mason-mcp/mason-test" && (r.user === "claude" ? r.role === "everything" : r.user === "analyst" && r.role === "analyst")),
     JSON.stringify(rows.map((r) => [r.applicationName, r.user, r.role])));
   assert.ok(c.lines.every((l) => (JSON.parse(l) as { jsonrpc?: string }).jsonrpc === "2.0"), "stdout: JSON-RPC frames alone");
 });

@@ -118,7 +118,8 @@ const refusedWith = async (o: Parameters<typeof connect>[0]): Promise<pg.Databas
 test("mason user add prints the URL a tool pastes: it connects as that user, and the user name must be the user's", async () => {
   await wired();
   const added = await masonUser("add", "metabase");
-  assert.deepEqual(Object.keys(added).sort(), ["addedAt", "database", "host", "id", "next", "password", "port", "psql", "sslmode", "url", "user"]);
+  assert.deepEqual(Object.keys(added).sort(), ["addedAt", "database", "host", "id", "next", "password", "port", "psql", "roleFrom", "sslmode", "url", "user"]);
+  assert.equal(added.roleFrom, "none", "no roles file: no role, and every copied table read");
   assert.equal(added.user, "metabase");
   assert.equal(added.psql, `psql ${added.url as string}`, "its psql line, as mason user add prints it");
   assert.equal(added.url, `postgres://metabase:${added.password as string}@127.0.0.1:${api.port}/shop`, "the one URL builder: the user and its password");

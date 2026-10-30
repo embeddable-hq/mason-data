@@ -1,6 +1,6 @@
 /**
  * THE DUCKDB COPY KEPT CURRENT BY LOGICAL REPLICATION, AGAINST A REAL POSTGRES (src/duck/stream.ts, src/duck/sync.ts
- * replication mode; `mason start --replication` on Mason).
+ * replication mode; a table whose `sync:` is `replication` on Mason).
  *
  * DuckDB's `<schema>.<table>` must equal the source after every kind of change an app makes, as the stream brings it: an
  * insert, an update, a delete, a primary-key change, an UPDATE that leaves a large (TOASTed) value unchanged, a savepoint,
@@ -371,11 +371,11 @@ test("a table copies beside the stream: the others stay current and the slot mov
   }
 });
 
-// A PUBLICATION THE OPERATOR NAMED (`mason start --replication --publication <name>`; src/duck/publication.ts)
+// A PUBLICATION THE OPERATOR NAMED (`publication: <name>` in the sources file; src/duck/publication.ts)
 // is read as it is: verified, never created, altered or dropped — on a read replica Mason could not make one, and on a
 // customer's primary the one object Mason creates is its slot. A table it does not carry is refused on its own line, the
-// stream going on for the others; `--poll` drops the slot alone.
-test("a NAMED publication is read as it is, never altered: a table it lacks is refused with the way out, the others stream on; --poll drops only the slot", { skip }, async () => {
+// stream going on for the others; no table replicated any more drops the slot alone.
+test("a NAMED publication is read as it is, never altered: a table it lacks is refused with the way out, the others stream on; no table replicated drops only the slot", { skip }, async () => {
   const db = `${tag}_p`, url = urlOf(db);
   psql(adminUrl!, `CREATE DATABASE ${db}`);
   psql(url, "CREATE TABLE a (id int PRIMARY KEY, v text, extra text); CREATE TABLE b (id int PRIMARY KEY, v text); CREATE TABLE c (id int PRIMARY KEY, v text); " +
@@ -429,7 +429,7 @@ test("a NAMED publication is read as it is, never altered: a table it lacks is r
   assert.equal(tables(), published, "pg_publication_tables is unchanged");
   assert.ok(!logged.some((l) => /(made|re-pointed) publication/.test(l)), logged.join("\n"));
 
-  // mason start --poll (and mason destroy): the slot goes, verified; the publication is its owner's and stays as it was
+  // no table replicated any more (and mason destroy): the slot goes, verified; the publication is its owner's and stays as it was
   const { dropOwnReplication } = await import("../../src/cli/replication-mode.ts");
   assert.deepEqual(await dropOwnReplication(parsed.source, repl), [`replication slot ${repl.slot}`]);
   assert.equal(psql(url, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${repl.slot}'`), "0");

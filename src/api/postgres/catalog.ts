@@ -35,7 +35,7 @@ import { randomBytes } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { runnable } from "../../lib/runnable.ts";
-import type { RoleGrants } from "../../duck/grants.ts";
+import { NO_ROLE_CATALOG, type RoleGrants } from "../../duck/grants.ts";
 import { cstr, frame, splitFrames } from "./protocol.ts";
 import { PG_API_TYPE_SPELLING, typeNameParts, type PgJoin, type PgSchema, type PgTable } from "./schema.ts";
 
@@ -237,7 +237,9 @@ export function catalogViews(schema: PgSchema, roles: ReadonlyMap<string, RoleGr
   return (schema.views ?? []).map((v) => {
     const name = `${ident(v.schema)}.${ident(v.name)}`;
     const comment = v.description ? ` COMMENT ON VIEW ${name} IS ${literal(v.description)};` : "";
-    const granted = [...roles.keys()].map((r) => ` GRANT USAGE ON SCHEMA ${ident(v.schema)} TO ${ident(r)}; GRANT SELECT ON ${name} TO ${ident(r)};`).join("");
+    // every role of the file may see a view; the catalog's role of a user held to nothing sees none (as a login with no
+    // grant on Postgres)
+    const granted = [...roles.keys()].filter((r) => r !== NO_ROLE_CATALOG).map((r) => ` GRANT USAGE ON SCHEMA ${ident(v.schema)} TO ${ident(r)}; GRANT SELECT ON ${name} TO ${ident(r)};`).join("");
     return `CREATE SCHEMA IF NOT EXISTS ${ident(v.schema)}; CREATE VIEW ${name} AS ${v.definition.replace(/;\s*$/, "")};${comment}${granted}`;
   });
 }
@@ -256,7 +258,12 @@ export function catalogViews(schema: PgSchema, roles: ReadonlyMap<string, RoleGr
  * while roles exist** (the review of #35): the catalog's one connection is the superuser's with `SET ROLE` on top, so
  * inside one statement `set_config('role', 'none', false)` was a permitted RESET ROLE and the statement's later
  * targets ran as the superuser (`information_schema` listed every hidden column's name); revoked, a role's session is
- * refused it (42501 `permission denied for function set_config`) and the superuser keeps it.
+ * refused it (42501 `permission denied for function set_config`) and the superuser keeps it. A role of `tables: all`
+ * (stage 1b) is resolved to a whole-table grant on every copied table (src/cli/roles.ts resolveRoles), so it is written
+ * here as per-table `GRANT SELECT`s, never `GRANT SELECT ON ALL TABLES IN SCHEMA`: the catalog is rebuilt from the
+ * resolved grants whenever the copied tables move, so a table added later is granted at that rebuild. The file's
+ * `default:` role is one of these roles: a user with no role of its own runs its catalog requests under it; under a
+ * file with no default it runs them as `NO_ROLE_CATALOG` (src/duck/grants.ts catalogRolesOf), a role with no grant.
  */
 export function catalogRoles(schema: PgSchema, roles: ReadonlyMap<string, RoleGrants>): string[] {
   const out: string[] = [];
@@ -322,7 +329,7 @@ export const SESSION_SETTINGS = `mason_${randomBytes(8).toString("hex")}.session
  * Postgres's own (`block_size`; its 42704, or NULL under missing_ok, for a name nobody knows). The `version()`
  * override's way: search_path lists pg_catalog after public, so a statement reading no table and calling it is
  * forwarded as ever; one that writes `pg_catalog.current_setting` is spliced to this one (server.ts
- * sessionUserSpliced: Postgres's built-in runs its C function by OID, so its catalog row cannot be replaced). Plain
+ * userSpliced: Postgres's built-in runs its C function by OID, so its catalog row cannot be replaced). Plain
  * SQL (plpgsql would load its library, and SHOW ALL list its `plpgsql.*`); STRICT, as Postgres's.
  */
 export function currentSettingSql(): string[] {

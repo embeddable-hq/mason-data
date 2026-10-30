@@ -519,8 +519,8 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   (`entryProblems`; the stream cannot apply a keyless change, and publishing NOTHING fails the app's own UPDATEs).
   A sync change keeps the copy in every direction: into replication it is marked behind in `_mason.catch_up` and caught
   up by one poll while the stream holds its changes; out of it, it leaves the stream and is caught up by one poll.
-  `mason start --replication` / `--poll` / `MASON_CHANGES` are read only where the file agrees, else refused naming the
-  `sync:` line (`changesAgreement`); the next release removes them. **A table set to `replication` while the run is
+  `mason start --replication` / `--poll` / `--publication` and `MASON_CHANGES` are gone: each answers with the line to
+  write in the sources file, starting nothing (`removedStartFlags`, `changesRetired`, src/lib/table-sync.ts). **A table set to `replication` while the run is
   up, in a run that never checked the database for it, is held to the start's own checks first** (`checkReplication`,
   src/cli/dev.ts; `liveReadinessFailure`): refused with what the database lacks and the line that polls it, the file put
   back byte for byte — a review finding: on `wal_level = replica` the add said success and the table, polled until then,
@@ -533,7 +533,7 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
 - **A NAMED publication is read and verified, never created, altered or dropped; Mason makes its own only when none is
   named** (a read replica takes no CREATE PUBLICATION, and on a production primary the slot is the one
   object Mason creates). Named by `publication:` at the top of the sources file (`${PG_PUBLICATION}` allowed, read by
-  `readSource`), else `--publication` (both is refused), else `PG_PUBLICATION` (`namedPublication`) — never the one a
+  `readSource`), else `PG_PUBLICATION` (`namedPublication`) — never the one a
   start recorded, so a file that takes `publication:` out gets Mason's own; Mason's own one left behind by a switch to a
   named one is dropped, verified gone, before the record moves (`staleReplication`); verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
   second verifier. A gap in one table refuses that table alone, the others stream on; the way out is the found

@@ -269,13 +269,16 @@ that implements it, and fix the doc in the same change. This file included.
 ## Hard-won gotchas (violating these costs hours)
 
 - **A replication slot outlives its reader**, and holds the source's WAL while nobody reads it — for ever, whatever the
-  disk. So the SOURCE caps it: `max_slot_wal_keep_size` (Postgres 13+). `mason stop` says the slot stays; `mason destroy`
-  and `--poll` drop it, verified gone. A deployment torn down for good must drop its slot.
+  disk. So the SOURCE caps it: `max_slot_wal_keep_size` (Postgres 13+). `mason stop` says the slot stays; `mason destroy`,
+  and a start whose sources file has no table with `sync: replication`, drop it, verified gone. A deployment torn down for good must drop its slot.
 - **One process per DuckDB file.** The store opens the file once; `mason user` edits `.mason/users.json` beside it and
   the listener re-reads the file, because a second process cannot open the store. A platform runs ONE replica.
 - **`pgrep -f <pattern>` matches itself** inside a shell string; **never kill by a broad pattern** — kill by a checked PID.
 - **A read-replica source emits permanent benign WARNs** (`could not send wal heartbeat … during recovery`); not a fault.
 - **Postgres.app 18** guards passwordless `trust` connections with a macOS dialog that hangs clients; use password auth
   for the `postgres` role.
+- **CI runs Node 26, never 24**: Node 24's V8 aborts a process now and then when a WebAssembly instance (PGlite,
+  libpg-query) dies on one thread beside another's (`jit_page_->allocations_.erase(addr) == 1`, nodejs/node#66366), so
+  that crash on Node 24 is the runtime's, not the branch's (docs/DESIGN.md "The Node CI runs on").
 - **The browser and a BI tool cache**: confirm the new code is live (`mason --version`, `/healthz`) before believing a
   measurement.

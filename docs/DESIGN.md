@@ -218,8 +218,8 @@ watermark, then polled as its sync says. When no table is replicated any more th
 publication with it, VERIFIED gone (`retireReplication`: the stream stopped first, the slot waited inactive), at the
 start that finds none and live when the last one leaves; the project's config records what was made
 (`config.replication`) through the run's hook, so `mason destroy` drops what exists, never a name computed again.
-`mason start --replication` / `--poll` / `MASON_CHANGES` are taken only where they agree with the file and refused
-otherwise, naming the `sync:` line to write; PR 3 removes them.
+`mason start --replication` / `--poll` / `MASON_CHANGES` were taken only where they agreed with the file and refused
+otherwise, naming the `sync:` line to write, until PR 3 removed them (below).
 
 **Why.** One decision per project made the developer choose between a slot that decodes every table's writes (a busy
 log table the dashboards never read included) and polls that scan every table; the file already weighs each table's
@@ -229,8 +229,24 @@ what Mason reads. The slot is dropped when unused because it holds the source's 
 instant the stream was known current (`kept.syncedAt`: the later of its last poll and the stream's last keepalive or
 flush with nothing pending), said as `replicated, at <lsn>, <age>` on its line, so a stopped stream's copy is never
 read as current. **Where.** `src/duck/sync.ts` (`replicated`, `streams`, `ensurePublication`, `retireReplication`),
-`src/cli/replication-mode.ts` (`changesAgreement`, `publicationConflict`), `src/cli/sources.ts`; `tests/cli-sources.test.ts`,
+`src/cli/replication-mode.ts`, `src/cli/sources.ts`; `tests/cli-sources.test.ts`,
 `tests/integration/duck-stream.itest.ts` (a mixed project, a switch each way, a named publication, REPLICA IDENTITY NOTHING).
+
+**The flags and `MASON_CHANGES` gone** (2026-10-30, PR 3 of 3). `mason start --replication`, `--poll` and
+`--publication`, and `MASON_CHANGES` on a server, are removed: each flag answers, before the options are parsed and
+before anything starts, with the line to write at the top of the sources file (`sync: replication`, `sync: poll 5m`,
+`publication: <name>`) and exit 2, on one report however many are given; `MASON_CHANGES` set is one line of `mason
+serve`'s settings report, naming its `sync:` line (`removedStartFlags`, `changesRetired`, `src/lib/table-sync.ts`).
+The way out names the EDIT, read from the file (`sourcesTop`, `topEdit`): every file `mason init` writes has a `sync:`
+line at its top already, so "write `sync: replication` at the top" made a second one, a file the run refuses (the
+independent review); it says "change `sync: poll 5s` … to `sync: replication`", "keep", or "write" only where the file
+has no such line — `MASON_POLL_MS`'s too. A test applies each way out to an init-made file as written and parses it.
+**Why.** Taken where they agreed with the file (PR 2) they said nothing the file did not, and two places to say how a
+table is kept current is one more than production can be held to: the committed file is what runs. A removed setting
+refuses rather than runs a default (CLAUDE.md "Conventions"). `config.json`'s `changes`, the mode an older Mason
+recorded, is still READ — never written — so a start whose file replicates nothing drops that older run's slot and says
+why, and `mason destroy` drops it; the first start deletes it. **Where.** `src/cli/registry.ts`, `src/cli/serve.ts`,
+`src/lib/table-sync.ts`; `tests/cli-commands.test.ts`, `tests/serve.test.ts`.
 
 ### Logical replication
 
@@ -1127,6 +1143,38 @@ view must exist first) and checked on their base tables: stricter than Postgres,
 `src/api/postgres/server.ts` (`Session.grants`, `heldToRole`, `catalogAs`); `tests/duck-roles-wire.test.ts`,
 `tests/postgres-api/catalog.test.ts`, the oracle's `roleCases`.
 
+### Roles: the file decides the default (2026-10-29, GitHub issue 30, stage 1b)
+
+**What stage 1a left in the code.** A user with no role read every copied table, and so did a token: a grant nobody had
+written down, decided by `Session.grants()` returning "no role, nothing to hold". Beside a roles file that narrowed
+every other user, the one line of access no reviewer could read in a commit was the widest.
+
+**Decision (the owner, 2026-10-29): the FILE says it.** Three states, each said where a person and an agent look (`mason
+start`'s roles line, `mason user add` / `list`, `mason status`, the web page, `--json`'s `roleFrom` / `readsNothing`):
+no `mason/roles.yml` — every user reads every copied table, as before roles existed; `default: <role>` at the top of
+the file — a user added without `--role` reads as that role (its refusals, its catalog under `SET ROLE`, its request
+log rows); a file with no `default:` — such a user reads nothing, each statement that reads a copied table refused
+42501 with the two ways out as exact lines, `SELECT 1` still answered. Its catalog requests run as a grant-less role,
+`__mason_no_role` — named outside the file's namespace (a role name never starts with `_`) — so `information_schema`
+and the privilege functions answer as Postgres's do for a login with no grant (the review of #44: run as the catalog's
+superuser they listed every table and said `has_table_privilege` true while every read was refused). The session asks the roles at
+every statement (`LiveRoles` re-reads the file when its stat moves), so an edit of `default:` applies at the next one;
+`Session.roleName` is the effective role, the one name `catalogAs`, the plan cache and the request log read. A file
+that cannot be read refuses a roleless user too (57P03): its default cannot be known, and fail closed is the rule. A
+token is no user and keeps reading everything: it is minted from the API key, which is the operator's.
+
+**`tables: all`, Postgres's own word.** "Every table" is `GRANT SELECT ON ALL TABLES IN SCHEMA` in Postgres, so the
+file says `tables: all` rather than a word of Mason's; it is resolved against the tables copied at every read
+(`resolveRoles` writes a whole-table grant per copied table), so a table the sources file adds is the role's once its
+copy is served, and the catalog grants it per table at its rebuild — never `ON ALL TABLES`, which would be true only
+of the tables there at the GRANT. A table key `all` is refused with both meanings (`public.all` for a table so named).
+The oracle holds a Mason role of `tables: all` to a Postgres role granted `ALL TABLES IN SCHEMA public`.
+
+**`mason init` writes the file** (`newRolesText`, beside the sources file's `newSourceText`): one role, `everything`,
+`tables: all`, and `default: everything`, with a narrower role as a comment to copy. A new project starts with today's
+access, but visible in a committed file: narrowing it is an edit a reviewer sees, and deleting the `default:` line is
+the one-line way to make every roleless user read nothing. A file already there (a clone) is kept byte for byte.
+
 ### An MCP server (2026-10-29)
 
 **Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is
@@ -1241,7 +1289,7 @@ is left out of the sources file (2026-10-28, `DEMO_TABLE_TO_ADD` in `src/demo/se
 after `mason start` is a real `mason add` (or the web page's Add), and they see a copy begin; its foreign keys' targets
 are among the three, so it joins cleanly when it lands, and the writer keeps inserting into it in the database meanwhile. The port is chosen free at init and kept
 in that URL alone; the run reads it back from the resolved URL (`src/cli/demo.ts` `demoPort`). It is read by polling
-only: `--replication` on a demo project is refused before anything starts.
+only: a table whose `sync:` is `replication` in a demo project's sources file is refused before anything starts.
 
 **Why.** A first try should need nothing installed: no Docker, no Postgres, no database of one's own to point at.
 PGlite is a real Postgres (its catalog, its types, its `xmin`) already in the package, where a fixture of rows would be a
@@ -1258,7 +1306,7 @@ so the next start seeds it again. **Where.** `src/cli/demo.ts`, `src/demo/source
 ### On a server: `mason serve` and the image
 
 **Decision.** `mason serve` is `mason start --attach`'s run configured by the environment alone (`DATABASE_URL`,
-`MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_CHANGES`, `MASON_PG_*`), every bad setting on one
+`MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_PG_*`), every bad setting on one
 report, the log on stdout, SIGTERM its stop (tini PID 1). `GET /healthz` (`MASON_HEALTH_PORT`, 4140) is 503 until the run
 answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:24-slim with the
 copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress
@@ -1342,6 +1390,47 @@ statements in flight, and DuckDB 2.0 has no per-connection thread or priority co
 10. A table being caught up holds its decoded changes in Node's heap (`held`): unbounded for a migration meanwhile.
 11. A copy's catch-up is ONE poll, neither chunked nor resumable (a transaction held open on the source moves the rows
     since into it; a copy resumed days later catches up days), and a copy neither pauses for a smaller table nor yields.
+
+### The Node CI runs on (2026-10-30)
+
+**Incident.** From 2026-10-29 CI's `checks` job failed one test file after every test in it had passed, at the file's
+exit: `# Check failed: jit_page_->allocations_.erase(addr) == 1.` in `ThreadIsolation::UnregisterWasmAllocation`, on
+Node 24.22.1. Five runs in two days on five unrelated branches (about one `checks` run in thirteen), always a file that
+loads WebAssembly: `tests/duck-json-columns.test.ts` three times, `tests/postgres-api/catalog.test.ts` twice. It is a
+V8 bug, nodejs/node#66366: V8 13.6 (Node 24) keeps the wasm-to-JS import wrappers in ONE cache for every isolate of a
+process, and a wrapper the wasm code GC is freeing can be looked up by another thread and freed a second time; fixed in
+V8 by 9b8ca54d5a ("Fix lookup of wrappers marked is_dying"), in Node 26's V8 and absent from Node 22's (whose wrappers
+are per isolate), and in no Node 24 release yet (backport nodejs/node#66376, open). Mason meets it by design: PGlite on
+the catalog's worker and the function worker, libpg-query on the parser's, each its own isolate in one process, and a
+worker terminated whenever a catalog stops, is replaced or idles out, or the process ends.
+
+**Decision.** Every workflow runs Node 26 (`ci.yml`, `release.yml`), held by `tests/conventions.test.ts` ("no workflow
+runs Node 24"). Closing every instance before the exit was not it: both files already stop every catalog they start
+and close every PGlite they open (`finally`), and stop the parser in `after`, and the death of an instance is what
+feeds the code GC that races: closing earlier moves the race, it does not remove it.
+`--no-wasm-code-gc` does make the double free unreachable on Node 24 (V8 13.6 frees a wrapper only through the code
+GC's `DecRefOnDeadCode`, which the flag never triggers), but it reaches only the processes `node --test` starts: Node
+refuses it in `NODE_OPTIONS`, so the `mason` children the CLI tests spawn and the integration jobs' `mason serve` would
+still run with the bug. Node 26 removes the code that races, in every process CI starts.
+
+**Measured**, on CI's runner (ubuntu x64, 4 cores), the two files it hit run as three processes at once
+(`duck-json-columns` twice, `catalog` once) beside one CPU-bound process, in a loop for 15 minutes, 15 jobs an arm:
+
+| arm | file processes | the CHECK | jobs it failed |
+|---|---|---|---|
+| Node 24.22.1 | 537 | 9 (5 `duck-json-columns`, 4 `catalog`), the CI frames to the address | 7 of 15 |
+| Node 26.13 | 621 | 0 | 0 of 15 |
+| Node 24.22.1, `--no-wasm-code-gc` | 522 | 0 | 0 of 15 (one timing flake) |
+
+At Node 24's 1.7 %, none in 621 is a chance of about 3 in 100,000. A full suite does not show it on demand: none in 20
+full suites on each of the three arms (the suite is green on 26), none in 120 runs of `duck-json-columns` in an arm64
+container under 1 and 2 CPUs on Node 24 and 26, none in 20 runs of a PGlite and libpg-query worker churn under
+`--stress-wasm-code-gc` there. Upstream's reporter: 0 in 191 processes with the two V8 commits on Node 24, 8 in 149
+without, and none on Node 26.10.
+
+**Still true.** The image (`docker/mason-data.Dockerfile`, `node:24-slim`) and a user's own Node 24 still carry the bug,
+and `mason serve` terminates a catalog worker at every idle stop: there it is a rare abort the supervisor restarts.
+Lift the guard when a Node 24 release carries nodejs/node#66376.
 
 ## Measurements
 

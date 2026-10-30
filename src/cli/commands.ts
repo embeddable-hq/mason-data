@@ -117,7 +117,7 @@ export interface RunState {
   ui?: boolean;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
-  roles?: { file: string | null; roles: string[]; problem: string | null };
+  roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[] };
 }
 
 // ------------------------------------------------------------------ shared
@@ -378,7 +378,8 @@ const STATUS_USAGE = `usage: mason status [--json]
            was decided on), filled: { rows, seconds } (what its own fill measured), queued (a backfill waiting for the fill
            under way), keptAt, readyAt, why }]. roles (a run with a roles file, mason/roles.yml: what a user added
            with --role may read): { file, roles: [name], problem (what is wrong with the file now, every statement of a
-           user with a role refused while there is; null) }
+           user with a role refused while there is; null), default (the role of a user added without --role; null: the
+           file names none, and such a user reads nothing), all (the roles of tables: all) }
 
   In replication mode a Stream section says where the stream is: its position against the database's (bytes behind),
   when the newest change applied was committed and how long after it was applied, and each added table — streamed,
@@ -473,8 +474,9 @@ export async function status(argv: string[]): Promise<number> {
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
       ...(s.ui === true ? [["Web UI", `${run.control.url}/  (mason ui opens it)`] as [string, string]] : []),
       // the roles file as the listener reads it now (mason user add --role): its roles, or what is wrong with it
-      ...(s.roles && (s.roles.roles.length || s.roles.problem !== null)
-        ? [["Roles", s.roles.problem !== null ? st.red(`${s.roles.problem} (every statement of a user with a role is refused until it is fixed)`) : `${s.roles.roles.join(", ")}  (${s.roles.file}; a user with none reads every table)`] as [string, string]] : []),
+      ...(s.roles && s.roles.file !== null
+        ? [["Roles", s.roles.problem !== null ? st.red(`${s.roles.problem} (every statement of a user with a role is refused until it is fixed)`)
+          : `${s.roles.roles.join(", ")}  (${s.roles.file}; ${s.roles.default != null ? `default ${s.roles.default} for a user added without --role` : "no default: a user with no role reads nothing"})`] as [string, string]] : []),
       ...s.warnings.map((w) => ["Warning", w] as [string, string]),
     ];
     out(reportText({ headline: `Status: ${st.green("running")}`, details: rows }, st));

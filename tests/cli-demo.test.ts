@@ -50,16 +50,23 @@ test("the demo database's port is read from the URL it is kept in, at once (noth
   assert.match(notUrl.problem, /^DATABASE_URL in \.env was changed: "not a url" is not a URL\..* The demo database is postgres:\/\/demo@127\.0\.0\.1:<port>\/demo; mason destroy and mason init demo again/);
 });
 
-test("a demo project is polled: --replication, or a config edited to it, refused before anything starts; any other project untouched", () => {
-  const refusal = fn<[{ demo?: boolean; changes?: "poll" | "replication" }, "poll" | "replication" | null], { message: string; code: string; why: string; fix: string; next: Array<[string, string]> } | null>("demoChangesRefusal");
-  assert.equal(refusal({}, "replication"), null, "a project of its own database replicates as it may");
-  assert.equal(refusal({ demo: true }, null), null);
-  assert.equal(refusal({ demo: true }, "poll"), null);
-  assert.equal(refusal({ demo: true, changes: "replication" }, "poll"), null, "--poll takes it back");
-  assert.deepEqual(refusal({ demo: true }, "replication"), { message: "the demo database is read by polling only: --replication does not apply to it", code: "refused",
+test("a demo project is polled: a table set to sync: replication, or a config edited to it, refused before anything starts; any other project untouched", () => {
+  type File = { sync: { mode: string } | null; tables: Array<{ table: string; sync: { mode: string } | null }> };
+  const refusal = fn<[{ demo?: boolean; changes?: "poll" | "replication" }, File | null, string], { message: string; code: string; why: string; fix: string; next: Array<[string, string]> } | null>("demoChangesRefusal");
+  const shown = "mason/sources/demo.yml";
+  const polled: File = { sync: { mode: "poll" }, tables: [{ table: "public.orders", sync: null }] };
+  const streamed: File = { sync: { mode: "poll" }, tables: [{ table: "public.orders", sync: { mode: "replication" } }, { table: "public.customers", sync: null }] };
+  assert.equal(refusal({}, streamed, shown), null, "a project of its own database replicates as it may");
+  assert.equal(refusal({ demo: true }, null, shown), null);
+  assert.equal(refusal({ demo: true }, polled, shown), null);
+  assert.deepEqual(refusal({ demo: true }, streamed, shown), { message: "the demo database is read by polling only: sync: replication does not apply to it (orders)", code: "refused",
+    why: "the demo database has no change log for logical replication to read; Mason polls it with SELECTs",
+    fix: "write sync: poll 5s for it in mason/sources/demo.yml, then mason start", next: [["mason start", "the demo database and Mason, polled"]] });
+  // the mode an older Mason recorded, edited into a demo project's config by hand: the config's line to take out
+  assert.deepEqual(refusal({ demo: true, changes: "replication" }, polled, shown), { message: 'the demo database is read by polling only: "changes": "replication" in .mason/config.json does not apply to it', code: "refused",
     why: "the demo database has no change log for logical replication to read; mason start polls it with SELECTs, every few seconds",
-    fix: "mason start, without --replication", next: [["mason start", "the demo database and Mason, polled"]] });
-  assert.equal(refusal({ demo: true, changes: "replication" }, null)!.fix, `remove "changes": "replication" from .mason/config.json, then mason start`);
+    fix: 'remove "changes": "replication" from .mason/config.json, then mason start', next: [["mason start", "the demo database and Mason, polled"]] });
+  assert.equal(refusal({ demo: true, changes: "poll" }, polled, shown), null);
 });
 
 /** A fake of the demo database's handle (src/demo/source.ts DemoSource): what the run uses. */

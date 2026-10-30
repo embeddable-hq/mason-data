@@ -1,6 +1,6 @@
 /**
  * THE DUCKDB COPY KEPT CURRENT BY LOGICAL REPLICATION (replication for the DuckDB case, only to sync the copied tables).
- * `mason start --replication` on Mason's own publication and
+ * The tables whose `sync:` is `replication`, on Mason's own publication (or the one the sources file names) and
  * slot on the developer's database (src/cli/replication-mode.ts), the slot's `pgoutput` stream (src/cdc/pgoutput.ts,
  * over src/cdc/pg-wire.ts) applied to the copied tables (src/duck/sync.ts `applyChanges`) instead of polling them.
  *

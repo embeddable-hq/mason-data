@@ -196,35 +196,6 @@ test("publication: at the top names the publication replication reads, a ${VARIA
   assert.deepEqual(problems("kind: postgres\nurl: x\npublcation: app_pub\ntables: {}\n"), ["unexpected key publcation — did you mean `publication`? — a source file takes kind, url, sync, publication, tables"]);
 });
 
-test("--replication, --poll and MASON_CHANGES taken only where the file agrees, else refused on one report with the sync: line to write; the publication named twice refused naming both", async () => {
-  const R = await import("../src/cli/replication-mode.ts" as string) as typeof import("../src/cli/replication-mode.ts");
-  const file = (text: string) => parse(text) as Sources.SourceFile;
-  const shown = "mason/sources/app.yml";
-  const mixed = file("kind: postgres\nurl: x\nsync: poll 5s\ntables:\n  orders: { sync: replication }\n  customers: { sync: off }\n  events: {}\n");
-  const repl = R.changesAgreement(mixed, shown, "replication", "--replication")!;
-  assert.deepEqual(repl, { message: "--replication streams every table, and mason/sources/app.yml does not: customers (sync: off, its entry's), events (sync: poll 5s, the file's)", code: "refused",
-    why: "how each table is kept current is its sync: in mason/sources/app.yml now, at the top for every table and on an entry for that one (--replication is read only where it agrees, and goes in the next release)",
-    fix: "write sync: replication at the top of mason/sources/app.yml and take sync: off the entry of customers — or keep the file as it is — then mason start without --replication",
-    next: [["mason start", "each table kept current as its sync: says"]] });
-  const poll = R.changesAgreement(mixed, shown, "poll", "MASON_CHANGES=poll")!;
-  assert.deepEqual([poll.message, poll.fix], ["MASON_CHANGES=poll polls every table, and mason/sources/app.yml streams orders (sync: replication)",
-    "write sync: poll 5m (or off) on the entry of orders — or keep the file as it is — then unset MASON_CHANGES, then start again"]);
-  const allRepl = file("kind: postgres\nurl: x\nsync: replication\ntables:\n  orders: {}\n  customers: {}\n");
-  assert.equal(R.changesAgreement(allRepl, shown, "replication", "--replication"), null, "every table replicated: --replication agrees");
-  assert.match(R.changesAgreement(allRepl, shown, "poll", "--poll")!.fix!, /^write sync: poll 5m \(or off\) at the top of mason\/sources\/app\.yml — /);
-  assert.equal(R.changesAgreement(file("kind: postgres\nurl: x\nsync: poll 5s\ntables:\n  orders: {}\n"), shown, "poll", "--poll"), null, "none replicated: --poll agrees");
-  assert.equal(R.changesAgreement(mixed, shown, null, "--replication"), null, "no flag: the file alone");
-  assert.equal(R.changesAgreement(file("kind: postgres\nurl: x\ntables: {}\n"), shown, "replication", "--replication")!.message,
-    "--replication streams every table, and mason/sources/app.yml does not: its sync: (off, the default)");
-  // the publication named twice
-  assert.deepEqual(R.publicationConflict("flag_pub", { publicationName: "file_pub" }, shown), { message: "the publication is named twice: --publication flag_pub, and publication: in mason/sources/app.yml (file_pub)",
-    code: "refused", why: "the replicated tables are read through one publication",
-    fix: "keep publication: in mason/sources/app.yml and start without --publication (it goes in the next release), or write publication: flag_pub there",
-    next: [["mason start", "the replicated tables read through the file's publication"]] });
-  assert.equal(R.publicationConflict("flag_pub", { publicationName: null }, shown), null);
-  assert.equal(R.publicationConflict(null, { publicationName: "file_pub" }, shown), null);
-});
-
 test("the file read: one source per project, its URL from .env.local, .env or the shell — or what to write", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-sources-"));
   try {
@@ -597,4 +568,77 @@ test("the run's re-read keeps the tables read before when the file sets one to s
     "mason stop && mason start checks it and streams them");
   // checked (the start replicated a table, or the edit's check passed): taken
   assert.equal(S.rereadSources(prev, now, "x", CATALOG, "shop", "/app", { replicationChecked: true }).problem, null);
+});
+
+/**
+ * A WAY OUT APPLIED AS WRITTEN (the review of PR 48): a retired setting's answer names the edit to make at the top of
+ * the sources file, and that edit, made to a file `mason init` wrote (which has a `sync:` line already) as the words
+ * say it, leaves a file the run reads, saying what was asked. "write sync: replication at the top" of such a file made
+ * two sync: keys, a file the run refuses.
+ */
+test("every retired setting's way out, applied as written to a file mason init wrote, leaves a valid file saying what was asked", async () => {
+  type Top = { shown: string; sync: string | null; publication: string | null };
+  type Said = { message: string; why: string; fix: string } | null;
+  const T = await import("../src/lib/table-sync.ts" as string) as Record<string, unknown>;
+  const sourcesTop = (S as unknown as Record<string, unknown>).sourcesTop as ((root: string, folder: string) => Top) | undefined;
+  assert.equal(typeof sourcesTop, "function", "src/cli/sources.ts reads the top of the file (sourcesTop)");
+  const removed = T.removedStartFlags as (argv: string[], top: () => Top) => Said;
+  const changes = T.changesRetired as (env: Record<string, string>, top: () => Top) => Said;
+  const pollMs = T.pollMsRetired as (env: Record<string, string>, top: () => Top) => Said;
+  // the edits a way out names, applied as a person or an agent would: change the line it names, write one beside the
+  // others at the top, keep one; every value is the first one offered
+  const VALUE = String.raw`(poll \S+?|[^\s,()]+)(?=[\s,()]|$)`;
+  const apply = (text: string, fix: string): string => {
+    let out = text;
+    for (const m of fix.matchAll(new RegExp(String.raw`\bchange (sync|publication): .+? at the top of \S+ to (?:sync|publication): ${VALUE}`, "g"))) {
+      assert.match(out, new RegExp(`^${m[1]}:`, "m"), `${fix}: the file has the line it says to change`);
+      out = out.replace(new RegExp(`^${m[1]}:.*$`, "m"), `${m[1]}: ${m[2]}`);
+    }
+    // "write sync: replication and publication: app_pub at the top of …": each line it names, the first of any "or"
+    for (const w of fix.matchAll(/\bwrite (.+?) at the top of /g)) {
+      for (const part of w[1]!.split(" and ")) {
+        const m = new RegExp(String.raw`^(sync|publication): ${VALUE}`).exec(part.split(" or ")[0]!);
+        assert.ok(m, `${fix}: "${part}" is a line to write`);
+        out = out.replace(/^(url:.*)$/m, `$1\n${m[1]}: ${m[2]}`);
+      }
+    }
+    return out;
+  };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-way-out-"));
+  try {
+    const folder = path.join(root, "mason");
+    fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+    const file = path.join(folder, "sources", "demo.yml");
+    const files: Array<[string, string]> = [
+      ["init's (sync: off)", S.newSourceText("${DATABASE_URL}", ["orders"])],
+      ["init demo's (sync: poll 5s)", S.newSourceText("${DATABASE_URL}", ["orders"], (T.parseSync as (v: string) => never)("poll 5s"))],
+      ["one naming its publication", S.newSourceText("${DATABASE_URL}", ["orders"]).replace(/^(sync:.*)$/m, "$1\npublication: their_pub")],
+      ["one written by hand, with no sync:", "kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n"],
+    ];
+    for (const [what, text] of files) {
+      fs.writeFileSync(file, text);
+      const top = (): Top => sourcesTop!(root, folder);
+      const cases: Array<[string, Said, { sync?: string; publication?: string }]> = [
+        ["--replication", removed(["--replication"], top), { sync: "replication" }],
+        ["--poll", removed(["--poll"], top), {}],
+        ["--publication app_pub", removed(["--publication", "app_pub"], top), { publication: "app_pub" }],
+        ["--replication --publication app_pub", removed(["--replication", "--publication", "app_pub"], top), { sync: "replication", publication: "app_pub" }],
+        ["--poll --publication app_pub", removed(["--poll", "--publication", "app_pub"], top), { publication: "app_pub" }],
+        ["--replication --poll", removed(["--replication", "--poll"], top), { sync: "replication" }],
+        ["MASON_CHANGES=replication", changes({ MASON_CHANGES: "replication" }, top), { sync: "replication" }],
+        ["MASON_CHANGES=poll", changes({ MASON_CHANGES: "poll" }, top), {}],
+        ["MASON_POLL_MS=30000", pollMs({ MASON_POLL_MS: "30000" }, top), { sync: "poll 30s" }],
+      ];
+      for (const [given, said, want] of cases) {
+        assert.ok(said !== null, `${what}, ${given}: answered`);
+        assert.match(said.fix, /mason\/sources\/demo\.yml/, `${what}, ${given}: names the file`);
+        const edited = apply(text, said.fix);
+        const parsed = S.parseSourceText(edited, "demo", file);
+        assert.ok(!("problems" in parsed), `${what}, ${given}: "${said.fix}" applied leaves ${JSON.stringify("problems" in parsed ? parsed.problems : [])}\n${edited}`);
+        if (want.sync !== undefined) assert.equal(parsed.sync === null ? null : (T.syncText as (s: unknown) => string)(parsed.sync), want.sync, `${what}, ${given}: the top's sync`);
+        if (given === "--poll" || given === "MASON_CHANGES=poll") assert.equal(parsed.sync?.mode, "poll", `${what}, ${given}: every table polled`);
+        if (want.publication !== undefined) assert.deepEqual(parsed.publication, { literal: want.publication }, `${what}, ${given}: the publication`);
+      }
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
