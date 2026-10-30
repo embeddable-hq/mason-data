@@ -61,11 +61,14 @@ tables, scripts, or other artifacts that weren't explicitly requested. If a piec
 next step or you're unsure whether it's in scope, ask for confirmation or outline the plan first and let the project's owner decide.
 ("Do it" authorizes the thing under discussion, not everything previously suggested.)
 
-**What a session finds, it acts on, without being told.** This is the one exception to the rule above, for what is
-found along the way. An obvious bug gets a session of its own to fix it; anything else that needs investigating, or a
-bug whose fix is not obvious, gets a GitHub issue saying what was seen, what is not known and what done looks like.
+**What a session finds, it acts on, without being told** (2026-10-30). This is an exception to the rule above, for what
+is found along the way. A bug with an obvious fix gets a session of its own to fix it; anything else that needs
+investigating, including a bug whose fix is not obvious, gets a GitHub issue saying what was seen, what is not known and
+what done looks like. An issue is headed as a comment is ("Git workflow"), says a real database's findings in sizes and
+shapes ("The source database is production"), and is filed once, after a look for one that already names the thing.
 Neither waits for the owner to ask, and neither stops at a line in a message, which is forgotten: the task in hand goes
-on, and the fix's PR is reviewed like any other.
+on, the reply names what was filed or started, and the fix's PR is reviewed like any other and merged on the owner's
+word. A review's findings are the PR's and go to its author in one message ("How work is done here"), not here.
 
 ## Licensing
 
