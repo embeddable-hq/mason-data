@@ -97,7 +97,7 @@ export function suggestedWalCapGb(bytesPerSecond: number | null): number | null 
 }
 
 /** What Mason does about a lost slot (src/duck/sync.ts `prepareReplication`), one wording for every check that says it. */
-const SLOT_REMADE = "Mason makes a new slot and catches each table up with one poll, never a full sync";
+const SLOT_REMADE = "Mason makes a new slot and catches each table up with one poll (a scan of each table on your database), never a full sync";
 
 /** What wal_level = logical takes on this server: its provider's way, or postgresql.conf's. */
 function walLevelFix(f: ServerFacts): string {
@@ -126,7 +126,7 @@ export function replicationChecks(f: ServerFacts, slot: string, slotState: Await
   const free = f.maxSlots - f.slotsUsed;
   if (slotState) {
     out.push(slotState.walStatus === "lost"
-      ? { name: "slot", ok: true, warn: true, detail: `${slot} exists and Postgres invalidated it (wal_status lost): at the next start ${SLOT_REMADE}` }
+      ? { name: "slot", ok: true, warn: true, detail: `${slot} exists and Postgres invalidated it (wal_status lost): ${SLOT_REMADE}` }
       : slotState.active
         ? { name: "slot", ok: false, detail: `${slot} is in use by another reader${slotState.activePid !== null ? ` (pid ${slotState.activePid} on the database)` : ""}: one slot has one reader. ` +
           `Stop the other Mason for this project (mason stop). A run that crashed holds it until its connection ends${slotState.activePid !== null ? `: SELECT pg_terminate_backend(${slotState.activePid}) ends it now` : ""}` }
