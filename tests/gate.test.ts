@@ -43,7 +43,8 @@ case "$1" in
   logs) ${over.logs ?? "echo a log line"} ;;
 esac
 `, { mode: 0o755 });
-  fs.writeFileSync(psql, `#!/bin/sh\n${over.psql ?? `case "$1" in --version) echo psql;; *) echo logical;; esac`}\n`, { mode: 0o755 });
+  // PGPASSWORD to a file of its own: `calls` is what the password must never be in
+  fs.writeFileSync(psql, `#!/bin/sh\necho "psql $*" >> ${log}\necho "$PGPASSWORD" >> ${path.join(dir, "pgpassword")}\n${over.psql ?? `case "$1" in --version) echo psql;; *) echo logical;; esac`}\n`, { mode: 0o755 });
   return { dir, docker, psql, calls: () => (fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : []) };
 }
 
@@ -256,11 +257,22 @@ test("all green: exit 0, the Postgres removed by its exact name, and the verdict
 
 test("the container: a port Docker picks, password auth with the password in no argv, logical, bounded, the image CI uses", async () => {
   const s = stubs(); const lines: string[] = [];
-  await runGate(INTEGRATION, config(s, lines));
-  const run = s.calls().find((c) => c.startsWith("run ")) ?? "";
+  const seen = path.join(s.dir, "seen");
+  const file = js("t/integration/sees.itest.ts", `require("fs").writeFileSync(${JSON.stringify(seen)}, JSON.stringify({ url: process.env.IT_POSTGRES_URL, argv: process.argv }))`);
+  assert.equal(await runGate({ first: [], integration: [file] }, config(s, lines)), 0, lines.join("\n"));
+  const calls = s.calls();
+  const run = calls.find((c) => c.startsWith("run ")) ?? "";
   assert.match(run, /--publish 127\.0\.0\.1:0:5432 /);
   assert.match(run, /--env POSTGRES_PASSWORD --publish/, "the value comes from the environment");
   assert.match(run, /--entrypoint timeout postgres:18 --kill-after=30 \d+ docker-entrypoint\.sh postgres -c wal_level=logical$/);
+  // every docker and psql call and the file itself: the file has it in its env, and nothing has it in its argv
+  const { url, argv } = JSON.parse(fs.readFileSync(seen, "utf8")) as { url: string; argv: string[] };
+  const password = new URL(url).password;
+  assert.match(password, /^[0-9a-f]{32}$/);
+  const probes = calls.filter((c) => c.startsWith("psql ") && c.includes("SHOW wal_level"));
+  assert.ok(probes.length > 0, calls.join("\n"));
+  for (const c of [...calls, ...argv]) assert.ok(!c.includes(password), `the password in an argv: ${c}`);
+  assert.equal(fs.readFileSync(path.join(s.dir, "pgpassword"), "utf8").trim().split("\n").at(-1), password, "the probe has it by PGPASSWORD");
 });
 
 test("two gates at once use two names", async () => {

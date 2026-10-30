@@ -352,9 +352,10 @@ export async function runGate(plan: Plan, cfg: Config): Promise<number> {
     const mapped = parseMappedPort(text(port));
     if (port.code !== 0 || mapped === null) return fail(`docker port said ${JSON.stringify(text(port))} (exit ${port.code})`);
     const url = `postgres://postgres:${password}@127.0.0.1:${mapped}/postgres`;
+    const probeUrl = `postgres://postgres@127.0.0.1:${mapped}/postgres`; // the password goes by PGPASSWORD: argv is what `ps` shows
     const deadline = Date.now() + (cfg.postgresReadyMs ?? BOUNDS.postgresReady);
     while (stopped === null) {
-      const probe = await run({ label: "psql-probe", cmd: cfg.psql, args: ["-X", "-A", "-t", url, "-c", "SHOW wal_level"], boundMs: 30_000, env: { PGCONNECT_TIMEOUT: "5" } });
+      const probe = await run({ label: "psql-probe", cmd: cfg.psql, args: ["-X", "-A", "-t", probeUrl, "-c", "SHOW wal_level"], boundMs: 30_000, env: { PGCONNECT_TIMEOUT: "5", PGPASSWORD: password } });
       const said = text(probe);
       if (probe.code === 0 && said === "logical") { out(`gate: Postgres ${cfg.postgresImage} up on 127.0.0.1:${mapped} as ${name} (password auth, wal_level=logical)`); return url; }
       if (probe.code === 0) return fail(`wal_level is ${said}, and the stream's files need logical`);
