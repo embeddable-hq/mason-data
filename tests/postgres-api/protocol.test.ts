@@ -25,6 +25,161 @@ function drain(stream: Buffer, chunk: number, decoder = new FrontendDecoder()): 
   return out;
 }
 
+/**
+ * THE BYTES `run` COPIES through Buffer.from and Buffer.concat: the work done, so a bound on it holds on a machine under
+ * any load, where a clock would not.
+ */
+function bytesCopied(run: () => void): number {
+  const b = Buffer as unknown as { from: (...args: unknown[]) => Buffer; concat: (list: readonly Uint8Array[], length?: number) => Buffer };
+  const { from, concat } = b;
+  let copied = 0;
+  b.from = (...args) => { if (args[0] instanceof Uint8Array) copied += args[0].length; return from(...args); };
+  b.concat = (list, length) => { for (const part of list) copied += part.length; return concat(list, length); };
+  try { run(); } finally { b.from = from; b.concat = concat; }
+  return copied;
+}
+
+/** What a decoder costs is proportional to the stream: each byte is copied a few times, whatever the messages. */
+function assertLinear(copied: number, stream: Buffer): void {
+  assert.ok(copied >= stream.length, `${copied} bytes copied of a ${stream.length}-byte stream: the count no longer sees the decoder's copies`);
+  assert.ok(copied <= 3 * stream.length, `${copied} bytes copied to decode ${stream.length}: ${(copied / stream.length).toFixed(1)} times the stream`);
+}
+
+test("the backend decoder's work is linear in a reply, in one push or in a socket's chunks (issue 77)", () => {
+  // 1 MB of 5,000 rows: the copy of the rest after every message moved 2.6 GB of it
+  const stream = Buffer.concat(Array.from({ length: 5_000 }, (_, i) => dataRow([Buffer.alloc(200, i % 251)])));
+  let rows = 0;
+  assertLinear(bytesCopied(() => { rows = decodeBackend(stream).length; }), stream);
+  assert.equal(rows, 5_000);
+
+  const d = new BackendDecoder();
+  rows = 0;
+  assertLinear(bytesCopied(() => {
+    for (let off = 0; off < stream.length; off += 65_536) {
+      d.push(stream.subarray(off, off + 65_536));
+      while (d.next() !== null) rows++;
+    }
+  }), stream);
+  assert.equal(rows, 5_000);
+  assert.equal(d.pending, 0);
+});
+
+test("the frontend decoder's work is linear in what a client pipelines, in one push or in a socket's chunks", () => {
+  const stream = Buffer.concat(Array.from({ length: 5_000 }, () => wire.query(`SELECT ${"x".repeat(200)}`)));
+  const opened = (): FrontendDecoder => {
+    const d = new FrontendDecoder();
+    d.push(wire.startup({}));
+    d.next();
+    d.maxLength = MAX_MESSAGE_LENGTH;
+    return d;
+  };
+  let got: FrontendMessage[] = [];
+  assertLinear(bytesCopied(() => { got = drain(stream, stream.length, opened()); }), stream);
+  assert.equal(got.length, 5_000);
+  assertLinear(bytesCopied(() => { got = drain(stream, 65_536, opened()); }), stream);
+  assert.equal(got.length, 5_000);
+});
+
+test("a message split across pushes is whole at the push that ends it, behind messages already read, and `pending` counts what is left", () => {
+  const first = commandComplete("SELECT 1"), second = dataRow([Buffer.from("two"), null]), third = readyForQuery("I");
+  const d = new BackendDecoder();
+  // the first message whole, and the second to the middle of its length field: fewer than a header's bytes are left
+  d.push(Buffer.concat([first, second.subarray(0, 3)]));
+  assert.equal(d.pending, first.length + 3);
+  assert.deepEqual(d.next(), { type: "CommandComplete", tag: "SELECT 1" });
+  assert.equal(d.pending, 3);
+  assert.equal(d.next(), null);
+  assert.equal(d.pending, 3, "a next() that finds no whole message consumes nothing");
+
+  // the header whole, the body not: the length is read, the frame waits
+  d.push(second.subarray(3, 7));
+  assert.equal(d.pending, 7);
+  assert.equal(d.next(), null);
+  assert.equal(d.pending, 7);
+
+  // the rest of it, and the next one whole
+  d.push(Buffer.concat([second.subarray(7), third]));
+  assert.equal(d.pending, second.length + third.length);
+  assert.deepEqual(d.next(), { type: "DataRow", values: [Buffer.from("two"), null] });
+  assert.equal(d.pending, third.length);
+  assert.deepEqual(d.next(), { type: "ReadyForQuery", status: "I" });
+  assert.equal(d.pending, 0);
+  assert.equal(d.next(), null);
+});
+
+test("a decoded message owns its bytes, and a pushed chunk is the decoder's own: nothing reads memory that moved on", () => {
+  const row = dataRow([Buffer.from("kept")]);
+  const auth = Buffer.concat([Buffer.from("R"), Buffer.from([0, 0, 0, 10, 0, 0, 0, 5, 1, 2])]);
+  const unknown = Buffer.concat([Buffer.from("?"), Buffer.from([0, 0, 0, 7, 7, 8, 9])]);
+  const d = new BackendDecoder();
+  const chunk = Buffer.concat([row, auth, unknown, row.subarray(0, 2)]);
+  d.push(chunk);
+  chunk.fill(0xff);     // a caller's buffer is the caller's to reuse from the moment push returns
+  const kept = [d.next(), d.next(), d.next()];
+  d.push(row.subarray(2));     // a compaction behind them
+  assert.deepEqual(d.next(), { type: "DataRow", values: [Buffer.from("kept")] });
+  assert.deepEqual(kept, [
+    { type: "DataRow", values: [Buffer.from("kept")] },
+    { type: "Authentication", code: 5, data: Buffer.from([1, 2]) },
+    { type: "Unknown", code: "?", body: Buffer.from([7, 8, 9]) },
+  ]);
+
+  // a value too big for the buffer pool has an allocation of its own: a copy, never a view that pins the reply it came in
+  const size = Buffer.poolSize + 1;
+  const big = decodeBackend(dataRow([Buffer.alloc(size, 1)]))[0];
+  assert.equal(big?.type === "DataRow" ? big.values[0]?.buffer.byteLength : null, size);
+
+  const f = new FrontendDecoder();
+  f.push(wire.startup({}));
+  f.next();
+  const frames =Buffer.concat([wire.bind("", "", ["kept"], []), wire.sync()]);
+  f.push(frames);
+  frames.fill(0xff);
+  const bound = f.next();
+  assert.equal(f.next()?.type, "Sync");
+  f.push(wire.sync());
+  assert.equal(f.next()?.type, "Sync");
+  assert.deepEqual(bound?.type === "Bind" ? bound.params : null, [Buffer.from("kept")]);
+});
+
+test("a frame's length is read where the frame starts, past messages already consumed", () => {
+  const ok = readyForQuery("I");
+  const header = (code: string, len: number): Buffer => {
+    const b = Buffer.alloc(5);
+    b.write(code, "latin1");
+    b.writeInt32BE(len, 1);
+    return b;
+  };
+
+  // too long and too short, behind a message read from the same chunk: the limit holds, and the frame stays unread
+  const long = new BackendDecoder();
+  long.push(Buffer.concat([ok, header("D", MAX_MESSAGE_LENGTH + 1)]));
+  assert.equal(long.next()?.type, "ReadyForQuery");
+  assert.throws(() => long.next(), /message too long: 67108865 bytes \(the limit is 67108864\)/);
+  assert.equal(long.pending, 5);
+  const short = new BackendDecoder();
+  short.push(Buffer.concat([ok, header("D", 3)]));
+  short.next();
+  assert.throws(() => short.next(), /length of 3/);
+
+  // a malformed body is consumed before it throws, and the stream goes on behind it
+  const malformed = new BackendDecoder();
+  malformed.push(Buffer.concat([ok, header("Z", 4), ok]));
+  malformed.next();
+  assert.throws(() => malformed.next(), (err: unknown) => err instanceof ProtocolError && /malformed backend 'Z' message/.test(err.message));
+  assert.equal(malformed.pending, ok.length);
+  assert.equal(malformed.next()?.type, "ReadyForQuery");
+
+  // the frontend's: from the startup phase into the typed one inside one chunk, then a frame past the limit
+  const f = new FrontendDecoder();
+  f.push(Buffer.concat([wire.sslRequest(), wire.startup({}), wire.query("SELECT 1"), header("Q", MAX_MESSAGE_LENGTH + 1)]));
+  f.maxLength = MAX_MESSAGE_LENGTH;
+  assert.equal(f.next()?.type, "SSLRequest");
+  assert.equal(f.next()?.type, "Startup");
+  assert.deepEqual(f.next(), { type: "Query", sql: "SELECT 1" });
+  assert.throws(() => f.next(), /message too long: 67108865 bytes/);
+});
+
 test("every backend builder decodes back to what it was built from", () => {
   const fields = [
     { name: "id", typeOid: 20, typeSize: 8, typeModifier: -1, format: 0 as const },

@@ -19,7 +19,8 @@ import { changeUsers, isActive, isDisabled, keyFingerprint, newUserId, readUsers
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { out as styleOut } from "./style.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive } from "../duck/grants.ts";
-import { exampleRole, noRoleWayOut, problemText, rolesProblemText, readRoles, ROLE_NAME_RE, ROLE_NAME_RULE, ROLES_FILE, roleProblems, rolesFailure, rolesFile, userRole, type RoleFrom } from "./roles.ts";
+import { exampleRole, missingAttributesText, noRoleWayOut, problemText, rolesProblemText, readRoles, ROLE_NAME_RE, ROLE_NAME_RULE, ROLES_FILE, roleProblems, rolesFailure, rolesFile, userRole, usersMissingAttributes, type RoleFrom } from "./roles.ts";
+import { ATTRIBUTE_NAME_RE, ATTRIBUTE_NAME_RULE, whereAttributes, whereParts, type AttributeShape, type RowFilter } from "../duck/row-filter.ts";
 import { readSource, shownPath } from "./sources.ts";
 import { readState, type RunState } from "./commands.ts";
 import type { DevRun } from "./runs.ts";
@@ -31,7 +32,7 @@ export const USER: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "user",
   summary: "the users the Postgres API takes: a name and a password that does not expire, for a BI tool or an app",
-  usage: `usage: mason user add <name> [--role <role>] [--json]
+  usage: `usage: mason user add <name> [--role <role>] [--set <attribute>=<value> …] [--json]
        mason user list [--json]
        mason user disable <name> [--json]
        mason user enable <name> [--json]
@@ -66,9 +67,28 @@ export const USER: CommandSpec & { needs: "project" } = {
             columns: [id, country]   these columns only
           billing.invoices:
             exclude: [notes]         every column but these
+      tenant:
+        attributes: [tenant]         what each of its users carries: --set tenant=42
+        tables:
+          orders: { where: "tenant_id = :tenant" }    the rows it reads: a Postgres condition
+          order_items: { through: orders }          the rows whose order it reads
+      region:
+        attributes: { regions: list }               several values: --set regions=eu --set regions=us
+        tables:
+          customers: { where: "region = ANY(:regions)" }
+
+  --set <attribute>=<value> gives the user its value of an attribute its role declares (repeat --set for each
+  attribute; a list attribute takes one --set per value; an empty list cannot be written). A role's where:
+  reads it as :attribute, bound as a literal of the type Postgres infers for it there (tenant_id = :tenant: the
+  column's), so every read of the table — through a view, a join, a subquery, a prepared statement — reads only
+  its rows, as Postgres's row security reads them. A user without a value its role reads is refused at every
+  statement, never answered with no rows: add it again with the --set. Postgres refuses a where: it cannot read
+  when the running Mason reads the file, at its key.
 
     mason user add metabase                    a user for Metabase: its password and the URL to paste
     mason user add agent --role agent          a user held to the role agent
+    mason user add acme --role tenant --set tenant=42      the rows of tenant 42
+    mason user add emea --role region --set regions=eu --set regions=uk
     mason user list
     mason user disable metabase                metabase connects no more, until mason user enable metabase
     mason user enable metabase                 metabase connects again, with the same password
@@ -77,10 +97,11 @@ export const USER: CommandSpec & { needs: "project" } = {
 
   <name>    ${USER_NAME_RULE}
   --json    as data: add { user (the name), id, addedAt, password, database, role (the role it reads as: its own
-            or the file's default; absent when none), roleFrom (file: its own --role; default: the file's default;
+            or the file's default; absent when none), attributes? ({ name: value, or [values] for a list }), roleFrom (file: its own --role; default: the file's default;
             none), readsNothing (true: no role under a file with no default), and once Mason runs url, psql (the
             psql line for url), host, port, sslmode }; list { users: [{ name, id, addedAt, removedAt (null for a user
-            not removed), disabledAt (null for a user not disabled), live (connects now), role?, roleFrom, readsNothing?,
+            not removed), disabledAt (null for a user not disabled), live (connects now), role?, attributes?,
+            missingAttributes? (the attributes its role's filters read that it lacks: refused until added again), roleFrom, readsNothing?,
             roleKnown? (the roles file names its own role now), lastUsedAt (its newest statement, null when none within
             requestLogDays), url (to paste, without the password; null for a removed user or when Mason is not running) }],
             lastUsedNote (why lastUsedAt is unknown, else null), urlNote (why url is null, else null), requestLogDays
@@ -88,8 +109,8 @@ export const USER: CommandSpec & { needs: "project" } = {
             before) }; enable { enabled: { name, id, addedAt }, already (it was not disabled) }; remove { removed: { name,
             id, addedAt, removedAt } }; next
 `,
-  options: { json: { type: "boolean", default: false }, role: { type: "string" } },
-  json: ["user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
+  options: { json: { type: "boolean", default: false }, role: { type: "string" }, set: { type: "string", multiple: true } },
+  json: ["user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
 };
 
 
@@ -110,7 +131,7 @@ const liveOf = (u: MasonUser, apiKey: string): boolean => underKey(u, apiKey);
  * names it now (false: its statements are refused until it does).
  */
 export interface UserRow { name: string; id: string; addedAt: string; removedAt: string | null; disabledAt: string | null; live: boolean; lastUsedAt: string | null; url: string | null;
-  role?: string; roleFrom: RoleFrom; readsNothing?: true; roleKnown?: boolean }
+  role?: string; attributes?: Record<string, string | string[]>; missingAttributes?: string[]; roleFrom: RoleFrom; readsNothing?: true; roleKnown?: boolean }
 
 export const NOT_RUNNING_LAST_USED = "unknown: Mason is not running, and the request log is only read by a running Mason (mason start)";
 export const NOT_RUNNING_URL = "unknown: Mason is not running, so where its Postgres API listens is not known (mason start, then mason status)";
@@ -135,8 +156,68 @@ export function lastUsedText(lastUsedAt: string | null, lastUsedNote: string | n
 export interface AddedUser {
   user: string; id: string; addedAt: string; password: string; database: string;
   url?: string; psql?: string; host?: string; port?: number; sslmode?: string;
-  role?: string; roleFrom: RoleFrom; readsNothing?: true;
+  role?: string; attributes?: Record<string, string | string[]>; roleFrom: RoleFrom; readsNothing?: true;
   replaced: boolean;
+}
+
+// ------------------------------------------------------------------ the attributes a user is added with
+
+/** `--set name=value` read: the name and the value (everything after the first `=`, a comma included); or the problem */
+export function setOf(arg: string): { name: string; value: string } | string {
+  const eq = arg.indexOf("=");
+  if (eq < 0) return `--set ${arg}: is <attribute>=<value>, like --set tenant=42`;
+  const name = arg.slice(0, eq);
+  if (!ATTRIBUTE_NAME_RE.test(name)) return `--set ${arg}: ${JSON.stringify(name)} is not an attribute's name: ${ATTRIBUTE_NAME_RULE}`;
+  // through /api/users' JSON: a shell cannot pass one
+  if (arg.includes("\0")) return `--set ${name}: a value cannot hold a NUL byte — it would end every statement the value is bound into`;
+  return { name, value: arg.slice(eq + 1) };
+}
+
+/**
+ * THE ATTRIBUTE VALUES A USER IS ADDED WITH, held to its role (`role`: its own, or the file's default) as the roles are
+ * now (`live`): every attribute the role declares set — a missing one refused with the where: that reads it and the exact
+ * `--set` to add —, none it does not declare (the closest it does), a scalar once, a list once per value and never
+ * empty. Checked BEFORE the user is written, by `mason user add` and the run's `/api/users` alike (one grammar: the
+ * `--set` strings). A scalar is a string, a list an array of strings, in the order given.
+ */
+export function attributesToAdd(name: string, role: string | undefined, sets: readonly string[], live: RolesLive): { values: Record<string, string | string[]> } | { refused: Failure } {
+  const g = role === undefined ? undefined : live.grants.get(role);
+  const declared = g?.attributes ?? new Map<string, AttributeShape>();
+  const usage = (message: string, fix?: string): { refused: Failure } => ({ refused: { message, code: "usage", ...(fix !== undefined ? { fix } : {}) } });
+  const out: Record<string, string | string[]> = {};
+  for (const arg of sets) {
+    const s = setOf(arg);
+    if (typeof s === "string") return usage(s);
+    const shape = declared.get(s.name);
+    if (shape === undefined) {
+      if (role === undefined) return usage(`--set ${s.name}: the user has no role, so it carries no attribute`, `mason user add ${name} --role <a role that declares ${s.name}> --set ${arg}`);
+      const names = [...declared.keys()];
+      return usage(`--set ${s.name}: the role ${role} has no attribute ${s.name}${didYouMean(s.name, names)}`,
+        names.length ? `its attributes: ${names.join(", ")}` : `the role ${role} declares no attributes (attributes: [${s.name}] beside its tables: in ${live.file ?? `mason/${ROLES_FILE}`})`);
+    }
+    if (shape === "list") {
+      if (s.value === "") return usage(`--set ${s.name}=: ${s.name} is a list, and a list's value is never empty — an empty list is not written (Mason refuses a user without its values rather than answer no rows)`);
+      out[s.name] = [...((out[s.name] as string[] | undefined) ?? []), s.value];
+    } else {
+      if (out[s.name] !== undefined) {
+        const lists = [...declared].filter(([, k]) => k === "list").map(([n]) => n);
+        return usage(`--set ${s.name} twice: ${s.name} is a scalar of the role ${role!}, one value${didYouMean(s.name, lists)}`, `one --set ${s.name}=<value>; several values are a list attribute (attributes: { ${s.name}: list })`);
+      }
+      out[s.name] = s.value;
+    }
+  }
+  const missing = [...declared.keys()].filter((a) => out[a] === undefined);
+  if (missing.length > 0) {
+    const reads = (a: string): string => {
+      const f = [...(g?.filters?.values() ?? [])].find((x) => x.where !== undefined && whereAttributes(x.where.parts).includes(a));
+      return f === undefined ? "" : ` (${f.at}.where: ${f.where!.text})`;
+    };
+    const sets2 = missing.map((a) => declared.get(a) === "list" ? `--set ${a}=<value> --set ${a}=<another>` : `--set ${a}=<value>`).join(" ");
+    return { refused: { message: `the role ${role!} needs ${missing.map((a) => `--set ${a}=…`).join(" ")}: its users carry ${missing.length === 1 ? "the attribute" : "the attributes"} ${missing.map((a) => `${a}${reads(a)}`).join(", ")}`,
+      code: "usage", why: "a user without a value its role's rows are filtered by would be refused at every statement (Mason never answers it with no rows)",
+      fix: `mason user add ${name}${role === undefined ? "" : ` --role ${role}`} ${[...sets.map((x) => `--set ${x}`), sets2].join(" ")}` } };
+  }
+  return { values: out };
 }
 
 // ------------------------------------------------------------------ the role a user is added with
@@ -194,7 +275,7 @@ export async function rolesBeside(project: Project, run: DevRun | null): Promise
     // a run that does not answer its state (hung, or an older run without /api/state's roles): the file is read here
     // instead, as with Mason stopped — the user is still refused a role the file lacks, which is what this guards
     try { r = (await readState(run)).roles; } catch (e) { if (!(e instanceof RunUnreachable)) throw e; r = undefined; }
-    if (r !== undefined) return { file: r.file, grants: new Map(r.roles.map((n) => [n, { name: n, file: r.file ?? "", tables: new Map(), all: r.all?.includes(n) === true } as RoleGrants])), problem: r.problem, default: r.default ?? null };
+    if (r !== undefined) return { file: r.file, grants: new Map(r.roles.map((n) => [n, { name: n, file: r.file ?? "", tables: new Map(), all: r.all?.includes(n) === true, ...rowsOfState(r, n) } as RoleGrants])), problem: r.problem, default: r.default ?? null };
   }
   const read = readRoles(project.folder, project.root);
   if (read === null) return NO_ROLES;
@@ -205,8 +286,26 @@ export async function rolesBeside(project: Project, run: DevRun | null): Promise
   const copied = "message" in src ? null : src.tables.map((e) => ({ source: e.table, columns: e.columns === null ? null : e.columns.map((name) => ({ name })) }));
   const problems = copied === null ? [] : roleProblems(read, copied);
   if (problems.length) return { file, grants: new Map(), problem: problemText(rolesFailure(read.file, project.root, problems)), default: read.default };
-  return { file, grants: new Map(read.roles.map((r) => [r.name, { name: r.name, file, tables: new Map(), all: r.tables === "all" } as RoleGrants])), problem: null, default: read.default };
+  return { file, grants: new Map(read.roles.map((r) => {
+    const filters = new Map<string, RowFilter>(r.tables === "all" ? [] : r.tables.flatMap((t) => t.where === undefined ? [] : [[t.table, { table: t.table, at: `roles.${r.name}.tables.${t.name}`, where: t.where }] as [string, RowFilter]]));
+    return [r.name, { name: r.name, file, tables: new Map(), all: r.tables === "all", ...(r.attributes !== undefined ? { attributes: r.attributes } : {}), ...(filters.size > 0 ? { filters } : {}) } as RoleGrants];
+  })), problem: null, default: read.default };
 }
+
+/** a role's attributes and its where:s as `/api/state` says them, as the grants' fields `attributesToAdd` reads */
+function rowsOfState(r: NonNullable<RunState["roles"]>, role: string): Pick<RoleGrants, "attributes" | "filters"> {
+  const attrs = r.attributes?.[role];
+  const filters = new Map<string, RowFilter>();
+  for (const f of r.wheres?.[role] ?? []) {
+    const parts = whereParts(f.where);
+    if (!("problem" in parts)) filters.set(f.table, { table: f.table, at: f.at, where: { text: f.where, parts } });
+  }
+  return { ...(attrs !== undefined && Object.keys(attrs).length > 0 ? { attributes: new Map(Object.entries(attrs)) } : {}), ...(filters.size > 0 ? { filters } : {}) };
+}
+
+/** a user's attributes as `mason user add` and `mason user list` say them: `tenant=42, regions=[eu, uk]` */
+export const attributesText = (a: Readonly<Record<string, string | readonly string[]>>): string =>
+  Object.entries(a).map(([k, v]) => `${k}=${typeof v === "string" ? v : `[${v.join(", ")}]`}`).join(", ");
 
 /** What to run after an add: with Mason up, the list and how to end it; with Mason stopped, mason start first. */
 export const addedNext = (name: string, up: boolean): NextStep[] => up
@@ -252,7 +351,9 @@ export function listUsers(file: string, apiKey: string, link: PostgresLink | nul
   return { users: r.users.map((u) => ({ name: u.name, id: u.id, addedAt: u.addedAt, removedAt: u.removedAt ?? null, disabledAt: u.disabledAt ?? null,
     live: isActive(u) && !isDisabled(u) && liveOf(u, apiKey),
     lastUsedAt: null, url: link !== null && isActive(u) ? connectionUrl(link, u.name, null) : null,
-    ...roleFields(u, roles), ...(u.role !== undefined && roles.problem === null ? { roleKnown: roles.grants.has(u.role) } : {}) })) };
+    ...roleFields(u, roles), ...(u.attributes !== undefined ? { attributes: u.attributes } : {}),
+    ...((m) => m === undefined ? {} : { missingAttributes: m.missing })(usersMissingAttributes([u], roles)[0]),
+    ...(u.role !== undefined && roles.problem === null ? { roleKnown: roles.grants.has(u.role) } : {}) })) };
 }
 
 /** a user's role as the JSON says it: the role it reads as, where from, and whether it reads nothing (src/cli/roles.ts userRole) */
@@ -281,7 +382,7 @@ export async function withLastUsed(rows: readonly UserRow[], requests: { lastUse
  * ADD A USER to `file` under its lock: a new id, its password (said here, once, and kept nowhere), and — `link`, where
  * the run's Postgres API listens, when it is up — the URL to paste. A name taken by a live user is refused.
  */
-export function addUser(file: string, apiKey: string, name: string, o: { link: PostgresLink | null; database: string; role?: string; roles?: RolesLive }): AddedUser | Failure {
+export function addUser(file: string, apiKey: string, name: string, o: { link: PostgresLink | null; database: string; role?: string; roles?: RolesLive; attributes?: Record<string, string | string[]> }): AddedUser | Failure {
   const usage = userNameProblem("add", name);
   if (usage !== null) return { message: usage, code: "usage" };
   const fingerprint = keyFingerprint(apiKey);
@@ -295,7 +396,8 @@ export function addUser(file: string, apiKey: string, name: string, o: { link: P
       if (was !== undefined && was.key === fingerprint) return { refused: "taken" };
       replaced = was !== undefined;
       const now = new Date().toISOString();
-      added = { name, id: newUserId(), addedAt: now, key: fingerprint, ...(o.role !== undefined ? { role: o.role } : {}) };
+      added = { name, id: newUserId(), addedAt: now, key: fingerprint, ...(o.role !== undefined ? { role: o.role } : {}),
+        ...(o.attributes !== undefined && Object.keys(o.attributes).length > 0 ? { attributes: o.attributes } : {}) };
       return [...users.map((u) => u === was ? { ...u, removedAt: now } : u), added];
     });
   } catch (e) { return cantChange(file, e); }
@@ -310,7 +412,7 @@ export function addUser(file: string, apiKey: string, name: string, o: { link: P
   const { link } = o;
   return { user: u.name, id: u.id, addedAt: u.addedAt, password, database: link?.database ?? o.database,
     ...(link !== null ? { url: connectionUrl(link, u.name, password), psql: psqlLine(connectionUrl(link, u.name, password)), host: link.host, port: link.port, sslmode: link.sslmode ?? "disable" } : {}),
-    ...roleFields(u, o.roles ?? NO_ROLES), replaced };
+    ...roleFields(u, o.roles ?? NO_ROLES), ...(u.attributes !== undefined ? { attributes: u.attributes } : {}), replaced };
 }
 
 /** REMOVE A USER from `file` under its lock: it connects no more. A name the file lacks is refused with the closest it has. */
@@ -401,6 +503,9 @@ export async function user(argv: string[]): Promise<number> {
   if (verb === "list" ? name !== undefined : rest.length) return usage(`mason user ${verb} takes ${verb === "list" ? "no name" : "one name"}: ${[name, ...rest].filter(Boolean).join(" ")} is too many`);
   const role = typeof f.values.role === "string" ? f.values.role : undefined;
   if (role !== undefined && verb !== "add") return usage(`--role goes with mason user add: mason user add <name> --role ${role}`);
+  const sets = Array.isArray(f.values.set) ? f.values.set.filter((x): x is string => typeof x === "string") : [];
+  if (sets.length > 0 && verb !== "add") return usage(`--set goes with mason user add: mason user add <name> --role <role> --set ${sets[0]!}`);
+  for (const arg of sets) { const s = setOf(arg); if (typeof s === "string") return usage(s); }
   if (verb !== "list") {
     const problem = userNameProblem(verb as "add" | "remove" | "disable" | "enable", name);
     if (problem !== null) return usage(problem);
@@ -448,19 +553,22 @@ export async function user(argv: string[]): Promise<number> {
     const rolesFileShown = roles.file ?? `mason/${ROLES_FILE}`;
     // the last use in the words the web page's Users page says it too (lastUsedText): "last used" before a time or "unknown"
     const used = (u: UserRow): string => { const t = lastUsedText(u.lastUsedAt, lastUsedNote, requestLogDays, u.addedAt); return t === "never" ? "never used" : t.startsWith("not used") ? t : `last used ${t}`; };
-    const lines = active.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${u.role !== undefined ? `role ${u.role}${u.roleFrom === "default" ? " (default)" : ""}   ` : ""}${s.dim(`id ${u.id} · added ${stamp(u.addedAt)} UTC · ${used(u)}`)}` +
+    const lines = active.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${u.role !== undefined ? `role ${u.role}${u.roleFrom === "default" ? " (default)" : ""}${u.attributes !== undefined ? ` (${attributesText(u.attributes)})` : ""}   ` : ""}${s.dim(`id ${u.id} · added ${stamp(u.addedAt)} UTC · ${used(u)}`)}` +
       (u.disabledAt !== null ? `   ${s.yellow(`${disabledText(u.disabledAt)}: does not connect until mason user enable ${u.name}`)}`
         : u.live ? "" : `   ${s.yellow("does not connect: the API key was rotated since it was added")}`) +
       (u.roleKnown === false ? `   ${s.yellow(`its role ${u.role} is not in the roles file: its statements are refused`)}` : "") +
-      (u.readsNothing === true ? `   ${s.yellow(`has no role, and ${rolesFileShown} names no default: its statements are refused`)}` : ""));
+      (u.readsNothing === true ? `   ${s.yellow(`has no role, and ${rolesFileShown} names no default: its statements are refused`)}` : "") +
+      (u.missingAttributes !== undefined ? `   ${s.yellow(`has no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}` : ""));
     const disabled = active.filter((u) => u.disabledAt !== null);
     const removedLines = gone.map((u) => `  ${s.dim(`${u.name.padEnd(width)}   id ${u.id} · added ${stamp(u.addedAt)} UTC · removed ${stamp(u.removedAt!)} UTC`)}`);
     const rotated = active.filter((u) => !u.live && u.disabledAt === null);
     const orphan = active.find((u) => u.roleKnown === false);
     const roleless = active.find((u) => u.readsNothing === true);
+    const unset = active.find((u) => u.missingAttributes !== undefined);
     out(withEnd(`${s.bold(`${active.length} user${active.length === 1 ? "" : "s"} of ${project.config.name}${disabled.length ? `, ${disabled.length} disabled` : ""}${gone.length ? `, ${gone.length} removed` : ""}`)}\n${[...lines, ...removedLines].join("\n")}`,
       { tips: [...(rotated.length ? [`A user added under another API key does not connect: mason user remove ${rotated[0]!.name}, then mason user add ${rotated[0]!.name}.`] : []),
         ...(orphan ? [`A role the roles file (mason/${ROLES_FILE}) does not name reads nothing: add ${orphan.role} to it, or mason user remove ${orphan.name}, then mason user add ${orphan.name} --role <role>.`] : []),
+        ...(unset ? [`A user without a value its role's rows are filtered by is refused at every statement: ${missingAttributesText({ name: unset.name, role: unset.role ?? "", missing: unset.missingAttributes! })}.`] : []),
         ...(roleless ? [`A user with no role reads nothing while ${rolesFileShown} names no default: ${noRoleWayOut(roleless.name, rolesFileShown, exampleRole(roles))}.`] : []),
         ...(roles.problem !== null && active.length ? [rolesProblemText(rolesFileShown, roles.problem)] : []),
         ...(lastUsedNote !== null ? [`Last used: ${lastUsedNote}.`] : [])], next }));
@@ -511,7 +619,10 @@ export async function user(argv: string[]): Promise<number> {
     const problem = roleToAdd(role, roles);
     if (problem !== null) return failed("user", problem, { json });
   }
-  const r = addUser(file, apiKey, name!, { link, database: project.config.name, roles, ...(role !== undefined ? { role } : {}) });
+  // the attributes the role declares, every one, and none other: refused before writing, as the role is
+  const attributes = attributesToAdd(name!, role ?? userRole({}, roles).role, sets, roles);
+  if ("refused" in attributes) return failed("user", attributes.refused, { json });
+  const r = addUser(file, apiKey, name!, { link, database: project.config.name, roles, ...(role !== undefined ? { role } : {}), attributes: attributes.values });
   if ("message" in r) return failed("user", r, { json });
   const { replaced, ...added } = r;
   const next = addedNext(r.user, link !== null);
@@ -521,6 +632,7 @@ export async function user(argv: string[]): Promise<number> {
     details: [
       ...(r.url !== undefined && r.psql !== undefined ? [["url", r.url] as const, ["psql", r.psql] as const] : []),
       ["user", r.user], ["password", r.password], ["database", r.database],
+      ...(r.attributes !== undefined ? [["attributes", attributesText(r.attributes)] as const] : []),
       ...(r.roleFrom === "file" ? [["role", `${r.role!} (mason/${ROLES_FILE} names what it reads)`] as const]
         : r.roleFrom === "default" ? [["role", `${r.role!} (the file's default: ${roles.file ?? `mason/${ROLES_FILE}`})`] as const]
         : r.readsNothing === true ? [["role", `none, and ${roles.file ?? `mason/${ROLES_FILE}`} names no default: it reads nothing until one is written`] as const] : []),

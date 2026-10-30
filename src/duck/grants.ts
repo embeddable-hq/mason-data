@@ -25,6 +25,7 @@
 import { StatementError } from "../api/postgres/server.ts";
 import { catalogRows } from "./analyze.ts";
 import type { TreeNode, TreeValue } from "./pgtree.ts";
+import type { AttributeShape, BoundFilter, RowFilter } from "./row-filter.ts";
 
 /** What one role may read of one table: every column (`all`, the table's own grant), or `columns` alone. */
 export interface TableGrant {
@@ -50,6 +51,19 @@ export interface RoleGrants {
    * a role of the file to name in those lines (`<a role>` when it has none).
    */
   noRole?: { user: string; example: string };
+  /** the attributes its users carry (`attributes:` in the file; src/duck/row-filter.ts), by name; absent: none */
+  attributes?: ReadonlyMap<string, AttributeShape>;
+  /** the rows it reads of each filtered table (`where:` / `through:`, src/duck/row-filter.ts), by `schema.table`; absent:
+   *  every row of every table it reads */
+  filters?: ReadonlyMap<string, RowFilter>;
+  /** the type Postgres infers for each attribute of each `where:` (src/duck/row-filter.ts filterTypes), by
+   *  `schema.table`, then attribute: set by the listener once the catalog checked the filters (`checkedRoles`) */
+  filterTypes?: ReadonlyMap<string, ReadonlyMap<string, string>>;
+  /** THE SESSION'S FILTERS, BOUND to its user's attribute values (src/duck/row-filter.ts bindFilter), by `schema.table`:
+   *  set on the role a session hands the plan (src/api/postgres/server.ts `grants`), never on the roles file's */
+  rows?: ReadonlyMap<string, BoundFilter>;
+  /** the user `rows` were bound for, as a refusal of one of its values says it */
+  rowsUser?: string;
 }
 
 /**

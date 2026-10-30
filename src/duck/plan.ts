@@ -19,6 +19,7 @@ import { datumText, masonCalls, rewrite, treeDifference, Unrewritable, type Duck
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
 import { distinctCountTables, distinctKeyCounts, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
 import { enforceGrants, type RoleGrants } from "./grants.ts";
+import { attributeRefused, expandRowFilters, wallStatistics, wallSwitch, type Walls } from "./row-filter.ts";
 import type { PgAnalysis } from "./analyze.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802;
@@ -154,14 +155,44 @@ export function missingRelationHint(relation: string, copies: readonly CopyState
   }
 }
 
+/**
+ * THE TREE AS TEXT, DuckDB's `COLUMNS(…)` (decidedByKey's star, the statistics wall) unquoted: it is an expression only so,
+ * and the deparser quotes the keyword. Marked in the tree, never found in the printed text, where a literal or a name may
+ * hold the same characters: each call printed under a name the text holds nowhere else (the count says so), then that name
+ * replaced. No statement Postgres accepted calls a function "columns" (Postgres has none), and the read-back checks the text.
+ */
+function printed(tree: Node, statement: string): string {
+  const calls: Array<{ String: { sval: string } }> = [];
+  const collect = (v: unknown): void => {
+    if (Array.isArray(v)) { v.forEach(collect); return; }
+    if (typeof v !== "object" || v === null) return;
+    const name = (v as { FuncCall?: { funcname?: Array<{ String?: { sval: string } }> } }).FuncCall?.funcname;
+    if (name?.length === 1 && name[0]?.String?.sval === "columns") calls.push(name[0] as { String: { sval: string } });
+    Object.values(v).forEach(collect);
+  };
+  collect(tree);
+  if (calls.length === 0) return deparseSync(tree, { pretty: false });
+  // a text holds a mark at most once per few characters; a count that never agrees is a call the deparser does not print
+  const bound = deparseSync(tree, { pretty: false }).length;
+  for (let i = 0; i <= bound; i++) {
+    const mark = `__mason_columns_${i}`;
+    for (const c of calls) c.String.sval = mark;
+    const text = deparseSync(tree, { pretty: false });
+    for (const c of calls) c.String.sval = "columns";
+    if (text.split(`${mark}(`).length - 1 === calls.length) return text.replaceAll(`${mark}(`, "COLUMNS(");
+  }
+  throw new StatementError({ code: "0A000", message: "Mason cannot print this statement for the engine (a Mason gap: report it, with the statement)" }, statement);
+}
+
 /** A statement's plan. `wireBound`: its rows are bounded by a row count an Execute sets on the wire, which its SQL
  *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so).
  *  `grants`: the session's role (src/duck/grants.ts), held after the analysis; null for a session with no role where
- *  roles exist (the plan still names its reads, for an Execute under a role given later); undefined with no roles at all */
+ *  roles exist (the plan still names its reads, for an Execute under a role given later); undefined with no roles at all.
+ *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: Node, base: number,
   paramOids: readonly number[], searchPath: string, timeZone: string, collation: DuckCollation, verified: ReadonlyMap<string, string> | null,
   userTypes: ReadonlyMap<string, number> = new Map(), copies: () => readonly CopyState[] = () => [], depth = 0, kept: KeptRoutes | null = null,
-  wireBound = false, grants: RoleGrants | null | undefined = undefined): Promise<DuckPlan> {
+  wireBound = false, grants: RoleGrants | null | undefined = undefined, walls: Walls | null = null): Promise<DuckPlan> {
   const started = performance.now();
   const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
   if ("refused" in analysis) {
@@ -178,7 +209,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const expanded = await expandViews(catalog, stmt, analysis, pathSql(searchPath));
   if (expanded !== null) {
     if (depth >= MAX_VIEW_DEPTH) throw viewRefused(`Mason cannot yet answer views read through more than ${MAX_VIEW_DEPTH} other views`, "read the tables the views read");
-    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, grants); }
+    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, grants, walls); }
     catch (e) {
       if (!(e instanceof StatementError)) throw e;
       const { position: _p, ...fields } = e.fields;
@@ -190,6 +221,37 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   // before the rewrite (a role's refusal before a Mason gap's). The reads stay on the plan: an Execute under a role
   // given or taken since the Parse is held to them again (src/api/postgres/server.ts)
   const reads = grants === undefined ? undefined : await enforceGrants(catalog, analysis.tree, grants);
+  // THE ROLE'S ROWS (src/duck/row-filter.ts): every read of a table the role filters becomes its filtered read, and that
+  // statement is planned from the start — analysed by Postgres, rewritten and verified as any other (one grammar), held
+  // to nothing more (the grants were held above, on the statement as written: a filter may read a column the role
+  // may not, as a policy may on Postgres). Its errors are the expanded text's, so they carry no position into this one
+  if (grants?.rows !== undefined && grants.rows.size > 0) {
+    const filtered = await expandRowFilters(catalog, stmt, analysis, pathSql(searchPath), grants.rows);
+    if (filtered !== null) {
+      let inner: DuckPlan;
+      try { inner = await planDuck(catalog, filtered.text, filtered.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, undefined, filtered.walls); }
+      catch (e) {
+        if (!(e instanceof StatementError)) throw e;
+        // a data exception may be a bound value's, not the statement's: `--set tenant=abc` on an integer
+        const bad = e.fields.code.startsWith("22") && e.gap === null ? await attributeRefused(catalog, grants.rows, filtered.tables) : null;
+        if (bad !== null) {
+          const user = JSON.stringify(grants.rowsUser ?? "");
+          throw new StatementError({ code: "42501", message: `permission denied: the user ${user} has a value for the attribute ${bad.name} that is not of type ${bad.type}, which the role ${grants.name} filters rows by`,
+            detail: `${bad.at} reads :${bad.name} as ${bad.type} (${bad.where}): ${bad.problem}`,
+            hint: `mason user remove ${grants.rowsUser ?? "<user>"} && mason user add ${grants.rowsUser ?? "<user>"} --role ${grants.name} --set ${bad.name}=<a value of type ${bad.type}>` }, text);
+        }
+        // the statement as written passed this check above, so what fails it is the table being a subquery (carryKeyDependency)
+        if (e.fields.code === "42803" || /could not identify an equality operator/.test(e.fields.message)) {
+          throw gapRefusal("roles", `Mason cannot yet answer a GROUP BY of a key of a table its role filters here: ${e.fields.message}`,
+            "name each column it reads in the GROUP BY, or read it in an aggregate", text);
+        }
+        const { position: _p, ...fields } = e.fields;
+        throw new StatementError(fields, text, e.gap);
+      }
+      const rowFilters = filtered.tables.map((t) => ({ table: t, words: `filtered by the role ${grants.name}: ${grants.rows!.get(t)!.words}` }));
+      return { ...inner, ...(reads !== undefined ? { reads } : {}), rowFilters };
+    }
+  }
   // the catalog's own OIDs for the types an extension made (citext): the rewrite knows a few by name, and the wire sends
   // the SOURCE's OID for them (`userTypes`, from the copy), never the catalog's
   let resolved = resolvedKeys(analysis.tree);
@@ -266,9 +328,9 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
       "write the statement without it (docs/SQL-SUPPORT.md lists what is verified), or report it: a statement Mason has not verified is refused rather than answered differently",
       text, `: ${unverified.join(", ")}`);
   }
-  // DuckDB's COLUMNS(t.*) (decidedByKey's star) is an expression only unquoted; the deparser quotes the keyword. No
-  // statement Postgres accepted calls a function "columns" (Postgres has none), and the read-back below checks the text
-  const sql = deparseSync(tree as Node, { pretty: false }).replaceAll('any_value("columns"(', "any_value(COLUMNS(");
+  // only a statement with its filtered reads in place: no other statement's text changes, whatever it names its subqueries
+  if (walls !== null && wallSwitch.statistics) wallStatistics(tree, walls);
+  const sql = printed(tree as Node, text);
   // THE PRINTED TEXT MUST READ BACK AS THE TREE: a printing gap (the deparser drops or respells something) would run
   // another statement than the one Postgres analysed — refused instead, by name
   const back = (await parseSql(sql)).stmts?.[0]?.stmt;

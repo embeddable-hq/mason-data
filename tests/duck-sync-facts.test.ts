@@ -27,7 +27,15 @@ const replication = { slot: "mason_x", publication: "mason_x", owned: true };
 function batch(rows: Record<string, string | null>, truncated = false): Map<string, TableChanges> {
   const keys: TableChanges["keys"] = new Map();
   for (const [id, v] of Object.entries(rows)) keys.set(JSON.stringify([id]), { key: [id], change: v === null ? { kind: "delete" } : { kind: "row", values: [id, v] } });
-  return new Map([["public.t", { columns: ["id", "v"], truncated, keys, counts: { ...noCounts(), inserts: Object.keys(rows).length } }]]);
+  return new Map([["public.t", { stay: null, truncated, keys, counts: { ...noCounts(), inserts: Object.keys(rows).length } }]]);
+}
+
+/** the batch as the stream decodes it: of the table's stay in the stream now (`StreamedTable.stay`) */
+function decoded(sync: Sync, b: Map<string, TableChanges>): Map<string, TableChanges> {
+  const s = sync as unknown as { refreshStreamed: () => void; streamed: ReadonlyMap<string, { stay: number }> };
+  s.refreshStreamed();
+  for (const [name, c] of b) c.stay = s.streamed.get(name)?.stay ?? null;
+  return b;
 }
 
 interface Run {
@@ -61,7 +69,7 @@ async function aRun(body: (r: Run) => Promise<void>): Promise<void> {
     await sync.setTables([T]);
     const st = (): Record<string, unknown> => sync.state()[0] as unknown as Record<string, unknown>;
     const apply = (b: Map<string, TableChanges>, lsn: bigint): Promise<void> =>
-      (sync as unknown as { applyStreamed: (b: Map<string, TableChanges>, lsn: bigint, at: Date) => Promise<void> }).applyStreamed(b, lsn, new Date());
+      (sync as unknown as { applyStreamed: (b: Map<string, TableChanges>, lsn: bigint, at: Date) => Promise<void> }).applyStreamed(decoded(sync, b), lsn, new Date());
     const one = async (sql: string): Promise<number> => Number((await store.writer.runAndReadAll(sql)).getRowsJS()[0]![0]);
     const rows = async (): Promise<number[]> => [Number(st().rows), await one(`SELECT "rows" FROM ${MASON_SCHEMA}.copy_state WHERE source = 'public.t'`), await one("SELECT count(*) FROM public.t")];
     await body({ store, sync, events, st, apply, rows });
@@ -102,6 +110,92 @@ test("a copy's last sync is read back at a start and moved by every batch; curre
     assert.match(events[0]!.message, /^current again \(it had failed: replication: the slot is in use\)$/);
     await apply(batch({ 12: "new" }), 0x30n);
     assert.equal(events.length, 1, "current again once, never at every batch");
+  });
+});
+
+// A SYNC'S TIME IS ONE VALUE, THE LEDGER'S (`Sync.polledAt`, `Synced`): the ledger's now() beside the run's `new Date()`
+// were two, until a read of the ledger replaced one with the other. Held offline where no source is needed: a swap and a
+// stream batch, in a session zone that is not UTC (the time is an instant, whatever the zone it is read in), the value
+// the run says equal to the ledger's before anything reads the ledger again, and to the millisecond across a restart.
+// A poll's own is held against a real source: tests/integration/duck-poll.itest.ts "right after its copy and after each poll".
+test("the time a swap and a stream batch say is the time the ledger holds, at once, in any session zone, and a restart reads the same", async () => {
+  await aRun(async ({ store, sync, st, apply }) => {
+    await store.writer.run("SET TimeZone = 'Asia/Kathmandu'");
+    const s = sync as unknown as { swap: (t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null }) => Promise<void>; readPolledAt: () => Promise<void>; readSynced: () => Promise<void> };
+    const instant = async (sql: string): Promise<string> => new Date(Number((await store.writer.runAndReadAll(sql)).getRowsJS()[0]![0])).toISOString();
+    const polled = (): Promise<string> => instant(`SELECT epoch_ms(polled_at) FROM ${MASON_SCHEMA}.poll_state WHERE source = 'public.t'`);
+    const applied = (): Promise<string> => instant(`SELECT epoch_ms(applied_at) FROM ${MASON_SCHEMA}.stream_state`);
+    const kept = (): string | null | undefined => (st().kept as { syncedAt?: string | null }).syncedAt;
+    const synced = (): { at: string; by: string } => st().synced as { at: string; by: string };
+
+    const before = Date.now();
+    await store.writer.run("CREATE TABLE public.t__mason_copy AS SELECT * FROM public.t");
+    await s.swap(T, "public.t__mason_copy", { snapshot: "200:200:", behind: null });
+    const ledger = await polled();
+    assert.equal(kept(), ledger, "the swap's time, as written, with nothing having read the ledger since");
+    assert.ok(Date.parse(ledger) >= before && Date.parse(ledger) <= Date.now(), `an instant, not a wall clock of another zone: ${ledger}`);
+    await s.readPolledAt();
+    assert.equal(kept(), ledger, "a read of the ledger moves nothing");
+
+    await apply(batch({ 11: "new" }), 0x20n);
+    assert.deepEqual([synced().by, synced().at], ["stream", await applied()], "a batch's time, as written");
+    const said = synced().at;
+    await s.readSynced();
+    assert.deepEqual([synced().by, synced().at], ["stream", said], "and what a start reads back");
+  });
+});
+
+// `readPolledAt` ON THE WRITER'S CONNECTION BESIDE A COMMIT ON THE REBUILDS': its SELECT's snapshot may be older than a
+// commit whose time is set while it is answered, and writing back what it read moved that time backwards. The SELECT's
+// answer is held here until a real swap has committed and said its time, so the order is the test's, never the machine's.
+test("a read of the ledger answered after a later commit leaves the later time, drops a removed table's, and keeps one a commit gave meanwhile", async () => {
+  await aRun(async ({ store, sync, st }) => {
+    const s = sync as unknown as { swap: (t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null }) => Promise<void>; readPolledAt: () => Promise<void>; polledAt: Map<string, string> };
+    const kept = (): string | null | undefined => (st().kept as { syncedAt?: string | null }).syncedAt;
+    const swapped = async (): Promise<void> => {
+      await store.writer.run("CREATE TABLE public.t__mason_copy AS SELECT * FROM public.t");
+      await s.swap(T, "public.t__mason_copy", { snapshot: "200:200:", behind: null });
+    };
+    const noRow = (): Promise<unknown> => store.writer.run(`DELETE FROM ${MASON_SCHEMA}.poll_state WHERE source = 'public.t'`);
+    /** a read of the ledger whose SELECT has answered and whose answer waits for `meanwhile` */
+    const readBeside = async (meanwhile: () => Promise<void>): Promise<void> => {
+      const w = store.writer as unknown as { runAndReadAll: (...a: unknown[]) => Promise<unknown> };
+      const real = w.runAndReadAll;
+      let answered!: (r: unknown) => void;
+      const held = new Promise<unknown>((resolve) => { answered = resolve; });
+      w.runAndReadAll = (...a: unknown[]) => {
+        w.runAndReadAll = real;
+        void real.apply(store.writer, a).then(answered);
+        return held.then(async (r) => { await done; return r; });
+      };
+      let finished!: () => void;
+      const done = new Promise<void>((resolve) => { finished = resolve; });
+      const read = s.readPolledAt();
+      await held;
+      await meanwhile();
+      finished();
+      await read;
+    };
+    const older = kept();
+    assert.ok(typeof older === "string", String(older));
+    // the SELECT holds the older time (seeded an hour ago); the commit's is newer: it stands
+    let newer = "";
+    await readBeside(async () => { await swapped(); newer = kept()!; });
+    assert.ok(newer > older!, `${older} to ${newer}`);
+    assert.equal(kept(), newer, "a read answered after a later commit moves nothing back");
+    // a table the ledger no longer holds (removed): gone from what the run says, as the clear did
+    await noRow();
+    await s.readPolledAt();
+    assert.equal(s.polledAt.has("public.t"), false, "a removed table's time is dropped");
+    // no row at the SELECT, and a commit gives it one while it is answered: kept
+    await readBeside(swapped);
+    assert.equal(s.polledAt.has("public.t"), true, "a time a commit gave meanwhile is kept");
+    assert.equal(kept(), s.polledAt.get("public.t"));
+    // and a time the ledger holds and the run does not is read in
+    const was = s.polledAt.get("public.t")!;
+    s.polledAt.delete("public.t");
+    await s.readPolledAt();
+    assert.equal(s.polledAt.get("public.t"), was, "a start reads every table's");
   });
 });
 
@@ -278,7 +372,7 @@ test("a stream's failure is over when the stream next applies a batch WITH A POS
     assert.equal(st().error, "replication: the slot is in use", "the publication check does not clear the stream's failure");
     assert.deepEqual(said(), [], "and says no recovery");
     // a piece of a large transaction: written, but no position yet
-    await s.applyStreamed(batch({ 11: "piece" }), null, new Date());
+    await s.applyStreamed(decoded(sync, batch({ 11: "piece" })), null, new Date());
     assert.equal(st().error, "replication: the slot is in use", "a piece without a position does not");
     assert.deepEqual(said(), []);
     // a batch with a position, of another table only (the database committed): every streamed table is current as of it

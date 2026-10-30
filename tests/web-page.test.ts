@@ -163,7 +163,7 @@ const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; 
   clientsTotal: o.clientsTotal ?? { clients: (o.clients ?? CLIENTS).length, sessions: (o.clients ?? CLIENTS).reduce((a: number, c) => a + (c as { sessions: number }).sessions, 0) } });
 const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s" };
 const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
-const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", tokenName: "", user: "metabase", role: "",
+const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", tokenName: "", user: "metabase", role: "", attributes: null,
   method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: "relation \"nope\" does not exist\nLINE 1", detail: null, hint: null, rows: null, durationMs: 3,
   endedAt: "2026-10-27T09:02:00.503Z", bytesSent: 120, query: "SELECT *\n  FROM nope", queryTruncated: false };
 const FAILED_REQUESTS = { requests: [REQUEST, { ...REQUEST, requestId: "0b9e5c1e-0000-4000-8000-000000000002", applicationName: "", user: "", outcome: "cancelled", sqlstate: "57014",
@@ -419,6 +419,20 @@ test("the users: a user's role (mason user add --role) in its own column; one th
     { name: "bare", id: "0000000000000004", ...at, roleFrom: "none", readsNothing: true }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
   assert.match(textOf(html), /^User Role Status Added Last used agent id 0000000000000001 agent Active .* old id 0000000000000002 gone not in the roles file: its statements are refused Active /);
   assert.match(textOf(html), /dflt id 0000000000000003 everything \(default\) Active .* bare id 0000000000000004 no role, and the roles file names no default: its statements are refused Active /);
+});
+
+test("the users: a user's attributes beside its role in mason user list's words; one its role's filters read and it lacks, said refused", async () => {
+  const renderUsers = fn<[unknown, string | null, number?], string>("renderUsers");
+  const attributesText = fn<[Record<string, string | string[]>], string>("attributesText");
+  const cli = await import("../src/cli/user.ts");
+  const values = { tenant: "42", regions: ["eu", "uk"] };
+  assert.equal(attributesText(values), cli.attributesText(values), "the page's words are the CLI's");
+  assert.equal(attributesText(values), "tenant=42, regions=[eu, uk]");
+  const at = { addedAt: "2026-10-29T08:00:00.000Z", removedAt: null, live: true, lastUsedAt: null, url: null };
+  const html = renderUsers({ users: [{ name: "acme", id: "0000000000000001", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: values },
+    { name: "stale", id: "0000000000000002", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: { tenant: "7" }, missingAttributes: ["regions"] }],
+    lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
+  assert.match(textOf(html), /acme id 0000000000000001 tenant tenant=42, regions=\[eu, uk\] Active .* stale id 0000000000000002 tenant tenant=7 no value for regions: its statements are refused Active /);
 });
 
 test("the users: a row each, active first then removed without Remove; Remove asks first; none is said", () => {
@@ -1410,7 +1424,7 @@ test("running now: a row each in the commands' words — held equal to mason log
   // under the section's own heading (Running now): no second title; the statement's number is No., its text Statement
   assert.match(text, /^Session No\. User Client Running for Rows Statement /);
   assert.ok(!text.includes("Started (UTC)"), "how long it has run is the one time a running statement says: when it started is its title");
-  assert.match(html, /<td class="num"><time datetime="2026-10-28T09:04:00\.000Z" title="started 2026-10-28 09:04:00 UTC">2 min<\/time><\/td>/);
+  assert.match(html, /<td class="num"><time data-tick datetime="2026-10-28T09:04:00\.000Z" title="started 2026-10-28 09:04:00 UTC">2 min<\/time><\/td>/);
   assert.match(text, /12 45 metabase Metabase v0\.50 2 min 1,200 rows sent SELECT customer_id, sum\(total\) FROM orders GROUP BY 1 Cancel/);
   assert.match(text, /13 7 \(no application_name\) 1\.5 s 1 row sent SELECT 1 <b> Cancel/);
   assert.ok(!html.includes("<b>"), "the statement is escaped");
@@ -1473,17 +1487,17 @@ test("the request log: a row each, newest first, in the commands' words — held
       `the page's word for ${outcome} is the CLI's`);
   }
   // started: how long ago, the UTC time its title
-  assert.match(html, /<time datetime="2026-10-28T09:01:00.000Z" title="2026-10-28 09:01:00 UTC">/);
+  assert.match(html, /<time data-tick datetime="2026-10-28T09:01:00.000Z" title="2026-10-28 09:01:00 UTC">/);
   assert.match(renderRequests({ requests: [REQUESTS[0]], keptDays: 7, before: null }, { now: Date.parse("2026-10-28T09:05:00.000Z") }), /<time [^>]*>5 min ago<\/time>/);
   // opened: the expanded row holds the whole id, when it started and ended, the bytes, the whole statement and error
   const opened = textOf(renderRequests({ requests: REQUESTS, keptDays: 7, before: null }, { isOpen: (k: string) => k === "request:r-old" }));
-  assert.match(opened, /Completed r-old .* SELECT count\(\*\) FROM orders Query id r-old Started \(UTC\) 2026-10-28 09:00:00 Ended \(UTC\) 2026-10-28 09:00:01 Bytes sent 2\.0 KiB SELECT count\(\*\) FROM orders$/);
+  assert.match(opened, /Completed r-old .* SELECT count\(\*\) FROM orders Query id r-old Started \(UTC\) 2026-10-28 09:00:00\.000 Ended \(UTC\) 2026-10-28 09:00:01\.234 Bytes sent 2\.0 KiB SELECT count\(\*\) FROM orders$/);
   assert.ok(!/Query id r-new/.test(opened), "only the one opened");
   // the id is its first 8 characters, the whole one its title and in the details
   const long = renderRequests({ requests: [{ ...REQUESTS[0], requestId: "0b9e5c1e-0000-4000-8000-000000000001", query: "SELECT\n 1", message: "boom\nline 2", sqlstate: "XX000" }], keptDays: 7, before: null });
   assert.match(long, /<summary>0b9e5c1e<\/summary>/, "the id is its first 8 characters");
   const longOpen = renderRequests({ requests: [{ ...REQUESTS[0], requestId: "0b9e5c1e-0000-4000-8000-000000000001", query: "SELECT\n 1", message: "boom\nline 2", sqlstate: "XX000" }], keptDays: 7, before: null }, { isOpen: () => true });
-  assert.match(textOf(longOpen), /Query id 0b9e5c1e-0000-4000-8000-000000000001 Started \(UTC\) 2026-10-28 09:00:00 Ended \(UTC\) 2026-10-28 09:00:01 Bytes sent 2\.0 KiB SELECT 1 XX000 boom line 2/);
+  assert.match(textOf(longOpen), /Query id 0b9e5c1e-0000-4000-8000-000000000001 Started \(UTC\) 2026-10-28 09:00:00\.000 Ended \(UTC\) 2026-10-28 09:00:01\.234 Bytes sent 2\.0 KiB SELECT 1 XX000 boom line 2/);
   assert.match(longOpen, /<pre class="stmt">SELECT\n 1<\/pre><pre class="error">XX000 boom\nline 2<\/pre>/, "the whole statement and the whole error");
   assert.ok(!html.includes("data-newest"), "the newest page has no Newest");
   for (const r of REQUESTS) {
@@ -1800,7 +1814,7 @@ test("Sync events: the sync's events are mason logs --events' lines in a table, 
   assert.equal(textOf(renderEvents(UL_EVENTS, { now: at, sort: { key: "time", dir: "asc" } })), "When ↑ Kind Table Message 10 min ago copied public.orders copied 2,000,000 rows 9 min ago ✗ copy_failed public.events the source closed the connection the sync tries it again in 5 min 5 min ago ✗ restart (the sync) the run stopped <b>after</b> 42 s",
     "oldest first, as the command lists them, when asked");
   assert.match(timeline, /<th scope="col" aria-sort="descending"><button type="button" class="sort on" data-sort-table="events" data-sort-key="time">When/);
-  assert.match(timeline, /<time datetime="2026-10-28T09:00:00.000Z" title="2026-10-28 09:00:00 UTC">10 min ago<\/time>/, "how long ago, the UTC time as the command prints it its title");
+  assert.match(timeline, /<time data-tick datetime="2026-10-28T09:00:00.000Z" title="2026-10-28 09:00:00 UTC">10 min ago<\/time>/, "how long ago, the UTC time as the command prints it its title");
   assert.match(timeline, /<span class="badge ok">copied<\/span>/); assert.equal([...timeline.matchAll(/<span class="badge bad">✗ /g)].length, 2, "a failure is a red badge with its ✗");
   assert.equal([...html.matchAll(/class="t-failed"/g)].length, 2, "the failures are marked");
   // Failures only: what was read, narrowed in the page alone
@@ -2493,7 +2507,7 @@ test("Usage, a past range: who sent statements in it and the slowest that comple
   assert.equal(textOf(clients), "User Client Statements Failed Sessions Last metabase Metabase v0.50 1,100 9 3 30s ago Queries token ci (no application_name) 104 1 60 min ago Queries " +
     "2 clients sent statements in the last 24 hours. A session that sent only what the log does not list (select 1, SET, a catalog query) is not here.");
   assert.match(clients, /<td class="act"><a class="btn small" href="#observability\/queries\?user=metabase&amp;client=Metabase\+v0\.50&amp;range=24h" title="the statements of metabase from Metabase v0\.50 in the last 24 hours">Queries<\/a><\/td>/);
-  assert.match(clients, /<time datetime="2026-10-27T09:05:00.000Z" title="2026-10-27 09:05:00 UTC">30s ago<\/time>/, "when the latest started: how long ago, the UTC time its title");
+  assert.match(clients, /<time data-tick datetime="2026-10-27T09:05:00.000Z" title="2026-10-27 09:05:00 UTC">30s ago<\/time>/, "when the latest started: how long ago, the UTC time its title");
   assert.equal(textOf(renderClients([], { range: "1h" })), "No client sent a statement the request log lists in the last hour.");
   // past `top`, the others in one row with their sums
   const many = Array.from({ length: 12 }, (_, i) => ({ ...CLIENTS[0]!, user: `u${i}`, statements: 100 - i, failed: 1, sessions: 2 }));
@@ -3569,4 +3583,75 @@ test("a past range's 'as of' is its own read's, never another page's; a Refresh 
   release(); hold = null;
   await clicked; await settle();
   assert.ok((run2.asked as string[]).includes("GET /api/activity?since=1h"), `the Refresh ran once the poll ended: ${run2.asked.join(", ")}`);
+});
+
+test("a request's + opens on its click: the toggle event a repaint strands (the live log's ages move every second) is never needed", async () => {
+  // found in the browser: of six clicks on a request's id, three opened nothing — the pointerup's repaint replaced the
+  // details (its ages had moved), and the toggle event, fired on the replaced element, never reached the document
+  const run = fakeRun();
+  run.answers.set("GET /api/requests?since=15m", answer({ requests: REQUESTS, keptDays: 7, before: null }));
+  const { el, on, settle } = fakeBrowser(run, "#observability/queries");
+  await settle();
+  assert.match(el("request-log").html, /data-open="request:r-new"/);
+  assert.ok(!/<tr class="detail">/.test(el("request-log").html), "closed at first");
+  // the click on the summary: the toggle handler is NOT called (as when the event is stranded)
+  let prevented = false;
+  const det = { tagName: "DETAILS", id: "", open: false, dataset: { open: "request:r-new" } };
+  const summary = { parentElement: det };
+  await on.get("click")!({ target: { closest: (sel: string) => sel === "summary" ? summary : null }, preventDefault: () => { prevented = true; } });
+  assert.match(el("request-log").html, /<details data-open="request:r-new" open>/, "open, from the click alone");
+  assert.match(el("request-log").html, /<tr class="detail">/);
+  assert.ok(prevented, "the browser's own toggle is not run as well");
+  // clicked again: closed
+  await on.get("click")!({ target: { closest: (sel: string) => sel === "summary" ? { parentElement: { ...det, open: true } } : null }, preventDefault: () => undefined });
+  assert.ok(!/<tr class="detail">/.test(el("request-log").html), "closed again");
+});
+
+test("a summary's click: a link inside it keeps its own click, a details no page keeps is the browser's, an element disagreeing with the state is written again, the raw log opens", async () => {
+  const run = fakeRun();
+  run.answers.set("GET /api/requests?since=15m", answer({ requests: REQUESTS, keptDays: 7, before: null }));
+  const { el, on, settle, go } = fakeBrowser(run, "#observability/queries");
+  await settle();
+  const click = async (det: object, extra: (sel: string) => unknown = () => null) => {
+    let prevented = false;
+    await on.get("click")!({ target: { closest: (sel: string) => sel === "summary" ? { parentElement: det } : extra(sel) }, preventDefault: () => { prevented = true; } });
+    return prevented;
+  };
+  const keyed = { tagName: "DETAILS", id: "", open: false, dataset: { open: "request:r-new" } };
+  // a link (or a box) inside the summary: not the details' click
+  assert.equal(await click(keyed, (sel) => sel.startsWith("a,") ? { href: "#" } : null), false, "the link's default is not prevented");
+  assert.ok(!/<tr class="detail">/.test(el("request-log").html), "and the details did not open");
+  // a details no page keeps state of: the browser opens it, as ever
+  assert.equal(await click({ tagName: "DETAILS", id: "", open: false, dataset: {} }), false);
+  // the element shows open, the state says closed: the click asks for closed, which the state already is — still
+  // answered, and the part written again from the state (closed), never left to the browser's toggle
+  const writes = el("request-log").writes;
+  assert.equal(await click({ ...keyed, open: true, in: "request-log" }), true, "prevented: not the browser's own toggle");
+  assert.ok(el("request-log").writes > writes, "written again though its HTML did not change");
+  assert.ok(!/<tr class="detail">/.test(el("request-log").html));
+  // the raw log of Sync events (kept by its id, not a key): opened by the click, and read
+  run.answers.set("GET /api/events?limit=500&since=15m", answer(EVENTS));
+  go("#observability/syncs"); await settle();
+  run.asked.length = 0;
+  assert.equal(await click({ tagName: "DETAILS", id: "syncs-raw", open: false, dataset: {} }), true);
+  await settle();
+  assert.ok((run.asked as string[]).includes("GET /api/logs?lines=200"), `the raw log read: ${run.asked.join(", ")}`);
+  assert.match(el("syncs-run").html, /<details id="syncs-raw" open>/, "open, from the click alone");
+});
+
+test("only the clock moved: the ages are set where they are, the part not written again (a rewrite each second dropped a selection, the focus, a click)", async () => {
+  const run = fakeRun();
+  const fresh = { ...REQUESTS[0]!, startedAt: new Date(Date.now() - 5000).toISOString() };
+  run.answers.set("GET /api/requests?since=15m", answer({ requests: [fresh], keptDays: 7, before: null }));
+  const { el, tick, settle } = fakeBrowser(run, "#observability/queries");
+  await settle();
+  const log = el("request-log") as unknown as { writes: number; html: string; querySelectorAll?: (s: string) => { innerHTML: string }[] };
+  assert.match(log.html, /<time data-tick [^>]*>\ds ago<\/time>/);
+  const shown = [{ innerHTML: /<time data-tick [^>]*>(\ds ago)</.exec(log.html)![1]! }];
+  log.querySelectorAll = (sel: string) => sel === "time[data-tick]" ? shown : [];
+  const writes = log.writes;
+  await new Promise((r) => setTimeout(r, 1100));
+  tick(); await settle();
+  assert.equal(log.writes, writes, "not written again");
+  assert.match(shown[0]!.innerHTML, /^[67]s ago$/, "the age moved where it is");
 });

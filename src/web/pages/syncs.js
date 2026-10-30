@@ -49,7 +49,7 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
   const rows = ordered.slice(0, limit).map((e) => {
     const c = eventCells(e);
     const more = e.message.includes("\n") ? `<pre>${esc(e.message.split("\n").slice(1).join("\n"))}</pre>` : "";
-    return `<tr${e.failed ? ` class="t-failed"` : ""}><th scope="row"><time datetime="${esc(e.at)}" title="${esc(c.time)} UTC">${esc(agoText(e.at, now))}</time></th><td>${kindBadge(e)}</td>` +
+    return `<tr${e.failed ? ` class="t-failed"` : ""}><th scope="row"><time data-tick datetime="${esc(e.at)}" title="${esc(c.time)} UTC">${esc(agoText(e.at, now))}</time></th><td>${kindBadge(e)}</td>` +
       `<td>${c.table.startsWith("(") ? `<span class="dim">${esc(c.table)}</span>` : `<code class="name" title="${esc(c.table)}">${esc(c.table)}</code>`}</td><td>${esc(c.message)}${more}</td></tr>`;
   }).join("");
   const count = narrowed ? `<p class="dim">${n(passing.length)} of the ${n(b.events.length)} events read.</p>` : "";
@@ -147,7 +147,7 @@ export const page = {
       toggle(target) {
         if (target.id !== "syncs-raw") return null;
         const open = target.open === true;
-        if (open === m.rawOpen) return null;
+        if (open === m.rawOpen) return target.clicked === true ? true : null;   // a click: the element disagrees, written again
         return actions.showRawLog(open);
       },
     };

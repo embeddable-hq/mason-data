@@ -112,10 +112,15 @@ export const fileSize = (b) => b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} G
 /** Bytes as mason status's queries say them: B under a KiB, then `fileSize` (src/cli/commands.ts `bytesText`). */
 export const bytesText = (b) => b < 1024 ? `${n(b)} B` : fileSize(b);
 
+/** An ISO time (as `toISOString` writes it) in UTC, to its first `length` characters, the T a space. */
+const utcCut = (length) => (iso) => iso.slice(0, length).replace("T", " ");
 /** An ISO time as the commands' lines print it: `2026-10-27 09:04:00` (UTC). */
-export const utcText = (iso) => iso.slice(0, 19).replace("T", " ");
+export const utcText = utcCut(19);
+/** The same to the millisecond: `2026-10-27 09:04:05.123` (UTC) — a statement's start and end, where a second is too
+ *  coarse to tell two apart or read how long one took. */
+export const utcMsText = utcCut(23);
 /** The same to the minute, as the commands' lists print it: `2026-10-27 09:04` (UTC). */
-export const utcMinute = (iso) => iso.slice(0, 16).replace("T", " ");
+export const utcMinute = utcCut(16);
 
 /** A statement on one line, as mason logs says it (src/cli/commands.ts `oneLine`): whitespace collapsed, cut with an ellipsis. */
 export const oneLine = (sql, max = 120) => {
@@ -505,7 +510,9 @@ export function createOpenSet() {
       const key = target?.dataset?.open;
       if (typeof key !== "string" || key === "") return null;
       const now = target.open === true;
-      if (now === open.has(key)) return null;
+      // nothing changed: the toggle a rewrite causes itself — but a click asked for what is already the state, so the
+      // element shown disagrees with it, and is written again
+      if (now === open.has(key)) return target.clicked === true ? true : null;
       if (now) open.add(key); else open.delete(key);
       return true;
     },

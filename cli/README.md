@@ -1,6 +1,6 @@
 # @mason-data/cli
 
-The `mason` command points [Mason](https://masondata.ai) at the Postgres your app already uses, syncs the tables you
+The `mason` command points [Mason](https://github.com/embeddable-hq/mason-data) at the Postgres your app already uses, syncs the tables you
 add, keeps them up to date, and serves them to BI tools and your app over the Postgres protocol. Every command works the
 same for you and for a coding agent (Claude Code, Codex, …): it prints for a person, or with `--json` as data, and its
 exit code says how it went ([for coding agents](#for-coding-agents)).

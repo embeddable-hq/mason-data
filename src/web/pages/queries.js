@@ -11,7 +11,7 @@
  * empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away. Usage's rows lead here
  * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`).
  */
-import { msText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, details, createOpenSet, status,
+import { msText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
   clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery } from "../shared.js";
 
 const STATE = "/api/state";
@@ -66,7 +66,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const [kind, word] = OUTCOME[r.outcome] ?? [undefined, String(r.outcome)];
     const row = `<tr class="s-${esc(word.toLowerCase())}"><td>${status(kind, word)}</td>` +
       `<td class="id">${details(key, r.requestId.slice(0, 8), "", open)}</td>` +
-      `<td class="when"><time datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td>` +
+      `<td class="when"><time data-tick datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td>` +
       `<td class="num">${esc(msText(r.durationMs))}</td><td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td>` +
       `<td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num">${r.rows === null ? "" : esc(n(r.rows))}</td><td class="stmt-cell">${statementCell(r.query)}${error}</td></tr>`;
@@ -74,7 +74,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const stmt = capped(r.query || "(no statement)", STATEMENT_MAX, "mason logs --requests --json");
     const err = capped(r.message ?? "", STATEMENT_MAX, "mason logs --requests --json");
     // its body is as wide as the row and no wider (`.detail-body`): a long statement scrolls in its box, never widens a column
-    const more = open ? `<tr class="detail"><td colspan="${REQUEST_COLUMNS.length}"><div class="detail-body">${rowsHtml([["Query id", r.requestId], ["Started (UTC)", utcText(r.startedAt)], ["Ended (UTC)", utcText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
+    const more = open ? `<tr class="detail"><td colspan="${REQUEST_COLUMNS.length}"><div class="detail-body">${rowsHtml([["Query id", r.requestId], ["Started (UTC)", utcMsText(r.startedAt)], ["Ended (UTC)", utcMsText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
       `<pre class="stmt">${esc(stmt.text)}</pre>${stmt.cut ? `<p class="dim cut">${esc(stmt.cut)}${r.queryTruncated ? " (as the log kept it)" : ""}</p>` : r.queryTruncated ? `<p class="dim cut">the request log kept the statement cut</p>` : ""}` +
       `${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(err.text)}</pre>${err.cut ? `<p class="dim cut">${esc(err.cut)}</p>` : ""}` : ""}</div></td></tr>` : "";
     return row + more;

@@ -125,8 +125,8 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   cancelled through its SESSION — the CANCEL TABLE (`src/duck/cancel.ts`, shared memory the listener writes at once,
   never a message to the busy worker; every `__mason_*` call carries `getvariable('__mason_session')` first,
   src/duck/rewrite.ts `fn`): its next call raises, it is interrupted as well (its call-free rest stops at DuckDB's next
-  chunk), and the result is closed only once DuckDB handed it back (`drain`, src/duck/store.ts) AND the session's calls
-  have been quiet 50 ms (`cleanUp`, below). One that calls none is interrupted and closed at once. `tests/duck-executor.test.ts` and `tests/duck-wire.test.ts` "a client
+  chunk), and the result is closed only once DuckDB ended the query off this thread (`cleanUp`, below); one that calls none
+  is interrupted and goes the same way. `tests/duck-executor.test.ts` and `tests/duck-wire.test.ts` "a client
   leaving mid-statement" / "statement_timeout stops a statement that calls a Mason function" hold it.
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
@@ -136,14 +136,27 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
 - **A cancel asked is a cancel answered**: a statement whose cancel or timeout landed after its last call, or as its
   last chunk was computed, is told 57014, never "ok" (the worker reads the cancel table at the end, the listener's
   thread its own signal). A drained statement's own error is logged, never swallowed.
-- **A result that did not end is closed only once its calls have stopped** (under load the suite's process
-  sat at 0 % CPU for good — the worker inside a result's close, DuckDB's `CancelTasks`, waiting for a task that waited
-  inside a Mason function call for the worker): DuckDB hands a failed or cancelled chunk back while another task of
-  the query may still wait for a call, every close is synchronous on the worker, and the node API refuses a second
-  query on a connection with a result open, so a calling statement that failed, was cancelled or closed early is
-  marked cancelled, interrupted, and closed once no call of its session has been answered for `CALLS_QUIET_MS`
-  (`SessionRunner.cleanUp`; `lastCallAt`, src/duck/functions.ts). Never a sync close of a calling statement's result
-  outside that path. `tests/duck-executor.test.ts` "cancelling a function-calling statement again and again" holds it.
+- **The worker's thread never waits for DuckDB's tasks** (under load the suite's process sat at 0 % CPU for good — the
+  worker inside a result's close, DuckDB's `CancelTasks`, waiting for a task that waited inside a Mason function call for
+  the worker; issue 58 made it with no load at all): every close is synchronous on the worker, a close of an open
+  result or of a connection with something running waits for its tasks, and a call-free statement's close holds the
+  thread for the rest of a native vector (17.9 s measured, every session behind it). So a statement that did not run to
+  its end — failed, cancelled, closed early, calling or not — is interrupted and READ ON with an async `fetchChunk` until
+  it fails or ends (`SessionRunner.cleanUp`): every end of a query waits for its tasks on the thread that ends it
+  (`EndQueryInternal`), there libuv's, while this thread answers their calls, and only then is the result closed. A
+  **statement performs no wait**: DuckDB refuses one while a result holds the connection, so `SELECT 1` is the PROOF
+  that nothing is left, never the wait (DETECTOR: a refused probe is logged as a Mason bug; RESPONSE: closed all the
+  same, and the watch below catches a deadlock). Time is no proof: no call for 50 ms proved nothing, a vector's native
+  work outlasts any window. A connection's close (`conn.close`, src/duck/executor-worker.ts) interrupts its own calls and
+  waits for them. A new synchronous call into DuckDB on the worker is read against this rule (`tests/conventions.test.ts`
+  lists the closes). `tests/duck-executor.test.ts` "a vector slower than any quiet window", "a call-free statement closed
+  inside a slow vector", "a connection closed under its own", "cancelling a function-calling statement again and again"
+  hold it. Any statement on a session's connection waits for `releasing` first: DuckDB would refuse it. ("The watch")
+  **Its log line does not wait for that close** (`say`, src/duck/store.ts): a statement's line is posted before its client
+  is told it ended, in the worker port's order, so a statement's own line is before its answer and no earlier statement
+  it was told of lands after it (a late line entered the next test's window). A statement its client closed
+  early (a portal, a session gone) has no end its client hears: its line still comes at its release.
+  `tests/duck-wire.test.ts` "logged before its client is told" holds it.
 - **Nothing is closed under a pending call of DuckDB's** (a stop during a drain aborted the process, exit
   134): a session's connection closes once nothing runs on it (`SessionRunner.close`: an open answer drained, every
   fetch settled), and the worker's shutdown waits for every session close in flight and every connection's call before
@@ -153,6 +166,14 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   a request pending is given up on — every request told 57P02, the run told (`onCrash`) — and `close` settles within
   5 s whatever the worker does. A thread blocked inside native code is never ended by `terminate` or `process.exit`
   (measured), so a file given up on is never opened again in the process (`abandoned`); its supervisor's SIGKILL ends it.
+- **The watch counts its own ticks and hears a beat, so it fires on nothing but a stuck thread** (issue 58): silence is
+  unanswered pings on the MAIN thread's ticks, never the wall clock, so a main thread blocked or a process frozen counts
+  nothing against a healthy worker, and every Mason function call and row bumps the BEAT (`beat`, src/duck/cancel.ts,
+  shared memory), since a calling statement holds the worker's loop a thousand calls at a time with no pong (a 20 kB
+  document: 999 × 322 ms). What is left is a thread that neither turned its loop nor ran a row of a function for 60 s of
+  main's time. A new long stretch of JavaScript on the worker with no loop turn beats, or the watch calls it stuck. Never
+  a test that blocks the main thread: `nodeProcess` in `tests/duck-executor.test.ts` is an async spawn. "the watch" tests
+  there hold both sides: blocked main and a beating thread must not fire, the silent worker and a spinning thread must.
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a
   Mason function call; a 1 ms grace reproduced it 6 times in 6). A worker given up on (the grace, the silence) is asked
@@ -343,7 +364,9 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
 - **A copy's progress is rendered between commits** (`CopyLive`, `copyProgressNow`, `CopyState.progress`): the chunks
   done and about how many in all, the ones reading and how long the oldest has, the readers' measured rate and the time
   the pages left take at it, and the rows the chunks in flight have read by now at that rate, each held under 90 % of
-  its expected rows (`READING_SHARE_CAP`) so a commit moves the count forward. Its SHARE is of the heap's pages read
+  its expected rows (its pages at the rows a page so far, `READING_SHARE_CAP`) so a commit that holds them moves the
+  count forward: an estimate, which a chunk's pages may undercut (the heap's last page, a sparse range), when the count
+  steps back to what committed. Its SHARE is of the heap's pages read
   (`share`), never of the rows: the ranges are exact and the row estimate is Postgres's, which a copy can outrun (23.7 M
   rows under 20.1 M sent the bar back to 0 %), and a share derived from an estimate must never move backwards.
   `mason wait` and `mason status` render it (`copyingText`, src/cli/commands.ts); the rate is the sync's, never a
@@ -467,6 +490,14 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   Error`). A relation that stops carrying a column the copy holds (a DDL, a narrower publication) refuses THAT table by
   name with the way out, marked behind before anything past it is acknowledged; the others stream on.
   ("Logical replication")
+- **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
+  (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
+  `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or
+  catch-up holds them. Never tell them apart by columns: two copies inside one flush (a sources file edited and restored,
+  0.2 s each on CI) mixed two shapes in one batch (`VALUES lists must all be the same length`, then the 5-minute
+  back-off), lost the changes after the catch-up's poll (a batch that began in a copy gone by the flush), or replayed an
+  old change over the poll that read a newer one (same columns). `duck-stream.itest.ts` "a batch open across" forces each
+  order. ("Logical replication")
 - **A table is never left neither streamed nor copied**: after every rebuild, a table that still needs a copy or a
   catch-up gets a pass at once (`followUp`; a change of its columns during its copy re-copies it at once), or when its back-off
   ends (`wakeAt`) — replication mode runs a pass only when kicked, and on the test server a failed catch-up left that table dead
@@ -491,7 +522,10 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   that polls, and warns a poll of over `COSTLY_POLL_ROWS` under a minute with its estimate and basis. A setting that
   sets an interval for every table (`MASON_POLL_MS`) refuses the start. DETECTOR: `kept` on every table's line
   (`mason status`, `wait`, EXPLAIN, the MCP tools) says its sync and its copy's age; `tests/duck-sync-schedule.test.ts`
-  and `tests/integration/duck-poll.itest.ts` hold the schedule and the switch. ("Each table's sync") A pass is ONE
+  and `tests/integration/duck-poll.itest.ts` hold the schedule and the switch. ("Each table's sync") **A polled table's
+  `kept.pending` is `pollable`'s answer, never a second check**: nothing pending means a `mason sync` of it runs, so a table
+  stays pending until its rebuild ended, the writer's turn after its catch-up, and says so in its own words
+  (`notStreamedReason`; `rebuildingNow.kind` turns to `catch-up` as the whole read ends). A pass is ONE
   attachment of the source (`attach` / `detach`: a new connection on the database), so at `poll 1s`, the floor, a
   table costs the source a connection a second beside its scan; holding the attachment across close passes is a later
   step, measured first.
@@ -595,8 +629,17 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   swap, the poll's reconciled count at its commit, and after every stream batch the rows its writes inserted less the
   rows they deleted (`rowsChanged`, `writeByKey`) — never a `count(*)` per batch (a write by key's deletes make it a
   scan) — written to `copy_state` IN the batch's transaction. When it was last brought current, and how,
-  is `CopyState.synced` (`Synced`: the swap, a poll's commit, the stream's last batch); `/api/state` derives each
-  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked.
+  is `CopyState.synced` (`Synced`: the swap, a poll's start, the stream's last batch); `/api/state` derives each
+  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked. **A poll's or a
+  batch's time is ONE value, the ledger's**: taken once before the sync's transaction, written in it (`polled_at`,
+  `applied_at`) and remembered as written (`polledAt`, `synced`), never `now()` in the ledger beside a `new Date()`
+  here — the two stood until `readPolledAt` replaced one with the other, and a table's `syncedAt` went 8 ms backwards
+  under `mason status`. **A copy has TWO, each one value**: its watermark's `polled_at`, taken before the swap, which
+  `kept.syncedAt`, `dueAt` and `nextAt` read, and `copied_at`, taken after it, which `CopyState.synced.at` and
+  `copiedAt` read; they differ by the swap's length, and `copied_at >= polled_at` is how `readSynced` tells a copy from
+  a later poll. **`readPolledAt` only ever moves a time forward** (its SELECT's snapshot may be older than a commit on
+  the rebuilds' connection), and drops a table the ledger no longer holds only when no commit gave it a time meanwhile.
+  `tests/duck-sync-facts.test.ts` and `tests/integration/duck-poll.itest.ts` hold what the run says to the ledger.
 
 ## Users (`mason user`, src/duck/users.ts)
 

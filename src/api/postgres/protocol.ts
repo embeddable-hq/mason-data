@@ -94,12 +94,10 @@ class BodyReader {
   get done(): boolean { return this.#off >= this.#buf.length; }
 }
 
-/** The next frame of `buf` at `off`: its length (type byte excluded, length field included) when the frame is whole,
- *  or null for "need more bytes". `headerLength` is 5 with a type byte, 4 in the startup phase. */
-/** The length field of the frame at the start of `buf` (type byte excluded, the field itself included), checked
- *  against `limit`; `headerLength` is 5 with a type byte, 4 in the startup phase. */
-function frameLength(buf: Buffer, headerLength: 4 | 5, limit: number): number {
-  const len = buf.readInt32BE(headerLength - 4);
+/** The length field of the frame at `off` in `buf` (type byte excluded, the field itself included), checked against
+ *  `limit`; `headerLength` is 5 with a type byte, 4 in the startup phase. */
+function frameLength(buf: Buffer, off: number, headerLength: 4 | 5, limit: number): number {
+  const len = buf.readInt32BE(off + headerLength - 4);
   if (len < 4) throw new ProtocolError(`malformed message: a length of ${len} (the length counts itself, so it is at least 4)`);
   if (len > limit) throw new ProtocolError(`message too long: ${len} bytes (the limit is ${limit})`);
   return len;
@@ -107,8 +105,10 @@ function frameLength(buf: Buffer, headerLength: 4 | 5, limit: number): number {
 
 /** Decodes what a frontend sends. Push every chunk the socket delivers; call `next()` until it returns null. */
 export class FrontendDecoder {
-  /** the bytes of the frame being assembled, once its header has arrived */
+  /** the chunks joined so far: consumed bytes before `#off`, then the frames not yet read, the last perhaps partial */
   #buf: Buffer = Buffer.alloc(0);
+  /** where the next frame starts in `#buf`: a frame consumed moves this, never the bytes behind it (BackendDecoder) */
+  #off = 0;
   /** chunks received since, concatenated ONCE, when the frame they complete is whole (never per chunk: a frame in
    *  64 KiB pieces re-copied everything received so far on every piece — review of #480) */
   #pending: Buffer[] = [];
@@ -128,11 +128,14 @@ export class FrontendDecoder {
     this.#pendingLength += chunk.length;
   }
 
-  /** Makes `#buf` hold at least `need` bytes when that many have arrived, moving the pending chunks in with one copy. */
+  /** Makes `#buf` hold at least `need` bytes past `#off` when that many have arrived, moving the pending chunks in with
+   *  one copy, which leaves the consumed bytes behind. */
   #assemble(need: number): boolean {
-    if (this.#buf.length >= need) return true;
-    if (this.#buf.length + this.#pendingLength < need) return false;
-    this.#buf = Buffer.concat([this.#buf, ...this.#pending]);
+    const held = this.#buf.length - this.#off;
+    if (held >= need) return true;
+    if (held + this.#pendingLength < need) return false;
+    this.#buf = Buffer.concat([this.#buf.subarray(this.#off), ...this.#pending]);
+    this.#off = 0;
     this.#pending = [];
     this.#pendingLength = 0;
     return true;
@@ -147,13 +150,16 @@ export class FrontendDecoder {
    *  or null while the header or the body is still arriving */
   #whole(headerLength: 4 | 5): number | null {
     if (!this.#assemble(headerLength)) return null;
-    const len = frameLength(this.#buf, headerLength, this.#startup ? Math.min(this.maxLength, MAX_STARTUP_LENGTH) : this.maxLength);
+    const len = frameLength(this.#buf, this.#off, headerLength, this.#startup ? Math.min(this.maxLength, MAX_STARTUP_LENGTH) : this.maxLength);
     return this.#assemble(headerLength - 4 + len) ? len : null;
   }
 
+  /** The frame's body, a view of `#buf` that lives as long as its BodyReader: every value a reader returns is a copy. */
   #take(headerLength: 4 | 5, len: number): Buffer {
-    const body = this.#buf.subarray(headerLength, headerLength - 4 + len);
-    this.#buf = Buffer.from(this.#buf.subarray(headerLength - 4 + len));
+    const body = this.#buf.subarray(this.#off + headerLength, this.#off + headerLength - 4 + len);
+    this.#off += headerLength - 4 + len;
+    // wholly consumed, it is let go: a connection idle on a frame boundary holds no bytes of what it last sent
+    if (this.#off === this.#buf.length) { this.#buf = Buffer.alloc(0); this.#off = 0; }
     return body;
   }
 
@@ -183,7 +189,7 @@ export class FrontendDecoder {
   #nextTyped(): FrontendMessage | null {
     const len = this.#whole(5);
     if (len === null) return null;
-    const code = String.fromCharCode(this.#buf[0]!);
+    const code = String.fromCharCode(this.#buf[this.#off]!);
     const r = new BodyReader(this.#take(5, len), `'${code}'`);
     switch (code) {
       case "p": return { type: "Password", password: r.cstring() };
@@ -425,23 +431,30 @@ function decodeBackendBody(code: string, body: Buffer): BackendMessage {
 /** Decodes what a backend sends, chunk by chunk, as FrontendDecoder does for the other direction. */
 export class BackendDecoder {
   #buf: Buffer = Buffer.alloc(0);
+  /** WHERE THE NEXT FRAME STARTS IN `#buf`: `next()` moves this and `push` drops what is behind it. Copying the rest off
+   *  after every message was quadratic in a reply: a 30 MB reply of 150,000 rows took about six minutes on CI (issue
+   *  77). A new buffer is always allocated, never written over, and no decoded message keeps a view of one (BodyReader
+   *  copies). */
+  #off = 0;
 
   push(chunk: Buffer): void {
-    this.#buf = this.#buf.length === 0 ? Buffer.from(chunk) : Buffer.concat([this.#buf, chunk]);
+    const rest = this.#buf.subarray(this.#off);
+    this.#buf = rest.length === 0 ? Buffer.from(chunk) : Buffer.concat([rest, chunk]);
+    this.#off = 0;
   }
 
   next(): BackendMessage | null {
-    if (this.#buf.length < 5) return null;
-    const len = frameLength(this.#buf, 5, MAX_MESSAGE_LENGTH);
-    if (this.#buf.length < 1 + len) return null;
-    const code = String.fromCharCode(this.#buf[0]!);
-    const body = this.#buf.subarray(5, 1 + len);
-    this.#buf = Buffer.from(this.#buf.subarray(1 + len));
+    if (this.pending < 5) return null;
+    const len = frameLength(this.#buf, this.#off, 5, MAX_MESSAGE_LENGTH);
+    if (this.pending < 1 + len) return null;
+    const code = String.fromCharCode(this.#buf[this.#off]!);
+    const body = this.#buf.subarray(this.#off + 5, this.#off + 1 + len);
+    this.#off += 1 + len;
     return decodeBackendBody(code, body);
   }
 
   /** bytes pushed and not yet consumed by a whole message */
-  get pending(): number { return this.#buf.length; }
+  get pending(): number { return this.#buf.length - this.#off; }
 }
 
 /** Every message of a buffer that holds whole messages only (a `execProtocolRaw` reply, a builder's output). A

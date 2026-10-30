@@ -61,7 +61,7 @@ export const MATRIX_MORE: Readonly<Record<string, ReadonlyArray<readonly string[
 /** Further lines a command is run with in every state, beside MATRIX_ARGS's (a flag of its own that must refuse
  *  before it writes: `--role` names a role the roles file lacks, so no user is ever added). */
 export const MATRIX_EXTRA_ARGS: Readonly<Record<string, readonly (readonly string[])[]>> = {
-  user: [["add", "nobody", "--role", "no_such_role"]],
+  user: [["add", "nobody", "--role", "no_such_role"], ["add", "nobody", "--role", "no_such_role", "--set", "tenant=1"]],
 };
 
 /** The commands a state may not run in the matrix because they CHANGE it: they are the session's transitions. */
@@ -85,10 +85,10 @@ export function matrixEnv(extra: Record<string, string> = {}): Record<string, st
 }
 
 /** One `mason` command as a process: its exit, its two streams, how long it took. Killed after `timeoutMs`. */
-export function runMason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000): Promise<Answer> {
+export function runMason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000, main = MAIN): Promise<Answer> {
   const t0 = Date.now();
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [MAIN, ...argv], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [main, ...argv], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (b: Buffer) => { stdout += b.toString(); });
     child.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });
