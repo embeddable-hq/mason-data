@@ -23,7 +23,7 @@ answers. The difference is what an answer costs as the tables grow and as more r
 | 10 M rows, 32 clients | 96.6 | 3.51 | 28× faster |
 | one order by its primary key, 30 M rows, 8 clients (p50) | 0.013 | 0.99 | 79× slower |
 
-Mason is for scans and aggregates; a lookup through an index stays Postgres's ([docs/DESIGN.md](DESIGN.md) "Heap order, no index").
+Mason is for scans and aggregates. A lookup through an index is faster on Postgres ([docs/DESIGN.md](DESIGN.md) "Heap order, no index").
 
 ## As the tables grow
 
