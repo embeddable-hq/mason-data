@@ -58,9 +58,10 @@ export function renderReadmeSupport(gaps: Record<string, Gap>, verified: Readonl
   const m = alone.mason;
   const wrong = m.differs === 0 ? "none was answered with a wrong value" : `${m.differs.toLocaleString("en-US")} were answered with a wrong value`;
   return `${README_START}
-To show what Mason adds over DuckDB by itself, the oracle also sends ${alone.statements.toLocaleString("en-US")} of its queries to a plain DuckDB connection. Of those, Mason answers ${pct(m.exact)} exactly as
-Postgres does. It answers ${pct(m.decided)} differently, each by a decision it lists. It refuses ${pct(m.refused)} with an error that says what
-to write instead. ${wrong[0]!.toUpperCase() + wrong.slice(1)}. DuckDB alone, over the same tables, answers only ${pct(alone.duckdb.exact)} of them exactly.
+To show what Mason adds over DuckDB by itself, the oracle also sends ${alone.statements.toLocaleString("en-US")} of its queries to a plain DuckDB connection,
+over the same tables. DuckDB alone answers only ${pct(alone.duckdb.exact)} of them exactly as Postgres does. Mason answers ${pct(m.exact)}.
+It answers ${pct(m.decided)} differently, each by a decision it lists, and it refuses ${pct(m.refused)} with an error that says what to write
+instead. ${wrong[0]!.toUpperCase() + wrong.slice(1)}.
 
 [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the ${verified.size.toLocaleString("en-US")} verified pieces (types, functions,
 operators, aggregates, window functions, casts, constructs and their forms). It also lists the ${of("refused")} refused shapes, the
