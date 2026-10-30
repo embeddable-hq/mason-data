@@ -59,7 +59,7 @@ export function renderReadmeSupport(gaps: Record<string, Gap>, verified: Readonl
   const wrong = m.differs === 0 ? "none was answered with a wrong value" : `${m.differs.toLocaleString("en-US")} were answered with a wrong value`;
   return `${README_START}
 To show what Mason adds over DuckDB by itself, the oracle also sends ${alone.statements.toLocaleString("en-US")} of its queries to a plain DuckDB connection,
-over the same tables. DuckDB alone answers only ${pct(alone.duckdb.exact)} of them exactly as Postgres does. Mason answers ${pct(m.exact)}.
+over the same tables. **DuckDB alone answers only ${pct(alone.duckdb.exact)} of them exactly as Postgres does. Mason answers ${pct(m.exact)}.**
 It answers ${pct(m.decided)} differently, each by a decision it lists, and it refuses ${pct(m.refused)} with an error that says what to write
 instead. ${wrong[0]!.toUpperCase() + wrong.slice(1)}.
 
