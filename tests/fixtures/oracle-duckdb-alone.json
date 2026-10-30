@@ -74,7 +74,7 @@
         "limit-lateral-argument": { "planted": 0, "natural": 2 },
         "limit-lateral-filter": { "planted": 0, "natural": 2 },
         "min-max-scale-tie": { "planted": 1, "natural": 0 },
-        "mixed-scale-numeric": { "planted": 0, "natural": 3 },
+        "mixed-scale-numeric": { "planted": 1, "natural": 2 },
         "negative-zero": { "planted": 0, "natural": 10 },
         "nested-exact-numeric": { "planted": 1, "natural": 0 },
         "numeric-stddev": { "planted": 0, "natural": 2 },
@@ -142,7 +142,7 @@
         "limit-lateral-argument": { "planted": 0, "natural": 6 },
         "limit-lateral-filter": { "planted": 0, "natural": 8 },
         "min-max-scale-tie": { "planted": 3, "natural": 0 },
-        "mixed-scale-numeric": { "planted": 0, "natural": 9 },
+        "mixed-scale-numeric": { "planted": 3, "natural": 6 },
         "negative-zero": { "planted": 0, "natural": 26 },
         "nested-exact-numeric": { "planted": 3, "natural": 0 },
         "numeric-stddev": { "planted": 0, "natural": 6 },
@@ -152,5 +152,11 @@
       }
     }
   },
-  "measured": "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy"
+  "measured": {
+    "what": "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy",
+    "machine": "darwin arm64",
+    "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu",
+    "collation": "en_US.utf8 (c)",
+    "shapes": true
+  }
 }

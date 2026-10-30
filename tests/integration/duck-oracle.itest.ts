@@ -296,7 +296,10 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
    * tests/fixtures/oracle-duckdb-alone.json, which docs/SQL-SUPPORT.md's comparison renders; UPDATE_FIXTURE=1 rewrites it, and
    * a run whose tallies moved by more than a percentage point of the statements fails until it is. Its `gaps` detail
    * (oracle/gap-tally.ts) is rewritten with it and never compared: one statement moving between two gaps is no
-   * failure, and a total that moves is already held, so the detail reads as of the last UPDATE_FIXTURE=1.
+   * failure, and a total that moves is already held, so the detail reads as of the last UPDATE_FIXTURE=1. It is that
+   * run's, and more than the statements decide it: the decided counts part by machine (a float's last digit, and which
+   * of -0 and 0 an aggregate keeps), shapes off leaves out what only a shape meets, and a C or ICU database what only
+   * libc meets. `measured` says what it was measured on; tests/duck-gaps.test.ts holds shapes on, libc and Linux.
    */
   const alone = await theStore.instance.connect();
   await alone.run("SET search_path = 'public'");
@@ -427,7 +430,11 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of
   // play), and the gaps' detail beside them: here, past the last phase, as `everyAsk` counts every phase
   if (ONLY === null) {
-    const fixture = { ...tallies, gaps: { copyPhase: fixtureTally(copyPhaseGaps), everyAsk: { asked, ...fixtureTally(everyAskGaps) } }, measured: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy" };
+    const measured = {
+      what: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy",
+      machine: `${process.platform} ${process.arch}`, postgres: psql(dbUrl, "SELECT version()").split(",")[0]!, collation, shapes: SHAPES,
+    };
+    const fixture = { ...tallies, gaps: { copyPhase: fixtureTally(copyPhaseGaps), everyAsk: { asked, ...fixtureTally(everyAskGaps) } }, measured };
     const pct = (n: number): string => `${(100 * n / tallies.statements).toFixed(1)}%`;
     console.log(`duck oracle, DuckDB alone: ${tallies.statements} statements: exact ${pct(tallies.duckdb.exact)}, the rows under its own names ${pct(tallies.duckdb.name)}, refused ${pct(tallies.duckdb.refused)}, ` +
       `a wrong value ${pct(tallies.duckdb.value)}, wrong rows ${pct(tallies.duckdb.rows)}, other text ${pct(tallies.duckdb.text)}, other ${pct(tallies.duckdb.other)}; ` +

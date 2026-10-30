@@ -1,8 +1,9 @@
 /**
  * HOW MUCH OF THE ORACLE EACH GAP ACCOUNTS FOR (src/duck/gaps.ts; tests/integration/duck-oracle.itest.ts `meet`): the
  * refusals and decided differences by the gap they name, each count split in two:
- *  - `planted`: a statement of oracle/gap-cases.ts (`group: "gap case"`), there so the registry cannot list a gap the
- *    oracle never saw: it says the gap exists, and nothing about how often it is met;
+ *  - `planted`: a statement there only to meet its gap, so the registry cannot list a gap the oracle never saw: one of
+ *    oracle/gap-cases.ts (`group: "gap case"`), or MIXED_SCALE (`group: "decided"`, postgres-cases.ts), which carries
+ *    the decision mixed-scale-numeric. It says the gap exists, and nothing about how often it is met;
  *  - `natural`: every other statement of the oracle, written for something else, which met the gap in passing.
  * Two measures, never to be added: `copyPhase`, each of the oracle's statements once, as `tallies.mason` counts them, so
  * its counts sum to that tally; `everyAsk`, the three phases and the shapes. A shape wraps only what was answered alike,
@@ -21,7 +22,7 @@ export const emptyTally = (): GapTally => ({ refused: {}, decided: {} });
 
 export function countGap(tally: GapTally, met: Met, gap: GapId, group: string): void {
   const c = tally[met][gap] ??= { planted: 0, natural: 0 };
-  c[group === "gap case" ? "planted" : "natural"]++;
+  c[group === "gap case" || group === "decided" ? "planted" : "natural"]++;
 }
 
 const entries = (counts: GapCounts): Array<[GapId, GapCount]> => Object.entries(counts) as Array<[GapId, GapCount]>;
