@@ -65,7 +65,7 @@ export function packageJson(m: Manifest, p: ExtensionPlatform, cliVersion: strin
     name: packageName(p),
     version: cliVersion,
     description: `The copy's postgres and inet extensions for @mason-data/cli on ${p} (engine ${m.engine}), so Mason downloads nothing after npm install`,
-    homepage: "https://masondata.ai",
+    homepage: "https://github.com/embeddable-hq/mason-data#readme",
     // built by this script; the package's own folder is cli/platforms/<platform>/, which is not committed
     repository: { type: "git", url: "git+https://github.com/embeddable-hq/mason-data.git", directory: `cli/platforms/${p}` },
     // the extensions' own (MIT), and what postgres_scanner links: libpq (PostgreSQL) and OpenSSL (Apache-2.0)

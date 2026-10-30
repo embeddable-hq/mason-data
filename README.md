@@ -34,7 +34,7 @@ A drop-in replacement for your Postgres read replica. Same SQL. Same answers. Se
   - [A CLI for coding agents](#a-cli-for-coding-agents)
 - [Documentation](#documentation) · [Community](#community) · [Contributing](#contributing) · [License](#license)
 
-[Website](https://masondata.ai) · [Issues](https://github.com/embeddable-hq/mason-data/issues)
+[Issues](https://github.com/embeddable-hq/mason-data/issues)
 
 [![npm](https://img.shields.io/npm/v/@mason-data/cli)](https://www.npmjs.com/package/@mason-data/cli)
 [![CI](https://img.shields.io/github/actions/workflow/status/embeddable-hq/mason-data/ci.yml?branch=main&label=CI)](https://github.com/embeddable-hq/mason-data/actions/workflows/ci.yml)
