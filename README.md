@@ -256,8 +256,8 @@ with what to write instead.
 
 Only the project folder travels: `mason/`, the sources file and `mason.yml` (the Mason version
 it is written for). In production Mason runs as one container, `mason serve`, configured by the
-environment, its copy on one volume, with `/healthz` for the platform. `mason help production` is
-this section, offline.
+environment, its copy on one volume, with `/healthz` for the platform and `/metrics` for Prometheus
+(numbers only, no name, no secret). `mason help production` is this section, offline.
 
 From a checkout of this repository (or with `deploy/mason-data/compose.yml` and `.env.example` copied into a folder of
 yours):
