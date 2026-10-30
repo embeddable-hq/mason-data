@@ -77,8 +77,10 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
 - **The roles file decides what a user with no role reads, never the code** (`Session.grants` / `roleName`; docs/DESIGN.md
   "Roles: the file decides the default"): no file, every copied table; `default: <role>`, that role (its refusals,
   its catalog under `SET ROLE`, its request-log `role`), read at every statement; a file with no `default:`, nothing —
-  every statement that reads a copied table refused 42501 with the two ways out, `SELECT 1` and a catalog read
-  answered. A token reads every copied table. Why: a default in the code is a grant nobody committed. DETECTOR:
+  every statement that reads a copied table refused 42501 with the two ways out, `SELECT 1` answered, the catalog run
+  as `NO_ROLE_CATALOG` (a grant-less role, src/duck/grants.ts `catalogRolesOf`: information_schema lists nothing, the
+  privilege functions are false, `current_user` / `current_role` / `user` spliced to the user's name, `set_config`
+  refused), never as the catalog's superuser. A token reads every copied table. Why: a default in the code is a grant nobody committed. DETECTOR:
   `tests/duck-roles-wire.test.ts` (stage 1b's tests), `tests/cli-roles.test.ts`.
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,

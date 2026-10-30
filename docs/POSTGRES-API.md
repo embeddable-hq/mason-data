@@ -75,8 +75,11 @@ roles:
 - **a file with no `default:`**: a user with no role reads NOTHING. Every statement that reads a copied table is
   refused `42501 permission denied for table …`, the DETAIL `the user "<name>" has no role and mason/roles.yml names
   no default`, the HINT the two ways out (`write default: <a role> at the top of mason/roles.yml, or mason user remove
-  <name> and mason user add <name> --role <a role>`); a statement that reads none (`SELECT 1`, a catalog read) is
-  answered. `mason start` and `mason user list` name such users; `mason user add` still writes one, saying so.
+  <name> and mason user add <name> --role <a role>`); a statement that reads none (`SELECT 1`) is answered, and the
+  catalog answers as Postgres does for a login with no grant (it runs as a grant-less role, `__mason_no_role`):
+  `information_schema` lists no table or view, every `has_*_privilege` is false, `current_user`, `current_role` and
+  `user` are the user's own name, and `set_config` is refused (42501). `mason start` and `mason user list` name such
+  users; `mason user add` still writes one, saying so.
 
 A token (minted from the API key, no user) reads every copied table in every state. `tables: all` is Postgres's own word
 (`GRANT SELECT ON ALL TABLES IN SCHEMA`), resolved against the tables copied at every read: a table the sources file adds
@@ -120,7 +123,8 @@ is the role's once its copy is served. A table key `all` under `tables:` is refu
   (42501, `permission denied for function set_config`), where Postgres lets a role `set_config('role', 'none')` back
   to its login: the catalog is one superuser connection with `SET ROLE` on top, and inside one statement that call
   was a reset to the superuser (the hidden columns' NAMES, never rows, were listed by the rest of the statement). A
-  token's session keeps `set_config`; a user under the file's default is that role's session.
+  token's session keeps `set_config`; a user under the file's default is that role's session, and a user the file
+  holds to nothing is refused it too.
 - **Every refusal is a row of the request log with the role it was held to** (`role` in `_mason.requests`: the user's
   own, or the file's default; empty for a token and for a user held to nothing).
 

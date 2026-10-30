@@ -58,13 +58,20 @@ test("default: a role of the file, read; the user's role decided by the file (us
   const file = r.parseRolesText("default: everything\nroles:\n  everything:\n    tables: all\n", FILE);
   assert.ok(!("problems" in file));
   assert.equal(file.default, "everything");
-  assert.deepEqual(r.userRole({ role: "agent" }, { file: "mason/roles.yml", default: "everything" }), { role: "agent", roleFrom: "file", readsNothing: false });
-  assert.deepEqual(r.userRole({}, { file: "mason/roles.yml", default: "everything" }), { role: "everything", roleFrom: "default", readsNothing: false });
-  assert.deepEqual(r.userRole({}, { file: "mason/roles.yml", default: null }), { roleFrom: "none", readsNothing: true });
-  assert.deepEqual(r.userRole({}, { file: null, default: null }), { roleFrom: "none", readsNothing: false });
-  assert.deepEqual(r.usersWithNoRole([{ name: "a" }, { name: "b", role: "agent" }], { file: "mason/roles.yml", default: null }), ["a"]);
-  assert.deepEqual(r.usersWithNoRole([{ name: "a" }], { file: "mason/roles.yml", default: "everything" }), []);
-  assert.deepEqual(r.usersWithNoRole([{ name: "a" }], { file: null, default: null }), []);
+  assert.deepEqual(r.userRole({ role: "agent" }, { file: "mason/roles.yml", default: "everything", problem: null }), { role: "agent", roleFrom: "file", readsNothing: false });
+  assert.deepEqual(r.userRole({}, { file: "mason/roles.yml", default: "everything", problem: null }), { role: "everything", roleFrom: "default", readsNothing: false });
+  assert.deepEqual(r.userRole({}, { file: "mason/roles.yml", default: null, problem: null }), { roleFrom: "none", readsNothing: true });
+  assert.deepEqual(r.userRole({}, { file: null, default: null, problem: null }), { roleFrom: "none", readsNothing: false });
+  assert.deepEqual(r.usersWithNoRole([{ name: "a" }, { name: "b", role: "agent" }], { file: "mason/roles.yml", default: null, problem: null }), ["a"]);
+  assert.deepEqual(r.usersWithNoRole([{ name: "a" }], { file: "mason/roles.yml", default: "everything", problem: null }), []);
+  assert.deepEqual(r.usersWithNoRole([{ name: "a" }], { file: null, default: null, problem: null }), []);
+  // a file that cannot be read as it is now says nothing of a default: the listener refuses such a user for the FILE
+  // (57P03, repair it), so it is neither defaulted nor "reads nothing" (the review of #44)
+  const broken = { file: "mason/roles.yml", default: null, problem: "it is not YAML" };
+  assert.deepEqual(r.userRole({}, broken), { roleFrom: "none", readsNothing: false });
+  assert.deepEqual(r.userRole({}, { ...broken, default: "everything" }), { roleFrom: "none", readsNothing: false }, "a last good default is not said either");
+  assert.deepEqual(r.userRole({ role: "agent" }, broken), { role: "agent", roleFrom: "file", readsNothing: false });
+  assert.deepEqual(r.usersWithNoRole([{ name: "a" }], broken), []);
 });
 
 test("the new keys' refusals, each at its key with the way out, on ONE report", async () => {

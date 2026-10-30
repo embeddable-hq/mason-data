@@ -82,6 +82,9 @@ const tag = `it_duckoracle_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 const ROLE_LOGIN = `${tag}_agent`;
 /** the Postgres LOGIN role of the `tables: all` role cases (stage 1b): GRANT SELECT ON ALL TABLES IN SCHEMA public */
 const ROLE_ALL = `${tag}_all`;
+/** the Postgres LOGIN of the no-role cases (stage 1b): CONNECT and USAGE only, against a Mason user with no role under a
+ *  roles file with no default: */
+const ROLE_NONE = `${tag}_none`;
 const dbUrl = adminUrl ? (() => { const u = new URL(adminUrl); u.pathname = `/${tag}`; return u.toString(); })() : "";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-duck-oracle-"));
 const report = path.join(process.env.IT_LOG_DIR ?? os.tmpdir(), "duck-oracle-differences.txt");
@@ -230,7 +233,7 @@ after(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
   if (adminUrl) psql(adminUrl, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
   // the role cases' login role (its grants went with the database)
-  if (adminUrl) psql(adminUrl, `DROP ROLE IF EXISTS ${ROLE_LOGIN}; DROP ROLE IF EXISTS ${ROLE_ALL}`);
+  if (adminUrl) psql(adminUrl, `DROP ROLE IF EXISTS ${ROLE_LOGIN}; DROP ROLE IF EXISTS ${ROLE_ALL}; DROP ROLE IF EXISTS ${ROLE_NONE}`);
 });
 
 test("the DuckDB endpoint answers every statement exactly as Postgres does, before and after changes", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 1_800_000 }, async () => {
@@ -315,7 +318,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     ["public.customers", { table: "public.customers", all: true, columns: [] }]]) }]]) };
   server = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: tag, masonVersion: "oracle",
-    authenticate: (_password, user) => user === ROLE_LOGIN ? { user, role: "agent" } : user === ROLE_ALL ? { user, role: "everything" } : {},
+    authenticate: (_password, user) => user === ROLE_LOGIN ? { user, role: "agent" } : user === ROLE_ALL ? { user, role: "everything" } : user === ROLE_NONE ? { user } : {},
     roles: () => roles,
     schema: () => theSync.schema(),
     record: () => undefined, log: (l) => log.push(l),
@@ -501,6 +504,48 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     }
     console.log(`duck oracle: ${cases.length} role case(s) asked as a role of Postgres and a user of a Mason role, ${refusedAlike} refused alike by SQLSTATE and message`);
     await allRoleCases();
+    await noRoleCases();
+  }
+
+  /**
+   * A USER THE FILE HOLDS TO NOTHING (no role, `default:` not written — this run's file names none), HELD TO A POSTGRES
+   * LOGIN WITH NO GRANT (CONNECT and USAGE only): a table read refused alike by SQLSTATE and message, and the catalog
+   * answering alike — information_schema lists nothing, the privilege functions are false, the user names itself.
+   */
+  async function noRoleCases(): Promise<void> {
+    const cases: Array<{ name: string; sql: string; decided?: string }> = [
+      { name: "no role, a table read", sql: "SELECT count(*) FROM public.orders" },
+      { name: "no role, a column read", sql: "SELECT id FROM public.customers ORDER BY id" },
+      { name: "no role, no table read", sql: "SELECT 1 + 1 AS two" },
+      { name: "no role, information_schema.tables", sql: "SELECT table_name::text FROM information_schema.tables WHERE table_schema = 'public' ORDER BY 1" },
+      { name: "no role, information_schema.columns", sql: "SELECT column_name::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'orders' ORDER BY 1" },
+      { name: "no role, the privilege functions", sql: "SELECT has_table_privilege('public.orders', 'SELECT'), has_any_column_privilege('public.orders', 'SELECT'), has_column_privilege('public.orders', 'status', 'SELECT')" },
+      { name: "no role, the user's names", sql: "SELECT current_user::text, current_role::text, user::text, session_user::text" },
+      // Postgres lets a login set_config; the catalog revokes it from every role, this one included: a decided difference
+      { name: "no role, set_config, decided", sql: "SELECT set_config('application_name', 'x', false)", decided: "42501" },
+    ].filter((q) => ONLY === null || ONLY.test(`role case: ${q.name}`));
+    if (cases.length === 0) return;
+    psql(dbUrl, `CREATE ROLE ${ROLE_NONE} LOGIN PASSWORD 'x'; GRANT CONNECT ON DATABASE ${tag} TO ${ROLE_NONE}; GRANT USAGE ON SCHEMA public TO ${ROLE_NONE};`);
+    const u = new URL(dbUrl); u.username = ROLE_NONE; u.password = "x";
+    const sourceNone = new pg.Client({ connectionString: u.toString(), application_name: "duck-oracle-role-none" });
+    const masonNone = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: ROLE_NONE, password: "x", application_name: "duck-oracle-role-none" });
+    for (const c of [sourceNone, masonNone]) { await c.connect(); clients.push(c); await c.query("SET TimeZone = 'UTC'"); }
+    let refusedAlike = 0;
+    for (const q of cases) {
+      const [want, got] = [await ask(sourceNone, q.sql), await ask(masonNone, q.sql)];
+      if (q.decided !== undefined) {
+        const ok = !("code" in want) && "code" in got && got.code === q.decided;
+        if (!ok) differences.push({ phase: "roles", group: "role case", kind: "code" in got ? "sqlstate" : "answered", name: `role case: ${q.name}`, detail: `decided ${q.decided}: ${JSON.stringify(got)} where Postgres ${JSON.stringify(want)}`, sql: q.sql });
+        continue;
+      }
+      const v = verdict(want, got, ordered(q.sql));
+      if (v !== null) { differences.push({ phase: "roles", group: "role case", kind: v.kind, name: `role case: ${q.name}`, detail: v.detail, sql: q.sql }); continue; }
+      if ("code" in want && "code" in got) {
+        refusedAlike++;
+        if (want.message !== got.message) differences.push({ phase: "roles", group: "role case", kind: "text", name: `role case: ${q.name}`, detail: `${JSON.stringify(got.message)} where Postgres says ${JSON.stringify(want.message)}`, sql: q.sql });
+      }
+    }
+    console.log(`duck oracle: ${cases.length} role case(s) asked as a Postgres login with no grant and a Mason user the roles file holds to nothing, ${refusedAlike} refused alike by SQLSTATE and message`);
   }
 
   /**

@@ -194,8 +194,9 @@ export function listUsers(file: string, apiKey: string, roles: RolesLive = NO_RO
   const r = readUsers(file);
   if ("problem" in r) return { message: `the list of users cannot be read: ${r.problem}`, code: "bad_config", why: "no user connects while it cannot be read",
     fix: `repair ${file}, or move it aside, which removes every user` };
+  // roleKnown only where the file can be read: under a problem the listener refuses every user held to it for the FILE
   return { users: r.users.map((u) => ({ name: u.name, id: u.id, addedAt: u.addedAt, live: liveOf(u, apiKey), ...roleFields(u, roles),
-    ...(u.role !== undefined ? { roleKnown: roles.problem === null && roles.grants.has(u.role) } : {}) })) };
+    ...(u.role !== undefined && roles.problem === null ? { roleKnown: roles.grants.has(u.role) } : {}) })) };
 }
 
 /** a user's role as the JSON says it: the role it reads as, where from, and whether it reads nothing (src/cli/roles.ts userRole) */
@@ -306,6 +307,7 @@ export async function user(argv: string[]): Promise<number> {
         ...(rotated.length ? [`A user added under another API key does not connect: mason user remove ${rotated[0]!.name}, then mason user add ${rotated[0]!.name}.`] : []),
         ...(orphan ? [`A role the roles file (mason/${ROLES_FILE}) does not name reads nothing: add ${orphan.role} to it, or mason user remove ${orphan.name}, then mason user add ${orphan.name} --role <role>.`] : []),
         ...(roleless ? [`A user with no role reads nothing while ${rolesFileShown} names no default: ${noRoleWayOut(roleless.name, rolesFileShown, exampleRole(roles))}.`] : []),
+        ...(roles.problem !== null && r.users.length ? [`${rolesFileShown} cannot be read as it is now, so every statement of a user held to it is refused: ${roles.problem}`] : []),
       ], next }));
     return 0;
   }

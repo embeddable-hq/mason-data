@@ -552,6 +552,27 @@ test("catalogRoles: a role of tables: all (stage 1b) is granted every copied tab
   assert.ok(!ddl.some((l) => /ON ALL TABLES/.test(l)));
 });
 
+test("catalogRolesOf: a grant-less role for a user the file holds to nothing, only where a roles file exists; catalogRoles makes it with no table and catalogViews grants it no view", async () => {
+  // the module's own names, read when the test runs, so a tree without them fails this test by name
+  const g = await import("../../src/duck/grants.ts") as unknown as Record<string, unknown>;
+  const NO = g.NO_ROLE_CATALOG as string;
+  const of = g.catalogRolesOf as ((live: unknown) => ReadonlyMap<string, { name: string; tables: ReadonlyMap<string, unknown>; all: boolean }>) | undefined;
+  assert.equal(NO, "__mason_no_role", "a name the roles file can never hold (ROLE_NAME_RE: no leading underscore)");
+  assert.ok(of !== undefined);
+  assert.equal(of(g.NO_ROLES).size, 0, "no roles file: no catalog role at all");
+  const file = { file: "mason/roles.yml", problem: null, default: null, grants: twoRoles() };
+  const roles = of(file);
+  assert.deepEqual([...roles.keys()], ["agent", "ops", NO]);
+  assert.deepEqual([roles.get(NO)!.tables.size, roles.get(NO)!.all], [0, false]);
+  assert.deepEqual([...of({ ...file, grants: new Map() }).keys()], [NO], "a file naming no role still has it");
+  const m = catalogModule as unknown as { catalogRoles: (s: PgSchema, r: ReadonlyMap<string, unknown>) => string[]; catalogViews: (s: PgSchema, r: ReadonlyMap<string, unknown>) => string[] };
+  const ddl = m.catalogRoles(schema, roles);
+  assert.equal(ddl[0], "REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC;", "set_config revoked: the no-role session is refused it too");
+  assert.deepEqual(ddl.filter((l) => l.includes(`"${NO}"`)), [`CREATE ROLE "${NO}" NOLOGIN;`, `GRANT USAGE ON SCHEMA "public" TO "${NO}";`], "no table grant");
+  const [v] = m.catalogViews({ ...schema, views: [{ schema: "public", name: "paid_orders", definition: " SELECT id FROM public.orders WHERE paid;" }] }, roles);
+  assert.ok(v !== undefined && !v.includes(NO), v);
+});
+
 test("asRole wraps a request in SET ROLE … RESET ROLE, with a Sync where the request has none; unwrapRole strips the SET's and RESET's replies, and names a refused SET", () => {
   const m = catalogModule as unknown as { asRole: (b: Uint8Array, role: string) => Uint8Array; unwrapRole: (f: Array<{ type: string; frame: Buffer }>) => { frames: Array<{ type: string }>; setRoleRefused: Buffer | null } };
   const framesOf = (b: Uint8Array): string[] => decode(b).map((f) => f.type);

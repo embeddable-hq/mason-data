@@ -310,18 +310,20 @@ export type RoleFrom = "file" | "default" | "none";
 /**
  * THE ROLE A USER IS HELD TO, as the listener decides it (src/api/postgres/server.ts Session.grants): its own, else the
  * file's default; `readsNothing` where the file names no default for a user with none. One function for `mason user
- * list`, `mason user add`, `mason start` and the web page, so they say what the listener does.
+ * list`, `mason user add`, `mason start` and the web page, so they say what the listener does. A file that cannot be
+ * read as it is now (`problem`) says nothing of a default — the listener refuses such a user 57P03 for the FILE, whose
+ * way out is to repair it, never to write `default:` — so a roleless user is then neither defaulted nor "reads nothing".
  */
-export function userRole(u: { role?: string | undefined }, live: Pick<RolesLive, "file" | "default">): { role?: string; roleFrom: RoleFrom; readsNothing: boolean } {
+export function userRole(u: { role?: string | undefined }, live: Pick<RolesLive, "file" | "default" | "problem">): { role?: string; roleFrom: RoleFrom; readsNothing: boolean } {
   if (u.role !== undefined) return { role: u.role, roleFrom: "file", readsNothing: false };
-  if (live.file === null) return { roleFrom: "none", readsNothing: false };
+  if (live.file === null || live.problem !== null) return { roleFrom: "none", readsNothing: false };
   if (live.default !== null) return { role: live.default, roleFrom: "default", readsNothing: false };
   return { roleFrom: "none", readsNothing: true };
 }
 
 /** The users with no role under a roles file that names no default — said at the start and by `mason user list`:
  *  their statements are refused until the file has a `default:` or the user is made again with a role. */
-export function usersWithNoRole(users: ReadonlyArray<{ name: string; role?: string | undefined }>, live: Pick<RolesLive, "file" | "default">): string[] {
+export function usersWithNoRole(users: ReadonlyArray<{ name: string; role?: string | undefined }>, live: Pick<RolesLive, "file" | "default" | "problem">): string[] {
   return users.filter((u) => userRole(u, live).readsNothing).map((u) => u.name);
 }
 

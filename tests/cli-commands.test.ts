@@ -544,6 +544,21 @@ test("stage 1b, the roles file decides a user added without --role: its default 
   const tips = noDefault.stdout.split("\n").filter((l) => l.startsWith("Tip: A user with no role"));
   assert.deepEqual(tips, ["Tip: A user with no role reads nothing while mason/roles.yml names no default: write default: everything at the top of mason/roles.yml, or mason user remove metabase and mason user add metabase --role everything."], "ONE tip");
 
+  // A FILE THAT CANNOT BE READ (the review of #44): the listener refuses every user held to it for the FILE (57P03), so
+  // nothing says "no default" or "not in the roles file" — the file's problem is said once, the way out its repair
+  fs.writeFileSync(rolesFile, "roles: [not a map");
+  const broken = await run(["user", "list"]);
+  assert.equal(broken.code, 0, broken.stdout + broken.stderr);
+  assert.doesNotMatch(broken.stdout, /names no default|not in the roles file/);
+  assert.deepEqual(broken.stdout.split("\n").filter((l) => l.includes("cannot be read as it is now")),
+    [`Tip: mason/roles.yml cannot be read as it is now, so every statement of a user held to it is refused: ${broken.stdout.split("refused: ")[1]?.split("\n")[0] ?? ""}`], "ONE tip");
+  assert.match(broken.stdout, /refused: mason\/roles\.yml: it is not YAML: /, "the file's own mistake");
+  assert.deepEqual(roleOf(await listed("metabase")), { role: undefined, roleFrom: "none", readsNothing: undefined });
+  assert.equal((await listed("bot"))?.roleKnown, undefined, "under a problem roleKnown is left out, never false");
+  const brokenAdd = await run(["user", "add", "redash"]);
+  assert.equal(brokenAdd.code, 0, brokenAdd.stdout + brokenAdd.stderr);
+  assert.doesNotMatch(brokenAdd.stdout, /^ {2}role |reads nothing/m);
+
   // NO FILE: every user reads every copied table, as before stage 1b: no role, nothing said
   fs.rmSync(rolesFile);
   assert.deepEqual(roleOf(await listed("metabase")), { role: undefined, roleFrom: "none", readsNothing: undefined });

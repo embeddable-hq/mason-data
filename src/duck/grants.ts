@@ -71,6 +71,22 @@ export interface RolesLive {
 /** no roles file: every session reads every copied table, as before; one object, so the listener sees no change */
 export const NO_ROLES: RolesLive = { file: null, grants: new Map(), problem: null, default: null };
 
+/**
+ * THE CATALOG'S ROLE OF A USER THE FILE HOLDS TO NOTHING (no role of its own, no `default:`): a Postgres role with no
+ * grant, so its catalog requests answer as Postgres answers a login with none — information_schema lists none of the
+ * copied tables or views, every `has_*_privilege` is false, `set_config` is refused (revoked while any role exists).
+ * Named outside the file's namespace: `ROLE_NAME_RE` (src/cli/roles.ts) forbids a leading underscore, so no role of the
+ * file can ever be it.
+ */
+export const NO_ROLE_CATALOG = "__mason_no_role";
+
+/** The roles the catalog Postgres holds (src/api/postgres/catalog.ts catalogRoles): the file's, and — whenever a roles
+ *  file exists — `NO_ROLE_CATALOG`, a role with no table, for a user the file holds to nothing. */
+export function catalogRolesOf(live: RolesLive): ReadonlyMap<string, RoleGrants> {
+  if (live.file === null) return live.grants;
+  return new Map([...live.grants, [NO_ROLE_CATALOG, { name: NO_ROLE_CATALOG, file: live.file, tables: new Map(), all: false }]]);
+}
+
 /** `FirstLowInvalidHeapAttributeNumber` is -7: a column's bit in `selectedCols` is its attnum + 7 */
 const ATTNUM_OFFSET = 7;
 /** ACL_SELECT in `requiredPerms` */

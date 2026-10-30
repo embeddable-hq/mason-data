@@ -1106,7 +1106,10 @@ start`'s roles line, `mason user add` / `list`, `mason status`, the web page, `-
 no `mason/roles.yml` — every user reads every copied table, as before roles existed; `default: <role>` at the top of
 the file — a user added without `--role` reads as that role (its refusals, its catalog under `SET ROLE`, its request
 log rows); a file with no `default:` — such a user reads nothing, each statement that reads a copied table refused
-42501 with the two ways out as exact lines, `SELECT 1` and a catalog read still answered. The session asks the roles at
+42501 with the two ways out as exact lines, `SELECT 1` still answered. Its catalog requests run as a grant-less role,
+`__mason_no_role` — named outside the file's namespace (a role name never starts with `_`) — so `information_schema`
+and the privilege functions answer as Postgres's do for a login with no grant (the review of #44: run as the catalog's
+superuser they listed every table and said `has_table_privilege` true while every read was refused). The session asks the roles at
 every statement (`LiveRoles` re-reads the file when its stat moves), so an edit of `default:` applies at the next one;
 `Session.roleName` is the effective role, the one name `catalogAs`, the plan cache and the request log read. A file
 that cannot be read refuses a roleless user too (57P03): its default cannot be known, and fail closed is the rule. A

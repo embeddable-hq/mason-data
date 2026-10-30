@@ -14,8 +14,9 @@
  *   - stage 1b, THE FILE DECIDES A ROLELESS USER'S ACCESS: `tables: all` grants every copied table, one the sources file
  *     adds later included; `default:` edited under a held session applies at the next statement (the catalog's
  *     information_schema, has_column_privilege and current_user answer for it); a file with no `default:` refuses
- *     every statement of a roleless user that reads a copied table (42501, the two ways out), answers `SELECT 1`, and
- *     leaves a token reading everything; the request log records the EFFECTIVE role;
+ *     every statement of a roleless user that reads a copied table (42501, the two ways out), answers `SELECT 1`, runs
+ *     its catalog as a role with no grant (information_schema lists nothing, the privilege functions are false,
+ *     current_user is its own name), and leaves a token reading everything; the request log records the EFFECTIVE role;
  *   - the role is read with the user at every statement: a role changed under a user applies to its next statement,
  *     and to an EXECUTE of a statement prepared before; a role removed from the file refuses by name (fail closed), a
  *     file that cannot be read refuses 57P03, a repaired one answers again — no restart anywhere;
@@ -486,7 +487,7 @@ test("default: a user with no role reads as the file's default; default: edited 
   } finally { fs.writeFileSync(rolesFile, ROLES); await c.end(); }
 });
 
-test("no default: a user with no role reads nothing — refused 42501 with the two ways out; SELECT 1 and a catalog read answered; a token reads everything", async () => {
+test("no default: a user with no role reads nothing — refused 42501 with the two ways out; SELECT 1 answered and the catalog as for a login with no grant; a token reads everything", async () => {
   await wire();
   const c = await connect("dflt", addUser("dflt"));
   const prepared = { name: "dflt_amounts", text: "SELECT amount FROM orders WHERE id = $1", values: [1] };
@@ -505,14 +506,26 @@ test("no default: a user with no role reads nothing — refused 42501 with the t
     const ex = await refused(c, prepared);
     assert.deepEqual([ex.code, ex.detail], ["42501", `the user "dflt" has no role and ${ROLES_PATH} names no default`], "an Execute of a statement prepared before");
     assert.deepEqual((await c.query("SELECT 1 AS one")).rows, [{ one: 1 }], "a statement that reads no copied table is answered");
-    assert.equal((await c.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")).rows.length > 0, true, "a catalog read is answered");
+    // THE CATALOG ANSWERS AS FOR A LOGIN WITH NO GRANT (the review of #44): information_schema lists nothing, every
+    // privilege function is false, the user names itself, set_config is refused — never the catalog's superuser view
+    assert.deepEqual((await c.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")).rows, [], "no table, no view");
+    assert.deepEqual((await c.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'orders'")).rows, []);
+    assert.deepEqual((await c.query("SELECT has_table_privilege('orders', 'SELECT') AS t, has_any_column_privilege('orders', 'SELECT') AS a, has_column_privilege('orders', 'status', 'SELECT') AS c")).rows,
+      [{ t: false, a: false, c: false }]);
+    assert.deepEqual((await c.query("SELECT current_user, current_role, user, session_user, upper(current_user::text) AS up")).rows,
+      [{ current_user: "dflt", current_role: "dflt", user: "dflt", session_user: "dflt", up: "DFLT" }], "its own name, never the catalog's role");
+    assert.deepEqual((await c.query({ text: "SELECT current_user AS who, $1::text AS p", values: ["v"] })).rows, [{ who: "dflt", p: "v" }], "the extended protocol too");
+    assert.equal((await refused(c, "SELECT set_config('application_name', 'x', false)")).code, "42501", "set_config refused, as to a role's session");
+    assert.deepEqual((await token.query("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")).rows, [{ n: 3 }], "a token sees every table");
+    assert.deepEqual((await token.query("SELECT current_user AS who")).rows, [{ who: "postgres" }], "a token's catalog is the catalog's own");
     assert.equal((await token.query("SELECT notes FROM orders")).rows.length, 3, "a token reads every copied table in every state");
     // a role of its own is unchanged
     const a = await connect("agent", addUser("agent", "agent"));
     try { assert.deepEqual((await a.query("SELECT count(*)::int AS n FROM orders")).rows, [{ n: 3 }]); } finally { await a.end(); }
-    // the default written again: the same session reads at its next statement
+    // the default written again: the same session reads at its next statement, and its catalog is the default role's
     fs.writeFileSync(rolesFile, ROLES);
     assert.deepEqual((await c.query("SELECT count(*)::int AS n FROM orders")).rows, [{ n: 3 }]);
+    assert.deepEqual((await c.query("SELECT current_user AS who, has_table_privilege('orders', 'SELECT') AS t")).rows, [{ who: "everything", t: true }]);
   } finally { fs.writeFileSync(rolesFile, ROLES); await c.end(); await token.end(); }
 });
 
