@@ -181,7 +181,7 @@ export function renderRunning(running, asking = null, outcome = null, now = Date
     }
     if (said !== null && said.key === key) { shown = true; pops.push(pop(anchor, outcomeHtml(said))); }
     return `<tr><td>${r.session}</td><td>${r.statement}</td><td><span class="clip" title="${esc(r.user)}">${esc(r.user)}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
-      `<td class="num"><time datetime="${esc(r.startedAt)}" title="started ${esc(utcText(r.startedAt))} UTC">${esc(spanText(r.runningMs / 1000))}</time></td><td class="num">${esc(plural(r.rows, "row"))} sent</td>` +
+      `<td class="num"><time data-tick datetime="${esc(r.startedAt)}" title="started ${esc(utcText(r.startedAt))} UTC">${esc(spanText(r.runningMs / 1000))}</time></td><td class="num">${esc(plural(r.rows, "row"))} sent</td>` +
       `<td>${statementCell(r.query)}</td><td class="act" id="${esc(anchor)}">${asking === key ? `<button type="button" class="danger small" aria-expanded="true" disabled>Cancel</button>` : `<button type="button" class="danger small" data-ask-cancel="${esc(key)}">Cancel</button>`}</td></tr>`;
   }).join("");
   const table = running.length
@@ -226,7 +226,7 @@ export function renderClients(clients, { top = SESSIONS_TOP, range = DEFAULT_RAN
   return panel(`<table class="sessions"><thead><tr><th scope="col">User</th><th scope="col">Client</th><th scope="col" class="num">Statements</th><th scope="col" class="num">Failed</th>` +
     `<th scope="col" class="num">Sessions</th><th scope="col">Last</th><th scope="col" class="act"></th></tr></thead><tbody>` +
     shown.map((c) => `<tr>${cell(who(c))}${cell(clientText(c.client))}<td class="num">${esc(n(c.statements))}</td><td class="num">${c.failed ? esc(n(c.failed)) : ""}</td>` +
-      `<td class="num">${esc(n(c.sessions))}</td><td><time datetime="${esc(c.last)}" title="${esc(utcText(c.last))} UTC">${esc(agoText(c.last, now))}</time></td><td class="act">${queriesLink(c.user, c.client, range)}</td></tr>`).join("") +
+      `<td class="num">${esc(n(c.sessions))}</td><td><time data-tick datetime="${esc(c.last)}" title="${esc(utcText(c.last))} UTC">${esc(agoText(c.last, now))}</time></td><td class="act">${queriesLink(c.user, c.client, range)}</td></tr>`).join("") +
     (rest.length ? `<tr class="others"><td colspan="2">${esc(n(rest.length))} other client${rest.length === 1 ? "" : "s"}</td><td class="num">${esc(n(sum("statements")))}</td><td class="num">${esc(n(sum("failed")))}</td><td class="num">${esc(n(sum("sessions")))}</td><td></td><td></td></tr>` : "") +
     `</tbody></table>`) + `<p class="dim">${esc(plural(total, "client"))}${total > clients.length ? ` (the ${esc(n(clients.length))} with the most statements are listed)` : ""} sent statements in ${esc(span)}. A session that sent only what the log does not list (select 1, SET, a catalog query) is not here.</p>`;
 }
@@ -241,7 +241,7 @@ export function renderSlowest(list, { range = DEFAULT_RANGE, now = Date.now() } 
   if (!list.length) return empty(`No statement completed in ${span}.`);
   return `<div class="scroll"><table class="running"><thead><tr><th scope="col">Started</th><th scope="col" class="num">Took</th><th scope="col">User</th><th scope="col">Client</th>` +
     `<th scope="col" class="num">Rows</th><th scope="col">Statement</th><th scope="col" class="act"></th></tr></thead><tbody>` +
-    list.map((r) => `<tr><td><time datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td><td class="num">${esc(msText(r.durationMs))}</td>` +
+    list.map((r) => `<tr><td><time data-tick datetime="${esc(r.startedAt)}" title="${esc(utcText(r.startedAt))} UTC">${esc(agoText(r.startedAt, now))}</time></td><td class="num">${esc(msText(r.durationMs))}</td>` +
       `<td><span class="clip" title="${esc(r.user || r.tokenName)}">${esc(r.user || (r.tokenName ? `token ${r.tokenName}` : ""))}</span></td><td><span class="clip" title="${esc(clientText(r.applicationName))}">${esc(clientText(r.applicationName))}</span></td>` +
       `<td class="num">${r.rows === null ? "" : esc(n(r.rows))}</td><td class="stmt-cell">${statementCell(r.query)}</td>` +
       `<td class="act"><a class="btn small" href="${esc(queriesHref({ user: r.user, client: r.applicationName, slow: r.durationMs >= 1000 ? "1" : "" }, range))}" title="its client's statements on Observability › Queries">Queries</a></td></tr>`).join("") +

@@ -3,7 +3,7 @@
   "version": "0.7.0",
   "description": "mason start: point Mason at your Postgres and pick the tables to copy. Fast analytics for the database your app already has.",
   "keywords": ["mason", "analytics", "postgres", "duckdb", "cli"],
-  "homepage": "https://masondata.ai",
+  "homepage": "https://github.com/embeddable-hq/mason-data#readme",
   "repository": { "type": "git", "url": "git+https://github.com/embeddable-hq/mason-data.git", "directory": "cli" },
   "license": "Apache-2.0",
   "type": "module",

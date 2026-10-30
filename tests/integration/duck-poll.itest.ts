@@ -739,9 +739,10 @@ test("a copy's chunks are sized by the rate measured on its connection, and its 
   type Rate = { pagesPerSecond: number; rowsPerSecond: number; bytesPerSecond: number; chunks: number };
   type Event = Chunk & { pages?: number; ceiling?: number; sizedBy?: Rate | null; seconds?: number };
   type View = { chunksDone: number; chunksTotal: number; reading: number; readingSeconds: number | null; rowsReading: number; rowsPerSecond: number | null; secondsLeft: number | null; share: number };
-  const { nextChunkPages, nextRate } = syncModule as unknown as {
+  const { nextChunkPages, nextRate, READING_SHARE_CAP } = syncModule as unknown as {
     nextChunkPages?: (ceiling: number, rate: Rate | null, seconds: number) => number;
     nextRate?: (prev: Rate | null, m: { pages: number; rows: number; seconds: number; blockSize: number }) => Rate;
+    READING_SHARE_CAP: number;
   };
   const { url, db, source } = await parallelDatabase("ts");
   const pages = Number(psql(url, "SELECT pg_relation_size('big') / current_setting('block_size')::int"));
@@ -805,7 +806,10 @@ test("a copy's chunks are sized by the rate measured on its connection, and its 
     assert.equal(commits.length, done.length);
     for (const c of commits) assert.equal(c.rowsSoFar, c.committed, "rowsSoFar is every committed chunk's rows, at each commit");
     // WHILE A CHUNK READS, THE STATE SAYS SO: one chunk reading, for at least as long as it has slept, and once a rate
-    // is measured, the rows it has read by now — under what it will commit
+    // is measured, the rows it has read by now — an ESTIMATE, held under what its pages are EXPECTED to hold at the rows
+    // a page so far (`READING_SHARE_CAP`), which is under what a chunk of full pages commits. The heap's last page is
+    // not full: where the sizes land the last chunk on it alone, its 1 page expected 14 rows and held 10, and "12 read
+    // by now" is the product keeping its bound, not an overrun (CI, 1 run in many: the chunks' sizes follow the rates)
     const reads = seen.filter((x) => x.phase === "read");
     let share = -1, firstShare: number | null = null;
     for (const [i, r] of reads.entries()) {
@@ -823,7 +827,11 @@ test("a copy's chunks are sized by the rate measured on its connection, and its 
       if (i === 0) assert.deepEqual([p.rowsPerSecond, p.rowsReading], [null, 0], "nothing measured during the first chunk");
       else {
         assert.ok(p.rowsPerSecond !== null && p.rowsPerSecond > 0 && p.secondsLeft !== null, `chunk ${i}: a measured rate and time left`);
-        assert.ok(p.rowsReading > 0 && p.rowsReading < done[i]!.rows, `chunk ${i}: ${p.rowsReading} rows read by now, under its ${done[i]!.rows}`);
+        const before = done.slice(0, i);
+        const rowsPerPage = before.reduce((n, e) => n + e.rows, 0) / before.reduce((n, e) => n + e.pages!, 0);
+        const expected = READING_SHARE_CAP * done[i]!.pages! * rowsPerPage;
+        assert.ok(p.rowsReading > 0 && p.rowsReading <= Math.floor(expected), `chunk ${i}: ${p.rowsReading} rows read by now, held under the ${expected} expected of its ${done[i]!.pages} page(s)`);
+        if (i < done.length - 1) assert.ok(p.rowsReading < done[i]!.rows, `chunk ${i}: ${p.rowsReading} rows read by now, under its ${done[i]!.rows}`);
       }
     }
     assert.ok(firstShare !== null && share > firstShare, `the share moved while the chunks read: ${firstShare} to ${share}`);
@@ -1266,6 +1274,60 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
     // sync is stopped, so the poll it owes is refused as stopping (a project that streamed every table said "streamed")
     await assert.rejects(repl.pollNow(["public.manual", "public.slow"]), (e: Error) => e.message === "Mason is stopping");
   } finally { await repl.stop(); other.close(); }
+});
+
+// A SYNC'S TIME IS ONE VALUE, THE LEDGER'S: `poll_state.polled_at` was now() (the transaction's start) where the run
+// remembered a `new Date()` of after the commit, until `readPolledAt` replaced the one with the other, so a `syncedAt`
+// read in between moved BACKWARDS at that read (CI: 8 ms, "its syncedAt moves only with its own poll"). Held at the
+// moments that window was open, whatever the machine's timing: right after a swap, and as the run is about to read the
+// ledger again after each poll — what it says by then is already what the ledger holds. Without the fix each differs
+// by the transaction's length, never by luck.
+test("what a sync says of a table right after its copy and after each poll is the time the ledger holds, and a restart reads the same", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const source = ownDatabase("onetime", "CREATE TABLE t (id int PRIMARY KEY, v text); INSERT INTO t SELECT g, 'v' || g FROM generate_series(1, 5) g");
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "onetime.db"), (l) => logged.push(l));
+  const sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+  const ledger = async (): Promise<string> => new Date(Number((await store.writer.runAndReadAll("SELECT epoch_ms(polled_at) FROM _mason.poll_state WHERE source = 'public.t'")).getRowsJS()[0]![0])).toISOString();
+  const lastSync = (s: Sync): { at: string; by: string } | undefined => (s.state().find((x) => x.source === "public.t") as { synced?: { at: string; by: string } } | undefined)?.synced;
+  // the moments: each is on the writer's turn, the ledger committed, the run's next read of it not yet made
+  const said: Array<{ moment: string; syncedAt: string | null; ledger: string; last: { at: string; by: string } | undefined }> = [];
+  const hooks = sync as unknown as { swap: (...a: unknown[]) => Promise<void>; readPolledAt: () => Promise<void> };
+  const swap = hooks.swap.bind(sync), read = hooks.readPolledAt.bind(sync);
+  const look = async (moment: string): Promise<void> => {
+    const at = syncedAt(sync, "public.t");
+    said.push({ moment, syncedAt: at, ledger: at === null ? "" : await ledger(), last: lastSync(sync) });
+  };
+  hooks.swap = async (...a: unknown[]) => { await swap(...a); await look("the copy's swap"); };
+  hooks.readPolledAt = async () => { await look("before the ledger is read again"); await read(); };
+  try {
+    await sync.open();
+    await sync.setTables([tableOf("t", OFF)]);
+    sync.start();
+    await until("the table copied and caught up", settled(sync, ["public.t"]));
+    psql(url, "INSERT INTO t VALUES (6, 'new')");
+    await sync.pollNow(["public.t"]);
+    psql(url, "INSERT INTO t VALUES (7, 'new')");
+    await sync.pollNow(["public.t"]);
+    const moments = said.filter((x) => x.syncedAt !== null);
+    assert.ok(moments.some((x) => x.moment === "the copy's swap"), JSON.stringify(said));
+    assert.ok(moments.filter((x) => x.moment !== "the copy's swap").length >= 3, `the catch-up and two polls at least: ${JSON.stringify(said)}`);
+    for (const m of moments) {
+      assert.equal(m.syncedAt, m.ledger, `${m.moment}: what the run says is what the ledger holds`);
+      if (m.last?.by === "poll" || m.last?.by === "catch-up") assert.equal(m.last.at, m.ledger, `${m.moment}: and its last sync`);
+    }
+    // the last sync is that poll's time, to the millisecond, in UTC, however the ledger's TIMESTAMPTZ is read back
+    const last = await ledger();
+    assert.equal(syncedAt(sync, "public.t"), last);
+    assert.deepEqual([lastSync(sync)?.at, lastSync(sync)?.by], [last, "poll"]);
+    await sync.stop();
+    const again = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+    await again.open();
+    await again.stop();
+    await again.setTables([tableOf("t", OFF)]);
+    assert.equal(syncedAt(again, "public.t"), last, "a restart says the time the run said");
+    assert.equal(lastSync(again)?.at, last, "and the same last sync");
+  } finally { await sync.stop(); store.close(); }
 });
 
 // A CHANGE OF A TABLE'S SYNC KEEPS ITS COPY AND CATCHES IT UP BY ONE POLL, never copies it again — by `mason add --sync`
