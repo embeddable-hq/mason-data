@@ -149,3 +149,58 @@ export function pollMsRetiredText(env: Readonly<Record<string, string | undefine
   const r = pollMsRetired(env);
   return r === null ? null : `${r.message}: ${r.why} — ${r.fix}`;
 }
+
+/** what every retired way of choosing a whole project's changes is told: where it is said now, so what runs is what is
+ *  committed — how each table is kept current (`sync`), the publication replication reads (`publication`), or both */
+function saidInTheFile(what: { sync: boolean; publication: boolean }): string {
+  const said = [...(what.sync ? ["how each table is kept current is its sync: in the sources file (at the top for every table, on an entry for that one)"] : []),
+    ...(what.publication ? [`the publication replication reads is ${what.sync ? "its" : "the sources file's"} publication:`] : [])];
+  return `${said.join(", and ")}, so what runs is what is committed`;
+}
+
+/**
+ * `mason start --replication`, `--poll` AND `--publication <name>` ARE GONE (issue 33, PR 3; no backwards compatibility
+ * before v1.0): each answers, without starting, with the line to write at the top of the sources file (`shown`, as a
+ * person names it) — `sync: replication`, `sync: poll 5m`, `publication: <name>` — every one given on ONE report. Null
+ * when none is given. Read from the raw command line, before the options are parsed, so a removed flag is answered as
+ * removed and never as an unknown option.
+ */
+export function removedStartFlags(argv: readonly string[], shown: string): { message: string; why: string; fix: string } | null {
+  let replication = false, poll = false, publication: string | null | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--") break;
+    if (a === "--replication" || a.startsWith("--replication=")) replication = true;
+    else if (a === "--poll" || a.startsWith("--poll=")) poll = true;
+    else if (a.startsWith("--publication=")) publication = a.slice("--publication=".length) || null;
+    else if (a === "--publication") { const v = argv[i + 1]; publication = v !== undefined && !v.startsWith("-") ? v : null; }
+  }
+  const given = [...(replication ? ["--replication"] : []), ...(poll ? ["--poll"] : []), ...(publication !== undefined ? ["--publication"] : [])];
+  if (given.length === 0) return null;
+  const sync = [...(replication ? ["sync: replication"] : []), ...(poll ? ["sync: poll 5m"] : [])].join(" or ");
+  const lines = [...(sync ? [sync] : []), ...(publication !== undefined ? [`publication: ${publication ?? "<name>"}`] : [])].join(" and ");
+  const named = given.length === 1 ? `${given[0]} is gone` : `${given.slice(0, -1).join(", ")} and ${given.at(-1)} are gone`;
+  return { message: `${named}: the sources file says it now`, why: saidInTheFile({ sync: replication || poll, publication: publication !== undefined }),
+    fix: `write ${lines} at the top of ${shown}${poll ? " (any interval: poll 5s, poll 1h; or leave sync: off, the default, and run mason sync <table> when you need it)" : ""}` +
+      `${publication !== undefined && !replication ? ", with sync: replication on the tables it carries" : ""}, then mason start` };
+}
+
+/**
+ * `MASON_CHANGES` SET IS REFUSED, never run on a default (CLAUDE.md: a removed setting refuses the start, naming the
+ * line to write): how each table is kept current is the sources file's `sync:` (`shown`, as the server names it). Null
+ * when it is unset; else a Failure's fields, joined on one line of `mason serve`'s settings report
+ * (`changesRetiredText`).
+ */
+export function changesRetired(env: Readonly<Record<string, string | undefined>>, shown: string): { message: string; why: string; fix: string } | null {
+  const v = env.MASON_CHANGES;
+  if (v === undefined || v === "") return null;
+  const line = v === "replication" ? "sync: replication" : v === "poll" ? "sync: poll 5m" : "sync: replication (or sync: poll 5m)";
+  return { message: `MASON_CHANGES=${v} is no longer read`, why: saidInTheFile({ sync: true, publication: false }),
+    fix: `write ${line} at the top of ${shown} (every table) or on a table's entry, then unset MASON_CHANGES` };
+}
+
+/** the same, as one line */
+export function changesRetiredText(env: Readonly<Record<string, string | undefined>>, shown: string): string | null {
+  const r = changesRetired(env, shown);
+  return r === null ? null : `${r.message}: ${r.why} — ${r.fix}`;
+}

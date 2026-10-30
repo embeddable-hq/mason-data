@@ -196,35 +196,6 @@ test("publication: at the top names the publication replication reads, a ${VARIA
   assert.deepEqual(problems("kind: postgres\nurl: x\npublcation: app_pub\ntables: {}\n"), ["unexpected key publcation — did you mean `publication`? — a source file takes kind, url, sync, publication, tables"]);
 });
 
-test("--replication, --poll and MASON_CHANGES taken only where the file agrees, else refused on one report with the sync: line to write; the publication named twice refused naming both", async () => {
-  const R = await import("../src/cli/replication-mode.ts" as string) as typeof import("../src/cli/replication-mode.ts");
-  const file = (text: string) => parse(text) as Sources.SourceFile;
-  const shown = "mason/sources/app.yml";
-  const mixed = file("kind: postgres\nurl: x\nsync: poll 5s\ntables:\n  orders: { sync: replication }\n  customers: { sync: off }\n  events: {}\n");
-  const repl = R.changesAgreement(mixed, shown, "replication", "--replication")!;
-  assert.deepEqual(repl, { message: "--replication streams every table, and mason/sources/app.yml does not: customers (sync: off, its entry's), events (sync: poll 5s, the file's)", code: "refused",
-    why: "how each table is kept current is its sync: in mason/sources/app.yml now, at the top for every table and on an entry for that one (--replication is read only where it agrees, and goes in the next release)",
-    fix: "write sync: replication at the top of mason/sources/app.yml and take sync: off the entry of customers — or keep the file as it is — then mason start without --replication",
-    next: [["mason start", "each table kept current as its sync: says"]] });
-  const poll = R.changesAgreement(mixed, shown, "poll", "MASON_CHANGES=poll")!;
-  assert.deepEqual([poll.message, poll.fix], ["MASON_CHANGES=poll polls every table, and mason/sources/app.yml streams orders (sync: replication)",
-    "write sync: poll 5m (or off) on the entry of orders — or keep the file as it is — then unset MASON_CHANGES, then start again"]);
-  const allRepl = file("kind: postgres\nurl: x\nsync: replication\ntables:\n  orders: {}\n  customers: {}\n");
-  assert.equal(R.changesAgreement(allRepl, shown, "replication", "--replication"), null, "every table replicated: --replication agrees");
-  assert.match(R.changesAgreement(allRepl, shown, "poll", "--poll")!.fix!, /^write sync: poll 5m \(or off\) at the top of mason\/sources\/app\.yml — /);
-  assert.equal(R.changesAgreement(file("kind: postgres\nurl: x\nsync: poll 5s\ntables:\n  orders: {}\n"), shown, "poll", "--poll"), null, "none replicated: --poll agrees");
-  assert.equal(R.changesAgreement(mixed, shown, null, "--replication"), null, "no flag: the file alone");
-  assert.equal(R.changesAgreement(file("kind: postgres\nurl: x\ntables: {}\n"), shown, "replication", "--replication")!.message,
-    "--replication streams every table, and mason/sources/app.yml does not: its sync: (off, the default)");
-  // the publication named twice
-  assert.deepEqual(R.publicationConflict("flag_pub", { publicationName: "file_pub" }, shown), { message: "the publication is named twice: --publication flag_pub, and publication: in mason/sources/app.yml (file_pub)",
-    code: "refused", why: "the replicated tables are read through one publication",
-    fix: "keep publication: in mason/sources/app.yml and start without --publication (it goes in the next release), or write publication: flag_pub there",
-    next: [["mason start", "the replicated tables read through the file's publication"]] });
-  assert.equal(R.publicationConflict("flag_pub", { publicationName: null }, shown), null);
-  assert.equal(R.publicationConflict(null, { publicationName: "file_pub" }, shown), null);
-});
-
 test("the file read: one source per project, its URL from .env.local, .env or the shell — or what to write", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-sources-"));
   try {

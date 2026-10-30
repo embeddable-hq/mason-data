@@ -100,8 +100,8 @@ CLI lacks).
   destroy` removes it with the copy.
   Why: a first try must need nothing installed, and must run the read path production runs. **Its port is in the URL
   alone** (chosen free at init, read back by `demoPort`): a second record would disagree with an edited `.env`, which the
-  run refuses with the way out. **Poll only**: the demo database has no change log, so `--replication` and a file with
-  `sync: replication` are refused before anything starts (`demoChangesRefusal`). A command that connects while the run is down (`tables`, `add`, `remove`, `doctor`) says the
+  run refuses with the way out. **Poll only**: the demo database has no change log, so a file with `sync: replication`
+  is refused before anything starts (`demoChangesRefusal`). A command that connects while the run is down (`tables`, `add`, `remove`, `doctor`) says the
   demo database runs inside mason start — told by the config's `demo`, never by sniffing the URL.
 - **Up means it answers** (what a reboot does to a run): a run is up only when its command server answers
   `/api/ping` with the run's token and its own pid (`answers`, src/cli/runs.ts); a pid in the config that is alive is
@@ -228,16 +228,15 @@ CLI lacks).
   its `serve` hooks (src/cli/dev.ts `ServeHooks`), never a second run. Every setting missing or wrong is ONE report; a
   project `mason init` made is never taken over; `/healthz` takes no credential, so it says counts, never a name.
 - **`sync: replication` is the production change path on a laptop, per table** (src/cli/replication-mode.ts): the
-  sources file decides — `--replication`, `--poll` and `MASON_CHANGES` are taken only where they agree with it, and
-  refused otherwise in the Failure shape naming the `sync:` line to write (`changesAgreement`; the next release removes
-  them). A start that replicates any table holds the developer's database to the production checks' own rules
+  sources file alone decides — `mason start --replication`, `--poll` and `--publication` are gone, each answered with
+  the line to write and exit 2 before anything starts (`removedStartFlags`, src/lib/table-sync.ts), and `MASON_CHANGES`
+  set refuses `mason serve` on its settings report (`changesRetired`). A start that replicates any table holds the developer's database to the production checks' own rules
   (`replicationChecks`, src/cli/replication-checks.ts: `wal_level`, the role, a free slot and WAL sender, the WAL cap
   said, not refused; a slot held by another run named with the way out). A switch keeps the copies and catches each
   table up by one poll. What it made is recorded (`config.json` `replication`) and dropped, VERIFIED gone, when no
   table is replicated any more and at `mason destroy`; when they cannot be, the rest goes and the failure prints the
   statements. A slot outlives the run: `mason stop` says it stays and holds WAL. **A publication the operator names
-  (`publication:` in the sources file, else `--publication` — both is refused — else `PG_PUBLICATION`, else the
-  recorded one, `config.json` `publication`) is never created, altered or dropped** — only
+  (`publication:` in the sources file, else `PG_PUBLICATION`) is never created, altered or dropped** — only
   the slot goes — and a read replica needs one, refused by name before any slot is made (`readinessVerdict`;
   `.claude/rules/duckdb.md`).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the

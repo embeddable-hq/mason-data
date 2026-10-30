@@ -123,29 +123,8 @@ A column that looks like a secret (`password`, `token`, `api_key`, …) is left 
 begins at the start); `mason add` and `mason remove` keep the rest of the file as it was, comments included. An entry
 you edit by hand is applied at the next `mason start`, and a mistake in it is refused with the key and the way out.
 
-**How each copy stays current is its `sync:`**, at the top of the file for every table and on an entry for that one:
-
-- **`sync: off`, the default**: after its first copy, Mason reads the table again only when you run `mason sync
-  orders`, which polls the tables you name once, right away — before a report, from cron, at the end of a deploy.
-  Between syncs Mason does not touch your database for it. A file that writes no `sync:` is `off`, and `mason start`
-  says so.
-- **`sync: poll <interval>`** (`5s`, `5m`, `1h`; from `1s` to `24h`, a longer wait being `off` with `mason sync` from a scheduler): the table is polled at that interval — its changed
-  rows found by `xmin` in one transaction over one snapshot. Postgres has no index on `xmin`, so each poll reads the
-  whole table: every few seconds suits a small table, every hour a big one. Mason waits at least four times as long as
-  a poll took before that table's next.
-- `mason add orders --sync "poll 30s"` writes a table's own; on a table already added, `--sync` alone changes that
-  line and nothing else. A table over a million rows added under a file that polls is written `sync: off` and said,
-  and a poll of tens of millions of rows more often than every minute is warned of with an estimate of its cost.
-- Changing a table's `sync:` keeps its copy: it is caught up by one poll, never copied again.
-- `mason status`, `mason wait`, the MCP tools and EXPLAIN say each table's sync and when it was last synced, so a
-  copy's age is never hidden.
-- **`sync: replication`**: the table is kept current from the database's change log (logical replication), within
-  seconds and with no scan of the table. It needs `wal_level = logical`, a user that may replicate and a primary key.
-  The project has ONE slot, and one publication carrying the replicated tables alone: Mason's own, re-pointed as their
-  `sync:` changes, or the one `publication: <name>` (or `${PG_PUBLICATION}`) at the top of the file names, read as it
-  is and never altered. The other tables are polled beside the stream, or left `off`; when no table is replicated any
-  more the slot is dropped, verified gone. A table with no primary key (`key:`) is polled, never replicated, and
-  `mason add` of one under a `sync: replication` file writes `sync: poll 5m` on its entry and says so.
+How each table stays current after its first copy is its `sync:`, at the top of the file or on its entry: off by
+default, polled, or replicated ([Syncing from Postgres](#syncing-from-postgres)).
 
 **2. Connect a tool.** `mason user add` makes a user of Mason's Postgres API and prints its password once, with the
 URL to paste into the tool's datasource form:
@@ -178,6 +157,49 @@ with examples; [`cli/README.md`](cli/README.md) has every command and option.
 **Driving it from a coding agent** (Claude Code, Codex, …): the commands are the same for you and for an agent. Each
 prints for a person or, with `--json`, one object of a declared shape; it says by its exit code how it went and names
 what to run next. `mason help agent` is the page an agent reads first.
+
+## Syncing from Postgres
+
+**Mason reads each table once, then only what you tell it to.** After the first copy nothing Mason does to your
+database is a hidden default: how each table stays current is its `sync:` in the sources file, committed with it, so
+production runs exactly what you ran. The top of the file sets every table's; an entry overrides it for that table:
+
+```yaml
+# mason/sources/app.yml
+kind: postgres
+url: ${DATABASE_URL}
+sync: poll 5m                 # every table: polled every 5 minutes, unless its entry says otherwise
+publication: ${PG_PUBLICATION}  # optional: the publication sync: replication reads, yours, never altered
+tables:
+  customers: {}               # polled every 5 minutes, as the top says
+  orders: { sync: replication }   # this one from the change log, within seconds
+  events: { sync: off }       # this one read again only by mason sync events
+```
+
+| `sync:` | After the first copy | What it costs your database |
+|---|---|---|
+| `off` (the default) | nothing, until `mason sync <table>` polls it once, now: before a report, from cron, at the end of a deploy | nothing between syncs |
+| `poll <interval>` (`5s`, `5m`, `1h`; `1s` to `24h`) | its changed rows found by `xmin`, in one transaction over one snapshot, at that interval | a scan of the whole table each poll (no index covers `xmin`); the next poll waits at least four times as long as the last took, so the polls never take more than a fifth of the database's time |
+| `replication` | its changes read from the change log (logical replication), within seconds | no scan; one slot for the project, which holds WAL while Mason is down |
+
+- **`off` is the default** `mason init` writes, and a file that writes no `sync:` is `off` too (`mason start` says
+  so). `mason sync orders customers` reads the tables you name right away, whatever their `sync:`.
+- **`poll`** suits a small table every few seconds and a big one every hour. `mason add orders --sync "poll 30s"`
+  writes a table's own; on a table already added, `--sync` alone changes that line and nothing else. A table over a
+  million rows added under a file that polls is written `sync: off` and said, and a poll of tens of millions of rows
+  more often than every minute is warned of with an estimate of its cost.
+- **`replication`** needs `wal_level = logical`, a user with `REPLICATION` (or `rds_replication`), and a primary key:
+  a table with none (`key:`) is polled, and `mason add` of one under a `sync: replication` file writes
+  `sync: poll 5m` on its entry and says so. The project has ONE slot and one publication carrying the replicated
+  tables alone: Mason's own, re-pointed as their `sync:` changes, or the one `publication: <name>` (or
+  `${PG_PUBLICATION}`) at the top of the file names, read as it is and never altered (a read replica needs one).
+  Cap the slot's WAL on the database with `max_slot_wal_keep_size`; when no table is replicated any more, and at
+  `mason destroy`, the slot is dropped, verified gone.
+- **Changing a table's `sync:` keeps its copy**: it is caught up by one poll, never copied again.
+- **A copy's age is never hidden**: `mason status`, `mason wait`, the MCP tools and EXPLAIN say each table's sync and
+  when it was last synced.
+- `mason start --replication`, `--poll`, `--publication` and `MASON_CHANGES` are gone: each answers with the line to
+  write in the sources file, and starts nothing.
 
 ## How it works
 

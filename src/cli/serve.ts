@@ -26,8 +26,7 @@ import { parseSource } from "./preflight.ts";
 import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
-import { pollMsRetiredText } from "../lib/table-sync.ts";
-import { changesAgreement } from "./replication-mode.ts";
+import { changesRetiredText, pollMsRetiredText } from "../lib/table-sync.ts";
 import { version } from "./version.ts";
 import type { CopyState } from "../duck/sync.ts";
 
@@ -52,8 +51,6 @@ export const SERVE: CommandSpec = {
     MASON_PROJECT           the project folder: sources/, mason.yml (default ./mason)
     MASON_DATA              the folder whose .mason/ holds the copy and the state: the volume (default .)
     MASON_NAME              the project's name, the database name clients connect to (default mason)
-    MASON_CHANGES           read only where it agrees with the sources file, whose sync: says per table how each is kept
-                            current (replication: every table's is; poll: none is); it goes in the next release
     MASON_HEALTH_PORT       /healthz's port (default 4140), on MASON_HEALTH_HOST (default 0.0.0.0)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
@@ -82,8 +79,6 @@ export interface ServeSettings {
   project: string;
   /** the folder whose `.mason/` is the state, absolute */
   data: string;
-  /** null: the project's own (poll until a replication start recorded otherwise) */
-  changes: "poll" | "replication" | null;
   selfSignedTls: boolean;
   health: { host: string; port: number };
 }
@@ -102,12 +97,10 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   else if (apiKey.length < MIN_API_KEY) wrong.push(`MASON_API_KEY is ${apiKey.length} characters: at least ${MIN_API_KEY}, as openssl rand -hex 24 makes`);
   const name = env.MASON_NAME || "mason";
   if (!NAME_RE.test(name)) wrong.push(`MASON_NAME=${JSON.stringify(name)} is not a project name: lower case letters, digits, - and _, at most 48`);
-  const changes = env.MASON_CHANGES || null;
-  if (changes !== null && changes !== "poll" && changes !== "replication") wrong.push(`MASON_CHANGES=${JSON.stringify(changes)}: poll or replication`);
-  // taken only where it says what the sources file says, refused HERE with the other settings, before anything is
-  // written or connected (a review finding: the run refused it after writing the config and connecting)
-  else if (changes !== null) { const against = changesSettingProblem(project, changes); if (against !== null) wrong.push(against); }
-  // how often a table is polled is the sources file's sync: now, per table (src/lib/table-sync.ts)
+  // how each table is kept current, and how often a table is polled, are the sources file's sync: now, per table
+  // (src/lib/table-sync.ts): the old settings refused HERE with the others, before anything is written or connected
+  const changes = changesRetiredText(env, servedSourcesFile(project));
+  if (changes !== null) wrong.push(changes);
   const pollMs = pollMsRetiredText(env);
   if (pollMs !== null) wrong.push(pollMs);
   const selfSigned = env.MASON_PG_SELF_SIGNED_TLS || "0";
@@ -122,25 +115,17 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
       next: [["mason serve --help", "every setting, with its default"]] };
   }
   return {
-    name, apiKey, changes: changes as ServeSettings["changes"], selfSignedTls: selfSigned === "1",
+    name, apiKey, selfSignedTls: selfSigned === "1",
     project, data,
     health: { host: env.MASON_HEALTH_HOST || "0.0.0.0", port },
   };
 }
 
-/** MASON_CHANGES against the project's one sources file (src/cli/replication-mode.ts changesAgreement), as one line of
- *  the settings report; a file that cannot be read is serveSource's to say, on its own report. */
-function changesSettingProblem(project: string, changes: "poll" | "replication"): string | null {
+/** The project folder's sources file as the server's operator names it (`mason/sources/app.yml`), for a retired
+ *  setting's line to write: its one file, else the name every project's has. */
+function servedSourcesFile(project: string): string {
   const names = sourceFileNames(project);
-  if (names.length !== 1) return null;
-  const file = path.join(sourcesDir(project), names[0]!);
-  let text: string;
-  // a file that cannot be read is serveSource's to say (readSource), with the file and the error, on its own report
-  try { text = fs.readFileSync(file, "utf8"); } catch { return null; }
-  const parsed = parseSourceText(text, names[0]!.replace(/\.ya?ml$/, ""), file);
-  if ("problems" in parsed) return null;
-  const f = changesAgreement(parsed, path.join(path.basename(project), "sources", names[0]!), changes, `MASON_CHANGES=${changes}`);
-  return f === null ? null : `${f.message} — ${f.fix}`;
+  return path.join(path.basename(project), "sources", names.length === 1 ? names[0]! : "<name>.yml");
 }
 
 /**
@@ -296,7 +281,7 @@ export async function serve(argv: string[]): Promise<number> {
   process.chdir(s.data);
   let code: number;
   try {
-    code = await dev({ port: 4039, version: version(), changes: s.changes, publication: null, selfSignedTls: s.selfSignedTls,
+    code = await dev({ port: 4039, version: version(), selfSignedTls: s.selfSignedTls,
       serve: { log: say, ready: (run) => { state = { phase: "ready", tables: run.tables }; }, stopping: () => { state = { phase: "stopping" }; } } });
   } finally {
     // a platform's health check may hold a keep-alive connection open, which close() alone would wait for

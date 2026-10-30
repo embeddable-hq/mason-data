@@ -2,16 +2,16 @@
  * LOGICAL REPLICATION FOR THE TABLES WHOSE `sync:` SAYS SO (the journey to production, item 6; issue 33): a project's run
  * reading its database's change log as production does — a publication, a replication slot, `wal_level = logical` —
  * for each table whose sync is `replication`, beside the polled ones (src/cdc/poll.ts). A developer then meets the setup
- * production needs on their own database first. The sources file decides it, per table; `mason start --replication`,
- * `--poll` and `MASON_CHANGES` are taken only where they say what the file says (`changesAgreement`), until the next
- * release removes them.
+ * production needs on their own database first. The sources file decides it, per table, and nothing else does
+ * (`mason start --replication`, `--poll`, `--publication` and `MASON_CHANGES` are gone: src/lib/table-sync.ts
+ * `removedStartFlags`, `changesRetired`).
  *
  * What it costs the developer's database, said where it happens: Mason creates its slot there (`mason_<deployment>`), and
- * a slot holds WAL while nobody reads it — so `mason stop` says so, and `mason destroy`, or going back to polling, drops
+ * a slot holds WAL while nobody reads it — so `mason stop` says so, and `mason destroy`, or no table replicated any more, drops
  * it (`dropOwnReplication`), verified gone, by the name the start that made it RECORDED (`madeReplication`), never one
  * computed again. The PUBLICATION is Mason's own (`mason_<deployment>`, made and dropped with
- * the slot) unless the operator names one (`--publication <name>`, else `PG_PUBLICATION`, else the one
- * an earlier start recorded): that one is the database owner's, read as it is and never created, altered or dropped
+ * the slot) unless the operator names one (`publication:` at the top of the sources file, else `PG_PUBLICATION`):
+ * that one is the database owner's, read as it is and never created, altered or dropped
  * (src/duck/publication.ts) — on a read replica it is the only way, since CREATE PUBLICATION is refused on a standby.
  *
  * In the ClickHouse service this was cut from, the two modes kept row versions that could not continue each other (a
@@ -21,10 +21,7 @@
  */
 import { createHash } from "node:crypto";
 import { replicationNames } from "../cdc/source.ts";
-import type { ChangeSource } from "../cdc/poll.ts";
 import type { Failure } from "./command.ts";
-import { effectiveSync, entryName, replicatedEntries, type SourceFile } from "./sources.ts";
-import { syncText } from "../lib/table-sync.ts";
 import { connectSource, systemIdentifier, type Source } from "./preflight.ts";
 import type { ProjectConfig } from "./project.ts";
 import { readServerFacts, readSlotFacts, replicationChecks, type ProductionCheck, type ServerFacts } from "./replication-checks.ts";
@@ -50,8 +47,8 @@ export function deploymentOf(project: string, source: string): string {
 export interface ProjectReplication { publication: string; slot: string; owned: boolean }
 
 /**
- * The publication and slot a project's run reads: the publication `named` (the flag, `PG_PUBLICATION` or the recorded
- * one: `namedPublication`), else Mason's own — by the change reader's own rule (src/cdc/source.ts `replicationNames`),
+ * The publication and slot a project's run reads: the publication `named` (the sources file's or `PG_PUBLICATION`:
+ * `namedPublication`, or the recorded one), else Mason's own — by the change reader's own rule (src/cdc/source.ts `replicationNames`),
  * which also says whether it is Mason's to make. The slot is always the project's own.
  */
 export function projectReplication(name: string, source: string, named: string | null = null): ProjectReplication {
@@ -61,7 +58,7 @@ export function projectReplication(name: string, source: string, named: string |
 
 /**
  * WHAT REPLICATION MODE MADE ON THE DATABASE, as the start that made it recorded it (`config.json` `replication`): what
- * `--poll` and `mason destroy` drop. Recorded, never computed again, so a name that changes since — the sources file
+ * a start whose sources file replicates no table, and `mason destroy`, drop. Recorded, never computed again, so a name that changes since — the sources file
  * renamed, the naming rule — never leaves a slot that nobody drops, holding the database's WAL for ever. A project with
  * no record (none started in replication mode since it was kept) has the names the rule gives now.
  */
@@ -71,64 +68,14 @@ export function madeReplication(cfg: Pick<ProjectConfig, "name" | "publication" 
 
 /**
  * THE PUBLICATION A START READS, and where it is named: the sources file's `publication:` (its `${PG_PUBLICATION}`
- * resolved), else `--publication`, else `PG_PUBLICATION` (both go in the next release), else none — Mason's own. NEVER
+ * resolved), else `PG_PUBLICATION` in the environment, else none — Mason's own. NEVER
  * the one an earlier start recorded: a file that takes `publication:` out means Mason makes its own, as every refusal's
  * way out says (a review finding: the record kept a named one read after its line was gone).
  */
-export function namedPublication(file: { publicationName: string | null }, flag: string | null, env: NodeJS.ProcessEnv): { name: string; from: "file" | "flag" | "env" } | null {
+export function namedPublication(file: { publicationName: string | null }, env: NodeJS.ProcessEnv): { name: string; from: "file" | "env" } | null {
   if (file.publicationName !== null) return { name: file.publicationName, from: "file" };
-  if (flag) return { name: flag, from: "flag" };
   if (env.PG_PUBLICATION) return { name: env.PG_PUBLICATION, from: "env" };
   return null;
-}
-
-/** The mode a start runs: the flag, else the project's, else polling. */
-export function changesOf(flag: ChangeSource | null, recorded: ChangeSource | undefined): ChangeSource {
-  return flag ?? recorded ?? "poll";
-}
-
-/**
- * `--replication`, `--poll` OR `MASON_CHANGES` AGAINST THE SOURCES FILE (issue 33, PR 2 of 3: the next release removes
- * them): how each table is kept current is the file's `sync:` now, so a setting for every table is taken only when it
- * says what the file says — `replication` when every table's sync is replication, `poll` when none is — and otherwise
- * refused, before anything starts, with the `sync:` line to write. `said` is how it was set (`--replication`,
- * `MASON_CHANGES=poll`); `shown` the file as a person names it. Null: it agrees, or none was set.
- */
-export function changesAgreement(file: Pick<SourceFile, "sync" | "tables">, shown: string, flag: ChangeSource | null, said: string): Failure | null {
-  if (flag === null) return null;
-  const without = said.startsWith("--") ? `mason start without ${said}` : `unset ${said.split("=")[0]}, then start again`;
-  const why = `how each table is kept current is its sync: in ${shown} now, at the top for every table and on an entry for that one (${said} is read only where it agrees, and goes in the next release)`;
-  const top = effectiveSync(file, undefined);
-  if (flag === "replication") {
-    const others = file.tables.map((e) => ({ e, s: effectiveSync(file, e) })).filter((x) => x.s.sync.mode !== "replication");
-    if (others.length === 0 && (file.tables.length > 0 || top.sync.mode === "replication")) return null;
-    const own = others.filter((x) => x.s.from === "entry").map((x) => entryName(x.e.table));
-    const listed = others.length ? others.map((x) => `${entryName(x.e.table)} (sync: ${syncText(x.s.sync)}, ${x.s.from === "entry" ? "its entry's" : x.s.from === "file" ? "the file's" : "the default"})`).join(", ")
-      : `its sync: (${syncText(top.sync)}${top.from === "default" ? ", the default" : ""})`;
-    return { message: `${said} streams every table, and ${shown} does not: ${listed}`, code: "refused", why,
-      fix: `write sync: replication at the top of ${shown}${own.length ? ` and take sync: off the ${own.length === 1 ? "entry" : "entries"} of ${own.join(", ")}` : ""} — ` +
-        `or keep the file as it is — then ${without}`,
-      next: [["mason start", "each table kept current as its sync: says"]] };
-  }
-  const streamed = replicatedEntries(file);
-  if (streamed.length === 0) return null;
-  const names = streamed.map((e) => entryName(e.table));
-  const fromTop = top.sync.mode === "replication" && streamed.some((e) => e.sync === null);
-  return { message: `${said} polls every table, and ${shown} streams ${names.join(", ")} (sync: replication)`, code: "refused", why,
-    fix: `write sync: poll 5m (or off) ${fromTop ? `at the top of ${shown}` : `on the ${names.length === 1 ? "entry" : "entries"} of ${names.join(", ")}`} — or keep the file as it is — then ${without}`,
-    next: [["mason start", "each table kept current as its sync: says"]] };
-}
-
-/**
- * THE PUBLICATION NAMED TWICE: `--publication` and the sources file's `publication:` both set is refused, naming both
- * (one of them would be read silently instead of the other). Null when at most one is.
- */
-export function publicationConflict(flag: string | null, file: { publicationName: string | null }, shown: string): Failure | null {
-  if (flag === null || file.publicationName === null) return null;
-  return { message: `the publication is named twice: --publication ${flag}, and publication: in ${shown} (${file.publicationName})`, code: "refused",
-    why: "the replicated tables are read through one publication",
-    fix: `keep publication: in ${shown} and start without --publication (it goes in the next release)${flag !== file.publicationName ? `, or write publication: ${flag} there` : ""}`,
-    next: [["mason start", "the replicated tables read through the file's publication"]] };
 }
 
 /**

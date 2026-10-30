@@ -50,8 +50,9 @@ const initAt = /^DATABASE_URL=postgres:\/\/demo@(127\.0\.0\.1:\d+)\/demo$/m.exec
 if (initAt === undefined) throw new Error("mason init demo wrote no demo URL in .env");
 const demoAt = "127.0.0.1:1";
 fs.writeFileSync(demoEnv, fs.readFileSync(demoEnv, "utf8").replace(`@${initAt}/`, `@${demoAt}/`));
-/** The commands' lines in a state: a demo project's start asks for replication, refused before anything starts (a
- *  plain start there would host the demo database and run, which the matrix must not leave behind). */
+/** The commands' lines in a state: a demo project's start is given --replication, a flag that is gone, answered with
+ *  the line to write and exit 2 before anything starts (a plain start there would host the demo database and run,
+ *  which the matrix must not leave behind). */
 const argsIn = (state: string, cmd: string): readonly string[] => state === "demo" && cmd === "start" ? ["--replication"] : MATRIX_ARGS[cmd]!;
 
 /** A folder in a state; `null` config writes none. */
@@ -247,7 +248,7 @@ test("mason status and mason wait --json, Mason up: each added table says how it
   }
 });
 
-test("a demo project, stopped: mason tables says its database runs inside mason start, and --replication is refused before anything starts", async () => {
+test("a demo project, stopped: mason tables says its database runs inside mason start, and a table set to sync: replication is refused before anything starts", async () => {
   const tables = await runMason(folderIn("demo"), ["tables", "--json"], matrixEnv());
   assert.equal(tables.code, 1, tables.stdout + tables.stderr);
   const t = (JSON.parse(tables.stdout) as { error: { code: string; message: string; fix: string } }).error;
@@ -255,10 +256,12 @@ test("a demo project, stopped: mason tables says its database runs inside mason 
     "the demo database runs inside mason start: start it first"]);
   for (const json of [false, true]) {
     const root = folderIn("demo");
-    const start = await runMason(root, ["start", "--replication", ...(json ? ["--json"] : [])], matrixEnv());
+    const file = path.join(root, "mason", "sources", "demo.yml");
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^ {2}orders: \{\}$/m, "  orders: { sync: replication }"));
+    const start = await runMason(root, ["start", ...(json ? ["--json"] : [])], matrixEnv());
     assert.equal(start.code, 1, start.stdout + start.stderr);
     if (json) assert.equal((JSON.parse(start.stdout) as { error: { code: string } }).error.code, "refused");
-    assert.match(json ? start.stdout : start.stderr, /the demo database is read by polling only: --replication does not apply to it/);
+    assert.match(json ? start.stdout : start.stderr, /the demo database is read by polling only: sync: replication does not apply to it \(orders\)/);
     assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, "refused before a run was spawned");
   }
 });

@@ -40,20 +40,23 @@ test("the settings: every one missing or wrong said at once, each with what to s
     MASON_PG_SELF_SIGNED_TLS: "yes", MASON_HEALTH_PORT: "99999", MASON_POLL_MS: "30000" }, "/srv");
   assert.ok("message" in wrong);
   for (const said of [/DATABASE_URL: the URL's scheme is mysql/, /MASON_API_KEY is 5 characters: at least 32/, /MASON_NAME="Big Name" is not a project name/,
-    /MASON_CHANGES="cdc": poll or replication/, /MASON_PG_SELF_SIGNED_TLS="yes": 1, or 0/, /MASON_HEALTH_PORT="99999": a port number/]) assert.match(wrong.message, said);
+    /MASON_PG_SELF_SIGNED_TLS="yes": 1, or 0/, /MASON_HEALTH_PORT="99999": a port number/]) assert.match(wrong.message, said);
   // a setting that is no longer read refuses the start, naming the line to write instead (never runs a default)
   assert.ok(wrong.message.includes("MASON_POLL_MS=30000 is no longer read: how often each table is polled is its sync: in the sources file — " +
     "write sync: poll 30s at its top (every table) or on a table's entry, then unset MASON_POLL_MS"), wrong.message);
+  assert.ok(wrong.message.includes("MASON_CHANGES=cdc is no longer read: how each table is kept current is its sync: in the sources file (at the top for every table, " +
+    "on an entry for that one), so what runs is what is committed — write sync: replication (or sync: poll 5m) at the top of mason/sources/<name>.yml (every table) " +
+    "or on a table's entry, then unset MASON_CHANGES"), wrong.message);
   assert.match(wrong.message, /^7 settings are missing or wrong/);
 
   const s = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY }, "/srv");
   assert.ok(!("message" in s));
-  assert.deepEqual(s, { name: "mason", apiKey: KEY, changes: null, selfSignedTls: false, project: "/srv/mason", data: "/srv",
+  assert.deepEqual(s, { name: "mason", apiKey: KEY, selfSignedTls: false, project: "/srv/mason", data: "/srv",
     health: { host: "0.0.0.0", port: 4140 } });
   const t = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_PROJECT: "/mason/project", MASON_DATA: "/mason/data", MASON_NAME: "shop",
-    MASON_CHANGES: "replication", MASON_PG_SELF_SIGNED_TLS: "1", MASON_HEALTH_PORT: "8080", MASON_HEALTH_HOST: "127.0.0.1" }, "/srv");
+    MASON_PG_SELF_SIGNED_TLS: "1", MASON_HEALTH_PORT: "8080", MASON_HEALTH_HOST: "127.0.0.1" }, "/srv");
   assert.ok(!("message" in t));
-  assert.deepEqual([t.project, t.data, t.name, t.changes, t.selfSignedTls, t.health], ["/mason/project", "/mason/data", "shop", "replication", true, { host: "127.0.0.1", port: 8080 }]);
+  assert.deepEqual([t.project, t.data, t.name, t.selfSignedTls, t.health], ["/mason/project", "/mason/data", "shop", true, { host: "127.0.0.1", port: 8080 }]);
 });
 
 test("the config: new on an empty volume, resumed over what the runs recorded; a developer's project and a renamed copy refused", () => {
@@ -225,19 +228,30 @@ test("mason start refuses MASON_POLL_MS too, before it spawns and in the run its
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("MASON_CHANGES against the sources file is refused with the other settings, before anything is written or connected; one that agrees is taken", () => {
+test("MASON_CHANGES set is refused with the other settings, naming the sync: line to write in the project's sources file, before anything is written or connected; mason serve exits 1 in the failure shape", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-changes-"));
   try {
     fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
-    const file = (text: string): void => fs.writeFileSync(path.join(dir, "mason", "sources", "app.yml"), text);
+    fs.writeFileSync(path.join(dir, "mason", "sources", "app.yml"), "kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\ntables:\n  orders: {}\n");
     const env = { DATABASE_URL: URL_, MASON_API_KEY: KEY };
-    file("kind: postgres\nurl: ${DATABASE_URL}\nsync: poll 5m\ntables:\n  orders: { sync: replication }\n");
-    const refused = serveSettings({ ...env, MASON_CHANGES: "poll" }, dir);
-    assert.ok("message" in refused);
-    assert.equal(refused.message, "a setting is missing or wrong: MASON_CHANGES=poll polls every table, and mason/sources/app.yml streams orders (sync: replication) — " +
-      "write sync: poll 5m (or off) on the entry of orders — or keep the file as it is — then unset MASON_CHANGES, then start again");
+    // whatever it says, even what the file says: the setting is gone, never read where it agrees
+    const line = (v: string, sync: string): string => `a setting is missing or wrong: MASON_CHANGES=${v} is no longer read: how each table is kept current is its sync: in the sources file ` +
+      `(at the top for every table, on an entry for that one), so what runs is what is committed — write ${sync} at the top of mason/sources/app.yml (every table) or on a table's entry, then unset MASON_CHANGES`;
+    for (const [v, sync] of [["replication", "sync: replication"], ["poll", "sync: poll 5m"]] as const) {
+      const refused = serveSettings({ ...env, MASON_CHANGES: v }, dir);
+      assert.ok("message" in refused, v);
+      assert.deepEqual([refused.code, refused.message], ["bad_config", line(v, sync)]);
+    }
+    assert.ok(!("message" in serveSettings({ ...env, MASON_CHANGES: "" }, dir)), "set empty is unset");
     assert.equal(fs.readdirSync(dir).join(","), "mason", "nothing written beside the project: no .mason/");
-    file("kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\ntables:\n  orders: {}\n");
-    assert.ok(!("message" in serveSettings({ ...env, MASON_CHANGES: "replication" }, dir)), "every table replicated: it agrees");
+    const child = spawn(process.execPath, [MAIN, "serve", "--json"], { cwd: dir, env: { PATH: process.env.PATH, HOME: dir, ...env, MASON_CHANGES: "replication" }, stdio: ["ignore", "pipe", "pipe"] });
+    let json = "";
+    child.stdout.on("data", (d) => { json += String(d); });
+    const code = await new Promise<number | null>((r) => child.once("exit", r));
+    assert.equal(code, 1, json);
+    const v = JSON.parse(json) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string }> };
+    assert.deepEqual([v.error.code, v.error.message], ["bad_config", line("replication", "sync: replication")]);
+    assert.deepEqual(v.next.map((n) => n.command), ["mason serve --help"]);
+    assert.equal(fs.readdirSync(dir).join(","), "mason", "mason serve wrote nothing: no .mason/");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
