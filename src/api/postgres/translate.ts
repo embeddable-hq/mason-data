@@ -11,6 +11,7 @@
  *   - anything else: REFUSED BY NAME (`Unsupported`), with its position in the statement, a SQLSTATE and the way
  *     out, never passed through on a guess. The switch has no default branch that accepts.
  */
+import { gapMark, type GapId } from "../../duck/gaps.ts";
 import type { A_Const, ColumnRef, CommonTableExpr, Node, RangeVar, SelectStmt, TypeCast, VariableSetStmt } from "libpg-query";
 
 /** A statement, or a part of one, this listener does not answer: named, placed, with a SQLSTATE and the way out. */
@@ -20,8 +21,10 @@ export class Unsupported extends Error {
   /** `0A000` feature not supported; `42601` syntax; `25006` read only; `22023` an invalid value */
   readonly sqlstate: string;
   readonly hint: string | undefined;
-  constructor(message: string, offset: number | null, sqlstate = "0A000", hint?: string) {
-    super(message); this.offset = offset; this.sqlstate = sqlstate; this.hint = hint;
+  /** the registry entry that refused it (src/duck/gaps.ts): the request log's `gap`; null for any other refusal */
+  readonly gap: GapId | null;
+  constructor(message: string, offset: number | null, sqlstate = "0A000", hint?: string, gap: GapId | null = null) {
+    super(message); this.offset = offset; this.sqlstate = sqlstate; this.hint = hint; this.gap = gap;
   }
 }
 
@@ -30,8 +33,9 @@ export type Translation =
   | { kind: "catalog" }
   | { kind: "set"; name: string; value: string | null; local: boolean }
   | { kind: "show"; name: string }
+  | { kind: "set_config"; name: string; value: string; column: string }
   | { kind: "transaction"; tag: string }
-  | { kind: "discard" }
+  | { kind: "discard"; target: string }
   | { kind: "deallocate" }
   | { kind: "empty" };
 
@@ -76,7 +80,7 @@ function sessionStatement(stmt: Node): Translation {
       if (tag === null) throw new Unsupported(`${String(k).replace("TRANS_STMT_", "").toLowerCase()}: this connection is read-only and has no transactions; BEGIN, COMMIT and ROLLBACK are accepted and do nothing`, null);
       return { kind: "transaction", tag };
     }
-    case "DiscardStmt": return { kind: "discard" };
+    case "DiscardStmt": return { kind: "discard", target: String(bodyOf<{ target?: string }>(stmt).target ?? "DISCARD_ALL").replace(/^DISCARD_/, "") };
     case "DeallocateStmt": return { kind: "deallocate" };
     case "InsertStmt": case "UpdateStmt": case "DeleteStmt": case "MergeStmt": case "CopyStmt": case "TruncateStmt":
     case "CreateStmt": case "DropStmt": case "AlterTableStmt": case "CreateTableAsStmt": case "ViewStmt": case "IndexStmt":
@@ -99,6 +103,8 @@ function sessionStatement(stmt: Node): Translation {
  */
 export function duckTranslate(stmt: Node, text: string): Translation | { kind: "duckdb"; sql: string; names?: (string | null)[] | null }
   | { kind: "explain"; query: Node; options: unknown[] } {
+  const configured = setConfig(stmt);
+  if (configured !== null) return configured;
   const kind = kindOf(stmt);
   // an EXPLAIN is the statement it explains (src/api/postgres/explain.ts, src/duck/explain.ts): its options read, then
   // that statement classified as it would be alone, by the server
@@ -114,6 +120,42 @@ export function duckTranslate(stmt: Node, text: string): Translation | { kind: "
   const relations = collect(s, "RangeVar").map((n) => bodyOf<RangeVar>(n)).filter((r) => r.schemaname !== undefined || !names.has(String(r.relname ?? "")));
   if (relations.every(isCatalogRelation)) return { kind: "catalog" };
   return { kind: "duckdb", sql: text, names: pgColumnNames(s) };
+}
+
+/**
+ * `set_config(name, value, is_local)` IS A SET, and a session's SET is the listener's: forwarded, it ran on the catalog's
+ * ONE connection, as its superuser, outside any transaction, so its value stayed for EVERY session — `set_config(
+ * 'search_path', 'zzz', false)` moved the catalog's resolution of `current_setting` and `version()` to Postgres's own,
+ * and a `myapp.x` one session set another read (a review finding of #46). So every call of it is the session's or
+ * refused, wherever it is in the statement (an EXPLAIN ANALYZE's included): alone in a SELECT of no table, its
+ * arguments literals and `is_local` false (what a tool sends: pgAdmin's `bytea_output`, an ORM's `search_path`), it is
+ * `SET name = value` answered as the function's row; any other form is the `set-config-forms` gap. null: no call of it.
+ */
+function setConfig(stmt: Node): { kind: "set_config"; name: string; value: string; column: string } | null {
+  const named = (n: Node): boolean => {
+    const parts = strings(bodyOf<{ funcname?: Node[] }>(n).funcname);
+    return parts[parts.length - 1] === "set_config" && (parts.length === 1 || (parts.length === 2 && parts[0] === PG_CATALOG));
+  };
+  const calls = collect(stmt, "FuncCall").filter(named);
+  if (calls.length === 0) return null;
+  const refuse = (at: number | null): never => {
+    throw new Unsupported(`set_config() is answered by Mason only alone in a SELECT, with literal arguments and is_local false (${gapMark("set-config-forms")})`,
+      at, "0A000", "write SET name = 'value', or SELECT set_config('name', 'value', false) on its own", "set-config-forms");
+  };
+  const at = loc(calls[0]);
+  if (kindOf(stmt) !== "SelectStmt") return refuse(at);
+  const s = bodyOf<Any>(stmt);
+  if (Object.keys(s).some((k) => k !== "targetList" && k !== "limitOption" && k !== "op") || s.op !== "SETOP_NONE") return refuse(at);
+  const targets = (s.targetList ?? []) as Node[];
+  const target = targets.length === 1 ? bodyOf<{ name?: string; val?: Node }>(targets[0]!) : null;
+  if (target?.val === undefined || kindOf(target.val) !== "FuncCall" || !named(target.val)) return refuse(at);
+  const call = bodyOf<Any>(target.val);
+  if (Object.keys(call).some((k) => k !== "funcname" && k !== "args" && k !== "funcformat" && k !== "location")) return refuse(at);
+  const args = ((call.args ?? []) as Node[]).map((a) => kindOf(a) === "A_Const" ? bodyOf<Any>(a) : null);
+  const text = (c: Any | null): string | null => typeof (c?.sval as { sval?: unknown } | undefined)?.sval === "string" ? (c!.sval as { sval: string }).sval : null;
+  const [name, value, local] = [text(args[0] ?? null), text(args[1] ?? null), args[2]?.boolval as { boolval?: boolean } | undefined];
+  if (args.length !== 3 || name === null || value === null || local === undefined || local.boolval === true) return refuse(at);
+  return { kind: "set_config", name: name.toLowerCase(), value, column: target.name ?? "set_config" };
 }
 
 /**

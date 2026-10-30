@@ -15,6 +15,7 @@
  */
 import type { ExplainOptions } from "../api/postgres/explain.ts";
 import type { CopyState, KeptCurrent } from "./sync.ts";
+import { agoText, syncText } from "../lib/table-sync.ts";
 
 type Body = Record<string, unknown>;
 
@@ -65,7 +66,7 @@ export function profiled(doc: unknown): { sql: string | null; plan: PlanNode[] }
 }
 
 /** what EXPLAIN ANALYZE says of a statement DuckDB's profiler timed no operator of */
-export const UNPROFILED = "DuckDB's profiler recorded no operator of this statement: DuckDB answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered";
+export const UNPROFILED = "the copy's profiler recorded no operator of this statement: the copy answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered";
 
 /** DuckDB's operator as DuckDB's own plan prints it (`HASH_GROUP_BY` is `Hash Group By`), a scan `Table Scan` as its
  *  profiler names it: DuckDB's EXPLAIN says SEQ_SCAN for the same operator, and Postgres's `Seq Scan` says otherwise */
@@ -144,12 +145,14 @@ const UNKNOWN = "how it is kept current is unknown: the sync has no record of it
 
 /**
  * HOW A COPY IS KEPT CURRENT, in EXPLAIN's words, from the sync's one derivation (src/duck/sync.ts `KeptCurrent`, which
- * `mason status` renders too): a copy not yet copied or whose copy failed says so first; then polled with its last
- * poll, served as copied and skipped by the passes (to be copied again, caught up first, over the poll's row limit),
- * copied again whole, or, in replication mode, its part in the stream, how far the stream has applied and why it is
- * not running. "kept current" is said only of a copy that is (`keptCurrentBy`).
+ * `mason status` renders too): a copy not yet copied or whose copy failed says so first; then its sync and its age —
+ * `off: last synced 3 days ago (…)` with the command that syncs it, `polled every 30s, last 4 s ago (…)` — or served as
+ * copied and skipped by the passes (to be copied again, caught up first), copied again whole, or, in replication mode,
+ * its part in the stream, how far the stream has applied and why it is not running. A copy's age is never left out:
+ * a BI tool or an agent reading a stale count cannot tell it is one. "kept current" is said only of a copy that is
+ * (`keptCurrentBy`).
  */
-export function keptText(f: CopyFacts | null): string {
+export function keptText(f: CopyFacts | null, now: number = Date.now()): string {
   if (f === null) return UNKNOWN;
   if (f.phase === "waiting") return "waiting for its copy to start";
   if (f.phase === "copying") return `being copied (${count(f.rowsSoFar ?? 0)} rows so far): kept current once copied`;
@@ -157,14 +160,16 @@ export function keptText(f: CopyFacts | null): string {
   const k = f.kept;
   if (k === undefined) return UNKNOWN;
   if (k.by === "poll") {
-    const asOf = k.polledAt === null ? "no poll recorded yet" : `as of ${utc(k.polledAt)}`;
-    if (k.pending !== undefined) return `NOT kept current (${asOf}): ${k.pending}`;
-    if (k.unsynced !== undefined) return `NOT kept current (${k.unsynced}; ${asOf}): mason sync ${f.source} polls it now`;
-    return `kept current by polling, ${k.polledAt === null ? "no poll recorded yet" : `last poll ${utc(k.polledAt)}`}`;
+    const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`;
+    if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
+    if (k.sync.mode === "off") return `off: ${synced}; mason sync ${f.source} syncs it now`;
+    return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`}`;
   }
   if (k.by === "recopy") return `kept current by copying it again whole, ${k.copiedAt === null ? "no copy recorded yet" : `last copied ${utc(k.copiedAt)}`}`;
   const stream = `logical replication (slot ${k.slot})`;
-  const where = `applied through ${k.position}, ${k.lastCommit === null ? "no change applied this run" : `last change committed ${utc(k.lastCommit)}`}`;
+  // the copy's age as status says it (replicated, at <lsn>, <age>), then the newest change it applied
+  const synced = k.syncedAt === null ? "not synced yet" : `last synced ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`;
+  const where = `replicated, at ${k.position}, ${synced}, ${k.lastCommit === null ? "no change applied this run" : `last change committed ${utc(k.lastCommit)}`}`;
   if (k.state === "streamed") return k.notRunning === null ? `kept current by ${stream}, ${where}`
     : `streamed by ${stream}, ${where}; NOT kept current now, the stream is not running: ${k.notRunning}`;
   return k.state === "left-out" ? `NOT kept current: left out of ${stream}: ${k.why ?? ""}`
@@ -172,12 +177,12 @@ export function keptText(f: CopyFacts | null): string {
 }
 
 /** what keeps a copy current NOW, as FORMAT JSON's `Kept Current By` says it: null for a copy nothing does (not copied
- *  yet, skipped by the passes, over the poll's row limit, not streamed, the stream down), so a reader keying on it is
+ *  yet, skipped by the passes, its sync off, not streamed, the stream down), so a reader keying on it is
  *  never told of a mode that is not at work on it */
 export function keptCurrentBy(f: CopyFacts | null): "polling" | "copying again" | "logical replication" | null {
   const k: KeptCurrent | undefined = f?.phase === "copied" ? f.kept : undefined;
   if (k === undefined) return null;
-  if (k.by === "poll") return k.pending === undefined && k.unsynced === undefined ? "polling" : null;
+  if (k.by === "poll") return k.pending === undefined && k.sync.mode === "poll" ? "polling" : null;
   if (k.by === "recopy") return "copying again";
   return k.state === "streamed" && k.notRunning === null ? "logical replication" : null;
 }
@@ -187,8 +192,8 @@ function keptJson(f: CopyFacts | null): Record<string, unknown> {
   const k: KeptCurrent | undefined = f?.phase === "copied" ? f.kept : undefined;
   return {
     "Kept Current By": keptCurrentBy(f), "Kept Current": keptText(f),
-    ...(k?.by === "poll" ? { "Last Poll": k.polledAt } : {}),
-    ...(k?.by === "replication" ? { Slot: k.slot, "Stream State": k.state, "Applied Through": k.position, "Last Change Committed": k.lastCommit, "Stream Not Running": k.notRunning } : {}),
+    ...(k?.by === "poll" ? { Sync: syncText(k.sync), "Last Synced": k.syncedAt, "Next Poll": k.nextAt } : {}),
+    ...(k?.by === "replication" ? { Sync: "replication", Slot: k.slot, "Stream State": k.state, "Applied Through": k.position, "Last Synced": k.syncedAt, "Last Change Committed": k.lastCommit, "Stream Not Running": k.notRunning } : {}),
   };
 }
 
@@ -224,15 +229,15 @@ function copyLine(c: Copy): string {
 /** EXPLAIN as Postgres's text format: one line a row */
 export function explainText(e: Explained, o: ExplainOptions): string[] {
   const lines: string[] = [];
-  lines.push(e.copies.length === 0 ? "Mason: answered by DuckDB, reading none of its copies"
-    : e.copies.length === 1 ? `Mason: answered by DuckDB from its copy of ${copyLine(e.copies[0]!)}` : "Mason: answered by DuckDB from its copies of");
+  lines.push(e.copies.length === 0 ? "Mason: answered without reading any of its copies"
+    : e.copies.length === 1 ? `Mason: answered from its copy of ${copyLine(e.copies[0]!)}` : "Mason: answered from its copies of");
   if (e.copies.length > 1) for (const c of e.copies) lines.push(`  ${copyLine(c)}`);
-  lines.push(`  Sent to DuckDB: ${e.sql}`);
-  lines.push(`  Computed by Mason after DuckDB: ${e.computed.length === 0 ? "nothing" : e.computed.join("; ")}`);
-  if (e.functions.length > 0) lines.push(`  Mason's functions DuckDB calls: ${e.functions.join(", ")}`);
-  for (const name of o.ignored) lines.push(`  Note: ${name} has no DuckDB meaning: ignored`);
+  lines.push(`  Sent to the copy: ${e.sql}`);
+  lines.push(`  Computed by Mason after the copy: ${e.computed.length === 0 ? "nothing" : e.computed.join("; ")}`);
+  if (e.functions.length > 0) lines.push(`  Mason's functions the copy calls: ${e.functions.join(", ")}`);
+  for (const name of o.ignored) lines.push(`  Note: ${name} has no meaning to the copy: ignored`);
   if (e.analyzed?.profiled === false) lines.push(`  Note: ${UNPROFILED}`);
-  else if (e.analyzed !== undefined && o.timing) lines.push("  Note: an operator's thread time is DuckDB's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time");
+  else if (e.analyzed !== undefined && o.timing) lines.push("  Note: an operator's thread time is the copy's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time");
   const walk = (n: PlanNode, depth: number): void => {
     const lead = depth === 0 ? "" : `${" ".repeat(6 * depth - 4)}->  `;
     const on = scannedTable(n);
@@ -246,8 +251,8 @@ export function explainText(e: Explained, o: ExplainOptions): string[] {
   e.plan.forEach((n) => walk(n, 0));
   if (e.analyzed !== undefined && o.summary) {
     const p = e.analyzed.planning, x = e.analyzed.execution;
-    lines.push(`Planning Time: ${ms(p.analysisMs + p.rewriteMs + p.duckdbMs)} ms (Postgres's analysis ${ms(p.analysisMs)}, Mason's rewrite ${ms(p.rewriteMs)}, DuckDB's planning ${ms(p.duckdbMs)})`);
-    lines.push(`Execution Time: ${ms(x.duckdbMs + x.masonMs)} ms (DuckDB ${ms(x.duckdbMs)}, Mason's conversion and exact numerics ${ms(x.masonMs)})`);
+    lines.push(`Planning Time: ${ms(p.analysisMs + p.rewriteMs + p.duckdbMs)} ms (Postgres's analysis ${ms(p.analysisMs)}, Mason's rewrite ${ms(p.rewriteMs)}, the copy's planning ${ms(p.duckdbMs)})`);
+    lines.push(`Execution Time: ${ms(x.duckdbMs + x.masonMs)} ms (the copy ${ms(x.duckdbMs)}, Mason's conversion and exact numerics ${ms(x.masonMs)})`);
   }
   return lines;
 }
@@ -262,22 +267,22 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
       "Node Type": operatorName(n.type),
       ...(on === null ? {} : { "Relation Name": on.name, Schema: on.schema }),
       ...(o.costs && n.estimate !== null ? { "Plan Rows": n.estimate } : {}),
-      ...(n.actualRows === undefined ? {} : { "Actual Rows": n.actualRows, "Actual Loops": 1, ...(o.timing && n.threadMs !== undefined ? { "DuckDB Thread Time": Number(ms(n.threadMs)) } : {}) }),
-      ...Object.fromEntries(Object.entries(n.extra).filter(([k]) => o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)).map(([k, v]) => [`DuckDB ${k}`, v])),
+      ...(n.actualRows === undefined ? {} : { "Actual Rows": n.actualRows, "Actual Loops": 1, ...(o.timing && n.threadMs !== undefined ? { "Copy Thread Time": Number(ms(n.threadMs)) } : {}) }),
+      ...Object.fromEntries(Object.entries(n.extra).filter(([k]) => o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)).map(([k, v]) => [`Copy ${k}`, v])),
       ...(n.children.length === 0 ? {} : { Plans: n.children.map(node) }),
     };
   };
   // Postgres's plan has one root; DuckDB's has one too (a statement's), kept as a list should it ever have more
   const roots = e.plan.map(node);
   const top: Record<string, unknown> = {
-    Plan: roots.length === 1 ? roots[0] : { "Node Type": "DuckDB Plans", Plans: roots },
+    Plan: roots.length === 1 ? roots[0] : { "Node Type": "Copy Plans", Plans: roots },
     Mason: {
-      "Answered By": "DuckDB",
+      "Answered By": "the copy",
       Copies: e.copies.map((c) => ({ Table: c.table, "Estimated Rows": c.rows, ...keptJson(c.facts) })),
-      "Sent To DuckDB": e.sql,
-      "Computed After DuckDB": e.computed,
-      "Mason Functions DuckDB Calls": e.functions,
-      ...(o.ignored.length === 0 ? {} : { Ignored: o.ignored.map((n) => `${n} has no DuckDB meaning`) }),
+      "Sent To Copy": e.sql,
+      "Computed After Copy": e.computed,
+      "Mason Functions Copy Calls": e.functions,
+      ...(o.ignored.length === 0 ? {} : { Ignored: o.ignored.map((n) => `${n} has no meaning to the copy`) }),
       ...(e.analyzed?.profiled === false ? { Note: UNPROFILED } : {}),
     },
   };
@@ -285,8 +290,8 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
     const p = e.analyzed.planning, x = e.analyzed.execution;
     top["Planning Time"] = Number(ms(p.analysisMs + p.rewriteMs + p.duckdbMs));
     top["Execution Time"] = Number(ms(x.duckdbMs + x.masonMs));
-    (top.Mason as Body)["Planning"] = { "Postgres Analysis": Number(ms(p.analysisMs)), "Mason Rewrite": Number(ms(p.rewriteMs)), "DuckDB Planning": Number(ms(p.duckdbMs)) };
-    (top.Mason as Body)["Execution"] = { DuckDB: Number(ms(x.duckdbMs)), "Mason Conversion": Number(ms(x.masonMs)) };
+    (top.Mason as Body)["Planning"] = { "Postgres Analysis": Number(ms(p.analysisMs)), "Mason Rewrite": Number(ms(p.rewriteMs)), "Copy Planning": Number(ms(p.duckdbMs)) };
+    (top.Mason as Body)["Execution"] = { Copy: Number(ms(x.duckdbMs)), "Mason Conversion": Number(ms(x.masonMs)) };
   }
   return JSON.stringify([top], null, 2);
 }

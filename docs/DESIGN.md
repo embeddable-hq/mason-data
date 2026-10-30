@@ -43,7 +43,7 @@ order is only roughly time order, so pruning by time is good, not exact.
 **Writes by key**: a poll piece or stream batch deletes its keys by ONE join against the key column, then inserts; an
 unchanged-TOAST update is ONE `UPDATE … FROM` per set of carried columns. Each scans the key column: 10,000 changes into
 1 M uuid rows 4 ms, 10 M 20 ms, 195 M 0.35–0.86 s to delete and 1.5–1.8 s to update (laptop NVMe); on the test server
-the 3 GB key column is read from EBS, tens of seconds. So a stream batch touching a table over `POLL_ROW_LIMIT` is
+the 3 GB key column is read from EBS, tens of seconds. So a stream batch touching a table over `BIG_TABLE_ROWS` (1,000,000) is
 applied at most every 5 s in pieces of up to 50,000 (`BIG_APPLY_MS`, `BIG_PIECE_CHANGES`): a 12 M-row migration is 240
 scans, not 1,200, and the batch's other tables wait seconds with it. A bigserial key prunes (its zonemaps are in order).
 
@@ -164,9 +164,8 @@ under another transaction's write fails its commit, hence swaps on the writer's 
 **Decision.** Each table is polled by ONE DuckDB transaction over ONE source snapshot: rows whose `xmin` is at or past the
 watermark are written by key, an anti-join deletes what the source lacks only when the counts differ, and the watermark
 commits WITH the rows. Over `POLL_PIECE_ROWS` (50,000) changed rows the deletes go first and the rows 50,000 to a commit,
-the watermark moving with the last. The interval stretches to four times the last poll (`nextPollDelayMs`). Only tables
-of at most 1,000,000 rows by the estimate are polled (`POLL_ROW_LIMIT`); a bigger one serves as of its copy, said on its
-line, and `mason sync <table>` polls it now.
+the watermark moving with the last. Which tables are polled, and how often, is the sources file's `sync:` (next
+section); a table's next poll is its interval after its last, stretched to four times that poll's time (`nextPollAt`).
 
 **Why.** At 64 MB on 1 M uuid keys (while copies had a key) one upsert of 600,000 changed rows ran out of memory; in
 pieces of 50,000 all 1 M went in, in 1.5 s; 8,000 deletes after 720,000 upserts ran out where before them they did not.
@@ -175,9 +174,83 @@ A poll is a full scan of every polled table (no index covers `xmin`): 13–17 s 
 polled every 74 s for seven hours). On the test server one 22 M-row table cost the replica 12 s of scan and 2 s of count
 per poll. **Where.** `src/duck/sync.ts`, `src/cdc/poll.ts`; `tests/integration/duck-poll.itest.ts`.
 
+### Each table's sync (issue 33)
+
+**Decision** (2026-10-29). How a copy stays current after its first copy is the sources file's `sync:`, at the top of
+the file for every table and on an entry for that one: `off` (the default) reads it again only at `mason sync <table>`,
+`poll <interval>` (`<n>s|m|h`, 1 s to 24 h) polls it at that interval. One grammar (`parseSync`, src/lib/table-sync.ts)
+read by the file's reader and by `mason add --sync`; `replication` streams the table from the change log (below, PR 2
+of 3). The run is ONE pass loop that polls
+the tables due (`Sync.dueAt`), never a timer a table: a pass also queues copies, drops removed tables and attaches the
+source once. Two bounds on what the polls cost the source: a table's own (`nextPollAt`, four times its last poll) and
+the passes' (`passDelayMs`, four times the last pass). The sync each table was last polled or copied under is a column
+of `_mason.poll_state`, so a change made by hand while Mason was down is seen at the next start; a change keeps the
+copy and catches it up by one poll. The row limit moved from the run to `mason add`: a table over `BIG_TABLE_ROWS`
+(1,000,000) added under a file whose default polls is written `sync: off` on its entry and said, and a poll of more than
+`COSTLY_POLL_ROWS` (10 M) more often than every minute is warned of with an estimate and its basis (the table's last
+poll measured, else the copy's read rate a reader, else the catalog's rows at an assumed 1.8 M rows a second).
+`MASON_POLL_MS` is no longer read, and refuses the start naming the line to write.
+
+**Why.** The project-wide interval and the run's row limit made one decision for every table, and the second was found
+only by its effect: a table over the limit was copied, served and never polled, said only as "NOT kept current" on its
+line, and an operator who wanted a small table every 5 s and a big one hourly could not say so. A poll is a full scan
+(above), so the cost of polling is the table's size times its frequency: the file is where the developer weighs it,
+table by table, and `off` by default means Mason reads nothing it was not told to. The copy's age is said wherever a
+copy is read (`mason status`, `wait`, `sync`, EXPLAIN, the MCP tools), since an `off` table is as old as its last sync.
+**Where.** `src/lib/table-sync.ts`, `src/duck/sync.ts`, `src/cli/source-edit.ts`; `tests/cli-sources.test.ts`,
+`tests/duck-sync-schedule.test.ts`, `tests/integration/duck-poll.itest.ts`.
+
+**`sync: replication`, per table** (2026-10-29, PR 2 of 3). A table whose sync is `replication` is streamed; the others
+are polled beside the stream or left `off`, in one run. The project still has ONE slot and ONE publication, and the
+publication carries the replicated tables alone: Mason's own is `ALTER PUBLICATION … SET TABLE` to exactly that list
+(created with it when missing) and verified against `pg_publication_tables` afterwards, so a polled table's writes
+are never decoded into the slot's WAL; a publication the operator names (`publication:` at the top of the sources
+file, `${PG_PUBLICATION}` allowed, read by `readSource` as `url:` is) is never altered, and a replicated table it lacks
+is refused alone with the `ALTER PUBLICATION … ADD TABLE` its owner runs. What cannot be replicated is refused at the
+file's read, on one report with the line to write: a `key:` table (no primary key, so the stream cannot apply its
+changes by key) and a `REPLICA IDENTITY NOTHING` one (publishing it would fail the app's own UPDATEs), the latter read
+from the catalog; `mason add` of either under a file whose default is `replication` writes `sync: poll 5m` on its
+entry and says why. A change of sync keeps the copy in every direction: into replication the table is marked behind
+(`_mason.catch_up`, so a restart owes the same) and its changes are held from before its one catch-up poll — the
+publication carries it before that poll starts, which is what makes the replay safe (src/duck/stream.ts) — then it
+joins the stream; out of it the table leaves the stream (`refreshStreamed`) and is caught up by one poll from its
+watermark, then polled as its sync says. When no table is replicated any more the slot is dropped, and Mason's own
+publication with it, VERIFIED gone (`retireReplication`: the stream stopped first, the slot waited inactive), at the
+start that finds none and live when the last one leaves; the project's config records what was made
+(`config.replication`) through the run's hook, so `mason destroy` drops what exists, never a name computed again.
+`mason start --replication` / `--poll` / `MASON_CHANGES` were taken only where they agreed with the file and refused
+otherwise, naming the `sync:` line to write, until PR 3 removed them (below).
+
+**Why.** One decision per project made the developer choose between a slot that decodes every table's writes (a busy
+log table the dashboards never read included) and polls that scan every table; the file already weighs each table's
+cost, so the change log is one more choice there. A publication of the replicated tables alone keeps the slot's WAL to
+what Mason reads. The slot is dropped when unused because it holds the source's WAL for ever otherwise (CLAUDE.md
+"A replication slot outlives its reader"). The copy's age of a replicated table is the stream's position and the last
+instant the stream was known current (`kept.syncedAt`: the later of its last poll and the stream's last keepalive or
+flush with nothing pending), said as `replicated, at <lsn>, <age>` on its line, so a stopped stream's copy is never
+read as current. **Where.** `src/duck/sync.ts` (`replicated`, `streams`, `ensurePublication`, `retireReplication`),
+`src/cli/replication-mode.ts`, `src/cli/sources.ts`; `tests/cli-sources.test.ts`,
+`tests/integration/duck-stream.itest.ts` (a mixed project, a switch each way, a named publication, REPLICA IDENTITY NOTHING).
+
+**The flags and `MASON_CHANGES` gone** (2026-10-30, PR 3 of 3). `mason start --replication`, `--poll` and
+`--publication`, and `MASON_CHANGES` on a server, are removed: each flag answers, before the options are parsed and
+before anything starts, with the line to write at the top of the sources file (`sync: replication`, `sync: poll 5m`,
+`publication: <name>`) and exit 2, on one report however many are given; `MASON_CHANGES` set is one line of `mason
+serve`'s settings report, naming its `sync:` line (`removedStartFlags`, `changesRetired`, `src/lib/table-sync.ts`).
+The way out names the EDIT, read from the file (`sourcesTop`, `topEdit`): every file `mason init` writes has a `sync:`
+line at its top already, so "write `sync: replication` at the top" made a second one, a file the run refuses (the
+independent review); it says "change `sync: poll 5s` … to `sync: replication`", "keep", or "write" only where the file
+has no such line — `MASON_POLL_MS`'s too. A test applies each way out to an init-made file as written and parses it.
+**Why.** Taken where they agreed with the file (PR 2) they said nothing the file did not, and two places to say how a
+table is kept current is one more than production can be held to: the committed file is what runs. A removed setting
+refuses rather than runs a default (CLAUDE.md "Conventions"). `config.json`'s `changes`, the mode an older Mason
+recorded, is still READ — never written — so a start whose file replicates nothing drops that older run's slot and says
+why, and `mason destroy` drops it; the first start deletes it. **Where.** `src/cli/registry.ts`, `src/cli/serve.ts`,
+`src/lib/table-sync.ts`; `tests/cli-commands.test.ts`, `tests/serve.test.ts`.
+
 ### Logical replication
 
-**Decision.** `mason start --replication` keeps the copies current from the change log (`src/duck/stream.ts`); the rules
+**Decision.** A table whose `sync:` is `replication` is kept current from the change log (`src/duck/stream.ts`); the rules
 are `.claude/rules/duckdb.md` "Keeping a copy current". Why each is so:
 
 | decision | why, with the number |
@@ -1042,6 +1115,66 @@ statement (28000), no restart; an unreadable file refuses every user (57P03); ro
 user` runs beside the process holding DuckDB's lock. Named as Postgres names it (`CREATE USER … WITH PASSWORD`).
 **Where.** `src/duck/users.ts`, `src/cli/user.ts`; `tests/duck-users.test.ts`, `tests/duck-users-wire.test.ts`.
 
+### Roles: tables and columns per user (2026-10-29, GitHub issue 30, stage 1a)
+
+**Decision.** A roles file beside the sources file (`mason/roles.yml`, `src/cli/roles.ts`) names what each role may
+read: tables, and `columns:` or `exclude:` of each, in the sources file's own words; `mason user add <name> --role
+<role>` puts a role on a user (`role` in `.mason/users.json`). A role is enforced in `src/duck/plan.ts` on the tree
+Postgres analysed, after the views are expanded and before the rewrite (`src/duck/grants.ts`): every
+`RTEPERMISSIONINFO` of a copied table, its `selectedCols` mapped through `pg_attribute` (bit − 7 = attnum; bit 7 the
+whole row; a lower bit a system column, which needs the whole table; none, a `count(*)`, any column). The refusal is
+Postgres's: `42501 permission denied for table <name>` — measured on Postgres 18, which never names the column under
+column grants — with the role and the column in the DETAIL and what the role reads in the HINT. The catalog Postgres
+holds one role per Mason role with the same GRANTs and runs a role's session's catalog statements under `SET ROLE …
+RESET ROLE` in one request, so `information_schema`, `has_*_privilege` and `mason mcp` answer for the role;
+`pg_catalog` is left unfiltered (Postgres filters it no more than Mason does). Fail closed everywhere: a role the
+file lost refuses its users by name, a file that cannot be read refuses 57P03 and keeps the last good grants for the
+catalog. The role travels with the user's token, re-read before every statement, and a plan carries its reads so an
+Execute is held to the role of that moment; the plan cache is keyed by role.
+
+**Why on the tree.** A text match misses a CTE, a `USING` join, a lateral's argument and a `*`; Postgres has already
+resolved every one of them by the time the planner sees the tree, and its own permission check reads the same node.
+**Why the catalog has real roles.** `information_schema` is a view over `has_*_privilege`: filtering it by hand would
+be a second implementation of Postgres's rules; a real role makes PGlite answer as Postgres does, for every
+introspection a tool sends. Views are granted to every role (the grant rides in the view's own statement, since the
+view must exist first) and checked on their base tables: stricter than Postgres, said in the docs.
+**Not in this stage.** `pg_catalog` filtered by role; row filters (stage 2); limits (stage 3).
+**Where.** `src/duck/grants.ts`, `src/cli/roles.ts`, `src/api/postgres/catalog.ts` (`catalogRoles`, `asRole`),
+`src/api/postgres/server.ts` (`Session.grants`, `heldToRole`, `catalogAs`); `tests/duck-roles-wire.test.ts`,
+`tests/postgres-api/catalog.test.ts`, the oracle's `roleCases`.
+
+### Roles: the file decides the default (2026-10-29, GitHub issue 30, stage 1b)
+
+**What stage 1a left in the code.** A user with no role read every copied table, and so did a token: a grant nobody had
+written down, decided by `Session.grants()` returning "no role, nothing to hold". Beside a roles file that narrowed
+every other user, the one line of access no reviewer could read in a commit was the widest.
+
+**Decision (the owner, 2026-10-29): the FILE says it.** Three states, each said where a person and an agent look (`mason
+start`'s roles line, `mason user add` / `list`, `mason status`, the web page, `--json`'s `roleFrom` / `readsNothing`):
+no `mason/roles.yml` — every user reads every copied table, as before roles existed; `default: <role>` at the top of
+the file — a user added without `--role` reads as that role (its refusals, its catalog under `SET ROLE`, its request
+log rows); a file with no `default:` — such a user reads nothing, each statement that reads a copied table refused
+42501 with the two ways out as exact lines, `SELECT 1` still answered. Its catalog requests run as a grant-less role,
+`__mason_no_role` — named outside the file's namespace (a role name never starts with `_`) — so `information_schema`
+and the privilege functions answer as Postgres's do for a login with no grant (the review of #44: run as the catalog's
+superuser they listed every table and said `has_table_privilege` true while every read was refused). The session asks the roles at
+every statement (`LiveRoles` re-reads the file when its stat moves), so an edit of `default:` applies at the next one;
+`Session.roleName` is the effective role, the one name `catalogAs`, the plan cache and the request log read. A file
+that cannot be read refuses a roleless user too (57P03): its default cannot be known, and fail closed is the rule. A
+token is no user and keeps reading everything: it is minted from the API key, which is the operator's.
+
+**`tables: all`, Postgres's own word.** "Every table" is `GRANT SELECT ON ALL TABLES IN SCHEMA` in Postgres, so the
+file says `tables: all` rather than a word of Mason's; it is resolved against the tables copied at every read
+(`resolveRoles` writes a whole-table grant per copied table), so a table the sources file adds is the role's once its
+copy is served, and the catalog grants it per table at its rebuild — never `ON ALL TABLES`, which would be true only
+of the tables there at the GRANT. A table key `all` is refused with both meanings (`public.all` for a table so named).
+The oracle holds a Mason role of `tables: all` to a Postgres role granted `ALL TABLES IN SCHEMA public`.
+
+**`mason init` writes the file** (`newRolesText`, beside the sources file's `newSourceText`): one role, `everything`,
+`tables: all`, and `default: everything`, with a narrower role as a comment to copy. A new project starts with today's
+access, but visible in a committed file: narrowing it is an edit a reviewer sees, and deleting the `default:` line is
+the one-line way to make every roleless user read nothing. A file already there (a clone) is kept byte for byte.
+
 ### An MCP server (2026-10-29)
 
 **Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is
@@ -1086,6 +1219,38 @@ clients that take a static header. The tool code would not change; the transport
 **Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`), `src/api/postgres/catalog.ts`
 (`sourceTypeNames`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
 
+## Observability (2026-10-27 – 2026-10-29)
+
+**Decision.** Every run keeps its history in its own file — the request log (below), the sync's events, a usage
+sample a minute and each copy's size every 10 minutes — and the commands (`mason status`, `mason logs`, `mason usage`)
+and `mason start`'s web page (`mason ui`) render the same JSON. The plan, the endpoints and the access options are
+docs/OBSERVABILITY.md; the page's rules are .claude/rules/web-ui.md; the numbers of its architecture review are
+docs/OBSERVABILITY.md "Architecture review".
+
+**The page's look, as it was decided.** A first palette of black bands and a dark orange read as dated, and its hard
+stepped shadows as heavy: the owner kept the type (Geist Mono, Geist Sans, Zilla Slab) and asked for other colours,
+so the page is a stone white with one patina accent and a hairline-and-soft-shadow step. A copy's bar was first a
+course of bricks; the owner found it read as noise, and it is a plain line with its % at the end. A first chart set
+its title into its frame, where "Statements an hour" overflowed the card; the title is the card's now. The owner's
+rule for clicks — "clicking buttons in a table should not shift it around" — is why every question, form and answer
+is a popover, every changing label keeps the room of its longest, and the Tables and Users lists have fixed columns
+(a disabled user's "Disabled <when>" once widened Users' Status column).
+
+**The ranges.** The views share one time range. Now (the last 15 minutes, read every few seconds) is the default,
+and every other range is read once and holds still, with when it was read and Refresh: a person comparing a past
+hour wants it to stay put. The Overview's links carry the range of what their card counts (24 hours; the sync's
+failures 7 days): with Now the default, a card of 12 failed statements once landed on an empty 15 minutes.
+
+**Measured.** A copy's size from `pragma_storage_info`: 61–72 ms cold on 30 M rows × 14 columns, metadata only but
+growing with rows × columns, so it is sampled every 10 minutes, never per request; `duckdb_memory()` under 1 ms. A
+`count(*)` after a stream batch that wrote by key was a scan, 12 ms on 20 M rows, so a copy's rows are kept by the
+batch's own inserts less its deletes. A copy with no persistent block yet (its rows still in the write-ahead log) was
+measured "0.0 KiB" for 5,000 rows, so it is not measured until it has one; and the file's block size read without
+`current_database()` was the in-memory catalog's 0, which made every copy 0 B.
+
+**Where.** `src/duck/{requests,events,usage,history}.ts`, `src/cli/{run-server,usage,commands}.ts`, `src/web/`;
+`tests/duck-{requests,events,usage,history}.test.ts`, `tests/cli-run-server.test.ts`, `tests/web-page.test.ts`.
+
 ## The request log
 
 **Decision.** Every statement DuckDB answered and every refusal or failure (a Parse, a Bind, a syntax error, a refused
@@ -1094,7 +1259,7 @@ BEGIN is chatter and is not. Its columns: `request_id`, `seq`, `started_at`, `du
 `application_name`, `token_name` (a NAME, never the token), `user_name`, `method`, `sqlstate`, `message`, `detail`,
 `hint`, `rows`, `query` (cut at 64 KiB, `query_truncated`) and `json_reads` ("Stored JSON paths" 1.). Written in batches
 (a second or 1,000 rows) on a connection of its own, never the writer's turn; a failed write is said and fails no
-statement; kept `MASON_REQUEST_LOG_DAYS` (7) days; read only through the command server; ordered by `started_at`, `seq`.
+statement; kept `MASON_HISTORY_DAYS` (7) days; read only through the command server; ordered by `started_at`, `seq`.
 
 **Why.** A BI tool met an error on the test server and nothing could be found afterwards: the run threw the rows away
 (`record: () => undefined`). A swap or a stream batch may hold the writer for seconds. With a random uuid and a
@@ -1124,7 +1289,7 @@ is left out of the sources file (2026-10-28, `DEMO_TABLE_TO_ADD` in `src/demo/se
 after `mason start` is a real `mason add` (or the web page's Add), and they see a copy begin; its foreign keys' targets
 are among the three, so it joins cleanly when it lands, and the writer keeps inserting into it in the database meanwhile. The port is chosen free at init and kept
 in that URL alone; the run reads it back from the resolved URL (`src/cli/demo.ts` `demoPort`). It is read by polling
-only: `--replication` on a demo project is refused before anything starts.
+only: a table whose `sync:` is `replication` in a demo project's sources file is refused before anything starts.
 
 **Why.** A first try should need nothing installed: no Docker, no Postgres, no database of one's own to point at.
 PGlite is a real Postgres (its catalog, its types, its `xmin`) already in the package, where a fixture of rows would be a
@@ -1141,10 +1306,11 @@ so the next start seeds it again. **Where.** `src/cli/demo.ts`, `src/demo/source
 ### On a server: `mason serve` and the image
 
 **Decision.** `mason serve` is `mason start --attach`'s run configured by the environment alone (`DATABASE_URL`,
-`MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_CHANGES`, `MASON_PG_*`), every bad setting on one
+`MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_PG_*`), every bad setting on one
 report, the log on stdout, SIGTERM its stop (tini PID 1). `GET /healthz` (`MASON_HEALTH_PORT`, 4140) is 503 until the run
-answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:24-slim with DuckDB's
-postgres extension installed at build (closed egress still copies); one replica, stop-then-start deploys;
+answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:24-slim with the
+copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress
+still copies); one replica, stop-then-start deploys;
 `deploy/mason-data/compose.yml` the quickstart. `version()` is `PostgreSQL 18.6 (mason-data <version>) …`, Postgres first
 since tools parse it. Item 1 of the server's plan was a login that does not expire: `mason user` ("Users").
 
@@ -1154,6 +1320,42 @@ the HEALTHCHECK start period is 2 minutes plus three checks 15 s apart. One repl
 process beside the writer. Not built: Let's Encrypt, an SSH tunnel, readers over shared
 storage, measuring where the catalog's ~820 MB goes. **Where.** `src/cli/serve.ts`; `tests/serve.test.ts`,
 `tests/integration/duck-serve.itest.ts`.
+
+### The copy's extensions ship with Mason (2026-10-29)
+
+**Decision.** DuckDB bundles neither extension Mason needs — `postgres` (the copy reads the source through it) nor
+`inet` (a text cast to inet, `s::inet`, reaches DuckDB's CAST and autoloads it) — and by default downloads each from
+its repository at the first statement that needs it: a laptop offline at its first copy could not copy, and a server
+fetched code at run time. Both now ship as ONE npm PACKAGE PER PLATFORM, `@mason-data/extensions-<platform>`
+(darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64), optional dependencies of `@mason-data/cli` with
+`os` / `cpu` / `libc`, as DuckDB's node bindings ship their binary (`src/duck/extensions.ts`). With the package found,
+the instance's `extension_directory` is the package's folder and autoinstall is off: `LOAD postgres` and the inet
+autoload read it, nothing is installed or downloaded, and the folder may be read-only. Without it (`--omit=optional`,
+musl, Windows on arm64, a checkout) DuckDB's own install runs, said with the reason; `mason doctor` probes which.
+
+**Why these choices.** `extension_directory` over `LOAD '<path>'`: a LOAD by path loads that file, and the inet cast's
+autoload still looked in `~/.duckdb` (measured: the cast then tried to download). The official extensions are signed,
+and DuckDB checks the signature at every LOAD with `allow_unsigned_extensions` off (measured, DuckDB 2.0: both load
+from a read-only folder with no `.info` file). The files are pinned by sha256 and size in `cli/extensions.json` (DuckDB
+publishes no checksum list: the pin is what was fetched once and read, and `node cli/extensions.ts --pin` makes the next
+for a new engine), and `@duckdb/node-api` is pinned exactly, since a range could install an engine the packages hold no
+files for. The image uses the same package rather than an INSTALL at build: one way for both, every file held to its
+pin, `inet` too (the INSTALL had only `postgres`), and found by path, never under `$HOME`, which a container run as
+another uid does not have. `cli/` has no lock of its own: `npm ci` there refuses a lock without the platform packages,
+and they are published in the same release run as the CLI.
+
+**Measured, DuckDB v2.0.0** (each package holds both files; a user downloads one):
+
+| platform | postgres | inet | packed | installed |
+|---|---|---|---|---|
+| darwin-arm64 | 45.9 MB | 11.3 MB | 17.0 MiB | 54.6 MiB |
+| darwin-x64 | 47.6 MB | 11.3 MB | 17.6 MiB | 56.3 MiB |
+| linux-arm64 | 56.5 MB | 14.6 MB | 21.1 MiB | 67.8 MiB |
+| linux-x64 | 59.2 MB | 14.9 MB | 22.4 MiB | 70.7 MiB |
+| win32-x64 | 52.1 MB | 46.4 MB | 31.0 MiB | 93.9 MiB |
+
+A machine's first copy downloaded the postgres extension anyway, so what an install adds is the inet extension (and
+the download moves from the first copy to `npm install`).
 
 ### Memory and the machine
 
@@ -1188,6 +1390,47 @@ statements in flight, and DuckDB 2.0 has no per-connection thread or priority co
 10. A table being caught up holds its decoded changes in Node's heap (`held`): unbounded for a migration meanwhile.
 11. A copy's catch-up is ONE poll, neither chunked nor resumable (a transaction held open on the source moves the rows
     since into it; a copy resumed days later catches up days), and a copy neither pauses for a smaller table nor yields.
+
+### The Node CI runs on (2026-10-30)
+
+**Incident.** From 2026-10-29 CI's `checks` job failed one test file after every test in it had passed, at the file's
+exit: `# Check failed: jit_page_->allocations_.erase(addr) == 1.` in `ThreadIsolation::UnregisterWasmAllocation`, on
+Node 24.22.1. Five runs in two days on five unrelated branches (about one `checks` run in thirteen), always a file that
+loads WebAssembly: `tests/duck-json-columns.test.ts` three times, `tests/postgres-api/catalog.test.ts` twice. It is a
+V8 bug, nodejs/node#66366: V8 13.6 (Node 24) keeps the wasm-to-JS import wrappers in ONE cache for every isolate of a
+process, and a wrapper the wasm code GC is freeing can be looked up by another thread and freed a second time; fixed in
+V8 by 9b8ca54d5a ("Fix lookup of wrappers marked is_dying"), in Node 26's V8 and absent from Node 22's (whose wrappers
+are per isolate), and in no Node 24 release yet (backport nodejs/node#66376, open). Mason meets it by design: PGlite on
+the catalog's worker and the function worker, libpg-query on the parser's, each its own isolate in one process, and a
+worker terminated whenever a catalog stops, is replaced or idles out, or the process ends.
+
+**Decision.** Every workflow runs Node 26 (`ci.yml`, `release.yml`), held by `tests/conventions.test.ts` ("no workflow
+runs Node 24"). Closing every instance before the exit was not it: both files already stop every catalog they start
+and close every PGlite they open (`finally`), and stop the parser in `after`, and the death of an instance is what
+feeds the code GC that races: closing earlier moves the race, it does not remove it.
+`--no-wasm-code-gc` does make the double free unreachable on Node 24 (V8 13.6 frees a wrapper only through the code
+GC's `DecRefOnDeadCode`, which the flag never triggers), but it reaches only the processes `node --test` starts: Node
+refuses it in `NODE_OPTIONS`, so the `mason` children the CLI tests spawn and the integration jobs' `mason serve` would
+still run with the bug. Node 26 removes the code that races, in every process CI starts.
+
+**Measured**, on CI's runner (ubuntu x64, 4 cores), the two files it hit run as three processes at once
+(`duck-json-columns` twice, `catalog` once) beside one CPU-bound process, in a loop for 15 minutes, 15 jobs an arm:
+
+| arm | file processes | the CHECK | jobs it failed |
+|---|---|---|---|
+| Node 24.22.1 | 537 | 9 (5 `duck-json-columns`, 4 `catalog`), the CI frames to the address | 7 of 15 |
+| Node 26.13 | 621 | 0 | 0 of 15 |
+| Node 24.22.1, `--no-wasm-code-gc` | 522 | 0 | 0 of 15 (one timing flake) |
+
+At Node 24's 1.7 %, none in 621 is a chance of about 3 in 100,000. A full suite does not show it on demand: none in 20
+full suites on each of the three arms (the suite is green on 26), none in 120 runs of `duck-json-columns` in an arm64
+container under 1 and 2 CPUs on Node 24 and 26, none in 20 runs of a PGlite and libpg-query worker churn under
+`--stress-wasm-code-gc` there. Upstream's reporter: 0 in 191 processes with the two V8 commits on Node 24, 8 in 149
+without, and none on Node 26.10.
+
+**Still true.** The image (`docker/mason-data.Dockerfile`, `node:24-slim`) and a user's own Node 24 still carry the bug,
+and `mason serve` terminates a catalog worker at every idle stop: there it is a rare abort the supervisor restarts.
+Lift the guard when a Node 24 release carries nodejs/node#66376.
 
 ## Measurements
 

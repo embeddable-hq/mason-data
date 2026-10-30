@@ -10,6 +10,8 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "libc-uncovered", sql: "SELECT id FROM coll ORDER BY s, id" },
   { gap: "libc-symbol-punctuation", sql: "SELECT s FROM coll WHERE id BETWEEN 50 AND 59 ORDER BY s" },
   { gap: "explain-option", sql: "EXPLAIN (FORMAT XML) SELECT id FROM typed" },
+  // is_local: Postgres's change ends with the statement's own transaction, so the session's state is the same after
+  { gap: "set-config-forms", sql: "SELECT set_config('application_name', 'gap-case', true) FROM public.one" },
   { gap: "setop-ordinal-star", sql: "SELECT * FROM (SELECT id, t FROM typed) s UNION SELECT id, t FROM typed ORDER BY 1" },
   { gap: "with-ties-distinct", sql: "SELECT DISTINCT i4 FROM typed ORDER BY i4 FETCH FIRST 2 ROWS WITH TIES" },
   { gap: "collation-unknown", sql: "SELECT id FROM typed ORDER BY t COLLATE \"en_US.utf8\", id" },
@@ -43,4 +45,6 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "min-max-scale-tie", sql: "SELECT min(a / b), max(a / b) FROM public.one, (VALUES (0::numeric, 7::numeric), (0, 1000000)) AS v(a, b)" },
   { gap: "nested-exact-numeric", sql: "SELECT x * 2 FROM (SELECT 7 / 3.0 AS x FROM public.one) AS s" },
   { gap: "unicode-16-case", sql: "SELECT upper('\u{10D70}'), lower('\u{10D50}') FROM public.one" },
+  // the session's own statement (Postico's connect): its fields and the rows the sessions set are held alike (KNOWN's `holds`)
+  { gap: "show-all", sql: "SHOW ALL" },
 ];

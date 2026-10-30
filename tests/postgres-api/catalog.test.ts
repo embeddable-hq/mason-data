@@ -436,7 +436,8 @@ test("a statement past the deadline is refused naming it, the instance is replac
   try {
     const started = Date.now();
     await assert.rejects(slow.run(simpleQuery("SELECT count(*) FROM generate_series(1, 4000000000)")), (e: Error) => {
-      assert.match(e.message, /^the catalog did not answer .* within 0\.3 s: PGlite was discarded \(the next statement starts a fresh one; MASON_PG_CATALOG_TIMEOUT_MS raises the deadline\)/);
+      assert.match(e.message, /^the catalog did not answer .* within 0\.3 s, so Mason started it again \(the next statement is answered as usual; MASON_PG_CATALOG_TIMEOUT_MS raises the deadline\)/);
+      assert.doesNotMatch(e.message, /pglite/i, "what a client reads names no engine");
       return true;
     });
     assert.ok(Date.now() - started < 5_000, "the deadline fired");
@@ -490,4 +491,186 @@ test("the shop's schema starts the catalog, every foreign key in it", async () =
   } finally {
     await own.stop();
   }
+});
+
+// --- roles: the catalog's roles mirror the roles file (src/api/postgres/catalog.ts catalogRoles, asRole, unwrapRole) ---
+// `catalogModule` is read by name, so a tree without these fails each test by name (scripts/fails-without.ts)
+
+/** a role's grants as src/cli/roles.ts resolves them (src/duck/grants.ts RoleGrants) */
+const grants = (name: string, tables: Array<[string, string[] | "all"]>) => ({ name, file: "mason/roles.yml", all: false,
+  tables: new Map(tables.map(([table, cols]) => [table, { table, all: cols === "all", columns: cols === "all" ? [] : cols }])) });
+const twoRoles = () => new Map([
+  ["agent", grants("agent", [["public.orders", ["id", "amount", "paid"]], ["public.regions", "all"]])],
+  ["ops", grants("ops", [["public.customers", "all"]])],
+]);
+
+test("catalogRoles: one NOLOGIN role per Mason role, USAGE on every table schema, SELECT whole or by column; a table the schema lacks is skipped", () => {
+  const m = catalogModule as unknown as { catalogRoles: (s: PgSchema, r: Map<string, unknown>) => string[] };
+  assert.deepEqual(m.catalogRoles(schema, twoRoles()), [
+    // set_config revoked while roles exist: under SET ROLE it was a RESET ROLE inside one statement (the review of #35)
+    "REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC;",
+    `CREATE ROLE "agent" NOLOGIN;`,
+    `GRANT USAGE ON SCHEMA "public" TO "agent";`,
+    `GRANT SELECT ("id", "amount", "paid") ON public."orders" TO "agent";`,
+    `GRANT SELECT ON public."regions" TO "agent";`,
+    `CREATE ROLE "ops" NOLOGIN;`,
+    `GRANT USAGE ON SCHEMA "public" TO "ops";`,
+    `GRANT SELECT ON public."customers" TO "ops";`,
+  ]);
+  assert.deepEqual(m.catalogRoles(schema, new Map()), []);
+  // a role naming a table not in the schema yet (added, not copied) grants nothing on it; a column the copy lacks is left out
+  const partial = new Map([["r", grants("r", [["public.shipments", "all"], ["public.orders", ["id", "nope"]]])]]);
+  assert.deepEqual(m.catalogRoles(schema, partial).slice(1), [`CREATE ROLE "r" NOLOGIN;`, `GRANT USAGE ON SCHEMA "public" TO "r";`, `GRANT SELECT ("id") ON public."orders" TO "r";`]);
+  // every role may see every view (the grant rides in the view's own statement: the view must exist first)
+  const m2 = catalogModule as unknown as { catalogViews: (s: PgSchema, r: Map<string, unknown>) => string[] };
+  const [v] = m2.catalogViews({ ...schema, views: [{ schema: "public", name: "paid_orders", definition: " SELECT id FROM public.orders WHERE paid;" }] }, twoRoles());
+  assert.equal(v, `CREATE SCHEMA IF NOT EXISTS "public"; CREATE VIEW "public"."paid_orders" AS  SELECT id FROM public.orders WHERE paid; GRANT USAGE ON SCHEMA "public" TO "agent"; GRANT SELECT ON "public"."paid_orders" TO "agent"; GRANT USAGE ON SCHEMA "public" TO "ops"; GRANT SELECT ON "public"."paid_orders" TO "ops";`);
+});
+
+test("catalogRoles: a role of tables: all (stage 1b) is granted every copied table whole, a table copied later at the rebuild — per table, never ON ALL TABLES", async () => {
+  // the role as src/cli/roles.ts reads and resolves it, imported here so a tree without tables: all fails this test by name
+  const r = await import("../../src/cli/roles.ts");
+  const m = catalogModule as unknown as { catalogRoles: (s: PgSchema, r: ReadonlyMap<string, unknown>) => string[] };
+  const file = r.parseRolesText("default: everything\nroles:\n  everything:\n    tables: all\n", "/p/mason/roles.yml");
+  assert.ok(!("problems" in file), JSON.stringify(file));
+  const copiedOf = (s: PgSchema) => s.tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, columns: t.columns.map((c) => ({ name: c.name })) }));
+  const resolved = r.resolveRoles(file, copiedOf(schema), "/p");
+  assert.ok(!("message" in resolved));
+  assert.deepEqual(m.catalogRoles(schema, resolved).slice(1), [
+    `CREATE ROLE "everything" NOLOGIN;`,
+    `GRANT USAGE ON SCHEMA "public" TO "everything";`,
+    `GRANT SELECT ON public."orders" TO "everything";`,
+    `GRANT SELECT ON public."customers" TO "everything";`,
+    `GRANT SELECT ON public."regions" TO "everything";`,
+  ]);
+  // the sources file adds a table in another schema: resolved again, the rebuild grants it too
+  const later: PgSchema = { ...schema, tables: [...schema.tables, { name: "invoices", schema: "billing", primaryKey: ["id"], columns: [{ name: "id", type: "int8" }], joins: [] }] };
+  const again = r.resolveRoles(file, copiedOf(later), "/p");
+  assert.ok(!("message" in again));
+  const ddl = m.catalogRoles(later, again);
+  assert.ok(ddl.includes(`GRANT USAGE ON SCHEMA "billing" TO "everything";`), ddl.join("\n"));
+  assert.ok(ddl.includes(`GRANT SELECT ON "billing"."invoices" TO "everything";`), ddl.join("\n"));
+  assert.ok(!ddl.some((l) => /ON ALL TABLES/.test(l)));
+});
+
+test("catalogRolesOf: a grant-less role for a user the file holds to nothing, only where a roles file exists; catalogRoles makes it with no table and catalogViews grants it no view", async () => {
+  // the module's own names, read when the test runs, so a tree without them fails this test by name
+  const g = await import("../../src/duck/grants.ts") as unknown as Record<string, unknown>;
+  const NO = g.NO_ROLE_CATALOG as string;
+  const of = g.catalogRolesOf as ((live: unknown) => ReadonlyMap<string, { name: string; tables: ReadonlyMap<string, unknown>; all: boolean }>) | undefined;
+  assert.equal(NO, "__mason_no_role", "a name the roles file can never hold (ROLE_NAME_RE: no leading underscore)");
+  assert.ok(of !== undefined);
+  assert.equal(of(g.NO_ROLES).size, 0, "no roles file: no catalog role at all");
+  const file = { file: "mason/roles.yml", problem: null, default: null, grants: twoRoles() };
+  const roles = of(file);
+  assert.deepEqual([...roles.keys()], ["agent", "ops", NO]);
+  assert.deepEqual([roles.get(NO)!.tables.size, roles.get(NO)!.all], [0, false]);
+  assert.deepEqual([...of({ ...file, grants: new Map() }).keys()], [NO], "a file naming no role still has it");
+  const m = catalogModule as unknown as { catalogRoles: (s: PgSchema, r: ReadonlyMap<string, unknown>) => string[]; catalogViews: (s: PgSchema, r: ReadonlyMap<string, unknown>) => string[] };
+  const ddl = m.catalogRoles(schema, roles);
+  assert.equal(ddl[0], "REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC;", "set_config revoked: the no-role session is refused it too");
+  assert.deepEqual(ddl.filter((l) => l.includes(`"${NO}"`)), [`CREATE ROLE "${NO}" NOLOGIN;`, `GRANT USAGE ON SCHEMA "public" TO "${NO}";`], "no table grant");
+  const [v] = m.catalogViews({ ...schema, views: [{ schema: "public", name: "paid_orders", definition: " SELECT id FROM public.orders WHERE paid;" }] }, roles);
+  assert.ok(v !== undefined && !v.includes(NO), v);
+});
+
+test("asRole wraps a request in SET ROLE … RESET ROLE, with a Sync where the request has none; unwrapRole strips the SET's and RESET's replies, and names a refused SET", () => {
+  const m = catalogModule as unknown as { asRole: (b: Uint8Array, role: string) => Uint8Array; unwrapRole: (f: Array<{ type: string; frame: Buffer }>) => { frames: Array<{ type: string }>; setRoleRefused: Buffer | null } };
+  const framesOf = (b: Uint8Array): string[] => decode(b).map((f) => f.type);
+  // a simple Query: no Sync of its own, so one is added before the RESET
+  const q = m.asRole(simpleQuery("SELECT 1"), "agent");
+  assert.deepEqual(framesOf(q), ["Q", "Q", "S", "Q"]);
+  assert.match(dec.decode(q), /SET ROLE "agent"\0.*SELECT 1\0.*RESET ROLE\0/s);
+  // an extended batch ending in a Sync: none added
+  const batch = concat(message("P", concat(cstring(""), cstring("SELECT 1"), int16(0))), message("S", new Uint8Array(0)));
+  assert.deepEqual(framesOf(m.asRole(batch, "a\"b")), ["Q", "P", "S", "Q"]);
+  assert.match(dec.decode(m.asRole(batch, "a\"b")), /SET ROLE "a""b"/, "the role is an identifier, quoted");
+  const f = (type: string): { type: string; frame: Buffer } => ({ type, frame: Buffer.from(type) });
+  // the SET's C Z first, the RESET's C Z last; the request's own frames between, its Sync's Z included
+  assert.deepEqual(m.unwrapRole([f("C"), f("Z"), f("T"), f("D"), f("C"), f("Z"), f("C"), f("Z")]).frames.map((x) => x.type), ["T", "D", "C", "Z"]);
+  const refused = m.unwrapRole([f("E"), f("Z"), f("C"), f("Z")]);
+  assert.deepEqual([refused.frames, refused.setRoleRefused?.toString()], [[], "E"]);
+  assert.deepEqual(m.unwrapRole([]).frames, []);
+});
+
+test("asSession wraps a request in SET search_path and SET <carrier> … RESET, its settings as JSON and a Sync where it has none; unwrapSession strips them, and says one out of step", () => {
+  const m = catalogModule as unknown as { asSession: (b: Uint8Array, s: ReadonlyMap<string, string>) => Uint8Array; unwrapSession: (f: Array<{ type: string; frame: Buffer }>) => Array<{ type: string }>; SESSION_SETTINGS: string };
+  // the carrier is no name a tool writes: named anew by the process
+  assert.match(m.SESSION_SETTINGS, /^mason_[0-9a-f]{16}\.session$/);
+  const carrier = m.SESSION_SETTINGS.replace(".", "\\.");
+  const framesOf = (b: Uint8Array): string[] => decode(b).map((f) => f.type);
+  const settings = new Map([["timezone", "Europe/Berlin"], ["myapp.x", "it's"]]);
+  // a simple Query ends in itself: no Sync added; a value's quote doubled inside the literal
+  const q = m.asSession(simpleQuery("SELECT 1"), settings);
+  assert.deepEqual(framesOf(q), ["Q", "Q", "Q"]);
+  assert.match(dec.decode(q), new RegExp(`SET search_path = public, pg_catalog; SET ${carrier} = '\\{"timezone":"Europe/Berlin","myapp\\.x":"it''s"\\}'\0.*SELECT 1\0.*RESET ${carrier}\0`, "s"));
+  // an extended batch with no Sync gets one, before the RESET (ignore_till_sync); one with a Sync none
+  const parse = message("P", concat(cstring(""), cstring("SELECT 1"), int16(0)));
+  assert.deepEqual(framesOf(m.asSession(parse, settings)), ["Q", "P", "S", "Q"]);
+  assert.deepEqual(framesOf(m.asSession(concat(parse, message("S", new Uint8Array(0))), settings)), ["Q", "P", "S", "Q"]);
+  const f = (type: string): { type: string; frame: Buffer } => ({ type, frame: Buffer.from(type) });
+  assert.deepEqual(m.unwrapSession([f("C"), f("C"), f("Z"), f("T"), f("D"), f("C"), f("Z"), f("C"), f("Z")]).map((x) => x.type), ["T", "D", "C", "Z"]);
+  assert.throws(() => m.unwrapSession([f("E"), f("Z"), f("C"), f("Z")]), /did not take the session's settings/);
+  assert.throws(() => m.unwrapSession([f("C"), f("Z"), f("T"), f("C"), f("Z"), f("C"), f("Z")]), /did not take the session's settings/);
+});
+
+test("the catalog's current_setting is the session's under the carrier, Postgres's own (its 42704) otherwise, any case; nothing stays after the RESET", async () => {
+  const m = catalogModule as unknown as { asSession: (b: Uint8Array, s: ReadonlyMap<string, string>) => Uint8Array; unwrapSession: (f: Array<{ type: string; frame: Buffer }>) => Array<{ type: string; frame: Buffer }> };
+  const c = new PgCatalog(schema, { log: () => undefined, setup: [...(catalogModule as unknown as { currentSettingSql: () => string[] }).currentSettingSql(), "SET search_path = public, pg_catalog"] } as never);
+  try {
+    const sql = "SELECT current_setting('TimeZone') || ' ' || current_setting('MYAPP.X', true) || ' ' || current_setting('block_size') || ' ' || (current_setting('no_such', true) IS NULL)::text";
+    const own = new Map([["timezone", "Europe/Berlin"], ["myapp.x", "v"]]);
+    assert.deepEqual(rowsOf(await c.run(m.asSession(simpleQuery(sql), own))).map((r) => r[0]), ["Europe/Berlin v 8192 true"]);
+    // the next request, of a session holding nothing: the catalog's own, and its error for a name nobody knows
+    assert.deepEqual(rowsOf(await c.run(m.asSession(simpleQuery("SELECT current_setting('myapp.x', true) IS NULL"), new Map()))).map((r) => r[0]), ["t"]);
+    const err = decode(await c.run(simpleQuery("SELECT current_setting('myapp.x')"))).find((f) => f.type === "E");
+    assert.deepEqual([err?.error?.C, err?.error?.M], ["42704", 'unrecognized configuration parameter "myapp.x"']);
+    // a catalog whose search_path was moved off public (a forwarded set_config did it): the request pins it, so the
+    // override still answers the session's
+    await c.run(simpleQuery("SELECT pg_catalog.set_config('search_path', 'pg_catalog', false)"));
+    assert.deepEqual(rowsOf(await c.run(m.asSession(simpleQuery("SELECT current_setting('TimeZone')"), own))).map((r) => r[0]), ["Europe/Berlin"]);
+    // the carrier is no tool's name: `mason.session` is Postgres's 42704
+    const carrier = decode(await c.run(m.asSession(simpleQuery("SELECT current_setting('mason.session')"), own))).find((f) => f.type === "E");
+    assert.deepEqual([carrier?.error?.C, carrier?.error?.M], ["42704", 'unrecognized configuration parameter "mason.session"']);
+  } finally { await c.stop(); }
+});
+
+test("under SET ROLE the catalog answers FOR THE ROLE: information_schema and the privilege functions; two roles' requests interleaved never see each other's view; a RESET follows an error", async () => {
+  const m = catalogModule as unknown as { asRole: (b: Uint8Array, role: string) => Uint8Array };
+  const withRoles = new PgCatalog(schema, { log: () => undefined, roles: twoRoles() } as never);
+  try {
+    const columns = "SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position";
+    const asAgent = async (sql: string) => rowsOf(await withRoles.run(m.asRole(simpleQuery(sql), "agent"))).map((r) => r[0]);
+    const asOps = async (sql: string) => rowsOf(await withRoles.run(m.asRole(simpleQuery(sql), "ops"))).map((r) => r[0]);
+    const asNobody = async (sql: string) => rowsOf(await withRoles.run(simpleQuery(sql))).map((r) => r[0]);
+    assert.deepEqual(await asAgent(columns), ["orders.id", "orders.amount", "orders.paid", "regions.code", "regions.name"]);
+    assert.deepEqual(await asOps(columns), ["customers.id", "customers.name"]);
+    assert.equal((await asNobody(columns)).length, 12, "no role: everything");
+    const priv = "SELECT has_table_privilege('public.orders', 'SELECT')::text || ' ' || has_any_column_privilege('public.orders', 'SELECT')::text || ' ' || " +
+      "has_column_privilege('public.orders', 'tenant_id', 'SELECT')::text || ' ' || has_column_privilege('public.orders', 'paid', 'SELECT')::text || ' ' || current_user";
+    assert.deepEqual(await asAgent(priv), ["false true false true agent"]);
+    assert.deepEqual(await asOps(priv), ["false false false false ops"]);
+    // set_config is the superuser's alone: under SET ROLE it is refused, so no statement can reset the role midway
+    const esc = decode(await withRoles.run(m.asRole(simpleQuery("SELECT set_config('role', 'none', false), (SELECT count(*) FROM information_schema.columns WHERE table_name = 'orders')"), "agent")));
+    assert.equal(esc.find((f) => f.type === "E")?.error?.M, "permission denied for function set_config");
+    assert.deepEqual(await asNobody("SELECT set_config('application_name', 'x', false)"), ["x"]);
+    // interleaved: each request is SET … RESET in one message, run whole by the chain
+    for (let i = 0; i < 5; i++) {
+      const [a, o, n] = await Promise.all([asAgent(columns), asOps(columns), asNobody(columns)]);
+      assert.equal(a.length, 5, `round ${i}`); assert.equal(o.length, 2, `round ${i}`); assert.equal(n.length, 12, `round ${i}`);
+    }
+    // an error under the role: the Sync asRole added lets the RESET run, so the next request without a role is nobody's
+    const err = decode(await withRoles.run(m.asRole(simpleQuery("SELECT * FROM information_schema.nope"), "agent"))).find((f) => f.type === "E");
+    assert.equal(err?.error?.C, "42P01");
+    assert.deepEqual(await asNobody("SELECT current_user"), ["postgres"]);
+    assert.equal((await asNobody(columns)).length, 12);
+    // a role the catalog does not have: the SET is refused first, nothing else runs
+    const missing = decode(await withRoles.run(m.asRole(simpleQuery("SELECT 1"), "ghost")));
+    assert.equal(missing[0]?.type, "E");
+    assert.equal(missing[0]?.error?.C, "22023");
+    // replace() with the roles changed: the new role is there, the old one gone, at the next run
+    await withRoles.replace(schema, new Map([["ghost", grants("ghost", [["public.regions", "all"]])]]));
+    assert.deepEqual(await rowsOf(await withRoles.run(m.asRole(simpleQuery("SELECT current_user"), "ghost"))).map((r) => r[0]), ["ghost"]);
+    assert.equal(decode(await withRoles.run(m.asRole(simpleQuery("SELECT 1"), "agent")))[0]?.type, "E");
+  } finally { await withRoles.stop(); }
 });

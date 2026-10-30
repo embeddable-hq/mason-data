@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { COMMANDS } from "../src/cli/registry.ts";
 import { PROJECT_STATES, meets, type ProjectState } from "../src/cli/state.ts";
-import { MATRIX_ARGS, TRANSITIONS, answerProblems, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
+import { MATRIX_ARGS, MATRIX_EXTRA_ARGS, MATRIX_MORE, TRANSITIONS, answerProblems, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
 import type { CopyState, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
@@ -50,9 +50,26 @@ const initAt = /^DATABASE_URL=postgres:\/\/demo@(127\.0\.0\.1:\d+)\/demo$/m.exec
 if (initAt === undefined) throw new Error("mason init demo wrote no demo URL in .env");
 const demoAt = "127.0.0.1:1";
 fs.writeFileSync(demoEnv, fs.readFileSync(demoEnv, "utf8").replace(`@${initAt}/`, `@${demoAt}/`));
-/** The commands' lines in a state: a demo project's start asks for replication, refused before anything starts (a
- *  plain start there would host the demo database and run, which the matrix must not leave behind). */
-const argsIn = (state: string, cmd: string): readonly string[] => state === "demo" && cmd === "start" ? ["--replication"] : MATRIX_ARGS[cmd]!;
+/**
+ * The folder a command runs in, in a state: a demo project's `mason start` gets a sources file with `orders: { sync:
+ * replication }`, which the demo refuses before anything starts (`demoChangesRefusal`, background.ts and dev.ts) — so the
+ * row runs the start itself in the demo state (its project, its run lookup, its refusal) and never leaves a run behind,
+ * where a plain start would host the demo database and run. The refusal's words: the demo test below.
+ */
+function folderFor(state: string, cmd: string): string {
+  const root = folderIn(state);
+  if (state === "demo" && cmd === "start") demoReplicating(root);
+  return root;
+}
+
+/** A demo folder's sources file with orders set to sync: replication. */
+function demoReplicating(root: string): void {
+  const file = path.join(root, "mason", "sources", "demo.yml");
+  const was = fs.readFileSync(file, "utf8");
+  const now = was.replace(/^ {2}orders: \{\}$/m, "  orders: { sync: replication }");
+  if (now === was) throw new Error(`the demo's sources file has no "orders: {}" line to set to sync: replication:\n${was}`);
+  fs.writeFileSync(file, now);
+}
 
 /** A folder in a state; `null` config writes none. */
 function folderIn(state: string): string {
@@ -186,11 +203,11 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
   const file = path.join(folder, "sources", "shop.yml");
   const ctx = {
     source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: catalog, systemIdentifier: null }), warnings: [],
-    slot: changes === "replication" ? "mason_matrix" : "", changes, ...(changes === "replication" ? { publication: { name: "mason_matrix", owned: true } } : {}),
+    replication: () => changes === "replication" ? { slot: "mason_matrix", publication: "mason_matrix", owned: true } : null,
     port: 0, token, page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
-    folder: () => folder, root, sourcesChanged: () => undefined, log: () => undefined, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
+    listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [] }, folder: () => folder, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(), sourcesChanged: () => undefined, log: () => undefined, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
     sources: () => ({ file: { name: "shop", file, kind: "postgres", url: { env: "DATABASE_URL" }, tables: ["orders", "events", "fresh"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null }),
-    duck: { copies: () => copies, file: path.join(root, ".mason", "duck.db"), pollSeconds: 5, poll: async () => ({ at: "", tables: [] }), stream: async () => stream,
+    duck: { copies: () => copies, file: path.join(root, ".mason", "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => stream, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);
@@ -208,19 +225,19 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
 test("mason status and mason wait --json, Mason up: each added table says how its copy is kept current (kept), in poll and in replication mode", async () => {
   const copied = (source: string, kept: KeptCurrent, extra: Partial<CopyState> = {}): CopyState =>
     ({ source, phase: "copied", rows: 3, bytes: 8192, seconds: 1, copiedAt: "2026-10-29T09:00:00.000Z", error: null, kept, ...extra });
-  const polled: KeptCurrent = { by: "poll", polledAt: "2026-10-29T09:30:00.000Z" };
-  const over: KeptCurrent = { by: "poll", polledAt: "2026-10-29T09:00:00.000Z", unsynced: "over the 1,000,000-row sync limit" };
-  const streamed: KeptCurrent = { by: "replication", slot: "mason_matrix", state: "streamed", why: null, position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null };
+  const polled: KeptCurrent = { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: "2026-10-29T09:30:00.000Z", nextAt: "2026-10-29T09:30:30.000Z" };
+  const over: KeptCurrent = { by: "poll", sync: { mode: "off" }, syncedAt: "2026-10-29T09:00:00.000Z", nextAt: null };
+  const streamed: KeptCurrent = { by: "replication", slot: "mason_matrix", state: "streamed", why: null, position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null, syncedAt: "2026-10-29T09:30:00.000Z" };
   const leftOut: KeptCurrent = { by: "replication", slot: "mason_matrix", state: "left-out", why: "publication mason_matrix does not carry public.events",
-    position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null };
+    position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null, syncedAt: "2026-10-29T09:00:00.000Z" };
   const zero = { inserts: 0, updates: 0, deletes: 0, truncates: 0 };
-  const stream: StreamStatus = { slot: "mason_matrix", publication: "mason_matrix", running: true, failure: null, position: "0/16B3F28", applied: "0/16B3F28",
+  const stream: StreamStatus = { slot: "mason_matrix", slotWal: { walHeldBytes: 2 ** 20, walStatus: "reserved", safeWalSizeBytes: 2 ** 30, at: "2026-10-29T09:30:00.000Z" }, publication: "mason_matrix", running: true, failure: null, position: "0/16B3F28", applied: "0/16B3F28",
     database: { lsn: "0/16B3F28", at: "2026-10-29T09:30:00.000Z" }, lag: { bytes: 0, seconds: 1 }, lastBatch: { appliedAt: "2026-10-29T09:30:00.000Z", committedAt: "2026-10-29T09:29:59.000Z" },
     tables: [{ table: "public.orders", state: "streamed", why: null, applied: zero }, { table: "public.events", state: "left-out", why: leftOut.why, applied: zero }] };
   // kept is the sync's, never the sources file's: `fresh`, just added, has no copy until the run reads the file again
   // (no kept); `logs`, just removed, is still held by the sync until then (its kept, though the file no longer adds it)
   const modes = [
-    { changes: "poll" as const, copies: [copied("public.orders", polled), copied("public.events", over, { unsynced: { reason: "over the 1,000,000-row sync limit", asOf: "2026-10-29T09:00:00.000Z" } }),
+    { changes: "poll" as const, copies: [copied("public.orders", polled), copied("public.events", over),
       copied("public.logs", polled)], stream: null, kept: { "public.orders": polled, "public.events": over, "public.logs": polled } },
     { changes: "replication" as const, copies: [copied("public.orders", streamed), copied("public.events", leftOut), copied("public.logs", streamed)], stream,
       kept: { "public.orders": streamed, "public.events": leftOut, "public.logs": streamed } },
@@ -247,18 +264,18 @@ test("mason status and mason wait --json, Mason up: each added table says how it
   }
 });
 
-test("a demo project, stopped: mason tables says its database runs inside mason start, and --replication is refused before anything starts", async () => {
+test("a demo project, stopped: mason tables says its database runs inside mason start, and a table set to sync: replication is refused before anything starts", async () => {
   const tables = await runMason(folderIn("demo"), ["tables", "--json"], matrixEnv());
   assert.equal(tables.code, 1, tables.stdout + tables.stderr);
   const t = (JSON.parse(tables.stdout) as { error: { code: string; message: string; fix: string } }).error;
   assert.deepEqual([t.code, t.message, t.fix], ["unreachable", `could not connect to postgres://demo@${demoAt}/demo: the demo database is not running on ${demoAt}`,
     "the demo database runs inside mason start: start it first"]);
   for (const json of [false, true]) {
-    const root = folderIn("demo");
-    const start = await runMason(root, ["start", "--replication", ...(json ? ["--json"] : [])], matrixEnv());
+    const root = folderFor("demo", "start");
+    const start = await runMason(root, ["start", ...(json ? ["--json"] : [])], matrixEnv());
     assert.equal(start.code, 1, start.stdout + start.stderr);
     if (json) assert.equal((JSON.parse(start.stdout) as { error: { code: string } }).error.code, "refused");
-    assert.match(json ? start.stdout : start.stderr, /the demo database is read by polling only: --replication does not apply to it/);
+    assert.match(json ? start.stdout : start.stderr, /the demo database is read by polling only: sync: replication does not apply to it \(orders\)/);
     assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, "refused before a run was spawned");
   }
 });
@@ -306,12 +323,18 @@ test("every command, in every state without a run, as a person and with --json: 
     for (const c of COMMANDS) {
       // start in a stopped project is the session's transition (it connects to the database): its refusal here is
       // the database not answering, which is checked; stop is harmless where nothing runs
-      for (const json of takesJson(c.name) ? [false, true] : [false]) {
-        jobs.push(async () => {
-          const root = folderIn(state);
-          const argv = [c.name, ...argsIn(state, c.name), ...(json ? ["--json"] : [])];
-          return { state, cmd: c.name, json, a: await runMason(root, argv, env, TRANSITIONS.has(c.name) ? 90_000 : 30_000) };
-        });
+      for (const args of [MATRIX_ARGS[c.name]!, ...(MATRIX_EXTRA_ARGS[c.name] ?? [])]) {
+        for (const json of takesJson(c.name) ? [false, true] : [false]) {
+          jobs.push(async () => {
+            const root = folderFor(state, c.name);
+            const argv = [c.name, ...args, ...(json ? ["--json"] : [])];
+            return { state, cmd: c.name, json, a: await runMason(root, argv, env, TRANSITIONS.has(c.name) ? 90_000 : 30_000) };
+          });
+        }
+      }
+      // its other modes, --json each (MATRIX_MORE)
+      for (const line of MATRIX_MORE[c.name] ?? []) {
+        jobs.push(async () => ({ state, cmd: c.name, json: true, a: await runMason(folderIn(state), [c.name, ...line, "--json"], env, 30_000) }));
       }
     }
   }

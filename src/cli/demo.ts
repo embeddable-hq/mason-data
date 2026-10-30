@@ -9,8 +9,8 @@
  *
  *   - THE PORT LIVES IN THE URL ALONE: `mason init demo` picks one free and writes it into `.env`; `mason start` reads
  *     it back from the resolved URL (`demoPort`), never from a second record that could disagree with it.
- *   - POLL ONLY: the demo database has no change log (no WAL sender), so `--replication` is refused before anything
- *     starts (`demoChangesRefusal`).
+ *   - POLL ONLY: the demo database has no change log (no WAL sender), so a table whose `sync:` is `replication` is
+ *     refused before anything starts (`demoChangesRefusal`).
  *   - A WRITER: every MASON_DEMO_CHANGE_MS (`demoSettings`) the run makes one round of changes (`demoChanges`), so the
  *     copy is seen keeping current.
  *
@@ -20,9 +20,8 @@
 import * as path from "node:path";
 import type { DemoSource } from "../demo/source.ts";
 import type { Failure } from "./command.ts";
-import type { ChangeSource } from "../cdc/poll.ts";
 import { parseSource, isLocalHost } from "./preflight.ts";
-import { changesOf } from "./replication-mode.ts";
+import { entryName, replicatedEntries, type SourceFile } from "./sources.ts";
 import { heldText, portHolder } from "./ports.ts";
 import { DEMO_DIR, STATE_DIR, type ProjectConfig } from "./project.ts";
 import { DEMO_DATABASE, DEMO_USER, demoUrl } from "../demo/seed.ts";
@@ -36,7 +35,7 @@ export const DEMO_PORT = 5434;
 /** The demo database's tables (the seed's own list), the ones `mason init demo` adds to the sources file and the one it
  *  leaves for the person to add, and its URL (src/demo/seed.ts: no PGlite is loaded by it, so `mason init demo` and
  *  `demoPort` never load the database). */
-export { DEMO_ADDED_TABLES, DEMO_TABLES, DEMO_TABLE_TO_ADD, demoUrl } from "../demo/seed.ts";
+export { DEMO_ADDED_TABLES, DEMO_SYNC, DEMO_TABLES, DEMO_TABLE_TO_ADD, demoUrl } from "../demo/seed.ts";
 
 /** How often the run changes the demo database by default (MASON_DEMO_CHANGE_MS). */
 export const DEMO_CHANGE_MS = 5000;
@@ -77,13 +76,21 @@ export function demoPort(url: string, from: string): { port: number } | { proble
   return { port: s.port };
 }
 
-/** The refusal of logical replication for a demo project (the flag, or a mode the config was edited to): before
- *  anything starts, with the way out; null for any other project, or a demo one polled. */
-export function demoChangesRefusal(cfg: Pick<ProjectConfig, "demo" | "changes">, flag: ChangeSource | null): Failure | null {
-  if (cfg.demo !== true || changesOf(flag, cfg.changes) !== "replication") return null;
-  return { message: "the demo database is read by polling only: --replication does not apply to it", code: "refused",
+/** The refusal of logical replication for a demo project (a table whose sync: is replication in its sources file,
+ *  `shown`, or the mode an older Mason recorded in the config, edited to it): before anything starts, with the way out;
+ *  null for any other project, or a demo one polled. */
+export function demoChangesRefusal(cfg: Pick<ProjectConfig, "demo" | "changes">, file: Pick<SourceFile, "sync" | "tables"> | null = null, shown = ""): Failure | null {
+  if (cfg.demo !== true) return null;
+  const streamed = file === null ? [] : replicatedEntries(file).map((e) => entryName(e.table));
+  if (streamed.length) {
+    return { message: `the demo database is read by polling only: sync: replication does not apply to it (${streamed.join(", ")})`, code: "refused",
+      why: "the demo database has no change log for logical replication to read; Mason polls it with SELECTs",
+      fix: `write sync: poll 5s for ${streamed.length === 1 ? "it" : "them"} in ${shown}, then mason start`, next: [["mason start", "the demo database and Mason, polled"]] };
+  }
+  if (cfg.changes !== "replication") return null;
+  return { message: `the demo database is read by polling only: "changes": "replication" in ${STATE_DIR}/config.json does not apply to it`, code: "refused",
     why: "the demo database has no change log for logical replication to read; mason start polls it with SELECTs, every few seconds",
-    fix: flag === "replication" ? "mason start, without --replication" : `remove "changes": "replication" from ${STATE_DIR}/config.json, then mason start`,
+    fix: `remove "changes": "replication" from ${STATE_DIR}/config.json, then mason start`,
     next: [["mason start", "the demo database and Mason, polled"]] };
 }
 

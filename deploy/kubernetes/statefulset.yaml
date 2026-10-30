@@ -62,7 +62,7 @@ spec:
             # said here so the two are changed together). The other half is the page cache, Node and the catalog.
             - name: MASON_DUCKDB_MEMORY
               value: "4GB"
-            # more settings (mason serve --help): MASON_CHANGES=replication with PG_PUBLICATION, MASON_POLL_MS, …
+            # more settings (mason serve --help): PG_PUBLICATION for the sources file's publication: ${PG_PUBLICATION}, MASON_STATEMENT_TIMEOUT, …
           resources:
             requests:
               cpu: "2"

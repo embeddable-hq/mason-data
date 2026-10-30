@@ -54,16 +54,12 @@ npm. On a server, you run the `ghcr.io/embeddable-hq/mason-data` Docker image (s
 <details>
 <summary><b>No internet on the machine?</b></summary>
 
-Mason syncs your database through DuckDB's `postgres` extension, which is downloaded once. `mason init` installs
-it. If it can't, it stops and writes nothing. `mason doctor` tells you whether this machine has the extension. On a
-machine with no internet, use one of these:
+Nothing is downloaded after `npm install`. The DuckDB extensions Mason uses (`postgres` and `inet`) ship with the
+CLI, in one optional package per platform (`@mason-data/extensions-<platform>`), and the `mason-data` image includes
+them. `mason doctor` tells you whether this machine has them.
 
-- the `mason-data` image, which includes the extension
-- run `mason init` once while the machine is online
-- copy `~/.duckdb/extensions/<version>/<platform>/postgres_scanner.duckdb_extension` from a machine of the same
-  platform (`mason doctor` prints the exact path)
-
-Mason never downloads anything else.
+There are two exceptions: a platform with no package (Linux on musl, Windows on arm64), and an install with
+`--omit=optional`. There, the first sync downloads the extensions once.
 
 </details>
 
@@ -124,7 +120,7 @@ after your project. The port stays the same every time Mason starts, so saved co
 
 ```bash
 mason status                         # shows your database, each synced table, the Postgres API, and the last day's and week's queries
-mason ui                             # shows the same in your browser, with pages for tables, users, queries, usage and syncs
+mason ui                             # shows the same in your browser: tables, users, queries, usage and sync events
 mason logs --requests --failed       # lists every query that was refused, failed or cancelled, and why
 mason logs --running                 # lists the queries running now (mason cancel <session> stops one)
 mason usage --since 7d --step 1h     # shows the last week, one line per hour: queries, the synced data, memory
@@ -158,7 +154,7 @@ docker compose exec mason mason user add metabase   # users are kept on the serv
 |---|---|
 | Image | `ghcr.io/embeddable-hq/mason-data`, for amd64 and arm64. The `main` tag is built from every merge, and `<version>` is a release. [`deploy/mason-data/README.md`](deploy/mason-data/README.md) walks you through it. |
 | Platforms | Fly.io, Kubernetes (manifests and a Helm chart), Railway and AWS ECS each have a guide. [`deploy/README.md`](deploy/README.md) lists them, and names the platforms that can't run Mason, and why. |
-| Replicas | Run one container per volume, because DuckDB lets only one process write its file. Deploy with stop-then-start (in Kubernetes, `strategy: Recreate`). A deploy means a few seconds of downtime, not a full sync from scratch. The synced data stays on the volume. A restarted Mason is healthy about half a second after it starts, and then it catches up on the changes it missed. |
+| Replicas | Run one container per volume, because DuckDB lets only one process write its file. Deploy with stop-then-start (in Kubernetes, `strategy: Recreate`). A deploy means a few seconds of downtime, not a full sync from scratch. The synced data stays on the volume. The first start takes about 15 seconds before `/healthz` answers. After that, a restarted Mason is healthy about half a second after it starts, and then it catches up on the changes it missed. |
 | TLS | Required when clients connect from outside the container. Set `MASON_PG_SELF_SIGNED_TLS=1` to create a certificate on the volume (clients then connect with `sslmode=require`), or mount a certificate from your CA. |
 | Sync | The sources file you deploy says how each table stays up to date, so production runs exactly what you committed. Off and polling need a user that can `SELECT` the tables. Replication needs more (see [Logical replication](#logical-replication)). |
 | Settings | [`deploy/mason-data/README.md`](deploy/mason-data/README.md#settings) lists the settings you must set and the ones worth deciding. `mason serve --help` lists all of them. |
@@ -197,7 +193,7 @@ For each table, you choose how it stays up to date:
 | `sync:` | Off (the default) | Polling | Logical replication |
 |---|---|---|---|
 | after the first sync | nothing, until you run `mason sync <table>` | `SELECT` queries, at an interval you choose | reads the database's change log, like a replica |
-| needs on your Postgres | a user that can `SELECT` the tables | the same | `wal_level = logical`, a user with `REPLICATION`, and a publication |
+| needs on your Postgres | a user that can `SELECT` the tables | the same | `wal_level = logical`, a user with `REPLICATION` (or `rds_replication`), and a publication |
 | creates on your Postgres | nothing | nothing | a replication slot (and a publication, if you don't name one) |
 | works with a read replica as the source | yes | yes | yes, on Postgres 16+, with a publication you name |
 | good for | trying Mason, and reports that run on a schedule | most tables, every few seconds to every few hours | big, busy tables, and changes within seconds |
@@ -251,7 +247,7 @@ a deploy. Between syncs, Mason does not touch your database.
 
 ### Polling
 
-Write `sync: poll <interval>`, for example `5s`, `5m` or `1h`. You don't need to set up anything on your Postgres.
+Write `sync: poll <interval>`, for example `5s`, `5m` or `1h` (from `1s` to `24h`). You don't need to set up anything on your Postgres.
 
 - **How it works**: At each interval, Mason reads the table in one transaction, from one snapshot. It finds the rows
   that changed since the last poll by their `xmin` (Postgres's row version), and writes them by key. To find deleted
@@ -259,8 +255,12 @@ Write `sync: poll <interval>`, for example `5s`, `5m` or `1h`. You don't need to
   are saved together, so if a poll fails, the next one simply reads the same rows again.
 - **What it costs your database**: Postgres has no index on `xmin`, so each poll reads the whole table. Choose an
   interval that suits the table's size: every few seconds for a small table, every hour for a table of 50 M rows.
-  Mason also limits the cost itself. After each poll, it waits at least four times as long as that poll took. So polls
-  never use more than a fifth of your database's time. `mason status` shows what each table's polls cost.
+  Mason also limits the cost itself. After each poll, it waits at least four times as long as that poll took. So a
+  table's polls never use more than a fifth of your database's time. `mason status` shows how long each table's last
+  poll took.
+- **Guards for big tables**: when your file's default polls, `mason add` writes `sync: off` for a table over 1 M rows,
+  and says so. If you set a table of over 10 M rows to poll more often than every minute, `mason add` warns you, with
+  an estimate of what each poll costs.
 
 ### Logical replication
 
@@ -270,7 +270,7 @@ within seconds.
 - **How it works**: Mason reads the database's change log through one replication slot per project, the way a
   Postgres replica does. Replicated tables stay up to date whatever their size. Tables set to `off` or `poll` keep
   working as before.
-- **What it needs**: `wal_level = logical` and a user with `REPLICATION`. It also needs a publication: either you name
+- **What it needs**: `wal_level = logical` and a user with `REPLICATION` (on RDS and Aurora, `rds_replication`). It also needs a publication: either you name
   one, or Mason needs permission to create its own. To name one, write `publication:` at the top of the sources file
   (`${PG_PUBLICATION}` works there, as in `url:`). Mason checks a named publication, but never creates, changes or
   drops it. If your source is a read replica, it needs Postgres 16+ and a publication you name.
@@ -334,7 +334,7 @@ Mason makes DuckDB faster:
 
 - **It stores what your queries keep computing.** When queries keep reading the same JSON field, such as
   `payload ->> 'status'`, Mason stores that field as a column of its own, in the background. After that, reading it
-  is about 200 times faster. It does the same for sorting and grouping by a `jsonb` column. `mason status` lists what
+  is about 200 times faster than parsing the JSON every time. It does the same for sorting and grouping by a `jsonb` column. `mason status` lists what
   it stores.
 - **It rewrites slow query shapes into fast ones, with the same answer.** BI tools send some shapes that DuckDB runs
   slowly as written: nulls placed last with `ORDER BY col IS NULL, col`, a `date_trunc` of a `timestamptz`, a
@@ -399,9 +399,9 @@ over the same tables. **DuckDB alone answers only 30% of them exactly as Postgre
 It answers 1% differently, each by a decision it lists, and it refuses 4% with an error that says what to write
 instead. None was answered with a wrong value.
 
-[docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the 993 verified pieces (types, functions,
-operators, aggregates, window functions, casts, constructs and their forms). It also lists the 47 refused shapes, the
-15 that are answered differently and the 7 limits, each with what to write instead.
+[docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the 996 verified pieces (types, functions,
+operators, aggregates, window functions, casts, constructs and their forms). It also lists the 48 refused shapes, the
+16 that are answered differently and the 7 limits, each with what to write instead.
 <!-- END GENERATED -->
 
 The tests also replay the queries that BI tools send: psql, pgjdbc, node-postgres, Metabase, Grafana, DBeaver and
@@ -419,8 +419,11 @@ Give each agent and each tool its own user, and a role that says what it may rea
 file syncs, by table, by column and by row:
 
 ```yaml
-# mason/roles.yml: commit it next to the sources file, and review it the same way
+# mason/roles.yml: mason init writes it. Commit it next to the sources file, and review it the same way.
+default: everything           # the role of a user added without --role
 roles:
+  everything:
+    tables: all               # every synced table and column, including tables added later
   agent:
     tables:
       orders: { columns: [id, status, amount, created_at] }
@@ -445,7 +448,9 @@ mason user remove claude             # blocks its next connection, and ends its 
   refused too. Mason never quietly returns fewer columns.
 - When a user reads the catalog or uses the MCP tools, it sees only what its role can read. So an agent never finds a
   table it is not allowed to query.
-- A user with no role can read every table and column the sources file syncs.
+- A user added without `--role` gets the file's `default:` role. `mason init` writes `default: everything`, so at
+  first every user can read every synced table. Remove the `default:` line, and a user with no role of its own reads
+  nothing: each query is refused with `42501`, and the error says how to give it a role.
 - Every user is read-only. Users exist only in Mason, never in your database. `mason user disable` and `mason user remove` take
   effect without a restart. A disabled user's logins are refused with `28000`, as Postgres refuses a role without
   `LOGIN`.
@@ -482,7 +487,7 @@ tool, and shows the setup for Claude Desktop.
 | `mason logs --events` | The sync's events: each first sync, poll or replication stream that failed, the database out of reach, a table up to date again, and each restart of Mason. |
 | `mason usage` | What Mason did over time, from a sample every minute: the queries and their p95, the rows and bytes sent, the synced data's size, the stalest table, the replication lag and the memory. |
 | `mason status` | Each synced table and how up to date it is. The last day's and week's queries: their results, their p50 and p95 times, and the rows and bytes sent. Then the slow and refused queries, each with its reason. |
-| `mason ui` | All of this in your browser, on six pages: Overview, Tables, Users, Queries, Usage and Syncs. You can also add and remove tables, sync one now, add and disable users, and cancel a running query. Its fonts and icons are bundled, so it works with no internet. |
+| `mason ui` | All of this in your browser, on four tabs: Overview, Tables, Users, and Observability (queries, usage and sync events). You can also add and remove tables, sync one now, add and disable users, and cancel a running query. Its fonts and icons are bundled, so it works with no internet. |
 | `EXPLAIN` | For each table a query reads: its rows and how up to date it is, next to the SQL Mason runs. |
 
 ### A CLI for coding agents
@@ -497,6 +502,7 @@ always tells you what to run next. `mason help agent` is the page an agent shoul
 |---|---|
 | [`cli/README.md`](cli/README.md) | every command and option of `mason` |
 | [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) | the Postgres API: how a tool connects, which SQL is answered, and what is refused |
+| [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | what you can see about a running Mason: each command, its endpoint and its JSON |
 | [`docs/WEB-UI.md`](docs/WEB-UI.md) | the web page (`mason ui`): its pages, how access to it is protected, and how to extend it |
 | [`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) | what is verified to answer exactly as Postgres does, and what is not (generated from the code) |
 | [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) | when Mason is faster than a Postgres read replica: every measurement and how it was taken (generated from the benchmark results) |

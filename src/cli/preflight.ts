@@ -156,6 +156,9 @@ export interface SourceTable {
   uniqueKeys?: UniqueKey[];
   /** the table's row type's OID in the SOURCE (pg_class.reltype): the wire's type for a whole row of it */
   rowTypeOid?: number;
+  /** what identifies a changed row to logical replication (pg_class.relreplident): `d` its primary key, `f` the whole
+   *  row, `i` an index, `n` NOTHING — a table that cannot be under `sync: replication` (src/cli/sources.ts entryProblems) */
+  replicaIdentity?: "d" | "n" | "f" | "i";
 }
 export interface UniqueKey {
   /** the index's name, as pg_indexes lists it */
@@ -217,7 +220,7 @@ export const VIEWS_SQL = `SET LOCAL search_path = pg_catalog; SELECT coalesce(js
 
 /** One catalog read: every ordinary or partitioned table outside the system schemas, its key, size, comments and FKs. */
 export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text FROM (
-  SELECT n.nspname AS schema, c.relname AS table, c.oid, c.reltype AS row_type_oid,
+  SELECT n.nspname AS schema, c.relname AS table, c.oid, c.reltype AS row_type_oid, c.relreplident AS replica_identity,
     -- a PARTITIONED table's rows and bytes are its leaves' (its own are -1 / 0 and ~0 bytes); "never analysed" is
     -- relpages = 0 AND reltuples <= 0 on any leaf, which Postgres 13 (reltuples 0) and 14+ (-1) both read
     CASE WHEN c.relkind = 'p'
@@ -266,7 +269,7 @@ export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text F
 ) t`;
 
 interface TableRow {
-  schema: string; table: string; oid: number; row_type_oid: number; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
+  schema: string; table: string; oid: number; row_type_oid: number; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
   unique_keys: Array<{ name: string; constraint: boolean; nulls_not_distinct: boolean; columns: string[] }>;
   columns: Array<{ name: string; type: string; not_null: boolean; comment: string | null; type_oid: number; type_array_oid: number;
     default: string | null; identity: string; generated: string; sequence: string | null }>;
@@ -299,6 +302,7 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
       foreignKeys: t.foreign_keys.map((f) => ({ column: f.column, target: f.target, targetColumn: f.target_column })),
       uniqueKeys: t.unique_keys.map((u) => ({ name: u.name, columns: u.columns, constraint: u.constraint, nullsNotDistinct: u.nulls_not_distinct })),
       ...(t.row_type_oid > 0 ? { rowTypeOid: t.row_type_oid } : {}),
+      ...(t.replica_identity === "d" || t.replica_identity === "n" || t.replica_identity === "f" || t.replica_identity === "i" ? { replicaIdentity: t.replica_identity } : {}),
     });
   }
   // the columns differ by version (datlocprovider from 15, daticulocale 15–16, datlocale from 17): read the row whole
@@ -354,7 +358,7 @@ export function sourceWarnings(s: Source, f: SourceFacts): string[] {
  *  both modes — the mode is the start's, not known here: a poll scans each table, replication reads the change log). */
 export function remoteWarning(s: Source): string {
   return `${s.host} is not this machine. mason start will copy the tables you pick to this machine (into its copy's file, ` +
-    "with no access control beyond this machine's), and keep them current while it runs: a scan of each table at every poll, or its change log with --replication";
+    "with no access control beyond this machine's), and keep them current while it runs: a scan of each table at every poll, or its change log for a table whose sync: is replication";
 }
 
 /**
@@ -367,7 +371,7 @@ export function remoteConfirmation(host: string, o: { cmd: "mason init" | "mason
   return { code: "failed", exit: 1,
     message: `stopped before ${o.cmd === "mason init" ? "writing anything" : "starting"}: ${host} is on another machine, and copying from it needs your say-so`,
     why: "mason start would copy the tables you pick to this machine: a file under .mason/, with no access control beyond this machine's\n" +
-      "and keep them current while it runs by reading that database: a scan of each table at every poll, or its change log with --replication",
+      "and keep them current while it runs by reading that database: a scan of each table at every poll, or its change log for a table whose sync: is replication",
     fix: o.wayOut, next: o.next };
 }
 

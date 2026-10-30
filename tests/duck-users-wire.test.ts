@@ -66,6 +66,18 @@ before(async () => {
   // the run's command server, as far as `mason user` asks it: is the run up (src/cli/runs.ts answers)
   control = http.createServer((req, res) => {
     if (req.url === "/api/ping" && req.headers.authorization === `Bearer ${RUN_TOKEN}`) { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ pid: process.pid, service: true })); return; }
+    // GET /api/users as the run answers it (src/cli/run-server.ts): the same functions, over this test's ledger
+    if (req.url === "/api/users?lastUsed=1" && req.headers.authorization === `Bearer ${RUN_TOKEN}`) {
+      void (async () => {
+        const m = await import("../src/cli/user.ts");
+        const { postgresLink } = await import("../src/cli/pg-url.ts");
+        const r = m.listUsers(path.join(home, "users.json"), API_KEY, postgresLink(`postgresql://127.0.0.1:${api.port}/shop`));
+        if ("message" in r) { res.writeHead(500).end("{}"); return; }
+        const used = await m.withLastUsed(r.users, ledger, () => undefined);
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ...used, urlNote: null }));
+      })();
+      return;
+    }
     res.writeHead(404).end("{}");
   });
   await new Promise<void>((resolve) => control.listen(0, "127.0.0.1", resolve));
@@ -106,8 +118,10 @@ const refusedWith = async (o: Parameters<typeof connect>[0]): Promise<pg.Databas
 test("mason user add prints the URL a tool pastes: it connects as that user, and the user name must be the user's", async () => {
   await wired();
   const added = await masonUser("add", "metabase");
-  assert.deepEqual(Object.keys(added).sort(), ["addedAt", "database", "host", "id", "next", "password", "port", "sslmode", "url", "user"]);
+  assert.deepEqual(Object.keys(added).sort(), ["addedAt", "database", "host", "id", "next", "password", "port", "psql", "roleFrom", "sslmode", "url", "user"]);
+  assert.equal(added.roleFrom, "none", "no roles file: no role, and every copied table read");
   assert.equal(added.user, "metabase");
+  assert.equal(added.psql, `psql ${added.url as string}`, "its psql line, as mason user add prints it");
   assert.equal(added.url, `postgres://metabase:${added.password as string}@127.0.0.1:${api.port}/shop`, "the one URL builder: the user and its password");
   assert.deepEqual([added.host, added.port, added.database, added.sslmode], ["127.0.0.1", api.port, "shop", "disable"]);
   const c = await connect({ url: added.url as string });
@@ -151,7 +165,8 @@ test("mason user remove, beside the listener: the next connection is refused at 
   held.on("error", (e) => { ended.push(e); });
   assert.equal((await held.query("SELECT 1 AS one")).rows[0].one, 1, "a catalog statement too is the session's");
   const removed = await masonUser("remove", "superset");
-  assert.deepEqual(removed.removed, { name: "superset", id: added.id, addedAt: added.addedAt });
+  assert.deepEqual(removed.removed, { name: "superset", id: added.id, addedAt: added.addedAt, removedAt: (removed.removed as { removedAt: string }).removedAt });
+  assert.match((removed.removed as { removedAt: string }).removedAt, /^\d{4}-\d\d-\d\dT[\d:.]+Z$/);
   // the held session: its next statement — any statement — ends it, FATAL, with the reason
   const e = await held.query("SELECT 1").then(() => assert.fail("it answered"), (x: pg.DatabaseError) => x);
   assert.equal(e.code, "28000");
@@ -163,8 +178,25 @@ test("mason user remove, beside the listener: the next connection is refused at 
   const again = await refusedWith({ url: added.url as string });
   assert.equal(again.code, "28P01");
   assert.match(again.message, /the user "superset" was removed \(mason user list shows the users; mason user add superset makes it again, with a new password\)/);
-  // and the list no longer has it
-  assert.deepEqual(((await masonUser("list")).users as Array<{ name: string }>).map((u) => u.name), ["metabase", "grafana"]);
+  // and the list keeps it, marked removed: it does not connect, and has no URL to paste
+  await ledger.flush();
+  const listAll = await masonUser("list");
+  assert.deepEqual([listAll.lastUsedNote, listAll.urlNote, listAll.requestLogDays], [null, null, 7]);
+  const listed = listAll.users as Array<{ name: string; removedAt: string | null; live: boolean; url: string | null; lastUsedAt: string | null }>;
+  // last used: the newest statement of the run's request log (metabase ran one above); the URL: without the password
+  assert.match(listed.find((u) => u.name === "metabase")!.lastUsedAt ?? "", /^\d{4}-\d\d-\d\dT/);
+  assert.equal(listed.find((u) => u.name === "grafana")!.lastUsedAt, null, "grafana never ran a statement");
+  assert.equal(listed.find((u) => u.name === "metabase")!.url, `postgres://metabase@127.0.0.1:${api.port}/shop`);
+  assert.deepEqual(listed.filter((u) => u.removedAt === null).map((u) => u.name), ["metabase", "grafana"]);
+  const gone = listed.find((u) => u.name === "superset")!;
+  assert.deepEqual([gone.removedAt, gone.live, gone.url], [(removed.removed as { removedAt: string }).removedAt, false, null]);
+  // the name added again is a new user, with a new password that connects; the removed entry stays
+  const back = await masonUser("add", "superset");
+  assert.notEqual(back.id, added.id);
+  const c = await connect({ url: back.url as string, app: "Superset" });
+  try { assert.equal((await c.query("SELECT 1 AS one")).rows[0].one, 1); } finally { await c.end(); }
+  const again2 = await refusedWith({ url: added.url as string });
+  assert.match(again2.message, /the user "superset" was removed/, "the old password is still refused");
 });
 
 test("FAIL CLOSED: a users file that cannot be read refuses a user's connection (57P03) and its session's statements, never lets it in; a token is untouched", async () => {
@@ -199,11 +231,92 @@ test("every statement of a user's session is that user's row of the request log;
   // the refused login as "mason" with metabase's password is the user it asked for: "mason"
   assert.ok(rows.some((r) => r.method === "CONNECT" && r.user === "mason" && r.sqlstate === "28P01" && /not a password of this project's users/.test(r.message ?? "")));
   // superset: its statement, then the one its session was ended at, then the refused connection after the removal
-  assert.deepEqual(of("superset"), [["QUERY", "refused", "28000"], ["CONNECT", "refused", "28P01"]],
-    "the SELECT 1 is the catalog's, no request; the statement the session ended at; the connection refused after");
+  assert.deepEqual(of("superset"), [["QUERY", "refused", "28000"], ["CONNECT", "refused", "28P01"], ["CONNECT", "refused", "28P01"]],
+    "the SELECT 1 is the catalog's, no request; the statement the session ended at; the connection refused after; the name added again connects (a catalog statement, no request); the old password refused again");
   assert.equal(rows.find((r) => r.user === "superset" && r.sqlstate === "28000")?.query, "SELECT 1");
   assert.deepEqual(of("looker"), [["CONNECT", "failed", "57P03"], ["QUERY", "failed", "57P03"], ["QUERY", "ok", null]]);
   // a token's session is no user's
   assert.ok(rows.filter((r) => r.applicationName === "psql").every((r) => r.user === ""));
   assert.ok(rows.every((r) => !r.query.includes("mason_")), "never a password");
+});
+
+test("mason user list with Mason NOT running still lists, removed ones too: last used and the URL are null, each with its reason — never a guess", async () => {
+  const file = path.join(home, "config.json");
+  const was = fs.readFileSync(file, "utf8");
+  const stopped = JSON.parse(was) as Record<string, unknown>;
+  delete stopped.running;
+  fs.writeFileSync(file, JSON.stringify(stopped), { mode: 0o600 });
+  try {
+    const l = await masonUser("list");
+    const rows = l.users as Array<{ name: string; removedAt: string | null; lastUsedAt: string | null; url: string | null }>;
+    assert.ok(rows.some((u) => u.removedAt !== null), "removed users are listed");
+    assert.ok(rows.every((u) => u.lastUsedAt === null && u.url === null));
+    assert.match(String(l.lastUsedNote), /^unknown: Mason is not running/);
+    assert.match(String(l.urlNote), /^unknown: Mason is not running/);
+    assert.equal(l.requestLogDays, null);
+    const human = await runMason(root, ["user", "list"], env);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /removed 20\d\d-\d\d-\d\d \d\d:\d\d UTC/);
+    assert.match(human.stdout, /last used unknown\b[\s\S]*Last used: unknown: Mason is not running/);
+  } finally { fs.writeFileSync(file, was, { mode: 0o600 }); }
+});
+
+test("mason user disable, beside the listener: a held session ends at its next statement and a login is refused 28000 as Postgres refuses a role without LOGIN; enable lets the same password in again", async () => {
+  await wired();
+  const added = await masonUser("add", "tableau");
+  const held = await connect({ url: added.url as string, app: "Tableau" });
+  held.on("error", () => undefined);   // the FATAL arrives as an 'error' event too once the socket ends: the query's rejection is what is held
+  assert.equal((await held.query("SELECT count(*) AS n FROM orders")).rows[0].n, "3");
+  const disabled = await masonUser("disable", "tableau");
+  const at = (disabled.disabled as { disabledAt: string }).disabledAt;
+  assert.match(at, /^\d{4}-\d\d-\d\dT[\d:.]+Z$/);
+  assert.deepEqual(disabled, { disabled: { name: "tableau", id: added.id, addedAt: added.addedAt, disabledAt: at }, already: false,
+    next: [{ command: "mason user enable tableau", what: "it connects again, with the same password" }, { command: "mason user list", what: "the users" }] });
+  // the held session: its next statement ends it, FATAL 28000, with the reason and the way back
+  const e = await held.query("SELECT count(*) FROM orders").then(() => assert.fail("it answered"), (x: pg.DatabaseError) => x);
+  assert.deepEqual([e.code, e.severity, e.message], ["28000", "FATAL", `the session's user is no longer accepted: the user "tableau" was disabled`]);
+  assert.equal(e.hint, "a disabled user's sessions end at their next statement; mason user enable tableau lets it connect again, with the same password");
+  await held.end().catch((x: Error) => { if (!/not connected|ended|terminated/.test(x.message)) throw x; });
+  // a new login with its right password: 28000, Postgres's words for a role that may not log in, then Mason's way out
+  const refused = await refusedWith({ url: added.url as string });
+  assert.equal(refused.code, "28000");
+  // Postgres's sentence alone; why in DETAIL, the way out in HINT, as Postgres splits them (review: the message once carried all three)
+  assert.equal(refused.message, `role "tableau" is not permitted to log in`);
+  assert.equal(refused.detail, `the user "tableau" is disabled (mason user disable). Mason: user_disabled`);
+  assert.equal(refused.hint, "mason user enable tableau lets it connect again, with the same password");
+  // a WRONG password for it is a wrong password, as before: its state is told only to the holder of the login
+  const wrong = await refusedWith({ user: "tableau", password: `mason_${added.id as string}_${"0".repeat(32)}` });
+  assert.equal(wrong.code, "28P01");
+  assert.doesNotMatch(wrong.message, /disabled/);
+  // disabling it again: said so, nothing changed, exit 0 (a no-op is no failure), its first time kept
+  const again = await masonUser("disable", "tableau");
+  assert.deepEqual([(again.disabled as { disabledAt: string }).disabledAt, again.already], [at, true]);
+  const human = await runMason(root, ["user", "disable", "tableau"], env);
+  assert.equal(human.code, 0, human.stderr);
+  assert.match(human.stdout, /^The user tableau is disabled already: nothing changed\n/);
+  // the list: kept, disabled, not live; its URL still the one to paste (it connects again once enabled)
+  const listed = (await masonUser("list")).users as Array<{ name: string; disabledAt: string | null; removedAt: string | null; live: boolean; url: string | null }>;
+  const row = listed.find((u) => u.name === "tableau" && u.removedAt === null)!;
+  assert.deepEqual([row.disabledAt, row.live, row.url], [at, false, `postgres://tableau@127.0.0.1:${api.port}/shop`]);
+  assert.ok(listed.filter((u) => u.name !== "tableau").every((u) => u.disabledAt === null), "only it");
+  const list = await runMason(root, ["user", "list"], env);
+  assert.match(list.stdout, /users of shop, 1 disabled, \d+ removed\n/);
+  assert.match(list.stdout, new RegExp(`tableau +id ${added.id as string} .*Disabled \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d UTC: does not connect until mason user enable tableau`));
+  assert.match(list.stdout, /mason user enable <name> +a disabled user connects again, with the same password/);
+  // a name it lacks: not found, with the closest
+  const typo = await runMason(root, ["user", "disable", "tableu", "--json"], env);
+  assert.equal(typo.code, 1);
+  assert.equal((JSON.parse(typo.stdout) as { error: { code: string; message: string } }).error.message, "there is no user \"tableu\" — did you mean `tableau`?");
+  assert.equal((JSON.parse(typo.stdout) as { error: { code: string } }).error.code, "not_found");
+  // enabled: the SAME password connects again
+  const enabled = await masonUser("enable", "tableau");
+  assert.deepEqual(enabled, { enabled: { name: "tableau", id: added.id, addedAt: added.addedAt }, already: false,
+    next: [{ command: "mason user list", what: "the users" }, { command: "mason user disable tableau", what: "it connects no more, until enabled" }] });
+  const back = await connect({ url: added.url as string, app: "Tableau" });
+  try { assert.equal((await back.query("SELECT count(*) AS n FROM orders")).rows[0].n, "3"); } finally { await back.end(); }
+  assert.equal((await masonUser("enable", "tableau")).already, true, "enabling one not disabled: said so");
+  // the request log: the statement the session ended at, and the login refused, each 28000 and the user's
+  await ledger.flush();
+  const rows = (await ledger.recent({ limit: 200 })).filter((r) => r.user === "tableau").map((r) => [r.method, r.outcome, r.sqlstate]);
+  assert.deepEqual(rows.filter((r) => r[2] !== null), [["QUERY", "refused", "28000"], ["CONNECT", "refused", "28000"], ["CONNECT", "refused", "28P01"]]);
 });

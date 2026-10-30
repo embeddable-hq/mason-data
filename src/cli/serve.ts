@@ -24,8 +24,10 @@ import { failed, parseCommand, type CommandSpec, type Failure } from "./command.
 import { dev } from "./dev.ts";
 import { parseSource } from "./preflight.ts";
 import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
-import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
+import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir, sourcesTop } from "./sources.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
+import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
+import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { version } from "./version.ts";
 import type { CopyState } from "../duck/sync.ts";
 
@@ -46,20 +48,22 @@ export const SERVE: CommandSpec = {
   Settings (the environment):
     DATABASE_URL            the database to copy from, as the sources file's url: \${DATABASE_URL} names it (the variable
                             the file names is required); read-only: SELECTs, or a replication slot
+    PG_PUBLICATION          the publication the tables under sync: replication are read through, the database owner's,
+                            never altered: the sources file's publication: first (publication: \${PG_PUBLICATION} reads
+                            this one), else this; default none: Mason makes its own
     MASON_API_KEY           what the users' passwords are made with (mason user add), at least 32 characters (required)
     MASON_PROJECT           the project folder: sources/, mason.yml (default ./mason)
     MASON_DATA              the folder whose .mason/ holds the copy and the state: the volume (default .)
     MASON_NAME              the project's name, the database name clients connect to (default mason)
-    MASON_CHANGES           poll (SELECTs, the default) or replication (the change log; PG_PUBLICATION names one)
     MASON_HEALTH_PORT       /healthz's port (default 4140), on MASON_HEALTH_HOST (default 0.0.0.0)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
     MASON_DUCKDB_MEMORY     the copy's memory, 4GB or 512MiB (default half the container's memory limit, else half the
                             machine's RAM; mason doctor says it); a statement past it fails alone with 53200
-    MASON_POLL_MS           how often the poll reads the tables' changes, in ms (default 5000)
     MASON_STATEMENT_TIMEOUT   each statement's limit, as Postgres's statement_timeout (default 5min; 0 for none)
-    MASON_REQUEST_LOG_DAYS  how long the request log keeps a statement, in days (default 7)
+    MASON_HISTORY_DAYS      how many days Mason keeps its history: the request log, the sync's events, the usage
+                            samples and the copies' sizes (default 7)
     MASON_STORE_JSON_PATHS  on (the default) stores the JSON paths statements keep reading as columns; off stores none
     MASON_COPY_PARALLEL     a copy's chunks read at once, each a backend on the database (1 to 8, default 3)
     MASON_COPY_CHUNK_SECONDS   how long each chunk takes to read, at the rate measured (1 to 300, default 12)
@@ -80,8 +84,6 @@ export interface ServeSettings {
   project: string;
   /** the folder whose `.mason/` is the state, absolute */
   data: string;
-  /** null: the project's own (poll until a replication start recorded otherwise) */
-  changes: "poll" | "replication" | null;
   selfSignedTls: boolean;
   health: { host: string; port: number };
 }
@@ -100,8 +102,16 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   else if (apiKey.length < MIN_API_KEY) wrong.push(`MASON_API_KEY is ${apiKey.length} characters: at least ${MIN_API_KEY}, as openssl rand -hex 24 makes`);
   const name = env.MASON_NAME || "mason";
   if (!NAME_RE.test(name)) wrong.push(`MASON_NAME=${JSON.stringify(name)} is not a project name: lower case letters, digits, - and _, at most 48`);
-  const changes = env.MASON_CHANGES || null;
-  if (changes !== null && changes !== "poll" && changes !== "replication") wrong.push(`MASON_CHANGES=${JSON.stringify(changes)}: poll or replication`);
+  // how each table is kept current, and how often a table is polled, are the sources file's sync: now, per table
+  // (src/lib/table-sync.ts): the old settings refused HERE with the others, before anything is written or connected
+  const top = (): SourcesTop => sourcesTop(path.dirname(project), project);
+  const changes = changesRetiredText(env, top);
+  if (changes !== null) wrong.push(changes);
+  const pollMs = pollMsRetiredText(env, top);
+  if (pollMs !== null) wrong.push(pollMs);
+  // the history's days: MASON_HISTORY_DAYS, a number of days; the old name refused (src/duck/history.ts)
+  const days = historyDaysSetting(env);
+  if (typeof days !== "number") wrong.push(historyDaysWrongText(days));
   const selfSigned = env.MASON_PG_SELF_SIGNED_TLS || "0";
   if (selfSigned !== "0" && selfSigned !== "1") wrong.push(`MASON_PG_SELF_SIGNED_TLS=${JSON.stringify(selfSigned)}: 1, or 0 (the default)`);
   const portText = env.MASON_HEALTH_PORT || "4140";
@@ -114,11 +124,12 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
       next: [["mason serve --help", "every setting, with its default"]] };
   }
   return {
-    name, apiKey, changes: changes as ServeSettings["changes"], selfSignedTls: selfSigned === "1",
+    name, apiKey, selfSignedTls: selfSigned === "1",
     project, data,
     health: { host: env.MASON_HEALTH_HOST || "0.0.0.0", port },
   };
 }
+
 
 /**
  * THE DATABASE'S URL AS A SETTING (the review of the sources file: an unset URL was found only after the other
@@ -273,7 +284,7 @@ export async function serve(argv: string[]): Promise<number> {
   process.chdir(s.data);
   let code: number;
   try {
-    code = await dev({ port: 4039, version: version(), changes: s.changes, publication: null, selfSignedTls: s.selfSignedTls,
+    code = await dev({ port: 4039, version: version(), selfSignedTls: s.selfSignedTls,
       serve: { log: say, ready: (run) => { state = { phase: "ready", tables: run.tables }; }, stopping: () => { state = { phase: "stopping" }; } } });
   } finally {
     // a platform's health check may hold a keep-alive connection open, which close() alone would wait for

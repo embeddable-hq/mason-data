@@ -89,6 +89,62 @@ test("the file: none is no users; written beside and renamed, mode 0600, no pass
   assert.deepEqual((u.readUsers(file) as { users: Array<{ name: string }> }).users.map((x) => x.name), ["grafana"]);
 });
 
+test("a removed user is KEPT with removedAt: the listener refuses it at login and mid-session as before, its name can be added again, malformed entries are still refused", async () => {
+  const u = await users();
+  const file = fileIn();
+  const live = new u.LiveUsers(file, KEY);
+  const m = await add(file, "metabase");
+  const g = await add(file, "grafana");
+  const token = live.login("metabase", m.password);
+  u.changeUsers(file, (l) => l.map((x) => x.name === "metabase" ? { ...x, removedAt: "2026-10-27T09:00:00.000Z" } : x));
+  const read = u.readUsers(file);
+  assert.ok("users" in read);
+  assert.deepEqual(read.users.map((x) => [x.name, x.removedAt]), [["metabase", "2026-10-27T09:00:00.000Z"], ["grafana", undefined]], "kept, marked");
+  assert.deepEqual(read.users.filter(u.isActive).map((x) => x.name), ["grafana"]);
+  // the held session's next statement and a new login: refused exactly as when the entry was deleted
+  assert.throws(() => live.recheck(token), (e: unknown) => e instanceof ApiError && e.status === 401 && e.message === "the user \"metabase\" was removed" && e.userName === "metabase");
+  refused(() => live.login("metabase", m.password), 401, /^the user "metabase" was removed \(mason user list shows the users; mason user add metabase makes it again, with a new password\)$/, "metabase");
+  assert.deepEqual(live.now(), { users: [read.users[1]] }, "the listener's list holds the live users only");
+  assert.equal(live.login("grafana", g.password).user, "grafana");
+  // a name added again beside the removed entry: a new id; the removed one stays refused
+  const again = await add(file, "metabase");
+  assert.equal(live.login("metabase", again.password).jti, again.id);
+  refused(() => live.login("metabase", m.password), 401, /was removed/, "metabase");
+  // a malformed entry is still refused, a removedAt that is not a string too
+  fs.writeFileSync(file, JSON.stringify({ users: [{ name: "x", id: "0123456789abcdef", addedAt: "t", key: "k", removedAt: 5 }] }));
+  const bad = u.readUsers(file);
+  assert.ok("problem" in bad && /users\[0\]\.removedAt is not a timestamp/.test(bad.problem), JSON.stringify(bad));
+  fs.writeFileSync(file, JSON.stringify({ users: [{ name: "x", id: "0123456789abcdef", addedAt: "t" }] }));
+  const bad2 = u.readUsers(file);
+  assert.ok("problem" in bad2 && /users\[0\] is not \{ name, id, addedAt, key, role\?\[, removedAt\]\[, disabledAt\] \}/.test(bad2.problem), JSON.stringify(bad2));
+});
+
+test("a DISABLED user is kept with disabledAt and its password: its login (right password) refused user_disabled in Postgres's words, mid-session too; a wrong password still a wrong one; enabled, the same password connects", async () => {
+  const u = await users();
+  const file = fileIn();
+  const live = new u.LiveUsers(file, KEY);
+  const m = await add(file, "metabase");
+  const token = live.login("metabase", m.password);
+  u.changeUsers(file, (l) => l.map((x) => x.name === "metabase" ? { ...x, disabledAt: "2026-10-28T09:00:00.000Z" } : x));
+  const read = u.readUsers(file);
+  assert.ok("users" in read);
+  assert.deepEqual(read.users.map((x) => [x.name, x.disabledAt, u.isActive(x), u.isDisabled(x)]), [["metabase", "2026-10-28T09:00:00.000Z", true, true]], "kept, marked, not removed");
+  const disabled = (e: unknown): boolean => e instanceof ApiError && e.status === 401 && e.code === "user_disabled" && e.userName === "metabase";
+  assert.throws(() => live.recheck(token), (e: unknown) => disabled(e) && (e as Error).message === "the user \"metabase\" was disabled");
+  assert.throws(() => live.login("metabase", m.password), (e: unknown) => disabled(e) &&
+    (e as Error).message === "role \"metabase\" is not permitted to log in");
+  // its state is said only to the holder of its password: a forged one is a wrong password, as for any user
+  refused(() => live.login("metabase", `mason_${m.id}_${"0".repeat(32)}`), 401, /^not a password of this project's users: mason user list shows them$/, "metabase");
+  // enabled: disabledAt gone, the same id, so the same password and the held token are live again
+  u.changeUsers(file, (l) => l.map((x) => { const { disabledAt: _, ...rest } = x; return rest; }));
+  assert.equal(live.login("metabase", m.password).jti, m.id);
+  assert.doesNotThrow(() => live.recheck(token));
+  // a disabledAt that is not a string: refused as the file mason user writes is not
+  fs.writeFileSync(file, JSON.stringify({ users: [{ name: "x", id: "0123456789abcdef", addedAt: "t", key: "k", disabledAt: true }] }));
+  const bad = u.readUsers(file);
+  assert.ok("problem" in bad && /users\[0\]\.disabledAt is not a timestamp as mason user disable writes it/.test(bad.problem), JSON.stringify(bad));
+});
+
 test("the file's lock: a held one waits, then refuses saying what holds it; one left by a process that died is taken", async () => {
   const u = await users();
   const file = fileIn();
@@ -112,7 +168,7 @@ test("a file that cannot be read is a problem, never an empty list; a change ref
   const file = fileIn();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   for (const [text, why] of [["{\"users\": [", /is not valid JSON/], ["[]", /is not \{ "users": \[ … \] \}/],
-    ["{\"users\": [{\"name\": \"Metabase\", \"id\": \"0123456789abcdef\", \"addedAt\": \"x\", \"key\": \"y\"}]}", /users\[0\] is not \{ name, id, addedAt, key \}/]] as const) {
+    ["{\"users\": [{\"name\": \"Metabase\", \"id\": \"0123456789abcdef\", \"addedAt\": \"x\", \"key\": \"y\"}]}", /users\[0\] is not \{ name, id, addedAt, key, role\?\[, removedAt\]\[, disabledAt\] \}/]] as const) {
     fs.writeFileSync(file, text);
     const r = u.readUsers(file);
     assert.ok("problem" in r && why.test(r.problem), `${text}: ${JSON.stringify(r)}`);

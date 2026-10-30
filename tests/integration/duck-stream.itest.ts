@@ -1,6 +1,6 @@
 /**
  * THE DUCKDB COPY KEPT CURRENT BY LOGICAL REPLICATION, AGAINST A REAL POSTGRES (src/duck/stream.ts, src/duck/sync.ts
- * replication mode; `mason start --replication` on Mason).
+ * replication mode; a table whose `sync:` is `replication` on Mason).
  *
  * DuckDB's `<schema>.<table>` must equal the source after every kind of change an app makes, as the stream brings it: an
  * insert, an update, a delete, a primary-key change, an UPDATE that leaves a large (TOASTed) value unchanged, a savepoint,
@@ -12,7 +12,7 @@
  * What it needs: IT_POSTGRES_URL with wal_level = logical, psql on PATH, DuckDB's postgres extension. It writes only
  * inside databases it creates, `it_dstream_<random>*`, and drops them and its slots at the end.
  */
-import { test, after } from "node:test";
+import { test, after, afterEach } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -37,6 +37,17 @@ function psql(url: string, sql: string): string {
   return r.stdout.trim();
 }
 const urlOf = (db: string): string => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); };
+
+// A TEST LEAVES NO SLOT for the next one: CI's Postgres keeps max_replication_slots = 10, and this file's tests make
+// more than that between them. After each, once its sync stopped and the walsender let go, its slots are dropped,
+// VERIFIED gone
+afterEach(async () => {
+  if (!adminUrl || !logical) return;
+  const held = (): string => psql(adminUrl, `SELECT count(*) FILTER (WHERE active) FROM pg_replication_slots WHERE slot_name LIKE '${tag}%'`);
+  for (const until = Date.now() + 10_000; held() !== "0" && Date.now() < until;) await new Promise((r) => setTimeout(r, 100));
+  psql(adminUrl, `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE '${tag}%' AND NOT active`);
+  assert.equal(psql(adminUrl, `SELECT string_agg(slot_name, ', ') FROM pg_replication_slots WHERE slot_name LIKE '${tag}%'`), "", "every slot a test made is dropped after it");
+});
 
 after(() => {
   fs.rmSync(dir, { recursive: true, force: true });
@@ -143,7 +154,7 @@ test("the copy and the stream keep DuckDB equal to the source through every kind
     psql(url, "INSERT INTO later VALUES (2, 'two'); UPDATE items SET v = 'beside it' WHERE id = 7");
     await same("a table added");
     assert.equal(await rowsOf(store, "SELECT id, v FROM public.later ORDER BY 1"), psql(url, "SELECT id, v FROM later ORDER BY 1"));
-    assert.ok(logged.slice(before).some((l) => /^re-pointed publication .* at public\.items, shop\.lines, public\.later$/.test(l)), logged.slice(before).join("\n"));
+    assert.ok(logged.slice(before).some((l) => /^re-pointed publication .* at public\.items, shop\.lines, public\.later: the tables whose sync is replication$/.test(l)), logged.slice(before).join("\n"));
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.items", "copied", null], ["shop.lines", "copied", null], ["public.later", "copied", null]]);
   } finally {
     await sync.stop();
@@ -360,11 +371,11 @@ test("a table copies beside the stream: the others stay current and the slot mov
   }
 });
 
-// A PUBLICATION THE OPERATOR NAMED (`mason start --replication --publication <name>`; src/duck/publication.ts)
+// A PUBLICATION THE OPERATOR NAMED (`publication: <name>` in the sources file; src/duck/publication.ts)
 // is read as it is: verified, never created, altered or dropped — on a read replica Mason could not make one, and on a
 // customer's primary the one object Mason creates is its slot. A table it does not carry is refused on its own line, the
-// stream going on for the others; `--poll` drops the slot alone.
-test("a NAMED publication is read as it is, never altered: a table it lacks is refused with the way out, the others stream on; --poll drops only the slot", { skip }, async () => {
+// stream going on for the others; no table replicated any more drops the slot alone.
+test("a NAMED publication is read as it is, never altered: a table it lacks is refused with the way out, the others stream on; no table replicated drops only the slot", { skip }, async () => {
   const db = `${tag}_p`, url = urlOf(db);
   psql(adminUrl!, `CREATE DATABASE ${db}`);
   psql(url, "CREATE TABLE a (id int PRIMARY KEY, v text, extra text); CREATE TABLE b (id int PRIMARY KEY, v text); CREATE TABLE c (id int PRIMARY KEY, v text); " +
@@ -418,7 +429,7 @@ test("a NAMED publication is read as it is, never altered: a table it lacks is r
   assert.equal(tables(), published, "pg_publication_tables is unchanged");
   assert.ok(!logged.some((l) => /(made|re-pointed) publication/.test(l)), logged.join("\n"));
 
-  // mason start --poll (and mason destroy): the slot goes, verified; the publication is its owner's and stays as it was
+  // no table replicated any more (and mason destroy): the slot goes, verified; the publication is its owner's and stays as it was
   const { dropOwnReplication } = await import("../../src/cli/replication-mode.ts");
   assert.deepEqual(await dropOwnReplication(parsed.source, repl), [`replication slot ${repl.slot}`]);
   assert.equal(psql(url, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${repl.slot}'`), "0");
@@ -506,6 +517,8 @@ test("the stream says where it is: a table joins and leaves on a line with its p
     assert.equal(s0.running, true);
     assert.deepEqual([table(s0, "public.a").state, table(s0, "public.a").applied], ["streamed", { inserts: 0, updates: 0, deletes: 0, truncates: 0 }]);
     assert.ok("lsn" in s0.database, `the database's position is read: ${JSON.stringify(s0.database)}`);
+    // the WAL the slot holds, read on the same connection: a number and Postgres's status, never a 0 for unknown
+    assert.ok("walHeldBytes" in s0.slotWal && s0.slotWal.walHeldBytes >= 0 && s0.slotWal.walStatus !== null && s0.slot === `${tag}_v`, `the slot's WAL is read: ${JSON.stringify(s0.slotWal)}`);
 
     // THE CHANGES MADE are what the state counts, the position moves, and the lag right after them is their age
     psql(url, "INSERT INTO a VALUES (11, 'x'), (12, 'y'), (13, 'z'); UPDATE a SET v = 'changed' WHERE id IN (1, 2); DELETE FROM a WHERE id = 3");
@@ -556,7 +569,8 @@ async function pick(source: Source, folder: string, picks: ReadonlyArray<readonl
   if ("failure" in c) throw new Error(c.failure.message);
   let facts;
   try { facts = await readSourceFacts(c.pg); } finally { c.pg.close(); }
-  let text = newSourceText(source.url);
+  // every table this file streams is replicated: the file's top sync: says so (a polled or off table is written so)
+  let text = newSourceText(source.url, [], { mode: "replication" });
   for (const [n, cols] of picks) {
     const r = withTable(text, { name: entryName(n), table: n, columns: cols === null ? null : [...cols], exclude: [], key: null });
     if ("problem" in r) throw new Error(r.problem);
@@ -567,7 +581,7 @@ async function pick(source: Source, folder: string, picks: ReadonlyArray<readonl
   fs.writeFileSync(path.join(sourcesDir(folder), "app.yml"), text);
   const read = readSource(folder, folder, {});
   if (!("tables" in read)) throw new Error(read.message);
-  const added = addedTables(read as ProjectSource, facts.tables, source.database, folder, { replication: true });
+  const added = addedTables(read as ProjectSource, facts.tables, source.database, folder);
   if (!Array.isArray(added)) throw new Error(`${added.message}\n${added.why ?? ""}`);
   return added;
 }
@@ -718,4 +732,229 @@ test("a column dropped on the database while streaming refuses that table by nam
     await sync.stop();
     store.close();
   }
+});
+
+// EACH TABLE KEPT CURRENT AS ITS SYNC SAYS, ONE PROJECT (issue 33, PR 2): `off`, `poll <interval>` and `replication` side
+// by side — the stream through the project's one slot and its own publication, which carries the replicated tables
+// alone; the polled table polled beside the stream; the off one read only when asked.
+const cols2 = [{ name: "id", type: "integer", notNull: true, comment: null }, { name: "v", type: "text", notNull: false, comment: null }];
+const tableOf = (name: string, sync: AddedTable["sync"]): AddedTable =>
+  ({ source: `public.${name}`, schema: "public", table: name, key: ["id"], bytes: 0, rows: null, foreignKeys: [], columns: cols2, ...(sync ? { sync } : {}) });
+const OFF = { mode: "off" } as const;
+const REPL = { mode: "replication" } as const;
+const POLL = (every: string, seconds: number) => ({ mode: "poll", every, seconds }) as const;
+const keptOf = (sync: Sync, source: string) => sync.state().find((s) => s.source === source)?.kept;
+/** copied, caught up and kept as its sync says: a polled or off table with nothing pending, a replicated one streamed */
+const settled = (sync: Sync, sources: readonly string[]) => () => sources.every((s) => {
+  const k = keptOf(sync, s);
+  return k?.by === "poll" ? k.pending === undefined && k.syncedAt !== null : k?.by === "replication" && k.state === "streamed";
+});
+const carried = (url: string, pub: string): string => psql(url, `SELECT string_agg(schemaname || '.' || tablename, ',' ORDER BY 1) FROM pg_publication_tables WHERE pubname = '${pub}'`);
+const slotThere = (url: string, slot: string): boolean => psql(url, `SELECT count(*) FROM pg_replication_slots WHERE slot_name = '${slot}'`) === "1";
+const pubThere = (url: string, pub: string): boolean => psql(url, `SELECT count(*) FROM pg_publication WHERE pubname = '${pub}'`) === "1";
+/** the polls of `source` the log says ran after `from` (each poll's line names the tables it read) */
+const pollsOf = (logged: readonly string[], from: number, source: string): number => logged.slice(from).filter((l) => l.startsWith("poll: ") && l.includes(` ${source} `)).length;
+
+test("a mixed project: an off table unchanged, a poll 1s table polled beside the stream, two replicated tables streamed; the publication carries those two alone", { skip }, async () => {
+  const db = `${tag}_mx`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, ["manual", "polled", "ra", "rb"].map((t) => `CREATE TABLE ${t} (id int PRIMARY KEY, v text); INSERT INTO ${t} SELECT g, '${t}' || g FROM generate_series(1, 5) g;`).join(" "));
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const names = { slot: `${tag}_mx`, publication: `${tag}_mx`, owned: true };
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "mx.db"), (l) => logged.push(l));
+  // the run's own mode is the poll's: each table names its own sync, the replicated ones through `names`
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "poll", names);
+  const all = ["public.manual", "public.polled", "public.ra", "public.rb"];
+  const same = async (t: string): Promise<boolean> => await rowsOf(store, `SELECT id, v FROM public.${t} ORDER BY 1`) === psql(url, `SELECT id, v FROM ${t} ORDER BY 1`);
+  try {
+    await sync.open();
+    await sync.setTables([tableOf("manual", OFF), tableOf("polled", POLL("1s", 1)), tableOf("ra", REPL), tableOf("rb", REPL)]);
+    sync.start();
+    await until(settled(sync, all), "every table copied, caught up and kept as its sync says", logged);
+    assert.equal(carried(url, names.publication), "public.ra,public.rb", "Mason's own publication carries the replicated tables alone");
+    assert.ok(slotThere(url, names.slot));
+    assert.equal(sync.streams(), true);
+    // the stream's status names the replicated tables alone; each table's kept is its own sync's
+    assert.deepEqual((await sync.streamStatus())!.tables.map((t) => [t.table, t.state]), [["public.ra", "streamed"], ["public.rb", "streamed"]]);
+    assert.deepEqual(all.map((s) => keptOf(sync, s)?.by), ["poll", "poll", "replication", "replication"]);
+    const manualSynced = (keptOf(sync, "public.manual") as { syncedAt: string }).syncedAt;
+
+    // an INSERT, an UPDATE and a DELETE on each kind
+    psql(url, ["manual", "polled", "ra", "rb"].map((t) => `INSERT INTO ${t} VALUES (6, 'new'); UPDATE ${t} SET v = 'changed' WHERE id = 2; DELETE FROM ${t} WHERE id = 3;`).join(" "));
+    await sync.caughtUp();
+    assert.ok(await same("ra") && await same("rb"), "the replicated tables streamed");
+    await until(() => same("polled"), "the poll 1s table polled beside the stream", logged, 10_000);
+    // the off table: as its copy left it, though every other kind moved
+    assert.equal(await rowsOf(store, "SELECT id, v FROM public.manual ORDER BY 1"), ["1\tmanual1", "2\tmanual2", "3\tmanual3", "4\tmanual4", "5\tmanual5"].join("\n"), "an off table does not change");
+    assert.equal((keptOf(sync, "public.manual") as { syncedAt: string }).syncedAt, manualSynced);
+    // a replicated table is polled once, by its catch-up after its copy; the stream keeps it current from then on
+    assert.deepEqual([pollsOf(logged, 0, "public.ra"), pollsOf(logged, 0, "public.rb")], [1, 1], logged.join("\n"));
+    // a replicated table's kept: the stream's position, and its copy's age
+    const ra = keptOf(sync, "public.ra");
+    assert.ok(ra?.by === "replication" && /^[0-9A-F]+\/[0-9A-F]+$/.test(ra.position) && ra.syncedAt !== null && ra.notRunning === null, JSON.stringify(ra));
+
+    // mason sync: the off table polled, the replicated one answered with the stream's position
+    const asked = await sync.pollNow(["public.manual", "public.ra"]);
+    assert.deepEqual(asked.tables.map((t) => [t.table, t.rows]), [["public.manual", 5]]);
+    assert.deepEqual(asked.streamed?.map((t) => [t.table, t.state]), [["public.ra", "streamed"]]);
+    assert.ok(await same("manual"), "mason sync syncs the off table");
+  } finally { await sync.stop(); store.close(); }
+});
+
+// A CHANGE OF A TABLE'S SYNC KEEPS ITS COPY in every direction, caught up by ONE poll, never copied again — live
+// (`setTables`, as mason add --sync does) and by hand while Mason is down (the ledger's record of its sync). The slot is
+// dropped, VERIFIED gone, when the last replicated table leaves, and made again when one returns.
+test("a switch in each direction keeps the copy, caught up by one poll; the slot goes with the last replicated table and comes back with the next", { skip }, async () => {
+  const db = `${tag}_sw`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE a (id int PRIMARY KEY, v text); CREATE TABLE b (id int PRIMARY KEY, v text); " +
+    "INSERT INTO a SELECT g, 'a' || g FROM generate_series(1, 20) g; INSERT INTO b SELECT g, 'b' || g FROM generate_series(1, 20) g");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const names = { slot: `${tag}_sw`, publication: `${tag}_sw`, owned: true };
+  const logged: string[] = [];
+  const recorded: boolean[] = [];
+  const file = path.join(dir, "sw.db");
+  let store = await DuckStore.open(file, (l) => logged.push(l));
+  const open = (): Sync => new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "poll", names, { onReplication: (made) => recorded.push(made) });
+  let sync = open();
+  const same = async (t: string): Promise<boolean> => await rowsOf(store, `SELECT id, v FROM public.${t} ORDER BY 1`) === psql(url, `SELECT id, v FROM ${t} ORDER BY 1`);
+  const copiedAt = (t: string): string | null => sync.state().find((s) => s.source === `public.${t}`)!.copiedAt;
+  const both = ["public.a", "public.b"];
+  /** one switch: the change on the source first, the new syncs, then the copy equal to the source after exactly ONE poll
+   *  of each switched table and no copy */
+  const switched = async (syncs: Record<"a" | "b", AddedTable["sync"]>, changed: readonly ("a" | "b")[], step: string): Promise<void> => {
+    const copies = [copiedAt("a"), copiedAt("b")];
+    psql(url, changed.map((t) => `UPDATE ${t} SET v = '${step}' WHERE id = 1; INSERT INTO ${t} VALUES ((SELECT max(id) + 1 FROM ${t}), '${step}'); DELETE FROM ${t} WHERE id = (SELECT min(id) + 1 FROM ${t});`).join(" "));
+    const from = logged.length;
+    await sync.setTables([tableOf("a", syncs.a), tableOf("b", syncs.b)]);
+    // the stream may apply the step's changes before a table leaves it, so equal is not yet caught up: its poll is awaited
+    await until(async () => settled(sync, both)() && changed.every((t) => pollsOf(logged, from, `public.${t}`) > 0) && await same("a") && await same("b"),
+      `${step}: both caught up and kept as their syncs say`, logged, 20_000);
+    for (const t of changed) assert.equal(pollsOf(logged, from, `public.${t}`), 1, `${step}: ${t} caught up by exactly one poll\n${logged.slice(from).join("\n")}`);
+    assert.deepEqual([copiedAt("a"), copiedAt("b")], copies, `${step}: never copied again`);
+    assert.equal(logged.slice(from).filter((l) => /^copied public\./.test(l)).length, 0, `${step}: nothing copied\n${logged.slice(from).join("\n")}`);
+  };
+  try {
+    await sync.open();
+    await sync.setTables([tableOf("a", POLL("1h", 3600)), tableOf("b", REPL)]);
+    sync.start();
+    await until(settled(sync, both), "both copied and caught up", logged);
+    assert.equal(carried(url, names.publication), "public.b");
+    assert.deepEqual(recorded, [true], "the slot's making is told to the run, which records it");
+
+    // poll → replication and replication → poll at once: the publication follows, verified
+    await switched({ a: REPL, b: POLL("1h", 3600) }, ["a", "b"], "a in, b out");
+    assert.equal(carried(url, names.publication), "public.a", "the publication carries the replicated table alone after the change");
+    assert.ok(logged.includes("public.a: sync: poll 1h → replication: its copy is kept, and caught up by one poll now, then streamed"), logged.join("\n"));
+    assert.ok(logged.some((l) => /^public\.b leaves the stream at [0-9A-F]+\/[0-9A-F]+: its sync is poll 1h now, so it is caught up by one poll from its watermark, then polled$/.test(l)), logged.join("\n"));
+    psql(url, "UPDATE a SET v = 'streamed' WHERE id = 5");
+    await sync.caughtUp();
+    assert.ok(await same("a"), "a is streamed");
+
+    // replication → off, the last replicated table: the slot and Mason's own publication dropped, verified gone
+    await switched({ a: OFF, b: POLL("1h", 3600) }, ["a"], "a off");
+    await until(() => !slotThere(url, names.slot) && !pubThere(url, names.publication), "the slot and the publication gone", logged, 20_000);
+    assert.equal(sync.streams(), false);
+    assert.equal(await sync.streamStatus(), null);
+    assert.ok(logged.some((l) => l === `no table's sync is replication now: dropped replication slot ${names.slot} and publication ${names.publication} from ${db}, verified gone (the slot held the database's WAL) — a table set to sync: replication makes the slot again`), logged.join("\n"));
+    assert.deepEqual(recorded, [true, false]);
+
+    // off → replication: the slot made again, the table caught up under it and streamed
+    await switched({ a: REPL, b: POLL("1h", 3600) }, ["a"], "a back");
+    assert.ok(slotThere(url, names.slot), "the slot is there again");
+    assert.equal(carried(url, names.publication), "public.a");
+    assert.deepEqual(recorded, [true, false, true]);
+    psql(url, "UPDATE a SET v = 'streamed again' WHERE id = 6");
+    await sync.caughtUp();
+    assert.ok(await same("a"));
+  } finally { await sync.stop(); store.close(); }
+
+  // BY HAND, while Mason is down: a replication → poll, b poll → replication — each caught up at the start
+  psql(url, "UPDATE a SET v = 'while down' WHERE id = 7; UPDATE b SET v = 'while down' WHERE id = 7; INSERT INTO a VALUES (100, 'down'); INSERT INTO b VALUES (100, 'down')");
+  store = await DuckStore.open(file, (l) => logged.push(l));
+  sync = open();
+  try {
+    await sync.open();
+    const from = logged.length;
+    await sync.setTables([tableOf("a", POLL("1h", 3600)), tableOf("b", REPL)]);
+    const copies = [copiedAt("a"), copiedAt("b")];
+    assert.ok(copies.every((c) => c !== null), "both copies kept across the restart");
+    sync.start();
+    await until(async () => settled(sync, both)() && both.every((t) => pollsOf(logged, from, t) > 0) && await same("a") && await same("b"), "both caught up at the start", logged, 30_000);
+    for (const t of both) assert.equal(pollsOf(logged, from, t), 1, `${t} caught up by exactly one poll at the start\n${logged.slice(from).join("\n")}`);
+    assert.ok(logged.slice(from).includes("public.a: sync: replication → poll 1h: its copy is kept, and caught up by one poll now"), logged.slice(from).join("\n"));
+    assert.ok(logged.slice(from).includes("public.b: sync: poll 1h → replication: its copy is kept, and caught up by one poll now, then streamed"), logged.slice(from).join("\n"));
+    assert.deepEqual([copiedAt("a"), copiedAt("b")], copies, "never copied again");
+    assert.equal(carried(url, names.publication), "public.b");
+    psql(url, "UPDATE b SET v = 'streamed after the restart' WHERE id = 8");
+    await sync.caughtUp();
+    assert.ok(await same("b"));
+  } finally { await sync.stop(); store.close(); }
+});
+
+test("a named publication is never altered by a sync change: a replicated table it lacks is refused with its ADD TABLE line, the polled table beside it goes on", { skip }, async () => {
+  const db = `${tag}_np`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE a (id int PRIMARY KEY, v text); CREATE TABLE b (id int PRIMARY KEY, v text); CREATE TABLE c (id int PRIMARY KEY, v text); " +
+    "INSERT INTO a SELECT g, 'a' || g FROM generate_series(1, 5) g; INSERT INTO b SELECT g, 'b' || g FROM generate_series(1, 5) g; INSERT INTO c SELECT g, 'c' || g FROM generate_series(1, 5) g; " +
+    "CREATE PUBLICATION owners_pub FOR TABLE a");
+  const definition = (): string => psql(url, "SELECT p.xmin, p.oid FROM pg_publication p WHERE pubname = 'owners_pub'") + "\n" + carried(url, "owners_pub");
+  const defined = definition();
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "np.db"), (l) => logged.push(l));
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "poll", { slot: `${tag}_np`, publication: "owners_pub", owned: false });
+  const same = async (t: string): Promise<boolean> => await rowsOf(store, `SELECT id, v FROM public.${t} ORDER BY 1`) === psql(url, `SELECT id, v FROM ${t} ORDER BY 1`);
+  try {
+    await sync.open();
+    await sync.setTables([tableOf("a", REPL), tableOf("b", REPL), tableOf("c", POLL("1s", 1))]);
+    sync.start();
+    await until(() => sync.state().find((s) => s.source === "public.b")?.error?.startsWith("replication: ") === true && settled(sync, ["public.a", "public.c"])(), "b refused, a and c kept", logged);
+    const b = sync.state().find((s) => s.source === "public.b")!;
+    assert.match(b.error!, /^replication: publication owners_pub does not carry what Mason's copy of the table holds\.\n/);
+    assert.match(b.error!, /\n {2}ALTER PUBLICATION owners_pub ADD TABLE\n {4}public\.b \(id, v\);\n/);
+    assert.match(b.error!, /give the table's entry sync: poll <interval> in the sources file/);
+    psql(url, "UPDATE a SET v = 'streamed' WHERE id = 1; UPDATE c SET v = 'polled' WHERE id = 1");
+    await sync.caughtUp();
+    assert.ok(await same("a"), "the carried table streams on");
+    await until(() => same("c"), "the polled table polled on", logged, 10_000);
+  } finally { await sync.stop(); store.close(); }
+  assert.equal(definition(), defined, "the named publication is never altered: byte-equal, its catalog row's version included");
+});
+
+test("REPLICA IDENTITY NOTHING under sync: replication is refused at the file's read, with the line to write, and by the run should it change after", { skip }, async () => {
+  const db = `${tag}_ri`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE a (id int PRIMARY KEY, v text); CREATE TABLE n (id int PRIMARY KEY, v text); ALTER TABLE n REPLICA IDENTITY NOTHING; " +
+    "INSERT INTO a SELECT g, 'a' || g FROM generate_series(1, 5) g; INSERT INTO n SELECT g, 'n' || g FROM generate_series(1, 5) g");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const [A, N] = await tablesOf(parsed.source, ["public.a", "public.n"]);
+  assert.deepEqual([A!.replicaIdentity, N!.replicaIdentity], ["d", "n"], "the catalog read says each table's replica identity");
+  // at the file's read: one report, the line to write
+  const { parseSourceText } = await import("../../src/cli/sources.ts");
+  const file = parseSourceText("kind: postgres\nurl: x\nsync: replication\ntables:\n  a: {}\n  n: {}\n", "app", "/p/mason/sources/app.yml");
+  if ("problems" in file) throw new Error(file.problems.join("; "));
+  const refused = addedTables(file, [A!, N!] as unknown as Parameters<typeof addedTables>[1], db, "/p");
+  assert.ok(!Array.isArray(refused));
+  assert.equal(refused.message, "mason/sources/app.yml: tables.n: public.n has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail (sync: replication) — " +
+    "give its entry sync: poll <interval> (poll 5m), or sync: off; or ALTER TABLE public.n REPLICA IDENTITY DEFAULT on the database");
+  // by the run: an identity changed after the start refuses the replicated tables, by name, and the polled one goes on
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "ri.db"), (l) => logged.push(l));
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "poll", { slot: `${tag}_ri`, publication: `${tag}_ri`, owned: true });
+  try {
+    await sync.open();
+    await sync.setTables([{ ...N!, sync: REPL }, { ...A!, sync: POLL("1s", 1) }]);
+    sync.start();
+    await until(() => (sync.state().find((s) => s.source === "public.n")?.error ?? "").includes("REPLICA IDENTITY NOTHING") && settled(sync, ["public.a"])(), "n refused, a polled", logged);
+    assert.match(sync.state().find((s) => s.source === "public.n")!.error!, /^replication: public\.n has REPLICA IDENTITY NOTHING: .* Give its entry sync: poll <interval> \(poll 5m\) in the sources file/);
+    assert.equal(psql(url, `SELECT count(*) FROM pg_publication WHERE pubname = '${tag}_ri'`), "0", "no publication carries it");
+    psql(url, "UPDATE a SET v = 'polled' WHERE id = 1");
+    await until(async () => await rowsOf(store, "SELECT v FROM public.a WHERE id = 1") === "polled", "the polled table polled on", logged, 10_000);
+  } finally { await sync.stop(); store.close(); }
 });

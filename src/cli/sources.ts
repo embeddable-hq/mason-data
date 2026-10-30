@@ -5,9 +5,14 @@
  *
  *   kind: postgres
  *   url: ${DATABASE_URL}          an env var from .env.local, .env or the shell; a literal URL for local dev
+ *   sync: off                     how each table is kept current after its first copy (src/lib/table-sync.ts): off
+ *                                 (the default: until mason sync <table>), poll <interval> or replication; an entry's
+ *                                 own overrides it
+ *   publication: ${PG_PUBLICATION}  the publication `replication` reads, its owner's (never altered); none: Mason's own
  *   tables:
  *     orders:                     a bare name is in `public`; `billing.invoices` names its schema
  *       columns: [id, customer_id, status]
+ *       sync: poll 30s            this table polled every 30 seconds
  *     customers: {}               every column
  *     events:
  *       exclude: [raw_body]       every column but these
@@ -31,10 +36,11 @@ import { closest, didYouMean } from "../lib/did-you-mean.ts";
 import type { Failure, NextStep } from "./command.ts";
 import { maskedUrl, type SourceTable } from "./preflight.ts";
 import type { AddedTable } from "../duck/sync.ts";
+import { DEFAULT_SYNC, parseSync, syncText, type SourcesTop, type TableSync } from "../lib/table-sync.ts";
 
 export const SOURCES_DIR = "sources";
-const KEYS = ["kind", "url", "tables"] as const;
-const ENTRY_KEYS = ["columns", "exclude", "key"] as const;
+const KEYS = ["kind", "url", "sync", "publication", "tables"] as const;
+const ENTRY_KEYS = ["columns", "exclude", "key", "sync"] as const;
 const ENV_REF = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 
 /** A table the file names, as it names it. */
@@ -49,6 +55,8 @@ export interface TableEntry {
   exclude: string[];
   /** the columns it is copied by, for a table the source gives no primary key; null: the primary key */
   key: string[] | null;
+  /** how it is kept current, as its entry says (null: the file's `sync:`, else the default: `effectiveSync`) */
+  sync: TableSync | null;
 }
 
 export interface SourceFile {
@@ -59,7 +67,24 @@ export interface SourceFile {
   kind: "postgres";
   /** where the URL comes from: `${NAME}` (resolved by `readSource`) or the URL written in the file */
   url: { env: string } | { literal: string };
+  /** every table's sync unless its entry says its own, as the file says it at the top (null: not written, so `off`) */
+  sync: TableSync | null;
+  /** the publication the `replication` tables are read through, its owner's: `${NAME}` (resolved by `readSource`) or
+   *  its name written in the file; null: none named, so Mason makes its own (src/duck/sync.ts ensurePublication) */
+  publication: { env: string } | { literal: string } | null;
   tables: TableEntry[];
+}
+
+/** The tables a file keeps current by replication, by their effective sync (`effectiveSync`): what streams. */
+export function replicatedEntries(src: Pick<SourceFile, "sync" | "tables">): TableEntry[] {
+  return src.tables.filter((e) => effectiveSync(src, e).sync.mode === "replication");
+}
+
+/** A table's sync: its entry's, else the file's, else the default (`off`) — and which of the three said it. */
+export function effectiveSync(src: Pick<SourceFile, "sync">, e: Pick<TableEntry, "sync"> | undefined): { sync: TableSync; from: "entry" | "file" | "default" } {
+  if (e?.sync) return { sync: e.sync, from: "entry" };
+  if (src.sync) return { sync: src.sync, from: "file" };
+  return { sync: DEFAULT_SYNC, from: "default" };
 }
 
 /** The file read and its URL resolved: what the run, `mason tables` and `mason doctor` connect with. */
@@ -68,6 +93,8 @@ export interface ProjectSource extends SourceFile {
   resolved: string;
   /** where it was read: `DATABASE_URL in .env`, `DATABASE_URL in the shell`, or the file's own path */
   from: string;
+  /** the publication `publication:` names, resolved (null: none named) */
+  publicationName: string | null;
 }
 
 /** A file as messages name it: relative to the project's root. */
@@ -161,6 +188,25 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
     else url = { literal: v.url.trim() };
   }
 
+  // the publication a replicated table is read through: a name, or ${NAME} as url: takes one (resolved by readSource)
+  let publication: SourceFile["publication"] = null;
+  if (v.publication !== undefined && v.publication !== null) {
+    const p = typeof v.publication === "string" ? v.publication.trim() : "";
+    const m = ENV_REF.exec(p);
+    if (p === "") problems.push("publication: write publication: ${PG_PUBLICATION}, or a publication's name (leave it out and Mason makes its own)");
+    else if (m) publication = { env: m[1]! };
+    else if (p.includes("$")) problems.push(`publication: ${JSON.stringify(p)} — write \${NAME} alone, like \${PG_PUBLICATION}, or the publication's name`);
+    else publication = { literal: p };
+  }
+
+  // every table's sync, unless its entry says its own (src/lib/table-sync.ts: one grammar, `mason add --sync` reads it too)
+  let sync: TableSync | null = null;
+  if (v.sync !== undefined) {
+    const s = parseSync(v.sync);
+    if ("problem" in s) problems.push(`sync: ${s.problem}`);
+    else sync = s;
+  }
+
   const tables: TableEntry[] = [];
   const tablesNode = isMap(doc.contents) ? (doc.contents as YAMLMap).items.find((p) => isScalar(p.key) && p.key.value === "tables")?.value : undefined;
   const odd = new Set<string>();
@@ -185,22 +231,24 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
       const before = seen.get(table);
       if (before !== undefined) { problems.push(`${at}: ${table} is named twice (as ${before} too) — keep one`); continue; }
       seen.set(table, key);
-      if (raw !== null && !isPlain(raw)) { problems.push(`${at}: is {} (every column), { columns: [...] }, { exclude: [...] } or { key: [...] }`); continue; }
+      if (raw !== null && !isPlain(raw)) { problems.push(`${at}: is {} (every column), { columns: [...] }, { exclude: [...] }, { key: [...] } or { sync: poll 5m }`); continue; }
       const e = raw ?? {};
       const stray = Object.keys(e).filter((k) => !(ENTRY_KEYS as readonly string[]).includes(k));
-      for (const k of stray) problems.push(`${at}: unexpected key ${k}${didYouMean(k, ENTRY_KEYS)} — a table takes columns, exclude and key`);
+      for (const k of stray) problems.push(`${at}: unexpected key ${k}${didYouMean(k, ENTRY_KEYS)} — a table takes columns, exclude, key and sync`);
       const both = e.columns !== undefined && e.exclude !== undefined;
       if (both) problems.push(`${at}: columns and exclude together — columns names what is copied, exclude what is left out of every column; keep one`);
       const columns = e.columns === undefined ? null : nameList(e.columns, `${at}.columns`, "the columns copied");
       const exclude = e.exclude === undefined ? [] : nameList(e.exclude, `${at}.exclude`, "the columns left out");
       const ownKey = e.key === undefined ? null : nameList(e.key, `${at}.key`, "the columns that tell its rows apart");
       for (const x of [columns, exclude, ownKey]) if (typeof x === "string") problems.push(x);
-      if (typeof columns === "string" || typeof exclude === "string" || typeof ownKey === "string" || stray.length || both) continue;
-      tables.push({ name: key, table, columns, exclude, key: ownKey });
+      const ownSync = e.sync === undefined ? null : parseSync(e.sync);
+      if (ownSync !== null && "problem" in ownSync) problems.push(`${at}.sync: ${ownSync.problem}`);
+      if (typeof columns === "string" || typeof exclude === "string" || typeof ownKey === "string" || stray.length || both || (ownSync !== null && "problem" in ownSync)) continue;
+      tables.push({ name: key, table, columns, exclude, key: ownKey, sync: ownSync });
     }
   }
   if (problems.length || kind === null || url === null) return { problems };
-  return { name, file, kind, url, tables };
+  return { name, file, kind, url, sync, publication, tables };
 }
 
 /** Where a project's source files are: `<folder>/sources/`. */
@@ -213,16 +261,50 @@ export function sourceFileNames(folder: string): string[] {
   return fs.readdirSync(dir).filter((f) => /\.ya?ml$/.test(f) && !f.startsWith(".")).sort();
 }
 
-/** The file `mason init` writes: the database, then its tables — none yet, but for `mason init demo`'s, which names the
+/**
+ * THE TOP OF A PROJECT'S SOURCES FILE, for a retired setting's way out (src/lib/table-sync.ts `topEdit`): its one file
+ * as a person names it from `root`, and the values its top-level `sync:` and `publication:` lines hold as written, so
+ * the way out changes the line the file has rather than writing a second. No file (or several): the place every
+ * project's file has, and no line. A file that cannot be read or parsed is said by the run in its own words
+ * (`readSource`); here it only words the edit, as for a file with no such line.
+ */
+export function sourcesTop(root: string, folder: string): SourcesTop {
+  const names = sourceFileNames(folder);
+  if (names.length !== 1) return { shown: `${shownPath(root, sourcesDir(folder))}/<name>.yml`, sync: null, publication: null };
+  const file = path.join(sourcesDir(folder), names[0]!);
+  const shown = shownPath(root, file);
+  let text: string;
+  try { text = fs.readFileSync(file, "utf8"); }
+  catch (e) {
+    // the run's own read says it, with the file and the error (readSource); the edit is worded as for no line
+    if ((e as NodeJS.ErrnoException).code === undefined) throw e;
+    return { shown, sync: null, publication: null };
+  }
+  const doc = parseDocument(text);
+  const at = (key: "sync" | "publication"): string | null => {
+    if (!isMap(doc.contents)) return null;
+    const node = doc.contents.get(key, true);
+    if (node === undefined || node === null) return null;
+    return isScalar(node) ? String(node.value) : String(node);
+  };
+  return { shown, sync: at("sync"), publication: at("publication") };
+}
+
+/** The file `mason init` writes: the database, how its tables are kept current (`sync`: `off`, the default; the demo's
+ *  `poll 5s`, so it shows a copy keeping up), then its tables — none yet, but for `mason init demo`'s, which names the
  *  demo database's tables (`tables`, each copied whole: `{}`), so its first start copies them and shows something. */
-export function newSourceText(url = "${DATABASE_URL}", tables: readonly string[] = []): string {
+export function newSourceText(url = "${DATABASE_URL}", tables: readonly string[] = [], sync: TableSync = DEFAULT_SYNC): string {
   return "# The database this project copies from, and which of its tables. Yours to commit; the URL stays out of it.\n" +
     "kind: postgres\n" +
     `url: ${url}${ENV_REF.test(url) ? "   # from .env.local, .env or the shell; a literal postgres:// URL works too" : ""}\n` +
+    `sync: ${syncText(sync)}${sync.mode === "off" ? "   # after its first copy, a table is read again only by mason sync <table> (poll 5m: every 5 minutes)"
+      : sync.mode === "replication" ? "   # each table kept current from the database's change log after its first copy (poll 5m, or off, on an entry)"
+      : `   # each table polled every ${sync.every} after its first copy (off: read again only by mason sync <table>)`}\n` +
     "\n" +
     "# One entry per table, a bare name in public, else schema.table: {} copies every column, columns: [id, status]\n" +
     "# those, exclude: [payload] every column but those; key: [a, b] names the columns that tell its rows apart, for a\n" +
-    "# table with no primary key. mason add and mason remove edit this list; so can you.\n" +
+    "# table with no primary key; sync: poll 30s (or off) keeps that table current its own way. mason add and mason remove\n" +
+    "# edit this list; so can you.\n" +
     (tables.length ? `tables:\n${tables.map((t) => `  ${t}: {}\n`).join("")}` : "tables: {}\n");
 }
 
@@ -238,7 +320,7 @@ export const OLD_TABLES_DIR = "models";
 /**
  * THE PROJECT'S SOURCE FILE, read: the one file in `sources/` (a second is refused by name: one source per project for
  * now), parsed, its URL resolved — `${NAME}` from the project's .env.local or .env, else the shell (src/lib/dotenv.ts
- * `appEnvValue`, the order `mason init` reads DATABASE_URL in, so the two cannot disagree); `shellFirst` for a server
+ * `appEnvValue`, the order `mason init` reads MASON_DATABASE_URL and DATABASE_URL in, so the two cannot disagree); `shellFirst` for a server
  * (`mason serve`), configured by its environment alone. A project with no file is told what to write — one an older
  * Mason made (its tables listed in another folder, which nothing reads) that mason init writes it.
  */
@@ -263,14 +345,27 @@ export function readSource(folder: string, root: string, env: NodeJS.ProcessEnv 
   const file = path.join(dir, names[0]!);
   const parsed = parseSourceText(fs.readFileSync(file, "utf8"), names[0]!.replace(/\.ya?ml$/, ""), file);
   if ("problems" in parsed) return sourceFailure(file, root, parsed.problems);
-  if ("literal" in parsed.url) return { ...parsed, resolved: parsed.url.literal, from: shownPath(root, file) };
+  const where = o.shellFirst ? "the environment, .env.local or .env" : ".env.local, .env or the shell";
+  // the publication's name, read as url: is: ${NAME} from the same places, in the same order
+  let publicationName: string | null = null;
+  if (parsed.publication !== null && "literal" in parsed.publication) publicationName = parsed.publication.literal;
+  else if (parsed.publication !== null) {
+    const v = parsed.publication.env;
+    const p = appEnvValue(root, v, env, { shellFirst: o.shellFirst === true });
+    if (p === null || p.value.trim() === "") {
+      return { message: `${shownPath(root, file)}: publication: \${${v}} is not set — not in ${where}`, code: "bad_source",
+        fix: `put ${v}=<the publication's name> in ${shownPath(root, path.join(root, ENV_FILE))} (or export it), or take publication: out of the file and Mason makes its own` };
+    }
+    publicationName = p.value.trim();
+  }
+  if ("literal" in parsed.url) return { ...parsed, resolved: parsed.url.literal, from: shownPath(root, file), publicationName };
   const found = appEnvValue(root, parsed.url.env, env, { shellFirst: o.shellFirst === true });
   if (found === null) {
     const v = parsed.url.env;
-    return { message: `${shownPath(root, file)}: url: \${${v}} is not set — not in ${o.shellFirst ? "the environment, .env.local or .env" : ".env.local, .env or the shell"}`, code: "bad_source",
+    return { message: `${shownPath(root, file)}: url: \${${v}} is not set — not in ${where}`, code: "bad_source",
       fix: `put ${v}=postgres://user:password@host:5432/your_app in ${shownPath(root, path.join(root, ENV_FILE))} (or export it), or write the URL in url:` };
   }
-  return { ...parsed, resolved: found.value, from: `${parsed.url.env} in ${found.from}` };
+  return { ...parsed, resolved: found.value, from: `${parsed.url.env} in ${found.from}`, publicationName };
 }
 
 /** The columns a table's copy keeps, in the source's order: the entry's, its key always among them. */
@@ -281,7 +376,7 @@ export function copiedColumns(t: SourceTable, e: Pick<TableEntry, "columns" | "e
 }
 
 /** Why a table cannot be copied as its entry says, each at its key, against the database's catalog; none when it can. */
-export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: readonly SourceTable[], database: string, o: { replication: boolean }): string[] {
+export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: readonly SourceTable[], database: string, sync: TableSync): string[] {
   const at = `tables.${e.name}`;
   if (t === undefined) {
     const names = all.map((x) => entryName(x.source));
@@ -297,7 +392,7 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
       out.push(...missing(e.key, "key"));
       out.push(...keyProblems(t, e.key, at));
       // its rows have no identity on the database, so logical replication carries no key to apply a change by
-      if (o.replication) out.push(`${at}: ${t.source} has no primary key, and logical replication cannot apply its changes by key: — copy it by polling (mason start --poll), or remove it`);
+      if (sync.mode === "replication") out.push(`${at}: ${t.source} has no primary key, so logical replication cannot apply its changes by its key: (sync: replication) — give its entry sync: poll <interval> (poll 5m), or sync: off`);
     }
   } else if (!t.key.length) {
     const unique = (t.uniqueKeys ?? []).find((u) => u.columns.every((c) => t.columns.find((x) => x.name === c)?.notNull === true));
@@ -305,6 +400,12 @@ export function entryProblems(t: SourceTable | undefined, e: TableEntry, all: re
       `${unique ? ` (its unique index ${unique.name})` : ""}`);
   }
   for (const k of (e.key ?? t.key).filter((k) => e.exclude.includes(k))) out.push(`${at}.exclude: ${k} is ${t.source}'s key, which is always copied — take it out of exclude`);
+  // a table that identifies no changed row: a publication carrying its updates would make the app's own UPDATEs and
+  // DELETEs on it fail (the catalog says so; the file cannot), so it is never replicated
+  if (sync.mode === "replication" && t.replicaIdentity === "n" && e.key === null) {
+    out.push(`${at}: ${t.source} has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail (sync: replication) — ` +
+      `give its entry sync: poll <interval> (poll 5m), or sync: off; or ALTER TABLE ${t.source} REPLICA IDENTITY DEFAULT on the database`);
+  }
   return out;
 }
 
@@ -336,16 +437,17 @@ function keyProblems(t: SourceTable, key: readonly string[], at: string): string
  * `primaryKey` keeps the source's own (none): the catalog declares only what the source does. Every entry's problems on
  * one report (`sourceFailure`).
  */
-export function addedTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string, o: { replication: boolean }): AddedTable[] | Failure {
+export function addedTables(src: SourceFile, tables: readonly SourceTable[], database: string, root: string): AddedTable[] | Failure {
   const problems: string[] = [];
   const out: AddedTable[] = [];
   for (const e of src.tables) {
     const t = tables.find((x) => x.source === e.table);
-    const p = entryProblems(t, e, tables, database, o);
+    const sync = effectiveSync(src, e).sync;
+    const p = entryProblems(t, e, tables, database, sync);
     if (p.length || t === undefined) { problems.push(...p); continue; }
     const keep = new Set(copiedColumns(t, e));
     out.push({ ...t, columns: t.columns.filter((c) => keep.has(c.name)), foreignKeys: t.foreignKeys.filter((f) => keep.has(f.column)),
-      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}) });
+      ...(e.key !== null ? { key: e.key, primaryKey: t.key } : {}), sync });
   }
   return problems.length ? sourceFailure(src.file, root, problems, [["mason tables", "the database's tables and their columns"]]) : out;
 }
@@ -360,14 +462,20 @@ export interface RunSources { file: SourceFile; tables: AddedTable[]; problem: s
  * problem: the run's catalog is the old database's, so it is said, and mason stop && mason start reads the new one.
  */
 export function rereadSources(prev: RunSources, read: ProjectSource | Failure, runUrl: string, catalog: readonly SourceTable[], database: string, root: string,
-  o: { replication: boolean }): RunSources & { said: string | null } {
+  o: { replicationChecked?: boolean } = {}): RunSources & { said: string | null } {
   let problem: string | null = null;
   let next: AddedTable[] | null = null;
   if ("message" in read) problem = `${read.message}${read.why ? `: ${read.why.replace(/\n/g, "; ")}` : ""}`;
   else if (read.resolved !== runUrl) {
     problem = `${shownPath(root, read.file)}: url: now names ${maskedUrl(read.resolved)} (${read.from}), and this run copies ${maskedUrl(runUrl)}: mason stop && mason start copies from the new one`;
+  } else if (o.replicationChecked === false && replicatedEntries(read).length > 0) {
+    // a table set to replication in a run that never checked the database for it (the commands' edits are checked, the
+    // run server's checkReplication): kept as it was, never frozen by a slot the database cannot make
+    const names = replicatedEntries(read).map((e) => entryName(e.table));
+    problem = `${shownPath(root, read.file)}: ${names.join(", ")} ${names.length === 1 ? "is" : "are"} sync: replication, and this run has not checked ${database} for logical replication ` +
+      "(no table was replicated when it started): mason stop && mason start checks it and streams them";
   } else {
-    const t = addedTables(read, catalog, database, root, o);
+    const t = addedTables(read, catalog, database, root);
     if (Array.isArray(t)) next = t;
     else problem = `${t.message}${t.why ? `: ${t.why.replace(/\n/g, "; ")}` : ""}`;
   }
@@ -419,12 +527,16 @@ export function chooseColumns(t: SourceTable, asked: readonly string[], key: rea
 const yamlName = (n: string): string => /^[A-Za-z_][A-Za-z0-9_$.]*$/.test(n) && !/^(true|false|null|yes|no|on|off|y|n)$/i.test(n) ? n : JSON.stringify(n);
 const flowList = (xs: readonly string[]): string => `[${xs.map(yamlName).join(", ")}]`;
 
+/** An entry as `mason add` writes it: its columns, key and its own sync (none: it follows the file's) */
+export type WrittenEntry = Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key"> & { sync?: TableSync | null };
+
 /** An entry's lines at `indent`: `name: {}` on one line, else its keys a line each under it. */
-export function entryText(e: Pick<TableEntry, "name" | "columns" | "exclude" | "key">, indent: string): string {
+export function entryText(e: Omit<WrittenEntry, "table">, indent: string): string {
   const body: string[] = [];
   if (e.columns !== null) body.push(`columns: ${flowList(e.columns)}`);
   else if (e.exclude.length) body.push(`exclude: ${flowList(e.exclude)}`);
   if (e.key !== null) body.push(`key: ${flowList(e.key)}`);
+  if (e.sync) body.push(`sync: ${syncText(e.sync)}`);
   if (!body.length) return `${indent}${yamlName(e.name)}: {}\n`;
   return `${indent}${yamlName(e.name)}:\n${body.map((b) => `${indent}  ${b}\n`).join("")}`;
 }
@@ -459,7 +571,7 @@ function entryPairs(map: YAMLMap): Array<{ pair: Pair; table: string; name: stri
  * (the `yaml` package's node ranges), never re-serialised, so a person's comments, quoting and layout stay theirs. A
  * reason instead when the map cannot be spliced (a `{ … }` flow map with entries, a file that does not parse).
  */
-export function withTable(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key">): { text: string } | { problem: string } {
+export function withTable(text: string, e: WrittenEntry): { text: string } | { problem: string } {
   return inOwnLineEndings(text, (t) => withTableLf(t, e));
 }
 
@@ -474,7 +586,7 @@ function inOwnLineEndings<R extends { text: string } | { problem: string } | nul
   return (r !== null && "text" in r ? { ...r, text: r.text.replace(/\n/g, "\r\n") } : r) as R;
 }
 
-function withTableLf(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key">): { text: string } | { problem: string } {
+function withTableLf(text: string, e: WrittenEntry): { text: string } | { problem: string } {
   const r = forEdit(text);
   if ("problem" in r) return r;
   const { pair, lineStart, lineEnd } = r;
@@ -506,6 +618,58 @@ function withTableLf(text: string, e: Pick<TableEntry, "name" | "table" | "colum
   const lv = last.value as Ranged | null;
   const at = lineEnd(lv?.range ? lv.range[1] : (last.key as Ranged).range![1]);
   return { text: `${text.slice(0, at)}${at > 0 && text[at - 1] !== "\n" ? "\n" : ""}${entryText(e, indent)}${text.slice(at)}` };
+}
+
+/**
+ * The file with ONE entry's own `sync:` set (`sync`), or taken out (null: it follows the file's again), and every other
+ * byte as it was — the entry's columns, key and comments too (`mason add orders --sync "poll 30s"` on a table already
+ * added): the value spliced at its node's range, a line of its own under the entry's last key at its keys' indent, or —
+ * an entry written as a flow map (`{}`, `{ columns: [...] }`) — the entry written again a key a line, a comment after it
+ * on the key's line kept. `e` is the entry as the file reads (its columns and key, for a flow map written again).
+ */
+export function withEntrySync(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key">, sync: TableSync | null): { text: string } | { problem: string } {
+  return inOwnLineEndings(text, (t) => withEntrySyncLf(t, e, sync));
+}
+
+function withEntrySyncLf(text: string, e: Pick<TableEntry, "name" | "table" | "columns" | "exclude" | "key">, sync: TableSync | null): { text: string } | { problem: string } {
+  const r = forEdit(text);
+  if ("problem" in r) return r;
+  const { pair, lineStart, lineEnd } = r;
+  const map = pair?.value;
+  if (!isMap(map)) return withTableLf(text, { ...e, sync });
+  if ((map as YAMLMap).flow) return { problem: FLOW_MAP };
+  const same = entryPairs(map as YAMLMap).find((x) => x.table === e.table);
+  if (same === undefined) return withTableLf(text, { ...e, sync });
+  const value = same.pair.value as (Ranged & YAMLMap) | null;
+  if (isMap(value) && !value.flow && value.items.length > 0) {
+    const own = value.items.find((p) => isScalar(p.key) && p.key.value === "sync");
+    if (own !== undefined) {
+      const k = own.key as Ranged, v = own.value as Ranged | null;
+      // its line cut, unless it is the entry's only key: then the entry is `{}` again
+      if (sync === null && value.items.length === 1) return withTableLf(text, { ...e, name: same.name, sync: null });
+      if (sync === null) return { text: `${text.slice(0, lineStart(k.range![0]))}${text.slice(lineEnd(v?.range ? v.range[1] : k.range![1]))}` };
+      if (!v?.range) return { problem: `its ${e.name}.sync: has no value to replace` };
+      return { text: `${text.slice(0, v.range[0])}${syncText(sync)}${text.slice(v.range[1])}` };
+    }
+    if (sync === null) return { text };
+    const first = value.items[0]!.key as Ranged;
+    const indent = text.slice(lineStart(first.range![0]), first.range![0]);
+    const last = value.items[value.items.length - 1]!;
+    const lv = last.value as Ranged | null;
+    const at = lineEnd(lv?.range ? lv.range[1] : (last.key as Ranged).range![1]);
+    return { text: `${text.slice(0, at)}${at > 0 && text[at - 1] !== "\n" ? "\n" : ""}${indent}sync: ${syncText(sync)}\n${text.slice(at)}` };
+  }
+  if (sync === null) return { text };
+  // a flow map (`orders: {}`, `orders: { columns: [id] }`) or nothing: the entry written again, a comment on its line kept
+  const k = same.pair.key as Ranged, v = value as Ranged | null;
+  // an entry with no value (`orders:   # c`) has an empty scalar placed AT its comment: the comment is read from the key
+  const after = v?.range && v.range[1] > v.range[0] ? v.range[1] : k.range![1];
+  const end = lineEnd(after);
+  const comment = /(\s+#.*)$/.exec(text.slice(after, end).replace(/\n$/, ""))?.[1] ?? "";
+  const indent = text.slice(lineStart(k.range![0]), k.range![0]);
+  const lines = entryText({ ...e, name: same.name, sync }, indent).split("\n");
+  lines[0] = `${lines[0]}${comment}`;
+  return { text: `${text.slice(0, lineStart(k.range![0]))}${lines.join("\n")}${text.slice(end)}` };
 }
 
 /**

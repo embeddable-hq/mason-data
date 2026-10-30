@@ -13,7 +13,7 @@
     "check": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "@duckdb/node-api": "^2.0.0-r.1",
+    "@duckdb/node-api": "2.0.0-r.1",
     "@electric-sql/pglite": "^0.5.10",
     "libpg-query": "^18.1.5",
     "pgsql-deparser": "18.3.8",

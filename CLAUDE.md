@@ -100,6 +100,10 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   the engine or the listener changed), and merges it. A sub-agent's report is its claim, not the evidence. Two
   implementations of two hours each ran side by side; the review-and-fix round after them was the next hour and a half,
   so the time to land a batch is the slowest implementation plus one review cycle, never the sum.
+- **Implementation runs on Opus 5.5; every review is Fable's.** A sub-agent or a session that writes code is started
+  on Opus 5.5 (`model: "opus"` on the Agent tool, `model: "claude-opus-5-5"` on a session: a session INHERITS the
+  coordinator's model when none is named). The independent review of a PR is done by the coordinating session itself
+  (Fable) or by a Fable agent, never by an Opus one: the reviewer must outread the author (2026-10-29).
 
 ## Git workflow
 
@@ -120,7 +124,8 @@ that needs a migration, a column, a backfill or a write-path change on the sourc
 user needs REPLICATION), and its own publication only when none is named (a named one is read and verified, never
 created, altered or dropped). **Keep the load on Mason's side** (overloading the source Postgres is the last thing
 Mason may do): a copy reads `MASON_COPY_PARALLEL` chunks at once, one backend each, never the attached scan's ten; the
-poll is a full scan of every polled table, so only tables under `POLL_ROW_LIMIT` are polled; a SELECT on the source
+poll is a full scan of the table, so a table is polled only when its `sync:` says so, and `mason add` writes `sync: off` for
+a big one; a SELECT on the source
 never carries an `ORDER BY`. `.claude/rules/duckdb.md` "The copy" has the rules and the numbers.
 
 **A real database's data and structures are confidential.** No real table, column or dataset name, and no row, from
@@ -138,6 +143,7 @@ npm run test:integration              # the real copy, stream, listener, serve a
                                       #   (a throwaway Postgres; tests/integration/README.md)
 node src/cli/main.ts --help           # the mason command from the checkout (every command, by step)
 node cli/build.ts                     # the npm package: src/ compiled to cli/dist/
+node cli/extensions.ts                # its platform packages (the copy's extensions, checksums pinned) in cli/platforms/
 docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; deploy/mason-data/compose.yml runs it
 scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it must fail with src/ as it was at <commit>
 ```
@@ -197,7 +203,8 @@ every session needs. Write the rule and one sentence of why; the incident, the m
   only — never by sniffing an environment variable that names an agent. A failure is one shape for both: what is wrong,
   why, the way out, what to run next (`Failure`, `src/cli/command.ts`).
 - **A refusal on the wire is Postgres's** (SQLSTATE, message, DETAIL, HINT), and every refusal names its registry entry
-  (`src/duck/gaps.ts`): a refusal without one does not compile.
+  (`src/duck/gaps.ts`): a DuckDB-side refusal without one does not compile; a `PgError` 0A000 in src/api/ without one fails
+  `tests/conventions.test.ts` (six older ones are ratcheted there).
 - **Never swallow an error.** No bare `.catch(() => {})`, no empty `catch {}`, no `2>/dev/null` or `|| true` over a failure
   you have not reasoned about. **A step that fails must never report success.** If a failure is genuinely tolerable,
   catch it narrowly, say why in a comment, log it, and — if the operation changed state — VERIFY the outcome afterwards.
@@ -262,13 +269,16 @@ that implements it, and fix the doc in the same change. This file included.
 ## Hard-won gotchas (violating these costs hours)
 
 - **A replication slot outlives its reader**, and holds the source's WAL while nobody reads it — for ever, whatever the
-  disk. So the SOURCE caps it: `max_slot_wal_keep_size` (Postgres 13+). `mason stop` says the slot stays; `mason destroy`
-  and `--poll` drop it, verified gone. A deployment torn down for good must drop its slot.
+  disk. So the SOURCE caps it: `max_slot_wal_keep_size` (Postgres 13+). `mason stop` says the slot stays; `mason destroy`,
+  and a start whose sources file has no table with `sync: replication`, drop it, verified gone. A deployment torn down for good must drop its slot.
 - **One process per DuckDB file.** The store opens the file once; `mason user` edits `.mason/users.json` beside it and
   the listener re-reads the file, because a second process cannot open the store. A platform runs ONE replica.
 - **`pgrep -f <pattern>` matches itself** inside a shell string; **never kill by a broad pattern** — kill by a checked PID.
 - **A read-replica source emits permanent benign WARNs** (`could not send wal heartbeat … during recovery`); not a fault.
 - **Postgres.app 18** guards passwordless `trust` connections with a macOS dialog that hangs clients; use password auth
   for the `postgres` role.
+- **CI runs Node 26, never 24**: Node 24's V8 aborts a process now and then when a WebAssembly instance (PGlite,
+  libpg-query) dies on one thread beside another's (`jit_page_->allocations_.erase(addr) == 1`, nodejs/node#66366), so
+  that crash on Node 24 is the runtime's, not the branch's (docs/DESIGN.md "The Node CI runs on").
 - **The browser and a BI tool cache**: confirm the new code is live (`mason --version`, `/healthz`) before believing a
   measurement.

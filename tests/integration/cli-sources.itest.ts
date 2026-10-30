@@ -86,7 +86,7 @@ test("init writes the sources file; tables, add and remove read and edit it; the
     "INSERT INTO events SELECT 1 + g % 3, g, 'k' || g, repeat('b', 10) FROM generate_series(1, 30) g");
   fs.mkdirSync(root);
   fs.mkdirSync(home);
-  env = { PATH: process.env.PATH ?? "", HOME: home, MASON_PG_PORT: String(await freePort()), MASON_POLL_MS: "500" };
+  env = { PATH: process.env.PATH ?? "", HOME: home, MASON_PG_PORT: String(await freePort()) };
 
   // INIT: the sources file names the variable, .env holds the URL, the config holds no URL
   const init = ok(mason("init", dbUrl, "--name", "shopit", "--json"), "mason init");
@@ -94,9 +94,12 @@ test("init writes the sources file; tables, add and remove read and edit it; the
   const said = init.json.source as { file: string; url: string; env: string | null };
   assert.deepEqual([said.file, said.url], [file, "${DATABASE_URL}"]);
   assert.match(said.env ?? "", /^DATABASE_URL=postgres(ql)?:\/\/postgres:\*\*\*\*@/, "the .env line it wrote, its password masked");
+  const init_ = fs.readFileSync(file, "utf8");
+  assert.match(init_, /^kind: postgres\nurl: \$\{DATABASE_URL\}[ #].*\nsync: off {3}# /m, "init writes sync: off, with what it means");
+  assert.ok(init_.endsWith("\ntables: {}\n"), init_);
+  // every table polled every second, as a person writes it at the file's top: the run below is kept current by polling
+  fs.writeFileSync(file, init_.replace(/^sync: off {3}#.*$/m, "sync: poll 1s"));
   const written = fs.readFileSync(file, "utf8");
-  assert.match(written, /^kind: postgres\nurl: \$\{DATABASE_URL\}[ #].*\n/m);
-  assert.ok(written.endsWith("\ntables: {}\n"), written);
   // everything above tables: stays byte for byte through every add and remove below
   const HEAD = written.slice(0, written.length - "tables: {}\n".length);
   assert.match(fs.readFileSync(path.join(root, ".env"), "utf8"), new RegExp(`^DATABASE_URL=${dbUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
@@ -145,7 +148,7 @@ test("init writes the sources file; tables, add and remove read and edit it; the
   const st = ok(mason("status"), "mason status");
   assert.match(st.stdout, new RegExp(`Web UI +http://127\\.0\\.0\\.1:${pageUrl.port}/  \\(mason ui opens it\\)`));
   assert.ok(!st.stdout.includes(token) && !fs.readFileSync(path.join(root, ".mason", "dev.log"), "utf8").includes(token), "the token is only mason ui's");
-  assert.match(fs.readFileSync(path.join(root, ".mason", "dev.log"), "utf8"), /^ {2}Web UI {2}mason ui {2}\(the status page and the users, in your browser\)$/m);
+  assert.match(fs.readFileSync(path.join(root, ".mason", "dev.log"), "utf8"), /^ {2}Web UI {2}mason ui {2}\(the status, tables, users and statements, in your browser\)$/m);
   assert.deepEqual(psqlWithHeader(api, "SELECT * FROM public.customers ORDER BY id"),
     { columns: "id\tname\temail", rows: psql(dbUrl, "SELECT id, name, email FROM customers ORDER BY id") }, "columns: only those, the key first");
   assert.deepEqual(psqlWithHeader(api, "SELECT * FROM public.orders ORDER BY id"),

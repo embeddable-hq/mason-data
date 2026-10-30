@@ -19,13 +19,16 @@ differently on a guess.
 ```bash
 mason user add metabase                             # the URL, the user and its password: paste them into the tool now
 mason user list                                     # metabase   id 81fcb84caead79b7 · added 2026-10-26 12:00 UTC
+mason user disable metabase                         # kept: its logins refused (28000) until mason user enable metabase
+mason user enable metabase                          # it connects again, with the same password
 mason user remove metabase                          # its next connection is refused; its sessions end at their next statement
 docker compose exec mason mason user add grafana    # beside mason serve, in its data folder
 ```
 
 **A user is how a tool connects** (`mason start` and `mason serve`): a BI tool's datasource stores ONE
 password. `mason user add <name>` makes a named user whose password does not expire and prints it ONCE, with the URL
-to connect with; `mason user list` says the users (name, id, when added); `mason user remove <name>` removes one.
+to connect with; `mason user list` says the users (name, id, when added); `mason user disable <name>` stops one connecting and
+`mason user enable <name>` lets it again; `mason user remove <name>` removes one.
 
 - **The user name must be the user's**: the password is `mason_<id>_<mac>`, the MAC over the user's name and id keyed
   by the project's API key, so a connection sending another name is refused as a wrong password is (28P01), the reason
@@ -39,12 +42,107 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
   connection is refused (28P01, "was removed"), and a session the user holds ends, FATAL (28000), at its next
   statement, whatever it is. A file that cannot be read refuses every user's connection and statement (57P03, the
   reason said), never lets one in. `mason destroy` keeps it, as it keeps the API key.
+- **A disabled user is kept, with its password** (`disabledAt` in the file): its login, the password right, is refused
+  as Postgres refuses a role without LOGIN — `28000`, `role "metabase" is not permitted to log in`, DETAIL `the user
+  "metabase" is disabled (mason user disable). Mason: user_disabled`, HINT `mason user enable metabase lets it connect
+  again, with the same password` — and a session it holds ends, FATAL (28000, "was disabled"), at its next statement, as a removed
+  user's does. A wrong password for it is a wrong password (28P01): the state is told only to the login's holder.
+  `mason user enable` clears it: the same password connects again. Disabling one disabled already (or enabling one
+  that is not) says so and changes nothing, exit 0.
 - **Rotating the API key removes every user at once** (`apiKey` in `.mason/config.json`, `MASON_API_KEY` under
   `mason serve`): no password verifies under the new key, the refusal says the key was rotated, and `mason user list`
   marks each as not connecting. Remove and add each again for new passwords.
 - **A name is one user**: adding an existing name is refused, with the way out (remove it, then add it: a new
   password; or add another name and remove the old one once the tool uses it). The password is never kept, so it
   cannot be printed again: a lost one is a remove and an add.
+
+### Roles
+
+**A role limits what a user reads to tables and columns**: `mason user add <name> --role <role>` names a role of the
+project's roles file, `mason/roles.yml` beside the sources file, written in the sources file's own words. `mason init`
+writes it, with today's access said in it — one role reading everything, the default:
+
+```yaml
+default: everything              # the role of a user added without --role
+roles:
+  everything:
+    tables: all                  # every copied table and column, those added to the sources file later included
+  agent:                         # the role's name
+    tables:
+      orders: {}                 # every column of a copied table
+      customers:
+        columns: [id, country]   # these columns only
+      billing.invoices:
+        exclude: [notes]         # every column but these
+```
+
+**The file decides what a user with no role reads, never the code**:
+
+- **no `mason/roles.yml`**: every user reads every copied table (`mason start` says so, and that `mason init` writes one);
+- **`default: <role>`**: a user added without `--role` reads as that role — its refusals, its catalog (`current_user`
+  is the role's name) and its request-log rows are the role's. Edit the line and the next statement of every such
+  session is held to the new default, with no restart;
+- **a file with no `default:`**: a user with no role reads NOTHING. Every statement that reads a copied table is
+  refused `42501 permission denied for table …`, the DETAIL `the user "<name>" has no role and mason/roles.yml names
+  no default`, the HINT the two ways out (`write default: <a role> at the top of mason/roles.yml, or mason user remove
+  <name> and mason user add <name> --role <a role>`); a statement that reads none (`SELECT 1`) is answered, and the
+  catalog answers as Postgres does for a login with no grant (it runs as a grant-less role, `__mason_no_role`):
+  `information_schema` lists no table or view, every `has_*_privilege` is false, `current_user`, `current_role` and
+  `user` are the user's own name, and `set_config` alone is the session's `SET`, as for every session. `mason start`
+  and `mason user list` name such users; `mason user add` still writes one, saying so.
+
+**Before upgrading from a release with roles but no `default:`**: a roles file from before this release names no
+default: write `default: <role>` at its top before upgrading, or its roleless users read nothing.
+
+A token (minted from the API key, no user) reads every copied table in every state. `tables: all` is Postgres's own word
+(`GRANT SELECT ON ALL TABLES IN SCHEMA`), resolved against the tables copied at every read: a table the sources file adds
+is the role's once its copy is served. A table key `all` under `tables:` is refused (`public.all` names a table called
+`all`).
+
+- **A role names copied tables only**: a table the sources file does not copy, a column the copy lacks, a role with
+  no table, a column both listed and excluded — each refuses `mason start` (and `mason user add --role`) by its key,
+  with the closest name and the way out, before anything opens. The file is read again whenever it changes, with no
+  restart; one edited into a mistake while Mason runs refuses every statement of a user with a role (57P03, the
+  mistake said) until it is repaired, never widens.
+- **It is enforced on the analysed tree, never on the statement's text**: after the catalog Postgres has analysed a
+  statement (views expanded, every name resolved) and before it is rewritten, every table it reads and every column
+  of each — in a WHERE, a CTE, a subquery, a USING or NATURAL join, a window, an ORDER BY, a GROUP BY, a CASE, a
+  lateral, a parameter, a prepared statement — is held to the role. A read past it is refused as Postgres refuses it:
+  `42501`, `permission denied for table orders` (Postgres's own message, which never names the column), the DETAIL
+  naming the role and the column (`the role agent may not read column notes of orders`), the HINT what the role may
+  read. `SELECT *` or `t.*` on a partly granted table is refused naming the first hidden column, never narrowed to the
+  granted ones; `count(*)` over a table of which the role reads any column is answered, as on Postgres; a system
+  column (`xmin`) needs the whole table, as on Postgres; a statement that reads no copied table is untouched.
+- **The role is read with the user before every statement** (the users file, `recheckMs: 0`): a role given, taken or
+  changed under a held session applies to its next statement — an EXECUTE of a statement prepared before included —
+  and a role the file no longer names refuses its users by name (42501, the way out: add it back, or remove and add
+  the user) rather than letting them read everything. `mason start` and `mason user list` say which users carry a
+  role the file lacks. A user with no role is held to the file's `default:` (above), read at every statement too; a
+  file that cannot be read refuses it as well (57P03): its default cannot be known.
+- **The catalog answers for the role**: one Postgres role per Mason role, with the same `GRANT SELECT` and
+  `GRANT SELECT (columns)`, lives in the catalog Postgres, rebuilt when the file or the copied tables change, and a
+  session with a role runs each catalog statement under `SET ROLE … RESET ROLE` in one request. So
+  `information_schema.tables` and `.columns` list the role what it may read, `has_table_privilege` /
+  `has_column_privilege` / `has_any_column_privilege` answer as Postgres's would for its grants (`current_user` is the
+  role's name, as under Postgres's own `SET ROLE`), and `mason mcp`'s
+  `tables` and `describe` (which ask them) list an agent only what its user may read. **`pg_catalog` itself is not
+  filtered in this stage**: `pg_class` and `pg_attribute` still list every copied column to every role (as they do on
+  Postgres, which filters neither), while a read of a hidden one is refused. **Every role may see every view** of the
+  source: reading one is held to the tables it reads, so a view over a hidden column is refused when read — stricter
+  than Postgres, where a view's owner's grants apply. No row filter yet (the gap `roles` in docs/SQL-SUPPORT.md).
+- **A session is its user and becomes no one else**: `SET ROLE` and `SET SESSION AUTHORIZATION` to its own name,
+  `NONE` or `RESET` are no-ops, and so is `SET ROLE` to the role it already is (its own, or the file's default: what
+  `current_user` says), as Postgres always allows; any other name is Postgres's refusal (`42501 permission denied to
+  set role "…"`), `SET SESSION AUTHORIZATION` to a role included;
+  `session_user` is the session's user and `current_user` its role. **`set_config` never reaches the embedded
+  Postgres**: `SELECT set_config('name', 'value', false)` on its own is the session's `SET` (so `set_config('role',
+  'none', false)` is `SET ROLE NONE`'s no-op, `set_config('role', '<the role it already is>', false)` is `SET ROLE`'s,
+  and any other role is the same 42501), and any other form is refused (below). Inside the embedded Postgres it is
+  also revoked while roles exist: that is one superuser connection with `SET ROLE` on top, and inside one statement
+  the call was a reset to the superuser (the hidden columns' NAMES, never rows, were listed by the rest of the
+  statement).
+- **Every refusal is a row of the request log with the role it was held to** (`role` in `_mason.requests`: the user's
+  own, or the file's default; empty for a token and for a user held to nothing).
 
 `mason start` listens on 5433 when it is free on every address (127.0.0.1, 0.0.0.0, `::` and `::1`: a port another
 Postgres holds on any of them would send a container or a driver trying `::1` first to that server), else on the next
@@ -132,7 +230,9 @@ of this API like any tool: it connects as a `mason user` by the URL `mason user 
 honours the URL's `sslmode`, and sets `application_name` to `mason-mcp/<the MCP client's name>`, so the request log
 names the agent. Its tools say over this wire what a bare SQL tool would leave a model to guess:
 
-- `tables` and `describe` read the catalog (`pg_class`, `pg_attribute`, `pg_index`, `pg_constraint`) and, for each
+- `tables` and `describe` read the catalog (`pg_class`, `pg_attribute`, `pg_index`, `pg_constraint`, filtered by
+  `has_table_privilege` / `has_any_column_privilege` and `has_column_privilege`, so a user with a role is shown what
+  it may read, "Roles" above) and, for each
   copy's rows and how it is kept current, `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` — one EXPLAIN a table, a few at
   once, so a remote `mason serve` answers as a local run does; a table is named as EXPLAIN names it, as a statement
   writes it (`public."Clients"`);
@@ -202,6 +302,29 @@ answer). `statement_timeout` is honoured, and may only shorten the run's own lim
 (the embedded Postgres validates it, inside a transaction it rolls back: the value is the session's alone); one it
 does not know is 42704.
 
+`SHOW ALL` (Postico sends it on connect) answers Postgres's three text columns, `name`, `setting` and
+`description`, a row per setting the embedded Postgres has, ordered by name, with this session's own values laid over
+(`TimeZone`, `search_path`, `application_name`, `DateStyle`, `ssl`, what it SET): each row's `setting` is what
+`SHOW <name>` answers. They are Mason's settings, never the source database's (`show-all` in
+[docs/SQL-SUPPORT.md](SQL-SUPPORT.md)).
+
+**One reader answers a session's settings, however a tool asks.** `SHOW <name>`, SHOW ALL's row, the ParameterStatus
+the session is told and `current_setting(name[, missing_ok])` are the same string: after `SET search_path = sales,
+public`, `current_setting('search_path')` answers `sales, public` in a statement the embedded Postgres answers and in
+one over a copied table alike, in a WHERE, a CTE or a prepared statement executed after the SET (each catalog request
+carries the session's settings in and takes them out again, and a statement over a copy reads them, never the copy
+engine's own). A name the session does not hold is the embedded Postgres's own value (`block_size`), and a name nobody
+holds is Postgres's 42704, or NULL with `missing_ok`. `RESET <name>`, `RESET ALL` and `DISCARD ALL` restore the value
+the session started with — its startup packet's `application_name` and `options` (`-c name=value`) included — and the
+session is told a ParameterStatus for each reported parameter whose value changed, as Postgres tells a driver that
+caches them (pgjdbc, npgsql): once per request and parameter, its last value, after the statements' CommandComplete
+and before the ReadyForQuery (a SET, a RESET or RESET ALL that moves nothing reports nothing).
+`SELECT set_config('name', 'value', false)` on its own is the session's `SET`, answered with the value as `SHOW` then
+answers it. Forwarded to the embedded Postgres, which every session shares, it stayed there for every session. Any
+other form — beside another column or a table, with an expression, a parameter or NULL, with `is_local` true, under
+EXPLAIN — is refused (`set-config-forms`). Not yet Postgres's: a `SET LOCAL`, and a SET inside a transaction that is
+rolled back, change the session's value for good (GitHub issue 47).
+
 `BEGIN`, `COMMIT` and `ROLLBACK` are accepted and write nothing — there is nothing to write. A failed statement inside
 a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it.
 `CancelRequest` cancels the statement running on that session's backend.
@@ -221,10 +344,22 @@ over the catalog alone (`pg_class`, `information_schema`, `SELECT version()`) is
 stopped reading at a row count (an Execute's: JDBC's `setMaxRows`, `mason mcp`'s `max_rows`) is a row when its portal
 closes (a Sync, a Close, the session's end), with the rows it sent. A row has
 the session, `application_name`, the `mason user`, the method (`QUERY`, `PARSE`, `BIND`, `DESCRIBE`, `EXECUTE`,
-`CONNECT`), the SQLSTATE, message, detail and hint sent, the rows sent, the duration and the statement (cut at 64 KiB,
-flagged when cut). It is kept `MASON_REQUEST_LOG_DAYS` days (default 7). `mason logs --requests` reads it, a request
-a line (`--failed` for the refused and failed only, `--json` for every column), and `mason status` shows the last
-day's slow and refused statements (docs/DESIGN.md "The request log").
+`CONNECT`), the SQLSTATE, message, detail and hint sent, the rows sent, the bytes sent (every frame of the answer, its
+CommandComplete or ErrorResponse included, the ReadyForQuery after it not), the duration and the statement (cut at 64
+KiB, flagged when cut). Its outcome is the SQLSTATE's: `ok`, `refused` (the statement's own fault), `failed` (Mason's
+or the machine's: classes XX, 53, 57, 58) or `cancelled` (57014: a cancel or a statement timeout). It is kept
+`MASON_HISTORY_DAYS` days (default 7). `mason logs --requests` reads it, a request a line, filtered by
+`--outcome`, `--since` / `--until`, `--user` and `--client` (`--failed` for every one not answered), a page at a time
+(`--before`, the position the last page answered with), `--json` for every column; `mason status` shows the last
+day's and week's statements (each outcome, the completed ones' average / p50 / p95 time, the rows and bytes sent) and
+the last day's slow and refused statements (docs/DESIGN.md "The request log").
+
+`mason logs --running` lists the statements running now, one per session (its number, its user, `application_name`,
+when it started, the rows sent so far), and `mason cancel <session> --statement <n>` stops one exactly as the client's
+own cancel would: the client is told 57014 "canceling statement due to user request", its session goes on, and the
+request log keeps it as cancelled. With `--statement`, a statement that ended before the cancel arrived is never
+mistaken for the session's next one: nothing is cancelled, and the answer names the one it runs now (409). Without it,
+whatever the session runs at that moment is stopped, as a `CancelRequest` stops it (Postgres's own semantics).
 
 ## Settings
 
@@ -236,7 +371,7 @@ day's slow and refused statements (docs/DESIGN.md "The request log").
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |
 | `MASON_PG_CATALOG_TIMEOUT_MS` | 10000 | how long a catalog statement may take before the embedded Postgres is discarded and the statement refused |
 | `MASON_STATEMENT_TIMEOUT` | 5min | the longest one statement may run (Postgres's units; 0 for none); a session's `statement_timeout` may only shorten it |
-| `MASON_REQUEST_LOG_DAYS` | 7 | how many days of the request log are kept |
+| `MASON_HISTORY_DAYS` | 7 | how many days of the request log (and the sync's events, the usage samples and the copies' sizes) are kept |
 | `MASON_STORE_JSON_PATHS` | on | `off`: never store the JSON paths statements keep reading as columns of the copy (`payload ->> 'customer_id'` read by 3 statements, or by one taking 1 s, is stored, and read from there; `mason status` lists them), and drop those stored, at that start |
 | `MASON_PG_TRACE` | unset | `1`: log every statement text a session receives |
 
@@ -252,6 +387,9 @@ day's slow and refused statements (docs/DESIGN.md "The request log").
 - **The wire** (`tests/postgres-api/protocol.test.ts`, `encode.test.ts`, `server.test.ts`, `tests/duck-wire.test.ts`):
   the frames, the bytes of every type against Postgres's own, and sessions driven by node-postgres over a real DuckDB
   copy.
+- **Roles** (`tests/duck-roles-wire.test.ts`, `tests/postgres-api/catalog.test.ts`, the oracle's role cases): every
+  shape a hidden column can be read in, refused over a real listener; the catalog's roles and `SET ROLE`; and a
+  Postgres role with the same grants asked the same statements, the refusals equal by SQLSTATE and message.
 - **The tool corpus** (`tests/duck-corpus.test.ts`, `tests/postgres-api/corpus/`): the statements psql, pgjdbc 42.7.14,
   node-postgres 8.23, Metabase 0.64.2.8, Grafana 13.2.4, DBeaver 26.2.0 and Superset 6.1.0 were RECORDED sending
   (`MASON_PG_TRACE`) on connect, to list the catalog and to describe a table, replayed and held to an

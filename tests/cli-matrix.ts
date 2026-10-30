@@ -28,7 +28,8 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   init: [],
   start: [],
   tables: ["no_such_table"],
-  add: ["no_such_table"],
+  // with a sync, so the flag is read in every state too (a bad one is a usage error before any state is met)
+  add: ["no_such_table", "--sync", "poll 30s"],
   remove: ["no_such_table"],
   wait: ["--timeout", "1"],
   user: ["list"],
@@ -39,9 +40,28 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   ui: ["--no-open"],
   sync: ["no_such_table"],
   logs: [],
+  // a session that is not open: refused by name in every state with a run, and by the state without one
+  cancel: ["99999"],
+  usage: [],
   stop: [],
   destroy: [],
   serve: [],
+};
+
+/**
+ * MORE LINES of a command whose modes answer from different places (review: `user disable|enable` and `logs --events|
+ * --running|--requests` ran only against a fake run): each run in every state too, with --json alone (the person's
+ * form of each is its command's line above; a line a state runs is a process, and the matrix is the suite's slowest).
+ */
+export const MATRIX_MORE: Readonly<Record<string, ReadonlyArray<readonly string[]>>> = {
+  user: [["disable", "no_such_user"], ["enable", "no_such_user"]],
+  logs: [["--events"], ["--running"], ["--requests"]],
+};
+
+/** Further lines a command is run with in every state, beside MATRIX_ARGS's (a flag of its own that must refuse
+ *  before it writes: `--role` names a role the roles file lacks, so no user is ever added). */
+export const MATRIX_EXTRA_ARGS: Readonly<Record<string, readonly (readonly string[])[]>> = {
+  user: [["add", "nobody", "--role", "no_such_role"]],
 };
 
 /** The commands a state may not run in the matrix because they CHANGE it: they are the session's transitions. */

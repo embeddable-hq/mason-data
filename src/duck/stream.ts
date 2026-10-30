@@ -1,6 +1,6 @@
 /**
  * THE DUCKDB COPY KEPT CURRENT BY LOGICAL REPLICATION (replication for the DuckDB case, only to sync the copied tables).
- * `mason start --replication` on Mason's own publication and
+ * The tables whose `sync:` is `replication`, on Mason's own publication (or the one the sources file names) and
  * slot on the developer's database (src/cli/replication-mode.ts), the slot's `pgoutput` stream (src/cdc/pgoutput.ts,
  * over src/cdc/pg-wire.ts) applied to the copied tables (src/duck/sync.ts `applyChanges`) instead of polling them.
  *
@@ -222,7 +222,7 @@ export function fold(t: TableChanges, key: Array<string | null>, change: KeyChan
 export const PIECE_CHANGES = 10_000;
 
 /**
- * A BATCH THAT CHANGES A BIG TABLE (one over src/duck/sync.ts POLL_ROW_LIMIT, `big` in `StreamTarget.tables`) is
+ * A BATCH THAT CHANGES A BIG TABLE (one over src/lib/table-sync.ts BIG_TABLE_ROWS, `big` in `StreamTarget.tables`) is
  * applied at most every `BIG_APPLY_MS`, and a transaction's piece holds up to `BIG_PIECE_CHANGES`: each application
  * scans that table's key column (`PIECE_CHANGES` says what that costs), so fewer, larger ones — a 12 M-row migration is
  * 240 scans where it would be 1,200. The other tables in such a batch wait with it (seconds of staleness, said in
@@ -270,6 +270,9 @@ export interface StreamTarget {
   apply(batch: ReadonlyMap<string, TableChanges>, lsn: bigint | null, committedAt: Date): Promise<void>;
   /** the position of the last commit applied (0 when none) */
   applied(): bigint;
+  /** told whenever the stream has everything the database wrote up to its position: a keepalive with nothing pending,
+   *  or a batch applied and acknowledged — the moment a streamed table's copy is current as of (`kept`'s syncedAt) */
+  current?(): void;
 }
 
 /**
@@ -368,6 +371,7 @@ export class ReplicationStream {
       this.acked = lastEnd;
       repl.sendStatus(this.acked);
       batch = new Map(); rows = 0; firstAt = 0; pieces = 0; big = false;
+      this.target.current?.();
     };
     // a piece of the open transaction: applied and committed, the position left where it is
     const piece = async (): Promise<void> => {
@@ -392,6 +396,7 @@ export class ReplicationStream {
           if (!inTxn && rows === 0 && lastEnd <= this.acked) {
             if (m.walEnd > this.seen) this.seen = m.walEnd;
             if (m.walEnd > this.acked) { this.acked = m.walEnd; repl.sendStatus(this.acked); }
+            this.target.current?.();
           } else if (m.replyRequested) repl.sendStatus(this.acked);
           if (!inTxn && rows > 0 && Date.now() - firstAt >= size().ms) await flush();
           continue;

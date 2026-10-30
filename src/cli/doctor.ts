@@ -14,6 +14,7 @@ import { theRun, type DevRun } from "./runs.ts";
 import { projectSource, type Project } from "./project.ts";
 import { DEFAULT_PG_PORT } from "../api/postgres/listener.ts";
 import { defaultMemoryLimit, machineMemoryBytes, MEMORY_LIMIT_RE } from "../duck/store.ts";
+import { probeExtensions, type ExtensionProbe } from "../duck/extensions.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 
@@ -29,7 +30,9 @@ export const NODE_MIN = "22.13";
 export const DOCTOR_USAGE = `usage: mason doctor [--json]
 
   Says whether this machine is ready for Mason — Node ${NODE_MIN} or later, memory (Mason's copy uses up to half of it by
-  default; MASON_DUCKDB_MEMORY=4GiB sets it), the ports Mason listens on — with the way out for anything missing. In a
+  default; MASON_DUCKDB_MEMORY=4GiB sets it), the copy's postgres and inet extensions (installed with Mason for this
+  platform, so nothing is downloaded; else the first copy downloads them), the ports Mason listens on — with the way
+  out for anything missing. In a
   project's folder it checks the project's database too; with Mason running for it, the run in a few lines instead: its
   database, whether every added table is copied, the statements of the last day it refused or answered slowly.
 
@@ -78,6 +81,13 @@ export function memoryCheck(totalBytes: number = machineMemoryBytes(), env: Node
     detail: `${gib} GiB; Mason's copy uses up to ${share.trim()}${set !== undefined ? " (MASON_DUCKDB_MEMORY)" : " (half, the default; MASON_DUCKDB_MEMORY sets it)"}` +
       (low ? ". Under 2 GiB, a large table's copy and a query starve each other: expect statements refused for memory" : ""),
   };
+}
+
+/** The copy's extensions (src/duck/extensions.ts): shipped with Mason and loaded by an engine of their own as the run's
+ *  will load them, or not shipped, and why. `probe` is a test's. */
+export async function extensionsCheck(probe: () => Promise<ExtensionProbe> = () => probeExtensions()): Promise<Check> {
+  const p = await probe();
+  return { name: "extensions", ok: p.ok, detail: p.detail };
 }
 
 /**
@@ -162,7 +172,7 @@ export function nextSteps(checks: readonly Check[], run: DevRun | null, project:
   if (bad("database") && project?.config.demo === true) return [["mason start", "hosts the demo database, then copies its tables"]];
   if (bad("database")) return [["mason start", `once the connection works (the detail above says how; the URL is in ${project ? `${project.dir}/config.json` : ".mason/config.json"})`]];
   if (project === null) return [
-    ["mason init", "in your app's folder: the database from DATABASE_URL in .env.local, .env or the shell"],
+    ["mason init", "in your app's folder: the database from MASON_DATABASE_URL or DATABASE_URL in .env.local, .env or the shell"],
     ["mason init postgres://user:password@localhost:5432/your_app", "or name it"],
   ];
   if (run === null) return [["mason start", "Mason in the background, for this folder"]];
@@ -204,6 +214,7 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
   if (run === null) {
     checks.push(nodeCheck());
     checks.push(memoryCheck());
+    checks.push(await extensionsCheck());
     checks.push(await portsCheck([], portHolder, process.env, project?.config.pgPort ?? null));
     if (project) {
       // the database the project's sources file names (src/cli/sources.ts): a file that cannot be read is the failing line

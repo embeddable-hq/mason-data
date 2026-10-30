@@ -28,7 +28,7 @@
  */
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
-import { pathIndex, SESSION_VARIABLE, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
+import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type Typed } from "./pgtree.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
@@ -69,11 +69,11 @@ export function duckCollation(provider: string, collate: string, locale: string 
   if (/^(C|POSIX)([.].*)?$/i.test(collate) && provider !== "i") return { kind: "bytes", ascii: true };
   if (provider === "i") {
     const name = icuName(locale ?? collate);
-    if (name === null) throw new Error(`the source database's ICU locale ${JSON.stringify(locale ?? collate)} has no DuckDB collation: Mason cannot sort text as it does`);
+    if (name === null) throw new Error(`the source database's ICU locale ${JSON.stringify(locale ?? collate)} has no collation in the copy: Mason cannot sort text as it does`);
     return { kind: "icu", name };
   }
   const name = icuName(collate);
-  if (name === null) throw new Error(`the source database's collation ${JSON.stringify(collate)} has no DuckDB collation to follow: Mason cannot sort text as it does`);
+  if (name === null) throw new Error(`the source database's collation ${JSON.stringify(collate)} has no collation in the copy to follow: Mason cannot sort text as it does`);
   return { kind: "libc", icu: name };
 }
 
@@ -968,7 +968,7 @@ class Rewriter {
    * same order and leaves the rank out (`* EXCLUDE`, DuckDB's).
    */
   private withTies(b: Body): AstNode {
-    if (b.distinctClause !== undefined) throw new Unrewritable("FETCH … WITH TIES over a SELECT DISTINCT is not supported by Mason (DuckDB has no WITH TIES)", "select the DISTINCT rows in a subquery and FETCH … WITH TIES from it", "with-ties-distinct");
+    if (b.distinctClause !== undefined) throw new Unrewritable("FETCH … WITH TIES over a SELECT DISTINCT is not supported by Mason (the copy has no WITH TIES)", "select the DISTINCT rows in a subquery and FETCH … WITH TIES from it", "with-ties-distinct");
     const order = (b.sortClause as AstNode[] | undefined) ?? [];
     const count = b.limitCount as AstNode;
     delete b.limitCount;
@@ -2476,6 +2476,8 @@ class Rewriter {
       case "family": return argType(0) === INET && args.length === 1
         ? caseWhen([[{ NullTest: { arg: this.cp(args[0]!), nulltesttype: "IS_NULL" } }, nullConst()], [fn("contains", [args[0]!, strConst(":")]), intConst(6)]], intConst(4)) : null;
       case "abbrev": return argType(0) === INET && args.length === 1 ? inetOut(args[0]!) : null;
+      // the session's setting, never DuckDB's own (`settingRead`)
+      case "current_setting": return args.length === 1 || args.length === 2 ? settingRead(this.cp, args) : null;
       // the transaction's start, as of the execution (sqlValueFunction says why)
       case "now": case "transaction_timestamp": return args.length === 0 ? this.now("exec") : null;
       case "age":
@@ -3945,6 +3947,25 @@ function replacement(r: AstNode): AstNode {
 }
 
 /** substring(text FROM pattern): the first parenthesised part when there is one, else the whole match; NULL without one */
+/**
+ * `current_setting(name[, missing_ok])` BESIDE A COPIED TABLE IS THE SESSION'S (GitHub issue 40): the name read, in any
+ * case, from the settings the session's statement runs under (`SETTINGS_VARIABLE`: src/api/postgres/server.ts
+ * `duckSession`, the listener's `sessionSetting` laid over the catalog Postgres's own, set by src/duck/store.ts
+ * `settle`) — never DuckDB's own `current_setting`, which answered DuckDB's settings (`search_path` its schemas,
+ * `work_mem` an error). A name neither holds is Postgres's 42704, or NULL under missing_ok; strict, as Postgres's.
+ */
+function settingRead(copy: Copy, args: AstNode[]): AstNode {
+  const [name, missingOk] = args as [AstNode, AstNode | undefined];
+  const settings = (): AstNode => fn("getvariable", [strConst(SETTINGS_VARIABLE)]);
+  const key = (): AstNode => fn("lower", [copy(name)]);
+  const unknown = fn("error", [concat(strConst('mason[42704]: unrecognized configuration parameter "'), copy(name), strConst('"'))]);
+  return caseWhen([
+    [missingOk === undefined ? isNull(name) : or([isNull(name), isNull(missingOk)]), nullConst()],
+    [fn("map_contains", [settings(), key()]), fn("map_extract_value", [settings(), key()])],
+    ...(missingOk === undefined ? [] : [[copy(missingOk), nullConst()] as [AstNode, AstNode]]),
+  ], unknown);
+}
+
 function regexSubstring(copy: Copy, s: AstNode, p: AstNode): AstNode {
   const pattern = regexPattern(p, true)!;
   const text = constString(p);

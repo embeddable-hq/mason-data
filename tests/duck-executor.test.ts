@@ -70,10 +70,13 @@ before(async () => {
   assert.ok("source" in parsed);
   const ctx: RunContext = {
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [],
-    slot: "", changes: "poll", port: 0, token: TOKEN, page: false, users: { file: path.join(dir, "users.json"), apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" }, folder: () => null, root: dir, sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined,
-    readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined,
-    duck: { copies: () => [], file: path.join(dir, "duck.db"), pollSeconds: 5, poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
+    replication: () => null, port: 0, token: TOKEN, page: false, users: { file: path.join(dir, "users.json"), apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" }, folder: () => null, root: dir, home: dir, version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined,
+    readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined, listener: api,
+    logs: { capacity: 2000, recent: () => [] },
+    duck: { copies: () => [], file: path.join(dir, "duck.db"), poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null, disk: () => ({ path: dir, freeBytes: null, projectedBytes: null }),
+      requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map(), 
+        lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
+      usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
   };
   control = createRunServer(ctx);
   await new Promise<void>((r) => control.listen(0, "127.0.0.1", () => r()));
@@ -172,7 +175,7 @@ test("a function-calling statement's answer closed after its last row and before
     const store = await DuckStore.open(${JSON.stringify(file)}, () => undefined);
     await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(10)");
     const r = await store.runner();
-    const session = { timeZone: "UTC", searchPath: "public" };
+    const session = { timeZone: "UTC", searchPath: "public", settings: {} };
     // the rewrite's call of json's -> (src/duck/rewrite.ts fn): the session first
     // a planned statement (src/duck/plan.ts PlannedSql): its text, and the functions its plan says it calls
     const a = await r.run({ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL",
@@ -440,7 +443,7 @@ test("cancelling a function-calling statement again and again never deadlocks th
   const r = inProcess("cancels", `
     await store.writer.run("CREATE TABLE public.calls AS SELECT range::INTEGER AS id, '{\\"n\\": ' || range || '}' AS j FROM range(2000000)");
     const runner = await store.runner();
-    const S = { timeZone: "UTC", searchPath: "public" };
+    const S = { timeZone: "UTC", searchPath: "public", settings: {} };
     // a planned statement (src/duck/plan.ts PlannedSql) calling json's -> on every row, as the rewrite writes it
     const calling = { text: "SELECT count(*) FROM calls WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL", functions: ["__mason_json_get"] };
     const told = {};
@@ -527,7 +530,7 @@ test("a copy closed past its grace under a function-calling statement, or a proc
       const store = await DuckStore.open(${JSON.stringify(path.join(dir, `${name}.db`))}, () => undefined, { closeGraceMs: 1 });
       await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(4000000)");
       const r = await store.runner();
-      const S = { timeZone: "UTC", searchPath: "public" };
+      const S = { timeZone: "UTC", searchPath: "public", settings: {} };
       // the rewrite's call of json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
       const call = "__mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false)";
       ${body}
@@ -612,7 +615,7 @@ await import(${at("../src/duck/executor-worker.ts")});
       // a count calling json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
       const asked = r.run(${calls
         ? `{ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL", functions: ["__mason_json_get"] }`
-        : `{ text: "SELECT count(*) FROM t", functions: [] }`}, [], { timeZone: "UTC", searchPath: "public" }, new AbortController().signal${calls ? "" : `, [{ name: "count", oid: 20 }]`})
+        : `{ text: "SELECT count(*) FROM t", functions: [] }`}, [], { timeZone: "UTC", searchPath: "public", settings: {} }, new AbortController().signal${calls ? "" : `, [{ name: "count", oid: 20 }]`})
         .then(() => order.push("answered"), (e) => order.push("refused " + (e.fields?.code ?? e.message)));
       ${before}
       await r.close();

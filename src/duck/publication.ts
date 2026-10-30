@@ -1,5 +1,5 @@
 /**
- * A PUBLICATION THE OPERATOR NAMED, READ AS IT IS: `mason start --replication --publication <name>`
+ * A PUBLICATION THE OPERATOR NAMED, READ AS IT IS: `publication: <name>` at the top of the sources file
  * (or `PG_PUBLICATION`) streams through a publication that is the database owner's, never Mason's — on a read replica
  * Mason could not make one (CREATE PUBLICATION is refused on a standby), and on a customer's primary the one object
  * Mason creates is its slot (CLAUDE.md "We are read-only on a customer's Postgres"). So it is VERIFIED, never created,
@@ -63,8 +63,8 @@ const requiredOf = (t: CopiedTable): string[] => t.columns.filter((c) => !c.gene
 
 /** what follows every refusal: Mason waits for the owner, and when it looks again */
 const NEVER_ALTERED = "Mason reads a publication it is given as it is, never altering it: once its owner has run that, the next mason start " +
-  "(or mason add) checks it again. Or mason start --replication without --publication, where Mason makes its own (not on a read " +
-  "replica), or mason start --poll, which needs no publication.";
+  "(or mason add) checks it again. Or give the table's entry sync: poll <interval> in the sources file, which needs no publication; " +
+  "or take publication: out of it, where Mason makes its own, carrying the replicated tables alone (not on a read replica).";
 
 /**
  * The verdict over a described publication (pure: `described` is what `readNamedPublication` read). `identities` are

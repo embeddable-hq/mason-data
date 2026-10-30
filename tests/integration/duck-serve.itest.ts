@@ -80,7 +80,7 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
   const data = path.join(dir, "data"), project = path.join(dir, "project");
   fs.mkdirSync(data);
   const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? dir, DATABASE_URL: dbUrl, MASON_API_KEY: KEY, MASON_DATA: data, MASON_PROJECT: project,
-    MASON_NAME: "served", MASON_HEALTH_PORT: String(health), MASON_HEALTH_HOST: "127.0.0.1", MASON_PG_PORT: String(pgPort), MASON_POLL_MS: "500" };
+    MASON_NAME: "served", MASON_HEALTH_PORT: String(health), MASON_HEALTH_HOST: "127.0.0.1", MASON_PG_PORT: String(pgPort) };
 
   const first = startServe(env);
   try {
@@ -88,7 +88,7 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
     assert.deepEqual(up.tables, { total: 0, copied: 0, copying: 0, waiting: 0, failed: 0 });
     assert.match(first.out(), /^mason serve: served, the project in .*project, the state in .*data\/\.mason$/m);
     assert.match(first.out(), /mason start: ready/);
-    assert.match(first.out(), /\[sync\]|\[duckdb\]/, "the run's log is on stdout");
+    assert.match(first.out(), /\[sync\]|\[copy\]/, "the run's log is on stdout");
     assert.doesNotMatch(first.out(), new RegExp(KEY), "the API key is never printed");
 
     // beside it, in its data folder, as `docker compose exec mason mason add …`

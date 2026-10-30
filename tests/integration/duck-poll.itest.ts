@@ -24,7 +24,7 @@ import { parseSource, type Source } from "../../src/cli/preflight.ts";
 import { heldCopy } from "./held-copy.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
-const { POLL_ROW_LIMIT, PollRefused } = syncModule as unknown as { POLL_ROW_LIMIT: number; PollRefused: typeof import("../../src/duck/sync.ts").PollRefused };
+const { PollRefused } = syncModule as unknown as { PollRefused: typeof import("../../src/duck/sync.ts").PollRefused };
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_duck_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
@@ -116,7 +116,15 @@ test("the copy and the xmin poll keep DuckDB equal to the source through every k
 
     psql(dbUrl, "INSERT INTO items VALUES (51, 'new', 9.99, NULL); UPDATE items SET v = 'changed', n = NULL WHERE id = 2; DELETE FROM items WHERE id = 3; " +
       "UPDATE shop.lines SET qty = -1 WHERE order_id = 1; DELETE FROM shop.lines WHERE order_id = 2");
+    // each copy's last sync: after its copy, the one poll that caught it up; once polled, that table's own poll
+    // (src/duck/sync.ts Synced), and its rows the copy's after it
+    const lastSync = (): unknown[] => sync.state().map((s) => { const x = (s as { synced?: { by: string; seconds: number | null } }).synced; return [s.source, x?.by, typeof x?.seconds]; });
+    assert.deepEqual(lastSync(), [["public.items", "catch-up", "number"], ["shop.lines", "catch-up", "number"]]);
+    const syncedBefore = (sync.state()[0] as { synced?: { at: string } }).synced?.at ?? "";
     await same("an insert, an update to NULL, a delete");
+    assert.deepEqual(lastSync(), [["public.items", "poll", "number"], ["shop.lines", "poll", "number"]]);
+    assert.ok(((sync.state()[0] as { synced?: { at: string } }).synced?.at ?? "") > syncedBefore, "a poll moves it");
+    assert.deepEqual(sync.state().map((s) => s.rows), [50, 27], "the rows after the poll: 50 + 1 - 1, 30 - 3");
 
     psql(dbUrl, "UPDATE items SET id = 1000 WHERE id = 4; UPDATE shop.lines SET line = 9 WHERE order_id = 3 AND line = 0");
     await same("a primary-key change");
@@ -202,7 +210,7 @@ test("an unconstrained or wide numeric is copied and polled exactly, and copied 
     await same("the first copy", 18);
     // q is a numeric(65,30) whose values use 2 decimals: 12 digits do not fit at 30, they do at 2 (the wire writes 30)
   assert.equal(await typesOf(), "id INTEGER, a DECIMAL(38,18), p DECIMAL(38,30), huge DOUBLE, odd DOUBLE, q DECIMAL(38,2)");
-    assert.ok(logged.some((l) => /public\.amounts\.huge: values of 41 digit\(s\) and 0 decimal\(s\) do not fit DuckDB's DECIMAL\(38\): copied as a double/.test(l)), logged.join("\n"));
+    assert.ok(logged.some((l) => /public\.amounts\.huge: values of 41 digit\(s\) and 0 decimal\(s\) do not fit the copy's DECIMAL\(38\): copied as a double/.test(l)), logged.join("\n"));
     assert.ok(logged.some((l) => /public\.amounts\.odd: 1 value\(s\) NaN or Infinity/.test(l)), logged.join("\n"));
     assert.ok(logged.some((l) => /public\.amounts\.a: values of 1 to 18 decimals: Mason answers each with 18, Postgres with its own/.test(l)), logged.join("\n"));
 
@@ -421,7 +429,7 @@ async function resumeToTheEnd(c: Awaited<ReturnType<typeof copyStoppedPartWay>>)
     void sync.setTables([RESUMED]);
     await sync.once();
     const said = c.logged.slice(from);
-    assert.ok(said.some((l) => l === "caught up public.big by one poll after its copy: the poll keeps it current"), said.join("\n"));
+    assert.ok(said.some((l) => l === "caught up public.big by one poll after its copy: the poll keeps it current (polled every 1h)"), said.join("\n"));
     // a digest of every row in key order: 100 MB is past what psql hands back here
     const digest = "count(*) || ' ' || md5(string_agg(id::text || ':' || v, ',' ORDER BY id))";
     assert.equal(String((await store.writer.runAndReadAll(`SELECT ${digest} FROM public.big`)).getRowsJS()[0]![0]), psql(c.url, `SELECT ${digest} FROM big`),
@@ -556,7 +564,7 @@ test("a copy read three chunks at a time, on three backends, ends equal to the s
     assert.ok(said.includes("3 at a time (MASON_COPY_PARALLEL), each a backend on the database"), said);
     assertTiles(committedOf(events), said);
     assert.equal(committedOf(events).length, events.filter((e) => e.phase === "read").length, "every chunk read was committed once");
-    assert.ok(logged.includes("caught up public.big by one poll after its copy: the poll keeps it current"), said);
+    assert.ok(logged.includes("caught up public.big by one poll after its copy: the poll keeps it current (polled every 1h)"), said);
     await assertEqualToSource(store, url, said);
   } finally { await sync.stop(); store.close(); }
 });
@@ -906,12 +914,16 @@ test("a failed copy waits before it is tried again, and a change of its columns 
   const since = (from: number, re: RegExp): number => logged.slice(from).filter((l) => re.test(l)).length;
   const tablesLeft = async (store: DuckStore): Promise<unknown> => (await store.writer.runAndReadAll("SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'public'")).getRowsJS();
   let store = await DuckStore.open(file, (l) => logged.push(l));
-  let sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  // the sync's events (src/duck/events.ts): the failure is one, with the log's words
+  const events: Array<{ kind: string; table: string | null; message: string }> = [];
+  let sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => { events.push(e); } });
   try {
     await sync.open();
     let from = logged.length;
     void sync.setTables([T(true)]);
     await sync.once();
+    assert.deepEqual(events.map((e) => [e.kind, e.table]), [["copy_failed", "public.t"]]);
+    assert.equal(`copy of public.t failed: ${events[0]!.message}`, logged.find((l) => l.startsWith("copy of public.t failed: ")));
     assert.equal(since(from, /^copying public\.t:/), 1, logged.slice(from).join("\n"));
     assert.equal(since(from, /^copy of public\.t failed: [\s\S]*; tried again after \d\d:\d\d UTC \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
     const [st] = sync.state();
@@ -1152,66 +1164,157 @@ test("a copy stored in key order with an index is said as a retired layout and c
   } finally { await sync.stop(); store.close(); }
 });
 
-// A TABLE OVER THE SYNC'S ROW LIMIT (src/duck/sync.ts POLL_ROW_LIMIT; each poll scanned a 22 M-row table
-// whole on a production replica): copied and served, never polled by a pass, said so in its state and once in the log,
-// and polled by `pollNow` when asked; a small table beside it is polled at every pass. The source's estimate is what
-// decides (`AddedTable.rows`), so the big table here is a small one said to be big.
-test("a table over the poll's row limit is copied and served, polled only when asked; a small one beside it at every pass", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
-  const db = `${tag}_big`;
+// EACH TABLE KEPT CURRENT AS ITS SYNC SAYS (the sources file's `sync:`, src/lib/table-sync.ts; GitHub issue 33): a mixed
+// project — one table `off`, one `poll 2s`, one `poll 10s` — on the passes' own timer (`start`, never `once`, which takes
+// every polled table as due). The `off` table is read again only when asked (`pollNow`, mason sync); each polled one at
+// its own interval; and each table's `syncedAt` moves only when its own poll runs.
+const cols2 = [{ name: "id", type: "integer", notNull: true, comment: null }, { name: "v", type: "text", notNull: false, comment: null }];
+const tableOf = (name: string, sync: AddedTable["sync"]): AddedTable =>
+  ({ source: `public.${name}`, schema: "public", table: name, key: ["id"], bytes: 0, rows: null, foreignKeys: [], columns: cols2, ...(sync ? { sync } : {}) });
+const OFF = { mode: "off" } as const;
+const POLL = (every: string, seconds: number) => ({ mode: "poll", every, seconds }) as const;
+/** a database of its own for one test, dropped after it */
+function ownDatabase(suffix: string, sql: string): Source {
+  const db = `${tag}_${suffix}`;
   const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
   psql(adminUrl!, `CREATE DATABASE ${db}`);
   after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
-  psql(url, "CREATE TABLE big (id int PRIMARY KEY, v text); CREATE TABLE small (id int PRIMARY KEY, v text); " +
-    "INSERT INTO big SELECT g, 'b' || g FROM generate_series(1, 20) g; INSERT INTO small SELECT g, 's' || g FROM generate_series(1, 5) g");
+  psql(url, sql);
   const parsed = parseSource(url);
   if ("problem" in parsed) throw new Error(parsed.problem);
-  const cols = [{ name: "id", type: "integer", notNull: true, comment: null }, { name: "v", type: "text", notNull: false, comment: null }];
-  const BIG: AddedTable = { source: "public.big", schema: "public", table: "big", key: ["id"], bytes: 0, rows: POLL_ROW_LIMIT + 1, foreignKeys: [], columns: cols };
-  const SMALL: AddedTable = { source: "public.small", schema: "public", table: "small", key: ["id"], bytes: 0, rows: POLL_ROW_LIMIT, foreignKeys: [], columns: cols };
+  return parsed.source;
+}
+/** until `ok` holds, or `ms` passed (then the failure says what was waited for) */
+async function until(what: string, ok: () => Promise<boolean> | boolean, ms = 30_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!(await ok())) {
+    if (Date.now() > deadline) throw new Error(`waited ${ms / 1000} s for ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+const keptOf = (sync: Sync, source: string) => sync.state().find((s) => s.source === source)?.kept;
+const syncedAt = (sync: Sync, source: string): string | null => { const k = keptOf(sync, source); return k?.by === "poll" ? k.syncedAt : null; };
+/** every table copied, caught up, and kept as its sync says (nothing pending) */
+const settled = (sync: Sync, sources: readonly string[]) => () => sources.every((s) => { const k = keptOf(sync, s); return k?.by === "poll" && k.pending === undefined && k.syncedAt !== null; });
+
+test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` one current within its interval, a `poll 10s` one not polled before its own", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const source = ownDatabase("mixed", "CREATE TABLE manual (id int PRIMARY KEY, v text); CREATE TABLE fast (id int PRIMARY KEY, v text); CREATE TABLE slow (id int PRIMARY KEY, v text); " +
+    "INSERT INTO manual SELECT g, 'm' || g FROM generate_series(1, 5) g; INSERT INTO fast SELECT g, 'f' || g FROM generate_series(1, 5) g; INSERT INTO slow SELECT g, 's' || g FROM generate_series(1, 5) g");
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
   const logged: string[] = [];
-  const store = await DuckStore.open(path.join(dir, "big.db"), (l) => logged.push(l));
-  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  const store = await DuckStore.open(path.join(dir, "mixed.db"), (l) => logged.push(l));
+  // the sync's own interval (a table with no sync of its own) is never at work here: every table names one
+  const sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
   await sync.open();
-  const ids = async (t: string): Promise<string> => ((await store.writer.runAndReadAll(`SELECT string_agg(id::VARCHAR, ' ' ORDER BY id) FROM ${t}`)).getRowsJS()[0]![0] as string);
-  const seq = (from: number, to: number, ...more: number[]): string => [...Array.from({ length: to - from + 1 }, (_, i) => from + i), ...more].join(" ");
+  const count = async (t: string): Promise<number> => Number((await store.writer.runAndReadAll(`SELECT count(*) FROM public.${t}`)).getRowsJS()[0]![0]);
+  const all = ["public.manual", "public.fast", "public.slow"];
   try {
-    sync.setTables([BIG, SMALL]);
-    await sync.once();
-    assert.equal(await ids("public.big"), seq(1, 20), "the big table is copied whole");
-    assert.deepEqual(sync.schema().tables.map((t) => t.name).sort(), ["big", "small"], "and served");
-    const big = sync.state().find((s) => s.source === "public.big")!;
-    assert.deepEqual([big.phase, big.unsynced?.reason], ["copied", "over the 1,000,000-row sync limit"]);
-    assert.ok(big.unsynced?.asOf !== null && Date.parse(big.unsynced!.asOf) > Date.now() - 600_000, `its state says when it was copied: ${big.unsynced?.asOf}`);
-    assert.equal(sync.state().find((s) => s.source === "public.small")!.unsynced, undefined, "a table at the limit is polled");
+    await sync.setTables([tableOf("manual", OFF), tableOf("fast", POLL("2s", 2)), tableOf("slow", POLL("10s", 10))]);
+    sync.start();
+    await until("every table copied and caught up", settled(sync, all));
+    const before = Object.fromEntries(all.map((s) => [s, syncedAt(sync, s)!]));
+    assert.deepEqual(all.map((s) => keptOf(sync, s)?.by === "poll" ? (keptOf(sync, s) as { sync: unknown }).sync : null), [OFF, POLL("2s", 2), POLL("10s", 10)]);
+    assert.equal((keptOf(sync, "public.manual") as { nextAt: string | null }).nextAt, null, "an off table has no next poll");
 
-    psql(url, "INSERT INTO big VALUES (21, 'new'); DELETE FROM big WHERE id = 1; INSERT INTO small VALUES (6, 'new')");
-    await sync.once();
-    await sync.once();
-    assert.equal(await ids("public.big"), seq(1, 20), "no pass polls the big table");
-    assert.equal(await ids("public.small"), seq(1, 6), "the small one is polled at every pass");
-    assert.equal(logged.filter((l) => l.startsWith("public.big (about 1,000,001 rows) is over the 1,000,000-row sync limit: it is served as copied, NOT kept current by the poll")).length, 1,
-      `said once, when first left out:\n${logged.join("\n")}`);
-    // its copy's one catch-up poll names it (a copy runs beside the passes, so the table is caught up from the copy's
-    // snapshot once copied: one scan per rebuild, said as such), and no pass's does
-    assert.equal(logged.filter((l) => /^poll: .*public\.big/.test(l)).length, 1, `only its copy's catch-up poll names it, never a pass's:\n${logged.join("\n")}`);
-    assert.ok(logged.some((l) => l === `caught up public.big by one poll after its copy: it is over the 1,000,000-row sync limit, so that was one scan for its rebuild, not the periodic poll: served as of now, mason sync public.big syncs it again`), logged.join("\n"));
+    psql(url, "INSERT INTO manual VALUES (6, 'new'); INSERT INTO fast VALUES (6, 'new'); INSERT INTO slow VALUES (6, 'new')");
+    const changedAt = Date.now();
+    // the 2s table: current within its interval (and a pass's own time)
+    // its rows are visible a moment before its pass reads the ledger's polled_at again: both are waited for
+    await until("the poll 2s table to have the new row, its syncedAt moved with its poll", async () => await count("fast") === 6 && syncedAt(sync, "public.fast")! > before["public.fast"]!, 8_000);
+    const fastSeen = Date.now();
+    // the 10s table: not polled before its interval, its syncedAt where its catch-up left it
+    if (fastSeen < Date.parse(before["public.slow"]!) + 9_000) {
+      assert.equal(await count("slow"), 5, "the poll 10s table is not polled before its interval");
+      assert.equal(syncedAt(sync, "public.slow"), before["public.slow"], "its syncedAt moves only with its own poll");
+    } else assert.fail(`the 2s table took ${(fastSeen - changedAt) / 1000} s: too late to tell the 10s table's interval apart`);
+    // then it is, once its interval passed since its last poll
+    await until("the poll 10s table to have the new row, its syncedAt moved", async () => await count("slow") === 6 && syncedAt(sync, "public.slow") !== before["public.slow"], 20_000);
+    const slowPolled = Date.parse(syncedAt(sync, "public.slow")!);
+    assert.ok(slowPolled - Date.parse(before["public.slow"]!) >= 9_500, `its next poll waited its interval: ${slowPolled - Date.parse(before["public.slow"]!)} ms`);
+    // the off table: unchanged though rows changed on the source, its syncedAt as its copy left it
+    assert.equal(await count("manual"), 5, "an off table is not polled by the passes");
+    assert.equal(syncedAt(sync, "public.manual"), before["public.manual"], "nor is its syncedAt moved by them");
+    assert.equal(logged.filter((l) => /^poll: .*public\.manual/.test(l)).length, 1, `only its copy's catch-up poll names it:\n${logged.join("\n")}`);
 
-    // asked: exactly the big table, now, whatever its size
-    const asked = await sync.pollNow(["public.big"]);
-    assert.deepEqual(asked.tables.map((t) => [t.table, t.changed, t.deleted, t.rows]), [["public.big", 1, 1, 20]]);
-    assert.equal(await ids("public.big"), seq(2, 21), "polled when asked: the insert and the delete arrived");
-    assert.ok(Date.parse(sync.state().find((s) => s.source === "public.big")!.unsynced!.asOf!) >= Date.parse(big.unsynced!.asOf!), "its as-of moves with the poll");
-
+    // mason sync: an off table polled once, now; and a polled table now too, whatever its interval
+    const asked = await sync.pollNow(["public.manual"]);
+    assert.deepEqual(asked.tables.map((t) => [t.table, t.changed, t.rows]), [["public.manual", 1, 6]]);
+    assert.equal(await count("manual"), 6);
+    assert.ok(syncedAt(sync, "public.manual")! > before["public.manual"]!, "mason sync moves its syncedAt");
+    assert.equal((keptOf(sync, "public.manual") as { nextAt: string | null }).nextAt, null, "and leaves it off: no next poll");
+    psql(url, "DELETE FROM slow WHERE id = 1");
+    const slowNow = await sync.pollNow(["public.slow"]);
+    assert.deepEqual(slowNow.tables.map((t) => [t.table, t.deleted, t.rows]), [["public.slow", 1, 5]], "a poll 10s table synced now, before its interval");
+    const next = Date.parse((keptOf(sync, "public.slow") as { nextAt: string }).nextAt);
+    assert.ok(next - Date.parse(syncedAt(sync, "public.slow")!) >= 9_000, "its next poll is an interval from this one");
     // refused by name: a table not added, with the closest added one
-    await assert.rejects(sync.pollNow(["public.bgi"]), (e: Error) => e instanceof PollRefused && e.code === "not_found" && /^public\.bgi is not added \(mason add adds it\) — did you mean `public\.big`\?$/.test(e.message));
+    await assert.rejects(sync.pollNow(["public.fats"]), (e: Error) => e instanceof PollRefused && e.code === "not_found" && /^public\.fats is not added \(mason add adds it\) — did you mean `public\.fast`\?$/.test(e.message));
   } finally { await sync.stop(); store.close(); }
 
-  // in replication mode every table is current already: there is nothing to poll
-  const other = await DuckStore.open(path.join(dir, "big-repl.db"), (l) => logged.push(l));
-  const repl = new Sync(other, parsed.source, db, (l) => logged.push(l), 3_600_000, "replication", { slot: "unused", publication: "unused", owned: true });
+  // a replicated table is not polled: mason sync answers where the stream is
+  const other = await DuckStore.open(path.join(dir, "mixed-repl.db"), (l) => logged.push(l));
+  const repl = new Sync(other, source, source.database, (l) => logged.push(l), 3_600_000, "replication", { slot: "unused", publication: "unused", owned: true });
   try {
-    await assert.rejects(repl.pollNow(["public.big"]), (e: Error) => e instanceof PollRefused && e.code === "refused" && /logical replication/.test(e.message));
+    // stopped first, as nothing here may make a slot: its tables set, no pass runs
+    await repl.open();
+    await repl.stop();
+    await repl.setTables([tableOf("manual", { mode: "replication" }), tableOf("slow", OFF)]);
+    const r = await repl.pollNow(["public.manual"]);
+    assert.deepEqual([r.tables, r.streamed?.map((t) => t.table)], [[], ["public.manual"]]);
+    assert.match(r.streamed![0]!.position, /^[0-9A-F]+\/[0-9A-F]+$/);
+    // an off table beside it, in a project that streams, is POLLED by mason sync, never answered as streamed: this
+    // sync is stopped, so the poll it owes is refused as stopping (a project that streamed every table said "streamed")
+    await assert.rejects(repl.pollNow(["public.manual", "public.slow"]), (e: Error) => e.message === "Mason is stopping");
   } finally { await repl.stop(); other.close(); }
+});
+
+// A CHANGE OF A TABLE'S SYNC KEEPS ITS COPY AND CATCHES IT UP BY ONE POLL, never copies it again — by `mason add --sync`
+// while the run is up (`setTables`), and by hand while it is down (the ledger's record of the sync it was polled under)
+test("a table's sync switched off→poll and poll→off keeps its copy and is caught up by one poll, at once or at the next start", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const source = ownDatabase("switch", "CREATE TABLE a (id int PRIMARY KEY, v text); CREATE TABLE b (id int PRIMARY KEY, v text); " +
+    "INSERT INTO a SELECT g, 'a' || g FROM generate_series(1, 5) g; INSERT INTO b SELECT g, 'b' || g FROM generate_series(1, 5) g");
+  const url = `postgres://${source.user}${source.password ? `:${encodeURIComponent(source.password)}` : ""}@${source.host}:${source.port}/${source.database}`;
+  const logged: string[] = [];
+  const file = path.join(dir, "switch.db");
+  let store = await DuckStore.open(file, (l) => logged.push(l));
+  let sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+  await sync.open();
+  const count = async (t: string): Promise<number> => Number((await store.writer.runAndReadAll(`SELECT count(*) FROM public.${t}`)).getRowsJS()[0]![0]);
+  const copiedAt = (t: string): string | null => sync.state().find((s) => s.source === `public.${t}`)!.copiedAt;
+  const both = ["public.a", "public.b"];
+  try {
+    await sync.setTables([tableOf("a", OFF), tableOf("b", POLL("1h", 3600))]);
+    sync.start();
+    await until("both copied and caught up", settled(sync, both));
+    const copies = [copiedAt("a"), copiedAt("b")];
+    psql(url, "INSERT INTO a VALUES (6, 'x'); INSERT INTO b VALUES (6, 'x')");
+    // mason add a --sync "poll 1h", mason add b --sync off: each caught up by ONE poll, now
+    await sync.setTables([tableOf("a", POLL("1h", 3600)), tableOf("b", OFF)]);
+    await until("both caught up by one poll", async () => await count("a") === 6 && await count("b") === 6, 10_000);
+    assert.ok(logged.includes("public.a: sync: off → poll 1h: its copy is kept, and caught up by one poll now"), logged.join("\n"));
+    assert.ok(logged.includes("public.b: sync: poll 1h → off: its copy is kept, and caught up by one poll now"), logged.join("\n"));
+    assert.deepEqual([copiedAt("a"), copiedAt("b")], copies, "never copied again");
+    assert.equal(logged.filter((l) => /^copied public\.[ab]\b/.test(l)).length, 2, `one copy each, the first:\n${logged.join("\n")}`);
+    // then each kept as it now says: neither due (poll 1h, off), so a change waits
+    psql(url, "INSERT INTO a VALUES (7, 'y'); INSERT INTO b VALUES (7, 'y')");
+    await new Promise((r) => setTimeout(r, 2_500));
+    assert.deepEqual([await count("a"), await count("b")], [6, 6], "after the one poll, each kept as its new sync says");
+  } finally { await sync.stop(); store.close(); }
+
+  // BY HAND, while Mason is down: a's entry now says off (recorded: poll 1h), b's still off — a is caught up at the start
+  store = await DuckStore.open(file, (l) => logged.push(l));
+  sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll");
+  await sync.open();
+  try {
+    const seen = logged.length;
+    await sync.setTables([tableOf("a", OFF), tableOf("b", OFF)]);
+    sync.start();
+    await until("a caught up at the start", async () => await count("a") === 7, 10_000);
+    assert.ok(logged.slice(seen).includes("public.a: sync: poll 1h → off: its copy is kept, and caught up by one poll now"), logged.slice(seen).join("\n"));
+    await new Promise((r) => setTimeout(r, 1_500));
+    assert.equal(await count("b"), 6, "b's sync did not change: off, not polled at the start");
+    assert.equal(logged.slice(seen).filter((l) => /^copied public\./.test(l)).length, 0, "nothing copied again");
+  } finally { await sync.stop(); store.close(); }
 });
 
 // A BULK CHANGE ON A BIG TABLE (a migration's UPDATE over tens of millions of rows, one Postgres
@@ -1330,7 +1433,7 @@ test("a table copies beside the polls: the other table is polled meanwhile, and 
     big.release();
     await until(() => logged.slice(from).some((l) => /^caught up public\.big /.test(l)), "big caught up");
     const said = logged.slice(from).join("\n");
-    assert.ok(logged.slice(from).some((l) => l === "caught up public.big by one poll after its copy: the poll keeps it current"), said);
+    assert.ok(logged.slice(from).some((l) => l.startsWith("caught up public.big by one poll after its copy: the poll keeps it current (polled every ")), said);
     assert.equal(await read("SELECT id, v FROM public.big WHERE id IN (0, 7, 8) ORDER BY 1"), "0\tnew during its copy\n7\tchanged during its copy", `the changes made during its copy\n${said}`);
     assert.equal(await read("SELECT count(*), count(DISTINCT id) FROM public.big"), `${ROWS}\t${ROWS}`);
     // and polled by the passes from then on

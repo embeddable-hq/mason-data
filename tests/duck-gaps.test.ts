@@ -230,3 +230,10 @@ test("every refused entry is one the code refuses with, and a heldBy test names 
   });
   assert.deepEqual(unheld, [], "a heldBy test that does not exist or does not name its gap (`Mason gap <id>`)");
 });
+
+test("what a refused statement is said to have used is in a developer's words: no internal name (the oracle, the engine, the catalog's)", () => {
+  // `what` is the line mason status and the web page's Unsupported SQL say to the person who sent the statement
+  // (unsupportedLines); the engine and the oracle are named in the docs' other columns only
+  const internal = Object.entries(GAPS).filter(([, g]) => /\b(oracle|duckdb|pglite)\b/i.test(g.what)).map(([id, g]) => `${id}: ${g.what}`);
+  assert.deepEqual(internal, []);
+});

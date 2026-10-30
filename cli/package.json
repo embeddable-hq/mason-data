@@ -15,10 +15,17 @@
     "prepack": "node build.ts"
   },
   "dependencies": {
-    "@duckdb/node-api": "^2.0.0-r.1",
+    "@duckdb/node-api": "2.0.0-r.1",
     "@electric-sql/pglite": "^0.5.10",
     "libpg-query": "^18.1.5",
     "pgsql-deparser": "18.3.8",
     "yaml": "^2.6.0"
+  },
+  "optionalDependencies": {
+    "@mason-data/extensions-darwin-arm64": "0.7.0",
+    "@mason-data/extensions-darwin-x64": "0.7.0",
+    "@mason-data/extensions-linux-arm64": "0.7.0",
+    "@mason-data/extensions-linux-x64": "0.7.0",
+    "@mason-data/extensions-win32-x64": "0.7.0"
   }
 }

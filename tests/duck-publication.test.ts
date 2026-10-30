@@ -58,7 +58,7 @@ test("a table the publication does not carry is refused ON ITS OWN, with the ADD
     "    public.items (id, v, n)",
     "",
     "Mason reads a publication it is given as it is, never altering it: once its owner has run that, the next mason start (or mason add) checks it again. " +
-      "Or mason start --replication without --publication, where Mason makes its own (not on a read replica), or mason start --poll, which needs no publication.",
+      "Or give the table's entry sync: poll <interval> in the sources file, which needs no publication; or take publication: out of it, where Mason makes its own, carrying the replicated tables alone (not on a read replica).",
   ].join("\n"));
 });
 

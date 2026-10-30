@@ -21,24 +21,25 @@ import { DuckDBInstance, version, type DuckDBConnection, type DuckDBPreparedStat
 import { Executor, type DuckConnection } from "./executor.ts";
 import { beginStatement, cancelStatement, slotName, statementCancelled } from "./cancel.ts";
 import type { PgSession } from "../api/postgres/encode.ts";
-import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner, type ExplainHow } from "../api/postgres/server.ts";
+import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner, type DuckSession, type ExplainHow } from "../api/postgres/server.ts";
 import { duckParameters, missingRelationHint, planDuck, quoteDuckKeywords } from "./plan.ts";
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
 import { VERIFIED } from "./verified.ts";
-import { msSinceCall, registerFunctions, SESSION_VARIABLE } from "./functions.ts";
+import { msSinceCall, registerFunctions, SESSION_VARIABLE, SETTINGS_VARIABLE } from "./functions.ts";
 import { duckCollation, type DuckCollation } from "./rewrite.ts";
 import { decodeLibcOrder, encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
 import { dataRow } from "../api/postgres/protocol.ts";
 import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } from "./types.ts";
 import type { ExactColumn } from "./rewrite.ts";
-import { gapMark } from "./gaps.ts";
+import { gapIn, gapMark, type GapId } from "./gaps.ts";
 import { cellsOf, evaluateText, NumericError } from "../lib/pg-numeric.ts";
 import { explainJson, explainText, planNodes, profiled, qualifiedName, scannedTables, type Copy, type CopyFacts, type Explained, type PlanNode, type TableName } from "./explain.ts";
 import type { PlannedSql } from "./plan.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { DuckDBType } from "@duckdb/node-api";
+import { extensionSettings, findExtensions, type Extensions } from "./extensions.ts";
 
 export const MASON_SCHEMA = "_mason";
 
@@ -66,6 +67,9 @@ export const DUCKDB_VERSION = version();
  * holds the key under every collation), and a LEFT lateral's unnest of an expression, which computes the expression
  * once with `list_transform(list_value(e), l -> CASE … l … END)[1]` (`rangeFunction`; tests/duck-wire.test.ts). A `->`
  * that is not a lambda function's argument is still the json operator.
+ *
+ * Beside them, the copy's extensions (src/duck/extensions.ts `extensionSettings`): with Mason's package for this
+ * platform, `extension_directory` is that package and nothing is ever downloaded; without one, DuckDB's defaults.
  */
 const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compression: "zstd", lambda_syntax: "ENABLE_SINGLE_ARROW" };
 
@@ -122,8 +126,8 @@ export async function openDuck(file: string, settings: Record<string, string>): 
   catch (e) {
     const m = (e as Error).message;
     throw new Error(/lock/i.test(m)
-      ? `DuckDB could not open ${file}: another process holds it (${m}). Is another mason start running for this project? mason status says`
-      : `DuckDB could not open ${file}: ${m}. mason destroy deletes the copy, and the next mason start copies again`);
+      ? `Mason could not open the copy ${file}: another process holds it (${m}). Is another mason start running for this project? mason status says`
+      : `Mason could not open the copy ${file}: ${m}. mason destroy deletes the copy, and the next mason start copies again`);
   }
   const writer = await instance.connect();
   await writer.run(`CREATE SCHEMA IF NOT EXISTS ${MASON_SCHEMA}`);
@@ -145,32 +149,36 @@ export class DuckStore {
   private readonly executor: Executor;
   private closed: Promise<void> | null = null;
   private readonly closeGraceMs: number | undefined;
-  private constructor(file: string, executor: Executor, memoryLimit: number, closeGraceMs?: number) {
-    this.file = file; this.executor = executor; this.memoryLimitBytes = memoryLimit; this.closeGraceMs = closeGraceMs;
+  /** where the copy's extensions come from: Mason's package for this platform, or DuckDB's install (src/duck/extensions.ts) */
+  readonly extensions: Extensions;
+  private constructor(file: string, executor: Executor, memoryLimit: number, extensions: Extensions, closeGraceMs?: number) {
+    this.file = file; this.executor = executor; this.memoryLimitBytes = memoryLimit; this.extensions = extensions; this.closeGraceMs = closeGraceMs;
     this.writer = executor.writer();
     this.instance = { connect: () => executor.connect() };
   }
 
   /** `silentMs` and `closeGraceMs`: the executor's bounds (src/duck/executor.ts SILENT_MS, CLOSE_GRACE_MS), shorter only
-   *  in a test; `workerFile`, the executor worker's module, another only in a test */
-  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; silentMs?: number; closeGraceMs?: number; workerFile?: string } = {}): Promise<DuckStore> {
+   *  in a test; `workerFile`, the executor worker's module, another only in a test; `extensions`, this machine's
+   *  (`findExtensions`) unless a test names a package */
+  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions } = {}): Promise<DuckStore> {
+    const extensions = options.extensions ?? findExtensions();
     const memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
     if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(`MASON_DUCKDB_MEMORY=${JSON.stringify(memoryLimit)} is not an amount of memory: write it as 8GB or 512MiB (unset, half the machine's RAM: ${DEFAULT_MEMORY_LIMIT})`);
     const where = path.resolve(file);
     const before = opened.get(where);
-    if (before !== undefined && before.closed === null) throw new Error(`DuckDB could not open ${file}: this process has it open already (Mason bug: report it)`);
+    if (before !== undefined && before.closed === null) throw new Error(`Mason could not open the copy ${file}: this process has it open already (Mason bug: report it)`);
     // a copy whose thread was given up on may still hold the file: a second instance of it would lose writes
-    if (before?.abandoned != null) throw new Error(`DuckDB could not open ${file}: this process gave up on the copy's thread before (${before.abandoned}), which may still hold it; start mason again (a new process opens it)`);
+    if (before?.abandoned != null) throw new Error(`Mason could not open the copy ${file}: this process gave up on the copy's thread before (${before.abandoned}), which may still hold it; start mason again (a new process opens it)`);
     const mine = { closed: null as Promise<void> | null, abandoned: null as string | null };
     opened.set(where, mine);
     let executor: Executor;
     try {
       if (before !== undefined) await before.closed;
       // every connection's, the sync's and each session's
-      executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, memory_limit: memoryLimit, temp_directory: `${file}.tmp` }, log,
+      executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, ...extensionSettings(extensions), memory_limit: memoryLimit, temp_directory: `${file}.tmp` }, log,
         ...(options.silentMs !== undefined ? { silentMs: options.silentMs } : {}), ...(options.workerFile !== undefined ? { workerFile: options.workerFile } : {}) });
     } catch (e) { if (opened.get(where) === mine) opened.delete(where); throw e; }
-    const store = new DuckStore(file, executor, memoryLimitBytes(memoryLimit), options.closeGraceMs);
+    const store = new DuckStore(file, executor, memoryLimitBytes(memoryLimit), extensions, options.closeGraceMs);
     // closed: the file may be opened again — unless its thread was given up on (`abandoned`), which keeps it here
     store.closing = (p) => { mine.closed = p; void p.then(() => { if (executor.abandoned !== null) mine.abandoned = executor.abandoned; else if (opened.get(where) === mine) opened.delete(where); }); };
     return store;
@@ -221,7 +229,8 @@ export class DuckStore {
     return {
       collation: c,
       open: () => this.runner(),
-      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound) => planDuck(catalog, text, stmt, base, paramOids, searchPath, timeZone, c, verified, userTypes, copies, 0, kept ?? null, wireBound ?? false),
+      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound, grants) =>
+        planDuck(catalog, text, stmt, base, paramOids, searchPath, timeZone, c, verified, userTypes, copies, 0, kept ?? null, wireBound ?? false, grants),
       parameters: duckParameters,
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,
@@ -268,20 +277,22 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   const kind = /^([A-Za-z ]+) Error: /.exec(full)?.[1] ?? "";
   const message = full.replace(/^[A-Za-z ]+ Error: /, "").replace(/\n\n?LINE \d+:[\s\S]*$/, "").trim();
   const pg = postgresWording(kind, message);
-  if (pg !== null) return new StatementError({ ...pg, detail: `DuckDB: ${message}` }, sql);
+  // a refusal raised inside DuckDB (a Mason function's, the rewrite's error() call) crossed it as its text alone: the
+  // entry its text names (gapIn), read here, the one place that text becomes a statement's error
+  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, detail: `the copy: ${message}` }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
   const fn = /(?:Scalar|Aggregate|Table) Function with name "?([A-Za-z_][\w]*)"? does not exist/.exec(message)?.[1];
   if (fn !== undefined) {
     // what reaches DuckDB was verified against Postgres (src/duck/verified.ts), so a function DuckDB lacks is a gap in
     // Mason's rewrite, never something for the client to write in DuckDB's dialect
-    return new StatementError({ code: "0A000", message: `function ${fn}() is not supported: Mason answers SQL with DuckDB, which has no ${fn}`,
-      hint: "this is a gap in Mason's translation: report it with the statement (docs/SQL-SUPPORT.md lists what is known)", detail: `DuckDB: ${message}` });
+    return new StatementError({ code: "0A000", message: `function ${fn}() is not supported: Mason's copy has no ${fn}`,
+      hint: "this is a gap in Mason's translation: report it with the statement (docs/SQL-SUPPORT.md lists what is known)", detail: `the copy: ${message}` });
   }
   const table = /Table with name "?([^"!\s]+)"? does not exist/.exec(message)?.[1];
   if (table !== undefined) {
     // DuckDB's miss comes after the catalog held the table (the plan passed): one dropped as no longer added, whose way
     // back is `mason add`, so no copy state is read
     return new StatementError({ code: "42P01", message: `relation "${table}" does not exist`,
-      hint: missingRelationHint(table, []), detail: `DuckDB: ${message}` });
+      hint: missingRelationHint(table, []), detail: `the copy: ${message}` });
   }
   const code = kind === "Parser" ? "42601"
     : kind === "Catalog" ? "42P01"
@@ -301,18 +312,18 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
     : kind === "Invalid Input" ? "22023"
     : "XX000";
   return new StatementError({ code, message: code === "57014" ? "canceling statement due to user request"
-      : code === "53200" ? "out of memory: this statement needs more than the memory Mason's DuckDB may use, in a part that cannot spill to disk" : message,
+      : code === "53200" ? "out of memory: this statement needs more than the memory Mason's copy may use, in a part that cannot spill to disk" : message,
     // DuckDB's own advice is SET, which a client of Mason cannot do: Mason's way out instead
     ...(code === "53200" ? { hint: "ask for less at once (a filter, a LIMIT, fewer or narrower columns, a coarser GROUP BY), or raise MASON_DUCKDB_MEMORY (8GB, 24GB) and start mason again; nothing else stopped" } : {}),
     // what Mason ran (the statement as rewritten for DuckDB, src/duck/rewrite.ts): a report of the error needs it
-    detail: `DuckDB${kind ? ` ${kind} Error` : ""} (Mason answers SQL with DuckDB): ${message}${sql === "" ? "" : `; DuckDB ran: ${oneLine(sql, 2000)}`}`,
+    detail: `the copy${kind ? ` ${kind} error` : ""}: ${message}${sql === "" ? "" : `; Mason ran: ${oneLine(sql, 2000)}`}`,
     // Postgres accepted the GROUP BY (it analysed the statement first): DuckDB refusing it is Mason's rewrite's gap
-    ...(code === "42803" ? { hint: "Postgres accepts this GROUP BY and Mason's rewrite did not carry it to DuckDB: report it with the statement; adding the column to the GROUP BY answers meanwhile" } : {}),
+    ...(code === "42803" ? { hint: "Postgres accepts this GROUP BY and Mason's rewrite did not carry it to the copy: report it with the statement; adding the column to the GROUP BY answers meanwhile" } : {}),
   }, sql);
 }
 
 /** The errors DuckDB raises for what Postgres raises too, in Postgres's code and words (a tool or a person matches them). */
-function postgresWording(kind: string, message: string): { code: string; message: string } | null {
+function postgresWording(kind: string, message: string): { code: string; message: string; gap?: GapId | null } | null {
   if (/^Division by zero\b/i.test(message) || message === "division by zero") return { code: "22012", message: "division by zero" };
   const zone = /Unknown TimeZone '([^']*)'/.exec(message);
   if (zone) return { code: "22023", message: `time zone "${zone[1]}" not recognized` };
@@ -327,10 +338,10 @@ function postgresWording(kind: string, message: string): { code: string; message
   // a cast to numeric(p, s) of a value with more than p - s integer digits
   if (/Casting value "[^"]*" to type DECIMAL\(\d+,\s*\d+\) failed: value is out of range/.test(message)) return { code: "22003", message: "numeric field overflow" };
   // an exact sum past DuckDB's 38 digits (a text read as numeric is summed as a DECIMAL(38,18), src/duck/rewrite.ts summed)
-  if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past DuckDB's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})` };
+  if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past the copy's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})`, gap: "numeric-exact-sum" };
   // a numeric(p, s) read from a text holding NaN or Infinity (src/duck/rewrite.ts pgInput): DuckDB's decimal has none
   const special = /Could not convert string ['"](NaN|-?Infinity)['"] to DECIMAL/.exec(message);
-  if (special) return { code: "0A000", message: `a numeric ${special[1]} read from a text is not supported by Mason (${gapMark("numeric-special")})` };
+  if (special) return { code: "0A000", message: `a numeric ${special[1]} read from a text is not supported by Mason (${gapMark("numeric-special")})`, gap: "numeric-special" };
   const conv = /Could not convert string '((?:[^']|'')*)' to (INT16|INT32|INT64|DOUBLE|FLOAT|DATE|TIMESTAMP|UUID|BOOL)/.exec(message);
   if (conv) {
     const t = { INT16: "smallint", INT32: "integer", INT64: "bigint", DOUBLE: "double precision", FLOAT: "real", DATE: "date", TIMESTAMP: "timestamp", UUID: "uuid", BOOL: "boolean" }[conv[2] as "INT16"];
@@ -373,6 +384,7 @@ export class SessionRunner implements DuckRunner {
   private readonly log: (line: string) => void;
   private zone: string | null = null;
   private path: string | null = null;
+  private settings: string | null = null;
   private constructor(conn: DuckDBConnection, log: (line: string) => void, slot: number, cancels: Int32Array) {
     this.conn = conn; this.log = log; this.slot = slot; this.cancels = cancels;
   }
@@ -389,7 +401,7 @@ export class SessionRunner implements DuckRunner {
     return new SessionRunner(conn, log, slot, cancels);
   }
 
-  private async settle(session: { timeZone: string; searchPath: string }): Promise<void> {
+  private async settle(session: DuckSession): Promise<void> {
     if (session.timeZone !== this.zone) { await this.conn.run(`SET TimeZone = ${quoteLiteral(session.timeZone)}`); this.zone = session.timeZone; }
     // Postgres skips a schema of the path that does not exist; DuckDB refuses the SET (and with it every statement):
     // the path is the schemas DuckDB has (a table added later in a new schema is found at the next statement)
@@ -397,6 +409,13 @@ export class SessionRunner implements DuckRunner {
     const wanted = duckSearchPath(session.searchPath).split(",").filter((n) => have.has(n));
     const path = (wanted.length > 0 ? wanted : ["main"]).join(",");
     if (path !== this.path) { await this.conn.run(`SET search_path = ${quoteLiteral(path)}`); this.path = path; }
+    // what `current_setting(name)` reads (src/duck/rewrite.ts `settingRead`): the session's settings, as one map
+    const settings = JSON.stringify(session.settings);
+    if (settings !== this.settings) {
+      const entries = Object.entries(session.settings).map(([k, v]) => `${quoteLiteral(k)}: ${quoteLiteral(v)}`).join(", ");
+      await this.conn.run(`SET VARIABLE ${SETTINGS_VARIABLE} = MAP {${entries}}::MAP(VARCHAR, VARCHAR)`);
+      this.settings = settings;
+    }
   }
 
   private async prepare(sql: string): Promise<DuckDBPreparedStatement> {
@@ -412,7 +431,7 @@ export class SessionRunner implements DuckRunner {
    * else on it until the result is read or closed) and the signal's interrupt until it ends: read to the end, failed,
    * or closed.
    */
-  async run(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  async run(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null = null, exact: readonly ExactColumn[] = []): Promise<DuckAnswer> {
     return (await this.track(this.streamed(sql, params, session, signal, fields, exact))).answer;
   }
@@ -427,7 +446,7 @@ export class SessionRunner implements DuckRunner {
   /** `run`, and where its time goes as it is read: DuckDB's (its prepare, which plans; each chunk it computes) and
    *  Mason's (the exact numerics, the encoding), ms — what an EXPLAIN ANALYZE says. `profile`: the file DuckDB's
    *  profiler writes this statement's profile to (EXPLAIN ANALYZE), turned on here, after the settle */
-  private async streamed(planned: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  private async streamed(planned: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact: readonly ExactColumn[],
     profile: string | null = null): Promise<{ answer: DuckAnswer; timing: { prepareMs: number; duckdbMs: number; masonMs: number } }> {
     const sql = planned.text;
@@ -559,7 +578,7 @@ export class SessionRunner implements DuckRunner {
       }
       timing.duckdbMs += performance.now() - t1;
       const r = result;
-      if (fields !== null && r.columnCount < fields.length) throw new StatementError({ code: "XX000", message: `DuckDB answered ${r.columnCount} column(s) where Postgres's analysis has ${fields.length}: report it (Mason's rewrite)` }, sql);
+      if (fields !== null && r.columnCount < fields.length) throw new StatementError({ code: "XX000", message: `the copy answered ${r.columnCount} column(s) where Postgres's analysis has ${fields.length}: report it (Mason's rewrite)` }, sql);
       // Postgres's columns where its analysis gave them (a WITH TIES rank DuckDB adds after them is not sent)
       const columns = fields !== null
         ? fields.map((f, i) => pgTypedColumn(f.name, f.oid, r.columnType(i), f.typmod))
@@ -614,12 +633,12 @@ export class SessionRunner implements DuckRunner {
    * encoded, none sent — with DuckDB's profiler writing each operator's rows and time to a file of its own, read after.
    * Then the copies its scans read: their rows, and how each is kept current as the sync says it (`how.copies`).
    */
-  explain(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  explain(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     how: ExplainHow): Promise<string[]> {
     return this.track(this.explained(sql, params, session, signal, how));
   }
 
-  private async explained(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  private async explained(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     how: ExplainHow): Promise<string[]> {
     await Promise.all([...this.releasing]);
     const o = how.options;
@@ -643,7 +662,7 @@ export class SessionRunner implements DuckRunner {
         // whole table is the table's row count), and its plan is its EXPLAIN, the rows the ones it answered
         const profile = fs.existsSync(file) ? profiled(JSON.parse(fs.readFileSync(file, "utf8"))) : null;
         if (profile !== null && profile.sql !== sql.text) {
-          throw new StatementError({ code: "XX000", message: `DuckDB's profile of an EXPLAIN ANALYZE is of another statement (${oneLine(profile.sql ?? "none named")}): report it (Mason's EXPLAIN)` }, sql.text);
+          throw new StatementError({ code: "XX000", message: `the copy's profile of an EXPLAIN ANALYZE is of another statement (${oneLine(profile.sql ?? "none named")}): report it (Mason's EXPLAIN)` }, sql.text);
         }
         if (profile !== null) plan = profile.plan;
         else {
@@ -660,7 +679,7 @@ export class SessionRunner implements DuckRunner {
   }
 
   /** DuckDB's `EXPLAIN (FORMAT JSON)` of the planned SQL, its parameters bound: its plan, estimates only */
-  private async plainPlan(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal): Promise<PlanNode[]> {
+  private async plainPlan(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal): Promise<PlanNode[]> {
     try { await this.settle(session); }
     catch (e) { throw pgErrorOf(e, sql.text); }
     const p = await this.prepare(`EXPLAIN (FORMAT JSON) ${sql.text}`);
@@ -751,7 +770,7 @@ function exactColumns(columns: WireColumn[], fields: ReadonlyArray<{ name: strin
   const readers = exact[0]!.cells.map((conv, j) => cellText(typeAt(base + j), conv));
   const computed = exact.filter((e) => {
     const unreadable = readers.some((r, j) => r === null && programReads(e, j));
-    if (unreadable) columns[e.column] = { ...columns[e.column]!, divergence: `Postgres computes this numeric exactly; a part of it DuckDB computed as a double` };
+    if (unreadable) columns[e.column] = { ...columns[e.column]!, divergence: `Postgres computes this numeric exactly; a part of it the copy computed as a double` };
     return !unreadable;
   });
   if (computed.length === 0) return null;
@@ -772,7 +791,7 @@ function exactRows(computed: ComputedColumns, rows: DuckDBValue[][], base: numbe
     for (const e of computed.columns) {
       try { out[e.column] = evaluateText(e.program, values); }
       catch (err) {
-        if (err instanceof NumericError) throw new StatementError({ code: err.sqlstate, message: err.message }, sql);
+        if (err instanceof NumericError) throw new StatementError({ code: err.sqlstate, message: err.message }, sql, err.gap);
         throw err;
       }
     }
@@ -784,7 +803,7 @@ function exactRows(computed: ComputedColumns, rows: DuckDBValue[][], base: numbe
 function computedOf(exact: readonly ExactColumn[], fields: ReadonlyArray<{ name: string }> | null): string[] {
   return exact.map((e) => {
     const cells = new Set(cellsOf(e.program).filter((k) => !k.startsWith("$"))).size;
-    return `column ${e.column + 1}${fields?.[e.column] === undefined ? "" : ` "${fields[e.column]!.name}"`}: Postgres's exact numeric${e.text ? " as text" : ""}, from ${cells} of DuckDB's value(s)`;
+    return `column ${e.column + 1}${fields?.[e.column] === undefined ? "" : ` "${fields[e.column]!.name}"`}: Postgres's exact numeric${e.text ? " as text" : ""}, from ${cells} of the copy's value(s)`;
   });
 }
 

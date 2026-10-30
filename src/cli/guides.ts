@@ -41,7 +41,8 @@ async function agentGuide(): Promise<string> {
 
   Every command prints for a person, or with --json one JSON object for a program. One prints text alone: mason help
   (this reference); mason mcp's stdout is the MCP protocol's, so it takes no --json and says a failure to start on
-  stderr; mason logs --json is the log's lines, or with --requests the request log. Nothing a command prints
+  stderr; mason logs --json is the log's entries ({ at, text }), or with --requests the request log, --events the sync's
+  events, --running the statements running now. Nothing a command prints
   refers to a file this package does not ship.
 
   AN AGENT WITH MCP (Claude Code, Claude Desktop, any MCP client) adds Mason as an MCP server first, then asks with
@@ -79,9 +80,14 @@ ${codes}
   THE SOURCES FILE, mason/sources/<name>.yml (mason init writes it; one per project for now), is what Mason copies:
     kind: postgres
     url: \${DATABASE_URL}          a variable from .env.local, .env or the shell; a literal URL is allowed for local dev
+    sync: off                     how each table is kept current after its first copy: off (the default; mason sync
+                                  <table> reads it again), poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h) or
+                                  replication (the change log: a primary key, wal_level = logical)
+    publication: \${PG_PUBLICATION}  optional: the publication replication reads, its owner's, never altered
     tables:
       orders:                     a bare name is in public; billing.invoices names its schema
         columns: [id, status]     these columns (the primary key is always copied)
+        sync: poll 30s            this table's own: polled every 30 seconds (mason add orders --sync "poll 30s")
       customers: {}               every column
       events:
         exclude: [raw_body]       every column but these
@@ -89,17 +95,28 @@ ${codes}
         key: [tenant_id, id]      only for a table with no primary key: the unique columns to copy it by (polling only)
   mason add and mason remove edit one entry of it and keep the rest as it was, Mason running or not: with it running
   they take effect at once, else at mason start. An edit by hand is read at the next mason start (or the next add or
-  remove). Column types are read from the database at every start.
+  remove). Column types are read from the database at every start. A change of a table's sync: keeps its copy and
+  catches it up by one poll. mason status --json says each table's kept: { sync, syncedAt, nextAt } — how old its
+  copy is; a copy synced days ago answers today's count(*) as of then.
 
   A FIRST SESSION, as a shell runs it:
     mason doctor --json && mason init --json
     mason tables --json                       choose the tables (rows, key, whether one can be added)
     mason add orders customers --json         added to the sources file, checked against the database
     mason start --json && mason wait --json   Mason in the background; until every added table is copied
+    mason sync orders --json                  read what changed in it since (a table whose sync is off: only so)
     mason user add my-tool --json             the URL and password a tool connects with
-    mason status --json                       each table's copy, and the last day's slow and refused statements
+    mason status --json                       each table's copy, and the last day's slow, refused and unsupported statements
+  WATCHING IT, once it runs (every one with --json; --since and --until take an age, 30m or 2h or 7d, or an ISO 8601 time WITH
+  its zone):
+    mason status --json                       recentErrors: the sync's latest failures and the statements latest refused, failed or cancelled
+    mason logs --requests --failed --json     every statement a tool sent that was not answered, with its SQLSTATE and message
+    mason logs --events --failed --json       the sync's failures: a copy, a poll, the stream, the database out of reach, a restart
+    mason logs --running --json               the statements running now, one per session
+    mason cancel <session> --json             stops that session's statement, as a client's cancel does (its client gets a "canceling statement" error)
+    mason usage --since 7d --step 1h --json  the statements, the copy's size and age, the memory over time, a sample a minute
   With no database to hand, in a new folder: mason init demo --json && mason start --json — a demo database Mason
-  hosts itself (${DEMO_TABLES.join(", ")}), changed every few seconds, read by polling only. Init adds
+  hosts itself (${DEMO_TABLES.join(", ")}), changed every few seconds, polled every 5 s (its sync: poll 5s). Init adds
   ${DEMO_ADDED_TABLES.join(", ")}; ${DEMO_TABLE_TO_ADD} is left to add: mason add ${DEMO_TABLE_TO_ADD} --json && mason wait --json, after mason start.
 `;
 }
@@ -114,13 +131,28 @@ export function productionGuide(): string {
   return `GOING TO PRODUCTION — the project folder (mason/sources/, mason/mason.yml) is all that travels: its sources file
 names the tables the server copies, and its url: names the variable that holds the database's URL. Nothing in .mason/ goes with it; the server makes its own copy and state on its volume.
 
-1. PREPARE THE DATABASE. Mason only reads it. Polling (the default) needs a user that can SELECT the tables, and costs
-   the database a scan of each table per poll; it works on a read replica. Logical replication (MASON_CHANGES=replication)
-   needs wal_level = logical, a user with REPLICATION, and either a publication you name (PG_PUBLICATION, read as it is,
-   never altered) or the right to create one; the slot holds the database's WAL while Mason is down, so cap it with
-   max_slot_wal_keep_size. Try it locally first:
-     mason start --replication                      the change log, as the server reads it
-     mason start --replication --publication app_pub   through a publication the database's owner made
+1. PREPARE THE DATABASE. Mason only reads it, as a user that can SELECT the tables. How each table is kept current
+   after its first copy is the sources file's sync:, committed with it, so the server runs what you ran — at the top
+   for every table, and on an entry for that one:
+     sync: off                                      the file's default for every table
+     tables:
+       orders: { sync: replication }                this one from the change log, within seconds
+       customers: { sync: poll 5m }                 this one polled every 5 minutes
+       events: {}                                   off, as the top says
+   off (the default mason init writes): after the first copy Mason reads the table again only when you run mason sync
+   <table> (before a report, from cron, at the end of a deploy) — nothing Mason does to your database is a hidden
+   default. poll <interval> (1s to 24h): a SELECT that scans the table whole, at that interval, stretched to four
+   times the last poll's own time, so the polls never take more than a fifth of the database's time; it works on a
+   read replica. replication: the change log, through one slot and one publication for the project; it needs
+   wal_level = logical, a user with REPLICATION (or rds_replication), a primary key (a key: table is polled), and
+   either a publication you name (publication: \${PG_PUBLICATION} at the top of the sources file, read as it is, never
+   altered: it must carry every replicated table; a read replica needs one) or the right to create Mason's own, which
+   carries the replicated tables alone. The slot holds the database's WAL while Mason is down, so cap it on the
+   database with max_slot_wal_keep_size (Postgres 13+); it is dropped, verified gone, when no table's sync is
+   replication any more, and at mason destroy. The flags --replication, --poll and --publication of mason start, and
+   MASON_CHANGES on a server, are gone: each answers with the line to write in the sources file. Try it locally first:
+     mason add orders --sync replication             that table from the change log, as the server reads it
+     mason sync customers                           any table read again now, whatever its sync:
 
 2. RUN IT: one container, ghcr.io/embeddable-hq/mason-data:<version> (the version mason.yml names), running mason serve:
      DATABASE_URL           the database to copy from (the variable the sources file's url: names)
@@ -129,7 +161,7 @@ names the tables the server copies, and its url: names the variable that holds t
      MASON_DATA             the volume whose .mason/ holds the copy and the state (default .)
      MASON_PG_HOST=0.0.0.0 and TLS: MASON_PG_TLS_CERT / MASON_PG_TLS_KEY, or MASON_PG_SELF_SIGNED_TLS=1, or
      MASON_PG_PLAIN=1 behind a TLS proxy of your own
-   Docker Compose: ${REPO}/deploy/mason-data/README.md. One container per volume, never two: DuckDB lets one process
+   Docker Compose: ${REPO}/deploy/mason-data/README.md. One container per volume, never two: the copy lets one process
    write its file, so run one replica, with no autoscaling, and stop the old container before the new one starts.
    GET /healthz on MASON_HEALTH_PORT (4140) answers 503 while it starts and 200 once it serves; the first start takes
    about 15 seconds before that, then copies the tables.
@@ -146,16 +178,22 @@ names the tables the server copies, and its url: names the variable that holds t
 
 3. CONNECT THE TOOLS: beside the server (docker compose exec mason …), a user is a password a tool keeps:
      mason user add metabase                        its URL and password, printed once
+     mason user add agent --role agent              a user held to a role of mason/roles.yml: the tables and columns it reads
      mason user list
      mason user remove metabase                     ends it at once, without a restart
    The tool connects to the Postgres API (5433) as to a read replica, each added table a table. Changing
-   MASON_API_KEY removes every user.
+   MASON_API_KEY removes every user. mason/roles.yml ships with mason/ (mason help user shows the file): a user with
+   a role is refused anything past it as Postgres refuses it (42501), and information_schema and mason mcp list it only
+   what it may read; a user added without --role reads as the file's default: (mason init writes default:
+   everything, tables: all — every copied table), and nothing when the file names no default. A roles file from
+   before this release names no default: write default: <role> at its top before upgrading, or its roleless users
+   read nothing.
 
 4. CHANGE IT: ship mason/ with your release and restart the container; a table added or removed is copied or dropped
    at the next start, or beside the server:
      mason add public.orders                        copied at once, added to the mounted mason/sources/
      mason remove orders                            taken out of the sources file, its copy dropped
-     mason status                                   each table's copy, the slow and refused statements
+     mason status                                   each table's copy, the statements, the recent errors
    Upgrade: read the release notes, then move mason.yml and the image together. Removing Mason for good in replication mode:
    SELECT pg_drop_replication_slot('mason_dev_<name>_<source>') — the slot holds your WAL (mason status names it).
 

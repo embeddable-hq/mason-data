@@ -7,11 +7,10 @@
  */
 import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
-import { StatementError, type DuckPlan } from "../api/postgres/server.ts";
+import { gapRefusal, StatementError, type DuckPlan } from "../api/postgres/server.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
 import { describeKeys, nameUserKeys, resolvedKeys } from "./resolved.ts";
-import { gapMark } from "./gaps.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
 import { pgTyplen } from "./types.ts";
@@ -19,6 +18,7 @@ import type { CopyState } from "./sync.ts";
 import { datumText, masonCalls, rewrite, treeDifference, Unrewritable, type DuckCollation, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
 import { distinctCountTables, distinctKeyCounts, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
+import { enforceGrants, type RoleGrants } from "./grants.ts";
 import type { PgAnalysis } from "./analyze.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802;
@@ -155,11 +155,13 @@ export function missingRelationHint(relation: string, copies: readonly CopyState
 }
 
 /** A statement's plan. `wireBound`: its rows are bounded by a row count an Execute sets on the wire, which its SQL
- *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so) */
+ *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so).
+ *  `grants`: the session's role (src/duck/grants.ts), held after the analysis; null for a session with no role where
+ *  roles exist (the plan still names its reads, for an Execute under a role given later); undefined with no roles at all */
 export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: Node, base: number,
   paramOids: readonly number[], searchPath: string, timeZone: string, collation: DuckCollation, verified: ReadonlyMap<string, string> | null,
   userTypes: ReadonlyMap<string, number> = new Map(), copies: () => readonly CopyState[] = () => [], depth = 0, kept: KeptRoutes | null = null,
-  wireBound = false): Promise<DuckPlan> {
+  wireBound = false, grants: RoleGrants | null | undefined = undefined): Promise<DuckPlan> {
   const started = performance.now();
   const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
   if ("refused" in analysis) {
@@ -176,13 +178,18 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const expanded = await expandViews(catalog, stmt, analysis, pathSql(searchPath));
   if (expanded !== null) {
     if (depth >= MAX_VIEW_DEPTH) throw viewRefused(`Mason cannot yet answer views read through more than ${MAX_VIEW_DEPTH} other views`, "read the tables the views read");
-    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound); }
+    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, grants); }
     catch (e) {
       if (!(e instanceof StatementError)) throw e;
       const { position: _p, ...fields } = e.fields;
-      throw new StatementError(fields, text);
+      throw new StatementError(fields, text, e.gap);
     }
   }
+  // THE ROLE (src/duck/grants.ts): the tables and columns Postgres's analysis says the statement reads, held to the
+  // session's role — after Postgres's own refusal and the views' expansion (the check sees the tables a view reads),
+  // before the rewrite (a role's refusal before a Mason gap's). The reads stay on the plan: an Execute under a role
+  // given or taken since the Parse is held to them again (src/api/postgres/server.ts)
+  const reads = grants === undefined ? undefined : await enforceGrants(catalog, analysis.tree, grants);
   // the catalog's own OIDs for the types an extension made (citext): the rewrite knows a few by name, and the wire sends
   // the SOURCE's OID for them (`userTypes`, from the copy), never the catalog's
   let resolved = resolvedKeys(analysis.tree);
@@ -237,9 +244,8 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   catch (e) {
     // a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its SQLSTATE, and no gap
     if (e instanceof Unrewritable) {
-      throw new StatementError(typeof e.gap === "string"
-        ? { code: "0A000", message: e.message, hint: e.hint, detail: `${gapMark(e.gap)} (docs/SQL-SUPPORT.md)` }
-        : { code: e.gap.postgres, message: e.message, hint: e.hint }, text);
+      throw typeof e.gap === "string" ? gapRefusal(e.gap, e.message, e.hint, text)
+        : new StatementError({ code: e.gap.postgres, message: e.message, hint: e.hint }, text);
     }
     throw e;
   }
@@ -255,10 +261,10 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   if (unverified.length > 0) {
     const names = await describeKeys((sql) => catalogRows(catalog, sql), unverified);
     const listed = unverified.map((k) => names.get(k) ?? k);
-    throw new StatementError({ code: "0A000",
-      message: `Mason cannot yet answer this statement on DuckDB exactly as Postgres would: it uses ${listed.slice(0, 5).join("; ")}${listed.length > 5 ? ` and ${listed.length - 5} more` : ""}, which Mason has not verified`,
-      hint: "write the statement without it (docs/SQL-SUPPORT.md lists what is verified), or report it: a statement Mason has not verified is refused rather than answered differently",
-      detail: `${gapMark("unverified")}: ${unverified.join(", ")}` }, text);
+    throw gapRefusal("unverified",
+      `Mason cannot yet answer this statement exactly as Postgres would: it uses ${listed.slice(0, 5).join("; ")}${listed.length > 5 ? ` and ${listed.length - 5} more` : ""}, which Mason has not verified`,
+      "write the statement without it (docs/SQL-SUPPORT.md lists what is verified), or report it: a statement Mason has not verified is refused rather than answered differently",
+      text, `: ${unverified.join(", ")}`);
   }
   // DuckDB's COLUMNS(t.*) (decidedByKey's star) is an expression only unquoted; the deparser quotes the keyword. No
   // statement Postgres accepted calls a function "columns" (Postgres has none), and the read-back below checks the text
@@ -268,10 +274,11 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const back = (await parseSql(sql)).stmts?.[0]?.stmt;
   const difference = back === undefined ? "nothing" : treeDifference(back, tree);
   if (difference !== null) {
-    throw new StatementError({ code: "0A000", message: "Mason cannot run this statement on DuckDB exactly: its rewritten form does not read back as itself (a Mason gap: report it, with the statement)",
-      detail: `read back: ${difference}; DuckDB SQL: ${sql}` }, text);
+    throw new StatementError({ code: "0A000", message: "Mason cannot run this statement exactly: its rewritten form does not read back as itself (a Mason gap: report it, with the statement)",
+      detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}) } as unknown as PlannedSql;
   return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, dropLast, ...(exact.length > 0 ? { exact } : {}), resolved: keys,
-    ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
+    ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
+    timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
 }
