@@ -17,7 +17,8 @@
  *     with the explicit form `through: { orders: <column> }` as the way out, and the explicit form answers;
  *   - the session cannot SET its attributes; SHOW answers them; SET ROLE is unchanged; a whole row of a filtered table
  *     is refused by name (Mason gap roles); the catalog holds the filters as Postgres row security (pg_policies);
- *   - every statement's request-log row carries the user's attributes beside its role.
+ *   - every statement's request-log row carries the user's attributes beside its role;
+ *   - a prepared statement Executed after the roles file's `where:` was edited is planned again under the new filter.
  * The roles modules are imported inside the tests, so a tree without them fails each test by name (scripts/fails-without.ts).
  */
 import { test, after, before } from "node:test";
@@ -287,4 +288,18 @@ test("a where: Postgres cannot read is the roles' problem at its key; through: w
     assert.deepEqual((await rows(ref, "SELECT id FROM refunds ORDER BY id")).map((x) => x[0]), ["2"], "refund 2 replaces order 10, tenant 1's");
   } finally { fs.writeFileSync(rolesFile, ROLES); }
   assert.deepEqual((await rows(acme, "SELECT count(*) FROM orders"))[0], ["4"], "repaired: answered again, no restart");
+});
+
+test("a prepared statement Executed after its role's where: was edited answers under the new filter: re-planned, never the old plan", async () => {
+  await wire();
+  const acme = await connect("acme6", addUser("acme6", "tenant", { tenant: "1" }));
+  const run = async (): Promise<string> =>
+    (await acme.query({ name: "paid_ids", text: "SELECT id FROM orders WHERE status = $1 ORDER BY id", values: ["paid"], rowMode: "array" })).rows.map((x) => x.join(":")).join(",");
+  assert.equal(await run(), "10,13,16");
+  try {
+    fs.writeFileSync(rolesFile, ROLES.replace(`where: "tenant_id = :tenant" }\n      order_items`, `where: "tenant_id = :tenant AND amount > 40" }\n      order_items`));
+    assert.equal(await run(), "10", "orders 13 (amount 30) and 16 (amount 5) are no longer the role's: the statement prepared before the edit reads the new filter");
+    assert.equal((await rows(acme, "SELECT count(*) FROM order_items")).map((r) => r[0]).join(","), "3", "and its through: child follows (order 13's item is gone)");
+  } finally { fs.writeFileSync(rolesFile, ROLES); }
+  assert.equal(await run(), "10,13,16", "the edit undone: the old filter again");
 });

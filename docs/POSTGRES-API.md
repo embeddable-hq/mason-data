@@ -129,7 +129,7 @@ is the role's once its copy is served. A table key `all` under `tables:` is refu
   filtered in this stage**: `pg_class` and `pg_attribute` still list every copied column to every role (as they do on
   Postgres, which filters neither), while a read of a hidden one is refused. **Every role may see every view** of the
   source: reading one is held to the tables it reads, so a view over a hidden column is refused when read — stricter
-  than Postgres, where a view's owner's grants apply. No row filter yet (the gap `roles` in docs/SQL-SUPPORT.md).
+  than Postgres, where a view's owner's grants apply. A role's rows are filtered too (below).
 - **A session is its user and becomes no one else**: `SET ROLE` and `SET SESSION AUTHORIZATION` to its own name,
   `NONE` or `RESET` are no-ops, and so is `SET ROLE` to the role it already is (its own, or the file's default: what
   `current_user` says), as Postgres always allows; any other name is Postgres's refusal (`42501 permission denied to
@@ -143,6 +143,82 @@ is the role's once its copy is served. A table key `all` under `tables:` is refu
   statement).
 - **Every refusal is a row of the request log with the role it was held to** (`role` in `_mason.requests`: the user's
   own, or the file's default; empty for a token and for a user held to nothing).
+
+#### Rows per user
+
+**A role can limit which ROWS a user reads**, by values carried with the user: `attributes:` on the role names them,
+`where:` on a table is a Postgres condition over the table's columns reading them as `:name`, and `through:` makes a
+table's rows visible when the row of another table of the role they reference is:
+
+```yaml
+roles:
+  tenant:
+    attributes: [tenant]                       # each one value (a scalar)
+    tables:
+      customers: { where: "tenant_id = :tenant" }
+      orders: { exclude: [notes], where: "tenant_id = :tenant" }
+      order_items: { through: orders }         # by the foreign key from order_items to orders
+  regions:
+    attributes: { regions: list, plan: scalar }
+    tables:
+      customers: { where: "region = ANY(:regions) AND plan <> :plan" }
+      orders: { through: { customers: customer_id } }   # the column named: two foreign keys, or none
+      order_items: { through: orders }                  # two levels deep
+```
+
+```bash
+mason user add acme --role tenant --set tenant=42
+mason user add emea --role regions --set regions=eu --set regions=uk --set plan=trial
+```
+
+- **An attribute is a scalar or a list.** `attributes: [tenant]` declares scalars; `{ tenant: scalar, regions: list }`
+  says each. A list is set by repeating `--set` (there is no comma grammar: a comma is legal in a scalar), used as an
+  array (`= ANY(:regions)`, `<> ALL(:regions)`), and bound as one of the column's type (`ARRAY['12','41']::int[]`,
+  `uuid[]` for a uuid column). **An empty list is not expressible** (`--set regions=` is refused): a user who should
+  read no row of a role is a user of another role. A scalar given twice, an attribute the role does not declare (with
+  the closest name), or one missing is refused by `mason user add`, naming the attribute, the role, the `where:` that
+  reads it and the exact `--set` to add.
+- **The file is checked when it is read**, each mistake at its key on one report: a `:name` the role does not declare
+  (with the line that declares it), `where:` beside `through:`, a `through:` to a table the role lacks or to one with no
+  filter of its own, a cycle of `through:`s, and the `where:` itself analysed by the catalog Postgres against the copy's
+  columns — a column the copy lacks, a type that does not compare, a list used as a scalar or the reverse is Postgres's
+  own error with the key and the character (`roles.regions.tables.customers.where: operator does not exist: uuid =
+  uuid[] … :regions is a list, read here as one uuid — write = ANY(:regions)`). A subquery in a `where:` is refused
+  (use `through:`). A `through:` follows the foreign key from the table to its parent as the source's catalog reports
+  it; with none, or several, it is refused with the explicit form `through: { orders: <column> }` as the way out, which
+  compares the column named with the parent's one-column key.
+- **A user without a value its role reads is refused loudly, never answered with no rows**: every statement is
+  `42501 permission denied: the user "acme" has no value for the attribute tenant, which the role tenant filters rows
+  by`, the DETAIL the `where:` that reads it, the HINT `mason user remove acme && mason user add acme --role tenant
+  --set tenant=<value>`. Such a user is one added before the role gained the attribute: `mason start` and `mason user
+  list` name each.
+- **Every read of a filtered table is filtered, wherever it is**: after the catalog Postgres has analysed a statement
+  (views expanded) and after the role's grants are held, each read of a filtered table — in a view, a CTE, a subquery,
+  EXISTS, a UNION branch, a lateral, either side of a join, a prepared statement's every Execute — is replaced by the
+  table filtered by the user's values, and the result analysed again and rewritten like any statement (one grammar:
+  the predicate is SQL the catalog read, never text pasted into the statement). A whole-row reference to a filtered
+  table (`SELECT o FROM orders o`) is refused by name (the gap `roles`). A prepared statement executed after its role's
+  `where:` changed is planned again under the new filter.
+- **The catalog holds the same filters as Postgres row security**: each filtered table has `ROW LEVEL SECURITY`
+  enabled and one `CREATE POLICY … FOR SELECT TO <role> USING (…)` per role reading it, the `where:` reading
+  `current_setting('mason.attr.<name>')` (a list split on commas into the column's array type), so `pg_policies` lists
+  them. A session's attributes are settings it cannot change: `SHOW mason.attr.tenant` and
+  `current_setting('mason.attr.tenant')` answer the user's value (a list comma-joined), and `SET mason.attr.…` is
+  Postgres's refusal (`42501 permission denied to set parameter`).
+- **EXPLAIN says each table's filter** on the table's line, in words: `answered from its copy of public.orders (…;
+  filtered by the role tenant: tenant_id = 42)`, a list as `tenant_id = ANY(12, 41)` (its first five values, then
+  `… and N more`), a `through:` as `a row of orders it references by order_id is visible`; `FORMAT JSON` carries it as
+  the copy's `Row Filter`.
+- **The request log records the values**: `attributes` in `_mason.requests` (JSON, beside `role`; null for a user with
+  none and for a token).
+
+**The one divergence from Postgres row security**: Postgres evaluates a policy before any condition of the statement
+that could raise an error (a policy is a security barrier), so a hidden row never reaches a cast or a division the
+statement makes. Mason's engine may evaluate the statement's own conditions on a row before the filter drops it, so a
+statement whose expression fails on a hidden row's value (`'x'::int`, a division by zero) can be refused where Postgres
+answers it. No hidden row is ever returned; what such an error can reveal is that a row with that value exists. The
+oracle holds every answer a filtered user is given to Postgres's under the same policies
+(tests/integration/oracle/row-filters.ts).
 
 `mason start` listens on 5433 when it is free on every address (127.0.0.1, 0.0.0.0, `::` and `::1`: a port another
 Postgres holds on any of them would send a container or a driver trying `::1` first to that server), else on the next

@@ -1175,6 +1175,45 @@ The oracle holds a Mason role of `tables: all` to a Postgres role granted `ALL T
 access, but visible in a committed file: narrowing it is an edit a reviewer sees, and deleting the `default:` line is
 the one-line way to make every roleless user read nothing. A file already there (a clone) is kept byte for byte.
 
+### Roles: rows per user (2026-10-30, GitHub issue 30, stage 2)
+
+**Decision (the owner, 2026-10-30): one PR carrying `where:` and `through:`, scalars and lists, and a user missing a
+value refused loudly.** A role declares `attributes:` (`[tenant]`, or `{ tenant: scalar, regions: list }`); a table of
+it takes `where: "<SQL reading :name>"` or `through: <a table of the role>` (`through: { orders: order_id }` naming the
+column); a user carries its values (`mason user add … --set tenant=42`, a list by repeating `--set`; `attributes` in
+`.mason/users.json`). Answering a user that lacks a value with no rows would look like an empty tenant — a silent wrong
+answer — so every statement of such a user is refused 42501 with the attribute, the `where:` and the exact commands,
+and `mason start` and `mason user list` name such users.
+
+**One grammar.** `:name` is found by one lexer (`whereParts`, src/duck/row-filter.ts) that skips strings, quoted
+identifiers, dollar quotes, comments and `::` casts. The `where:` is analysed by the catalog Postgres at the file's read
+as `SELECT 1 FROM <table> WHERE <$n>`, which types each attribute as Postgres infers it there (`tenant_id = :tenant`:
+integer; `region = ANY(:regions)`: uuid[]); a list used as a scalar or the reverse is Postgres's own error at the key,
+told again with declared types so the message is the one a developer would meet. Bound, a scalar is `CAST('42' AS
+integer)` and a list `CAST(ARRAY['12', '41'] AS integer[])` — literals the catalog reads, never a value pasted into a
+statement's text. In the statement, each read of a filtered table (a `RangeVar` resolved by `to_regclass` under the
+session's search_path, every read the analysis found accounted for, as views are) is replaced by `(SELECT * FROM t WHERE
+<filter>) AS t`, a `through:` by an `EXISTS` over the parent's own filtered read, recursively; the result is analysed
+again and goes through the same grants, rewrite and allowlist as any statement. So a view, a CTE, a subquery, a join's
+side and a prepared statement's every Execute meet the filter because there is no read without it. The plan cache is
+keyed by the role AND the bound filters, and an Execute whose filters moved (the file edited) is planned again.
+
+**Postgres row security is the reference, twice.** The catalog holds the filters as real policies (`ENABLE ROW LEVEL
+SECURITY`, `CREATE POLICY … FOR SELECT TO <role> USING (… current_setting('mason.attr.tenant')::integer …)`), the
+attributes sent with each catalog request as the session's settings and unsettable by the session; and the oracle
+mirrors each Mason user with a Postgres login under the same policies (`ALTER ROLE … SET mason.attr.…`, a list read by
+`string_to_array(…)::int[]`), asking thirty shapes as six users and as an unfiltered one (tests/integration/oracle/row-filters.ts).
+**The divergence, said.** Postgres treats a policy as a security barrier: a statement's own condition never sees a
+hidden row. DuckDB has no barrier and may evaluate the statement's conditions before the filter, so an expression that
+fails on a hidden row's value can refuse a statement Postgres answers — no row is ever returned, but the error says
+such a value exists. Forcing the filter first (a materialised step) would cost every filtered read; the refusal is the
+documented price. **An empty list is not expressible**: `--set regions=` is refused, since a user reading no row of
+its role is a user of another role, and an empty array would be the silent zero rows this design refuses.
+**Where.** `src/duck/row-filter.ts`, `src/cli/roles.ts` (`attributesOf`, `rowsOf`, `throughColumns`),
+`src/api/postgres/server.ts` (`withRows`, `checkRoles`), `src/api/postgres/catalog.ts` (`catalogPolicies`),
+`src/cli/user.ts` (`attributesToAdd`); `tests/duck-roles-rows-wire.test.ts`, `tests/cli-roles.test.ts`,
+`tests/duck-row-filter.test.ts`, the oracle's `rowFilterCases`.
+
 ### An MCP server (2026-10-29)
 
 **Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is

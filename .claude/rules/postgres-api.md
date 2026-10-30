@@ -99,6 +99,16 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   privilege functions are false, `current_user` / `current_role` / `user` spliced to the user's name, `set_config`
   refused), never as the catalog's superuser. A token reads every copied table. Why: a default in the code is a grant nobody committed. DETECTOR:
   `tests/duck-roles-wire.test.ts` (stage 1b's tests), `tests/cli-roles.test.ts`.
+- **A role's rows are filtered by REPLACING every read of a filtered table on the analysed tree, never by text, and a
+  user missing a value is refused, never answered with no rows** (`src/duck/row-filter.ts` `expandRowFilters`,
+  `server.ts` `withRows`; docs/DESIGN.md "Roles: rows per user"): each read of the table — a view's, a CTE's, a
+  subquery's, a join side's — becomes its filtered read (`through:` an EXISTS over the parent's filtered read), the
+  attributes bound as typed literals the catalog inferred, and the result goes through the grants, rewrite and
+  allowlist again (one grammar). The plan cache is keyed by role AND bound filters; an Execute whose filters moved is
+  planned again. The catalog holds the same filters as `CREATE POLICY`, reading `current_setting('mason.attr.…')`,
+  which the session may SHOW but never SET. Why: zero rows for a missing value is a silent wrong answer, and a filter
+  in the text misses the read a view or a CTE hides. DETECTOR: `tests/duck-roles-rows-wire.test.ts`, the oracle's
+  `rowFilterCases` (Postgres logins under the same policies).
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
   `application_name`, a token's NAME (never the token) or the user's name, and the registry entry that refused it
