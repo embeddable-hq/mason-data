@@ -30,7 +30,7 @@ import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
 import { createRunServer, usageFacts, type RunContext } from "./run-server.ts";
-import { addedTables, effectiveSync, rereadSources, shownPath, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -54,7 +54,7 @@ import { isLibcCollation } from "../duck/rewrite.ts";
 import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
 import { exampleRole, LiveRoles, noRoleWayOut, readRoles, resolveRoles, rolesDefaultLine, rolesFile, usersWithNoRole, usersWithoutRole } from "./roles.ts";
 import { READY_LINE, readRestarts } from "./supervise.ts";
-import { changesOf, dropOwnReplication, dropStatements, madeReplication, namedPublication, projectReplication, replicationReadiness } from "./replication-mode.ts";
+import { changesAgreement, dropOwnReplication, dropStatements, liveReadinessFailure, madeReplication, namedPublication, projectReplication, publicationConflict, replicationReadiness, staleReplication } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
 import { LogBuffer } from "../lib/log-buffer.ts";
 import { pollMsRetired, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -148,18 +148,18 @@ async function closeDemo(hosted: Hosted, closed: string | null): Promise<void> {
 /** how soon a pass that failed (the database away) is tried again, and replication mode's pass when a table waits */
 const PASS_RETRY_MS = 5000;
 
-/** the tables by their sync, as the start line says them: ` (2 polled, every 5s and 30s; 1 off)` */
+/** the tables by their sync, as the start line says them: ` (2 polled, every 5s and 30s; 1 replicated; 1 off)` */
 function syncCounts(tables: ReadonlyArray<{ sync?: TableSync }>): string {
   const polled = tables.flatMap((t) => t.sync?.mode === "poll" ? [t.sync.every] : []);
-  const off = tables.length - polled.length;
-  const parts = [...(polled.length ? [`${polled.length} polled, every ${[...new Set(polled)].join(" and ")}`] : []), ...(off ? [`${off} off`] : [])];
+  const replicated = tables.filter((t) => t.sync?.mode === "replication").length;
+  const off = tables.length - polled.length - replicated;
+  const parts = [...(polled.length ? [`${polled.length} polled, every ${[...new Set(polled)].join(" and ")}`] : []), ...(replicated ? [`${replicated} replicated`] : []), ...(off ? [`${off} off`] : [])];
   return parts.length ? ` (${parts.join("; ")})` : "";
 }
 
 /**
  * THE SOURCES FILE'S DEFAULT SYNC, SAID ONCE AT THE START: what every table without its own `sync:` gets — `off` (the
- * default, said as such when the file writes none) or the file's `poll <interval>` — and how to change it. In
- * replication mode the stream keeps every table current, and the file's sync: is the poll's.
+ * default, said as such when the file writes none), the file's `poll <interval>` or `replication` — and how to change it.
  *
  * AN UPGRADE THAT STOPS THE POLLS IS SAID LOUDLY (issue 33's review): a file an older Mason wrote has no `sync:`
  * anywhere, and its tables were polled every 5 s; from this release they are `off`. When the copy already holds
@@ -167,9 +167,8 @@ function syncCounts(tables: ReadonlyArray<{ sync?: TableSync }>): string {
  * Mason polled them, and the exact line that keeps them current as before — true too of a hand-written file on a
  * project that never polled.
  */
-export function syncDefaultLine(file: SourceFile, shown: string, replication: boolean, copiedBefore = 0): string {
+export function syncDefaultLine(file: SourceFile, shown: string, copiedBefore = 0): string {
   const d = effectiveSync(file, undefined);
-  if (replication) return `sync: logical replication keeps every table current; ${shown}'s sync: (${syncText(d.sync)}${d.from === "default" ? ", the default" : ""}) is the poll's, read when mason start --poll goes back to it`;
   const noneWritten = d.from === "default" && file.tables.every((e) => e.sync === null);
   if (noneWritten && copiedBefore > 0) {
     // true of a file an older Mason polled and of one written by hand that never was: "not polled", the old way said
@@ -179,7 +178,19 @@ export function syncDefaultLine(file: SourceFile, shown: string, replication: bo
   }
   if (d.from === "default") return `sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of ${shown} polls every table, or on an entry that one`;
   return d.sync.mode === "off" ? `sync: off (${shown}): after its first copy, a table is read again only by mason sync <table>, unless its entry says sync: poll <interval>`
+    : d.sync.mode === "replication" ? `sync: replication (${shown}): every table without a sync: of its own is kept current from the database's change log`
     : `sync: ${syncText(d.sync)} (${shown}): every table without a sync: of its own is polled every ${d.sync.every}`;
+}
+
+/** WHAT REPLICATION MAKES ON THE DATABASE, recorded in the project's config as it is (at the start that replicates a
+ *  table, and when the run makes the slot later): the names `mason destroy`, and a start whose file replicates nothing,
+ *  drop — never computed again (src/cli/replication-mode.ts madeReplication) */
+function recordReplication(cfg: ProjectConfig, repl: ReturnType<typeof projectReplication>, home: string): void {
+  const recorded = repl.owned ? null : repl.publication;
+  if ((cfg.publication ?? null) === recorded && JSON.stringify(cfg.replication ?? null) === JSON.stringify(repl)) return;
+  cfg.publication = recorded;
+  cfg.replication = repl;
+  writeConfig(home, cfg);
 }
 
 async function run(o: DevOptions, hosted: Hosted): Promise<number> {
@@ -236,6 +247,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const wrotePin = o.serve ? null : ensurePin(folder, o.version);
   if (wrotePin) say(`  wrote ${path.relative(project.root, wrotePin)}: version ${o.version}, the Mason this project is written for — commit it`);
   if ("message" in src) return failed("start", src, { json: false });
+  // a demo project's file naming sync: replication (its database has no change log), refused before anything opens
+  const demoFile = demoChangesRefusal(cfg, o.changes, src, shownPath(project.root, src.file));
+  if (demoFile) return failed("start", demoFile, { json: false });
   const logFile = path.join(home, "mason.log");
   const log = fs.createWriteStream(logFile, { flags: "a" });
   // one entry a line: a multi-line message's further lines indented under it (src/lib/log.ts `textEntry`);
@@ -285,73 +299,81 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const { source, warnings } = checked;
   done(`Connected to ${db}: Postgres ${checked.facts.versionText}${checked.facts.standby ? " (a read replica)" : ""}, ${checked.facts.tables.length} table(s) this user can read`);
   for (const w of warnings) say(`  ! ${w}`);
-  // HOW THE CHANGES ARE READ (src/cli/replication-mode.ts): polling with SELECTs, or the change log as production reads
-  // it (src/duck/stream.ts). A switch copies nothing again here: polling goes on from each table's watermark, and a
-  // new slot's tables are caught up by one poll (Sync prepareReplication)
-  const changes = changesOf(o.changes, cfg.changes);
-  if (o.publication !== null && changes !== "replication") {
-    say("mason start: --publication names the publication logical replication reads, and this project polls: mason start --replication --publication <name>");
-    return 1;
+  // HOW THE CHANGES ARE READ (src/cli/replication-mode.ts): each table as its sync: in the sources file says — the tables
+  // whose sync is replication through the project's ONE slot and publication, the others polled with SELECTs beside the
+  // stream. A switch copies nothing again (src/duck/sync.ts setTables: one poll catches a table up). --replication,
+  // --poll and MASON_CHANGES are taken only where they say what the file says (the next release removes them)
+  const shownFile = shownPath(project.root, src.file);
+  if (o.changes !== null) {
+    const disagrees = changesAgreement(src, shownFile, o.changes, o.serve ? `MASON_CHANGES=${o.changes}` : `--${o.changes}`);
+    if (disagrees) return failed("start", disagrees, { json: false });
   }
-  // THE PUBLICATION: one the operator named (the flag, PG_PUBLICATION, or the one an earlier start recorded) is read as it
-  // is, never altered (src/duck/publication.ts); else Mason makes its own. What the run before made, as it recorded it,
-  // is what --poll drops (madeReplication)
-  const named = changes === "replication" ? namedPublication(o.publication, process.env, cfg.publication) : null;
+  const twice = publicationConflict(o.publication, src, shownFile);
+  if (twice) return failed("start", twice, { json: false });
+  const replicating = replicatedEntries(src).length > 0;
+  // whether this run has held the database to logical replication's checks: at this start when the file replicates a
+  // table, else when an edit first sets one to replication (checkReplication below)
+  let replicationChecked = replicating;
+  if (o.publication !== null && !replicating) {
+    return failed("start", { message: `--publication names the publication logical replication reads, and no table's sync is replication in ${shownFile}`, code: "refused",
+      fix: `write sync: replication at the top of ${shownFile} (or on a table's entry), and publication: ${o.publication} beside it; then mason start` }, { json: false });
+  }
+  // THE PUBLICATION: one the operator named (the file's publication:, the flag, PG_PUBLICATION, or the one an earlier start
+  // recorded) is read as it is, never altered (src/duck/publication.ts); else Mason makes its own, carrying the replicated
+  // tables alone. What the run before made, as it recorded it, is what goes when no table is replicated (madeReplication)
+  const named = namedPublication(src, o.publication, process.env);
   const repl = projectReplication(cfg.name, src.name, named?.name ?? null);
   const before = madeReplication(cfg, src.name);
-  if (changes === "replication") {
+  if (replicating) {
     begin("Checking logical replication");
     const ready = await replicationReadiness(source, repl);
     if ("failure" in ready || ready.refused.length) {
       fail("Checking logical replication");
       for (const c of "failure" in ready ? [{ name: "database", detail: ready.failure }] : ready.refused) say(`  ${c.name}: ${c.detail}`);
-      say("  (mason start --poll reads the database with SELECTs instead, which needs none of this)");
+      say(`  (${replicatedEntries(src).map((e) => entryName(e.table)).join(", ")} ${replicatedEntries(src).length === 1 ? "is" : "are"} sync: replication in ${shownFile}; sync: poll 5m reads a table with SELECTs instead, which needs none of this)`);
       return 1;
     }
-    done(repl.owned ? `Logical replication: Mason makes publication ${repl.publication} and slot ${repl.slot} on ${source.database} (mason destroy, or mason start --poll, drops them)`
-      : `Logical replication: publication ${repl.publication} is read as it is, never altered; Mason makes slot ${repl.slot} on ${source.database} (mason destroy, or mason start --poll, drops the slot alone)`);
-    if (named?.from === "recorded") say(`  publication ${repl.publication} was named at an earlier start of this copy, and is read again (mason start --replication --publication <name> names another)`);
+    done(repl.owned ? `Logical replication for ${replicatedEntries(src).length} table(s): Mason makes publication ${repl.publication} and slot ${repl.slot} on ${source.database} (mason destroy drops them, and so does a sources file in which no table's sync is replication)`
+      : `Logical replication for ${replicatedEntries(src).length} table(s): publication ${repl.publication} is read as it is, never altered; Mason makes slot ${repl.slot} on ${source.database} (mason destroy drops the slot alone, and so does a sources file in which no table's sync is replication)`);
     for (const w of ready.warnings) say(`  ! ${w.name}: ${w.detail}`);
-    // A SLOT RECORDED UNDER ANOTHER NAME (the sources file renamed since) is one this run no longer reads, and it holds
-    // the database's WAL while it exists: it goes as at --poll, verified, before the record names the new one
-    const was = cfg.replication ?? null;
-    if (was !== null && was.slot !== repl.slot) {
-      try { for (const d of await dropOwnReplication(source, was)) say(`  dropped ${d} from ${source.database}: this source's slot is ${repl.slot} now`); }
+    // WHAT THE RECORD NAMES AND THIS RUN NO LONGER READS — a slot under another name (the sources file renamed since),
+    // or Mason's own publication once another is named — goes, verified, before the record names the new one
+    const stale = staleReplication(cfg.replication ?? null, repl);
+    if (stale !== null) {
+      try { for (const d of await dropOwnReplication(source, stale.drop, null, stale.what)) say(`  dropped ${d} from ${source.database}: ${stale.why}`); }
       catch (e) {
-        say(`mason start: ${(e as Error).message}. They hold the database's WAL while nobody reads them: drop them by hand — ${dropStatements(was)}`);
+        const by = stale.what === "both" ? dropStatements(stale.drop) : `DROP PUBLICATION IF EXISTS ${stale.drop.publication};`;
+        say(`mason start: ${(e as Error).message}. Mason made ${stale.what === "both" ? "them" : "it"} and nothing reads ${stale.what === "both" ? "them" : "it"} now: drop ${stale.what === "both" ? "them" : "it"} by hand — ${by}`);
         return 1;
       }
     }
-    // recorded with the run, so mason status and mason stop say it, the next start reads the same one, and --poll and
-    // mason destroy drop what was made by its own name
-    const recorded = repl.owned ? null : repl.publication;
-    if ((cfg.publication ?? null) !== recorded || JSON.stringify(cfg.replication ?? null) !== JSON.stringify(repl)) {
-      cfg.publication = recorded;
-      cfg.replication = repl;
-      writeConfig(home, cfg);
+    // recorded with the run, so mason status and mason stop say it, the next start reads the same one, and mason
+    // destroy drops what was made by its own name
+    recordReplication(cfg, repl, home);
+  } else if ((cfg.replication ?? null) !== null || cfg.changes === "replication") {
+    // THE SLOT GOES WHENEVER NO TABLE IS REPLICATED: it holds the database's WAL while nobody reads it. A project an
+    // older start streamed whole (--replication, recorded) is told why, with the line that streams them again
+    if (cfg.changes === "replication") {
+      say(`  this project streamed every table (mason start --replication); ${shownFile} says how each table is kept current now, and none says sync: replication — ` +
+        `write sync: replication at its top to stream them again`);
     }
-  }
-  const previous = cfg.changes ?? "poll";
-  if (previous !== changes) {
-    // THE SLOT GOES WHENEVER THE PROJECT LEAVES REPLICATION: it holds the database's WAL while nobody reads it
-    if (previous === "replication") {
-      try { for (const d of await dropOwnReplication(source, before)) say(`  dropped ${d} from ${source.database}`); }
-      catch (e) {
-        say(`mason start: ${(e as Error).message}. They hold the database's WAL while nobody reads them: drop them by hand — ${dropStatements(before)}`);
-        return 1;
-      }
-      if (!before.owned) say(`  publication ${before.publication} is its owner's: left as it is`);
-      cfg.publication = null;
-      cfg.replication = null;
+    try { for (const d of await dropOwnReplication(source, before)) say(`  dropped ${d} from ${source.database}: no table's sync is replication`); }
+    catch (e) {
+      say(`mason start: ${(e as Error).message}. They hold the database's WAL while nobody reads them: drop them by hand — ${dropStatements(before)}`);
+      return 1;
     }
-    cfg.changes = changes;
+    if (!before.owned) say(`  publication ${before.publication} is its owner's: left as it is`);
+    cfg.publication = null;
+    cfg.replication = null;
     writeConfig(home, cfg);
   }
+  // the project's mode, as an older start recorded it: the sources file says it per table now
+  if (cfg.changes !== undefined) { delete cfg.changes; writeConfig(home, cfg); }
   let facts: SourceFacts = checked.facts;
   const move = sourceMove(cfg.sourceServer ?? null, { database: source.database, systemIdentifier: facts.systemIdentifier });
   if ("refuse" in move) { say(`mason start: ${move.refuse}`); return 1; }
   // THE TABLES THE SOURCES FILE NAMES, against the database's catalog: every mistake said at once, before anything opens
-  const firstTables = addedTables(src, facts.tables, source.database, project.root, { replication: changes === "replication" });
+  const firstTables = addedTables(src, facts.tables, source.database, project.root);
   if (!Array.isArray(firstTables)) return failed("start", firstTables, { json: false });
   // what the run copies: the sources file as last read, and what is wrong with it now (an edit the run cannot take)
   let sources: RunSources = { file: src, tables: firstTables, problem: null };
@@ -394,16 +416,22 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     else say(`  ! the copy's thread stopped: ${reason}`);
   });
   done(`the copy in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling to ${path.relative(project.root, duckFile)}.tmp`);
-  const syncMode = changes === "replication" ? "replication" : syncModeOf(process.env);
+  const syncMode = syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
   let events: SyncEvents;
   try { events = await SyncEvents.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Opening the copy"); say(`  the sync's events (${EVENTS_TABLE}) could not be opened: ${(e as Error).message}`); await store.close(); return 1; }
-  // each table is polled at its own sync: (the sources file's); the sync's interval is how soon a failed pass is tried
-  // again (and replication mode's, and MASON_DUCK_SYNC=recopy's whole copies)
+  // each table is kept current as its own sync: says (the sources file's); the sync's interval is how soon a failed pass
+  // is tried again (and MASON_DUCK_SYNC=recopy's whole copies). The slot and publication are the run's whenever a table
+  // is replicated, now or after a mason add --sync replication (the demo database has no change log: none)
   const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^copied |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
-    syncMode === "replication" ? repl : null, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths }, onEvent: (e) => events.record(e) });
+    cfg.demo === true ? null : repl, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths }, onEvent: (e) => events.record(e),
+      // what the run made on the database, recorded as it is made and dropped: mason destroy drops it by that name
+      onReplication: (made) => {
+        if (made) recordReplication(cfg, repl, home);
+        else if ((cfg.replication ?? null) !== null) { cfg.publication = null; cfg.replication = null; writeConfig(home, cfg); }
+      } });
   await sync.open();
   // the tables this copy already holds, before this start copies anything: an upgrade from a Mason that polled every
   // table says how many are not polled (`syncDefaultLine`)
@@ -414,7 +442,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // the views first: setting the tables rebuilds the catalog, which reads them. The sources file read again: a mistake in it
   // keeps the tables read before (a typo never drops a copy), said in the log and by mason status
   const added = (): void => {
-    const r = rereadSources(sources, readSources(), src.resolved, facts.tables, source.database, project.root, { replication: changes === "replication" });
+    const r = rereadSources(sources, readSources(), src.resolved, facts.tables, source.database, project.root, { replicationChecked });
     if (r.said !== null) logLine(`[sync] ${r.said}`);
     sources = { file: r.file, tables: r.tables, problem: r.problem };
     sync.setViews(facts.views ?? []);
@@ -510,16 +538,31 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const token = newToken();
   const runCtx: RunContext = {
     source, facts: () => facts, warnings,
-    slot: changes === "replication" ? repl.slot : "", changes, port: setupPort, token, folder: () => folder, root: project.root, home,
+    // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
+    replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
     version: o.version, startedAt,
     // the web page (mason ui) is mason start's alone: mason serve's run serves none (src/cli/run-server.ts RunContext.page)
     page: o.serve === undefined,
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database: cfg.name, postgresUrl },
     roles: () => liveRoles.now(),
-    ...(changes === "replication" ? { publication: { name: repl.publication, owned: repl.owned } } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
+    // a table set to sync: replication while the run is up, in a run that never checked the database for it: the
+    // start's own checks, now, and the edit refused when they fail (src/cli/run-server.ts /api/pick)
+    checkReplication: async (file) => {
+      const tables = replicatedEntries(file).map((e) => entryName(e.table));
+      if (replicationChecked || tables.length === 0) return null;
+      const shown = shownPath(project.root, file.file);
+      const demo = demoChangesRefusal(cfg, null, file, shown);
+      if (demo !== null) return { ...demo, fix: `mason add ${tables[0]} --sync "poll 5s" polls it`, next: [[`mason add ${tables[0]} --sync "poll 5s"`, "polls it"]] };
+      const ready = await replicationReadiness(source, repl);
+      const refused = liveReadinessFailure(ready, tables, shown, source.database);
+      if (refused !== null) return refused;
+      if (!("failure" in ready)) for (const w of ready.warnings) say(`  ! ${w.name}: ${w.detail}`);
+      replicationChecked = true;
+      return null;
+    },
     log: (m) => say(`  ${m}`),
     logs,
     // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
@@ -542,10 +585,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   cfg.running = { pid: process.pid, controlUrl: `http://127.0.0.1:${setupPort}`, token, postgresUrl, postgresListener: pgTls.listener };
   cfg.lastRun = new Date().toISOString();
   writeConfig(home, cfg);
-  done(`Mason is up: ${sync.state().length} table(s) added, kept current: ${syncMode === "replication" ? `changes streamed as they happen (logical replication: slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})`
-    : syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)} (a SELECT of each table's changed rows)` : `each table copied again whole every ${PASS_RETRY_MS / 1000} s (MASON_DUCK_SYNC=recopy)`}`);
+  done(`Mason is up: ${sync.state().length} table(s) added, kept current: ${syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)}` +
+      `${sync.streams() ? `; replicated tables streamed as they change (logical replication: slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})` : ""}`
+    : `each table copied again whole every ${PASS_RETRY_MS / 1000} s (MASON_DUCK_SYNC=recopy)`}`);
   // THE FILE'S DEFAULT, SAID ONCE (issue 33: nothing Mason does to your database is a hidden default)
-  const defaultLine = syncDefaultLine(sources.file, shownPath(project.root, sources.file.file), syncMode === "replication", syncMode === "poll" ? copiedBefore : 0);
+  const defaultLine = syncDefaultLine(sources.file, shownPath(project.root, sources.file.file), syncMode === "poll" ? copiedBefore : 0);
   say(`  ${defaultLine}`);
   logLine(`[sync] ${defaultLine}`);
   // THE DEMO'S WRITER: a round of changes every MASON_DEMO_CHANGE_MS, begun once the run is up, said in the log
@@ -598,7 +642,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         else {
           try { await store.close(); say(`  closed the copy (it stays in ${duckFile})`); } catch (e) { say(`  closing the copy: ${(e as Error).message}`); }
         }
-        if (syncMode === "replication") say(`  replication slot ${repl.slot} stays on ${source.database}, holding its WAL until the next mason start reads it (mason destroy drops it)` +
+        if ((cfg.replication ?? null) !== null) say(`  replication slot ${repl.slot} stays on ${source.database}, holding its WAL until the next mason start reads it (mason destroy drops it)` +
           (repl.owned ? "" : `; publication ${repl.publication} is its owner's, left as it is`));
         cfg.running = null;
         // how it ended, for mason status once it is gone (a kill records nothing: mason stop writes that one)

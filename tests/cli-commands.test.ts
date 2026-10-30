@@ -259,7 +259,7 @@ test("mason status and wait --json say how each table is kept current (kept, src
     { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: at(1), nextAt: at(31), pending: "its columns changed: it is copied again, then caught up by one poll" },
     { by: "poll", sync: { mode: "off" }, syncedAt: at(1), nextAt: null },
     { by: "recopy", copiedAt: at(2) },
-    { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C8", lastCommit: at(3), notRunning: "Mason is stopping" },
+    { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C8", lastCommit: at(3), notRunning: "Mason is stopping", syncedAt: at(3) },
   ];
   // read from the module's namespace: this file loads where it is missing, and the test fails by name (scripts/fails-without.ts)
   const { waitTable } = commands as unknown as { waitTable?: (t: TableState) => Record<string, unknown> };
@@ -495,7 +495,7 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   const add = await run(["add", "orders", "--json"]);
   assert.equal(add.code, 0, add.stdout + add.stderr);
   assert.deepEqual(JSON.parse(add.stdout), { added: [{ table: "public.orders", entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false,
-    sync: { value: "off", from: "default" }, bigOff: false, pollCost: null }],
+    sync: { value: "off", from: "default" }, bigOff: false, pollCost: null, notReplicated: null }],
     file: s.file, next: [{ command: "mason start", what: "Mason in the background, for this project: the copy of every added table begins" },
       { command: "mason wait", what: "then, until every added table is copied and served" }] });
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n`, "the entry, every other byte as it was");
@@ -517,6 +517,18 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables: {}\n`, "the last one gone: tables: {}");
 });
 
+test("mason add of a table a replicating file cannot replicate says it was written sync: poll 5m, why, and the alternatives", async () => {
+  const { addedLines } = await import("../src/cli/commands.ts");
+  const b = { table: "public.events", file: "/app/mason/sources/app.yml", entry: "events", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,
+    sync: { value: "poll 5m", from: "entry" as const }, bigOff: false, pollCost: null, notReplicated: "it has no primary key, so logical replication cannot apply its changes by its key:" };
+  assert.deepEqual(addedLines(b, "mason/sources/app.yml"), { line: "Added public.events to mason/sources/app.yml: every column, copied by tenant_id, id", notes: [
+    "sync: poll 5m written on its entry, not the file's replication: it has no primary key, so logical replication cannot apply its changes by its key: — " +
+    "mason add events --sync \"poll 1h\" polls it hourly; mason add events --sync off reads it only by mason sync events"] });
+  // one the file's replication keeps current: said so, and the way to poll it instead
+  assert.equal(addedLines({ ...b, table: "public.orders", entry: "orders", key: null, sync: { value: "replication", from: "file" as const }, notReplicated: null }, "f").notes[0],
+    "sync: replication (the file's): kept current from the database's change log after its first copy — mason add orders --sync \"poll 5m\" polls it instead");
+});
+
 test("the run and the commands refuse an edit in the SAME words, Mason up or down: one check-and-write at every entrance (src/cli/source-edit.ts)", async () => {
   const s = await shop();
   const app = path.join(s.root, "app");
@@ -536,7 +548,7 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
   const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
-    source: parsed.source, facts: () => facts, warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
+    source: parsed.source, facts: () => facts, warnings: [], replication: () => null, port: 0, token: "t0ken-of-the-run",
     folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
@@ -720,7 +732,7 @@ test("stage 1b, the roles file decides a user added without --role: its default 
   // the run's command server over this project (main's RunContext: its ledgers faked, nothing here reads them), its roles a LiveRoles
   const ctx: RunContext = {
     page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
-    source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0, token: "t0ken-of-the-run",
+    source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], replication: () => null, port: 0, token: "t0ken-of-the-run",
     folder: () => folder, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
     readSource: () => readSource(folder, root, {}), runUrl: "postgres://mason:x@127.0.0.1:1/shop", roles: () => live.now(),
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [], cancel: (session) => ({ unknown: session }) },
@@ -790,7 +802,7 @@ test("mason logs --requests filters and pages, mason logs --running and mason ca
     last: "2026-10-24T10:04:00.000Z", example: "SELECT json_agg(DISTINCT status) FROM orders" };
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
-    source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], slot: "", changes: "poll", port: 0,
+    source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [], replication: () => null, port: 0,
     token: "t0ken-of-the-run", folder: () => path.join(app, "mason"), root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => {}, log: () => {},
     readSource: () => ({ message: "not read here", code: "bad_source" }), runUrl: "postgres://me@localhost:5432/shop",
     listener: { openSessions: () => ({ open: 1, byClient: [{ user: "metabase", client: "Metabase", open: 1, running: 1 }] }), running: () => [running], cancel: (session, statement) => { cancelled.push(statement === undefined ? session : [session, statement]);

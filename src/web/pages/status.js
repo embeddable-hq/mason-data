@@ -70,7 +70,7 @@ export function tableLine(t, now = Date.now()) {
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its copy to start" };
   const age = keptAge(t, now);
   // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
-  if (t.kept?.by === "poll" && t.kept.pending !== undefined) {
+  if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && (t.kept.state !== "streamed" || t.kept.notRunning !== null))) {
     return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
   }
   return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · copied${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
@@ -90,6 +90,11 @@ function syncedAgo(iso, now = Date.now()) {
 /** How a copied table is kept current and how old its copy is (src/cli/commands.ts `keptAge`). */
 export function keptAge(t, now = Date.now()) {
   const k = t.kept;
+  if (k?.by === "replication") {
+    if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
+    const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : syncedAgo(k.syncedAt, now)}`;
+    return k.notRunning === null ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
+  }
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`;
   if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
@@ -152,10 +157,11 @@ export function sourceRows(s) {
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
     // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
-    ["Changes", s.source.replication ? `streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
-        `${s.source.replication.owned ? "Mason's own" : "named: read as it is, never altered"}) · mason start --poll checks each table as its sync: says instead`
-      : `each table as its sync: says (a SELECT of its changed rows)${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
-        `${s.source.demo ? "the demo database is checked this way only" : "mason start --replication streams them as they happen instead"}`],
+    ["Changes", `each table as its sync: says${s.source.replication ? "" : " (a SELECT of its changed rows)"}${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
+      (s.source.replication ? `sync: replication tables streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
+          `${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others by a SELECT of their changed rows`
+        : s.source.demo ? "the demo database is checked this way only"
+        : "sync: replication on an entry streams that table as it happens instead")],
   ];
 }
 

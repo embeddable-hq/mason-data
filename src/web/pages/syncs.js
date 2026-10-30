@@ -59,7 +59,7 @@ export function renderEvents(b, { failuresOnly = false, kind = "", table = "", n
 
 /** EVERY KIND OF SYNC EVENT, in its order (src/duck/events.ts `EVENT_KINDS`, held equal by the tests): the Kind filter
  *  offers each, whether the range has one or not. */
-export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "restart", "copied", "recovered", "synced"];
+export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "restart", "copied", "recovered", "synced", "sync_changed"];
 
 /** The kind and table filters' controls: EVERY kind (EVENT_KINDS), and EVERY added table (`/api/state` `tables`, `s`) —
  *  the sync's own "(the sync)" first — whether the range has an event of it or not, so the choices never depend on what

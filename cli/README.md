@@ -126,8 +126,9 @@ runs in, or the nearest one above it.
    `mason init` writes) reads it again only at `mason sync <table>`; `poll 30s` polls it every 30 seconds, each poll a
    scan of the table, the next one at least four times the last one's time later. Changing a table's `sync:` keeps its
    copy and catches it up by one poll. `mason status` says each table's sync and when it was last synced, on its line.
-   (`--replication` is the exception, said below: it reads the change log, as production does, for every table, and
-   makes its own slot.)
+   (`sync: replication` is the exception: that table is read from the change log, as production does, through one slot
+   Mason makes and a publication carrying the replicated tables alone — its own, or the one `publication:` at the top
+   of the file names, never altered. The slot is dropped, verified gone, once no table is replicated.)
 2. **It copies each added table** into a DuckDB file in `.mason/`, a range of pages at a time, a few in parallel, one
    Postgres backend each, smallest table first; a copy that stops continues with the ranges it did not commit. The table
    is served the moment its copy lands; the copy runs beside the polls, never instead of them.
@@ -151,9 +152,9 @@ there (`mason status` lists them); `MASON_STORE_JSON_PATHS=off` turns that off.
 
 | Option | What it does |
 |---|---|
-| `--replication` | Read the database's changes from its change log (logical replication), as production does, instead of polling. It needs `wal_level = logical` and a user that may replicate, and makes its own publication and slot (`mason_dev_<project>_<source>`, the source the sources file's name; past 63 bytes, a prefix and a hash) on the database. The project keeps the mode until `--poll`; a switch keeps the copies and catches each table up by one poll. `mason stop` leaves the slot (it holds WAL until the next start); `mason destroy` and `--poll` drop it. |
-| `--publication <name>` | With `--replication`: a publication the database owner made (else `PG_PUBLICATION`), read as it is, verified to carry every added table and column, never created, altered or dropped. A read replica needs one. |
-| `--poll` | Read them with `SELECT` again (the default). |
+| `--replication` | Taken only when every table's `sync:` is `replication`, and refused otherwise with the `sync:` line to write: how each table is kept current is the sources file's now. Goes in the next release. |
+| `--publication <name>` | Taken only when the sources file names no `publication:` (both set is refused, naming both); `publication: <name>` at the top of the file is the way to name it. Goes in the next release. |
+| `--poll` | Taken only when no table's `sync:` is `replication`. Goes in the next release. |
 | `--self-signed-tls` | The Postgres API requires TLS, from a certificate made for this project in `.mason/` (served again by every later start with the flag); clients connect with `sslmode=require`. |
 | `--port <n>` | The port the `mason` commands reach it on (default 4039, or the next free one). |
 | `--attach` | Stay in the foreground: the terminal shows Mason's progress, and Ctrl-C stops it. |
@@ -275,7 +276,7 @@ log) is in its `.mason/`, readable by your user only and gitignored by `mason in
 
 Only the project folder travels — `mason/`, with `mason.yml` naming the Mason version it is written for. Production runs
 it as one container, `ghcr.io/embeddable-hq/mason-data`, with `mason serve`: the same run, configured by the environment,
-its copy on one volume, reading Postgres's change log (`MASON_CHANGES=replication`) or polling it. `mason help
+its copy on one volume, each table read from Postgres's change log or polled as its `sync:` says. `mason help
 production` is the road, offline; `deploy/mason-data/` in the repo is the Compose file and its walkthrough.
 
 Apache-2.0.

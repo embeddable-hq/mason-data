@@ -24,7 +24,6 @@ import { fileURLToPath } from "node:url";
 import { readBody, sendJson } from "../lib/http-json.ts";
 import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, SECURITY_HEADERS } from "./security.ts";
-import type { ChangeSource } from "../cdc/poll.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
@@ -33,7 +32,7 @@ import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
 import { addedNext, addUser, disabledNext, disableUser, enabledNext, enableUser, listUsers, removeUser, REMOVED_NEXT, roleToAdd, withLastUsed } from "./user.ts";
 import { postgresFacts, postgresLink } from "./pg-url.ts";
-import { catalogTable, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
+import { catalogTable, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
 import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -52,12 +51,10 @@ export interface RunContext {
   source: Source;
   facts: () => SourceFacts;
   warnings: string[];
-  /** replication mode: the slot the run reads (src/cli/replication-mode.ts); '' when polling */
-  slot: string;
-  /** how the run reads the database's changes: a database elsewhere is refused large tables only when polled */
-  changes: ChangeSource;
-  /** replication: the publication the run reads, and whether it is Mason's own (else the operator named it: only read) */
-  publication?: { name: string; owned: boolean };
+  /** the slot and publication the run streams through NOW (src/cli/replication-mode.ts; `owned`: the publication is
+   *  Mason's own, else the operator named it, only read), or null while no table's sync is replication (src/duck/sync.ts
+   *  `streams`): it changes as the sources file does */
+  replication: () => { slot: string; publication: string; owned: boolean } | null;
   port: number;
   token: string;
   /** the web page (src/web/, `mason ui`): `mason start`'s run serves it, `mason serve`'s never (its guard is loopback's
@@ -85,6 +82,9 @@ export interface RunContext {
   sources: () => { file: SourceFile | null; problem: string | null };
   /** the sources file changed (a table added or removed): the run reads it again */
   sourcesChanged: () => void;
+  /** a sources file that replicates a table, held to the database's checks for logical replication when this run never
+   *  made them (it replicated nothing when it started): the refusal, or null when it may (absent: never refused) */
+  checkReplication?: (file: SourceFile) => Promise<Failure | null>;
   /** the sources file read as the run reads it, its URL resolved (src/cli/sources.ts readSource) */
   readSource: () => ProjectSource | Failure;
   /** the database's URL the run copies from, as the sources file resolved it at the start */
@@ -135,6 +135,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   const by = new Map(copies.map((c) => [c.source, c]));
   const project = folder && fs.existsSync(folder) ? projectFingerprint(folder) : null;
   const facts = ctx.facts();
+  const repl = ctx.replication();
   const bytes = fileBytes(ctx.duck.file);
   const disk = ctx.duck.disk();
   const tables = facts.tables.map((t) => {
@@ -167,11 +168,12 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // the run serves the web page (mason ui): mason status prints its URL
     ui: ctx.page,
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
-      version: facts.versionText, standby: facts.standby, changes: ctx.changes, name: sources.file?.name ?? null, file: sources.file?.file ?? null,
+      // `replication` while a table's sync is replication (the run streams), else `poll`: each table's own is its kept
+      version: facts.versionText, standby: facts.standby, changes: repl !== null ? "replication" : "poll", name: sources.file?.name ?? null, file: sources.file?.file ?? null,
       shownFile: sources.file ? shownPath(ctx.root, sources.file.file) : null,
       // every table's sync unless its entry says its own: the file's top `sync:`, or the default when it writes none
       sync: { default: syncText(sources.file?.sync ?? DEFAULT_SYNC), written: sources.file?.sync != null },
-      ...(ctx.publication ? { replication: { slot: ctx.slot, publication: ctx.publication.name, owned: ctx.publication.owned } } : {}) },
+      ...(repl !== null ? { replication: { slot: repl.slot, publication: repl.publication, owned: repl.owned } } : {}) },
     // a sources file edited into a mistake while the run is up: the run copies what it read last, and says so
     warnings: [...ctx.warnings, ...(sources.problem ? [`${sources.problem} (Mason copies the tables it read before; mason start reads the file again)`] : [])],
     folder, project, tables,
@@ -353,15 +355,16 @@ function sourceOnDisk(ctx: RunContext): EditTarget {
 }
 
 /** The database this run copies, as an edit is checked against it: the catalog it last read, and how it reads changes. */
-const catalogOf = (ctx: RunContext): EditCatalog => ({ tables: ctx.facts().tables, database: ctx.source.database, replication: ctx.changes === "replication",
+const catalogOf = (ctx: RunContext): EditCatalog => ({ tables: ctx.facts().tables, database: ctx.source.database,
   ...(ctx.duck.measured ? { measured: ctx.duck.measured } : {}) });
 
 /**
  * ADD A TABLE: the check-and-write every entrance shares (src/cli/source-edit.ts addEntry), against the file on disk and
  * this run's catalog; the caller tells the run the file changed, and the sync starts the copy.
  */
-export function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null, o: { sync?: TableSync; keep?: boolean } = {}): PickResult {
-  return addEntry(sourceOnDisk(ctx), catalogOf(ctx), table, columns, key, o);
+export function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null, o: { sync?: TableSync; keep?: boolean } = {},
+  at: EditTarget = sourceOnDisk(ctx)): PickResult {
+  return addEntry(at, catalogOf(ctx), table, columns, key, o);
 }
 
 /** REMOVE TABLES: the check-and-write every entrance shares (src/cli/source-edit.ts removeEntries); the run then drops their copies. */
@@ -561,7 +564,16 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (body.columns !== undefined && !(Array.isArray(body.columns) && body.columns.every((c) => typeof c === "string"))) throw new Refusal(400, "columns is a list of column names, or [\"*\"]");
           if (body.key !== undefined && !(Array.isArray(body.key) && body.key.length > 0 && body.key.every((c) => typeof c === "string"))) throw new Refusal(400, "key is a list of column names");
           if (body.picked) {
-            const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null, { ...(sync !== undefined ? { sync } : {}), keep: body.keep === true });
+            // the file as it was (its text, read once with the edit): an edit that sets a table to sync: replication the
+            // database cannot serve is undone below
+            const at = sourceOnDisk(ctx);
+            const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null, { ...(sync !== undefined ? { sync } : {}), keep: body.keep === true }, at);
+            // A LIVE SWITCH INTO REPLICATION is held to the start's checks (wal_level, the role, a free slot): one the
+            // database cannot serve would leave the table, polled until now, NOT kept current for ever — the file is put
+            // back as it was, byte for byte, and the refusal says what the database lacks and the line that polls it
+            const now = r.already || ctx.checkReplication === undefined ? null : parseSourceText(fs.readFileSync(at.file, "utf8"), at.parsed.name, at.file);
+            const refused = now === null || "problems" in now ? null : await ctx.checkReplication!(now);
+            if (refused !== null) { fs.writeFileSync(at.file, at.text); sendFailure(res, statusOf(refused), refused); return; }
             if (!r.already) ctx.log(`added ${r.table} to ${r.file}`);
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });

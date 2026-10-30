@@ -40,10 +40,11 @@ export const EVENTS_DDL = `CREATE TABLE IF NOT EXISTS ${EVENTS_TABLE} (happened_
  * database could not be attached), `restart` (the supervisor started the run again after it died) — each a failure;
  * `copied` (a copy finished and was swapped in), `recovered` (a table whose poll, catch-up or stream failed is
  * current again; of no table, the stream applying changes or the database attached again after it failed) and
- * `synced` (a sync asked by hand — mason sync, the page's Sync now — and what it did). A scheduled poll that succeeds
+ * `synced` (a sync asked by hand — mason sync, the page's Sync now — and what it did), and `sync_changed` (a table's
+ * `sync:` in the sources file changed while it is copied: from what, to what, and how its copy is caught up). A scheduled poll that succeeds
  * is no event: one every few seconds would bury the failures; its last result is the table's last sync.
  */
-export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "restart", "copied", "recovered", "synced"] as const;
+export const EVENT_KINDS = ["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "restart", "copied", "recovered", "synced", "sync_changed"] as const;
 export type SyncEventKind = (typeof EVENT_KINDS)[number];
 const FAILURES: ReadonlySet<SyncEventKind> = new Set(["copy_failed", "poll_failed", "catch_up_failed", "stream_failed", "source_unreachable", "restart"]);
 /** whether an event of this kind is a failure: the one place that says it (the reader's filter, `failed`) */

@@ -167,7 +167,9 @@ export function keptText(f: CopyFacts | null, now: number = Date.now()): string 
   }
   if (k.by === "recopy") return `kept current by copying it again whole, ${k.copiedAt === null ? "no copy recorded yet" : `last copied ${utc(k.copiedAt)}`}`;
   const stream = `logical replication (slot ${k.slot})`;
-  const where = `applied through ${k.position}, ${k.lastCommit === null ? "no change applied this run" : `last change committed ${utc(k.lastCommit)}`}`;
+  // the copy's age as status says it (replicated, at <lsn>, <age>), then the newest change it applied
+  const synced = k.syncedAt === null ? "not synced yet" : `last synced ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`;
+  const where = `replicated, at ${k.position}, ${synced}, ${k.lastCommit === null ? "no change applied this run" : `last change committed ${utc(k.lastCommit)}`}`;
   if (k.state === "streamed") return k.notRunning === null ? `kept current by ${stream}, ${where}`
     : `streamed by ${stream}, ${where}; NOT kept current now, the stream is not running: ${k.notRunning}`;
   return k.state === "left-out" ? `NOT kept current: left out of ${stream}: ${k.why ?? ""}`
@@ -191,7 +193,7 @@ function keptJson(f: CopyFacts | null): Record<string, unknown> {
   return {
     "Kept Current By": keptCurrentBy(f), "Kept Current": keptText(f),
     ...(k?.by === "poll" ? { Sync: syncText(k.sync), "Last Synced": k.syncedAt, "Next Poll": k.nextAt } : {}),
-    ...(k?.by === "replication" ? { Slot: k.slot, "Stream State": k.state, "Applied Through": k.position, "Last Change Committed": k.lastCommit, "Stream Not Running": k.notRunning } : {}),
+    ...(k?.by === "replication" ? { Sync: "replication", Slot: k.slot, "Stream State": k.state, "Applied Through": k.position, "Last Synced": k.syncedAt, "Last Change Committed": k.lastCommit, "Stream Not Running": k.notRunning } : {}),
   };
 }
 

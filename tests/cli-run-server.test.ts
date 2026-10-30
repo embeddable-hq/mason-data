@@ -124,7 +124,7 @@ const API_KEY = "k".repeat(48);
 const ctx: RunContext = {
   page: true, users: { file: usersFile, apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" },
   source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [],
-  slot: "", changes: "poll", port: 0, token: "t0ken-of-this-run",
+  replication: () => null, port: 0, token: "t0ken-of-this-run",
   folder: () => chosen, root: path.join(root, "app"), home: path.join(root, "app", ".mason"), version: "9.9.9", startedAt: Date.parse("2026-10-28T08:00:00.000Z"), sources: () => ({ file: null, problem: null }), sourcesChanged: () => { changed++; }, log: (m) => logged.push(m),
   // the file as the run reads it: its URL resolved from no environment (the test's file writes it whole)
   readSource: () => chosen === null ? { message: "no folder chosen", code: "bad_source" } : readSource(chosen, path.join(root, "app"), {}),
@@ -582,7 +582,7 @@ test("the state says how each copy is kept current, as the sync's state has it (
   // say how a table was kept current, or why it was not, though its text and EXPLAIN did
   const polled = { by: "poll" as const, sync: { mode: "poll" as const, every: "30s", seconds: 30 }, syncedAt: "2026-10-24T10:01:00.000Z", nextAt: "2026-10-24T10:01:30.000Z" };
   const streamed = { by: "replication" as const, slot: "mason_app", state: "left-out" as const, why: "publication app_pub does not carry public.orders",
-    position: "0/16B3F28", lastCommit: null, notRunning: null };
+    position: "0/16B3F28", lastCommit: null, notRunning: null, syncedAt: null };
   const recopied = { by: "recopy" as const, copiedAt: "2026-10-24T10:00:00.000Z" };
   const waiting = { by: "poll" as const, sync: { mode: "off" as const }, syncedAt: null, nextAt: null, pending: "it waits for its copy: it joins once copied and caught up by one poll" };
   copies = [
@@ -610,7 +610,7 @@ test("a table of any size on a database elsewhere can be added, and mason tables
   const own = path.join(root, "remote", "mason");
   fs.mkdirSync(path.join(own, "sources"), { recursive: true });
   fs.writeFileSync(path.join(own, "sources", "app.yml"), newSourceText("postgres://me@db.example.com:5432/app"));
-  const remoteCtx: RunContext = { ...ctx, source: remote.source, changes: "poll", folder: () => own,
+  const remoteCtx: RunContext = { ...ctx, source: remote.source, folder: () => own,
     facts: () => ({ version: 160000, versionText: "16", standby: true, tables: [table({ table: "events", rows: 22_000_000 })], systemIdentifier: null }) };
   const remoteServer = createRunServer(remoteCtx);
   await new Promise<void>((r) => remoteServer.listen(0, "127.0.0.1", () => r()));
@@ -756,6 +756,38 @@ test("every error answer carries the Failure shape beside its sentence, the catc
   assert.match(JSON.parse(notJson.text).failure.message, /^the body is not JSON: /);
   const limit = JSON.parse((await call("GET", "/api/requests?limit=0")).text);
   assert.deepEqual(limit, { error: "limit is a whole number of requests, 1 to 10000", failure: { code: "usage", message: "limit is a whole number of requests, 1 to 10000", next: [] } });
+});
+
+test("a table set to sync: replication while the run is up, on a database that cannot replicate, is refused with what it lacks and the line that polls it; the file is put back byte for byte", async () => {
+  const R = await import("../src/cli/replication-mode.ts" as string) as Partial<typeof import("../src/cli/replication-mode.ts")>;
+  assert.equal(typeof R.liveReadinessFailure, "function", "src/cli/replication-mode.ts exports liveReadinessFailure");
+  chosen = folder;
+  const text = "kind: postgres\nurl: postgres://me@localhost:5432/app\nsync: poll 5m\ntables:\n  customers: {}\n";
+  fs.writeFileSync(sourceFile, text);
+  // the run's check as the run wires it (src/cli/dev.ts checkReplication): the start's readiness, here a wal_level=replica one
+  const checked: string[][] = [];
+  ctx.checkReplication = async (file) => {
+    const sources = sourcesModule as unknown as typeof import("../src/cli/sources.ts");
+    const replicated = sources.replicatedEntries(file).map((e) => sources.entryName(e.table));
+    checked.push(replicated);
+    return replicated.length === 0 ? null : R.liveReadinessFailure!({ refused: [{ name: "wal_level", ok: false, detail: "replica: logical replication needs logical" }], warnings: [] },
+      replicated, "mason/sources/app.yml", "app");
+  };
+  changed = 0;
+  try {
+    const refused = await call("POST", "/api/pick", { body: { table: "public.customers", picked: true, sync: "replication", keep: true } });
+    assert.equal(refused.status, 409, refused.text);
+    const f = JSON.parse(refused.text).failure;
+    assert.deepEqual([f.code, f.message, f.why, f.fix], ["refused", "customers cannot be kept current by logical replication from app: wal_level", "wal_level: replica: logical replication needs logical",
+      "poll it instead: mason add customers --sync \"poll 5m\", or sync: poll 5m on its entry in mason/sources/app.yml, which needs none of this — or fix the database as said, then mason stop && mason start"]);
+    assert.equal(fs.readFileSync(sourceFile, "utf8"), text, "the file as it was, byte for byte: the table stays polled");
+    assert.equal(changed, 0, "the run is not told of an edit it did not take");
+    // a polled one is taken, the check asked and answering null
+    const polled = await call("POST", "/api/pick", { body: { table: "public.customers", picked: true, sync: "poll 30s", keep: true } });
+    assert.equal(polled.status, 200, polled.text);
+    assert.equal(changed, 1);
+    assert.deepEqual(checked, [["customers"], []]);
+  } finally { delete ctx.checkReplication; fs.writeFileSync(sourceFile, text); }
 });
 
 test("GET /api/logs: the run's last entries from memory, { at, text } oldest first, under the guard; lines and since narrow, a bad one is a sentence", async () => {

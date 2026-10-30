@@ -35,24 +35,28 @@ export const DEV: CommandSpec & { needs: "project" } = {
 
   Starts Mason for the project of this folder (mason init made it): one process, which copies the tables you add
   (mason add) from the project's database into its own file, keeps them current as the sources file says, and answers
-  the Postgres protocol for BI tools and your app. It only reads the database (SELECT): no wal_level, replication slot
-  or publication is needed or made. It returns once Mason is up; run it again any time (it says so when Mason is
+  the Postgres protocol for BI tools and your app. It only reads the database (SELECT, and a table's change log when
+  its sync: says replication). It returns once Mason is up; run it again any time (it says so when Mason is
   already running). The copy and Mason's state stay between runs: the next start resumes.
 
   After its first copy, each table is kept current as the sources file's sync: says — at the top for every table, or
   on a table's entry: off (the default, which mason init writes) reads it again only when you run mason sync <table>;
-  poll <interval> (poll 5s, poll 5m, poll 1h) polls it with SELECTs at that interval. Each poll scans its table whole
+  poll <interval> (poll 5s, poll 5m, poll 1h) polls it with SELECTs at that interval; replication reads its changes
+  from the database's change log, as they are made. Each poll scans its table whole
   on your database, and the next waits at least four times as long as that poll took, so the polls never take more
   than a fifth of your database's time. The start says the file's default once; mason status says how each table is
   kept current and when it was last synced. A table whose sync: changed keeps its copy and is caught up by one poll.
 
-  With --replication it reads the database's change log instead: it needs wal_level = logical and a user that may
-  replicate, and makes its own publication and replication slot on the database (mason destroy, or mason start --poll,
-  drops them). The project keeps the mode until --poll; a switch keeps the copies and catches each table up by one
-  poll. --publication <name> (else PG_PUBLICATION) names a publication that is the database owner's: it is read as it
-  is, verified to carry every added table and column, and never created, altered or dropped — Mason makes only its
-  slot. A read replica needs one (it takes no CREATE PUBLICATION). The name is kept with the project, so the next
-  mason start --replication reads it again.
+  A table under sync: replication needs wal_level = logical, a user that may replicate, and a primary key (a key:
+  table is polled): Mason makes one replication slot for the project and its own publication, carrying the replicated
+  tables alone, and drops them, verified gone, when no table's sync is replication any more (and at mason destroy).
+  publication: <name> at the top of the sources file (\${PG_PUBLICATION} reads it from .env) names a publication that
+  is the database owner's: it is read as it is, verified to carry every replicated table and column, and never
+  created, altered or dropped — Mason makes only its slot. A read replica needs one (it takes no CREATE PUBLICATION).
+
+  --replication, --poll and --publication are taken only where they say what the sources file says (--replication:
+  every table's sync is replication; --poll: none is), and are refused otherwise with the sync: line to write; they
+  go in the next release.
 
   The Postgres API's port is the project's: the first start takes 5433, or the next port free on every address when a
   second Postgres holds it, and records it; every later start listens on the same port, so a BI tool's saved connection
@@ -69,15 +73,13 @@ export const DEV: CommandSpec & { needs: "project" } = {
 
     mason start
     mason start --attach      in the foreground: Ctrl-C stops it
-    mason start --replication read the change log, as production does
-    mason start --replication --publication app_pub   through the database owner's publication
     MASON_PG_HOST=0.0.0.0 mason start --self-signed-tls   the Postgres API for other machines, over TLS
 
   --attach            stay in the foreground (Ctrl-C stops Mason)
-  --replication       read the database's changes from its change log (logical replication), as production does
-  --publication <name>  with --replication: the publication to read, the owner's, never altered (PG_PUBLICATION;
-                      default: Mason's own, mason_dev_<project>_<source>)
-  --poll              read them with SELECTs, as each table's sync: says (the default; takes back --replication)
+  --replication       taken only when every table's sync: is replication (the sources file decides; goes in the next release)
+  --publication <name>  the publication the replicated tables are read through, the owner's, never altered (the
+                      sources file's publication: says it instead; not both); default: Mason's own
+  --poll              taken only when no table's sync: is replication (the sources file decides; goes in the next release)
   --self-signed-tls   the Postgres API requires TLS, from a certificate made for this project in .mason/ (kept and
                       served again by every later start with the flag); not with MASON_PG_TLS_CERT / _KEY
   --port <n>          the port the mason commands reach it on (default 4039, or the next free one)
@@ -104,7 +106,7 @@ async function runDev(argv: string[]): Promise<number> {
   }
   const port = v.port === undefined ? 4039 : Number(v.port);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return failed("start", { message: `--port must be a port number (1-65535), not ${JSON.stringify(v.port)}`, code: "usage" }, { json: v.json });
-  if (!v.attach) return devInBackground(argv, { json: v.json, selfSignedTls: v["self-signed-tls"], changes: v.replication ? "replication" : v.poll ? "poll" : null });
+  if (!v.attach) return devInBackground(argv, { json: v.json, selfSignedTls: v["self-signed-tls"], changes: v.replication ? "replication" : v.poll ? "poll" : null, publication: v.publication ?? null });
   return dev({ port, version: version(), changes: v.replication ? "replication" : v.poll ? "poll" : null, publication: v.publication ?? null, selfSignedTls: v["self-signed-tls"] });
 }
 
