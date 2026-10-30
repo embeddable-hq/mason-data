@@ -1246,10 +1246,13 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
     // stopped first, as nothing here may make a slot: its tables set, no pass runs
     await repl.open();
     await repl.stop();
-    await repl.setTables([tableOf("manual", { mode: "replication" })]);
+    await repl.setTables([tableOf("manual", { mode: "replication" }), tableOf("slow", OFF)]);
     const r = await repl.pollNow(["public.manual"]);
     assert.deepEqual([r.tables, r.streamed?.map((t) => t.table)], [[], ["public.manual"]]);
     assert.match(r.streamed![0]!.position, /^[0-9A-F]+\/[0-9A-F]+$/);
+    // an off table beside it, in a project that streams, is POLLED by mason sync, never answered as streamed: this
+    // sync is stopped, so the poll it owes is refused as stopping (a project that streamed every table said "streamed")
+    await assert.rejects(repl.pollNow(["public.manual", "public.slow"]), (e: Error) => e.message === "Mason is stopping");
   } finally { await repl.stop(); other.close(); }
 });
 
