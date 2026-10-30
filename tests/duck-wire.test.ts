@@ -1026,6 +1026,25 @@ test("date_trunc in a zone of its own is NULL in a NULL zone and reads a row's z
   } finally { await c.end(); }
 });
 
+// A STATEMENT'S LINE IS IN THE LOG BY THE TIME ITS CLIENT HEARS ITS END (src/duck/store.ts `say`): a failed statement that
+// calls a Mason function is released only once its calls have stopped, 50 ms and more after its client was told, and its
+// line was said at that release: inside the next test's statements, where a test reading "the last statement since
+// `from`" took it for its own (CI, on a pull request's head; 1 run in 100 on main under load). Ordered by the worker's
+// port, so this reads the log at once, with no wait and no sleep: without the order the line is not there yet.
+test("a failed statement that calls a Mason function is logged before its client is told, once", async () => {
+  const c = await client();
+  const lines = (from: number): string[] => logged.slice(from).filter((l) => l.startsWith("statement: ") && l.includes("Nowhere/Land"));
+  try {
+    const from = logged.length;
+    const bad = "SELECT id, date_trunc('day', at, CASE WHEN id = 5 THEN 'Nowhere/Land' ELSE 'UTC' END) FROM instants ORDER BY id";
+    await assert.rejects(c.query(bad), (e: pg.DatabaseError) => e.code === "22023", bad);
+    assert.equal(lines(from).length, 1, `its line is in the log already:\n${logged.slice(from).join("\n")}`);
+    // the session's next statement waits for its release: said once, never again there
+    await answer(c, "SELECT 1 FROM instants LIMIT 1");
+    assert.equal(lines(from).length, 1, `once:\n${logged.slice(from).join("\n")}`);
+  } finally { await c.end(); }
+});
+
 /** a LEFT lateral whose argument reads an enum and another column (moods): the step, as for two columns of any type */
 const ENUM_STEPPED = [
   "SELECT q.id, x FROM moods q LEFT JOIN unnest(ARRAY[q.m::text, q.id::text]) x ON TRUE LIMIT 5",
