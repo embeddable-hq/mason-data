@@ -44,6 +44,11 @@
  * opens with a TLS ClientHello as TLS at once (`directTls`: `sslnegotiation=direct`, a terminator in front), and REQUIRES
  * one or the other (a plain startup is refused: the password travels in it). Without them it is plain, says so at
  * start, and closes a connection that opens with a ClientHello, saying why in the log.
+ *
+ * TWO SOCKETS, ONE SERVER (`mason share`, `PgApiServer.openShare`): what a connection may do is a property of the socket
+ * it arrived on (`Door`), carried into its session, never of the server: the same sessions, store, roles and request
+ * log, with TLS required and a login of its own on the share's socket alone, so opening one drops no session and
+ * changes nothing for a local tool.
  */
 import type { ExactColumn } from "../../duck/rewrite.ts";
 import type { PlannedSql } from "../../duck/plan.ts";
@@ -341,9 +346,53 @@ export interface PgApiOptions {
   duck: DuckOptions;
 }
 
+/**
+ * A SECOND SOCKET ON THE SAME SERVER (`mason share`, src/cli/share-run.ts): on loopback, because a tunnel's client is on
+ * this machine, and treated as public, because what is on the tunnel's other end is not. TLS is required of every
+ * connection, however the plain listener is set; only `authenticate` logs in (a `mason user` and a token are refused
+ * by not being asked); and every connection that has not logged in is one of at most `pendingLimit`, for at most
+ * `pendingMs`. A tunnel hides who connects, so nothing here can tell a scanner from the BI tool: when the limit is met
+ * the OLDEST connection still logging in makes way (`LoginQueue`), so a connection held open cannot keep a login out.
+ */
+export interface ShareDoor {
+  tls: { cert: Buffer; key: Buffer };
+  authenticate(password: string, user: string): PgToken | Promise<PgToken>;
+  /** asked before every statement, as `PgApiOptions.recheck` is: throws once the session's login is gone */
+  recheck(token: PgToken): Promise<PgToken | void>;
+  /** what a refused login is told, and a session ended by `recheck` */
+  loginHint: string;
+  /** default DEFAULT_PENDING_LIMIT */
+  pendingLimit?: number;
+  /** default DEFAULT_PENDING_MS */
+  pendingMs?: number;
+  /** a login refused here: the startup packet's user (the socket's peer is the tunnel's client: no source to name).
+   *  false: it is counted, and no row of the request log, whose growth a stranger would otherwise set */
+  refused?(user: string): boolean;
+  /** a connection dropped without logging in: `why`, in a few words */
+  dropped?(why: string): void;
+}
+
+/** How many connections may be logging in on a share's socket at once: more than a pool opens at a time. */
+export const DEFAULT_PENDING_LIMIT = 32;
+/** How long one may take to log in: a tunnel's round trips and a TLS handshake are seconds, Postgres allows 60. */
+export const DEFAULT_PENDING_MS = 15_000;
+
+/** A share's socket, open (`PgApiServer.openShare`). */
+export interface ShareSocket {
+  readonly port: number;
+  /** the sessions logged in on it now */
+  readonly sessions: number;
+  /** ends the sessions of one login (`PgToken.jti`) at once; how many */
+  endSessions(jti: string, why: string): number;
+  /** every session on it ended, and the socket closed; every other session untouched */
+  close(): Promise<void>;
+}
+
 export interface PgApiServer {
   readonly port: number;
   close(): Promise<void>;
+  /** opens a second socket (`ShareDoor`); closed by its own `close`, or with the server's */
+  openShare(door: ShareDoor): Promise<ShareSocket>;
   /** the roles as the listener holds them now, their row filters checked by the catalog Postgres (`checkRoles`): a filter
    *  Postgres refuses is the roles' `problem`. What `/api/state` says of the roles, and `mason user add` is held to */
   roles(): RolesLive;
@@ -643,6 +692,63 @@ interface Asked { sql: string; method: string; startedAt: number; sentAt: number
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
 
+/** A name as Postgres takes one from a startup packet: its first 63 bytes (NAMEDATALEN - 1). */
+const nameLength = (name: string | undefined): string | undefined => name === undefined ? undefined : Buffer.from(name, "utf8").subarray(0, 63).toString("utf8");
+
+/** The hint a refused login is told on the run's own listener. */
+const USER_LOGIN_HINT = "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL";
+
+/**
+ * WHAT A CONNECTION MAY DO IS ITS SOCKET'S (`ShareDoor`): how it starts and who logs in, read from here, so the run's
+ * listener and a share's differ by what their door holds, never by a branch in the session.
+ */
+interface Door {
+  /** offered, and required of every connection; null: a plain socket */
+  tls: tls.SecureContext | null;
+  authenticate: PgApiOptions["authenticate"];
+  recheck: PgApiOptions["recheck"];
+  recheckMs: number;
+  /** what the session's login is, in the log's line */
+  who: string;
+  loginHint: string;
+  /** reachable by anyone: nothing about the project is said before a login, and a CancelRequest reaches its own sessions alone */
+  public: boolean;
+  logins: LoginQueue | null;
+  refused?: ((user: string) => boolean) | undefined;
+}
+
+/**
+ * THE CONNECTIONS STILL LOGGING IN ON A PUBLIC SOCKET (`ShareDoor`): at most `limit`, each for at most `ms`, the oldest
+ * making way for a new one. A limit that refused the NEW connection would hand the socket to whoever opened `limit`
+ * connections first and sat on them, which is the attack; every connection through a tunnel comes from 127.0.0.1, so
+ * a limit per source cannot exist.
+ */
+class LoginQueue {
+  private readonly waiting = new Map<Session, NodeJS.Timeout>();
+  private readonly limit: number;
+  private readonly ms: number;
+  private readonly dropped: ((why: string) => void) | undefined;
+  constructor(limit: number, ms: number, dropped: ((why: string) => void) | undefined) { this.limit = limit; this.ms = ms; this.dropped = dropped; }
+
+  admit(s: Session): void {
+    if (this.waiting.size >= this.limit) {
+      const oldest = this.waiting.keys().next().value!;
+      this.dropped?.("made way for a newer connection");
+      oldest.end("made way for a newer connection");
+    }
+    const timer = setTimeout(() => { this.dropped?.("did not log in in time"); s.end("did not log in in time"); }, this.ms);
+    timer.unref();
+    this.waiting.set(s, timer);
+  }
+
+  settled(s: Session): void {
+    const timer = this.waiting.get(s);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.waiting.delete(s);
+  }
+}
+
 let nextSessionId = 1;
 
 class Session {
@@ -654,6 +760,8 @@ class Session {
   user = "";
   token: PgToken | null = null;
   presented: string | null = null;
+  /** the database a public socket's startup named that is not this one: refused once the login is good */
+  private wrongDatabase: string | null = null;
   /** when the user was last found live (a user's session is asked again, `recheckMs`) */
   verifiedAt = 0;
   vars: Vars = defaultVars();
@@ -709,11 +817,15 @@ class Session {
   private closedBy: string | null = null;
 
   private readonly server: Server;
+  /** the socket it arrived on: how it may start, and who may log in */
+  readonly door: Door;
 
-  constructor(socket: net.Socket, server: Server) {
+  constructor(socket: net.Socket, server: Server, door: Door) {
     this.server = server;
+    this.door = door;
     this.socket = socket;
     this.attach(socket);
+    door.logins?.admit(this);
   }
 
   private attach(socket: net.Socket): void {
@@ -751,6 +863,7 @@ class Session {
     const wasReady = this.phase === "ready";
     this.phase = "closed";
     this.closedBy = why;
+    this.door.logins?.settled(this);
     if (wasReady) this.server.log(`session ${this.id} closed: ${why}`);
     this.running?.abort();
     this.socket.destroy();
@@ -852,34 +965,37 @@ class Session {
   private startup(m: FrontendMessage): void {
     switch (m.type) {
       case "SSLRequest": {
-        if (this.server.tls === null) { this.send(sslResponse(false)); return; }
+        if (this.door.tls === null) { this.send(sslResponse(false)); return; }
         this.send(sslResponse(true));
-        this.startTls(this.server.tls, null);
+        this.startTls(this.door.tls, null);
         return;
       }
       case "GSSENCRequest": this.send(sslResponse(false)); return;
       case "CancelRequest": {
-        this.server.cancel(m.pid, m.secret);
+        this.server.cancel(m.pid, m.secret, this.door);
         this.end("cancel request");
         return;
       }
       case "Startup": {
         if (m.major !== 3 || m.minor !== 0) { this.fatal("0A000", `unsupported frontend protocol ${m.major}.${m.minor}: server supports 3.0`); return; }
-        if (this.server.tls !== null && !(this.socket instanceof tls.TLSSocket)) {
+        if (this.door.tls !== null && !(this.socket instanceof tls.TLSSocket)) {
           this.fatal("28000", "this server requires TLS: the password must not travel in clear (connect with sslmode=require)");
           return;
         }
-        const user = m.params.user;
+        // a public socket's refused logins are rows of the request log: what a stranger names is a name's length there
+        const user = this.door.public ? nameLength(m.params.user) : m.params.user;
         if (user === undefined || user === "") { this.fatal("28000", "no PostgreSQL user name specified in startup packet"); return; }
         this.user = user;
         const database = m.params.database ?? user;
         if (database !== this.server.database) {
-          this.fatal("3D000", `database "${database}" does not exist`, wrongDatabaseHint(this.server.database));
-          return;
+          // a share's socket is public: refused here, a wrong name and the right one would answer apart before any
+          // password, so a stranger could guess the project's. It is refused after the login, as Postgres does
+          if (!this.door.public) { this.fatal("3D000", `database "${database}" does not exist`, wrongDatabaseHint(this.server.database)); return; }
+          this.wrongDatabase = database;
         }
         const encoding = m.params.client_encoding;
         if (encoding !== undefined && !isUtf8(encoding)) { this.fatal("22023", `client_encoding ${encoding} is not supported: this API sends UTF8 only`); return; }
-        if (m.params.application_name !== undefined) this.vars.applicationName = m.params.application_name;
+        if (m.params.application_name !== undefined) this.vars.applicationName = (this.door.public ? nameLength(m.params.application_name) : m.params.application_name)!;
         try {
           if (m.params.options !== undefined) this.commandLineOptions(m.params.options);
           for (const [k, v] of Object.entries(m.params)) {
@@ -928,14 +1044,14 @@ class Session {
    * and this listener has no certificate to send), so it is refused in the log, naming the way out, and closed.
    */
   private directTls(first: Buffer): void {
-    if (this.server.tls === null) {
+    if (this.door.tls === null) {
       this.server.log(`session ${this.id} refused: a direct TLS start (a TLS ClientHello as its first bytes: sslnegotiation=direct, or a TLS ` +
         `terminator re-encrypting to Mason) on a plain listener — set MASON_PG_TLS_CERT and MASON_PG_TLS_KEY to serve TLS, or terminate TLS ` +
         `in front and send Mason the plain protocol (docs/POSTGRES-API.md "Connecting")`);
       this.end("a direct TLS start on a plain listener");
       return;
     }
-    this.startTls(this.server.tls, first);
+    this.startTls(this.door.tls, first);
   }
 
   /** libpq's `options=-c name=value …` (JDBC's `options`): each a SET before the session starts */
@@ -951,7 +1067,7 @@ class Session {
     if (m.type !== "Password") { this.fatal("08P01", `expected a password message, got ${m.type}`); return; }
     let token: PgToken;
     try {
-      token = await this.server.options.authenticate(m.password, this.user);
+      token = await this.door.authenticate(m.password, this.user);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // a revocation record that could not be read is no wrong password: the server could not tell, said as such
@@ -965,16 +1081,18 @@ class Session {
         : new PgError({ code: unknown ? "57P03" : "28P01",
           message: unknown ? `the password could not be checked for user "${this.user}": ${message}` : `password authentication failed for user "${this.user}": ${message}`,
           hint: unknown ? "connect again once Mason can read its list of users"
-            : "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL" }, 401);
+            : this.door.loginHint }, 401);
       // a tool that cannot connect is the first thing to look for in the request log
       this.asked = { sql: "", method: "CONNECT", startedAt: Date.now(), sentAt: this.sentBytes };
       const response = errorResponse({ ...refused.fields, severity: "FATAL" });
-      this.recordRequest(refused, undefined, err instanceof ApiError ? err.userName : undefined, [response]);
+      if (this.door.refused?.(this.user) !== false) this.recordRequest(refused, undefined, err instanceof ApiError ? err.userName : undefined, [response]);
       this.send(response);
       this.end("authentication failed");
       return;
     }
     if (this.phase !== "password") return;   // the socket closed while the ledger was read
+    this.door.logins?.settled(this);
+    if (this.wrongDatabase !== null) { this.fatal("3D000", `database "${this.wrongDatabase}" does not exist`, wrongDatabaseHint(this.server.database)); return; }
     this.token = token;
     this.presented = m.password;
     this.verifiedAt = this.server.now();
@@ -982,7 +1100,7 @@ class Session {
     this.decoder.maxLength = MAX_MESSAGE_LENGTH;   // authenticated: a statement may be as long as the protocol allows
     // what is happening, as it happens (mason logs once showed little): who connected, and (end) who left
     this.server.log(`session ${this.id} connected: ${this.vars.applicationName === "" ? "a client with no application_name" : JSON.stringify(this.vars.applicationName)} as ${JSON.stringify(this.user)}` +
-      (token.user !== undefined ? " (a mason user)" : ""));
+      (token.user !== undefined ? ` (${this.door.who})` : ""));
     this.sendAll([authenticationOk(), ...this.reportChanges(), backendKeyData(this.id, this.secret), readyForQuery("I")]);
   }
 
@@ -2276,11 +2394,11 @@ class Session {
    * refuses this statement only (recorded by `refuse`).
    */
   private async stillLive(asked: string): Promise<PgError | null> {
-    const recheck = this.server.options.recheck;
+    const recheck = this.door.recheck;
     const user = this.token?.user;
     if (recheck === undefined || user === undefined) return null;
     const now = this.server.now();
-    if (now - this.verifiedAt < (this.server.options.recheckMs ?? DEFAULT_RECHECK_MS)) return null;
+    if (now - this.verifiedAt < this.door.recheckMs) return null;
     try {
       // the user as the file has it NOW: its role given or taken since applies to this statement
       const fresh = await recheck(this.token!);
@@ -2290,7 +2408,7 @@ class Session {
       // could not tell: this statement is refused, the session kept, and the next statement asks again
       if (err instanceof ApiError && err.status === 503) return new PgError({ code: "57P03", message, hint: "run the statement again once Mason can read its list of users" }, 503);
       if (err instanceof ApiError) this.recordRefusal(asked.toUpperCase(), err);
-      this.fatal("28000", `the session's user is no longer accepted: ${message}`, err instanceof ApiError && err.code === USER_DISABLED
+      this.fatal("28000", `the session's user is no longer accepted: ${message}`, this.door.public ? this.door.loginHint : err instanceof ApiError && err.code === USER_DISABLED
         ? `a disabled user's sessions end at their next statement; mason user enable ${user} lets it connect again, with the same password`
         : `a removed user's sessions end at their next statement; mason user add ${user} makes it again, with a new password`);
       return null;
@@ -2503,14 +2621,16 @@ class Server {
     this.duckPlans.set(key, plan);
     return plan;
   }
-  readonly tls: tls.SecureContext | null;
+  /** the run's own listener's door */
+  readonly door: Door;
   readonly catalog: PgCatalog;
   private lastSchema: PgSchema;
   private lastRoles: RolesLive;
   options: PgApiOptions;
   constructor(options: PgApiOptions) {
     this.options = options;
-    this.tls = options.tls === null ? null : tls.createSecureContext({ cert: options.tls.cert, key: options.tls.key });
+    this.door = { tls: options.tls === null ? null : tls.createSecureContext({ cert: options.tls.cert, key: options.tls.key }), authenticate: options.authenticate,
+      recheck: options.recheck, recheckMs: options.recheckMs ?? DEFAULT_RECHECK_MS, who: "a mason user", loginHint: USER_LOGIN_HINT, public: false, logins: null };
     this.lastSchema = options.schema();
     this.lastRoles = options.roles?.() ?? NO_ROLES;
     const version = versionText(options.product ?? "Mason", options.masonVersion);
@@ -2614,7 +2734,7 @@ class Server {
         const problem = `the roles' row filters could not be checked by the catalog: ${e instanceof Error ? e.message : String(e)}`;
         // tried again at every statement of every session, so said once a streak: the line a streak's end answers
         if (!this.rolesCheckFailing) { this.rolesCheckFailing = true; this.log(`roles: ${problem} — tried again at each statement, every statement of a user held to a role refused until then`); }
-        return { ...raw, problem: raw.problem ?? problem };
+        return raw.problem !== null ? raw : { ...raw, problem, checkFailed: true };
       }
       if (this.rolesCheckFailing) { this.rolesCheckFailing = false; this.log("roles: the catalog checks the row filters again"); }
       const problem = raw.problem ?? (problems.length === 0 ? null : `${raw.file ?? "the roles file"}: ${problems.join("; ")}`);
@@ -2645,10 +2765,12 @@ class Server {
 
   forget(s: Session): void { this.sessions.delete(s.id); }
 
-  /** A CancelRequest: the session's statement stopped when the key is the session's (`interrupt`). */
-  cancel(pid: number, secret: number): void {
+  /** A CancelRequest: the session's statement stopped when the key is the session's (`interrupt`) and it arrived on
+   *  the session's own socket (a driver's cancel opens a connection to the address it logged in at; a public socket
+   *  reaches its own sessions alone). */
+  cancel(pid: number, secret: number, door: Door): void {
     const s = this.sessions.get(pid);
-    if (s === undefined || s.secret !== secret) return;   // as Postgres: a wrong key is ignored, never answered
+    if (s === undefined || s.secret !== secret || s.door !== door) return;   // as Postgres: a wrong key is ignored, never answered
     this.interrupt(s);
   }
 
@@ -2705,22 +2827,52 @@ class Server {
   }
 }
 
-export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServer> {
-  const server = new Server(options);
+/** A socket that takes connections through `door`, listening; its port. Two of these are one server's two sockets. */
+async function listenOn(server: Server, door: Door, port: number, host: string): Promise<{ listener: net.Server; port: number }> {
   const listener = net.createServer((socket) => {
     socket.setNoDelay(true);
-    const session = new Session(socket, server);
+    const session = new Session(socket, server, door);
     server.sessions.set(session.id, session);
   });
   await new Promise<void>((resolve, reject) => {
     listener.once("error", reject);
-    listener.listen(options.port, options.host, () => { listener.off("error", reject); resolve(); });
+    listener.listen(port, host, () => { listener.off("error", reject); resolve(); });
   });
   listener.on("error", (err: Error) => server.log(`listener error: ${err.message}`));
   const address = listener.address();
-  const port = typeof address === "object" && address !== null ? address.port : options.port;
+  return { listener, port: typeof address === "object" && address !== null ? address.port : port };
+}
+
+const closeListener = (listener: net.Server): Promise<void> => new Promise((resolve) => listener.close(() => resolve()));
+
+export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServer> {
+  const server = new Server(options);
+  const { listener, port } = await listenOn(server, server.door, options.port, options.host);
+  const shares = new Set<net.Server>();
+  const sessionsOf = (door: Door): Session[] => [...server.sessions.values()].filter((s) => s.door === door);
   return {
     port,
+    async openShare(o) {
+      const door: Door = { tls: tls.createSecureContext({ cert: o.tls.cert, key: o.tls.key }), authenticate: o.authenticate, recheck: o.recheck, recheckMs: 0, who: "a share",
+        loginHint: o.loginHint, public: true, logins: new LoginQueue(o.pendingLimit ?? DEFAULT_PENDING_LIMIT, o.pendingMs ?? DEFAULT_PENDING_MS, o.dropped), refused: o.refused };
+      // loopback whatever the run's own listener is bound to: a tunnel's client is on this machine
+      const share = await listenOn(server, door, 0, "127.0.0.1");
+      shares.add(share.listener);
+      return {
+        port: share.port,
+        get sessions() { return sessionsOf(door).filter((s) => s.phase === "ready").length; },
+        endSessions: (jti, why) => {
+          const ended = sessionsOf(door).filter((s) => s.token?.jti === jti);
+          for (const s of ended) s.end(why);
+          return ended.length;
+        },
+        async close() {
+          if (!shares.delete(share.listener)) return;
+          for (const s of sessionsOf(door)) s.end("the share ended");
+          await closeListener(share.listener);
+        },
+      };
+    },
     get sessions() { return server.sessions.size; },
     roles: () => server.rolesChecked(),
     checkRoles: () => server.checkRoles(),
@@ -2729,7 +2881,8 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
     cancel: (session, statement) => server.cancelSession(session, statement),
     async close() {
       for (const s of [...server.sessions.values()]) s.end("server closing");
-      await new Promise<void>((resolve) => listener.close(() => resolve()));
+      await Promise.all([listener, ...shares].map(closeListener));
+      shares.clear();
       await server.catalog.stop();
       await stopParser();
     },

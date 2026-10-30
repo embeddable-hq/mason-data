@@ -56,6 +56,58 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
   password; or add another name and remove the old one once the tool uses it). The password is never kept, so it
   cannot be printed again: a lost one is a remove and an add.
 
+### From a cloud BI tool
+
+A hosted BI tool cannot reach `127.0.0.1`. To try Mason from one, `mason share` opens a temporary public address for a
+run on your laptop, through a free tunnel service, with nothing else to set up:
+
+```bash
+mason share                 # the host, port, database, user and password to type in; Ctrl-C ends it
+mason share --role sales    # what it reads: a role of mason/roles.yml
+mason share --via bore      # another tunnel (cargo install bore-cli); the default needs only ssh
+```
+
+**It is a one-hour evaluation, not a way to run a dashboard.** A free Pinggy tunnel ends after an hour, and the share
+ends with it: the address is gone, the password stops working, and `mason share` says so and exits 1. Running it again
+gives a new host, a new port and a new password, so a saved connection in a BI tool breaks each time. With a paid token in
+`MASON_PINGGY_TOKEN` (the shell or `.env`, never a flag: a command line is every local user's to read, and Mason writes
+the token to a 0600 file of its own instead) the address survives, so a dropped tunnel is opened again by itself,
+the password unchanged, and it says so. For anything lasting, `mason serve` on a host.
+
+**What it promises is narrow: a relay that forwards bytes cannot read them.** The run opens a second socket for the
+share, on loopback, that REQUIRES TLS of every connection (`28000` to a plain startup), so a BI tool's password and
+rows cross the relay encrypted. Your local tools and the run's own listener notice nothing, and no session is dropped.
+The limits, plainly:
+
+- **A malicious relay could sit in the middle of the handshake.** The certificate is the project's self-signed one and a
+  tool connects with `sslmode=require`, which checks no certificate, so a relay that terminated TLS itself would get
+  the password and the rows. `mason share` prints the certificate's SHA-256 fingerprint for a tool that can pin it, and
+  checks that fingerprint through the tunnel once from this machine, which catches a wrong address and says nothing
+  about what the relay does to another client's connection. Do not send a relay data you would not trust it with.
+- **The relay sees metadata**: source addresses, connection times, bytes. A free tunnel's host name can also carry your
+  own machine's public IP address, so whoever you give the address to can read it there.
+- **The address is a public Postgres login prompt.** Port scanners find it within minutes. Every connection through a
+  tunnel reaches Mason from `127.0.0.1`, so Mason cannot tell a scanner from your BI tool, and a throttle by source
+  cannot exist. What holds instead: the password is 192 random bits; at most 32 connections may be logging in at once,
+  the oldest making way for a new one, and each has 15 s, so a connection held open cannot keep your tool out; ten
+  refused logins a minute are rows of the request log, each name cut to 63 bytes, so a stranger cannot set the log's
+  growth; every one is counted by `mason status` and in a line of `mason logs` (at most one a minute, with how many),
+  with no source named because none is known. Before a login the socket says nothing of the project: the certificate
+  any connection is handed is `CN=mason`, and a wrong database is refused only after a good password, as Postgres does.
+
+**The login lasts for one run of `mason share`.** It is made by the command, printed once and kept nowhere: the run holds
+its SHA-256 in memory, tied to a role, and it is no row of `.mason/users.json`. It works on the share's socket alone,
+it is refused everywhere else, and a `mason user`'s password and an API token are refused on the share's socket. It goes
+when the command's connection to the run goes, a `kill -9` included. The share's session is an ordinary one: the same
+role held the same way, the same request log, the user named `share_<id>`.
+
+**What it reads is one role.** `--role <role>` names it; a roles file of one role uses that one and says so; with several,
+a person at a terminal is asked, and anything else is refused with the line to run. With no roles file it reads every
+synced table, and says so. A role with a `where:` is held on the share's socket as on any other. A role whose `where:`
+reads an attribute cannot be shared, because a share's login is a password and carries no values: it is refused at the
+start, naming the roles that can be, and so is any role while a row filter is one Postgres refuses. `mason status` shows an open share, and `--json` answers one object once the address is known;
+the end is on stderr with the exit code.
+
 ### Roles
 
 **A role limits what a user reads to tables and columns**: `mason user add <name> --role <role>` names a role of the

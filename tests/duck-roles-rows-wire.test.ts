@@ -183,6 +183,60 @@ async function refusal(c: pg.Client, sql: string): Promise<{ code: string; messa
   assert.fail(`answered where a refusal was expected: ${sql}`);
 }
 
+test("a share's session reads a filtered role's rows as a plain session of that role does; the listener's refusals reach mason share's start", async () => {
+  await wire();
+  const { RunShares, shareSecret } = await import("../src/cli/share-run.ts");
+  const { selfSignedCertificate } = await import("../src/cli/self-signed-cert.ts");
+  const pair = selfSignedCertificate("mason-share-rows");
+  const shares = new RunShares({ listener: api, database: "shop", log: () => undefined, certificate: () => ({ cert: Buffer.from(pair.cert), key: Buffer.from(pair.key), fingerprint: "AA" }) });
+  // a where: with no attribute, and a through: from it: rows a password alone can be held to
+  const paid = `${ROLES}  paid:\n    tables:\n      orders: { columns: [id, status], where: "status = 'paid'" }\n      order_items: { through: orders }\n`;
+  fs.writeFileSync(rolesFile, paid);
+  const plain = await connect("paid1", addUser("paid1", "paid"));
+  const whole = await connect("whole1", addUser("whole1", "everything"));
+  const opened = await shares.open({ secret: shareSecret("share-password"), role: "paid" });
+  assert.ok("user" in opened, JSON.stringify(opened));
+  const share = new pg.Client({ host: "127.0.0.1", port: opened.port, database: "shop", user: opened.user, password: "share-password", ssl: { rejectUnauthorized: false } });
+  await share.connect();
+  try {
+    const statements: Array<[string, unknown[]]> = [
+      ["SELECT id FROM orders ORDER BY id", [{ id: "10" }, { id: "12" }, { id: "13" }, { id: "15" }, { id: "16" }]],
+      ["SELECT count(*)::int AS n FROM orders", [{ n: 5 }]],
+      ["SELECT id FROM order_items ORDER BY id", [{ id: "100" }, { id: "101" }, { id: "103" }, { id: "105" }, { id: "107" }]],
+      ["SELECT count(*)::int AS n FROM orders o JOIN order_items i ON i.order_id = o.id", [{ n: 5 }]],
+    ];
+    for (const [sql, rows] of statements) {
+      const seen = (await share.query(sql)).rows;
+      assert.deepEqual(seen, rows, sql);
+      assert.deepEqual((await plain.query(sql)).rows, seen, `a plain session of the role: ${sql}`);
+      assert.notDeepEqual((await whole.query(sql)).rows, seen, `an unfiltered user reads more: ${sql}`);
+    }
+    assert.equal((await refusal(share, "SELECT notes FROM orders")).code, "42501", "its columns too");
+  } finally {
+    await share.end();
+    await shares.closeAll("the test");
+  }
+
+  // a role whose rows need an attribute: refused at the start, never a share whose every statement fails
+  const tenant = await shares.open({ secret: shareSecret("x"), role: "tenant" });
+  assert.ok("failure" in tenant);
+  assert.equal(tenant.failure.code, "refused");
+  assert.equal(tenant.failure.message, "a share cannot read as the role tenant: its rows depend on :tenant, and a share's login has no attributes");
+  assert.equal(tenant.failure.why, "roles.tenant.tables.customers.where reads :tenant (tenant_id = :tenant)");
+  assert.match(tenant.failure.fix ?? "", /^--role paid: reads 2 synced tables/m);
+  assert.deepEqual(tenant.failure.next?.at(-1), ["mason user add <name> --role tenant --set tenant=<value>", "a login that carries the values, for a tool that can reach this machine"]);
+
+  // a filter Postgres refuses: the role reads as well-formed until the catalog has read it, so the share asks the catalog
+  fs.writeFileSync(rolesFile, paid.replace("status = 'paid'", "stauts = 'paid'"));
+  try {
+    const bad = await shares.open({ secret: shareSecret("y"), role: "paid" });
+    assert.ok("failure" in bad, JSON.stringify(bad));
+    assert.equal(bad.failure.code, "bad_roles");
+    assert.match(bad.failure.message, /roles\.yml cannot be read as it is now, so nothing is shared: .*roles\.paid\.tables\.orders\.where: column "stauts" does not exist/);
+    assert.match(bad.failure.fix ?? "", /^repair .*roles\.yml, then mason share$/);
+  } finally { fs.writeFileSync(rolesFile, ROLES); }
+});
+
 test("no path reaches the copy without the filter: *, count, a view, joins, subqueries, EXISTS, UNION, a CTE, a prepared statement executed twice", async () => {
   await wire();
   const acme = await connect("acme", addUser("acme", "tenant", { tenant: "1" }));
@@ -606,6 +660,14 @@ test("a catalog that cannot check the filters: every statement refused, the line
     fs.writeFileSync(rolesFile, `${ROLES}\n# a new file, so a new check\n`);
     for (let i = 0; i < 4; i++) assert.equal((await refusal(acme, "SELECT count(*) FROM orders")).code, "57P03", "fails closed");
     assert.equal(failing().length - before, 1, `one line for the streak:\n${failing().join("\n")}`);
+    // mason share meets the same catalog: the failure is said as Mason's, and the file is not blamed
+    const { RunShares, shareSecret } = await import("../src/cli/share-run.ts");
+    const shares = new RunShares({ listener: api, database: "shop", log: () => undefined, certificate: () => ({ message: "no socket should open", code: "failed" }) });
+    const opened = await shares.open({ secret: shareSecret("x"), role: "everything" });
+    assert.ok("failure" in opened, JSON.stringify(opened));
+    assert.equal(opened.failure.code, "failed");
+    assert.match(opened.failure.message, /^nothing is shared: the roles' row filters could not be checked by the catalog: the catalog is gone$/);
+    assert.deepEqual(opened.failure.next, [["mason logs", "the run's log"]]);
   } finally { PgCatalog.prototype.policies = policies; fs.writeFileSync(rolesFile, ROLES); }
   assert.deepEqual((await rows(acme, "SELECT count(*) FROM orders"))[0], ["4"], "answered again, no restart");
   assert.ok(logged.some((l) => l.includes("the catalog checks the row filters again")), "the streak's end said");

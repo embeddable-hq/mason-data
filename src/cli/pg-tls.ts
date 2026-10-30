@@ -46,15 +46,19 @@ export function runListenerSettings(shell: Readonly<Record<string, string | unde
     ...(s.kind === "plain" ? { next: [["mason start --self-signed-tls", "TLS from a certificate made in .mason/ (clients connect with sslmode=require)"]] } : {}) };
 }
 
+/** The name in every self-signed certificate: a certificate is handed to whoever connects, before any login, so it
+ *  names no project. */
+const SELF_SIGNED_NAME = "mason";
+
 /**
  * The project's self-signed certificate: the one in `.mason/` when it is still good (it parses, its key is its own, it
- * has not expired), else a new one, both files 0600. `said` is why a new one was made, for the run to print.
+ * has not expired, it names no project), else a new one, both files 0600. `said` is why a new one was made, for the run to print.
  */
-export function ensureSelfSigned(home: string, project: string, now = new Date()): { fingerprint: string; said: string | null } {
+export function ensureSelfSigned(home: string, now = new Date()): { fingerprint: string; said: string | null } {
   const certFile = path.join(home, SELF_SIGNED_FILES.cert), keyFile = path.join(home, SELF_SIGNED_FILES.key);
   const kept = keptCertificate(certFile, keyFile, now);
   if ("fingerprint" in kept) return { fingerprint: kept.fingerprint, said: null };
-  const made = selfSignedCertificate(`mason-${project}`, { now });
+  const made = selfSignedCertificate(SELF_SIGNED_NAME, { now });
   for (const [file, text] of [[keyFile, made.key], [certFile, made.cert]] as const) {
     fs.writeFileSync(file, text, { mode: 0o600 });
     fs.chmodSync(file, 0o600);   // a file that was there keeps its mode through writeFileSync
@@ -62,11 +66,18 @@ export function ensureSelfSigned(home: string, project: string, now = new Date()
   return { fingerprint: new crypto.X509Certificate(made.cert).fingerprint256, said: kept.why };
 }
 
+/** The project's self-signed certificate as a listener reads it: the two files of `ensureSelfSigned`, and what it said. */
+export function selfSignedPair(home: string): { cert: Buffer; key: Buffer; fingerprint: string; said: string | null } {
+  const { fingerprint, said } = ensureSelfSigned(home);
+  return { cert: fs.readFileSync(path.join(home, SELF_SIGNED_FILES.cert)), key: fs.readFileSync(path.join(home, SELF_SIGNED_FILES.key)), fingerprint, said };
+}
+
 function keptCertificate(certFile: string, keyFile: string, now: Date): { fingerprint: string } | { why: string } {
   if (!fs.existsSync(certFile) || !fs.existsSync(keyFile)) return { why: `made a self-signed certificate: .mason/${SELF_SIGNED_FILES.cert}` };
   try {
     const x = new crypto.X509Certificate(fs.readFileSync(certFile));
     if (!x.checkPrivateKey(crypto.createPrivateKey(fs.readFileSync(keyFile)))) return { why: `made a new self-signed certificate: .mason/${SELF_SIGNED_FILES.key} was not the key of .mason/${SELF_SIGNED_FILES.cert}` };
+    if (x.subject !== `CN=${SELF_SIGNED_NAME}` || x.issuer !== `CN=${SELF_SIGNED_NAME}`) return { why: "made a new self-signed certificate: the one in .mason/ named this project to whoever connected" };
     if (new Date(x.validTo).getTime() <= now.getTime()) return { why: `made a new self-signed certificate: the one in .mason/ expired ${x.validTo}` };
     return { fingerprint: x.fingerprint256 };
   } catch (e) {

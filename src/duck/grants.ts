@@ -77,6 +77,8 @@ export interface RolesLive {
   file: string | null;
   grants: ReadonlyMap<string, RoleGrants>;
   problem: string | null;
+  /** the `problem` is the catalog's, which could not check the filters, never the file's (Server.checkRoles): tried again */
+  checkFailed?: true;
   /** the file's `default:`: the role of every user with no role of its own; null where it names none (such a user
    *  reads nothing) or there is no file (every user reads every copied table) */
   default: string | null;

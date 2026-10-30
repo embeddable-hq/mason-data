@@ -2954,6 +2954,30 @@ test("the sessions logged in now, by user and client, and how many of each run a
   } finally { a.end(); b.end(); c.end(); }
 });
 
+// A CANCEL ON A SHARE'S SOCKET (mason share): a public socket, whose CancelRequest arrives in clear, reaches its own sessions alone
+test("a CancelRequest on a share's socket does not reach a session of the run's own listener: the statement goes on, and the key on its own socket stops it", async () => {
+  const { selfSignedCertificate } = await import("../src/cli/self-signed-cert.ts");
+  const pair = selfSignedCertificate("mason-share-cancel");
+  const share = await api.openShare({ tls: { cert: Buffer.from(pair.cert), key: Buffer.from(pair.key) }, authenticate: () => ({}), recheck: async () => undefined, loginHint: "" });
+  const s = await rawSession();
+  const send = async (port: number): Promise<void> => {
+    const c = net.connect(port, "127.0.0.1");
+    await new Promise<void>((r) => c.once("connect", () => r()));
+    c.end(wire.cancelRequest(s.pid, s.secret));
+    await new Promise<void>((r) => c.once("close", () => r()));
+  };
+  try {
+    s.socket.write(wire.query(SLOW));
+    for (const deadline = Date.now() + 10_000; api.running().every((r) => r.session !== s.pid); await sleep(20)) if (Date.now() > deadline) throw new Error("the statement never showed as running");
+    await send(share.port);
+    await sleep(200);
+    assert.ok(api.running().some((r) => r.session === s.pid), "the share's socket cancelled a session of the run's own listener");
+    await send(api.port);
+    const error = (await s.untilReady()).find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+    assert.equal(error?.fields.C, "57014");
+  } finally { s.end(); await share.close(); }
+});
+
 // THE STATEMENTS RUNNING NOW, AND A CANCEL BY SESSION (`/api/running`, `POST /api/cancel`): the listener's own, and the
 // cancel is the CancelRequest's path — the client told 57014 "due to user request", recorded cancelled, the session on
 test("the statements running now, by session; a cancel by session stops one as a CancelRequest does, and says when there is nothing to stop", async () => {

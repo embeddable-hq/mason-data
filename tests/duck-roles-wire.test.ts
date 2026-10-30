@@ -165,6 +165,41 @@ const ROLES_PATH = "mason/roles.yml";
 // the HINT names the gap's row of docs/SQL-SUPPORT.md too, as every refusal names its entry (Mason gap roles)
 const AGENT_ORDERS = `the role agent reads these columns of orders: id, status, amount (${ROLES_PATH} names what each role reads; Mason gap roles)`;
 
+test("a share's session is a plain session's: the same role held the same way on the second socket, with the same refusal, and the same request-log row", async () => {
+  await wire();
+  const { RunShares, shareSecret } = await import("../src/cli/share-run.ts");
+  const { selfSignedCertificate } = await import("../src/cli/self-signed-cert.ts");
+  const pair = selfSignedCertificate("mason-share-roles");
+  const shares = new RunShares({ listener: api, database: "shop", log: () => undefined,
+    certificate: () => ({ cert: Buffer.from(pair.cert), key: Buffer.from(pair.key), fingerprint: "AA" }) });
+  const opened = await shares.open({ secret: shareSecret("share-password"), role: "agent" });
+  assert.ok("user" in opened);
+  const plain = await connect("agent", addUser("agent", "agent"));
+  const share = new pg.Client({ host: "127.0.0.1", port: opened.port, database: "shop", user: opened.user, password: "share-password", application_name: "Metabase", ssl: { rejectUnauthorized: false } });
+  await share.connect();
+  try {
+    assert.equal((await share.query("SHOW ssl")).rows[0].ssl, "on");
+    for (const sql of ["SELECT id, status FROM orders ORDER BY id", "SELECT count(*)::int AS n FROM orders"]) {
+      assert.deepEqual((await share.query(sql)).rows, (await plain.query(sql)).rows, sql);
+    }
+    for (const sql of ["SELECT notes FROM orders", "SELECT * FROM orders", "WITH x AS (SELECT notes FROM orders) SELECT * FROM x", "SELECT count(*) FROM events"]) {
+      assert.deepEqual(await refused(share, sql), await refused(plain, sql), sql);
+    }
+    const names = async (c: pg.Client): Promise<unknown> => (await c.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY 1")).rows;
+    assert.deepEqual(await names(share), await names(plain), "the catalog answers for the role");
+    await ledger.flush();
+    const rows = await ledger.page({ limit: 200 } as never);
+    const of = (user: string): Array<{ role?: string | null; sqlstate?: string | null }> => (rows as unknown as { requests: Array<{ user?: string | null; role?: string | null; sqlstate?: string | null }> }).requests.filter((r) => r.user === user);
+    assert.ok(of(opened.user).length > 0, "its statements are rows of the request log");
+    assert.ok(of(opened.user).every((r) => r.role === "agent"), JSON.stringify(of(opened.user)));
+    assert.ok(of(opened.user).some((r) => r.sqlstate === "42501"));
+  } finally {
+    await plain.end();
+    await share.end();
+    await shares.closeAll("the test");
+  }
+});
+
 test("a role reads what it is granted: granted columns, count(*), a join on granted columns, a statement over no copied table", async () => {
   await wire();
   const c = await connect("agent", addUser("agent", "agent"));

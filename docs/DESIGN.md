@@ -1156,6 +1156,57 @@ so a TLS proxy had been written beside it. Postgres 17's `sslnegotiation=direct`
 had answered `off` over TLS. **Where.** `src/api/postgres/listener.ts`, `src/cli/pg-tls.ts`; `tests/pg-tls.test.ts`,
 `tests/postgres-api/tls.test.ts`.
 
+### mason share (2026-10-30, GitHub issue 62)
+
+**Decision.** A second socket of the one listener, TLS required, opened by the run for a tunnel's client: the plain
+listener is untouched, so no session drops and a local tool notices nothing. Restarting under `--self-signed-tls` was
+rejected (fifteen seconds, every session dropped, TLS asked of every local tool), and offering TLS on the plain socket
+too (a tunnel's connection and a local psql are the same to it, so a tool configured without SSL would send its
+password through the relay in clear, and Mason would never know).
+
+The owner's decisions on the issue: a free tunnel's end ends the share, because a new tunnel is a new address to copy
+anyway; a paid token keeps the address, so it reconnects. The login lasts for one run of the command. No throttle: every
+tunnelled connection is from 127.0.0.1, so a throttle cannot tell a scanner from the BI tool, and a port scanner would
+lock the tool out. The promise is "a relay that forwards bytes cannot read them", never more.
+
+Decided in the building:
+
+- **The command makes the password; the run gets its SHA-256.** A run that holds a hash cannot log, answer or dump a
+  password, whatever a later change prints, where a test for its absence holds only the paths it thought of. A fast hash
+  is right because the password is 192 random bits.
+- **The connection is the share**: an answer left open, so the end of the process is the end of the share with no
+  signal, heartbeat or state file. A tunnel client would outlive a `kill -9` of its parent, so the run stops it, by its
+  pid and only while that process names the share's port.
+- **Oldest out, not newest refused**: with a cap that refuses, `limit` idle connections hold the socket for as long as
+  their deadline; with eviction, a flood must outrun a real login. A flood through a relay still can, and nothing here
+  stops it: no source is known.
+- **`ssh` config over `-o`** keeps the token off the command line, and `-F` keeps the developer's `~/.ssh/config`
+  (a `ProxyCommand`, a `ControlMaster`) out of it. A machine that needs a proxy to reach the internet is the price.
+- **A second `mason share` meets the same socket with its own login**, so the issue's "a second call answers the same
+  port" holds under a credential per run.
+- **Measured once on the real free route (2026-10-30, the demo's synthetic data, a laptop on IPv6).** The client says
+  "expire in 60 minutes" and it does: the service closed the session 3,601 s after it opened ("Time exceeded"), `ssh`
+  exited 255, and a probe every 10 s saw the address answer until then and refuse after, so the end of `ssh` is the end
+  of the address and `mason share` needs no timer of its own. A second tunnel minutes after the first got another port
+  and another host, so a free tunnel keeps neither, and its host name held the laptop's public IPv6 address. Between
+  the two, `sslmode=require` logged in, a plain client got `28000`, and `openssl` read the share's own fingerprint
+  through the relay. The paid route has not been run.
+- **A probe of the printed address**, because the address is read from output Mason does not own: the contract answers a
+  probe (CLAUDE.md "Fix the class").
+- **A public socket says nothing before a login**, which the independent review found it did twice: the certificate
+  named the project (any TLS client reads it with no password), and `3D000` before the password let a scanner confirm a
+  guessed name. So every self-signed certificate is `CN=mason`, one already in `.mason/` that names a project is made
+  again, said, because its fingerprint moves; and a public socket refuses a wrong database after the password. The plain
+  socket keeps its early hint: it is a developer's, on this machine.
+- **Ten refused logins a minute are rows, and the rest are counted**: a row per refusal let a stranger set the request
+  log's growth, each carrying up to a 10,000-byte startup packet, for `MASON_HISTORY_DAYS`. A person who mistypes a
+  password still finds it in the log, and names are cut to Postgres's 63 bytes. A once-a-minute aggregate row was the
+  alternative; it would hide the mistyped login inside a scan.
+- **The tunnel client's pid can be lost in one small gap**: a `kill -9` between `ssh` starting and the run hearing its
+  pid (a request to loopback) leaves the client running. Closing it means starting `ssh` through a shell that waits to
+  be told, which loses `ENOENT`, the way a missing `ssh` is said. What is left running forwards to a socket already
+  closed, with no login valid, so the gap is left open.
+
 ### The database name a tool connects with (2026-10-30)
 
 **Decision.** The name is `mason`, unless the sources file says another with `database:`. It was the project's name

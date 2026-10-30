@@ -96,6 +96,17 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   TLS start** (`directTls`): a connection's first byte 0x16 is a ClientHello (`sslnegotiation=direct`, a
   TLS terminator in front) and is TLS at once, ALPN `postgresql`, the bytes read unshifted onto the socket whole —
   never a second read path; a plain listener closes it saying so in the log.
+- **What a connection may do is its SOCKET'S, never the server's** (`Door`, `Session.door`, `openShare`; docs/POSTGRES-API.md
+  "From a cloud BI tool"): TLS, who logs in, what a login is told. One server with two sockets, the same sessions,
+  store, roles and request log, so a new socket is a door, never a branch in the session. **A share's socket is TLS or
+  refused, on loopback too**, because what is on the tunnel's other end is not loopback ("off loopback it is TLS or
+  refused" stays for the run's own listener). It is PUBLIC: nothing of the project is said before a login (every
+  self-signed certificate is `CN=mason`, a certificate reaches whoever connects; a wrong database is refused after the
+  password, so it is no oracle for the name), what a stranger writes to the request log is bounded (names cut to 63
+  bytes, `refused` answering false past ten rows a minute), a CancelRequest on it reaches its own sessions alone (one in clear is how a driver cancels: never a reason to refuse it), and
+  its pending logins are capped with the OLDEST making way (`LoginQueue`): a cap that refused the new connection
+  would hand the socket to whoever sat on it, and a tunnel hides every source, so nothing can be per source and no log
+  line may name one. DETECTOR: `tests/postgres-api/tls.test.ts`, `tests/duck-roles-wire.test.ts`, `tests/duck-wire.test.ts`.
 - **The sessions open are the listener's own, counted in memory** (`openSessions`: logged-in sessions by user and
   application_name, and how many run a statement): `/api/state` `sessions`, `mason status`, the usage samples — never a
   query of the request log.

@@ -35,6 +35,8 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   user: ["list"],
   // no URL: refused in every state, with the way out (stdin is closed, so a server would end at once)
   mcp: [],
+  // needs a run: below one it answers the state's code, and with no tunnel started
+  share: [],
   status: [],
   // never a browser: in a state with no run it is refused before; --no-open whatever happens
   ui: ["--no-open"],
