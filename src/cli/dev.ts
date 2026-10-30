@@ -39,7 +39,7 @@ import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postg
 import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, SELF_SIGNED_FILES } from "./pg-tls.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
 import { RequestLedger, REQUESTS_TABLE } from "../duck/requests.ts";
-import { historyDays, historyDaysRenamed } from "../duck/history.ts";
+import { historyDaysSetting } from "../duck/history.ts";
 import { EVENTS_TABLE, SyncEvents } from "../duck/events.ts";
 import { USAGE_TABLE, UsageSampler } from "../duck/usage.ts";
 import { withPlaceholders } from "./pg-url.ts";
@@ -207,9 +207,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
   const pollMs = pollMsRetired(process.env);
   if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: false });
-  // the history's days are MASON_HISTORY_DAYS now: the old name refuses the start, named (src/duck/history.ts)
-  const renamed = historyDaysRenamed(process.env);
-  if (renamed !== null) return failed("start", { code: "refused", ...renamed }, { json: false });
+  // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused, named), read
+  // before anything opens (src/duck/history.ts); every history below keeps them
+  const keptDays = historyDaysSetting(process.env);
+  if (typeof keptDays !== "number") return failed("start", { code: "refused", ...keptDays }, { json: false });
   // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
   // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
   // always was (after the listener's checks): a demo project's port is needed first
@@ -396,8 +397,6 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const syncMode = changes === "replication" ? "replication" : syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
-  const keptDays = historyDays(process.env.MASON_HISTORY_DAYS);
-  if (typeof keptDays !== "number") { fail("Opening the copy"); say(`  ${keptDays.problem}`); await store.close(); return 1; }
   let events: SyncEvents;
   try { events = await SyncEvents.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Opening the copy"); say(`  the sync's events (${EVENTS_TABLE}) could not be opened: ${(e as Error).message}`); await store.close(); return 1; }
@@ -453,7 +452,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     await sync.stop(); await events.close(); await store.close(); return 1;
   }
   // THE REQUEST LOG (src/duck/requests.ts): every statement the listener answers or refuses, kept in the copy's own file
-  // for MASON_HISTORY_DAYS (read above, with the sync's events)
+  // for MASON_HISTORY_DAYS (read above, before anything opened)
   let requests: RequestLedger;
   try { requests = await RequestLedger.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Starting the Postgres listener"); say(`  the request log (${REQUESTS_TABLE}) could not be opened: ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }

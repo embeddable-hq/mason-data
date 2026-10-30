@@ -225,6 +225,39 @@ test("mason start refuses MASON_POLL_MS too, before it spawns and in the run its
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a MASON_HISTORY_DAYS that is not a number of days refuses mason serve (on its one report) and mason start (before it spawns, in the run, and --json) in the Failure shape, before anything opens", async () => {
+  const why = "it is how many days Mason keeps its history (the request log, the sync's events, the usage samples and the copies' sizes): a whole number, 1 or more";
+  const fix = "write MASON_HISTORY_DAYS=7 (the default, as when it is unset) or another whole number of days";
+  for (const bad of ["abc", "0", "-1"]) {
+    const served = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_HISTORY_DAYS: bad }, "/srv");
+    assert.ok("message" in served, `${bad}: refused`);
+    assert.equal(served.message, `a setting is missing or wrong: MASON_HISTORY_DAYS=${JSON.stringify(bad)} is not a number of days: ${why} — ${fix}`, bad);
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-history-days-bad-"));
+  try {
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({
+      name: "shop", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false, apiKey: KEY,
+      sourceServer: null, lastRun: null, running: null,
+    }), { mode: 0o600 });
+    const env = matrixEnv({ HOME: path.join(root, "home"), PATH: path.dirname(process.execPath), MASON_HISTORY_DAYS: "abc" });
+    const message = 'MASON_HISTORY_DAYS="abc" is not a number of days';
+    for (const attach of [false, true]) {
+      const p = await runMason(root, ["start", ...(attach ? ["--attach"] : [])], env);
+      assert.equal(p.code, 1, p.stdout + p.stderr);
+      assert.ok(p.stderr.includes(`✗ mason start: ${message}\n  why   ${why}\n  fix   ${fix}\n`),
+        `${attach ? "the run itself" : "before it spawns"}:\n${p.stdout}${p.stderr}`);
+      assert.doesNotMatch(p.stdout + p.stderr, /Connecting to|Opening the copy/, "refused before the database or the copy is touched");
+    }
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "duck.db")), "the copy's file was never opened");
+    const j = await runMason(root, ["start", "--json"], env);
+    assert.equal(j.code, 1, j.stdout + j.stderr);
+    assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message, why, fix });
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("MASON_REQUEST_LOG_DAYS is MASON_HISTORY_DAYS now: set, it refuses mason serve (on its one report) and mason start (before it spawns and in the run), naming the line to write — never runs the default", async () => {
   const why = "it was renamed MASON_HISTORY_DAYS, since the days it keeps are every history's (the request log, the sync's events, the usage samples and the copies' sizes)";
   const fix = "write MASON_HISTORY_DAYS=30 instead, then unset MASON_REQUEST_LOG_DAYS";

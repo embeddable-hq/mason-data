@@ -170,7 +170,9 @@ test("MASON_HISTORY_DAYS: a whole number of days, 1 or more; unset, 7; anything 
   assert.equal(historyDays(""), 7);
   assert.equal(historyDays("30"), 30);
   for (const bad of ["0", "-1", "1.5", "a week"]) {
-    assert.deepEqual(historyDays(bad), { problem: `MASON_HISTORY_DAYS=${JSON.stringify(bad)} is not a number of days: write a whole number, 1 or more (unset, 7)` }, bad);
+    assert.deepEqual(historyDays(bad), { message: `MASON_HISTORY_DAYS=${JSON.stringify(bad)} is not a number of days`,
+      why: "it is how many days Mason keeps its history (the request log, the sync's events, the usage samples and the copies' sizes): a whole number, 1 or more",
+      fix: "write MASON_HISTORY_DAYS=7 (the default, as when it is unset) or another whole number of days" }, bad);
   }
 });
 

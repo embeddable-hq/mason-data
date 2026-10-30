@@ -25,7 +25,7 @@ import { demoChangesRefusal, demoPort } from "./demo.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
 import { pollMsRetired } from "../lib/table-sync.ts";
-import { historyDaysRenamed } from "../duck/history.ts";
+import { historyDaysSetting } from "../duck/history.ts";
 import { DEV } from "./registry.ts";
 import { UI } from "./ui.ts";
 import { out as styleOut, stepRenderer } from "./style.ts";
@@ -79,9 +79,10 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   // the person (or --json) reads it, by the run's own check (src/lib/table-sync.ts)
   const pollMs = pollMsRetired(process.env);
   if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: o.json });
-  // MASON_REQUEST_LOG_DAYS is MASON_HISTORY_DAYS now (src/duck/history.ts): refused here as in the run
-  const renamed = historyDaysRenamed(process.env);
-  if (renamed !== null) return failed("start", { code: "refused", ...renamed }, { json: o.json });
+  // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused), by the run's own
+  // check (src/duck/history.ts), refused here as in the run
+  const days = historyDaysSetting(process.env);
+  if (typeof days !== "number") return failed("start", { code: "refused", ...days }, { json: o.json });
   // a MASON_PG_PORT that is no port, or is held, is refused HERE, where the person (or --json) reads it, before a run is
   // spawned; the run checks again for itself (choosePgPort, src/cli/ports.ts), since a port may be taken in between.
   // A demo project's database port (its URL's, src/cli/demo.ts demoPort) is avoided as the run avoids it

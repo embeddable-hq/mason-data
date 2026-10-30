@@ -27,7 +27,7 @@ import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenPro
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
 import { pollMsRetiredText } from "../lib/table-sync.ts";
-import { historyDaysRenamedText } from "../duck/history.ts";
+import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { version } from "./version.ts";
 import type { CopyState } from "../duck/sync.ts";
 
@@ -107,9 +107,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // how often a table is polled is the sources file's sync: now, per table (src/lib/table-sync.ts)
   const pollMs = pollMsRetiredText(env);
   if (pollMs !== null) wrong.push(pollMs);
-  // the history's days are MASON_HISTORY_DAYS now (src/duck/history.ts)
-  const renamed = historyDaysRenamedText(env);
-  if (renamed !== null) wrong.push(renamed);
+  // the history's days: MASON_HISTORY_DAYS, a number of days; the old name refused (src/duck/history.ts)
+  const days = historyDaysSetting(env);
+  if (typeof days !== "number") wrong.push(historyDaysWrongText(days));
   const selfSigned = env.MASON_PG_SELF_SIGNED_TLS || "0";
   if (selfSigned !== "0" && selfSigned !== "1") wrong.push(`MASON_PG_SELF_SIGNED_TLS=${JSON.stringify(selfSigned)}: 1, or 0 (the default)`);
   const portText = env.MASON_HEALTH_PORT || "4140";

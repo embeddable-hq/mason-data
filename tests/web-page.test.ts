@@ -350,12 +350,12 @@ test("the tables: each of the database's, added, not added or cannot be added wi
   assert.match(text, /public\.staging Not added rows unknown key id Add Columns… A copy's own size/);
   assert.match(html, /<button type="button" class="small" data-sync-table="public\.customers" data-room="Syncing…">Sync now<\/button>/);
   assert.ok(!/data-sync-table="public\.(audit|event_log)"/.test(html), "no Sync for a table not added");
-  // View syncs: its sync events, on Observability › Syncs narrowed to it (a link, before Sync now)
+  // View events: its sync events, on Observability › Sync events narrowed to it (a link, before Sync now)
   assert.match(html, /<td class="act" id="act-tables-public\.customers"><a class="btn small" href="#observability\/syncs\?table=public\.customers&amp;range=7d">View events<\/a> <button type="button" class="small" data-sync-table="public\.customers"/);
   const syncsHref = (await import(path.join(WEB, "pages", "tables.js") as string) as { syncsHref?: (t: string) => string }).syncsHref;
   assert.equal(typeof syncsHref, "function", "src/web/pages/tables.js exports syncsHref");
   assert.equal(syncsHref!("billing.invoices & co"), "#observability/syncs?table=billing.invoices%20%26%20co&range=7d", "over the week: a table's copy is rarely in Now's 15 minutes");
-  assert.ok(!/href="#observability\/syncs\?table=public\.(audit|event_log)"/.test(html), "no View syncs for a table not added");
+  assert.ok(!/href="#observability\/syncs\?table=public\.(audit|event_log)"/.test(html), "no View events for a table not added");
   assert.match(html, /<button type="button" class="primary small" data-add-table="public\.audit">Add<\/button>/);
   assert.ok(!/data-add-table="public\.(event_log|customers)"/.test(html), "no Add for a table that cannot be added as it is, nor for one added");
   assert.match(html, /<button type="button" class="danger small" data-remove-table="public\.customers">Remove<\/button>/);
@@ -931,10 +931,10 @@ test("in the browser: the tables are written when they change, never at every po
 
 // ------------------------------------------------------------------ the shell: a page per hash, each polling its own
 
-test("the shell: a sidebar nav — Overview · Tables · Users, the Observability group's Queries · Usage · Syncs — each page a module with a section and a route; every old hash lands on its view", async () => {
+test("the shell: a sidebar nav — Overview · Tables · Users, the Observability group's Queries · Usage · Sync events — each page a module with a section and a route; every old hash lands on its view", async () => {
   const parseHash = fn<[string | undefined], { id: string; params: Record<string, string> }>("parseHash");
   const hashes = ["#overview", "#tables", "#users", "#observability/queries", "#observability/usage", "#observability/syncs", "#observability",
-    // the hashes of before the Observability tab, and of before Logs was Syncs: bookmarks keep working
+    // the hashes of before the Observability tab, and of before Logs was Sync events: bookmarks keep working
     "#status", "#queries", "#usage", "#logs", "#syncs", "#observability/logs",
     // none, one unknown, one with parameters
     "", undefined, "#", "#nope", "#Tables", "#tables?show=failed", "#observability/usage?range=7d", "#observability/nope"];
@@ -1092,7 +1092,7 @@ test("in the browser: the hash chooses the section shown and the page asked; a l
   assert.ok(!(run.asked as string[]).some((x) => x.includes("/api/usage") || x.includes("/api/activity")), "a past range is not read again by the clock");
   await on.get("click")!({ target: { closest: () => ({ dataset: { refreshRange: "" } }) } });
   assert.deepEqual((run.asked as string[]).filter((x) => x.includes("/api/usage") || x.includes("/api/activity")), ["GET /api/activity?since=7d", "GET /api/usage?since=7d&step=21600"], "Refresh: read again at once");
-  // the sub-tab beside it keeps the range: Syncs reads the week's events (an old #observability/logs lands there)
+  // the sub-tab beside it keeps the range: Sync events reads the week's events (an old #observability/logs lands there)
   run.answers.set("GET /api/events?limit=500&since=7d", answer(EVENTS));
   run.asked.length = 0;
   go("#observability/logs?range=7d"); await settle();
@@ -1757,7 +1757,7 @@ test("Usage: under Now what runs every poll, the range's statements and who is c
   assert.match(textOf(app.view()["usage-kpis"]!), /Statements, last 24 hours 1,204/, "the last counts stay under the banner");
 });
 
-test("Syncs: the sync's events are mason logs --events' lines in a table, a failure marked, NEWEST FIRST (When turns it round); none is said as the CLI says it", () => {
+test("Sync events: the sync's events are mason logs --events' lines in a table, a failure marked, NEWEST FIRST (When turns it round); none is said as the CLI says it", () => {
   const renderEvents = fnOf<[unknown, Record<string, unknown>?], string>(syncsPage, "renderEvents"), cells = fn<[unknown], Record<string, string>>("eventCells");
   for (const e of UL_EVENTS.events) {
     const c = cells(e);
@@ -1786,7 +1786,7 @@ test("Syncs: the sync's events are mason logs --events' lines in a table, a fail
   assert.equal(textOf(renderEvents({ events: [], keptDays: 1 })), "No sync event in the last 1 day (MASON_HISTORY_DAYS).");
 });
 
-test("Syncs: the run's entries are rows, NEWEST FIRST, a multi-line entry kept as one preformatted row", () => {
+test("Sync events: the run's entries are rows, NEWEST FIRST, a multi-line entry kept as one preformatted row", () => {
   const renderLogs = fnOf<[unknown], string>(syncsPage, "renderLogs");
   const html = renderLogs(LOG);
   assert.equal([...html.matchAll(/<div class="log-line">/g)].length, 2, "two entries, two lines");
@@ -1797,7 +1797,7 @@ test("Syncs: the run's entries are rows, NEWEST FIRST, a multi-line entry kept a
   assert.match(textOf(renderLogs({ lines: [], kept: 2000 })), /The run has logged nothing yet\./);
 });
 
-test("Syncs: the events every 10 s while the range is Now, once for another; the run's raw log sits behind a closed details and is read, every 5 s, only while it is open; a refusal is its Failure under it", async () => {
+test("Sync events: the events every 10 s while the range is Now, once for another; the run's raw log sits behind a closed details and is read, every 5 s, only while it is open; a refusal is its Failure under it", async () => {
   const run = fakeRun(); withUsageAnswers(run);
   let t = Date.UTC(2026, 9, 28, 9, 0, 0);
   const app = fn<[unknown, () => Date], App & { showRawLog(open: boolean): Promise<void> }>("createApp")(run.fetch, () => new Date(t));
@@ -1862,13 +1862,13 @@ test("in the browser: opening the raw log's details reads it at once, closing it
   assert.ok(!(run.asked as string[]).some((a) => a.includes("/api/logs")), "closed again: not read");
 });
 
-test("Syncs: a closed raw log has nothing inside to read", () => {
+test("Sync events: a closed raw log has nothing inside to read", () => {
   const renderRawLog = fnOf<[boolean, string], string>(syncsPage, "renderRawLog");
   assert.match(renderRawLog(false, "<p>x</p>"), /^<details id="syncs-raw"><summary>The run's raw log \(for debugging\)<\/summary><\/details>$/);
   assert.match(renderRawLog(true, "<p>x</p>"), /^<details id="syncs-raw" open><summary>.*<\/summary><p>x<\/p><\/details>$/);
 });
 
-test("Usage and Syncs: the index.html has the parts the pages write, the placeholders' parts are gone", () => {
+test("Usage and Sync events: the index.html has the parts the pages write, the placeholders' parts are gone", () => {
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   for (const id of ["usage-kpis", "usage-charts", "usage-connected", "usage-running", "unsupported", "usage-hourly", "usage-sizes", "syncs-filters", "syncs-events", "syncs-run", "request-log", "tables"]) assert.match(html, new RegExp(`<div id="${id}"[^>]*></div>`), id);
   assert.match(html, /<h3 id="usage-connected-h">[^<]*<\/h3>/);
@@ -2397,7 +2397,7 @@ test("a popover is placed beside its anchor: under it, its right edge on the anc
   assert.deepEqual(placePops({}, {}), [], "a document that cannot place one: none");
 });
 
-// ------------------------------------------------------------------ the restyled Queries, Usage and Syncs pages (docs/WEB-UI.md "Presentation")
+// ------------------------------------------------------------------ the restyled Queries, Usage and Sync events pages (docs/WEB-UI.md "Presentation")
 
 const queriesModule = await import(path.join(WEB, "pages", "queries.js") as string).catch(() => ({})) as Record<string, (...a: never[]) => unknown>;
 
@@ -2554,7 +2554,7 @@ test("Sync events: the page and mason logs --events say what the list leaves out
   assert.match(textOf(row), /synced public\.orders synced by hand: 3 changed, 0 deleted, 1,200 rows now · 41 ms/);
 });
 
-test("Syncs: 'Failures only' narrows the events read, in the page alone; the events' kinds are badges and their times how long ago", async () => {
+test("Sync events: 'Failures only' narrows the events read, in the page alone; the events' kinds are badges and their times how long ago", async () => {
   const run = fakeRun(); withUsageAnswers(run);
   let t = Date.parse("2026-10-28T09:10:00.000Z");
   const app = fn<[unknown, () => Date], App & { pages: Map<string, { input(t: unknown): unknown }> }>("createApp")(run.fetch, () => new Date(t));
@@ -2580,7 +2580,7 @@ test("Syncs: 'Failures only' narrows the events read, in the page alone; the eve
   assert.match(textOf(app.view()["syncs-events"]!), /11 min ago/, "the ages move with the clock");
 });
 
-test("Queries, Usage and Syncs: the index.html carries the parts the restyled pages write — a header each, the filter toolbar, the failures toggle", () => {
+test("Queries, Usage and Sync events: the index.html carries the parts the restyled pages write — a header each, the filter toolbar, the failures toggle", () => {
   const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
   for (const id of ["usage-kpis", "usage-charts"]) assert.match(html, new RegExp(`<div id="${id}"></div>`), id);
   assert.ok(!html.includes('id="queries-kpis"'), "Queries has no cards: they are Usage's");
@@ -2609,7 +2609,7 @@ test("the shared range: each Observability view reads its span — the request l
   assert.ok((await asked("#observability/queries?range=1h")).includes("GET /api/requests?since=1h"), "Queries: the last hour's requests");
   assert.ok((await asked("#observability/usage?range=1h")).includes("GET /api/usage?since=1h&step=60"), "Usage: the hour, a minute a point");
   assert.ok((await asked("#observability/usage?range=1h")).includes("GET /api/activity?since=1h"), "Usage: the hour's statements");
-  assert.deepEqual(await asked("#observability/syncs?range=1h"), ["GET /api/events?limit=500&since=1h", "GET /api/state"], "Syncs: the hour's events, and nothing of the other views (the state is the sidebar's, once a minute)");
+  assert.deepEqual(await asked("#observability/syncs?range=1h"), ["GET /api/events?limit=500&since=1h", "GET /api/state"], "Sync events: the hour's events, and nothing of the other views (the state is the sidebar's, once a minute)");
   assert.ok((await asked("#observability/usage?range=7d")).includes("GET /api/usage?since=7d&step=21600"), "the week, six hours a point");
   const now = await asked("#observability/usage");
   assert.ok(now.includes("GET /api/usage?since=15m&step=60") && now.includes("GET /api/activity?since=15m"), "no range: Now, the last 15 minutes a minute a point");
@@ -3360,7 +3360,7 @@ test("layout guard: a click moves no row and no column — a question, a form an
   const syncing = renderTables(CATALOG_STATE, { syncing: ["public.customers"] });
   const sync = renderTables(CATALOG_STATE, { synced: { table: "public.customers", synced, at: 0 }, now: 1 });
   for (const h of [html, syncing, sync]) assert.match(h, /<a class="btn small" href="#observability\/syncs\?table=public\.customers&amp;range=7d">View events<\/a> <button type="button" class="small"[^>]* data-room="Syncing…"[^>]*>(Sync now|Syncing…|Synced ✓)<\/button> <button type="button" class="danger small"/,
-    "View syncs, a link that never changes, before the sync's room");
+    "View events, a link that never changes, before the sync's room");
   // a user's Disable → Enable once disabled: one room, the longer, and no cell or row added
   for (const label of ["Disable", "Enable"]) assert.ok([...label].length <= [...ROOMS.disable!].length, `${label} fits Disable's room`);
   const rowB = (h: string) => /<td class="act" id="act-users-b">(.*?)<\/td>/s.exec(h)![1]!;
@@ -3471,7 +3471,7 @@ test("the time range past a week: 30 and 90 days, a day a point, offered when th
   for (const age of ["30d", "90d"]) assert.equal(typeof timeOf("--since", age, Date.parse("2026-10-29T00:00:00Z")), "string", age);
 });
 
-test("Syncs' filters list every kind and every added table, whatever the range read; a table with none says so by its name", () => {
+test("Sync events' filters list every kind and every added table, whatever the range read; a table with none says so by its name", () => {
   const renderEventFilters = of<[unknown, Record<string, string>, unknown], string>(syncsPage, "syncs.js", "renderEventFilters");
   const renderEvents = of<[unknown, Record<string, unknown>], string>(syncsPage, "syncs.js", "renderEvents");
   assert.deepEqual((syncsPage as Record<string, unknown>).EVENT_KINDS, [...EVENT_KINDS], "the page's kinds are src/duck/events.ts's");
@@ -3486,13 +3486,13 @@ test("Syncs' filters list every kind and every added table, whatever the range r
   assert.equal(textOf(renderEvents({ events: [], keptDays: 7 }, { span: "the last 24 hours" })), "No sync event in the last 24 hours (the events are kept 7 days: MASON_HISTORY_DAYS).");
 });
 
-test("Syncs: #observability/syncs?table= (a table's View syncs) narrows the events to it, the Table filter showing it; ?failures=1 the failures; a link without either keeps what was chosen", async () => {
+test("Sync events: #observability/syncs?table= (a table's View events) narrows the events to it, the Table filter showing it; ?failures=1 the failures; a link without either keeps what was chosen", async () => {
   const run = fakeRun(); withUsageAnswers(run);
   run.answers.set("GET /api/state", answer(RUNNING));
   const app = fn<[unknown, () => Date], App & { pages: Map<string, { model: { table: string; failuresOnly: boolean; kind: string } }> }>("createApp")(run.fetch, () => new Date("2026-10-28T09:10:00.000Z"));
   const box = { checked: false };
   const doc = { getElementById: (id: string) => id === "syncs-failures-only" ? box : null };
-  // the Tables page's View syncs is this address (tables.js syncsHref)
+  // the Tables page's View events is this address (tables.js syncsHref)
   const syncsHref = (await import(path.join(WEB, "pages", "tables.js") as string) as { syncsHref: (t: string) => string }).syncsHref;
   app.show(syncsHref("public.events"), { doc });
   await app.poll();
