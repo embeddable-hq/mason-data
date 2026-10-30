@@ -1131,8 +1131,28 @@ Decided in the building:
   (a `ProxyCommand`, a `ControlMaster`) out of it. A machine that needs a proxy to reach the internet is the price.
 - **A second `mason share` meets the same socket with its own login**, so the issue's "a second call answers the same
   port" holds under a credential per run.
+- **Measured once on the real free route (2026-10-30, the demo's synthetic data, a laptop on IPv6).** The client says
+  "expire in 60 minutes" and it does: the service closed the session 3,601 s after it opened ("Time exceeded"), `ssh`
+  exited 255, and a probe every 10 s saw the address answer until then and refuse after, so the end of `ssh` is the end
+  of the address and `mason share` needs no timer of its own. A second tunnel minutes after the first got another port
+  and another host, so a free tunnel keeps neither, and its host name held the laptop's public IPv6 address. Between
+  the two, `sslmode=require` logged in, a plain client got `28000`, and `openssl` read the share's own fingerprint
+  through the relay. The paid route has not been run.
 - **A probe of the printed address**, because the address is read from output Mason does not own: the contract answers a
   probe (CLAUDE.md "Fix the class").
+- **A public socket says nothing before a login**, which the independent review found it did twice: the certificate
+  named the project (any TLS client reads it with no password), and `3D000` before the password let a scanner confirm a
+  guessed name. So every self-signed certificate is `CN=mason`, one already in `.mason/` that names a project is made
+  again, said, because its fingerprint moves; and a public socket refuses a wrong database after the password. The plain
+  socket keeps its early hint: it is a developer's, on this machine.
+- **Ten refused logins a minute are rows, and the rest are counted**: a row per refusal let a stranger set the request
+  log's growth, each carrying up to a 10,000-byte startup packet, for `MASON_HISTORY_DAYS`. A person who mistypes a
+  password still finds it in the log, and names are cut to Postgres's 63 bytes. A once-a-minute aggregate row was the
+  alternative; it would hide the mistyped login inside a scan.
+- **The tunnel client's pid can be lost in one small gap**: a `kill -9` between `ssh` starting and the run hearing its
+  pid (a request to loopback) leaves the client running. Closing it means starting `ssh` through a shell that waits to
+  be told, which loses `ENOENT`, the way a missing `ssh` is said. What is left running forwards to a socket already
+  closed, with no login valid, so the gap is left open.
 
 ### Users
 

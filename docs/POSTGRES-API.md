@@ -67,9 +67,9 @@ mason share --role sales    # what it reads: a role of mason/roles.yml
 mason share --via bore      # another tunnel (cargo install bore-cli); the default needs only ssh
 ```
 
-**It is a one-hour evaluation, not a way to run a dashboard.** A free Pinggy tunnel ends after about an hour, and the share
+**It is a one-hour evaluation, not a way to run a dashboard.** A free Pinggy tunnel ends after an hour, and the share
 ends with it: the address is gone, the password stops working, and `mason share` says so and exits 1. Running it again
-gives a new address and a new password, so a saved connection in a BI tool breaks each time. With a paid token in
+gives a new host, a new port and a new password, so a saved connection in a BI tool breaks each time. With a paid token in
 `MASON_PINGGY_TOKEN` (the shell or `.env`, never a flag: a command line is every local user's to read, and Mason writes
 the token to a 0600 file of its own instead) the address survives, so a dropped tunnel is opened again by itself,
 the password unchanged, and it says so. For anything lasting, `mason serve` on a host.
@@ -84,13 +84,16 @@ The limits, plainly:
   the password and the rows. `mason share` prints the certificate's SHA-256 fingerprint for a tool that can pin it, and
   checks that fingerprint through the tunnel once from this machine, which catches a wrong address and says nothing
   about what the relay does to another client's connection. Do not send a relay data you would not trust it with.
-- **The relay sees metadata**: source addresses, connection times, bytes.
+- **The relay sees metadata**: source addresses, connection times, bytes. A free tunnel's host name can also carry your
+  own machine's public IP address, so whoever you give the address to can read it there.
 - **The address is a public Postgres login prompt.** Port scanners find it within minutes. Every connection through a
   tunnel reaches Mason from `127.0.0.1`, so Mason cannot tell a scanner from your BI tool, and a throttle by source
   cannot exist. What holds instead: the password is 192 random bits; at most 32 connections may be logging in at once,
-  the oldest making way for a new one, and each has 15 s, so a connection held open cannot keep your tool out; a refused
-  login is a row of the request log and a line of `mason logs` (at most one a minute, with how many), with no source
-  named because none is known; `mason status` counts them. Before a login the socket says nothing of the project.
+  the oldest making way for a new one, and each has 15 s, so a connection held open cannot keep your tool out; ten
+  refused logins a minute are rows of the request log, each name cut to 63 bytes, so a stranger cannot set the log's
+  growth; every one is counted by `mason status` and in a line of `mason logs` (at most one a minute, with how many),
+  with no source named because none is known. Before a login the socket says nothing of the project: the certificate
+  any connection is handed is `CN=mason`, and a wrong database is refused only after a good password, as Postgres does.
 
 **The login lasts for one run of `mason share`.** It is made by the command, printed once and kept nowhere: the run holds
 its SHA-256 in memory, tied to a role, and it is no row of `.mason/users.json`. It works on the share's socket alone,
