@@ -23,6 +23,7 @@ A drop-in replacement for a Postgres read replica, built for exceptionally fast 
 - [Performance vs Postgres](#performance-vs-postgres)
   - [When to use Mason](#when-to-use-mason)
   - [Why it's fast](#why-its-fast)
+  - [Making Mason faster](#making-mason-faster)
 - [Postgres compatibility](#postgres-compatibility)
   - [How a query is answered](#how-a-query-is-answered)
   - [How compatibility is tested](#how-compatibility-is-tested)
@@ -334,6 +335,30 @@ faster for that. And because analytical queries run on Mason's machine, they no 
 
 [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every measurement and how it was taken.
 [docs/BENCHMARK.md](docs/BENCHMARK.md) shows how to run the benchmark on your own machine.
+
+### Making Mason faster
+
+Most of Mason's speed comes from memory. These are the things that help most, in order:
+
+- **Give it enough memory.** A query is fast when the columns it reads are in memory. When they are not, it runs at
+  the disk's speed: reading a JSON column of a 22 M-row table from a cloud disk took 93.5 s. Give Mason enough memory
+  to hold the columns your dashboards read. `mason status` shows how big your synced data is, and Sizing in
+  [Going to production](#going-to-production) shows how to set the memory.
+- **Sync only the columns you query.** Use `--columns` or `exclude:` (see
+  [Choosing what to sync](#choosing-what-to-sync)). There is less to sync and less to keep in memory. This helps most
+  with wide text and JSON columns.
+- **Filter by time.** Mason keeps rows in the order they were inserted, so a filter on `created_at` or an increasing
+  `id` skips the blocks outside it. On 5 M rows inserted in time order, one day's filter read 1 of 41 blocks. Give
+  your dashboards a date range where you can.
+- **Let Mason store your JSON fields.** When queries keep reading the same JSON field, such as
+  `payload ->> 'status'`, Mason stores that field as a column of its own, in the background. After that, reading it
+  is about 200 times faster. `mason status` lists the stored fields. Write `payload ->> 'status'` rather than
+  `(payload -> 'status')::text`: Mason reads `->>` directly, and the cast takes a slower path.
+- **Add cores for more users.** One query already uses every core. More cores help when many dashboards query at
+  once: the benchmark's 4-core machine answered 12 queries a second with 8 clients and with 32, and the extra clients
+  waited in a queue.
+- **Find the slow queries.** `mason status` lists the queries that were slow in the last day. `EXPLAIN` shows the SQL that
+  Mason runs for a query, and how up to date each table it reads is.
 
 ## Postgres compatibility
 
