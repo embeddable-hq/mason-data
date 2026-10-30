@@ -7,6 +7,13 @@
  * `CREATE POLICY … USING (current_setting('mason.attr.…'))`, each Mason user mirrored by a Postgres login whose
  * `ALTER ROLE … SET mason.attr.…` is the user's `--set`. Every statement is asked of both as each user, and of both as
  * a user of the same tables with no filter (`open`), and held equal by the oracle's verdict.
+ *
+ * THE BARRIER (`BARRIER_SHAPES`, src/duck/row-filter.ts BARRIER): `shop.invoices` and `shop.invoice_lines` are built to show
+ * a statement's own expression reaching a hidden row: 40,000 rows, ids spread over 2 M, so more than 50 visible keys over a
+ * wide range (below that, or over a narrow range, the engine's dynamic join filter prunes hidden rows by itself and a leak
+ * passes unseen). Every even invoice is tenant 4's, region U2, seen by no filtered user here, and every hundredth of them
+ * carries the value the statement's expression raises on; every visible row holds 1. Postgres, whose policies are security
+ * barriers, answers each; so must Mason, for a scalar where:, a list, a uuid list and through:, and `open` is refused alike.
  */
 
 const U1 = "11111111-1111-4111-8111-111111111111", U2 = "22222222-2222-4222-8222-222222222222", U3 = "33333333-3333-4333-8333-333333333333";
@@ -24,6 +31,15 @@ INSERT INTO shop.orders SELECT g, CASE WHEN g % 37 = 0 THEN NULL ELSE (g * 7) % 
 INSERT INTO shop.order_items SELECT g, CASE WHEN g % 41 = 0 THEN NULL ELSE (g * 13) % 300 + 1 END, 'sku-' || (g % 17), g % 9 + 1,
   CASE WHEN g % 23 = 0 THEN NULL ELSE ((g * 31) % 5000) / 100.0 END FROM generate_series(1, 900) g;
 CREATE VIEW shop.paid_orders WITH (security_invoker = true) AS SELECT id, customer_id, tenant_id, amount FROM shop.orders WHERE status = 'paid';
+CREATE TYPE shop.tier AS ENUM ('free', 'pro', 'max');
+CREATE TABLE shop.accounts (id int PRIMARY KEY, tier shop.tier NOT NULL, tenant_id int NOT NULL, name text);
+INSERT INTO shop.accounts SELECT g, (ARRAY['free', 'pro', 'max'])[g % 3 + 1]::shop.tier, g % 5, 'account ' || g FROM generate_series(1, 90) g;
+CREATE TABLE shop.invoices (id bigint PRIMARY KEY, tenant_id int NOT NULL, region uuid NOT NULL, marker int NOT NULL);
+INSERT INTO shop.invoices SELECT g * 50 + (g % 2), CASE WHEN g % 2 = 0 THEN 4 ELSE g % 3 + 1 END, CASE WHEN g % 2 = 0 THEN '${U2}'::uuid WHEN g % 3 = 0 THEN '${U1}'::uuid ELSE '${U3}'::uuid END,
+  CASE WHEN g % 200 = 0 THEN 99 ELSE 1 END FROM generate_series(0, 39999) g;
+CREATE TABLE shop.invoice_lines (id bigint PRIMARY KEY, invoice_id bigint REFERENCES shop.invoices (id), qty int NOT NULL);
+INSERT INTO shop.invoice_lines SELECT 100000 + g, g * 50 + (g % 2), CASE WHEN g % 200 = 0 THEN 99 ELSE 1 END FROM generate_series(0, 39999) g;
+CREATE VIEW shop.marked_invoices WITH (security_invoker = true) AS SELECT id, tenant_id, marker FROM shop.invoices;
 `;
 
 /** the roles file (mason/roles.yml) as a project would write it */
@@ -33,24 +49,37 @@ export const ROWS_ROLES = `roles:
       shop.customers: {}
       shop.orders: {}
       shop.order_items: {}
+      shop.accounts: {}
+      shop.invoices: {}
+      shop.invoice_lines: {}
   tenant:
     attributes: [tenant]
     tables:
       shop.customers: { where: "tenant_id = :tenant" }
       shop.orders: { where: "tenant_id = :tenant" }
       shop.order_items: { through: shop.orders }
+      shop.invoices: { where: "tenant_id = :tenant" }
+      shop.invoice_lines: { through: shop.invoices }
   tenants:
     attributes: { tenants: list }
     tables:
       shop.customers: { where: "tenant_id = ANY(:tenants)" }
       shop.orders: { where: "tenant_id = ANY(:tenants)" }
       shop.order_items: { through: shop.orders }
+      shop.invoices: { where: "tenant_id = ANY(:tenants)" }
+      shop.invoice_lines: { through: shop.invoices }
   regions:
     attributes: { regions: list, tenant: scalar }
     tables:
       shop.customers: { where: "region = ANY(:regions) AND tenant_id <> :tenant" }
       shop.orders: { through: shop.customers }
       shop.order_items: { through: { shop.orders: order_id } }
+      shop.invoices: { where: "region = ANY(:regions)" }
+      shop.invoice_lines: { through: shop.invoices }
+  tiers:
+    attributes: { tier: scalar, tiers: list, tenants: list }
+    tables:
+      shop.accounts: { where: "tier = :tier OR (tier = ANY(:tiers) AND tenant_id <> ALL(:tenants))" }
   hidden:
     attributes: [tenant, blocked]
     tables:
@@ -60,6 +89,7 @@ export const ROWS_ROLES = `roles:
 /** each Mason user (`mason user add <key> --role <role> --set …`), mirrored by a Postgres login of the same settings */
 export const ROWS_USERS: ReadonlyArray<{ key: string; role: string; attributes: Record<string, string | string[]> }> = [
   { key: "open", role: "open", attributes: {} },
+  { key: "tiers", role: "tiers", attributes: { tier: "max", tiers: ["free", "pro"], tenants: ["0", "1"] } },
   { key: "tenant", role: "tenant", attributes: { tenant: "3" } },
   { key: "list2", role: "tenants", attributes: { tenants: ["1", "3"] } },
   { key: "list1", role: "tenants", attributes: { tenants: ["3"] } },
@@ -76,13 +106,15 @@ export function referenceSql(tag: string, login: (key: string) => string): strin
   const logins = ROWS_USERS.map((u) => {
     const settings = Object.entries(u.attributes).map(([a, v]) => `ALTER ROLE ${login(u.key)} SET mason.attr.${a} = '${typeof v === "string" ? v : v.join(",")}';`).join(" ");
     const grants = u.role === "hidden" ? `GRANT SELECT (id, tenant_id, region, name) ON shop.customers TO ${login(u.key)};`
-      : `GRANT SELECT ON shop.customers, shop.orders, shop.order_items, shop.paid_orders TO ${login(u.key)};`;
+      : u.role === "tiers" ? `GRANT SELECT ON shop.accounts TO ${login(u.key)};`
+      : `GRANT SELECT ON shop.customers, shop.orders, shop.order_items, shop.paid_orders, shop.invoices, shop.invoice_lines, shop.marked_invoices TO ${login(u.key)};` +
+        (u.role === "open" ? ` GRANT SELECT ON shop.accounts TO ${login(u.key)};` : "");
     return `CREATE ROLE ${login(u.key)} LOGIN PASSWORD 'x'; GRANT CONNECT ON DATABASE ${tag} TO ${login(u.key)}; GRANT USAGE ON SCHEMA shop TO ${login(u.key)}; ${grants} ${settings}`;
   }).join("\n");
   return [
     logins,
-    "ALTER TABLE shop.customers ENABLE ROW LEVEL SECURITY; ALTER TABLE shop.orders ENABLE ROW LEVEL SECURITY; ALTER TABLE shop.order_items ENABLE ROW LEVEL SECURITY;",
-    ...["customers", "orders", "order_items"].map((t) => policy(t, "open", "true")),
+    ...["customers", "orders", "order_items", "accounts", "invoices", "invoice_lines"].map((t) => `ALTER TABLE shop.${t} ENABLE ROW LEVEL SECURITY;`),
+    ...["customers", "orders", "order_items", "accounts", "invoices", "invoice_lines"].map((t) => policy(t, "open", "true")),
     policy("customers", "tenant", `tenant_id = ${scalar("tenant", "int")}`),
     policy("orders", "tenant", `tenant_id = ${scalar("tenant", "int")}`),
     policy("order_items", "tenant", "EXISTS (SELECT 1 FROM shop.orders p WHERE p.id = order_items.order_id)"),
@@ -93,6 +125,11 @@ export function referenceSql(tag: string, login: (key: string) => string): strin
     policy("orders", "regions", "EXISTS (SELECT 1 FROM shop.customers p WHERE p.id = orders.customer_id)"),
     policy("order_items", "regions", "EXISTS (SELECT 1 FROM shop.orders p WHERE p.id = order_items.order_id)"),
     policy("customers", "hidden", `tenant_id = ${scalar("tenant", "int")} AND secret <> ${scalar("blocked", "text")}`),
+    policy("invoices", "tenant", `tenant_id = ${scalar("tenant", "int")}`),
+    policy("invoices", "tenants", `tenant_id = ANY (${list("tenants", "int")})`),
+    policy("invoices", "regions", `region = ANY (${list("regions", "uuid")})`),
+    ...["tenant", "tenants", "regions"].map((r) => policy("invoice_lines", r, "EXISTS (SELECT 1 FROM shop.invoices p WHERE p.id = invoice_lines.invoice_id)")),
+    policy("accounts", "tiers", `tier = ${scalar("tier", "shop.tier")} OR (tier = ANY (${list("tiers", "shop.tier")}) AND tenant_id <> ALL (${list("tenants", "int")}))`),
   ].join("\n");
 }
 
@@ -128,6 +165,46 @@ export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: str
   // a prepared statement Parsed once and Executed twice, with other values: the filter is in its plan both times
   { name: "a prepared statement executed twice", sql: "SELECT count(*), sum(amount) FROM shop.orders WHERE placed_on >= $1::date", prepared: ["2026-02-01", "2026-03-15"] },
   { name: "information_schema of a filtered table", sql: "SELECT column_name::text FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'customers' ORDER BY ordinal_position" },
+];
+
+/** raises on the value hidden rows hold, every hundredth of them; 1 on every visible row */
+const RAISES = (c: string): string => `1/(CASE WHEN ${c} = 99 THEN 0 ELSE 1 END)`;
+const R = RAISES("marker"), Q = RAISES("qty");
+/** a statement's own expression in every place one can sit, over rows it would raise on were it to reach a hidden one
+ *  (see the head of this file): each answered as Postgres under the same policy answers it, `open` refused alike */
+export const BARRIER_SHAPES: ReadonlyArray<{ name: string; sql: string }> = [
+  { name: "barrier: WHERE, a scalar or a list's table", sql: `SELECT count(*) FROM shop.invoices WHERE ${R} > 0` },
+  { name: "barrier: WHERE, through: its SEMI join", sql: `SELECT count(*) FROM shop.invoice_lines WHERE ${Q} > 0` },
+  { name: "barrier: WHERE, through:, a key's parity", sql: "SELECT count(*) FROM shop.invoice_lines WHERE id >= 100000 AND 1/(invoice_id % 2) > 0" },
+  { name: "barrier: WHERE, beside a condition", sql: `SELECT count(*) FROM shop.invoices WHERE id > 0 AND ${R} = 1` },
+  { name: "barrier: the control, nothing raises", sql: "SELECT count(*) FROM shop.invoice_lines WHERE 1/(CASE WHEN qty = 98 THEN 0 ELSE 1 END) > 0" },
+  { name: "barrier: a statement that cannot raise", sql: "SELECT count(*), min(id), max(id) FROM shop.invoices WHERE id BETWEEN 51 AND 200000" },
+  { name: "barrier: the SELECT list", sql: `SELECT sum(${R}) FROM shop.invoices` },
+  { name: "barrier: an aggregate's FILTER", sql: `SELECT count(*) FILTER (WHERE ${R} > 0) FROM shop.invoices` },
+  { name: "barrier: GROUP BY", sql: `SELECT g, count(*) FROM (SELECT ${R} AS g FROM shop.invoices) s GROUP BY g ORDER BY g` },
+  { name: "barrier: HAVING", sql: `SELECT tenant_id FROM shop.invoices GROUP BY tenant_id HAVING min(${R}) > 0 ORDER BY 1` },
+  { name: "barrier: ORDER BY", sql: `SELECT id FROM shop.invoices ORDER BY ${R}, id LIMIT 5` },
+  { name: "barrier: a window", sql: `SELECT max(w) FROM (SELECT sum(${R}) OVER () AS w FROM shop.invoices) s` },
+  { name: "barrier: a derived table's column", sql: `SELECT count(*) FROM (SELECT id, ${R} AS x FROM shop.invoices) s WHERE x > 0` },
+  { name: "barrier: a CTE's column", sql: `WITH s AS (SELECT id, ${R} AS x FROM shop.invoices) SELECT count(*) FROM s WHERE x > 0` },
+  { name: "barrier: IN a subquery", sql: `SELECT count(*) FROM shop.invoices WHERE id IN (SELECT id FROM shop.invoices WHERE ${R} > 0)` },
+  { name: "barrier: a scalar subquery", sql: `SELECT (SELECT count(*) FROM shop.invoices WHERE ${R} > 0) AS n` },
+  { name: "barrier: a view", sql: `SELECT count(*) FROM shop.marked_invoices WHERE ${R} > 0` },
+  { name: "barrier: a correlated subquery", sql: `SELECT count(*) FROM shop.invoices o WHERE EXISTS (SELECT 1 FROM shop.invoice_lines i WHERE i.invoice_id = o.id AND ${Q} > 0)` },
+  { name: "barrier: a LATERAL", sql: `SELECT count(*) FROM shop.invoices o CROSS JOIN LATERAL (SELECT ${R} AS x) l WHERE l.x > 0` },
+  { name: "barrier: JOIN ON", sql: `SELECT count(*) FROM shop.invoices o JOIN shop.invoice_lines i ON i.invoice_id = o.id AND ${Q} > 0` },
+  { name: "barrier: LEFT JOIN ON", sql: `SELECT count(*) FROM shop.invoices o LEFT JOIN shop.invoice_lines i ON i.invoice_id = o.id AND ${Q} > 0 WHERE i.id IS NOT NULL` },
+  { name: "barrier: two filtered tables", sql: `SELECT count(*) FROM shop.invoices o JOIN shop.invoice_lines i ON i.invoice_id = o.id WHERE ${R} > 0 AND ${Q} > 0` },
+  { name: "barrier: a table read twice", sql: `SELECT count(*) FROM shop.invoices a JOIN shop.invoices b ON a.id = b.id WHERE ${RAISES("a.marker")} > 0 AND ${RAISES("b.marker")} > 0` },
+  { name: "barrier: UNION ALL branches", sql: `SELECT count(*) FROM (SELECT id FROM shop.invoices WHERE ${R} > 0 UNION ALL SELECT id FROM shop.invoice_lines WHERE ${Q} > 0) u` },
+];
+
+/** an enum attribute, scalar and list, and <> ALL over an integer list, one predicate: `tiers` reads shop.accounts alone */
+export const TIER_SHAPES: ReadonlyArray<{ name: string; sql: string }> = [
+  { name: "tiers: SELECT *", sql: "SELECT * FROM shop.accounts ORDER BY id" },
+  { name: "tiers: the enum read and grouped", sql: "SELECT tier, count(*) FROM shop.accounts GROUP BY tier ORDER BY tier" },
+  { name: "tiers: the enum compared by the statement", sql: "SELECT count(*) FROM shop.accounts WHERE tier > 'free'" },
+  { name: "tiers: a table the role lacks", sql: "SELECT count(*) FROM shop.customers" },
 ];
 
 /** the role `hidden` reads customers but its secret, filtered BY the secret and two attributes */

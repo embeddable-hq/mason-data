@@ -56,7 +56,7 @@ import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
-import { HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS } from "./oracle/row-filters.ts";
+import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
 import { GAP_MARK, GAPS, type GapId } from "../../src/duck/gaps.ts";
@@ -264,7 +264,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   assert.equal(added.length, COPIED.length, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
   // the row filters' own shop (oracle/row-filters.ts), copied beside the rest and read by `rowFilterCases` alone
   const shop = facts.tables.filter((t) => t.schema === "shop");
-  assert.deepEqual(shop.map((t) => t.source).sort(), ["shop.customers", "shop.order_items", "shop.orders"]);
+  assert.deepEqual(shop.map((t) => t.source).sort(), ["shop.accounts", "shop.customers", "shop.invoice_lines", "shop.invoices", "shop.order_items", "shop.orders"]);
   const log: string[] = [];
   store = await DuckStore.open(path.join(dir, "duck.db"), (l) => log.push(l));
   sync = new Sync(store, parsed.source, tag, (l) => log.push(l), 3_600_000, "poll", null, EAGER_JSON ? { json: { eager: true } } : {});
@@ -610,7 +610,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
    */
   async function rowFilterCases(): Promise<void> {
     const name = (user: string, shape: string): string => `row filter: ${user}: ${shape}`;
-    const users = ROWS_USERS.filter((u) => ONLY === null || [...ROW_SHAPES, ...HIDDEN_SHAPES, { name: "EXPLAIN" }].some((q) => ONLY.test(name(u.key, q.name))));
+    const shapesOfUser = (key: string): ReadonlyArray<{ name: string; sql: string; values?: string[]; prepared?: string[] }> =>
+      key === "hidden" ? HIDDEN_SHAPES : key === "tiers" ? TIER_SHAPES : key === "open" ? [...ROW_SHAPES, ...BARRIER_SHAPES, ...TIER_SHAPES] : [...ROW_SHAPES, ...BARRIER_SHAPES];
+    const users = ROWS_USERS.filter((u) => ONLY === null || [...shapesOfUser(u.key), { name: "EXPLAIN" }].some((q) => ONLY.test(name(u.key, q.name))));
     if (users.length === 0) return;
     const r = await import("../../src/cli/roles.ts");
     const file = r.parseRolesText(ROWS_ROLES, ROLE_FILE);
@@ -640,8 +642,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     };
     for (const u of users) {
       const { source, mason } = pair.get(u.key)!;
-      const shapes: ReadonlyArray<{ name: string; sql: string; values?: string[]; prepared?: string[] }> = u.key === "hidden" ? HIDDEN_SHAPES : ROW_SHAPES;
-      for (const q of shapes) {
+      for (const q of shapesOfUser(u.key)) {
         const n = name(u.key, q.name);
         if (ONLY !== null && !ONLY.test(n)) continue;
         const prepared = q.prepared;
@@ -660,7 +661,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       // EXPLAIN: Postgres's shape (one QUERY PLAN column of text), the filter said on each table read where there is one
       const n = name(u.key, "EXPLAIN");
       if (ONLY !== null && !ONLY.test(n)) continue;
-      const sql = u.key === "hidden" ? "EXPLAIN SELECT count(*) FROM shop.customers" : "EXPLAIN SELECT count(*) FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id";
+      const sql = u.key === "hidden" ? "EXPLAIN SELECT count(*) FROM shop.customers" : u.key === "tiers" ? "EXPLAIN SELECT count(*) FROM shop.accounts" : "EXPLAIN SELECT count(*) FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id";
       const [want, got] = [await ask(source, sql), await ask(mason, sql)];
       asked++;
       if ("code" in want || "code" in got || JSON.stringify([want.names, want.oids]) !== JSON.stringify([got.names, got.oids])) {
@@ -669,14 +670,14 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       }
       const plan = got.rows.map((row) => row[0]).join("\n");
       const said = (plan.match(new RegExp(`filtered by the role ${u.role}: `, "g")) ?? []).length;
-      const expected = u.role === "open" ? 0 : u.role === "hidden" ? 1 : u.role === "regions" ? 3 : 2;
+      const expected = u.role === "open" ? 0 : u.role === "hidden" || u.role === "tiers" ? 1 : u.role === "regions" ? 3 : 2;
       if (said !== expected || /filtered by the role/.test(plan) !== (expected > 0)) {
         differences.push({ phase: "row filters", group: "row filter", kind: "value", name: n, detail: `${said} table(s) said filtered where ${expected} are: ${plan}`, sql });
       }
     }
     // A ONE-VALUE LIST ANSWERS AS THE SCALAR: list1 (tenants: [3]) and tenant (tenant: 3), shape by shape
     let alike = 0;
-    for (const q of ROW_SHAPES) {
+    for (const q of [...ROW_SHAPES, ...BARRIER_SHAPES]) {
       const a = answers.get(name("list1", q.name)), b = answers.get(name("tenant", q.name));
       if (a === undefined || b === undefined || q.name.startsWith("information_schema")) continue;
       const v = verdict(b, a, ordered(q.sql));

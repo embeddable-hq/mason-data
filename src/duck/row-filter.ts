@@ -92,6 +92,8 @@ export function whereParts(sql: string): WherePart[] | { problem: string } {
     } else if (c === "$" && !/[A-Za-z0-9_]/.test(sql[i - 1] ?? "")) {
       const tag = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
       if (tag !== null) to = until(tag[0], i + tag[0].length, `a dollar-quoted string (${tag[0]}…${tag[0]})`);
+      // $1 is a statement's parameter: bound here it would read the STATEMENT's first value, never the role's
+      else if (/[0-9]/.test(next ?? "")) return { problem: `${/^\$[0-9]+/.exec(sql.slice(i))![0]} is a statement's parameter, which a where: cannot read — name an attribute of the role: :tenant` };
     } else if (c === ":" && next === ":") {
       to = i + 2;
     } else if (c === ":" && /[A-Za-z_]/.test(next ?? "")) {
@@ -245,18 +247,22 @@ export function bindFilter(f: RowFilter, types: ReadonlyMap<string, string>, val
   const predicate = renderWhere(parts, (a) => {
     const v = valueOf(a);
     const type = types.get(a) ?? "text";
-    return typeof v === "string" ? `CAST(${literal(v)} AS ${type})` : `CAST(ARRAY[${v.map(literal).join(", ")}]${v.length === 0 ? "::text[]" : ""} AS ${type})`;
+    return typeof v === "string" ? `CAST(${literal(v)} AS ${type})` : `CAST(ARRAY[${v.map(literal).join(", ")}] AS ${type})`;
   });
   const words = renderWhere(parts, (a) => { const v = valueOf(a); return typeof v === "string" ? shownValue(v) : shownList(v); }).replace(/\s+/g, " ").trim();
   return { table: f.table, predicate, words };
 }
+
+/** whether a user holds a value of an attribute: an empty list is none, never a filter that keeps no row (a user
+ *  written by hand: `mason user add` refuses one), which would be the silent zero rows this refuses */
+const hasValue = (v: string | readonly string[] | undefined): boolean => v !== undefined && (typeof v === "string" || v.length > 0);
 
 /** the attributes a role reads (its filters' `where:`s) that a user's values lack, each with the filter that reads it */
 export function missingAttributes(filters: Iterable<RowFilter>, values: AttributeValues): Array<{ attr: string; at: string; where: string }> {
   const out: Array<{ attr: string; at: string; where: string }> = [];
   for (const f of filters) {
     if (f.where === undefined) continue;
-    for (const a of whereAttributes(f.where.parts)) if (values[a] === undefined && !out.some((x) => x.attr === a)) out.push({ attr: a, at: `${f.at}.where`, where: f.where.text });
+    for (const a of whereAttributes(f.where.parts)) if (!hasValue(values[a]) && !out.some((x) => x.attr === a)) out.push({ attr: a, at: `${f.at}.where`, where: f.where.text });
   }
   return out;
 }
@@ -298,14 +304,29 @@ function refused(message: string, hint: string): StatementError {
   return gapRefusal("roles", message, hint);
 }
 
-/** the filtered read of `table` as SQL: its rows the filter keeps, `through:` read through its parent's filtered read */
+/**
+ * THE SECURITY BARRIER: what Postgres's row security gets by marking a policy's subquery a barrier, written in the one
+ * form the engine's optimiser cannot see through. It pushes a filter through a subquery, a projection and a join's side,
+ * so a statement's own condition would run on the rows the filter is there to hide — below a SEMI join, on every row of
+ * the table — and an expression that raises on one (`1/(CASE WHEN qty = 99 THEN 0 ELSE 1 END)`) would answer "does a
+ * hidden row satisfy P?" for any P. It never pushes a filter through a LIMIT, which would change what the limit keeps,
+ * so a limit that keeps every row is a wall: everything of the statement runs on what comes out of it. Measured
+ * (docs/DESIGN.md "Roles: rows per user"): `LIMIT <the largest bigint>` beside `OFFSET 0`, which runs a serial operator
+ * under the default settings, and with no gate: every filtered read has it. A filter's own reads (the parents of a
+ * `through:`) hold nothing of the statement's, so only the outermost read needs it.
+ */
+export const BARRIER = "LIMIT 9223372036854775807";
+
+/** the filtered read of `table` as SQL: its rows the filter keeps, `through:` read through its parent's filtered read;
+ *  behind the barrier at its outermost (`depth` 1), where the statement meets it */
 export function filteredSql(table: string, filters: ReadonlyMap<string, BoundFilter>, depth = 1): string {
   const f = filters.get(table);
   if (f === undefined) return `SELECT * FROM ${tableSql(table)}`;
-  if (f.predicate !== undefined) return `SELECT * FROM ${tableSql(table)} WHERE (${f.predicate})`;
+  const barrier = depth === 1 ? ` ${BARRIER}` : "";
+  if (f.predicate !== undefined) return `SELECT * FROM ${tableSql(table)} WHERE (${f.predicate})${barrier}`;
   const t = f.through!;
   const p = `__mason_parent${depth}`;
-  return `SELECT * FROM ${tableSql(table)} WHERE EXISTS (SELECT 1 FROM (${filteredSql(t.parent, filters, depth + 1)}) AS ${p} WHERE ${p}.${quoteIdent(t.parentColumn)} = ${tableSql(table)}.${quoteIdent(t.column)})`;
+  return `SELECT * FROM ${tableSql(table)} WHERE EXISTS (SELECT 1 FROM (${filteredSql(t.parent, filters, depth + 1)}) AS ${p} WHERE ${p}.${quoteIdent(t.parentColumn)} = ${tableSql(table)}.${quoteIdent(t.column)})${barrier}`;
 }
 
 /**
@@ -343,6 +364,15 @@ export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: P
     }
     if (r.parent === "RangeTableSample") throw refused(`Mason cannot yet answer a TABLESAMPLE of a table its role filters (${hit.table})`, "read the table without TABLESAMPLE");
     asFiltered.set(Number(i), hit.table);
+  }
+  // `row(c.*)`, `ARRAY[c.*]`, `VALUES (c.*)`: a star expanded where it is written, which only a SELECT's own list does
+  // on the copy; a whole row by another spelling (above), refused by the same name rather than the engine's own words
+  const filteredNames = new Set([...asFiltered.keys()].map((i) => { const b = ranges[i]!.body; return ((b.alias as Body | undefined)?.aliasname ?? b.relname) as string; }));
+  for (const c of all.filter((n) => n.kind === "ColumnRef" && n.parent !== "ResTarget")) {
+    const fields = c.body.fields as unknown[];
+    const star = isObject(fields[fields.length - 1]) && "A_Star" in (fields[fields.length - 1] as Body);
+    const of = fields.length >= 2 ? sval(fields[fields.length - 2]) : null;
+    if (star && of !== null && filteredNames.has(of)) throw refused("Mason cannot yet answer a whole row of a table its role filters", "name the table's columns, or write t.*");
   }
   const found = new Set(asFiltered.values());
   if ([...filteredRead.values()].some((v) => !found.has(v.table))) {

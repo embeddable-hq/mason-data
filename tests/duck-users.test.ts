@@ -119,6 +119,20 @@ test("a removed user is KEPT with removedAt: the listener refuses it at login an
   assert.ok("problem" in bad2 && /users\[0\] is not \{ name, id, addedAt, key, role\?, attributes\?\[, removedAt\]\[, disabledAt\] \}/.test(bad2.problem), JSON.stringify(bad2));
 });
 
+test("an attribute's value holding a NUL, written by hand, is the file's problem: it would end every statement it is bound into", async () => {
+  const u = await users();
+  const file = fileIn();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const entry = { name: "x", id: "0123456789abcdef", addedAt: "t", key: "k" };
+  for (const attributes of [{ tenant: "4\u00002" }, { regions: ["eu", "u\u0000k"] }]) {
+    fs.writeFileSync(file, JSON.stringify({ users: [{ ...entry, attributes }] }));
+    const bad = u.readUsers(file);
+    assert.ok("problem" in bad && /users\[0\] is not \{ name, id, addedAt, key, role\?, attributes\?/.test(bad.problem), JSON.stringify(bad));
+  }
+  fs.writeFileSync(file, JSON.stringify({ users: [{ ...entry, attributes: { tenant: "42", regions: ["eu"] } }] }));
+  assert.ok(!("problem" in u.readUsers(file)));
+});
+
 test("a DISABLED user is kept with disabledAt and its password: its login (right password) refused user_disabled in Postgres's words, mid-session too; a wrong password still a wrong one; enabled, the same password connects", async () => {
   const u = await users();
   const file = fileIn();

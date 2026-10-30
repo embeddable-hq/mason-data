@@ -174,12 +174,13 @@ mason user add emea --role regions --set regions=eu --set regions=uk --set plan=
 - **An attribute is a scalar or a list.** `attributes: [tenant]` declares scalars; `{ tenant: scalar, regions: list }`
   says each. A list is set by repeating `--set` (there is no comma grammar: a comma is legal in a scalar), used as an
   array (`= ANY(:regions)`, `<> ALL(:regions)`), and bound as one of the column's type (`ARRAY['12','41']::int[]`,
-  `uuid[]` for a uuid column). **An empty list is not expressible** (`--set regions=` is refused): a user who should
-  read no row of a role is a user of another role. A scalar given twice, an attribute the role does not declare (with
+  `uuid[]` for a uuid column). **An empty list is not expressible** (`--set regions=` is refused, and one written into
+  `.mason/users.json` by hand counts as a missing value): a user who should read no row of a role is a user of another
+  role. A value holding a NUL byte is refused. A scalar given twice, an attribute the role does not declare (with
   the closest name), or one missing is refused by `mason user add`, naming the attribute, the role, the `where:` that
   reads it and the exact `--set` to add.
 - **The file is checked when it is read**, each mistake at its key on one report: a `:name` the role does not declare
-  (with the line that declares it), `where:` beside `through:`, a `through:` to a table the role lacks or to one with no
+  (with the line that declares it), a `$1` (a `where:` reads attributes, never a statement's parameter), `where:` beside `through:`, a `through:` to a table the role lacks or to one with no
   filter of its own, a cycle of `through:`s, and the `where:` itself analysed by the catalog Postgres against the copy's
   columns — a column the copy lacks, a type that does not compare, a list used as a scalar or the reverse is Postgres's
   own error with the key and the character (`roles.regions.tables.customers.where: operator does not exist: uuid =
@@ -208,17 +209,26 @@ mason user add emea --role regions --set regions=eu --set regions=uk --set plan=
 - **EXPLAIN says each table's filter** on the table's line, in words: `answered from its copy of public.orders (…;
   filtered by the role tenant: tenant_id = 42)`, a list as `tenant_id = ANY(12, 41)` (its first five values, then
   `… and N more`), a `through:` as `a row of orders it references by order_id is visible`; `FORMAT JSON` carries it as
-  the copy's `Row Filter`.
+  the copy's `Row Filter`. A filtered table says no row count there (`about N rows`, `Estimated Rows`: the copy's estimate
+  is every row's). `EXPLAIN ANALYZE`'s scan still shows the rows it read, as Postgres's `Rows Removed by Filter` does.
 - **The request log records the values**: `attributes` in `_mason.requests` (JSON, beside `role`; null for a user with
   none and for a token).
 
-**The one divergence from Postgres row security**: Postgres evaluates a policy before any condition of the statement
-that could raise an error (a policy is a security barrier), so a hidden row never reaches a cast or a division the
-statement makes. Mason's engine may evaluate the statement's own conditions on a row before the filter drops it, so a
-statement whose expression fails on a hidden row's value (`'x'::int`, a division by zero) can be refused where Postgres
-answers it. No hidden row is ever returned; what such an error can reveal is that a row with that value exists. The
-oracle holds every answer a filtered user is given to Postgres's under the same policies
-(tests/integration/oracle/row-filters.ts).
+**The filter is a security barrier, as a Postgres policy is**: a statement's own expressions run only on the rows the
+filter keeps, in every place they can sit — WHERE, JOIN ON, the SELECT list, GROUP BY, HAVING, ORDER BY, a window, a
+subquery, a view, a statement reading two filtered tables — for a `where:`, a list and a `through:` alike. So an expression
+that fails on a hidden row's value (`'x'::int`, a division by zero) never fails: it never met that row. Every filtered read
+has the barrier, with no exception for a statement that looks harmless. **What is not guaranteed is timing**: how long a
+statement takes depends on the table's size and on rows it cannot read, on Mason as on Postgres.
+
+**Where Mason is deliberately stricter than Postgres row security**, each refused where Postgres would answer:
+
+- a user missing an attribute is refused at every statement, `SELECT 1` and unfiltered tables included;
+- a whole row of a filtered table, in any spelling (`SELECT c`, `row(c.*)`, `to_json(c.*)`), and a `TABLESAMPLE` of one
+  are refused `0A000`, naming the gap `roles`;
+- `SET`, `RESET` and `set_config` of `mason.attr.*` are refused `42501`;
+- a statement verified for an unfiltered user can be refused `0A000` unverified for a filtered one: what reaches the
+  allowlist is the statement with its filters in place.
 
 `mason start` listens on 5433 when it is free on every address (127.0.0.1, 0.0.0.0, `::` and `::1`: a port another
 Postgres holds on any of them would send a container or a driver trying `::1` first to that server), else on the next

@@ -1203,12 +1203,57 @@ SECURITY`, `CREATE POLICY … FOR SELECT TO <role> USING (… current_setting('m
 attributes sent with each catalog request as the session's settings and unsettable by the session; and the oracle
 mirrors each Mason user with a Postgres login under the same policies (`ALTER ROLE … SET mason.attr.…`, a list read by
 `string_to_array(…)::int[]`), asking thirty shapes as six users and as an unfiltered one (tests/integration/oracle/row-filters.ts).
-**The divergence, said.** Postgres treats a policy as a security barrier: a statement's own condition never sees a
-hidden row. DuckDB has no barrier and may evaluate the statement's conditions before the filter, so an expression that
-fails on a hidden row's value can refuse a statement Postgres answers — no row is ever returned, but the error says
-such a value exists. Forcing the filter first (a materialised step) would cost every filtered read; the refusal is the
-documented price. **An empty list is not expressible**: `--set regions=` is refused, since a user reading no row of
-its role is a user of another role, and an empty array would be the silent zero rows this design refuses.
+**An empty list is not expressible**: `--set regions=` is refused and an empty list in the users file counts as a missing
+value, since a user reading no row of its role is a user of another role, and an empty array would be the silent zero rows
+this design refuses.
+
+**The security barrier (the review of PR 51).** A Postgres policy is a barrier: a statement's condition runs below it only
+if it is leakproof. The first form of this feature had none. The filtered read was a plain subquery, DuckDB flattened it,
+and the statement's WHERE went below a `through:`'s or a list's SEMI join, onto every row of the table, so
+`WHERE 1/(CASE WHEN qty = 99 THEN 0 ELSE 1 END) > 0` answered "does a hidden row satisfy P?" for any P, as 22012 or a
+count. The tests had hidden it: DuckDB's dynamic join filter prunes hidden rows by itself below 50 build keys or over a
+narrow key range, so **a test of this needs more than 50 visible keys over a wide range**, and the oracle's and the wire
+test's do. Now the outermost filtered read ends `LIMIT 9223372036854775807` (`BARRIER`, src/duck/row-filter.ts): the filter
+pushdown does not cross a LIMIT, which would change what it keeps. **The limit need not reach the plan**: statistics
+propagation runs after the pushdown and drops a limit above the table's row count, so most plans hold no limit node, and
+the statement's expression stays above the role's filter all the same; that is also why the barrier costs so little. So
+the detector reads where the expression runs, never whether a Limit is there (`tests/duck-roles-barrier-wire.test.ts`).
+Removing the barrier fails three of that file's four tests and fifteen of the oracle's shapes, each `22012`.
+
+Measured on DuckDB 2.0, ten cores, a file of 30 M orders and 60 M items, a user keeping half the rows, min of five (three
+for the last three rows), ms. One thing changed per column:
+
+| Statement over the filtered read | No barrier | `LIMIT` max | `OFFSET 0` |
+|---|---:|---:|---:|
+| `count(*)` | 6 | 5 | 26 |
+| `sum`, `avg` over every row | 12 | 10 | 48 |
+| GROUP BY with a WHERE of its own | 18 | 23 | 85 |
+| the same, the filter a 50-value list | 16 | 23 | 83 |
+| a WHERE a zone map would prune (`id BETWEEN`) | 0 | 15 | 60 |
+| `through:`, an aggregate | 539 | 541 | 492 |
+| `through:`, a WHERE a zone map would prune | 98 | 505 | 514 |
+| a join of two filtered tables | 28 | 26 | 133 |
+| that join, a selective WHERE | 8 | 8 | 64 |
+| ORDER BY … LIMIT 10 | 19 | 18 | 83 |
+| 15 M rows returned | 130 | 72 | 160 |
+| a window, a WHERE of its own | 21 | 34 | 74 |
+| `count(*)` of a DISTINCT | 60 | 63 | 255 |
+
+`OFFSET 0`, Postgres's own idiom, is a barrier too, but statistics cannot drop it and it runs a serial operator under the
+default `preserve_insertion_order`: three to five times the cost, for nothing. **`WITH … AS MATERIALIZED` is no barrier**:
+the same reproduction raised 22012 through it, read once or twice, and it costs more (`sum` 165 ms, a `through:` aggregate
+1,319). **What the barrier costs is the
+statement's own pruning**: every shape is within noise but those whose WHERE a zone map would have pruned, the worst five
+times over on a `through:`, 400 ms on 60 M rows.
+
+**No leakproof gate.** Postgres omits the barrier for a leakproof condition, and the "No barrier" column is the most a
+gate could win back. It was not built: a gate must judge what reaches the engine, not what the user wrote, and Mason's
+rewrite turns a comparison into its own functions (a collation's key, an exact numeric), so `pg_proc.proleakproof` on the
+analysed tree says nothing about them. A safe gate needs an audit of every rewrite of every operator it admits, kept true
+as the rewrite changes, and it must read the whole tree, since a derived table's expression becomes the outer condition
+once substituted. A mistake there is the leak this section closes; its gain is the two pruned rows above. Timing is out of
+scope either way: how long a statement runs depends on rows it cannot read, on Postgres too.
+
 **Where.** `src/duck/row-filter.ts`, `src/cli/roles.ts` (`attributesOf`, `rowsOf`, `throughColumns`),
 `src/api/postgres/server.ts` (`withRows`, `checkRoles`), `src/api/postgres/catalog.ts` (`catalogPolicies`),
 `src/cli/user.ts` (`attributesToAdd`); `tests/duck-roles-rows-wire.test.ts`, `tests/cli-roles.test.ts`,

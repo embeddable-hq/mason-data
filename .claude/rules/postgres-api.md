@@ -108,7 +108,17 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   planned again. The catalog holds the same filters as `CREATE POLICY`, reading `current_setting('mason.attr.…')`,
   which the session may SHOW but never SET. Why: zero rows for a missing value is a silent wrong answer, and a filter
   in the text misses the read a view or a CTE hides. DETECTOR: `tests/duck-roles-rows-wire.test.ts`, the oracle's
-  `rowFilterCases` (Postgres logins under the same policies).
+  `rowFilterCases` (Postgres logins under the same policies). Every `duck.plan` caller passes the session's `grants`
+  (`tests/conventions.test.ts`).
+- **A filtered read is a SECURITY BARRIER: a statement's own expression never runs on a hidden row** (`BARRIER`,
+  `src/duck/row-filter.ts`; docs/DESIGN.md "Roles: rows per user"): the outermost filtered read ends in a LIMIT the filter
+  pushdown cannot cross, for a `where:`, a list and a `through:`, with no gate, because `proleakproof` on the analysed
+  tree says nothing about what the rewrite sends. Why: below a filter's SEMI join an expression that raises answers "does
+  a hidden row satisfy P?" for any P. DETECTOR: `tests/duck-roles-barrier-wire.test.ts` (both reproductions; the
+  expression above the role's filter and in no scan, read from the plan, never "a Limit is there", which statistics
+  propagation drops) and the oracle's `BARRIER_SHAPES`. **A test of this needs more than 50 visible keys over a wide
+  range**, or the engine's dynamic join filter hides the leak. RESPONSE: on a DuckDB upgrade these fail before the leak
+  ships; the barrier's form changes, never the guarantee. Timing is out of scope, and the docs say so.
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
   `application_name`, a token's NAME (never the token) or the user's name, and the registry entry that refused it

@@ -700,9 +700,10 @@ export class SessionRunner implements DuckRunner {
   private async copies(tables: readonly TableName[], facts: readonly CopyFacts[], filters: ReadonlyArray<{ table: string; words: string }> = []): Promise<Copy[]> {
     const out: Copy[] = [];
     for (const { schema, name } of tables) {
-      const rows = (await this.conn.runAndReadAll("SELECT estimated_size FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2", [schema, name])).getRowsJS()[0]?.[0];
       // the sync's source is the two names as they are; EXPLAIN says the table as a statement writes it (qualifiedName)
       const filter = filters.find((f) => f.table === `${schema}.${name}`)?.words;
+      // a table the role filters: its estimate is every row's, not the role's, and is never read here
+      const rows = filter !== undefined ? null : (await this.conn.runAndReadAll("SELECT estimated_size FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2", [schema, name])).getRowsJS()[0]?.[0];
       out.push({ table: qualifiedName({ schema, name }), rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === `${schema}.${name}`) ?? null,
         ...(filter !== undefined ? { filter } : {}) });
     }

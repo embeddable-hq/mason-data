@@ -62,8 +62,10 @@ export interface MasonUser {
 
 /** a user's attributes as the file keeps them: a name each, a string or a list of strings */
 function attributesValid(v: unknown): v is Record<string, string | string[]> {
+  // a NUL ends the statement it is bound into, wherever it is: every statement of the user would fail as a syntax error
+  const value = (x: unknown): boolean => typeof x === "string" && !x.includes("\0");
   return typeof v === "object" && v !== null && !Array.isArray(v) &&
-    Object.entries(v).every(([k, x]) => ATTRIBUTE_NAME_RE.test(k) && (typeof x === "string" || (Array.isArray(x) && x.every((y) => typeof y === "string"))));
+    Object.entries(v).every(([k, x]) => ATTRIBUTE_NAME_RE.test(k) && (value(x) || (Array.isArray(x) && x.every(value))));
 }
 
 /** Whether a user has not been removed (it may still not connect: see `underKey`). */

@@ -2477,9 +2477,11 @@ class Server {
         await this.catalog.policies(catalogPolicies(schema, catalogRolesOf({ ...raw, grants: typed })));
       } catch (e) {
         const problem = `the roles' row filters could not be checked by the catalog: ${e instanceof Error ? e.message : String(e)}`;
-        this.log(`roles: ${problem}`);
+        // tried again at every statement of every session, so said once a streak: the line a streak's end answers
+        if (!this.rolesCheckFailing) { this.rolesCheckFailing = true; this.log(`roles: ${problem} — tried again at each statement, every statement of a user held to a role refused until then`); }
         return { ...raw, problem: raw.problem ?? problem };
       }
+      if (this.rolesCheckFailing) { this.rolesCheckFailing = false; this.log("roles: the catalog checks the row filters again"); }
       const problem = raw.problem ?? (problems.length === 0 ? null : `${raw.file ?? "the roles file"}: ${problems.join("; ")}`);
       if (problem !== null && raw.problem === null && problem !== this.saidProblem) {
         this.saidProblem = problem;
@@ -2496,6 +2498,7 @@ class Server {
   private checked: { of: RolesLive; schema: PgSchema; live: RolesLive } | null = null;
   private checking: { of: RolesLive; schema: PgSchema; done: Promise<RolesLive> } | null = null;
   private saidProblem: string | null = null;
+  private rolesCheckFailing = false;
 
   /** the roles now, their row filters checked where the check for them is done (`checkRoles`), else as read: a
    *  session's `grants` refuses a filter not checked yet */

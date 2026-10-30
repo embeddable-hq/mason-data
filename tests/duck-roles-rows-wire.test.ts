@@ -18,7 +18,11 @@
  *   - the session cannot SET its attributes; SHOW answers them; SET ROLE is unchanged; a whole row of a filtered table
  *     is refused by name (Mason gap roles); the catalog holds the filters as Postgres row security (pg_policies);
  *   - every statement's request-log row carries the user's attributes beside its role;
- *   - a prepared statement Executed after the roles file's `where:` was edited is planned again under the new filter.
+ *   - a prepared statement Executed after the roles file's `where:` was edited is planned again under the new filter;
+ *   - an EMPTY list counts as a missing value, for an integer list and a uuid list, never as a filter keeping no row;
+ *   - `<> ALL(:list)` through a real where:; every whole-row spelling refused by the gap's name;
+ *   - EXPLAIN says no row count for a filtered table, in text or JSON (`Row Filter` there), and one for an unfiltered one;
+ *   - a catalog that cannot check the filters fails closed, said once a streak, and its recovery said.
  * The roles modules are imported inside the tests, so a tree without them fails each test by name (scripts/fails-without.ts).
  */
 import { test, after, before } from "node:test";
@@ -33,6 +37,7 @@ import { startPostgresApi, type PgApiOptions, type PgApiServer } from "../src/ap
 import { mintToken } from "../src/duck/token.ts";
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import { changeUsers, keyFingerprint, newUserId, userPassword } from "../src/duck/users.ts";
+import { PgCatalog } from "../src/api/postgres/catalog.ts";
 
 const API_KEY = "k".repeat(48);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-roles-rows-wire-"));
@@ -88,6 +93,12 @@ roles:
       customers: { where: "region = ANY(:regions)" }
       orders: { through: customers }
       order_items: { through: orders }
+  # a list of integers, and <> ALL: every tenant but these
+  others:
+    attributes: { tenants: list }
+    tables:
+      customers: { where: "tenant_id <> ALL(:tenants)" }
+      orders: { where: "tenant_id = ANY(:tenants)" }
 `;
 
 let wired: (Pick<PgApiOptions, "authenticate" | "recheck" | "recheckMs"> & { roles: () => unknown }) | null = null;
@@ -302,4 +313,74 @@ test("a prepared statement Executed after its role's where: was edited answers u
     assert.equal((await rows(acme, "SELECT count(*) FROM order_items")).map((r) => r[0]).join(","), "3", "and its through: child follows (order 13's item is gone)");
   } finally { fs.writeFileSync(rolesFile, ROLES); }
   assert.equal(await run(), "10,13,16", "the edit undone: the old filter again");
+});
+
+test("an empty list is a missing value, on an integer list and a uuid list: refused loudly, never a filter keeping no row", async () => {
+  await wire();
+  const empty: Array<[string, string, string]> = [["none_int", "others", "tenants"], ["none_uuid", "regions", "regions"]];
+  for (const [name, role, attr] of empty) {
+    const c = await connect(name, addUser(name, role, { [attr]: [] }));
+    for (const sql of ["SELECT count(*) FROM customers", "SELECT count(*) FROM orders", "SELECT 1"]) {
+      const r = await refusal(c, sql);
+      assert.equal(r.code, "42501", `${name}: ${sql}`);
+      assert.equal(r.message, `permission denied: the user "${name}" has no value for the attribute ${attr}, which the role ${role} filters rows by`);
+      assert.match(r.hint ?? "", new RegExp(`mason user remove ${name} && mason user add ${name} --role ${role} --set ${attr}=<value>`));
+    }
+  }
+});
+
+test("<> ALL(:list) through a real where:: every row but the list's, a NULL-free integer column; = ANY beside it", async () => {
+  await wire();
+  const c = await connect("others1", addUser("others1", "others", { tenants: ["1", "3"] }));
+  assert.deepEqual((await rows(c, "SELECT id FROM customers ORDER BY id")).map((r) => r[0]), ["3", "4"], "customers of no tenant in the list: tenant 2's");
+  assert.deepEqual((await rows(c, "SELECT count(*) FROM orders"))[0], ["5"], "orders of the list's tenants: 1's four, 3's one");
+  const plan = (await rows(c, "EXPLAIN SELECT id FROM customers")).map((r) => r[0]).join("\n");
+  assert.match(plan, /filtered by the role others: tenant_id <> ALL\(1, 3\)/);
+});
+
+test("every spelling of a whole row of a filtered table is refused by the gap's name, never in the engine's words", async () => {
+  await wire();
+  const c = await connect("acme7", addUser("acme7", "tenant", { tenant: "1" }));
+  for (const sql of ["SELECT c FROM customers c", "SELECT row(c.*) FROM customers c", "SELECT row(c.*) IS NULL FROM customers c", "SELECT ARRAY[row(c.*)] FROM customers c",
+    "SELECT count(row(c.*)) FROM customers c", "SELECT to_json(c.*) FROM customers c", "SELECT x FROM customers c, LATERAL (VALUES (row(c.*))) v(x)"]) {
+    const r = await refusal(c, sql);
+    assert.equal(r.code, "0A000", `${sql}: ${JSON.stringify(r)}`);
+    assert.match(`${r.message} ${r.detail ?? ""}`, /Mason gap roles/, `${sql}: ${JSON.stringify(r)}`);
+    assert.doesNotMatch(`${r.message} ${r.detail ?? ""}`, /STAR expression|__mason|LIMIT/, sql);
+  }
+  // t.* in a SELECT's own list is the columns, answered
+  assert.deepEqual((await rows(c, "SELECT c.* FROM customers c WHERE c.id = 1")).length, 1);
+});
+
+test("EXPLAIN says no row count for a filtered table, as text or JSON, where the Row Filter stands; an unfiltered table keeps its", async () => {
+  await wire();
+  const c = await connect("acme8", addUser("acme8", "tenant", { tenant: "1" }));
+  const text = (await rows(c, "EXPLAIN SELECT count(*) FROM orders")).map((r) => r[0]).join("\n");
+  assert.match(text, /Mason: answered from its copy of public\.orders \((?!about)[^\n]*filtered by the role tenant: tenant_id = 1\)/);
+  assert.doesNotMatch(text.split("\n")[0]!, /about \d|rows unknown/, "the copy's estimate is every row's");
+  const unfiltered = (await rows(c, "EXPLAIN SELECT sku FROM products")).map((r) => r[0]).join("\n");
+  assert.match(unfiltered, /public\.products \(about 3 rows/);
+  const json = JSON.parse((await rows(c, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM orders o JOIN products p ON p.sku = o.status"))[0]![0]!) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>;
+  const copies = json[0]!.Mason.Copies;
+  const orders = copies.find((x) => x.Table === "public.orders")!, products = copies.find((x) => x.Table === "public.products")!;
+  assert.equal(orders["Row Filter"], "filtered by the role tenant: tenant_id = 1");
+  assert.equal("Estimated Rows" in orders, false);
+  assert.equal(products["Estimated Rows"], 3);
+  assert.equal("Row Filter" in products, false);
+});
+
+test("a catalog that cannot check the filters: every statement refused, the line said once a streak, the recovery said", async () => {
+  await wire();
+  const acme = await connect("acme9", addUser("acme9", "tenant", { tenant: "1" }));
+  const policies = PgCatalog.prototype.policies;
+  const failing = (): string[] => logged.filter((l) => l.includes("could not be checked by the catalog"));
+  const before = failing().length;
+  PgCatalog.prototype.policies = async () => { throw new Error("the catalog is gone"); };
+  try {
+    fs.writeFileSync(rolesFile, `${ROLES}\n# a new file, so a new check\n`);
+    for (let i = 0; i < 4; i++) assert.equal((await refusal(acme, "SELECT count(*) FROM orders")).code, "57P03", "fails closed");
+    assert.equal(failing().length - before, 1, `one line for the streak:\n${failing().join("\n")}`);
+  } finally { PgCatalog.prototype.policies = policies; fs.writeFileSync(rolesFile, ROLES); }
+  assert.deepEqual((await rows(acme, "SELECT count(*) FROM orders"))[0], ["4"], "answered again, no restart");
+  assert.ok(logged.some((l) => l.includes("the catalog checks the row filters again")), "the streak's end said");
 });

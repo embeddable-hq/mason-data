@@ -267,3 +267,22 @@ test("the users missing an attribute their role reads: named with the commands t
     "the user bare has no value for tenant, regions, which the role t filters rows by: its statements are refused — mason user remove bare && mason user add bare --role t --set tenant=<value> --set regions=<value>");
   assert.deepEqual(r.usersMissingAttributes(users, { ...live, problem: "it is not YAML" }), [], "a file that cannot be read refuses everyone already (57P03): no second claim");
 });
+
+test("a where: reading a statement's parameter is refused at its key; a value holding a NUL is refused at add, never a syntax error at every statement", async () => {
+  const { message } = await report('roles:\n  t:\n    attributes: [tenant]\n    tables:\n      orders: { where: "tenant_id = :tenant AND id = $1" }\n');
+  assert.match(message, /roles\.t\.tables\.orders\.where: \$1 is a statement's parameter, which a where: cannot read — name an attribute of the role: :tenant/);
+  const r = await roles();
+  const file = r.parseRolesText('roles:\n  t:\n    attributes: { tenant: scalar, regions: list }\n    tables:\n      customers: { where: "tenant_id = :tenant AND email = ANY(:regions)" }\n', FILE);
+  assert.ok(!("problems" in file));
+  const grants = r.resolveRoles(file, shop, "/p");
+  assert.ok(!("message" in grants));
+  const { attributesToAdd } = await import("../src/cli/user.ts");
+  const live = { file: "mason/roles.yml", default: null, problem: null, grants };
+  for (const set of [["tenant=4\u00002", "regions=eu"], ["tenant=42", "regions=e\u0000u"]]) {
+    const added = attributesToAdd("acme", "t", set, live);
+    assert.ok("refused" in added, JSON.stringify(added));
+    assert.equal(added.refused.code, "usage");
+    assert.match(added.refused.message, /--set (tenant|regions): a value cannot hold a NUL byte/);
+  }
+  assert.deepEqual(attributesToAdd("acme", "t", ["tenant=42", "regions=eu", "regions=uk"], live), { values: { tenant: "42", regions: ["eu", "uk"] } });
+});

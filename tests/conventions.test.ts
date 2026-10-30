@@ -929,3 +929,27 @@ test("the Node guard catches the real thing", () => {
   assert.deepEqual(one("node-version: '26'\nnode-version: 26.13.0\nnode-version: '22'\n"), [], "26 carries the fix; 22's V8 never shared the wrappers");
   assert.deepEqual(one("# node-version: '24' in a comment\n"), [], "a comment is no setting");
 });
+
+/** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line */
+const planCallsWithoutGrants = (source: string): string[] => {
+  const file = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true);
+  const out: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && /\bduck\.plan$/.test(n.expression.getText(file)) && n.arguments.at(-1)?.getText(file) !== "grants") out.push(n.getText(file).split("\n")[0]!);
+    ts.forEachChild(n, visit);
+  };
+  visit(file);
+  return out;
+};
+
+test("every caller of duck.plan passes the session's grants: a statement planned without them reads no role's filter and no role's columns", () => {
+  const planned = scannedFiles().filter((f) => f.name.endsWith(".ts") && /\bduck\.plan\(/.test(f.src));
+  assert.ok(planned.some((f) => f.name === "src/api/postgres/server.ts"), `the guard reads the listener: ${planned.map((f) => f.name).join(", ")}`);
+  assert.deepEqual(planned.flatMap((f) => planCallsWithoutGrants(f.src).map((c) => `${f.name}: ${c}`)), []);
+});
+
+test("the duck.plan guard would catch the real thing", () => {
+  assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false);"), ["this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false)"]);
+  assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false, undefined);").length, 1, "an explicit undefined is no grants");
+  assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false, grants);"), []);
+});

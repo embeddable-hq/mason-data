@@ -223,9 +223,10 @@ const detail = (v: string | string[]): string => Array.isArray(v) ? v.join(", ")
 /** the details a plan line carries without VERBOSE: everything but the projections and filters, which VERBOSE adds */
 const VERBOSE_ONLY = new Set(["Projections", "Filters", "Table", "Type"]);
 
+/** a filtered table says no row count: the copy's estimate is every row's, which the role does not read */
 function copyLine(c: Copy): string {
-  const rows = c.rows === null ? "rows unknown" : `about ${count(c.rows)} rows`;
-  return `${c.table} (${rows}; ${keptText(c.facts)}${c.filter !== undefined ? `; ${c.filter}` : ""})`;
+  const rows = c.filter !== undefined ? "" : c.rows === null ? "rows unknown; " : `about ${count(c.rows)} rows; `;
+  return `${c.table} (${rows}${keptText(c.facts)}${c.filter !== undefined ? `; ${c.filter}` : ""})`;
 }
 
 /** EXPLAIN as Postgres's text format: one line a row */
@@ -280,7 +281,7 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
     Plan: roots.length === 1 ? roots[0] : { "Node Type": "Copy Plans", Plans: roots },
     Mason: {
       "Answered By": "the copy",
-      Copies: e.copies.map((c) => ({ Table: c.table, "Estimated Rows": c.rows, ...keptJson(c.facts), ...(c.filter !== undefined ? { "Row Filter": c.filter } : {}) })),
+      Copies: e.copies.map((c) => ({ Table: c.table, ...(c.filter === undefined ? { "Estimated Rows": c.rows } : {}), ...keptJson(c.facts), ...(c.filter !== undefined ? { "Row Filter": c.filter } : {}) })),
       "Sent To Copy": e.sql,
       "Computed After Copy": e.computed,
       "Mason Functions Copy Calls": e.functions,

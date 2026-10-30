@@ -168,6 +168,8 @@ export function setOf(arg: string): { name: string; value: string } | string {
   if (eq < 0) return `--set ${arg}: is <attribute>=<value>, like --set tenant=42`;
   const name = arg.slice(0, eq);
   if (!ATTRIBUTE_NAME_RE.test(name)) return `--set ${arg}: ${JSON.stringify(name)} is not an attribute's name: ${ATTRIBUTE_NAME_RULE}`;
+  // through /api/users' JSON: a shell cannot pass one
+  if (arg.includes("\0")) return `--set ${name}: a value cannot hold a NUL byte — it would end every statement the value is bound into`;
   return { name, value: arg.slice(eq + 1) };
 }
 

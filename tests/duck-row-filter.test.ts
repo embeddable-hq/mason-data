@@ -29,6 +29,33 @@ test("whereParts: :name is an attribute in the SQL, never in a string, an identi
   }
 });
 
+test("whereParts refuses a statement's parameter: $1 would read the STATEMENT's first value; a $ elsewhere is untouched", async () => {
+  const { whereParts } = await rf();
+  for (const sql of ["a = :t AND b = $1", "$12 = a", "a = ($2)"]) {
+    const r = whereParts(sql);
+    assert.ok(!Array.isArray(r) && /is a statement's parameter, which a where: cannot read — name an attribute of the role: :tenant/.test(r.problem), `${sql}: ${JSON.stringify(r)}`);
+  }
+  for (const sql of ["a$1 = :t", "note = '$1' AND a = :t", "\"$1\" = :t", "a = $$ $1 $$ AND b = :t", "a = $x$ $1 $x$ AND b = :t", "a = 1 -- $1\n AND b = :t"]) {
+    assert.ok(Array.isArray(whereParts(sql)), sql);
+  }
+});
+
+test("the filtered read is behind the barrier at its outermost only, for a scalar, a list and through:", async () => {
+  const { whereParts, bindFilter, filteredSql, BARRIER } = await rf();
+  const parts = whereParts("tenant_id = :tenant");
+  assert.ok(Array.isArray(parts));
+  const orders = bindFilter({ table: "public.orders", at: "x", where: { text: "…", parts } }, new Map([["tenant", "integer"]]), { tenant: "1" });
+  const items = bindFilter({ table: "public.order_items", at: "y", through: { parent: "public.orders", column: "order_id", parentColumn: "id" } }, new Map(), {});
+  const lines = bindFilter({ table: "public.lines", at: "z", through: { parent: "public.order_items", column: "item_id", parentColumn: "id" } }, new Map(), {});
+  const filters = new Map([["public.orders", orders], ["public.order_items", items], ["public.lines", lines]]);
+  for (const t of filters.keys()) {
+    const sql = filteredSql(t, filters);
+    assert.ok(sql.endsWith(` ${BARRIER}`), sql);
+    assert.equal(sql.split(BARRIER).length - 1, 1, `one barrier, the outermost: ${sql}`);
+  }
+  assert.equal(filteredSql("public.products", filters), 'SELECT * FROM "public"."products"', "a table no filter holds has no rows to hide");
+});
+
 test("bindFilter: a scalar binds as a typed CAST, a list as a typed ARRAY; EXPLAIN's words bound to five values", async () => {
   const { whereParts, bindFilter } = await rf();
   const parts = whereParts("tenant_id = :tenant AND region = ANY(:regions) AND note <> :note");
@@ -57,6 +84,7 @@ test("missingAttributes names each lacking attribute once with its where:; attri
   assert.deepEqual(missingAttributes(filters, { regions: ["eu"] }), [{ attr: "tenant", at: "roles.r.tables.customers.where", where: "tenant_id = :tenant" }]);
   assert.deepEqual(missingAttributes(filters, {}).map((m) => m.attr), ["tenant", "regions"]);
   assert.deepEqual(missingAttributes(filters, { tenant: "1", regions: ["eu"] }), []);
+  assert.deepEqual(missingAttributes(filters, { tenant: "1", regions: [] }).map((m) => m.attr), ["regions"], "an empty list is no value");
   assert.equal(attributeSetting("mason.attr.regions", { regions: ["12", "41"] }), "12,41");
   assert.equal(attributeSetting("mason.attr.tenant", { tenant: "42" }), "42");
   assert.equal(attributeSetting("mason.attr.tenant", {}), null);
