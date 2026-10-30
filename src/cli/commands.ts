@@ -19,7 +19,7 @@ import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
 import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
-import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectDatabase, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, STATE_DIR, databaseMoved, isProject, projectDatabase, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresFacts, postgresLink, type PostgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
@@ -422,9 +422,9 @@ export async function status(argv: string[]): Promise<number> {
     const st = styleOut();
     const read = await readState(run);
     // the name is read at the start, so an edit of the sources file's database: is said here until the run takes it
-    const fileSays = projectDatabase(r0.project);
     const answersAs = postgresLink(run.postgresUrl).database;
-    const s = typeof fileSays === "string" && fileSays !== answersAs
+    const fileSays = databaseMoved(r0.project, answersAs);
+    const s = fileSays !== null
       ? { ...read, warnings: [...read.warnings, `the sources file now says tools connect with ${fileSays}, and this run answers as ${answersAs}: mason stop && mason start takes it`] } : read;
     const r = readiness(s);
     // the statements the Postgres API answered slowly, and the ones it refused, with the reason (src/duck/requests.ts)

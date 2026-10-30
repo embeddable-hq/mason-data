@@ -48,7 +48,7 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   "The database name a tool connects with"): the listener compares it exactly, the wrong one is `3D000` whose hint
   (`wrongDatabaseHint`) says the right name, how to say it and where it is set, and never the sources file's path (a
   client reads it before any password, and that file is named for the source's database). The catalog renames its own
-  database to it (`databaseNameSql`, which moves PGlite's `template1` / `postgres` aside), so `current_database()` and
+  database to it (`databaseNameSql`, which moves another database holding the name, PGlite's `template0` / `template1`, aside), so `current_database()` and
   `pg_database` agree. The project's name names the slot alone. DETECTOR: `tests/conventions.test.ts`,
   `tests/database-name.test.ts`.
 - **What a tool sets is honoured or refused, never silently ignored**: `TimeZone` moves every timestamptz the session

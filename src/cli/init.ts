@@ -72,8 +72,8 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   --remote          go ahead with a database on another machine (read the warnings mason init prints); not with demo
   --skip-check      write the project without connecting (the database is not up yet); mason start checks it; not with demo
   --json            as data: { name, root, folder, config, demo (true for the demo database's project, else false),
-                    source: { name (the source's: its file's), file, url (as the file writes it), env (the .env line
-                    written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
+                    source: { name (the source's: its file's), file, url (as the file writes it), database (the name
+                    a tool connects with, or null when the file has a mistake), env (the .env line written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
                     database: { url (password masked), from, version, tables }, warnings, next }
 `;
 
@@ -323,7 +323,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
       await steps.step(`Writing ${rel(sourceFile)}`, () => {
         fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
         fs.writeFileSync(sourceFile, newSourceText(`\${${where.variable}}`, demo ? DEMO_ADDED_TABLES : [], demo ? DEMO_SYNC : DEFAULT_SYNC, connectName));
-      }, () => `Wrote ${rel(sourceFile)}: the database (url: \${${where.variable}}), sync: ${syncText(demo ? DEMO_SYNC : DEFAULT_SYNC)} ` +
+      }, () => `Wrote ${rel(sourceFile)}: the database (url: \${${where.variable}}), ${connectName === null ? "" : `database: ${connectName}, `}sync: ${syncText(demo ? DEMO_SYNC : DEFAULT_SYNC)} ` +
         `(${demo ? "every table polled every 5 s" : "each table read once, then again only by mason sync <table>"}) and the tables to sync, ` +
         `${demo ? `the demo's ${DEMO_ADDED_TABLES.length} added — mason add ${DEMO_TABLE_TO_ADD} adds the fourth` : "none yet (mason add)"} — commit it`);
     }
@@ -383,6 +383,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   if (json) {
     say(jsonText(INIT, { name, root, folder: path.relative(root, folder) || ".", config: path.join(root, STATE_DIR, "config.json"), demo,
       source: { name: path.basename(sourceFile).replace(/\.ya?ml$/, ""), file: sourceFile, url: keptFile !== null && !("problems" in keptFile) ? ("env" in keptFile.url ? `\${${keptFile.url.env}}` : maskedUrl(keptFile.url.literal)) : `\${${where.variable}}`,
+        database: keptFile === null ? connectName ?? DEFAULT_DATABASE : "problems" in keptFile ? null : keptFile.database ?? DEFAULT_DATABASE,
         env: where.line === null ? null : maskedLine(where.line) },
       roles: { file: rolesPath, written: !rolesKept },
       database, warnings: notes }, next));

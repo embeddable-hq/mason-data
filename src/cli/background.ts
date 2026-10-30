@@ -19,12 +19,11 @@ import { fileURLToPath } from "node:url";
 import { runnable } from "../lib/runnable.ts";
 import { READY, STEP_MARK } from "./dev.ts";
 import { liveRun } from "./runs.ts";
-import { projectSource, theProject } from "./project.ts";
+import { projectSource, startSettingRefusal, theProject } from "./project.ts";
 import { runListenerSettings } from "./pg-tls.ts";
 import { demoChangesRefusal, demoPort } from "./demo.ts";
-import { shownPath, sourcesTop } from "./sources.ts";
+import { shownPath } from "./sources.ts";
 import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
-import { pollMsRetired } from "../lib/table-sync.ts";
 import { historyDaysSetting } from "../duck/history.ts";
 import { DEV } from "./registry.ts";
 import { UI } from "./ui.ts";
@@ -79,10 +78,9 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   const shown = file === null ? "" : shownPath(t.project.root, file.file);
   const demoRefused = demoChangesRefusal(t.project.config, file, shown);
   if (demoRefused) return failed("start", demoRefused, { json: o.json });
-  // a setting no longer read (MASON_POLL_MS: each table's sync: says how often it is polled), refused here too, where
-  // the person (or --json) reads it, by the run's own check (src/lib/table-sync.ts)
-  const pollMs = pollMsRetired(process.env, () => sourcesTop(t.project.root, t.project.folder));
-  if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: o.json });
+  // a setting a start refuses, here where the person (or --json) reads it, by the run's own list (src/cli/project.ts)
+  const setting = startSettingRefusal(t.project, process.env, { serve: false });
+  if (setting !== null) return failed("start", setting, { json: o.json });
   // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused), by the run's own
   // check (src/duck/history.ts), refused here as in the run
   const days = historyDaysSetting(process.env);

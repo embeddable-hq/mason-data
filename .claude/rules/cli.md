@@ -201,8 +201,10 @@ CLI lacks).
   the run derives it once (`connectDatabase`, src/cli/dev.ts) and records it in `running.postgresUrl`, which every command
   reads (`postgresLink`); with Mason stopped, `projectDatabase` (src/cli/project.ts) reads the sources file's one key,
   so `mason user add` needs neither the URL nor the rest of the file, and a file that cannot say it is refused, never
-  guessed. A name is read at the start: `mason status` warns when the file has moved since. `MASON_PG_DATABASE` is
-  `mason serve`'s (the sources file's first, the two refused when they disagree) and `mason start` refuses it. Keep
+  guessed. A name is read at the start: `mason status` warns when the file has moved since (`databaseMoved`). `MASON_PG_DATABASE` is
+  `mason serve`'s (the sources file's first, the two refused when they disagree) and `mason start` refuses it. **A setting a
+  start refuses is on ONE list** (`startSettingRefusal`, src/cli/project.ts), asked by the parent and by the run: a check in
+  the run alone reaches a background start as "the run stopped", its way out in a log. Keep
   `mason init` writing no key: the default stays a default.
 - **`mason user add|list|disable|enable|remove` is the login a tool keeps** (src/cli/user.ts, src/duck/users.ts, the rules
   in .claude/rules/duckdb.md "Users"): a BI tool stores ONE password that does not expire. `add` prints the password

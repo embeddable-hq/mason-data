@@ -31,13 +31,13 @@ import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
 import { createRunServer, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import type { RunMetrics } from "./metrics.ts";
-import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, sourcesTop, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
-import { DEMO_DIR, DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, projectSource, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
 import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
-import { connectDatabase, databaseSettingRefusal } from "../lib/database-name.ts";
+import { connectDatabase } from "../lib/database-name.ts";
 import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, SELF_SIGNED_FILES } from "./pg-tls.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
 import { RequestLedger, REQUESTS_TABLE } from "../duck/requests.ts";
@@ -58,7 +58,7 @@ import { READY_LINE, readRestarts } from "./supervise.ts";
 import { dropOwnReplication, dropStatements, liveReadinessFailure, madeReplication, namedPublication, projectReplication, replicationReadiness, staleReplication } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
 import { LogBuffer } from "../lib/log-buffer.ts";
-import { pollMsRetired, syncText, type TableSync } from "../lib/table-sync.ts";
+import { syncText, type TableSync } from "../lib/table-sync.ts";
 
 export interface DevOptions {
   /** the port the commands reach the run on (src/cli/run-server.ts), or the next free one */
@@ -213,12 +213,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // mason serve has held the project to its pin already, before it wrote anything (src/cli/serve.ts servePin)
   const pinned = o.serve ? null : cliPinProblem(folder, o.version);
   if (pinned) { say(`mason start: ${pinned}`); return 1; }
-  // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
-  const pollMs = pollMsRetired(process.env, () => sourcesTop(project.root, project.folder));
-  if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: false });
-  // the name a tool connects with is the sources file's: a server's setting for it names nothing on a project
-  const databaseSetting = o.serve === undefined ? databaseSettingRefusal(process.env, sourcesTop(project.root, project.folder).shown) : null;
-  if (databaseSetting !== null) return failed("start", { code: "refused", ...databaseSetting }, { json: false });
+  // a setting a start refuses (the parent of a background start has asked the same list: src/cli/project.ts)
+  const setting = startSettingRefusal(project, process.env, { serve: o.serve !== undefined });
+  if (setting !== null) return failed("start", setting, { json: false });
   // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused, named), read
   // before anything opens (src/duck/history.ts); every history below keeps them
   const keptDays = historyDaysSetting(process.env);

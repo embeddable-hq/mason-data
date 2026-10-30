@@ -11,6 +11,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { connectionUrl, postgresLink, withPlaceholders } from "../src/cli/pg-url.ts";
 import { parseSource } from "../src/cli/preflight.ts";
+import { PgError } from "../src/cdc/pg-wire.ts";
+import { databaseMoved, type Project } from "../src/cli/project.ts";
 import { postgresApiUrl } from "../src/api/postgres/listener.ts";
 import * as S from "../src/cli/sources.ts";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
@@ -132,10 +134,67 @@ test("the key alone, for a command that reads neither the URL nor the tables; a 
     assert.ok("message" in bad);
     assert.equal(bad.code, "bad_source");
     assert.match(bad.message, /^mason\/sources\/app\.yml: database: is one name/);
+    // a file with no key to read is no file with none: what the run refuses, said, never `mason`
+    for (const [text, said] of [["- a\n- b\n", "not a mapping"], ["just words\n", "not a mapping"], ["", "empty"], ["# only a comment\n", "empty"]] as const) {
+      fs.writeFileSync(path.join(folder, "sources", "app.yml"), text);
+      const refused = S.writtenDatabase(folder, root);
+      assert.ok("message" in refused, JSON.stringify(text));
+      assert.equal(refused.message, `mason/sources/app.yml: it is ${said}: a source file is kind: postgres, url: \${DATABASE_URL} and tables: {}`);
+      assert.deepEqual((S.parseSourceText(text, "app", FILE) as { problems: string[] }).problems, [`it is ${said}: a source file is kind: postgres, url: \${DATABASE_URL} and tables: {}`], "as the run says it");
+    }
     fs.writeFileSync(path.join(folder, "sources", "app.yml"), "database: [\n");
     assert.match((S.writtenDatabase(folder, root) as { message: string }).message, /^mason\/sources\/app\.yml: it is not YAML/);
     fs.writeFileSync(path.join(folder, "sources", "other.yml"), HEAD);
     assert.match((S.writtenDatabase(folder, root) as { message: string }).message, /has 2 source files .*: one source per project for now/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a setting a start refuses is refused where the start was typed, in the failure shape, before anything is spawned; a typed run the same", async () => {
+  const root = project(`${HEAD}tables: {}\n`);
+  try {
+    const typed = await runMason(root, ["start", "--json"], matrixEnv({ MASON_PG_DATABASE: "reporting" }));
+    assert.equal(typed.code, 1, typed.stdout + typed.stderr);
+    const error = (JSON.parse(typed.stdout) as { error: { code: string; message: string; fix: string } }).error;
+    assert.equal(error.code, "refused", "never `failed`, the run stopped, with the way out in a log");
+    assert.equal(error.message, "MASON_PG_DATABASE is mason serve's setting, and mason start ignores no setting silently");
+    assert.equal(error.fix, "write database: reporting in mason/sources/app.yml (it is committed, so every machine answers as it), and unset MASON_PG_DATABASE");
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "no run spawned");
+    const attached = await runMason(root, ["start", "--attach"], matrixEnv({ MASON_PG_DATABASE: "reporting" }));
+    assert.equal(attached.code, 1, attached.stdout + attached.stderr);
+    assert.match(attached.stderr, /^✗ mason start: MASON_PG_DATABASE is mason serve's setting/m);
+    // the one list: the setting beside it answers the same way
+    const poll = await runMason(root, ["start", "--json"], matrixEnv({ MASON_POLL_MS: "5000" }));
+    assert.equal((JSON.parse(poll.stdout) as { error: { code: string } }).error.code, "refused");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason mcp's 3D000: the way out is the URL's last part and the hint's name, never the project's", async () => {
+  const { connectFailure } = await import("../src/cli/mcp.ts");
+  const client = parseSource("postgres://claude:pw@127.0.0.1:5433/my-shop");
+  assert.ok("source" in client);
+  const hint = "this Mason answers as the database \"mason\": connect with database=mason";
+  const wrong = connectFailure(new PgError({ S: "FATAL", C: "3D000", M: "database \"my-shop\" does not exist", H: hint }), client.source);
+  assert.equal(wrong.message, "127.0.0.1:5433 refused the connection: database \"my-shop\" does not exist (3D000)");
+  assert.equal(wrong.why, hint);
+  assert.equal(wrong.fix, "the last part of the URL is the database: change it to the one the hint names, or use the URL mason user add printed");
+  const other = connectFailure(new PgError({ S: "FATAL", C: "57P03", M: "not yet" }), client.source);
+  assert.equal(other.fix, "the URL mason user add printed");
+});
+
+test("mason status while up compares what the file says: a server named by its setting, asked from a shell without it, is no move", () => {
+  const root = project(`${HEAD}tables: {}\n`);
+  const at = (served: boolean): Project => ({ root, dir: path.join(root, ".mason"), folder: path.join(root, "mason"),
+    config: { name: "my-shop", folder: "mason", remote: false, apiKey: "k", ...(served ? { served } : {}) } });
+  const file = path.join(root, "mason", "sources", "app.yml");
+  try {
+    assert.equal(databaseMoved(at(true), "reporting"), null, "named by MASON_PG_DATABASE, which this shell need not have");
+    assert.equal(databaseMoved(at(false), "shop"), "mason", "a project's file took its line out: the next start answers as the default");
+    assert.equal(databaseMoved(at(false), "mason"), null);
+    fs.writeFileSync(file, `${HEAD}database: production\ntables: {}\n`);
+    assert.equal(databaseMoved(at(true), "reporting"), "production", "a file that writes a name is said on a server too");
+    assert.equal(databaseMoved(at(false), "production"), null);
+    fs.writeFileSync(file, "database: [\n");
+    assert.equal(databaseMoved(at(false), "mason"), null, "a file that cannot be read is said by what reads it");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -176,6 +235,11 @@ test("mason init --database writes the line; a name that cannot be served, or a 
     const first = fs.mkdtempSync(path.join(dir, "made-"));
     const made = await runMason(first, ["init", url, "--skip-check", "--database", "Production", "--json"], matrixEnv());
     assert.equal(made.code, 0, made.stdout + made.stderr);
+    assert.equal((JSON.parse(made.stdout) as { source: { database: string } }).source.database, "Production", "said back to an agent");
+    const plain = await runMason(fs.mkdtempSync(path.join(dir, "plain-")), ["init", url, "--skip-check", "--database", "Production"], matrixEnv());
+    assert.match(plain.stdout, /^✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\), database: Production, sync: off /m, "and to a person");
+    const fallback = await runMason(fs.mkdtempSync(path.join(dir, "default-")), ["init", url, "--skip-check", "--json"], matrixEnv());
+    assert.equal((JSON.parse(fallback.stdout) as { source: { database: string } }).source.database, "mason");
     assert.match(fs.readFileSync(path.join(first, "mason", "sources", "shop.yml"), "utf8"), /^database: Production {3}# the database name a tool connects with$/m);
     const bad = await runMason(fs.mkdtempSync(path.join(dir, "bad-")), ["init", url, "--skip-check", "--database", "..", "--json"], matrixEnv());
     assert.equal(bad.code, 2, bad.stdout);

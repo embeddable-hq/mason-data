@@ -176,6 +176,9 @@ function databaseKey(doc: Document, text: string): { database: string | null } |
   return bad === null ? { database: node.value } : { problem: `database: ${bad} — ${way}` };
 }
 
+/** A file that is YAML and no mapping, said; `v` is what it read as. */
+const notMapping = (v: unknown): string => `it is ${v === null || v === undefined ? "empty" : "not a mapping"}: a source file is kind: postgres, url: \${DATABASE_URL} and tables: {}`;
+
 /**
  * The file's text read as a source file: its shape, never the database (that is `addedTables`'s). `name` is the
  * source's (the file's name); the problems are each at their key, in the order they are in the file.
@@ -184,7 +187,7 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length) return { problems: [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`] };
   const v: unknown = doc.toJS();
-  if (!isPlain(v)) return { problems: [`it is ${v === null || v === undefined ? "empty" : "not a mapping"}: a source file is kind: postgres, url: \${DATABASE_URL} and tables: {}`] };
+  if (!isPlain(v)) return { problems: [notMapping(v)] };
   const problems: string[] = [];
   for (const k of Object.keys(v)) {
     if (!(KEYS as readonly string[]).includes(k)) problems.push(`unexpected key ${k}${didYouMean(k, KEYS)} — a source file takes ${KEYS.join(", ")}`);
@@ -327,6 +330,7 @@ export function writtenDatabase(folder: string, root: string): { database: strin
   const text = fs.readFileSync(file, "utf8");
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length) return sourceFailure(file, root, [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`]);
+  if (!isMap(doc.contents)) return sourceFailure(file, root, [notMapping(doc.toJS())]);
   const named = databaseKey(doc, text);
   return "problem" in named ? sourceFailure(file, root, [named.problem]) : named;
 }
