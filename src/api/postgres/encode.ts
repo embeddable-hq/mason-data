@@ -56,6 +56,7 @@ import { Buffer } from "node:buffer";
 import type { PgApiType } from "./schema.ts";
 import { numericBinary, numericOf, numericText, NumericError, type PgNumeric } from "../../lib/pg-numeric.ts";
 import type { FieldDescription } from "./protocol.ts";
+import type { GapId } from "../../duck/gaps.ts";
 
 export interface PgOid {
   oid: number;
@@ -109,7 +110,9 @@ export type ApiValue = string | number | boolean;
 export class EncodeError extends Error {
   /** the SQLSTATE Postgres raises for the same value (a timestamp past its range is 22008), else XX000: Mason's gap */
   readonly code: string;
-  constructor(message: string, code = "XX000") { super(message); this.code = code; }
+  /** the registry entry that refused the value (src/duck/gaps.ts): the request log's `gap`; null for any other error */
+  readonly gap: GapId | null;
+  constructor(message: string, code = "XX000", gap: GapId | null = null) { super(message); this.code = code; this.gap = gap; }
 }
 
 const refuse = (type: WireType, value: unknown, why: string): never => {

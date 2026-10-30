@@ -41,6 +41,12 @@ export const withoutPlaceholders = (shown: string): string => shown.replace(/^po
 /** The psql line for a URL, quoted for a shell. */
 export const psqlLine = (url: string): string => `psql ${shellWord(url)}`;
 
+/** WHERE A TOOL CONNECTS, as `mason status --json` and `/api/state` say it (`postgres`): the recorded URL's parts, the
+ *  URL with the credentials' place shown (`shown`, what `mason start` and `mason status` print) and its psql line — one
+ *  builder, so the web page's Connect panel and the commands print the same line. */
+export const postgresFacts = (recorded: string): PostgresLink & { shown: string; psql: string } =>
+  ({ ...postgresLink(recorded), shown: withPlaceholders(recorded), psql: psqlLine(withPlaceholders(recorded)) });
+
 /** What a tool connecting to the listener should know: it listens on every address; its certificate is self-signed. */
 export function listenerTips(l: PostgresListener | null): string[] {
   if (l === null) return [];

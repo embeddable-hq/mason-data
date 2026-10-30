@@ -15,6 +15,8 @@ import { DOCTOR, NODE_MIN, doctor } from "./doctor.ts";
 import { DESTROY, destroy } from "./machine.ts";
 import { INIT, init } from "./init.ts";
 import { SYNC, sync } from "./sync.ts";
+import { USAGE, usage } from "./usage.ts";
+import { CANCEL, cancel } from "./cancel.ts";
 import { SERVE, serve } from "./serve.ts";
 import { PROJECT_LINE } from "./dev.ts";
 import { version } from "./version.ts";
@@ -146,7 +148,7 @@ export const STEPS: ReadonlyArray<[step: string, commands: readonly Command[]]> 
   ["Set up", [{ ...DOCTOR, run: (argv) => doctor(argv) }, { ...INIT, run: (argv) => init(argv) }, { ...DEV, run: runDev }]],
   ["Add your tables", [{ ...TABLES, run: tables }, { ...ADD, run: add }, { ...REMOVE, run: remove }, { ...WAIT, run: wait }]],
   ["Connect", [{ ...USER, run: user }, { ...MCP, run: mcp }]],
-  ["Run", [{ ...STATUS, run: status }, { ...UI, run: ui }, { ...SYNC, run: sync }, { ...LOGS, run: logs }, { ...STOP, run: stop }, { ...DESTROY, run: (argv) => destroy(argv) }]],
+  ["Run", [{ ...STATUS, run: status }, { ...UI, run: ui }, { ...SYNC, run: sync }, { ...LOGS, run: logs }, { ...CANCEL, run: cancel }, { ...USAGE, run: (argv) => usage(argv) }, { ...STOP, run: stop }, { ...DESTROY, run: (argv) => destroy(argv) }]],
   ["Go to production", [{ ...SERVE, run: serve }]],
 ];
 
@@ -159,6 +161,10 @@ export const COMMANDS: readonly Command[] = STEPS.flatMap(([, commands]) => comm
  * it, then the next command for that moment — and mason help, every command. `mason help` and `mason --help` are the
  * whole list (topUsage).
  */
+/** WHAT MASON IS, in one line: the first `mason` alone and `mason --help` print, in the words its reader was told it
+ *  in ("a drop-in read replica for analytics"). */
+export const TAGLINE = "Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, copied, kept current and served to psql, BI tools and your app.";
+
 export async function orientation(cwd: string, s: Style = styleOut()): Promise<string> {
   const t = theProject(cwd);
   const project = "project" in t ? t.project : null;
@@ -172,7 +178,7 @@ export async function orientation(cwd: string, s: Style = styleOut()): Promise<s
       ["mason doctor", "what this machine needs for Mason, and whether it has it"]]
     : !run ? [["mason start", "start Mason for this project, in the background"], ["mason status", "the project and its tables"]]
     : [["mason status", "what Mason is doing: its tables, and the last day's slow and refused statements"], ["mason user add <name>", "a user for a BI tool or your app: its password and URL, printed once"]];
-  return `${reportText({ headline: "Mason: your Postgres tables, copied and served to BI tools and your app.", details: rows,
+  return `${reportText({ headline: TAGLINE, details: rows,
     next: [...next, ["mason help", "every command, and the guides"]] }, s)}\n`;
 }
 
@@ -200,8 +206,9 @@ export function topUsage(s: Style = styleOut()): string {
   return [
     `${s.bold("usage:")} mason <command> [options]`,
     "",
-    para("Mason: your Postgres tables, copied and served to BI tools and your app. Make your app's folder a project (mason init), " +
+    para(`${TAGLINE} Make your app's folder a project (mason init), ` +
       `add tables (mason add, before or after the start), start Mason (mason start), connect a tool (mason user add). It needs Node ${NODE_MIN} or later; mason doctor checks.`),
+    para("Try it first with nothing to install: mason init demo, then mason start and mason ui (a demo shop database, hosted by Mason itself)."),
     para(PROJECT_LINE),
     "",
     listed.map(([step, es]) => `  ${s.bold(step)}\n${block(es)}`).join("\n\n"),

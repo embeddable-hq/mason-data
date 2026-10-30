@@ -39,8 +39,10 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
 - **The password is a user's or a token's, the project is the database** (`authenticate`; `listenerLogins`,
   src/duck/users.ts): a `mason user`'s password (`mason_<id>_<mac>`, the MAC over its NAME and id keyed by the API key,
   so the startup packet's user name must be the user's and every statement is attributed), or a token minted from the
-  API key; a refused one is `28P01` as a wrong password is, with the reason in the log; the wrong database is `3D000`.
-  The users file is re-read before every statement of a user's session (`recheckMs: 0`), so `mason user remove` ends
+  API key; a refused one is `28P01` as a wrong password is, with the reason in the log; a DISABLED user's, its password
+  right, is `28000` "role … is not permitted to log in", as Postgres refuses a role without LOGIN (`user_disabled`); the
+  wrong database is `3D000`.
+  The users file is re-read before every statement of a user's session (`recheckMs: 0`), so `mason user remove` (and `disable`) ends
   a session at its next statement. Fail closed: a users file that cannot be read refuses every user (`57P03`).
 - **What a tool sets is honoured or refused, never silently ignored**: `TimeZone` moves every timestamptz the session
   sends; `extra_float_digits` below 1, a `client_encoding` other than UTF8 and a `DateStyle` other than ISO are
@@ -69,6 +71,9 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   TLS start** (`directTls`): a connection's first byte 0x16 is a ClientHello (`sslnegotiation=direct`, a
   TLS terminator in front) and is TLS at once, ALPN `postgresql`, the bytes read unshifted onto the socket whole —
   never a second read path; a plain listener closes it saying so in the log.
+- **The sessions open are the listener's own, counted in memory** (`openSessions`: logged-in sessions by user and
+  application_name, and how many run a statement): `/api/state` `sessions`, `mason status`, the usage samples — never a
+  query of the request log.
 - **A role is enforced on the ANALYSED tree, never on SQL text, and the catalog's roles mirror the roles file**
   (`src/duck/grants.ts`, `src/cli/roles.ts`, `catalog.ts` `catalogRoles` / `asRole`; docs/POSTGRES-API.md "Roles"):
   after Postgres's analysis (views expanded, names resolved) and before the rewrite, every `RTEPERMISSIONINFO` of a
@@ -85,7 +90,8 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   Postgres role with the same grants, the same statements, refusals equal by SQLSTATE and message).
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
-  `application_name`, a token's NAME (never the token) or the user's name. A refused statement is recorded in
+  `application_name`, a token's NAME (never the token) or the user's name, and the registry entry that refused it
+  (`gap`, from `PgError.gap`: the error's own field, never the text the client was sent). A refused statement is recorded in
   `Session.refuse` alone, the one sender of a statement's ErrorResponse, so no refusal can go unrecorded.
 - **A 64-bit integer, a numeric and a float are Postgres's TEXT** (`encode.ts`; `src/lib/pg-numeric.ts` for what
   Postgres computes exactly): the wire carries text, so a value's digits are the oracle's business, never JSON's.

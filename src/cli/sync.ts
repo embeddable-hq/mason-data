@@ -13,7 +13,7 @@ import { reach } from "./state.ts";
 import { findTable, guarded, readState, tableArg } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import type { KeptCurrent, PolledTable, StreamedAnswer } from "../duck/sync.ts";
-import { syncWords } from "../lib/table-sync.ts";
+import { syncedText, syncWords } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const n = (x: number): string => x.toLocaleString("en-US");
@@ -43,6 +43,22 @@ export const SYNC: CommandSpec & { needs: "run" } = {
   options: { json: { type: "boolean" } },
   json: ["syncedAt", "tables", "streamed", "next"],
 };
+
+/**
+ * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (the web page's Sync button says the same,
+ * src/web/pages/tables.js; tests/web-page.test.ts holds the two equal): the rows written and deleted, a line per table,
+ * and what happens next to each table synced (`syncedTips`: an `off` one stays as of this sync).
+ */
+export function syncedReport(b: { tables: readonly PolledTable[] }, picked: readonly string[], tables: ReadonlyArray<{ table: string; kept?: KeptCurrent }>):
+  { headline: string; details: Array<readonly [string, string]>; tips: string[] } {
+  const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
+  return {
+    headline: `Synced ${picked.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted.`,
+    details: b.tables.map((t) => [t.table, syncedText(t)] as const),
+    // what happens next to each: an `off` table stays as of now, a polled one is polled again after its interval
+    tips: syncedTips(tables),
+  };
+}
 
 export async function sync(argv: string[]): Promise<number> {
   const f = parseCommand(SYNC, argv);
@@ -85,14 +101,7 @@ export async function sync(argv: string[]): Promise<number> {
         details: b.streamed.map((t) => [t.table, `${t.state}${t.why ? `: ${t.why}` : ""} · the stream has applied the database's changes through ${t.position}`] as const), next }, styleOut()));
       return 0;
     }
-    const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
-    out(reportText({
-      headline: `Synced ${picked.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted.`,
-      details: b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${n(t.ms)} ms`] as const),
-      // what happens next to each: an `off` table stays as of now, a polled one is polled again after its interval
-      tips: syncedTips(added.filter((t) => picked.includes(t.table))),
-      next,
-    }, styleOut()));
+    out(reportText({ ...syncedReport(b, picked, added.filter((t) => picked.includes(t.table))), next }, styleOut()));
     return 0;
   });
 }

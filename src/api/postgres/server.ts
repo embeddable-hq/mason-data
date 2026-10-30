@@ -10,7 +10,8 @@
  *
  * THE RULES THIS MODULE EMBODIES:
  *   - THE PASSWORD IS VERIFIED BY `authenticate` (a `mason user`'s password, or a token minted from the API key,
- *     src/duck/users.ts `listenerLogins`): a refused one is `28P01` as a wrong password is. The database a tool names
+ *     src/duck/users.ts `listenerLogins`): a refused one is `28P01` as a wrong password is; a DISABLED user's (its
+ *     password right) is `28000`, as Postgres refuses a role without LOGIN. The database a tool names
  *     must be the project's: a tool connecting to the wrong Mason learns so at once (`3D000`).
  *   - WHAT A TOOL SETS IS HONOURED OR REFUSED, never silently ignored: `TimeZone` moves every timestamptz the session
  *     sends; `extra_float_digits` below 1 would print a float with FEWER digits than this listener sends and is
@@ -53,8 +54,9 @@ import * as crypto from "node:crypto";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import type { RawStmt } from "libpg-query";
-import { ApiError } from "../error.ts";
+import { ApiError, USER_DISABLED } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
+import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { grantRefusal, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
 import { asRole, asSession, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
@@ -81,7 +83,7 @@ interface ExplainTranslation { kind: "explain"; query: NonNullable<RawStmt["stmt
 interface Explaining { options: ExplainOptions; plan: DuckPlan | null }
 
 /** what an EXPLAIN of a catalog statement says first: whose plan it is */
-const CATALOG_EXPLAINED = "Mason: answered by the catalog Postgres (Mason's own, PGlite), not DuckDB: a statement of pg_catalog or information_schema, or of no table, is the catalog's, and this is its plan";
+const CATALOG_EXPLAINED = "Mason: answered by the catalog Postgres (Mason's own, PGlite), not the copy: a statement of pg_catalog or information_schema, or of no table, is the catalog's, and this is its plan";
 
 /** an EXPLAIN's one column, Postgres's: text, or json for FORMAT JSON (ExplainResultDesc) */
 const explainField = (o: ExplainOptions, format: 0 | 1): FieldDescription => ({ name: "QUERY PLAN", typeOid: o.format === "json" ? 114 : 25, typeSize: -1, typeModifier: -1, format });
@@ -106,7 +108,7 @@ function catalogExplained(frames: Buffer[], o: ExplainOptions): Buffer[] {
   const value = dataRowValues(frames[first]!)[0];
   if (value === null || value === undefined) return frames;
   const doc = JSON.parse(value.toString("utf8")) as Array<Record<string, unknown>>;
-  if (doc[0] !== undefined) doc[0].Mason = { "Answered By": "the catalog Postgres (Mason's own, PGlite), not DuckDB", Why: "a statement of pg_catalog or information_schema, or of no table, is the catalog's" };
+  if (doc[0] !== undefined) doc[0].Mason = { "Answered By": "the catalog Postgres (Mason's own, PGlite), not the copy", Why: "a statement of pg_catalog or information_schema, or of no table, is the catalog's" };
   return [...frames.slice(0, first), dataRow([Buffer.from(JSON.stringify(doc, null, 2))]), ...frames.slice(first + 1)];
 }
 /** a statement DuckDB answers as written: its text (the parser's slice of the message) */
@@ -230,7 +232,19 @@ export function timeoutMs(value: string): number | null {
 export class StatementError extends Error {
   readonly fields: Omit<ErrorFields, "severity">;
   readonly sql: string;
-  constructor(fields: Omit<ErrorFields, "severity">, sql = "") { super(fields.message); this.fields = fields; this.sql = sql; }
+  /** the registry entry (src/duck/gaps.ts) that refused the statement, as the refusal was built with it (`gapRefusal`,
+   *  src/duck/store.ts pgErrorOf): what the request log records as `gap`; null for every other error */
+  readonly gap: GapId | null;
+  constructor(fields: Omit<ErrorFields, "severity">, sql = "", gap: GapId | null = null) { super(fields.message); this.fields = fields; this.sql = sql; this.gap = gap; }
+}
+
+/**
+ * A REFUSAL BY A REGISTRY ENTRY (src/duck/gaps.ts), the one way one is built: 0A000, `Mason gap <id>` in its DETAIL (what
+ * the oracle and a reader read), followed by `detail` (docs/SQL-SUPPORT.md, or what it names), and the id itself on the
+ * error, so the request log records which entry refused it without reading the text back.
+ */
+export function gapRefusal(gap: GapId, message: string, hint: string, sql = "", detail = " (docs/SQL-SUPPORT.md)"): StatementError {
+  return new StatementError({ code: "0A000", message, hint, detail: `${gapMark(gap)}${detail}` }, sql, gap);
 }
 export const SERVER_VERSION = "18.6";
 export const SERVER_VERSION_NUM = "180006";
@@ -305,8 +319,64 @@ export interface PgApiOptions {
 export interface PgApiServer {
   readonly port: number;
   close(): Promise<void>;
-  /** sessions open now */
+  /** sessions open now (every connection, its login under way included) */
   readonly sessions: number;
+  /** the sessions logged in now, by user and client, and how many of each run a statement (`/api/state` `sessions`) */
+  openSessions(): SessionsOpen;
+  /** the statements running now, one per session, oldest first (`/api/running`, `mason logs --running`) */
+  running(): RunningStatement[];
+  /** cancels a session's statement exactly as a CancelRequest does (`POST /api/cancel`, `mason cancel`); `statement`
+   *  (RunningStatement.statement): only while the session runs that one, else nothing is cancelled (`other`) */
+  cancel(session: number, statement?: number): CancelAnswer;
+}
+
+/**
+ * THE SESSIONS LOGGED IN NOW (`openSessions`; `/api/state` `sessions`, mason status, the usage samples): how many, and
+ * by user and client — the `mason user` ('' for a token's session) and the application_name ('' when it sent none) —
+ * with how many of them run a statement now. Read from the sessions in memory: no query, no ledger.
+ */
+export interface SessionsOpen { open: number; byClient: Array<{ user: string; client: string; open: number; running: number }> }
+
+/**
+ * A statement running now: one a session's DuckDB is running, or whose rows it is sending — what a CancelRequest (and
+ * `mason cancel`) stops. A statement being parsed or planned, a catalog read, and a portal suspended between two
+ * Executes (the client's turn) are not running.
+ */
+export interface RunningStatement {
+  /** the listener's session number (the log's `session <n>`, the request log's `session`): what `mason cancel` names */
+  session: number;
+  /** the statement's number in this run (`statementIdOf`; one across the Executes that page a portal's rows): what
+   *  `mason cancel <session> --statement <n>` names, so the cancel stops the statement listed, never the next one */
+  statement: number;
+  /** the `mason user` the session logged in as ('' for a token's session) */
+  user: string;
+  /** the client's application_name ('' when it sent none) */
+  applicationName: string;
+  /** QUERY (a simple Query's statement) or EXECUTE */
+  method: string;
+  /** when the statement arrived, ISO 8601 UTC, and how long ago */
+  startedAt: string;
+  runningMs: number;
+  /** the rows sent so far */
+  rows: number;
+  /** the statement as the tool sent it, capped as the request log caps it (`queryTruncated`) */
+  query: string;
+  queryTruncated: boolean;
+}
+
+/** What a cancel did: asked the statement to stop (it ends with 57014, as Postgres's does), found the session idle,
+ *  found no such session, or — asked for one statement — found the session running another (`other`), cancelling none.
+ *  Without a statement it stops whatever the session runs, as a CancelRequest does (Postgres's own semantics). */
+export type CancelAnswer = { cancelled: RunningStatement } | { idle: number } | { unknown: number } | { other: RunningStatement; asked: number };
+
+/** EACH STATEMENT'S NUMBER IN THIS RUN, by the controller that runs it — the thing a cancel aborts, so a cursor's is one
+ *  number across the Executes that page its rows — given when first asked (`runningNow`), never reused */
+const statementIds = new WeakMap<AbortController, number>();
+let nextStatementId = 1;
+function statementIdOf(c: AbortController): number {
+  let id = statementIds.get(c);
+  if (id === undefined) { id = nextStatementId++; statementIds.set(c, id); }
+  return id;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -330,10 +400,13 @@ class PgError extends Error {
   readonly fields: ErrorFields;
   /** the HTTP-like status the request log records (400 for a refusal, 401 a refused login, 500 Mason's failure) */
   readonly status: number;
-  constructor(fields: Omit<ErrorFields, "severity"> & { severity?: string }, status = 400) {
+  /** the registry entry that refused it (StatementError.gap): the request log's `gap` */
+  readonly gap: GapId | null;
+  constructor(fields: Omit<ErrorFields, "severity"> & { severity?: string }, status = 400, gap: GapId | null = null) {
     super(fields.message);
     this.fields = { severity: "ERROR", ...fields };
     this.status = status;
+    this.gap = gap;
   }
 }
 
@@ -353,12 +426,14 @@ function sqlstateOf(status: number, code: string | undefined): string {
 }
 
 /**
- * A refused or failed statement as its log line (`Session.refuse`): `failed` where the fault is Mason's or the
- * machine's (SQLSTATE classes XX internal, 53 resources, 57 a timeout or cancel, 58 system), `refused` for the
- * statement's own; the detail and the hint where there are, and the statement on one line, as the answered lines carry it.
+ * A refused or failed statement as its log line (`Session.refuse`): its outcome (src/api/request-log.ts outcomeOf) —
+ * `cancelled` for 57014 (a cancel or a timeout), `failed` where the fault is Mason's or the machine's (SQLSTATE classes
+ * XX internal, 53 resources, 57, 58 system), `refused` for the statement's own; the detail and the hint where there
+ * are, and the statement on one line, as the answered lines carry it.
  */
 export function refusalLine(session: number, f: Omit<ErrorFields, "severity">, sql: string): string {
-  const word = outcomeOf(f.code) === "failed" ? "failed" : "refused";
+  const o = outcomeOf(f.code);
+  const word = o === "ok" ? "refused" : o;
   const statement = sql.replace(/\s+/g, " ").trim();
   return `session ${session} ${word}: ${f.code} ${f.message}${f.detail ? `; detail: ${f.detail}` : ""}${f.hint ? `; hint: ${f.hint}` : ""}` +
     ` — ${statement === "" ? "(no statement)" : statement}`;
@@ -366,17 +441,17 @@ export function refusalLine(session: number, f: Omit<ErrorFields, "severity">, s
 
 function asPgError(err: unknown, sql: string): PgError {
   if (err instanceof PgError) return err;
-  if (err instanceof StatementError) return new PgError({ ...err.fields, position: err.fields.position ?? undefined }, err.fields.code.startsWith("XX") ? 500 : 400);
+  if (err instanceof StatementError) return new PgError({ ...err.fields, position: err.fields.position ?? undefined }, err.fields.code.startsWith("XX") ? 500 : 400, err.gap);
   if (err instanceof Unsupported) {
-    return new PgError({ code: err.sqlstate, message: err.message, position: positionOf(sql, err.offset), hint: err.hint, detail: "Mason answers the Postgres subset in docs/POSTGRES-API.md" });
+    return new PgError({ code: err.sqlstate, message: err.message, position: positionOf(sql, err.offset), hint: err.hint, detail: "Mason answers the Postgres subset in docs/POSTGRES-API.md" }, 400, err.gap);
   }
   if (err instanceof PostgresSyntaxError) return new PgError({ code: "42601", message: err.message, position: positionOf(sql, err.offset) });
   if (err instanceof ApiError) return new PgError({ code: sqlstateOf(err.status, err.code), message: err.message, detail: `Mason: ${err.code}` }, err.status);
   // Postgres's own error for a numeric (a division by zero, 22012; a field overflow, 22003), raised as Postgres raises it
-  if (err instanceof NumericError) return new PgError({ code: err.sqlstate, message: err.message }, err.sqlstate === "XX000" ? 500 : 400);
+  if (err instanceof NumericError) return new PgError({ code: err.sqlstate, message: err.message }, err.sqlstate === "XX000" ? 500 : 400, err.gap);
   if (err instanceof EncodeError) return err.code === "XX000"
     ? new PgError({ code: "XX000", message: err.message, detail: "Mason: a value the column's Postgres type cannot carry; report it" }, 500)
-    : new PgError({ code: err.code, message: err.message }, 400);
+    : new PgError({ code: err.code, message: err.message }, 400, err.gap);
   if (err instanceof ProtocolError) return new PgError({ code: "08P01", message: err.message }, 500);
   const message = err instanceof Error ? err.message : String(err);
   return new PgError({ code: "XX000", message }, 500);
@@ -491,6 +566,10 @@ interface Portal {
   cursor?: DuckCursor;
   sent: number;
   fields: FieldDescription[] | null;
+  /** THE BYTES ITS EARLIER EXECUTES SENT (a paged portal's pages, `pageSent`): its request log row, written at its
+   *  last, counts them with that one's — never the session's bytes since its first Execute, which held every other
+   *  statement's sent between two of its Executes */
+  bytes: number;
 }
 
 type TxState = "none" | "open" | "failed";
@@ -509,6 +588,12 @@ interface DuckCursor { answer: DuckAnswer; formats: readonly number[]; controlle
   /** an Execute's row count stopped it with rows left (PortalSuspended), and no Execute runs on it now: a portal
    *  dropped so is recorded by the drop, one dropped mid-Execute by that Execute (its rows or its error) */
   suspended?: boolean }
+
+/** THE STATEMENT BEING ASKED (`Session.asked`): its text, its message, when it arrived and the session's bytes sent by
+ *  then (what this message sends is counted from there: one message is handled at a time, so nothing else is sent
+ *  meanwhile), what its portal's earlier Executes sent (`carried`, `Portal.bytes`), the JSON paths it reads, and the
+ *  rows sent so far while it runs */
+interface Asked { sql: string; method: string; startedAt: number; sentAt: number; carried?: number; jsonReads?: readonly string[]; rows?: number }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
@@ -542,6 +627,8 @@ class Session {
   skipToSync = false;
   /** the query running now, for a CancelRequest and the socket closing */
   running: AbortController | null = null;
+  /** the bytes written to the client so far: a message's are this less its mark (`Asked.sentAt`; `bytesFor`) */
+  sentBytes = 0;
   /** this session's DuckDB connection, opened at its first statement over a table */
   private duckRunner: DuckRunner | null = null;
 
@@ -550,7 +637,7 @@ class Session {
     if (this.duckRunner === null) return;
     const runner = this.duckRunner;
     this.duckRunner = null;
-    runner.close().catch((e: unknown) => { this.server.log(`session ${this.id}: closing its DuckDB connection failed: ${e instanceof Error ? e.message : String(e)}`); });
+    runner.close().catch((e: unknown) => { this.server.log(`session ${this.id}: closing its connection to the copy failed: ${e instanceof Error ? e.message : String(e)}`); });
   }
 
   /** A statement ended, however: the session's next one may run, and a session closed meanwhile closes its connection now. */
@@ -560,7 +647,7 @@ class Session {
   }
   /** THE STATEMENT BEING ASKED, for the request log (`recordRequest`): set as each message arrives, its
    *  text narrowed to one statement of a simple Query as each is run */
-  private asked: { sql: string; method: string; startedAt: number; jsonReads?: readonly string[] } | null = null;
+  private asked: Asked | null = null;
   /** messages are handled one at a time, in order: a parse is asynchronous */
   private draining = false;
   /** the connection's first bytes have been read, and told a TLS ClientHello from a startup packet */
@@ -591,7 +678,18 @@ class Session {
   /** the frames as one write; an answer's rows are many (150,000 spread into a call's arguments overflow the stack) */
   sendAll(parts: readonly Buffer[]): void {
     if (this.phase === "closed") return;
-    this.socket.write(Buffer.concat(parts));
+    const bytes = Buffer.concat(parts);
+    this.sentBytes += bytes.length;
+    this.socket.write(bytes);
+  }
+
+  /** The statement running now (RunningStatement), or null: one DuckDB runs or sends, so a cancel would stop it. */
+  runningNow(now: number): RunningStatement | null {
+    if (this.running === null || this.asked === null || this.phase !== "ready") return null;
+    const stored = storedPayload(this.asked.sql);
+    return { session: this.id, statement: statementIdOf(this.running), user: this.token?.user ?? "", applicationName: this.vars.applicationName, method: this.asked.method,
+      startedAt: new Date(this.asked.startedAt).toISOString(), runningMs: now - this.asked.startedAt, rows: this.asked.rows ?? 0,
+      query: stored.text, queryTruncated: stored.truncated };
   }
 
   end(why: string): void {
@@ -658,7 +756,7 @@ class Session {
       this.server.log(`trace ${this.id} ${JSON.stringify(this.vars.applicationName)} ${m.type}: ${JSON.stringify(m.sql)}`);
     }
     if (m.type === "Query" || m.type === "Parse" || m.type === "Bind" || m.type === "Describe" || m.type === "Execute") {
-      this.asked = { sql: m.type === "Query" || m.type === "Parse" ? m.sql : this.sqlOf(m), method: m.type.toUpperCase(), startedAt: Date.now() };
+      this.asked = { sql: m.type === "Query" || m.type === "Parse" ? m.sql : this.sqlOf(m), method: m.type.toUpperCase(), startedAt: Date.now(), sentAt: this.sentBytes };
     }
     // EVERY statement of a user's session is held to its removal (review of #507: a check inside the answer let a pool's
     // keep-alive, its catalog reads, SET and SHOW go on for ever after a revocation)
@@ -800,14 +898,21 @@ class Session {
       const message = err instanceof Error ? err.message : String(err);
       // a revocation record that could not be read is no wrong password: the server could not tell, said as such
       const unknown = err instanceof ApiError && err.status === 503;
-      const refused = new PgError({ code: unknown ? "57P03" : "28P01",
-        message: unknown ? `the password could not be checked for user "${this.user}": ${message}` : `password authentication failed for user "${this.user}": ${message}`,
-        hint: unknown ? "connect again once Mason can read its list of users"
-          : "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL" }, 401);
+      // a disabled user (`mason user disable`): its password was right, so it is no wrong password but a role that may
+      // not log in, which Postgres refuses 28000 "role … is not permitted to log in": that sentence alone, why in DETAIL,
+      // the way out in HINT, as Postgres splits them
+      const disabled = err instanceof ApiError && err.code === USER_DISABLED;
+      const refused = disabled
+        ? new PgError({ code: "28000", message, detail: `the user "${this.user}" is disabled (mason user disable). Mason: ${USER_DISABLED}`, hint: `mason user enable ${this.user} lets it connect again, with the same password` }, 401)
+        : new PgError({ code: unknown ? "57P03" : "28P01",
+          message: unknown ? `the password could not be checked for user "${this.user}": ${message}` : `password authentication failed for user "${this.user}": ${message}`,
+          hint: unknown ? "connect again once Mason can read its list of users"
+            : "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL" }, 401);
       // a tool that cannot connect is the first thing to look for in the request log
-      this.asked = { sql: "", method: "CONNECT", startedAt: Date.now() };
-      this.recordRequest(refused, undefined, err instanceof ApiError ? err.userName : undefined);
-      this.send(errorResponse({ ...refused.fields, severity: "FATAL" }));
+      this.asked = { sql: "", method: "CONNECT", startedAt: Date.now(), sentAt: this.sentBytes };
+      const response = errorResponse({ ...refused.fields, severity: "FATAL" });
+      this.recordRequest(refused, undefined, err instanceof ApiError ? err.userName : undefined, [response]);
+      this.send(response);
       this.end("authentication failed");
       return;
     }
@@ -982,7 +1087,7 @@ class Session {
     if (stmts.length === 0) { this.send(emptyQueryResponse(), readyForQuery(this.txStatus())); return; }
     for (const raw of stmts) {
       const text = statementText(sql, raw);
-      this.asked = { sql: text, method: "QUERY", startedAt: Date.now() };
+      this.asked = { sql: text, method: "QUERY", startedAt: Date.now(), sentAt: this.sentBytes };
       try {
         const out = await this.runSimple(raw, text, sql);
         this.sendAll(out);
@@ -1005,9 +1110,10 @@ class Session {
    */
   private refuse(e: PgError, sql: string, at?: string): void {
     this.server.log(refusalLine(this.id, e.fields, sql));
-    this.recordRequest(e, sql);
+    const response = errorResponse(e.fields);
+    this.recordRequest(e, sql, undefined, [response]);
     this.traceRefusal(e, at);
-    this.send(errorResponse(e.fields));
+    this.send(response);
   }
 
   private traceRefusal(e: PgError, at?: string): void {
@@ -1021,11 +1127,14 @@ class Session {
    * statement's ErrorResponse goes out), and for a refused password (CONNECT), through `options.record`. A catalog
    * read, a SET or a SHOW answered is the protocol's chatter, not recorded. Never throws: `record` buffers.
    */
-  private recordRequest(answer: PgError | { rows: number; startedAt?: number }, sql?: string, refusedUser?: string,
-    of?: { method: string; jsonReads: readonly string[] | undefined }): void {
-    // `of`: a statement recorded after its own messages (a portal dropped suspended), not the one being asked now
-    const asked = of === undefined ? this.asked : { sql: sql ?? "", method: of.method, startedAt: Date.now(), ...(of.jsonReads !== undefined ? { jsonReads: of.jsonReads } : {}) };
+  private recordRequest(answer: PgError | { rows: number; startedAt?: number }, sql?: string, refusedUser?: string, then: readonly Buffer[] = [],
+    of?: { method: string; jsonReads: readonly string[] | undefined; carried: number }): void {
+    // `of`: a statement recorded after its own messages (a portal dropped suspended), not the one being asked now: what
+    // it sent is what its pages sent (`carried`), nothing since
+    const asked: Asked | null = of === undefined ? this.asked
+      : { sql: sql ?? "", method: of.method, startedAt: Date.now(), sentAt: this.sentBytes, carried: of.carried, ...(of.jsonReads !== undefined ? { jsonReads: of.jsonReads } : {}) };
     const startedAt = (!(answer instanceof PgError) ? answer.startedAt : undefined) ?? asked?.startedAt ?? Date.now();
+    const bytesSent = this.bytesFor(then, asked);
     // a refusal's statement is the one refuse() names (a simple Query's own statement, an Execute's portal's)
     const stored = storedPayload(sql ?? asked?.sql ?? "");
     const user = this.token?.user ?? refusedUser;
@@ -1033,13 +1142,14 @@ class Session {
     this.server.options.record({
       requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs: Date.now() - startedAt,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
-      caller: hashCaller(this.presented),
+      caller: hashCaller(this.presented), bytesSent,
       ...(user !== undefined ? { user } : {}),
       ...(role !== undefined ? { role } : {}),
       ...(asked?.jsonReads !== undefined && asked.jsonReads.length > 0 ? { jsonReads: asked.jsonReads } : {}),
       ...(answer instanceof PgError
         ? { status: answer.status, sqlstate: answer.fields.code, error: answer.fields.message,
-            ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}) }
+            ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}),
+            ...(answer.gap !== null ? { gap: answer.gap } : {}) }
         : { status: 200, rows: answer.rows }),
     });
   }
@@ -1071,8 +1181,9 @@ class Session {
         const disarm = this.armTimeout(controller);
         try {
           const { field, rows } = await this.duckExplain({ options: e.options, plan: e.plan }, [], [], { parse: now, exec: now }, controller);
-          this.recordRequest({ rows: rows.length });
-          return [rowDescription([field]), ...rows, commandComplete("EXPLAIN")];
+          const out = [rowDescription([field]), ...rows, commandComplete("EXPLAIN")];
+          this.recordRequest({ rows: rows.length }, undefined, undefined, out);
+          return out;
         } finally { disarm(); }
       }
       case "catalog": return this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user));
@@ -1092,8 +1203,9 @@ class Session {
             this.send(rowDescription(fields));
             await this.streamRest(cursor);
           } finally { cursor.answer.close(); }
-          this.recordRequest({ rows: cursor.sent });
-          return [commandComplete(`SELECT ${cursor.sent}`)];
+          const done = [commandComplete(`SELECT ${cursor.sent}`)];
+          this.recordRequest({ rows: cursor.sent }, undefined, undefined, done);
+          return done;
         } finally { disarm(); }
       }
     }
@@ -1339,6 +1451,7 @@ class Session {
   private flushPending(c: DuckCursor): void {
     if (c.pending.length === 0) return;
     c.sent += c.pending.length;
+    if (this.asked !== null) this.asked.rows = c.sent;
     this.sendAll(c.pending);
     c.pending = [];
   }
@@ -1400,7 +1513,7 @@ class Session {
     const c = portal?.cursor;
     if (portal !== undefined && c !== undefined && c.suspended === true && c.recorded !== true && c.failed === undefined) {
       c.recorded = true;
-      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, portal.statement.sql, undefined, { method: "EXECUTE", jsonReads: portal.statement.duck?.jsonReads });
+      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, portal.statement.sql, undefined, [], { method: "EXECUTE", jsonReads: portal.statement.duck?.jsonReads, carried: portal.bytes });
     }
     c?.answer.close();
     this.portals.delete(name);
@@ -1650,7 +1763,7 @@ class Session {
       }
       this.dropPortal(m.portal);
       const rows = reply.slice(2, -2);
-      this.portals.set(m.portal, { statement, params: [], boundAt: this.server.now(), resultFormats: m.resultFormats, rows: null, sent: 0, fields: null,
+      this.portals.set(m.portal, { statement, params: [], boundAt: this.server.now(), resultFormats: m.resultFormats, rows: null, sent: 0, fields: null, bytes: 0,
         catalog: { description, rows: statement.explainCatalog === undefined ? rows : catalogExplained(rows, statement.explainCatalog), sent: 0, done } });
       return [bound];
     }
@@ -1668,7 +1781,7 @@ class Session {
     const boundAt = this.server.now();
     this.txNow ??= boundAt;
     this.dropPortal(m.portal);
-    this.portals.set(m.portal, { statement, params, boundAt, resultFormats: m.resultFormats, rows: null, sent: 0, fields: null });
+    this.portals.set(m.portal, { statement, params, boundAt, resultFormats: m.resultFormats, rows: null, sent: 0, fields: null, bytes: 0 });
     return [bindComplete()];
   }
 
@@ -1711,6 +1824,8 @@ class Session {
       c.sent += take;
       return c.sent < c.rows.length ? [...out, portalSuspended()] : [...out, c.done];
     }
+    // what its earlier Executes sent is this one's row's too (`bytesFor`)
+    if (this.asked !== null) this.asked.carried = portal.bytes;
     const statement = portal.statement;
     if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
     const t = statement.shape ?? this.classify(statement.raw.stmt, statementText(statement.sql, statement.raw));
@@ -1747,11 +1862,29 @@ class Session {
         const take = m.maxRows > 0 ? Math.min(m.maxRows, rows.length - portal.sent) : rows.length - portal.sent;
         const out = rows.slice(portal.sent, portal.sent + take);
         portal.sent += take;
-        if (portal.sent < rows.length) return [...out, portalSuspended()];
-        this.recordRequest({ rows: rows.length });
-        return [...out, commandComplete("EXPLAIN")];
+        if (portal.sent < rows.length) return this.pageSent(portal, [...out, portalSuspended()]);
+        const done = [...out, commandComplete("EXPLAIN")];
+        this.recordRequest({ rows: rows.length }, undefined, undefined, done);
+        return done;
       }
     }
+  }
+
+  /**
+   * THE BYTES SENT FOR THE STATEMENT BEING ASKED, `then` (the frames that end it, sent just after) among them: what its
+   * portal's earlier Executes sent (`carried`), and what the session was written since this message arrived — exact,
+   * since one message is handled at a time and a portal read aside meanwhile is read, never sent (`readAside`). Never
+   * the session's bytes since a portal's first Execute: another portal's rows sent between two of its Executes were
+   * counted in both rows.
+   */
+  private bytesFor(then: readonly Buffer[], asked: Asked | null = this.asked): number {
+    return (asked?.carried ?? 0) + this.sentBytes - (asked?.sentAt ?? this.sentBytes) + then.reduce((n, b) => n + b.length, 0);
+  }
+
+  /** a page of a portal, suspended: what it sends is kept on the portal (`Portal.bytes`) for its last Execute's row */
+  private pageSent(portal: Portal, frames: Buffer[]): Buffer[] {
+    portal.bytes = this.bytesFor(frames);
+    return frames;
   }
 
   /** the statement being answered reads these JSON paths: its request log row says so, answered or failed */
@@ -1764,7 +1897,7 @@ class Session {
     // each Execute of a paged portal is a message of its own: the last one's row in the request log carries the reads
     if (statement.duck !== undefined) this.readsOf(statement.duck);
     if (portal.cursor === undefined) {
-      if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a DuckDB statement without its plan: report it (Mason's Postgres listener)" });
+      if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a statement without its plan: report it (Mason's Postgres listener)" });
       // a row count on the wire bounds the rows: the plan made for it where it differs (boundOnWire)
       const plan = m.maxRows > 0 ? await this.boundOnWire(statement, statement.duck, controller) : statement.duck;
       const exec = this.txNow ??= this.server.now();
@@ -1780,19 +1913,21 @@ class Session {
       if (m.maxRows <= 0) {
         try { await this.streamRest(c); } finally { c.answer.close(); }
         c.recorded = true;
-        this.recordRequest({ rows: c.sent, startedAt: c.startedAt });
-        return [commandComplete(`SELECT ${c.sent}`)];
+        const done = [commandComplete(`SELECT ${c.sent}`)];
+        this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, undefined, undefined, done);
+        return done;
       }
       // at most maxRows (JDBC's fetch size, a cursor): suspended while a row is left, read one chunk ahead to know it
       while (!c.done && c.pending.length <= m.maxRows) await this.fill(c);
       const out = c.pending.splice(0, m.maxRows);
       c.sent += out.length;
-      // suspended: its row is written at its last Execute, or when it is dropped (dropPortal)
-      if (c.pending.length > 0) { c.suspended = true; return [...out, portalSuspended()]; }
+      // suspended: its row is written at its last Execute, or when it is dropped (dropPortal), with what its pages sent
+      if (c.pending.length > 0) { c.suspended = true; return this.pageSent(portal, [...out, portalSuspended()]); }
       c.answer.close();
       c.recorded = true;
-      this.recordRequest({ rows: c.sent, startedAt: c.startedAt });
-      return [...out, commandComplete(`SELECT ${c.sent}`)];
+      const done = [...out, commandComplete(`SELECT ${c.sent}`)];
+      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, undefined, undefined, done);
+      return done;
     } catch (e) {
       // its refusal is its row (refuse)
       c.recorded = true;
@@ -1833,7 +1968,9 @@ class Session {
       // could not tell: this statement is refused, the session kept, and the next statement asks again
       if (err instanceof ApiError && err.status === 503) return new PgError({ code: "57P03", message, hint: "run the statement again once Mason can read its list of users" }, 503);
       if (err instanceof ApiError) this.recordRefusal(asked.toUpperCase(), err);
-      this.fatal("28000", `the session's user is no longer accepted: ${message}`, `a removed user's sessions end at their next statement; mason user add ${user} makes it again, with a new password`);
+      this.fatal("28000", `the session's user is no longer accepted: ${message}`, err instanceof ApiError && err.code === USER_DISABLED
+        ? `a disabled user's sessions end at their next statement; mason user enable ${user} lets it connect again, with the same password`
+        : `a removed user's sessions end at their next statement; mason user add ${user} makes it again, with a new password`);
       return null;
     }
     this.verifiedAt = now;
@@ -2090,10 +2227,63 @@ class Server {
 
   forget(s: Session): void { this.sessions.delete(s.id); }
 
+  /** A CancelRequest: the session's statement stopped when the key is the session's (`interrupt`). */
   cancel(pid: number, secret: number): void {
     const s = this.sessions.get(pid);
     if (s === undefined || s.secret !== secret) return;   // as Postgres: a wrong key is ignored, never answered
+    this.interrupt(s);
+  }
+
+  /**
+   * THE ONE WAY A SESSION'S STATEMENT IS CANCELLED, for a CancelRequest and `mason cancel` alike: its controller aborted
+   * with no reason, so DuckDB is interrupted (or the wait for the client woken) and the client is told 57014 "canceling
+   * statement due to user request", recorded as cancelled. Answers what it stopped, or null when nothing ran.
+   */
+  interrupt(s: Session): RunningStatement | null {
+    const running = s.runningNow(Date.now());
     s.running?.abort();
+    return running;
+  }
+
+  /** `mason cancel <session>` (`POST /api/cancel`): the session's statement stopped as a CancelRequest stops it — with
+   *  `statement`, only while it is the one the session runs (a listing's statement may have ended, and the session
+   *  begun another, by the time the cancel arrives) */
+  cancelSession(id: number, statement?: number): CancelAnswer {
+    const s = this.sessions.get(id);
+    if (s === undefined) return { unknown: id };
+    if (statement !== undefined) {
+      const now = s.runningNow(Date.now());
+      if (now !== null && now.statement !== statement) return { other: now, asked: statement };
+    }
+    const stopped = this.interrupt(s);
+    if (stopped === null) return { idle: id };
+    this.log(`session ${id}: its statement cancelled by mason cancel`);
+    return { cancelled: stopped };
+  }
+
+  /** The sessions logged in now, by user and client, the most open first (`SessionsOpen`). */
+  openSessions(): SessionsOpen {
+    const now = Date.now();
+    const by = new Map<string, { user: string; client: string; open: number; running: number }>();
+    let open = 0;
+    for (const s of this.sessions.values()) {
+      if (s.phase !== "ready") continue;
+      open++;
+      const user = s.token?.user ?? "", client = s.vars.applicationName;
+      const k = JSON.stringify([user, client]);
+      const g = by.get(k) ?? { user, client, open: 0, running: 0 };
+      g.open++;
+      if (s.runningNow(now) !== null) g.running++;
+      by.set(k, g);
+    }
+    return { open, byClient: [...by.values()].sort((a, b) => b.open - a.open || (a.user < b.user ? -1 : a.user > b.user ? 1 : a.client < b.client ? -1 : a.client > b.client ? 1 : 0)) };
+  }
+
+  /** The statements running now, oldest first. */
+  running(): RunningStatement[] {
+    const now = Date.now();
+    return [...this.sessions.values()].map((s) => s.runningNow(now)).filter((r): r is RunningStatement => r !== null)
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.session - b.session);
   }
 }
 
@@ -2114,6 +2304,9 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
   return {
     port,
     get sessions() { return server.sessions.size; },
+    openSessions: () => server.openSessions(),
+    running: () => server.running(),
+    cancel: (session, statement) => server.cancelSession(session, statement),
     async close() {
       for (const s of [...server.sessions.values()]) s.end("server closing");
       await new Promise<void>((resolve) => listener.close(() => resolve()));

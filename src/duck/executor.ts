@@ -93,7 +93,7 @@ export function typeFromJson(j: Json): DuckDBType {
     case T.GEOMETRY: return duck.DuckDBGeometryType.create(alias, typeof o.crs === "string" ? o.crs : undefined);
   }
   const simple = SIMPLE_TYPES.get(id);
-  if (simple === undefined) throw new Error(`a DuckDB type Mason cannot carry between threads: ${JSON.stringify(j)} (Mason bug: report it)`);
+  if (simple === undefined) throw new Error(`a type of the copy that Mason cannot carry between threads: ${JSON.stringify(j)} (Mason bug: report it)`);
   return simple(alias);
 }
 /** every type of no parameters, by its id: each class's `create(alias)` */
@@ -143,13 +143,13 @@ export function valueFromClone(v: DuckDBValue, t: DuckDBType): DuckDBValue {
 
 /** what the worker answers a failure with: the error's own class where the listener tells it apart (a StatementError's
  *  fields, an EncodeError's or a NumericError's code: src/api/postgres/server.ts pgErrorOf), else its message */
-export type WireError = { kind: "statement"; fields: StatementError["fields"]; sql: string } | { kind: "encode"; message: string; code: string }
-  | { kind: "numeric"; message: string; sqlstate: string } | { kind: "error"; message: string; name: string };
+export type WireError = { kind: "statement"; fields: StatementError["fields"]; sql: string; gap: StatementError["gap"] } | { kind: "encode"; message: string; code: string; gap: EncodeError["gap"] }
+  | { kind: "numeric"; message: string; sqlstate: string; gap: NumericError["gap"] } | { kind: "error"; message: string; name: string };
 
 export function wireError(e: unknown): WireError {
-  if (e instanceof StatementError) return { kind: "statement", fields: e.fields, sql: e.sql };
-  if (e instanceof EncodeError) return { kind: "encode", message: e.message, code: e.code };
-  if (e instanceof NumericError) return { kind: "numeric", message: e.message, sqlstate: e.sqlstate };
+  if (e instanceof StatementError) return { kind: "statement", fields: e.fields, sql: e.sql, gap: e.gap };
+  if (e instanceof EncodeError) return { kind: "encode", message: e.message, code: e.code, gap: e.gap };
+  if (e instanceof NumericError) return { kind: "numeric", message: e.message, sqlstate: e.sqlstate, gap: e.gap };
   return { kind: "error", message: e instanceof Error ? e.message : String(e), name: e instanceof Error ? e.name : "Error" };
 }
 export type Reply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: WireError } | { log: string } | { pong: true };
@@ -167,9 +167,9 @@ export const STOPPING: StatementError["fields"] = { code: "57P01", message: "ter
   detail: "Mason is stopping (mason stop, or a shutdown)", hint: "connect again once Mason runs again (mason status says whether it does)" };
 
 const errorOf = (e: WireError): Error => {
-  if (e.kind === "statement") return new StatementError(e.fields, e.sql);
-  if (e.kind === "encode") return new EncodeError(e.message, e.code);
-  if (e.kind === "numeric") return new NumericError(e.message, e.sqlstate);
+  if (e.kind === "statement") return new StatementError(e.fields, e.sql, e.gap);
+  if (e.kind === "encode") return new EncodeError(e.message, e.code, e.gap);
+  if (e.kind === "numeric") return new NumericError(e.message, e.sqlstate, e.gap);
   const err = new Error(e.message);
   err.name = e.name;
   return err;
@@ -180,7 +180,7 @@ function plainValues(values: readonly unknown[] | undefined): unknown[] | undefi
   if (values === undefined) return undefined;
   for (const v of values) {
     if (v === null || typeof v !== "object" || Array.isArray(v) || ArrayBuffer.isView(v) || v instanceof Date) continue;
-    if (Object.getPrototypeOf(v) !== Object.prototype) throw new Error(`a ${(v as object).constructor.name} cannot be sent to DuckDB's thread: pass its text or a plain value (Mason bug: report it)`);
+    if (Object.getPrototypeOf(v) !== Object.prototype) throw new Error(`a ${(v as object).constructor.name} cannot be sent to the copy's thread: pass its text or a plain value (Mason bug: report it)`);
   }
   return [...values];
 }
@@ -290,7 +290,7 @@ export class Executor {
     this.watch = setInterval(() => {
       if (this.gone !== null || this.pending.size === 0) { this.heard = performance.now(); return; }
       if (performance.now() - this.heard > this.silentMs) {
-        this.abandon(`it answered nothing for ${Math.round(this.silentMs / 1000)} s with ${this.pending.size} request(s) waiting (stuck inside DuckDB: Mason bug, report it with mason logs)`);
+        this.abandon(`it answered nothing for ${Math.round(this.silentMs / 1000)} s with ${this.pending.size} request(s) waiting (stuck inside the copy: Mason bug, report it with mason logs)`);
         return;
       }
       this.worker.postMessage({ op: "ping" });
@@ -410,7 +410,7 @@ export class Executor {
     const closed = (async () => { await this.shutDown(); await this.exited; return "closed" as const; })();
     try {
       if (await Promise.race([closed, late]) === "late") {
-        this.log(`the copy's thread did not close within ${graceMs / 1000} s: given up on (its sessions are told 57P02); it ends once its shutdown finishes, and the process waits for it (a thread stuck inside DuckDB needs a SIGKILL)`);
+        this.log(`the copy's thread did not close within ${graceMs / 1000} s: given up on (its sessions are told 57P02); it ends once its shutdown finishes, and the process waits for it (a thread stuck inside the copy needs a SIGKILL)`);
         this.abandon(`it did not close within ${graceMs / 1000} s`);
       }
     } finally { clearTimeout(timer); }

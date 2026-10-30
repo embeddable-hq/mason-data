@@ -16,10 +16,9 @@
  */
 import { deparseSync } from "pgsql-deparser";
 import type { Node } from "libpg-query";
-import { StatementError } from "../api/postgres/server.ts";
+import { gapRefusal, type StatementError } from "../api/postgres/server.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { catalogRows, type PgAnalysis } from "./analyze.ts";
-import { gapMark } from "./gaps.ts";
 import type { TreeValue } from "./pgtree.ts";
 import { treeDifference } from "./rewrite.ts";
 
@@ -36,7 +35,7 @@ const literal = (s: string): string => `'${s.replace(/'/g, "''")}'`;
 const sval = (n: unknown): string | null => isObject(n) && isObject(n.String) && typeof n.String.sval === "string" ? n.String.sval : null;
 
 export function viewRefused(message: string, hint: string): StatementError {
-  return new StatementError({ code: "0A000", message, hint, detail: `${gapMark("view-forms")} (docs/SQL-SUPPORT.md)` });
+  return gapRefusal("view-forms", message, hint);
 }
 
 /** the views Postgres's analysis read: every range-table entry of a relation whose kind is a view, by OID */

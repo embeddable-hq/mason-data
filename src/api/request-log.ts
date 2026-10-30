@@ -40,21 +40,48 @@ export interface ApiLogRow {
   detail?: string | undefined;
   hint?: string | undefined;
   rows?: number | undefined;
+  /** the registry entry (src/duck/gaps.ts) that refused the statement, from the refusal itself (StatementError.gap):
+   *  absent for an answer and for any other refusal (a missing table, a syntax error) */
+  gap?: string | undefined;
   /** the copied tables' JSON paths the statement read by literal steps (src/duck/kept-route.ts readKey): what decides
    *  the paths Mason stores (src/duck/kept.ts) */
   jsonReads?: readonly string[] | undefined;
+  /** the bytes the listener sent the session for this statement: from its message's arrival to its last frame (its
+   *  rows, its CommandComplete or ErrorResponse) — what it cost to send; absent where nothing was counted */
+  bytesSent?: number | undefined;
 }
 
+/** The SQLSTATE of a cancelled statement: a CancelRequest, `mason cancel`, or a statement_timeout (Postgres's 57014). */
+export const CANCELLED_SQLSTATE = "57014";
+/** The SQLSTATE classes whose fault is Mason's or the machine's: XX internal, 53 resources, 57 an operator's, 58 system. */
+export const FAILED_CLASSES = ["XX", "53", "57", "58"] as const;
+
+/** A statement's outcome in a word: `ok`, `refused` (the statement's own fault), `failed` (Mason's or the machine's),
+ *  `cancelled` (57014: a cancel or a statement timeout). */
+export type Outcome = "ok" | "refused" | "failed" | "cancelled";
+export const OUTCOMES: readonly Outcome[] = ["ok", "refused", "failed", "cancelled"];
+
 /**
- * A Postgres-listener statement's outcome in a word, from the SQLSTATE it was sent: `failed` where the fault is Mason's
- * or the machine's (classes XX internal, 53 resources, 57 a timeout or a cancel, 58 system), `refused` for the
- * statement's own, `ok` for none. Read by the listener's refusal line (server.ts `refusalLine`) and the request log
- * (src/duck/requests.ts) alike.
+ * A Postgres-listener statement's outcome in a word, from the SQLSTATE it was sent: `cancelled` for 57014 (a cancel or a
+ * timeout), `failed` where the fault is Mason's or the machine's (FAILED_CLASSES), `refused` for the statement's own,
+ * `ok` for none. Read by the listener's refusal line (server.ts `refusalLine`) and the request log (src/duck/requests.ts)
+ * alike; the ledger's filter and summary read the SAME rule as SQL (`outcomeSql`), held equal by tests/duck-requests.test.ts.
  */
-export function outcomeOf(sqlstate: string | null | undefined): "ok" | "refused" | "failed" {
+export function outcomeOf(sqlstate: string | null | undefined): Outcome {
   if (sqlstate === null || sqlstate === undefined || sqlstate === "") return "ok";
-  return /^(XX|53|57|58)/.test(sqlstate) ? "failed" : "refused";
+  if (sqlstate === CANCELLED_SQLSTATE) return "cancelled";
+  return FAILED_CLASSES.some((c) => sqlstate.startsWith(c)) ? "failed" : "refused";
 }
+
+/** `outcomeOf` as a SQL expression over a SQLSTATE column: the one rule, for the ledger's filters and summary. */
+export function outcomeSql(column: string): string {
+  return `CASE WHEN ${column} IS NULL OR ${column} = '' THEN 'ok' WHEN ${column} = '${CANCELLED_SQLSTATE}' THEN 'cancelled' ` +
+    `WHEN left(${column}, 2) IN (${FAILED_CLASSES.map((c) => `'${c}'`).join(", ")}) THEN 'failed' ELSE 'refused' END`;
+}
+
+/** A statement as a reader shows it: completed (answered), failed (refused or failed), or cancelled. */
+export type RequestStatus = "completed" | "failed" | "cancelled";
+export const statusOf = (o: Outcome): RequestStatus => o === "ok" ? "completed" : o === "cancelled" ? "cancelled" : "failed";
 
 /**
  * The caller's identity WITHOUT the credential: a truncated SHA-256 of what was presented. Distinct callers stay

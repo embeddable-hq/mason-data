@@ -69,11 +69,11 @@ export function duckCollation(provider: string, collate: string, locale: string 
   if (/^(C|POSIX)([.].*)?$/i.test(collate) && provider !== "i") return { kind: "bytes", ascii: true };
   if (provider === "i") {
     const name = icuName(locale ?? collate);
-    if (name === null) throw new Error(`the source database's ICU locale ${JSON.stringify(locale ?? collate)} has no DuckDB collation: Mason cannot sort text as it does`);
+    if (name === null) throw new Error(`the source database's ICU locale ${JSON.stringify(locale ?? collate)} has no collation in the copy: Mason cannot sort text as it does`);
     return { kind: "icu", name };
   }
   const name = icuName(collate);
-  if (name === null) throw new Error(`the source database's collation ${JSON.stringify(collate)} has no DuckDB collation to follow: Mason cannot sort text as it does`);
+  if (name === null) throw new Error(`the source database's collation ${JSON.stringify(collate)} has no collation in the copy to follow: Mason cannot sort text as it does`);
   return { kind: "libc", icu: name };
 }
 
@@ -968,7 +968,7 @@ class Rewriter {
    * same order and leaves the rank out (`* EXCLUDE`, DuckDB's).
    */
   private withTies(b: Body): AstNode {
-    if (b.distinctClause !== undefined) throw new Unrewritable("FETCH … WITH TIES over a SELECT DISTINCT is not supported by Mason (DuckDB has no WITH TIES)", "select the DISTINCT rows in a subquery and FETCH … WITH TIES from it", "with-ties-distinct");
+    if (b.distinctClause !== undefined) throw new Unrewritable("FETCH … WITH TIES over a SELECT DISTINCT is not supported by Mason (the copy has no WITH TIES)", "select the DISTINCT rows in a subquery and FETCH … WITH TIES from it", "with-ties-distinct");
     const order = (b.sortClause as AstNode[] | undefined) ?? [];
     const count = b.limitCount as AstNode;
     delete b.limitCount;
