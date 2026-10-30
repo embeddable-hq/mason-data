@@ -114,6 +114,9 @@ export const bytesText = (b) => b < 1024 ? `${n(b)} B` : fileSize(b);
 
 /** An ISO time as the commands' lines print it: `2026-10-27 09:04:00` (UTC). */
 export const utcText = (iso) => iso.slice(0, 19).replace("T", " ");
+/** The same to the millisecond: `2026-10-27 09:04:05.123` (UTC) — a statement's start and end, where a second is too
+ *  coarse to tell two apart or read how long one took. */
+export const utcMsText = (iso) => iso.slice(0, 23).replace("T", " ");
 /** The same to the minute, as the commands' lists print it: `2026-10-27 09:04` (UTC). */
 export const utcMinute = (iso) => iso.slice(0, 16).replace("T", " ");
 

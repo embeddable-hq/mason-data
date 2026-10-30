@@ -11,7 +11,7 @@
  * empty and unfiltered, how to connect (`renderConnect`), so the first statement is a paste away. Usage's rows lead here
  * filtered (`route`: `?user=`, `?client=`, `?slow=1`, `?status=`).
  */
-import { msText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, details, createOpenSet, status,
+import { msText, agoText, bytesText, esc, firstLine, n, empty, renderFailure, rowsHtml, utcText, utcMsText, details, createOpenSet, status,
   clip, capped, TITLE_MAX, sortTh, sortedBy, nextSort, RANGES, DEFAULT_RANGE, clientText, renderConnect, copyClick, UNLISTED_STATEMENTS, statementCell, rangeEvery } from "../shared.js";
 
 const STATE = "/api/state";
@@ -74,7 +74,7 @@ export function renderRequests(page, { paged = false, filtered = false, isOpen =
     const stmt = capped(r.query || "(no statement)", STATEMENT_MAX, "mason logs --requests --json");
     const err = capped(r.message ?? "", STATEMENT_MAX, "mason logs --requests --json");
     // its body is as wide as the row and no wider (`.detail-body`): a long statement scrolls in its box, never widens a column
-    const more = open ? `<tr class="detail"><td colspan="${REQUEST_COLUMNS.length}"><div class="detail-body">${rowsHtml([["Query id", r.requestId], ["Started (UTC)", utcText(r.startedAt)], ["Ended (UTC)", utcText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
+    const more = open ? `<tr class="detail"><td colspan="${REQUEST_COLUMNS.length}"><div class="detail-body">${rowsHtml([["Query id", r.requestId], ["Started (UTC)", utcMsText(r.startedAt)], ["Ended (UTC)", utcMsText(r.endedAt)], ["Bytes sent", r.bytesSent === null ? "" : bytesText(r.bytesSent)]])}` +
       `<pre class="stmt">${esc(stmt.text)}</pre>${stmt.cut ? `<p class="dim cut">${esc(stmt.cut)}${r.queryTruncated ? " (as the log kept it)" : ""}</p>` : r.queryTruncated ? `<p class="dim cut">the request log kept the statement cut</p>` : ""}` +
       `${r.message ? `<pre class="error">${esc(r.sqlstate ? `${r.sqlstate} ` : "")}${esc(err.text)}</pre>${err.cut ? `<p class="dim cut">${esc(err.cut)}</p>` : ""}` : ""}</div></td></tr>` : "";
     return row + more;
