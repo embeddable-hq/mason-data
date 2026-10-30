@@ -923,7 +923,7 @@ test("a failed copy waits before it is tried again, and a change of its columns 
     void sync.setTables([T(true)]);
     await sync.once();
     assert.deepEqual(events.map((e) => [e.kind, e.table]), [["copy_failed", "public.t"]]);
-    assert.equal(`copy of public.t failed: ${events[0]!.message}`, logged.find((l) => l.startsWith("copy of public.t failed: ")));
+    assert.equal(`sync of public.t failed: ${events[0]!.message}`, logged.find((l) => l.startsWith("sync of public.t failed: ")));
     assert.equal(since(from, /^syncing public\.t:/), 1, logged.slice(from).join("\n"));
     assert.equal(since(from, /^sync of public\.t failed: [\s\S]*; tried again after \d\d:\d\d UTC \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
     const [st] = sync.state();
