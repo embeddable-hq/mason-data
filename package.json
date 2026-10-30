@@ -9,9 +9,9 @@
   "scripts": {
     "typecheck": "tsc",
     "test": "node --test 'tests/**/*.test.ts'",
-    "test:integration": "node --test --test-concurrency=1 'tests/integration/**/*.itest.ts'",
-    "check": "npm run typecheck && npm test",
-    "gate": "node scripts/gate.ts"
+    "test:integration": "node scripts/gate-slot.ts node --test --test-concurrency=1 'tests/integration/**/*.itest.ts'",
+    "check": "node scripts/gate-slot.ts sh -c 'npm run typecheck && npm test'",
+    "gate": "node scripts/gate-slot.ts node scripts/gate.ts"
   },
   "dependencies": {
     "@duckdb/node-api": "2.0.0-r.1",

@@ -1126,3 +1126,148 @@ test("the copy-word guard reads past what only looks like an exception", () => {
   assert.deepEqual(copyWords("a.ts", 'const label = done ? "copies" : "syncing";'), ["a.ts:1: copies"], "a lowercase word that is no phase");
   assert.deepEqual(copyWords("a.ts", 'i++ / 2; const s = "copy it";'), ["a.ts:1: copy it"], "a division after ++ is no regex");
 });
+
+/**
+ * A QUARANTINED TEST NAMES ITS ISSUE, AND THERE ARE FEW (CLAUDE.md "Local gates"): a flaky test met during other work is
+ * skipped with `{ skip: "quarantined: #<issue>" }` and fixed under that issue. A skip with no issue is one nobody will
+ * come back to, and the ceiling is what makes one come back: past it, CI is red until a quarantine has been fixed. So
+ * every skip or todo a run always takes is a quarantine, however it is spelled; one the run decides (no IT_POSTGRES_URL,
+ * root, no IPv6) is not. It reads the syntax tree: code in a string is no skip, and a constant is read to its value.
+ */
+const QUARANTINE_CEILING = 3;
+const isLogical = (n: ts.Node): boolean => ts.isBinaryExpression(n) &&
+  [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(n.operatorToken.kind);
+/** A comparison is the run's to decide, but only as a skip's value: unlike `&&`, it does not make what is beside it conditional. */
+const isComparison = (n: ts.Node): boolean => ts.isBinaryExpression(n) && [
+  ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.LessThanToken, ts.SyntaxKind.LessThanEqualsToken, ts.SyntaxKind.GreaterThanToken, ts.SyntaxKind.GreaterThanEqualsToken,
+].includes(n.operatorToken.kind);
+/** What each skip or todo that always applies says, whether or not it is a quarantine. What it cannot read counts. */
+export function quarantines(src: string): string[] {
+  const file = ts.createSourceFile("test.ts", src, ts.ScriptTarget.Latest, true);
+  const initializers = new Map<string, ts.Expression[]>();
+  const declared = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+      initializers.set(n.name.text, [...(initializers.get(n.name.text) ?? []), n.initializer]);
+    }
+    ts.forEachChild(n, declared);
+  };
+  declared(file);
+  /** What a value says when it always skips; nothing when it never does, or the run decides. */
+  const says = (e: ts.Expression, seen: string[] = []): string[] => {
+    let v = e;
+    while (ts.isParenthesizedExpression(v) || ts.isAsExpression(v) || ts.isSatisfiesExpression(v)) v = v.expression;
+    if (ts.isStringLiteralLike(v)) return [v.text];
+    if (v.kind === ts.SyntaxKind.FalseKeyword || v.kind === ts.SyntaxKind.NullKeyword) return [];
+    if (ts.isConditionalExpression(v) || ts.isCallExpression(v) || ts.isPrefixUnaryExpression(v) || isLogical(v) || isComparison(v)) return [];
+    if (ts.isIdentifier(v)) {
+      const name = v.text, found = initializers.get(name);
+      if (name === "undefined") return [];
+      if (found && !seen.includes(name)) return found.flatMap((i) => says(i, [...seen, name]));
+    }
+    return [v.getText(file)];
+  };
+  /** Under an `if`, a branch or a `catch` of its own function, the run decides. */
+  const branched = (n: ts.Node): boolean => {
+    for (let p = n.parent; p && !ts.isFunctionLike(p); p = p.parent) {
+      if (ts.isIfStatement(p) || ts.isConditionalExpression(p) || ts.isCatchClause(p) || isLogical(p)) return true;
+    }
+    return false;
+  };
+  const named = (n: ts.Node): boolean => (ts.isIdentifier(n) || ts.isStringLiteral(n)) && /^(?:skip|todo)$/.test(n.text);
+  const out: string[] = [];
+  const read = (n: ts.Node): void => {
+    if (!branched(n)) {
+      if (ts.isPropertyAssignment(n) && named(n.name)) out.push(...says(n.initializer));
+      else if (ts.isShorthandPropertyAssignment(n) && named(n.name)) out.push(...says(n.name));
+      else if (ts.isCallExpression(n)) {
+        const callee = ts.isPropertyAccessExpression(n.expression) ? n.expression.name : n.expression;
+        if (named(callee)) {
+          const said = n.arguments[0] ? says(n.arguments[0]) : [];
+          out.push(...(said.length > 0 ? said : [""]));
+        }
+      }
+    }
+    ts.forEachChild(n, read);
+  };
+  read(file);
+  return out;
+}
+const namesItsIssue = (said: string): boolean => /^quarantined: #\d+\b/i.test(said);
+
+test("a skip every run takes is a quarantine naming its issue, and no more than a few are quarantined", () => {
+  const self = "tests/conventions.test.ts";
+  const found = [...scannedFiles(["tests"]), { name: self, src: fs.readFileSync(path.join(ROOT, self), "utf8") }]
+    .filter((f) => f.name.endsWith(".ts"))
+    .flatMap((f) => quarantines(f.src).map((said) => ({ where: f.name, said })));
+  assert.deepEqual(found.filter((q) => !namesItsIssue(q.said)), [], 'a skip or todo no run decides says { skip: "quarantined: #<issue>" }');
+  assert.ok(found.length <= QUARANTINE_CEILING, `${found.length} tests are quarantined, over the ceiling of ${QUARANTINE_CEILING}: fix one first:\n  ${found.map((q) => `${q.where}: ${q.said}`).join("\n  ")}`);
+});
+
+test("the quarantine guard would catch the real thing", () => {
+  for (const said of ["quarantined: #81 since 2026-10-30", "Quarantined: #81", "QUARANTINED: #81"]) {
+    assert.deepEqual(quarantines(`test("a", { skip: "${said}" }, () => {});`), [said]);
+    assert.equal(namesItsIssue(said), true, said);
+  }
+  assert.deepEqual(quarantines('test("a", { todo: "quarantined: #81" }, () => {});'), ["quarantined: #81"], "a todo counts against the ceiling too");
+  const unnamed: Array<[string, string[]]> = [
+    ['test("a", { skip: "Quarantined: flaky" }, () => {});', ["Quarantined: flaky"]],
+    ['test("a", { skip: "flaky on CI" }, () => {});', ["flaky on CI"]],
+    ['test("a", { skip: true }, () => {});', ["true"]],
+    ['test("a", { "skip": "flaky" }, () => {});', ["flaky"]],
+    ['test.skip("a", () => {});', ["a"]],
+    ['describe.skip("a", () => {});', ["a"]],
+    ['test("a", (t) => { t.skip("flaky"); });', ["flaky"]],
+    ['test("a", (t) => { t.skip(why ? "one" : "other"); });', [""]],
+    ['skip("a", () => {});', ["a"]],
+    ['test("a", { todo: "later" }, () => {});', ["later"]],
+    ['test("a", { todo: true }, () => {});', ["true"]],
+    ['test.todo("a");', ["a"]],
+    ['const QUARANTINED = "flaky"; test("a", { skip: QUARANTINED }, () => {});', ["flaky"]],
+    ['test("a", { skip: QUARANTINED }, () => {});', ["QUARANTINED"]],
+    ['const skip = true; test("a", { skip }, () => {});', ["true"]],
+    ['test("a", { skip: `flaky ${why}` }, () => {});', ["`flaky ${why}`"]],
+    ['test("a", { skip: 1 + 1 }, () => {});', ["1 + 1"]],
+    ['test("a", { skip: "flaky" }, () => {}) === undefined;', ["flaky"]],
+  ];
+  for (const [src, said] of unnamed) {
+    assert.deepEqual(quarantines(src), said, src);
+    assert.ok(said.every((s) => !namesItsIssue(s)), src);
+  }
+  assert.equal(namesItsIssue("quarantined, flaky"), false);
+  assert.equal(namesItsIssue("quarantined: issue to be filed"), false);
+  for (const src of [
+    'test("a", { skip: process.getuid?.() === 0 ? "root writes anywhere" : false }, () => {});',
+    'test("a", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, () => {});',
+    'const skip = !adminUrl ? "not set" : false; test("a", { skip }, () => {});',
+    'test("a", { skip: !adminUrl }, () => {}); test("b", { skip: !adminUrl && "not set" }, () => {});',
+    'test("a", { skip: adminUrl === undefined }, () => {}); test("b", { skip: major < 16 }, () => {});',
+    'test("a", { skip: false, todo: undefined }, () => {});',
+    'test("a", async (t) => { if (!h) { t.skip("no IPv6 on this machine"); return; } });',
+    'if (skip !== false) test("a", { skip: "said once" }, () => {});',
+    'assert.ok(picked.skipped); const code = \'test("a", { skip: "flaky" }, f)\';',
+  ]) assert.deepEqual(quarantines(src), [], src);
+});
+
+/**
+ * A DURATION IS NOT WRITTEN WHERE A RULE READS IT (CLAUDE.md "Local gates"): "about twelve minutes" and "a few minutes"
+ * were each true once. What a gate costs moves with the suite and the machine, so it is measured and dated in
+ * docs/DESIGN.md, and these three files say what to do, never how long it takes.
+ */
+export function durationsSaid(src: string): number[] {
+  return src.split("\n").flatMap((l, i) => (/(?:\b(?:a few|several|about \S+|\d\S*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety)\s+|\()minutes?\b/i.test(l) ? [i + 1] : []));
+}
+
+test("the rules, the contributor's guide and the CI file state no gate's duration", () => {
+  for (const f of ["CLAUDE.md", "CONTRIBUTING.md", ".github/workflows/ci.yml"]) {
+    assert.deepEqual(durationsSaid(fs.readFileSync(path.join(ROOT, f), "utf8")), [], `${f}: a duration goes stale; say the rule, and measure in docs/DESIGN.md`);
+  }
+});
+
+test("the duration guard would catch the real thing", () => {
+  assert.deepEqual(durationsSaid("ok\nCI is about twelve minutes a run\ntypecheck, a few minutes"), [2, 3]);
+  assert.deepEqual(durationsSaid("twelve minutes a run\nmost of Twenty minutes\nsomeone minutes"), [1, 2], "a number in words is a length");
+  assert.deepEqual(durationsSaid("the oracle runs every statement\n    # (minutes), then the rest\nabout 12 minutes"), [2, 3]);
+  assert.deepEqual(durationsSaid("    timeout-minutes: 30"), [], "a setting's key is not a claim");
+  assert.deepEqual(durationsSaid("# Where the job's minutes went: the slowest tests"), [], "a length stated is the claim, not the word");
+});

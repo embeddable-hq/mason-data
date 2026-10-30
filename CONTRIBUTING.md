@@ -33,7 +33,7 @@ A checkout needs Node ≥ 23.6 (the root `package.json`'s `engines`): its TypeSc
 stripping, with no build step. The published CLI is compiled and needs less (`cli/README.md` says what).
 
 ```bash
-npm install && npm run check        # typecheck + the offline tests, a few minutes
+npm install && npm run check        # typecheck + the offline tests
 ```
 
 The integration tests run the real copy, stream, listener and `mason serve`, and the oracle; they need a throwaway Postgres (each file makes and drops a database on it;
@@ -45,7 +45,9 @@ npm run test:integration                                   # every file
 node --test tests/integration/duck-oracle.itest.ts         # the oracle alone
 ```
 
-CI runs both on every pull request. Every script is TypeScript run directly by Node (no build step).
+CI runs both on every pull request, and is the full gate. On a shared machine, `npm run check` and `npm run test:integration`
+queue for a machine-wide slot and say who they wait for (`MASON_GATE_SLOTS`, `scripts/gate-slot.ts`). Every script is
+TypeScript run directly by Node (no build step).
 
 To run the checkout's `mason` from any folder, with no build or install, define an alias once. A project folder
 elsewhere (`mkdir`, then `mason-local init demo`) is the quickest way to try a change by hand.
@@ -73,11 +75,10 @@ alias mason-local="node $PWD/src/cli/main.ts"   # from the checkout's root; then
 - **A test that fails without the change.** `scripts/fails-without.ts <commit> <test-file>` runs a test file with
   `src/` as it was at a commit and proves, by name, which tests the change makes pass. A fix without a failing test is
   a fix the next change can undo.
-- **The check green**, and the integration suite where the change touches the copy, the stream, the listener or a
-  statement's answer.
+- **CI green** on the last commit: the check, and the integration suite.
 - **Generated text regenerated, not edited.** `docs/SQL-SUPPORT.md`, `docs/MEASUREMENTS.md` and two short README blocks
   (the headline numbers, the counts of what is answered) are rendered from the code by tests; change the source (`src/duck/gaps.ts`, `src/duck/verified.ts`, the benchmark fixture) and run
-  `UPDATE_FIXTURE=1 npm test`, then read the diff.
+  `UPDATE_FIXTURE=1 npm run check`, then read the diff.
 - **Errors say the way out.** A message a person meets names the file and the key, says what is wrong in their words,
   and gives the fix on one report. `CLAUDE.md` has the rest of the conventions, written for coding agents and people
   alike.

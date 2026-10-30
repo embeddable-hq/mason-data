@@ -84,9 +84,7 @@ The extended column has a trap, the last fact below: a catalog statement runs at
 `rule`) and `flattenBool` with `guardFilters`. Anything that decides by looking across the statement is a pre-pass,
 because the walk meets a CTE before the SELECT that reads it.
 
-**Row filters are not on `main`.** A role holds tables and columns only, at the two points this map marks: `enforceGrants`
-while planning, `heldToRole` at each run. PR 51 adds them inside `planDuck`, straight after `enforceGrants`: the filtered
-statement is planned again from the top, as a view is, and the role key gains the bound filters.
+**Row filters** come straight after `enforceGrants` in `planDuck`: a role's `where:` and `through:` are expanded by `expandRowFilters` (`src/duck/row-filter.ts`), the filtered statement is planned again from the top, as a view is, and the role key gains the bound filters.
 
 ### 5. Run
 
