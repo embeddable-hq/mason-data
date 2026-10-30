@@ -5,7 +5,7 @@ A drop-in replacement for a Postgres read replica, built for exceptionally fast 
 - **Lightweight:** Mason is a single Node.js process you can run anywhere.
 - **Works like a read replica:** Choose which tables and columns to sync from your Postgres database, and how each stays in sync: on demand, polling or logical replication. Mason makes them available to query from any Postgres client.
 - **Lightning fast:** Mason rewrites your Postgres queries to run on [DuckDB](https://github.com/duckdb/duckdb)'s columnar engine, in the form DuckDB runs fastest. Analytical queries (`COUNT`, `SUM`, `GROUP BY`, etc.) over large tables run [significantly faster](#performance-vs-postgres) than on Postgres.
-- **Same SQL, same answers:** Mason is built from the ground up to match Postgres syntax and behaviour, so you can confidently point your existing SQL queries at Mason, without needing to port them to another SQL dialect (where subtle differences change your results).
+- **Same SQL, same answers:** Mason is built from the ground up to match Postgres syntax and behaviour, so you can confidently point your existing SQL queries at Mason, without needing to port them to another SQL dialect (where subtle differences change your results). Where Mason can't match Postgres exactly, it refuses the query and says what to write instead (apart from a few listed edge cases, such as a float's last digit). On the [oracle's](#how-compatibility-is-tested) test queries, DuckDB alone answers 30% exactly as Postgres does. Mason answers 95%.
 - **Built for AI agents:** Give AI agents fast, secure access to your data: a user per agent, role-based access control (RBAC) that limits the tables, columns and rows each one can read, every query logged, and native MCP support.
 
 **Contents**
@@ -184,8 +184,20 @@ docker compose exec mason mason user add metabase   # users are kept on the serv
 ## Syncing from Postgres
 
 Choose the tables and columns you want, and Mason syncs them. BI tools (Metabase, Grafana, Superset, Power BI, psql),
-AI agents and your own code then connect to Mason as they would to any read replica. Mason only reads from your
-Postgres. It never writes to it.
+AI agents and your own code then connect to Mason as they would to any read replica.
+
+**Your database stays safe.** Mason is built to be pointed at a production database:
+
+- **It only reads.** Mason sends `SELECT` queries and reads the change log. It never writes, never changes a table,
+  and never asks your database to sort.
+- **It creates nothing**, except a replication slot (and a publication, if you don't name one) for tables you set to
+  `sync: replication`. Mason drops the slot when no table uses it any more.
+- **It keeps its load small.** The first sync uses at most 3 connections (`MASON_COPY_PARALLEL`), and after a crash it
+  resumes where it stopped. A table's polls use at most a fifth of your database's time. By default, Mason reads
+  nothing again after the first sync.
+- **It can read from a read replica.** Point Mason at a replica, and its queries run there, not on your primary.
+- **It leaves secrets out.** `mason add` skips columns that look like secrets (`password`, `token`, `api_key`, …)
+  unless you name them.
 
 **By default, Mason reads each table once (the first sync). After that, it reads again only when you tell it to.**
 For each table, you choose how it stays up to date:
@@ -370,6 +382,16 @@ Mason's goal is to answer every query exactly as Postgres would. That means the 
 OIDs, the same text, the same row order and the same SQLSTATE error codes. So you can keep the SQL you already have.
 
 If Mason can't answer a query exactly, it refuses it. The error says what isn't supported and what to write instead.
+For example, Mason does not yet answer `json_agg(DISTINCT …)` exactly, so it refuses it with Postgres's "feature not
+supported" code (`0A000`):
+
+```text
+SELECT json_agg(DISTINCT status) FROM orders;
+ERROR:  json_agg(DISTINCT …) is not supported by Mason
+DETAIL:  Mason gap json-agg-distinct (docs/SQL-SUPPORT.md)
+HINT:  select the DISTINCT values in a subquery and json_agg them
+```
+
 In a few cases, Mason answers differently from Postgres on purpose. Each of these cases is listed, with the reason.
 Mason never gives a different answer silently.
 
