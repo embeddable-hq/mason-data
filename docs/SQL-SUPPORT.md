@@ -18,7 +18,7 @@ each). The copy is read-only.
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 86 forms of them verified |
 | The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 241 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 244 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
 | Anything else: 47 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
@@ -146,7 +146,7 @@ Not about one statement: what the prototype cannot do yet.
 | `numeric-parameter` | a numeric parameter ($1) compared in a WHERE | exact | a double (exact to 15 digits) | a literal |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (993)
+## What is verified (996)
 
 ### Types (49)
 
@@ -200,7 +200,7 @@ Not about one statement: what the prototype cannot do yet.
 - a value of type uuid
 - a value of type uuid[]
 
-### Functions (241)
+### Functions (244)
 
 - the function "extract"(text,date)
 - the function "extract"(text,interval)
@@ -264,7 +264,10 @@ Not about one statement: what the prototype cannot do yet.
 - the function chr(integer)
 - the function concat("any")
 - the function concat_ws(text,"any")
+- the function current_setting(text)
 - the function current_setting(text) (an extension's)
+- the function current_setting(text,boolean)
+- the function current_setting(text,boolean) (an extension's)
 - the function date(timestamp with time zone)
 - the function date(timestamp without time zone)
 - the function date_bin(interval,timestamp without time zone,timestamp without time zone)

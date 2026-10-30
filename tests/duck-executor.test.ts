@@ -172,7 +172,7 @@ test("a function-calling statement's answer closed after its last row and before
     const store = await DuckStore.open(${JSON.stringify(file)}, () => undefined);
     await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(10)");
     const r = await store.runner();
-    const session = { timeZone: "UTC", searchPath: "public" };
+    const session = { timeZone: "UTC", searchPath: "public", settings: {} };
     // the rewrite's call of json's -> (src/duck/rewrite.ts fn): the session first
     // a planned statement (src/duck/plan.ts PlannedSql): its text, and the functions its plan says it calls
     const a = await r.run({ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL",
@@ -440,7 +440,7 @@ test("cancelling a function-calling statement again and again never deadlocks th
   const r = inProcess("cancels", `
     await store.writer.run("CREATE TABLE public.calls AS SELECT range::INTEGER AS id, '{\\"n\\": ' || range || '}' AS j FROM range(2000000)");
     const runner = await store.runner();
-    const S = { timeZone: "UTC", searchPath: "public" };
+    const S = { timeZone: "UTC", searchPath: "public", settings: {} };
     // a planned statement (src/duck/plan.ts PlannedSql) calling json's -> on every row, as the rewrite writes it
     const calling = { text: "SELECT count(*) FROM calls WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL", functions: ["__mason_json_get"] };
     const told = {};
@@ -527,7 +527,7 @@ test("a copy closed past its grace under a function-calling statement, or a proc
       const store = await DuckStore.open(${JSON.stringify(path.join(dir, `${name}.db`))}, () => undefined, { closeGraceMs: 1 });
       await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(4000000)");
       const r = await store.runner();
-      const S = { timeZone: "UTC", searchPath: "public" };
+      const S = { timeZone: "UTC", searchPath: "public", settings: {} };
       // the rewrite's call of json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
       const call = "__mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false)";
       ${body}
@@ -612,7 +612,7 @@ await import(${at("../src/duck/executor-worker.ts")});
       // a count calling json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
       const asked = r.run(${calls
         ? `{ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL", functions: ["__mason_json_get"] }`
-        : `{ text: "SELECT count(*) FROM t", functions: [] }`}, [], { timeZone: "UTC", searchPath: "public" }, new AbortController().signal${calls ? "" : `, [{ name: "count", oid: 20 }]`})
+        : `{ text: "SELECT count(*) FROM t", functions: [] }`}, [], { timeZone: "UTC", searchPath: "public", settings: {} }, new AbortController().signal${calls ? "" : `, [{ name: "count", oid: 20 }]`})
         .then(() => order.push("answered"), (e) => order.push("refused " + (e.fields?.code ?? e.message)));
       ${before}
       await r.close();

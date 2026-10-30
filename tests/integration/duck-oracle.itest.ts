@@ -405,6 +405,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   await run("after the copy");
   alone.closeSync();
   await roleCases();
+  await settingCases();
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of play)
   if (ONLY === null) {
     const fixture = { ...tallies, measured: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy" };
@@ -498,6 +499,77 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       }
     }
     console.log(`duck oracle: ${cases.length} role case(s) asked as a role of Postgres and a user of a Mason role, ${refusedAlike} refused alike by SQLSTATE and message`);
+  }
+
+  /**
+   * THE SESSION'S SETTINGS (GitHub issues 40, 41): one session of each, asked the same statements IN ORDER — a SET
+   * moves what every later one reads — each held equal, a refusal by SQLSTATE and message. `current_setting` answers the
+   * session's value in the catalog and beside a copied table (a WHERE, a CTE, a parameter), and RESET, RESET ALL and
+   * DISCARD ALL restore the startup's values (its application_name and `options`; TimeZone is the startup's UTC on both,
+   * so a RESET never meets the server's own zone).
+   */
+  async function settingCases(): Promise<void> {
+    const read = "SELECT current_setting('TimeZone') AS tz, current_setting('search_path') AS path, current_setting('work_mem') AS mem, current_setting('application_name') AS app";
+    const cases: Array<{ name: string; sql: string; values?: string[] }> = [
+      { name: "before any SET", sql: read },
+      { name: "SET TimeZone", sql: "SET TimeZone = 'Europe/Berlin'" },
+      { name: "SET search_path", sql: "SET search_path = sales, public" },
+      { name: "SET work_mem", sql: "SET work_mem = '64MB'" },
+      { name: "after the SETs, in the catalog", sql: read },
+      { name: "after the SETs, beside a table", sql: `${read}, count(*) AS n FROM public.orders` },
+      { name: "after the SETs, any case and missing_ok", sql: "SELECT current_setting('TIMEZONE'), current_setting('Search_Path', true), current_setting('work_mem', false), current_setting('DateStyle'), current_setting('IntervalStyle') FROM public.one" },
+      { name: "qualified, in the catalog", sql: "SELECT pg_catalog.current_setting('TimeZone'), pg_catalog.current_setting('work_mem', true)" },
+      { name: "qualified, beside a table", sql: "SELECT pg_catalog.current_setting('search_path'), pg_catalog.current_setting('work_mem', true) FROM public.one" },
+      { name: "SET search_path without public", sql: "SET search_path = sales" },
+      { name: "a search_path without public, beside a table", sql: "SELECT current_setting('search_path'), current_setting('TimeZone', true) FROM public.one" },
+      { name: "a search_path without public, in the catalog", sql: "SELECT current_setting('search_path'), current_setting('work_mem', false)" },
+      { name: "SET search_path back", sql: "SET search_path = sales, public" },
+      { name: "in a WHERE over a table", sql: "SELECT count(*) FROM public.orders WHERE current_setting('search_path') = 'sales, public' AND current_setting('TimeZone') = 'Europe/Berlin'" },
+      { name: "in a WHERE of the catalog", sql: "SELECT relname::text FROM pg_catalog.pg_class WHERE relname = 'pg_class' AND current_setting('work_mem') = '64MB'" },
+      { name: "in a CTE over a table", sql: "WITH s AS (SELECT id, current_setting('work_mem') AS mem FROM public.orders) SELECT mem, count(*) FROM s GROUP BY mem" },
+      { name: "in a CTE of no table", sql: "WITH s AS (SELECT current_setting('search_path') AS p) SELECT p FROM s" },
+      { name: "a parameter, beside a table", sql: "SELECT current_setting($1) FROM public.one", values: ["TimeZone"] },
+      { name: "a parameter, in the catalog", sql: "SELECT current_setting($1), current_setting($2, true)", values: ["search_path", "work_mem"] },
+      { name: "a placeholder not set, missing_ok", sql: "SELECT current_setting('myapp.flag', true) IS NULL AS unset, current_setting('no_such_setting', true) IS NULL AS unknown FROM public.one" },
+      { name: "a placeholder not set", sql: "SELECT current_setting('myapp.flag')" },
+      { name: "SET a placeholder", sql: "SET myapp.flag = 'on'" },
+      { name: "a placeholder set", sql: "SELECT current_setting('myapp.flag'), current_setting('myapp.flag', true) FROM public.one" },
+      { name: "a name nobody knows, beside a table", sql: "SELECT current_setting('no_such_setting') FROM public.one" },
+      { name: "a name nobody knows, in the catalog", sql: "SELECT current_setting('no_such_setting')" },
+      { name: "RESET TimeZone", sql: "RESET TimeZone" },
+      { name: "after RESET TimeZone", sql: read },
+      { name: "SET application_name", sql: "SET application_name = 'after-set'" },
+      { name: "SHOW application_name, set", sql: "SHOW application_name" },
+      { name: "RESET ALL", sql: "RESET ALL" },
+      { name: "SHOW application_name after RESET ALL", sql: "SHOW application_name" },
+      { name: "SHOW a placeholder after RESET ALL", sql: "SHOW myapp.flag" },
+      { name: "SET a placeholder again", sql: "SET myapp.flag = 'again'" },
+      { name: "RESET a placeholder", sql: "RESET myapp.flag" },
+      { name: "a placeholder after its RESET", sql: "SELECT current_setting('myapp.flag'), current_setting('myapp.flag', true)" },
+      { name: "RESET a placeholder never set", sql: "RESET myapp.never" },
+      { name: "a placeholder RESET but never set", sql: "SELECT current_setting('myapp.never', true) FROM public.one" },
+      { name: "after RESET ALL, in the catalog", sql: read },
+      { name: "after RESET ALL, beside a table", sql: `${read}, current_setting('myapp.flag', true) AS flag FROM public.one` },
+      { name: "SET application_name again", sql: "SET application_name = 'pooled'" },
+      { name: "DISCARD ALL", sql: "DISCARD ALL" },
+      { name: "after DISCARD ALL", sql: "SELECT current_setting('application_name'), current_setting('TimeZone') FROM public.one" },
+    ].filter((q) => ONLY === null || ONLY.test(`setting case: ${q.name}`));
+    if (cases.length === 0) return;
+    const startup = { application_name: "duck-oracle-settings", options: "-c TimeZone=UTC" };
+    const sourceS = new pg.Client({ connectionString: dbUrl, ...startup });
+    const masonS = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: "oracle", password: "x", ...startup });
+    for (const c of [sourceS, masonS]) { await c.connect(); clients.push(c); }
+    let refusedAlike = 0;
+    for (const q of cases) {
+      const [want, got] = [await ask(sourceS, q.sql, q.values), await ask(masonS, q.sql, q.values)];
+      const v = verdict(want, got, ordered(q.sql));
+      if (v !== null) { differences.push({ phase: "settings", group: "setting case", kind: v.kind, name: `setting case: ${q.name}`, detail: v.detail, sql: q.sql }); continue; }
+      if ("code" in want && "code" in got) {
+        refusedAlike++;
+        if (want.message !== got.message) differences.push({ phase: "settings", group: "setting case", kind: "text", name: `setting case: ${q.name}`, detail: `${JSON.stringify(got.message)} where Postgres says ${JSON.stringify(want.message)}`, sql: q.sql });
+      }
+    }
+    console.log(`duck oracle: ${cases.length} setting case(s) asked in order of one session each, ${refusedAlike} refused alike by SQLSTATE and message`);
   }
 
   // ---- the verdict ----------------------------------------------------------------------------------------------

@@ -31,7 +31,7 @@ export type Translation =
   | { kind: "set"; name: string; value: string | null; local: boolean }
   | { kind: "show"; name: string }
   | { kind: "transaction"; tag: string }
-  | { kind: "discard" }
+  | { kind: "discard"; target: string }
   | { kind: "deallocate" }
   | { kind: "empty" };
 
@@ -76,7 +76,7 @@ function sessionStatement(stmt: Node): Translation {
       if (tag === null) throw new Unsupported(`${String(k).replace("TRANS_STMT_", "").toLowerCase()}: this connection is read-only and has no transactions; BEGIN, COMMIT and ROLLBACK are accepted and do nothing`, null);
       return { kind: "transaction", tag };
     }
-    case "DiscardStmt": return { kind: "discard" };
+    case "DiscardStmt": return { kind: "discard", target: String(bodyOf<{ target?: string }>(stmt).target ?? "DISCARD_ALL").replace(/^DISCARD_/, "") };
     case "DeallocateStmt": return { kind: "deallocate" };
     case "InsertStmt": case "UpdateStmt": case "DeleteStmt": case "MergeStmt": case "CopyStmt": case "TruncateStmt":
     case "CreateStmt": case "DropStmt": case "AlterTableStmt": case "CreateTableAsStmt": case "ViewStmt": case "IndexStmt":

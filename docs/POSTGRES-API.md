@@ -265,6 +265,17 @@ does not know is 42704.
 `SHOW <name>` answers. They are Mason's settings, never the source database's (`show-all` in
 [docs/SQL-SUPPORT.md](SQL-SUPPORT.md)).
 
+**One reader answers a session's settings, however a tool asks.** `SHOW <name>`, SHOW ALL's row, the ParameterStatus
+the session is told and `current_setting(name[, missing_ok])` are the same string: after `SET search_path = sales,
+public`, `current_setting('search_path')` answers `sales, public` in a statement the embedded Postgres answers and in
+one over a copied table alike, in a WHERE, a CTE or a prepared statement executed after the SET (each catalog request
+carries the session's settings in and takes them out again, and a statement over a copy reads them, never the copy
+engine's own). A name the session does not hold is the embedded Postgres's own value (`block_size`), and a name nobody
+holds is Postgres's 42704, or NULL with `missing_ok`. `RESET <name>`, `RESET ALL` and `DISCARD ALL` restore the value
+the session started with — its startup packet's `application_name` and `options` (`-c name=value`) included — and the
+session is told a ParameterStatus for each reported parameter whose value changed (a SET, a RESET or RESET ALL that
+moves nothing reports nothing), as Postgres tells a driver that caches them (pgjdbc, npgsql).
+
 `BEGIN`, `COMMIT` and `ROLLBACK` are accepted and write nothing — there is nothing to write. A failed statement inside
 a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it.
 `CancelRequest` cancels the statement running on that session's backend.

@@ -57,7 +57,7 @@ import { ApiError } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { grantRefusal, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
-import { asRole, databaseNameSql, PgCatalog, unwrapRole } from "./catalog.ts";
+import { asRole, asSession, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
 import { parseSql, PostgresSyntaxError, stopParser } from "./parser.ts";
@@ -142,14 +142,17 @@ export interface DuckAnswer {
    *  has let go of the main thread (src/duck/store.ts scalarCallsSettled); DuckDB's connection is free again then */
   close(): void;
 }
+/** what a DuckDB statement of a session runs under (`Session.duckSession`): its TimeZone and search_path, and every
+ *  setting `current_setting(name)` reads beside a copied table (src/duck/rewrite.ts, src/duck/store.ts settle) */
+export interface DuckSession { timeZone: string; searchPath: string; settings: Readonly<Record<string, string>> }
 export interface DuckRunner {
   /** `sql`: a plan's (src/duck/plan.ts PlannedSql), never a statement's text; `fields`: Postgres's columns for the
    *  result (the plan's), which DuckDB's values are written as */
-  run(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  run(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     fields?: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact?: readonly ExactColumn[]): Promise<DuckAnswer>;
   /** EXPLAIN of a plan (src/duck/explain.ts): its QUERY PLAN rows, a line each (FORMAT JSON: one document). ANALYZE runs
    *  it as `run` does, under the same `signal`, converting every row and sending none */
-  explain(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  explain(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     how: ExplainHow): Promise<string[]>;
   /** closes the connection once its answers are released: never under the executor (src/duck/store.ts) */
   close(): Promise<void>;
@@ -398,26 +401,29 @@ interface Vars {
 }
 
 const defaultVars = (): Vars => ({ timeZone: "UTC", applicationName: "", searchPath: '"$user", public', other: new Map() });
+const copyVars = (v: Vars): Vars => ({ ...v, other: new Map(v.other) });
 
-/** What `SHOW` / `current_setting` answer for the parameters this server fixes. */
+/** A placeholder's name as Postgres's `valid_custom_variable_name` reads it: two or more simple identifiers, dotted. */
+function placeholderName(name: string): void {
+  if (/^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*(\.[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*)+$/.test(name)) return;
+  throw new PgError({ code: "42602", message: `invalid configuration parameter name "${name}"`, detail: "Custom parameter names must be two or more simple identifiers separated by dots." });
+}
+
+/** What `SHOW` / `current_setting` answer for the parameters this server fixes, by name: read by `fixedParameter` alone. */
+const FIXED = new Map<string, (vars: Vars, user: string) => string>([
+  ["server_version", () => SERVER_VERSION], ["server_version_num", () => SERVER_VERSION_NUM],
+  ["server_encoding", () => "UTF8"], ["client_encoding", () => "UTF8"],
+  ["datestyle", () => "ISO, MDY"], ["intervalstyle", () => "postgres"],
+  ["timezone", (v) => v.timeZone], ["application_name", (v) => v.applicationName], ["search_path", (v) => v.searchPath],
+  ...["integer_datetimes", "standard_conforming_strings", "default_transaction_read_only", "transaction_read_only", "in_hot_standby"].map((n): [string, () => string] => [n, () => "on"]),
+  ["is_superuser", () => "off"],
+  // the session's user, and no role SET over it (SET ROLE is its own name or NONE, setStatement): Postgres's `none`
+  ["session_authorization", (_v, user) => user], ["role", () => "none"],
+  ["transaction_isolation", () => "read committed"], ["default_transaction_isolation", () => "read committed"],
+  ["extra_float_digits", () => "1"], ["max_identifier_length", () => "63"],
+]);
 function fixedParameter(name: string, vars: Vars, user: string): string | null {
-  switch (name) {
-    case "server_version": return SERVER_VERSION;
-    case "server_version_num": return SERVER_VERSION_NUM;
-    case "server_encoding": case "client_encoding": return "UTF8";
-    case "datestyle": return "ISO, MDY";
-    case "intervalstyle": return "postgres";
-    case "timezone": return vars.timeZone;
-    case "application_name": return vars.applicationName;
-    case "search_path": return vars.searchPath;
-    case "integer_datetimes": case "standard_conforming_strings": case "default_transaction_read_only": case "transaction_read_only": case "in_hot_standby": return "on";
-    case "is_superuser": return "off";
-    case "session_authorization": case "role": return user;
-    case "transaction_isolation": case "default_transaction_isolation": return "read committed";
-    case "extra_float_digits": return "1";
-    case "max_identifier_length": return "63";
-    default: return null;
-  }
+  return FIXED.get(name)?.(vars, user) ?? null;
 }
 
 /**
@@ -434,17 +440,6 @@ export function tlsParameters(on: boolean): Readonly<Record<string, string>> {
     ssl: "on", ssl_library: "OpenSSL", ssl_min_protocol_version: tls.DEFAULT_MIN_VERSION, ssl_max_protocol_version: tls.DEFAULT_MAX_VERSION,
     ssl_ciphers: tls.DEFAULT_CIPHERS, ssl_groups: tls.DEFAULT_ECDH_CURVE, ssl_prefer_server_ciphers: "off",
   };
-}
-
-/** The catalog's `current_setting(name[, missing_ok])`, answering the TLS parameters first (`tlsParameters`) and the rest
- *  as Postgres's own: the `version()` override's way (search_path lists pg_catalog after public), so a statement reading
- *  no table and calling it is forwarded as ever, and one table answers SHOW and current_setting alike. */
-export function currentSettingSql(params: Readonly<Record<string, string>>): string[] {
-  const cases = Object.entries(params).map(([name, value]) => `WHEN ${quoteLiteral(name)} THEN ${quoteLiteral(value)}`).join(" ");
-  return [
-    `CREATE OR REPLACE FUNCTION public.current_setting(text) RETURNS text LANGUAGE sql STABLE AS $$ SELECT CASE lower($1) ${cases} ELSE pg_catalog.current_setting($1) END $$`,
-    `CREATE OR REPLACE FUNCTION public.current_setting(text, boolean) RETURNS text LANGUAGE sql STABLE AS $$ SELECT CASE lower($1) ${cases} ELSE pg_catalog.current_setting($1, $2) END $$`,
-  ];
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -532,6 +527,10 @@ class Session {
   /** when the user was last found live (a user's session is asked again, `recheckMs`) */
   verifiedAt = 0;
   vars: Vars = defaultVars();
+  /** the session's parameters as its startup left them (its packet's `application_name` and `options`): what RESET restores */
+  startupVars: Vars = defaultVars();
+  /** each reported parameter's value as the client was last told it (`reportChanges`) */
+  readonly reported = new Map<string, string>();
   tx: TxState = "none";
   /** the instant the transaction began (Postgres's `now()`), null between transactions */
   txNow: number | null = null;
@@ -737,6 +736,8 @@ class Session {
           this.fatal(e.fields.code, e.message, e.fields.hint);
           return;
         }
+        // what RESET and RESET ALL restore: the startup packet's values beside the defaults
+        this.startupVars = copyVars(this.vars);
         this.phase = "password";
         this.send(authenticationCleartextPassword());
         return;
@@ -819,10 +820,7 @@ class Session {
     // what is happening, as it happens (mason logs once showed little): who connected, and (end) who left
     this.server.log(`session ${this.id} connected: ${this.vars.applicationName === "" ? "a client with no application_name" : JSON.stringify(this.vars.applicationName)} as ${JSON.stringify(this.user)}` +
       (token.user !== undefined ? " (a mason user)" : ""));
-    const status: Buffer[] = [authenticationOk()];
-    for (const [name, value] of this.reportedParameters()) status.push(parameterStatus(name, value));
-    status.push(backendKeyData(this.id, this.secret), readyForQuery("I"));
-    this.sendAll(status);
+    this.sendAll([authenticationOk(), ...this.reportChanges(), backendKeyData(this.id, this.secret), readyForQuery("I")]);
   }
 
   private reportedParameters(): Array<[string, string]> {
@@ -837,44 +835,43 @@ class Session {
   // ---------------------------------------------------------------- session parameters
 
   /**
-   * SET of one parameter. Returns the ParameterStatus to send when it is one Postgres reports. The parameters this
-   * server has an opinion on are decided here; the rest go to the catalog Postgres for validation and are kept.
+   * SET of one parameter (`value` null: its default). The parameters this server has an opinion on are decided here;
+   * the rest go to the catalog Postgres for validation and are kept. What a client is told of it is `reportChanges`'s.
    */
-  private setParameter(name: string, value: string | null, atStartup = false): Buffer[] {
-    const report = (n: string, v: string): Buffer[] => REPORTED.has(n) ? [parameterStatus(spell(n), v)] : [];
+  private setParameter(name: string, value: string | null, atStartup = false): void {
     switch (name) {
       case "timezone": case "time zone": {
         const zone = value === null || /^(default|local|localtime)$/i.test(value) ? "UTC" : canonicalZone(value);
         if (zone === null) throw new PgError({ code: "22023", message: `invalid value for parameter "TimeZone": "${value}"`, hint: "an IANA zone name (Europe/London) or UTC: this API knows no abbreviation or fixed offset" });
         this.vars.timeZone = zone;
-        return report("timezone", zone);
+        return;
       }
-      case "application_name": this.vars.applicationName = value ?? ""; return report(name, this.vars.applicationName);
-      case "search_path": this.vars.searchPath = value ?? '"$user", public'; return report(name, this.vars.searchPath);
+      case "application_name": this.vars.applicationName = value ?? ""; return;
+      case "search_path": this.vars.searchPath = value ?? '"$user", public'; return;
       case "client_encoding": case "names":
         if (value !== null && !isUtf8(value)) throw new PgError({ code: "22023", message: `invalid value for parameter "client_encoding": "${value}"`, hint: "this API sends UTF8 only" });
-        return report("client_encoding", "UTF8");
+        return;
       case "datestyle":
         if (value !== null && !/^\s*iso\b/i.test(value) && !/,\s*iso\s*$/i.test(value) && value.trim() !== "") {
           throw new PgError({ code: "0A000", message: `DateStyle ${value} is not supported: this API writes every date and time in ISO 8601 (DateStyle ISO)` });
         }
-        return report("datestyle", "ISO, MDY");
+        return;
       case "extra_float_digits": {
         const n = value === null ? 1 : Number(value);
         if (!Number.isInteger(n) || n < -15 || n > 3) throw new PgError({ code: "22023", message: `${n} is outside the valid range for parameter "extra_float_digits" (-15 .. 3)` });
         if (n < 1) throw new PgError({ code: "0A000", message: `extra_float_digits ${n} is not supported: this API sends every float as the shortest text that reads back exactly (Postgres's extra_float_digits >= 1, the default since Postgres 12); fewer digits would be a different number` });
-        return [];
+        return;
       }
       case "standard_conforming_strings":
         if (value !== null && !/^(on|true|yes|1)$/i.test(value)) throw new PgError({ code: "0A000", message: "standard_conforming_strings off is not supported: a string literal is read as Postgres reads it by default" });
-        return report(name, "on");
-      case "intervalstyle": return report(name, "postgres");
+        return;
+      case "intervalstyle": return;
       case "transaction_isolation": case "default_transaction_isolation": case "transaction": case "session characteristics":
         // read committed on a store that is never written: every level answers the same rows
-        return [];
+        return;
       case "default_transaction_read_only": case "transaction_read_only":
         if (value !== null && /^(off|false|no|0)$/i.test(value)) throw new PgError({ code: "25006", message: "cannot set transaction read-write mode: this API is read-only" });
-        return report(name, "on");
+        return;
       case "statement_timeout": case "lock_timeout": case "idle_in_transaction_session_timeout": case "idle_session_timeout":
       case "transaction_timeout": case "client_min_messages": case "log_min_messages": case "bytea_output":
       case "default_transaction_deferrable": case "xmloption": case "backslash_quote": case "escape_string_warning":
@@ -883,14 +880,61 @@ class Session {
         // accepted and remembered; none changes an answer (statement_timeout is honoured, armTimeout: it may only shorten
         // the run's own limit, MASON_STATEMENT_TIMEOUT)
         if (value === null) this.vars.other.delete(name); else this.vars.other.set(name, value);
-        return [];
+        return;
       default: {
         // a parameter Mason knows nothing of: the catalog Postgres decides whether it exists
         if (atStartup) throw new PgError({ code: "42704", message: `unrecognized configuration parameter "${name}" in the startup packet` });
         if (value === null) this.vars.other.delete(name); else this.vars.other.set(name, value);
-        return [];
+        return;
       }
     }
+  }
+
+  /**
+   * RESET of one parameter: the value the session STARTED with — its startup packet's (`application_name`, `options`'s
+   * `-c`) where it set one, else the default — as Postgres's RESET restores a parameter's session default. A placeholder
+   * (`myapp.x`, a dotted name Postgres does not list) has '' for its default and stays defined, as on Postgres.
+   */
+  private async resetParameter(name: string): Promise<void> {
+    const start = this.startupVars;
+    switch (name) {
+      case "timezone": case "time zone": this.vars.timeZone = start.timeZone; return;
+      case "application_name": this.vars.applicationName = start.applicationName; return;
+      case "search_path": this.vars.searchPath = start.searchPath; return;
+    }
+    this.setParameter(name, null);
+    const was = start.other.get(name) ?? (await this.isPlaceholder(name) ? "" : undefined);
+    if (was !== undefined) this.vars.other.set(name, was);
+  }
+
+  /** RESET ALL (and DISCARD ALL's): every parameter back to the session's start, the startup packet's included; a
+   *  placeholder the session SET stays defined, '' (`resetParameter`) */
+  private async resetAll(): Promise<void> {
+    const placeholders: string[] = [];
+    for (const name of this.vars.other.keys()) if (await this.isPlaceholder(name)) placeholders.push(name);
+    this.vars = copyVars(this.startupVars);
+    for (const name of placeholders) if (!this.vars.other.has(name)) this.vars.other.set(name, "");
+  }
+
+  /** a custom placeholder (`SET myapp.x`): a dotted name the catalog Postgres does not list (an extension's, `plpgsql.*`, it lists) */
+  private async isPlaceholder(name: string): Promise<boolean> {
+    return name.includes(".") && !(await this.server.catalogSettings()).has(name.toLowerCase());
+  }
+
+  /**
+   * WHAT THE CLIENT IS TOLD OF ITS REPORTED PARAMETERS (GUC_REPORT): a ParameterStatus for each whose value is not the one
+   * last reported — all of them at the startup, those a SET, a RESET, RESET ALL or DISCARD ALL moved after it — as
+   * Postgres reports a changed one (`ReportChangedGUCOptions`), each value `sessionSetting`'s through `reportedParameters`.
+   * A driver that caches them (pgjdbc, npgsql) was left with a SET's value after RESET ALL (GitHub issue 41).
+   */
+  private reportChanges(): Buffer[] {
+    const out: Buffer[] = [];
+    for (const [name, value] of this.reportedParameters()) {
+      if (this.reported.get(name) === value) continue;
+      this.reported.set(name, value);
+      out.push(parameterStatus(name, value));
+    }
+    return out;
   }
 
   /** The catalog Postgres validates a parameter this server has no opinion on; its own error is the answer. Inside a
@@ -1035,7 +1079,7 @@ class Session {
       case "set": return this.setStatement(t);
       case "show": return this.showStatement(t.name);
       case "transaction": return [...this.transaction(t.tag)];
-      case "discard": this.statements.clear(); this.dropPortals(); this.vars = { ...defaultVars(), applicationName: this.vars.applicationName }; return [commandComplete("DISCARD ALL")];
+      case "discard": return this.discard(t.target);
       case "deallocate": this.statements.clear(); return [commandComplete("DEALLOCATE ALL")];
       case "duckdb": {
         const plan = await this.duckPlan(raw, whole, []);
@@ -1110,17 +1154,20 @@ class Session {
   }
 
   /**
-   * A CATALOG REQUEST OF THIS SESSION, AS ITS ROLE (src/api/postgres/catalog.ts asRole): a session with a role runs its
-   * catalog statements under `SET ROLE`, RESET after, in the one request the catalog runs whole, so `information_schema`,
+   * A CATALOG REQUEST OF THIS SESSION, WITH ITS SETTINGS AND AS ITS ROLE (src/api/postgres/catalog.ts asSession, asRole):
+   * every request carries the session's settings (`sessionSettings`), so `current_setting(name)` answers what `SHOW`
+   * does, and a session with a role runs its catalog statements under `SET ROLE`, RESET after, each in the one request
+   * the catalog runs whole, so `information_schema`,
    * `has_table_privilege` and `has_column_privilege` answer for the role and no other session's request meets it. A
    * role the catalog has not made yet (its rebuild a moment behind the file) refuses the statement, said; a role the
    * file no longer names is refused before it reaches the catalog (`grants`).
    */
   private async catalogAs(message: Buffer): Promise<Array<{ type: string; frame: Buffer }>> {
     const role = this.token?.role;
-    if (role === undefined) return splitFrames(await this.server.catalog.run(message));
-    this.grants();
-    const { frames, setRoleRefused } = unwrapRole(splitFrames(await this.server.catalog.run(asRole(message, role))));
+    if (role !== undefined) this.grants();
+    const reply = unwrapSession(splitFrames(await this.server.catalog.run(asSession(role === undefined ? message : asRole(message, role), this.sessionSettings()))));
+    if (role === undefined) return reply;
+    const { frames, setRoleRefused } = unwrapRole(reply);
     if (setRoleRefused !== null) {
       const e = relayedError(setRoleRefused);
       throw new PgError({ code: "42501", message: `permission denied: the catalog has no role ${role} yet (${e.message})`, hint: "run the statement again: the catalog is rebuilt with the roles as the roles file changes" }, 403);
@@ -1203,7 +1250,7 @@ class Session {
     this.running = controller;
     try {
       const values = await this.duckValues(e.plan, params, clock);
-      const lines = await runner.explain(e.plan.sql, values, this.duckSession(), controller.signal,
+      const lines = await runner.explain(e.plan.sql, values, await this.duckSession(), controller.signal,
         { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
           // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
           copies: copyFacts(this.server.options.duck.copies?.() ?? []) });
@@ -1226,7 +1273,16 @@ class Session {
     return this.duckRunner;
   }
 
-  private duckSession(): { timeZone: string; searchPath: string } { return { timeZone: this.vars.timeZone, searchPath: this.vars.searchPath }; }
+  /**
+   * WHAT A DUCKDB STATEMENT OF THIS SESSION RUNS UNDER: its TimeZone and search_path, and every setting
+   * `current_setting(name)` reads beside a copied table (src/duck/rewrite.ts) — the catalog Postgres's own
+   * (`Server.catalogSettings`) with the session's laid over (`sessionSettings`), as the catalog's `current_setting`
+   * answers them, never DuckDB's own settings.
+   */
+  private async duckSession(): Promise<DuckSession> {
+    const settings = new Map([...await this.server.catalogSettings(), ...this.sessionSettings()]);
+    return { timeZone: settings.get("timezone") ?? "UTC", searchPath: settings.get("search_path") ?? "", settings: Object.fromEntries(settings) };
+  }
 
   /** A DuckDB statement run: its columns (Postgres's, where it has a plan), and its rows to read, encoded in the
    *  formats asked */
@@ -1239,7 +1295,7 @@ class Session {
     this.running = controller;
     try {
       const values = await this.duckValues(plan, params, clock);
-      const a = await runner.run(plan.sql, values, this.duckSession(), controller.signal, plan.fields, plan.exact ?? []);
+      const a = await runner.run(plan.sql, values, await this.duckSession(), controller.signal, plan.fields, plan.exact ?? []);
       // a SELECT's analysis always has its RowDescription; without one, DuckDB's own columns are said as they are
       const fields = plan.fields !== null
         ? plan.fields.map((f, i) => ({ name: f.name, typeOid: a.columns[i]!.oid, typeSize: f.size, typeModifier: a.columns[i]!.oid === f.oid ? f.typmod : -1, format: formatAt(resultFormats, i) }))
@@ -1360,7 +1416,7 @@ class Session {
   }
 
   private async setStatement(t: Extract<Translation, { kind: "set" }>): Promise<Buffer[]> {
-    if (t.name === "all") { this.vars = { ...defaultVars(), applicationName: this.vars.applicationName }; return [commandComplete("RESET")]; }
+    if (t.name === "all") { await this.resetAll(); return [...this.reportChanges(), commandComplete("RESET")]; }
     const tag = t.value === null ? "RESET" : "SET";
     // SET ROLE and SET SESSION AUTHORIZATION: a session is its user and becomes no one else — RESET, NONE and its own
     // name are Postgres's no-ops, any other name Postgres's refusal. Never the catalog's to validate: that is one
@@ -1370,9 +1426,22 @@ class Session {
       if (!own) throw new PgError({ code: "42501", message: `permission denied to set ${t.name === "role" ? "role" : "session authorization"} "${t.value}"` }, 403);
       return [commandComplete(tag)];
     }
-    if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
-    const status = this.setParameter(t.name, t.value);
-    return [...status, commandComplete(tag)];
+    // a placeholder (`myapp.x`) is validated here: a SET the catalog validated left it DEFINED there, with '', for every
+    // session (a `current_setting` of it answered '' where Postgres's is 42704) — its rollback undoes the value, not that
+    if (await this.isPlaceholder(t.name)) placeholderName(t.name);
+    else if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
+    if (t.value === null) await this.resetParameter(t.name); else this.setParameter(t.name, t.value);
+    return [...this.reportChanges(), commandComplete(tag)];
+  }
+
+  /** DISCARD ALL is Postgres's CLOSE ALL, DEALLOCATE ALL and RESET ALL (its ParameterStatus with it) in one; PLANS,
+   *  SEQUENCES and TEMP find nothing of theirs here */
+  private async discard(target: string): Promise<Buffer[]> {
+    if (target !== "ALL") return [commandComplete(`DISCARD ${target}`)];
+    this.statements.clear();
+    this.dropPortals();
+    await this.resetAll();
+    return [...this.reportChanges(), commandComplete("DISCARD ALL")];
   }
 
   private decidesHere(name: string): boolean {
@@ -1392,10 +1461,25 @@ class Session {
     return tlsParameters(this.socket instanceof tls.TLSSocket)[n] ?? fixedParameter(n, this.vars, this.user) ?? this.vars.other.get(n) ?? null;
   }
 
+  /**
+   * EVERY PARAMETER THIS SESSION HOLDS, each `sessionSetting`'s: what `current_setting(name)` answers, in the catalog
+   * (`catalogAs`, src/api/postgres/catalog.ts asSession) and beside a copied table (`duckSession`) — so it is the string
+   * `SHOW <name>` answers, however a tool asks (GitHub issue 40). The names are those `sessionSetting` reads from.
+   */
+  private sessionSettings(): Map<string, string> {
+    const names = new Set([...Object.keys(tlsParameters(this.socket instanceof tls.TLSSocket)), ...FIXED.keys(), ...this.vars.other.keys()]);
+    const out = new Map<string, string>();
+    for (const n of names) { const v = this.sessionSetting(n); if (v !== null) out.set(n, v); }
+    return out;
+  }
+
   private async showStatement(name: string): Promise<Buffer[]> {
     if (name === "all") return this.showAll();
     const value = this.sessionSetting(name);
     if (value === null) {
+      // a placeholder this session never SET is none of its settings, whatever the one catalog every session shares
+      // has defined (a forwarded `set_config` defines one there): Postgres's 42704
+      if (await this.isPlaceholder(name)) throw new PgError({ code: "42704", message: `unrecognized configuration parameter "${name}"` });
       const reply = splitFrames(await this.server.catalog.run(frame("Q", cstr(`SHOW ${quoteIdent(name)}`))));
       const err = reply.find((f) => f.type === "E");
       if (err !== undefined) throw relayedError(err.frame);
@@ -1502,10 +1586,9 @@ class Session {
     const err = reply.find((f) => f.type === "E");
     if (err !== undefined) {
       // AFTER AN ERROR IN THE EXTENDED PROTOCOL POSTGRES IGNORES EVERY MESSAGE UNTIL A SYNC (ignore_till_sync), and the
-      // sidecar is one connection every session shares: without this Sync one refused Parse silenced the catalog for
-      // every session until a restart (review of #480). The Sync's own ReadyForQuery is consumed here. (A request run
-      // as a role carries its own Sync, catalog.ts asRole: the RESET ROLE after it must run)
-      if (this.token?.role === undefined && !parts.some((p) => p[0] === 0x53 /* S */)) await this.server.catalog.run(frame("S"));
+      // sidecar is one connection every session shares: one refused Parse with no Sync after it silenced the catalog for
+      // every session until a restart (review of #480). Every request carries one (catalog.ts asSession: the RESET of
+      // the session's settings after it must run), its ReadyForQuery dropped here
       throw relayedError(err.frame);
     }
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
@@ -1641,7 +1724,7 @@ class Session {
       // as Postgres: the extended protocol's Execute sends the rows and the tag, the RowDescription is the Describe's
       case "show": return (await this.showStatement(t.name)).filter((f) => f[0] !== ROW_DESCRIPTION);
       case "transaction": return this.transaction(t.tag);
-      case "discard": this.statements.clear(); this.dropPortals(); return [commandComplete("DISCARD ALL")];
+      case "discard": return this.discard(t.target);
       case "deallocate": this.statements.clear(); return [commandComplete("DEALLOCATE ALL")];
       case "duckdb": {
         const controller = portal.cursor?.controller ?? new AbortController();
@@ -1780,21 +1863,27 @@ const quoteIdent = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 const quoteLiteral = (text: string): string => `'${text.replaceAll("'", "''")}'`;
 
 /**
- * `session_user` IN A STATEMENT THE CATALOG ANSWERS IS THIS SESSION'S USER, never the catalog's superuser (it answered
- * `postgres` for every session while `SHOW session_authorization` said the user's name: a review finding of #35). The
- * keyword cannot be overridden as `version()` and `current_setting` are, so each SESSION_USER of the parse tree is
- * spliced in the text with a scalar subquery named as the keyword names its column, `(SELECT 'agent'::name AS
- * session_user)`: the name, the type and every expression around it stay Postgres's. (`current_user` is the catalog's
- * role: the session's role under SET ROLE, src/api/postgres/catalog.ts asRole.) `base`: the statement's offset in the
- * text the parse tree's locations count from.
+ * WHAT A STATEMENT THE CATALOG ANSWERS READS OF ITS SESSION, spliced in its text at the parse tree's locations:
+ * - `session_user` IS THIS SESSION'S USER, never the catalog's superuser (it answered `postgres` for every session while
+ *   `SHOW session_authorization` said the user's name: a review finding of #35). The keyword cannot be overridden as
+ *   `version()` and `current_setting` are, so each SESSION_USER is spliced with a scalar subquery named as the keyword
+ *   names its column, `(SELECT 'agent'::name AS session_user)`: the name, the type and every expression around it stay
+ *   Postgres's. (`current_user` is the catalog's role: the session's role under SET ROLE, catalog.ts asRole.)
+ * - `pg_catalog.current_setting(…)`, so written, is the session's override (`public.current_setting`, catalog.ts
+ *   currentSettingSql): Postgres's own is called by its OID's C function whatever its catalog row says, so it cannot be
+ *   replaced, and so qualified it answered the catalog's values after a SET (GitHub issue 40).
+ * `base`: the statement's offset in the text the parse tree's locations count from.
  */
 function sessionUserSpliced(text: string, stmt: unknown, base: number, user: string): string {
-  const at: number[] = [];
+  const at: Array<{ loc: number; kind: "user" | "setting" }> = [];
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) { for (const x of n) walk(x); return; }
     if (typeof n !== "object" || n === null) return;
     const f = (n as { SQLValueFunction?: { op?: string; location?: number } }).SQLValueFunction;
-    if (f !== undefined && f.op === "SVFOP_SESSION_USER" && typeof f.location === "number") at.push(f.location);
+    if (f !== undefined && f.op === "SVFOP_SESSION_USER" && typeof f.location === "number") at.push({ loc: f.location, kind: "user" });
+    const c = (n as { FuncCall?: { funcname?: Array<{ String?: { sval?: string } }>; location?: number } }).FuncCall;
+    const name = c?.funcname?.map((x) => x.String?.sval ?? "");
+    if (c !== undefined && typeof c.location === "number" && name?.length === 2 && name[0] === "pg_catalog" && name[1] === "current_setting") at.push({ loc: c.location, kind: "setting" });
     for (const v of Object.values(n)) walk(v);
   };
   walk(stmt);
@@ -1802,11 +1891,15 @@ function sessionUserSpliced(text: string, stmt: unknown, base: number, user: str
   const bytes = Buffer.from(text, "utf8");
   const parts: Buffer[] = [];
   let end = bytes.length;
-  for (const loc of [...new Set(at)].sort((a, b) => b - a)) {
+  for (const { loc, kind } of [...new Map(at.map((x) => [x.loc, x])).values()].sort((x, y) => y.loc - x.loc)) {
     const from = loc - base;
-    if (from < 0 || !/^session_user$/i.test(bytes.subarray(from, from + 12).toString("utf8"))) continue;
-    parts.unshift(bytes.subarray(from + 12, end));
-    parts.unshift(Buffer.from(`(SELECT ${quoteLiteral(user)}::name AS session_user)`, "utf8"));
+    if (from < 0) continue;
+    // the qualifier as written (`pg_catalog.`, `"pg_catalog" .`): what is spliced is its span, never a guess at it
+    const written = kind === "user" ? /^session_user/i.exec(bytes.subarray(from, from + 12).toString("utf8"))
+      : /^(?:pg_catalog|"pg_catalog")\s*\.\s*/i.exec(bytes.subarray(from, from + 64).toString("utf8"));
+    if (written === null) continue;
+    parts.unshift(bytes.subarray(from + Buffer.byteLength(written[0]), end));
+    parts.unshift(Buffer.from(kind === "user" ? `(SELECT ${quoteLiteral(user)}::name AS session_user)` : "public.", "utf8"));
     end = from;
   }
   parts.unshift(bytes.subarray(0, end));
@@ -1874,6 +1967,8 @@ function relayedError(frame: Buffer): PgError {
 
 class Server {
   readonly sessions = new Map<number, Session>();
+  /** the catalog Postgres's own settings, by name (`catalogSettings`), read once */
+  private baseSettings: Promise<ReadonlyMap<string, string>> | null = null;
   /** the DuckDB plans by text, search_path, TimeZone, declared parameter types and an Execute's bound (Session.boundOnWire), for
    *  the schema they were made under */
   private duckPlans = new Map<string, DuckPlan>();
@@ -1944,8 +2039,8 @@ class Server {
       setup: [
         // `version()` says whose Postgres this is; search_path lists pg_catalog AFTER public so the override wins
         `CREATE OR REPLACE FUNCTION public.version() RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT '${version.replaceAll("'", "''")}' $$`,
-        // `current_setting('ssl')` says what every session of this listener is (tlsParameters), as SHOW does
-        ...currentSettingSql(tlsParameters(options.tls !== null)),
+        // `current_setting(name)` answers the session's settings, carried in by each of its requests (catalog.ts asSession)
+        ...currentSettingSql(),
         "SET search_path = public, pg_catalog",
         ...databaseNameSql(options.database),
       ],
@@ -1954,6 +2049,23 @@ class Server {
     });
   }
   get database(): string { return this.options.database; }
+
+  /**
+   * THE CATALOG POSTGRES'S OWN SETTINGS, every name its `current_setting` knows with the value it answers (`block_size`,
+   * `server_version_num` …), read once (they are the catalog's build's and its setup's, the same at every start): what a
+   * session's `current_setting` answers beside a copied table for a name the session does not hold (`duckSession`).
+   */
+  catalogSettings(): Promise<ReadonlyMap<string, string>> {
+    this.baseSettings ??= (async () => {
+      const reply = decodeBackend(Buffer.from(await this.catalog.run(frame("Q", cstr("SELECT name, pg_catalog.current_setting(name) FROM pg_catalog.pg_settings")))));
+      const err = reply.find((m) => m.type === "ErrorResponse");
+      if (err?.type === "ErrorResponse") throw new PgError({ code: "XX000", message: `the catalog Postgres's settings could not be read: ${err.fields.M} (Mason bug: report it)` }, 500);
+      return new Map(reply.flatMap((m) => m.type === "DataRow" ? [[m.values[0]!.toString("utf8").toLowerCase(), m.values[1]?.toString("utf8") ?? ""] as [string, string]] : []));
+    })();
+    // a read that failed is read again at the next statement, never kept
+    this.baseSettings.catch(() => { this.baseSettings = null; });
+    return this.baseSettings;
+  }
   /** the clock "now" is read from */
   now(): number { return (this.options.clock ?? Date.now)(); }
   log(line: string): void { (this.options.log ?? ((l: string) => console.log(l)))(`[postgres] ${line}`); }

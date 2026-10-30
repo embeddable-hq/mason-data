@@ -545,6 +545,37 @@ test("asRole wraps a request in SET ROLE … RESET ROLE, with a Sync where the r
   assert.deepEqual(m.unwrapRole([]).frames, []);
 });
 
+test("asSession wraps a request in SET mason.session … RESET, its settings as JSON and a Sync where it has none; unwrapSession strips them, and says one out of step", () => {
+  const m = catalogModule as unknown as { asSession: (b: Uint8Array, s: ReadonlyMap<string, string>) => Uint8Array; unwrapSession: (f: Array<{ type: string; frame: Buffer }>) => Array<{ type: string }> };
+  const framesOf = (b: Uint8Array): string[] => decode(b).map((f) => f.type);
+  const settings = new Map([["timezone", "Europe/Berlin"], ["myapp.x", "it's"]]);
+  // a simple Query ends in itself: no Sync added; a value's quote doubled inside the literal
+  const q = m.asSession(simpleQuery("SELECT 1"), settings);
+  assert.deepEqual(framesOf(q), ["Q", "Q", "Q"]);
+  assert.match(dec.decode(q), /SET mason\.session = '\{"timezone":"Europe\/Berlin","myapp\.x":"it''s"\}'\0.*SELECT 1\0.*RESET mason\.session\0/s);
+  // an extended batch with no Sync gets one, before the RESET (ignore_till_sync); one with a Sync none
+  const parse = message("P", concat(cstring(""), cstring("SELECT 1"), int16(0)));
+  assert.deepEqual(framesOf(m.asSession(parse, settings)), ["Q", "P", "S", "Q"]);
+  assert.deepEqual(framesOf(m.asSession(concat(parse, message("S", new Uint8Array(0))), settings)), ["Q", "P", "S", "Q"]);
+  const f = (type: string): { type: string; frame: Buffer } => ({ type, frame: Buffer.from(type) });
+  assert.deepEqual(m.unwrapSession([f("C"), f("Z"), f("T"), f("D"), f("C"), f("Z"), f("C"), f("Z")]).map((x) => x.type), ["T", "D", "C", "Z"]);
+  assert.throws(() => m.unwrapSession([f("E"), f("Z"), f("C"), f("Z")]), /did not take the session's settings/);
+});
+
+test("the catalog's current_setting is the session's under SET mason.session, Postgres's own (its 42704) otherwise, any case; nothing stays after the RESET", async () => {
+  const m = catalogModule as unknown as { asSession: (b: Uint8Array, s: ReadonlyMap<string, string>) => Uint8Array; unwrapSession: (f: Array<{ type: string; frame: Buffer }>) => Array<{ type: string; frame: Buffer }> };
+  const c = new PgCatalog(schema, { log: () => undefined, setup: [...(catalogModule as unknown as { currentSettingSql: () => string[] }).currentSettingSql(), "SET search_path = public, pg_catalog"] } as never);
+  try {
+    const sql = "SELECT current_setting('TimeZone') || ' ' || current_setting('MYAPP.X', true) || ' ' || current_setting('block_size') || ' ' || (current_setting('no_such', true) IS NULL)::text";
+    const own = new Map([["timezone", "Europe/Berlin"], ["myapp.x", "v"]]);
+    assert.deepEqual(rowsOf(await c.run(m.asSession(simpleQuery(sql), own))).map((r) => r[0]), ["Europe/Berlin v 8192 true"]);
+    // the next request, of a session holding nothing: the catalog's own, and its error for a name nobody knows
+    assert.deepEqual(rowsOf(await c.run(m.asSession(simpleQuery("SELECT current_setting('myapp.x', true) IS NULL"), new Map()))).map((r) => r[0]), ["t"]);
+    const err = decode(await c.run(simpleQuery("SELECT current_setting('myapp.x')"))).find((f) => f.type === "E");
+    assert.deepEqual([err?.error?.C, err?.error?.M], ["42704", 'unrecognized configuration parameter "myapp.x"']);
+  } finally { await c.stop(); }
+});
+
 test("under SET ROLE the catalog answers FOR THE ROLE: information_schema and the privilege functions; two roles' requests interleaved never see each other's view; a RESET follows an error", async () => {
   const m = catalogModule as unknown as { asRole: (b: Uint8Array, role: string) => Uint8Array };
   const withRoles = new PgCatalog(schema, { log: () => undefined, roles: twoRoles() } as never);

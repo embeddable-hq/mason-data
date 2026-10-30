@@ -48,6 +48,15 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   `42704`, as on Postgres) and kept by the session, so `SHOW` answers it. **What a session says about TLS is the
   session's** (`tlsParameters`): `SHOW ssl` / `current_setting('ssl')` and the `ssl_*` the listener knows
   are one table read before the catalog Postgres, which serves no TLS and said `off` on every TLS session.
+- **A session's settings have ONE reader, `sessionSetting`** (server.ts): `SHOW`, SHOW ALL's rows, every ParameterStatus
+  (the startup's and each a SET, RESET, RESET ALL or DISCARD ALL changed: `reportChanges`, Postgres's rule) and
+  `current_setting` — in the catalog, where every request carries the session's settings and RESETs them after
+  (`asSession`, catalog.ts; the catalog is one connection every session shares), and beside a copied table, where
+  the rewrite reads the map the session's statement runs under (`settingRead`, `SETTINGS_VARIABLE`), never DuckDB's
+  own. RESET restores the startup's values (`startupVars`: its packet's `application_name` and `options`). The
+  catalog's `current_setting` was a fourth reader answering its own values after a SET (issues 40, 41). DETECTOR:
+  `tests/conventions.test.ts` (one reader; every catalog request carries the settings or is named), `tests/duck-wire.test.ts`
+  and the oracle's setting cases.
 - **A transaction is Postgres's**: `BEGIN` opens one (ReadyForQuery `T`), an error inside it aborts it (`E`, every
   statement until `ROLLBACK` is `25P02`, as a driver with autocommit off expects), `COMMIT` of an aborted one is a
   `ROLLBACK`. Nothing is ever written, so a transaction holds nothing — the states exist because a driver reads them.

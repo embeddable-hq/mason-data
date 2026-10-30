@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import * as duck from "@duckdb/node-api";
 import type { DuckDBType, DuckDBValue, JS, Json } from "@duckdb/node-api";
 import { runnable } from "../lib/runnable.ts";
-import { StatementError, type DuckAnswer, type DuckRunner, type ExplainHow } from "../api/postgres/server.ts";
+import { StatementError, type DuckAnswer, type DuckRunner, type DuckSession, type ExplainHow } from "../api/postgres/server.ts";
 import { EncodeError } from "../api/postgres/encode.ts";
 import { NumericError } from "../lib/pg-numeric.ts";
 import type { PlannedSql } from "./plan.ts";
@@ -455,7 +455,7 @@ class RemoteConnection implements DuckConnection {
 
 // ------------------------------------------------------------------------------------------------- a wire session
 
-type Session = { timeZone: string; searchPath: string };
+type Session = DuckSession;
 type Fields = ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null;
 
 /** the reason an abort carries across: the statement timeout's fields, else none (the client's cancel) */

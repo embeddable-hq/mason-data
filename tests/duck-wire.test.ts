@@ -2178,6 +2178,154 @@ test("a #> path element is an array index exactly where Postgres reads one, on a
   } finally { await c.end(); }
 });
 
+// CURRENT_SETTING IS THE SESSION'S (GitHub issue 40): the catalog Postgres's `current_setting()` was a fourth reader of
+// the session's parameters and answered its own values after a SET (`TimeZone` UTC, `search_path` the catalog's), and
+// beside a copied table DuckDB's own `current_setting` answered DuckDB's settings. Each now answers the string `SHOW`
+// answers — in a statement the catalog answers and in one DuckDB does, in a WHERE, a CTE and a prepared statement
+// executed after a later SET — and a name the session does not hold is the catalog Postgres's own.
+test("current_setting answers the session's value of every name it holds, as SHOW does, in the catalog and beside a copied table", async () => {
+  const c = new pg.Client({ host: "127.0.0.1", port: api.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token, application_name: "tool-at-startup" });
+  await c.connect();
+  const one = async (sql: string, values?: unknown[]): Promise<unknown> => (await answer(c, sql, values)).rows[0]?.[0];
+  const code = async (sql: string): Promise<string> => { try { await c.query(sql); return "answered"; } catch (e) { return `${(e as pg.DatabaseError).code} ${(e as pg.DatabaseError).message}`; } };
+  try {
+    // read before any SET, prepared under a name: executed again after the SETs below, it reads the session of then
+    const prepared = { name: "setting_of", text: "SELECT current_setting($1) AS s FROM public.orders LIMIT 1", rowMode: "array" as const, types: raw };
+    assert.equal(((await c.query({ ...prepared, values: ["TimeZone"] })).rows[0] as unknown[])[0], "UTC");
+    await c.query("SET TimeZone = 'Europe/Berlin'; SET search_path = sales, public; SET work_mem = '64MB'; SET statement_timeout = '5s'; SET myapp.x = 'v1'");
+    const names = ["TimeZone", "search_path", "work_mem", "application_name", "statement_timeout", "myapp.x", "DateStyle", "IntervalStyle",
+      "server_version", "client_encoding", "is_superuser", "ssl", "standard_conforming_strings", "extra_float_digits"];
+    const wrong: string[] = [];
+    for (const name of names) {
+      const shown = await one(`SHOW "${name}"`);
+      const reads: Array<[string, string, unknown[]?]> = [
+        ["the catalog", `SELECT current_setting('${name}')`], ["any case", `SELECT current_setting('${name.toUpperCase()}')`],
+        ["missing_ok", `SELECT current_setting('${name}', true)`], ["missing_ok false", `SELECT current_setting('${name}', false)`],
+        ["a parameter", "SELECT current_setting($1)", [name]],
+        ["beside a table", `SELECT current_setting('${name}') FROM public.orders LIMIT 1`],
+        ["beside a table, missing_ok", `SELECT current_setting('${name}', true) FROM public.orders LIMIT 1`],
+        ["beside a table, a parameter", "SELECT current_setting($1) FROM public.orders LIMIT 1", [name]],
+        ["qualified", `SELECT pg_catalog.current_setting('${name}')`], ["qualified, beside a table", `SELECT pg_catalog.current_setting('${name}', false) FROM public.orders LIMIT 1`],
+        ["a CTE", `WITH s AS (SELECT current_setting('${name}') AS v) SELECT v FROM s`],
+        ["a CTE over a table", `WITH s AS (SELECT id, current_setting('${name}') AS v FROM public.orders) SELECT v FROM s LIMIT 1`],
+      ];
+      for (const [how, sql, values] of reads) { const got = await one(sql, values); if (got !== shown) wrong.push(`${name} (${how}): ${String(got)} where SHOW says ${String(shown)}`); }
+      // a WHERE, in the catalog and over a table
+      if (await one(`SELECT count(*) FROM pg_catalog.pg_class WHERE current_setting('${name}') = $1 AND relname = 'pg_class'`, [shown]) !== "1") wrong.push(`${name}: a catalog WHERE`);
+      if (await one(`SELECT count(*) > 0 FROM public.orders WHERE current_setting('${name}') = $1`, [shown]) !== "t") wrong.push(`${name}: a WHERE over a table`);
+    }
+    assert.deepEqual(wrong, []);
+    assert.equal(await one("SELECT current_setting('search_path')"), "sales, public");
+    assert.equal(await one("SELECT current_setting('timezone') FROM public.orders LIMIT 1"), "Europe/Berlin");
+    assert.equal(await one("SELECT current_setting('application_name')"), "tool-at-startup");
+    // the prepared statement, executed after the SETs: the session of its Execute
+    assert.equal(((await c.query({ ...prepared, values: ["TimeZone"] })).rows[0] as unknown[])[0], "Europe/Berlin");
+    await c.query("SET work_mem = '128MB'");
+    assert.equal(((await c.query({ ...prepared, values: ["work_mem"] })).rows[0] as unknown[])[0], "128MB");
+    // a name the session does not hold: the catalog Postgres's own, in both
+    const blockSize = (await postgres("SELECT current_setting('block_size')")).rows[0]![0];
+    assert.equal(await one("SELECT current_setting('block_size')"), blockSize);
+    assert.equal(await one("SELECT current_setting('block_size') FROM public.orders LIMIT 1"), blockSize);
+    // a name nobody holds: Postgres's 42704, or NULL under missing_ok; NULL in, NULL out (strict)
+    const unknown = await (async () => { try { await truth.query("SELECT current_setting('no_such_setting')"); return "answered"; } catch (e) { return `${(e as { code: string }).code} ${(e as Error).message}`; } })();
+    assert.equal(unknown, '42704 unrecognized configuration parameter "no_such_setting"');
+    assert.equal(await code("SELECT current_setting('no_such_setting')"), unknown);
+    assert.equal(await code("SELECT current_setting('no_such_setting') FROM public.orders"), unknown);
+    assert.equal(await one("SELECT current_setting('no_such_setting', true) IS NULL"), "t");
+    assert.equal(await one("SELECT current_setting('no_such_setting', true) IS NULL FROM public.orders LIMIT 1"), "t");
+    assert.deepEqual((await answer(c, "SELECT current_setting(NULL), current_setting(NULL, true), current_setting('TimeZone', NULL) FROM public.orders LIMIT 1")).rows, [[null, null, null]]);
+    assert.deepEqual((await answer(c, "SELECT current_setting(NULL), current_setting(NULL, true), current_setting('TimeZone', NULL)")).rows, [[null, null, null]]);
+    // a placeholder's name is Postgres's to read: two or more simple identifiers, dotted (42602 otherwise)
+    assert.equal(await code('SET "my app".x = 1'), '42602 invalid configuration parameter name "my app.x"');
+    // DuckDB's own settings are never a session's: a name only DuckDB knows is Postgres's 42704
+    assert.match(await code("SELECT current_setting('memory_limit') FROM public.orders"), /^42704 /);
+  } finally { await c.end(); }
+});
+
+// THE CATALOG IS ONE CONNECTION EVERY SESSION SHARES (src/api/postgres/catalog.ts asSession): each request carries its
+// session's settings and RESETs them after, so two sessions interleaved each read their own, and none is left behind —
+// after an error too (the RESET follows the Sync the request carries)
+test("two sessions' current_setting read their own settings however their requests interleave; none is left in the catalog", async () => {
+  const [a, b] = [await client(), await client()];
+  try {
+    await a.query("SET search_path = alpha_schema, public; SET myapp.who = 'a'");
+    await b.query("SET search_path = beta_schema, public; SET myapp.who = 'b'");
+    const reads = (c: pg.Client, want: string, who: string): Array<Promise<string | null>> => Array.from({ length: 12 }, async (_, i) => {
+      const sql = i % 3 === 0 ? "SELECT current_setting('search_path') || '/' || current_setting('myapp.who')"
+        : i % 3 === 1 ? "SELECT current_setting('search_path') || '/' || current_setting('myapp.who') FROM public.orders LIMIT 1"
+        : "SELECT current_setting('no_such_setting')";
+      try { const v = (await answer(c, sql)).rows[0]?.[0] as string; return v === `${want}/${who}` ? null : `${who}: ${v}`; }
+      catch (e) { return i % 3 === 2 && (e as pg.DatabaseError).code === "42704" ? null : `${who}: ${(e as Error).message}`; }
+    });
+    const wrong = (await Promise.all([...reads(a, "alpha_schema, public", "a"), ...reads(b, "beta_schema, public", "b")])).filter((x) => x !== null);
+    assert.deepEqual(wrong, []);
+    // nothing of either session stays in the catalog: a third session reads its own default
+    const c = await client();
+    try {
+      assert.deepEqual((await answer(c, "SELECT current_setting('search_path'), current_setting('myapp.who', true)")).rows, [['"$user", public', null]]);
+      // a placeholder another session SET is not this one's, however it asks (Postgres's 42704)
+      for (const sql of ["SHOW myapp.who", "SELECT current_setting('myapp.who')", "SELECT current_setting('myapp.who') FROM public.orders"]) {
+        await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "42704" && e.message === 'unrecognized configuration parameter "myapp.who"', sql);
+      }
+    } finally { await c.end(); }
+  } finally { await a.end(); await b.end(); }
+});
+
+// RESET ALL IS POSTGRES'S (GitHub issue 41): every parameter back to the session's start — the startup packet's
+// `application_name` and `options` included, which RESET ALL once kept (application_name) or dropped (`-c`) — and a
+// ParameterStatus for each REPORTED parameter that changed, as Postgres reports one (`ReportChangedGUCOptions`: a driver
+// that caches them, pgjdbc and npgsql, was left with the SET's values). `RESET <name>` and DISCARD ALL alike; a SET or a
+// RESET that changes nothing reports nothing
+test("RESET ALL, RESET <name> and DISCARD ALL restore the startup's values and report each reported parameter that changed", async () => {
+  const s = await rawSession(api.port, { application_name: "tool-at-startup", options: "-c work_mem=32MB -c search_path=startup_path" });
+  const statuses = (ms: BackendMessage[]): Array<[string, string]> => ms.flatMap((m) => m.type === "ParameterStatus" ? [[m.name, m.value] as [string, string]] : []).sort();
+  const errors = (ms: BackendMessage[]): BackendMessage[] => ms.filter((m) => m.type === "ErrorResponse");
+  const shown = async (sql: string): Promise<Array<string | null>> => {
+    s.socket.write(wire.query(sql));
+    const ms = await s.untilReady();
+    assert.deepEqual(errors(ms), [], sql);
+    return dataRows(ms).flatMap((r) => r.values.map((v) => v?.toString("utf8") ?? null));
+  };
+  const run = async (sql: string): Promise<BackendMessage[]> => { s.socket.write(wire.query(sql)); const ms = await s.untilReady(); assert.deepEqual(errors(ms), [], sql); return ms; };
+  try {
+    assert.equal(s.reported.get("application_name"), "tool-at-startup");
+    assert.equal(s.reported.get("search_path"), "startup_path", "the startup's options reported");
+    const set = await run("SET TimeZone = 'Europe/Berlin'; SET application_name = 'after-set'; SET search_path = sales, public; SET work_mem = '64MB'; SET IntervalStyle = postgres; SET myapp.x = 'v'");
+    assert.deepEqual(statuses(set), [["TimeZone", "Europe/Berlin"], ["application_name", "after-set"], ["search_path", "sales, public"]], "a SET reports what it changed (IntervalStyle did not)");
+    const reset = await run("RESET ALL");
+    assert.deepEqual(statuses(reset), [["TimeZone", "UTC"], ["application_name", "tool-at-startup"], ["search_path", "startup_path"]]);
+    // each ParameterStatus comes before the RESET's CommandComplete, in Postgres's spelling
+    assert.deepEqual(reset.map((m) => m.type), ["ParameterStatus", "ParameterStatus", "ParameterStatus", "CommandComplete", "ReadyForQuery"]);
+    assert.deepEqual(await shown("SHOW application_name; SHOW search_path; SHOW TimeZone; SHOW work_mem; SELECT current_setting('work_mem'), current_setting('application_name')"),
+      ["tool-at-startup", "startup_path", "UTC", "32MB", "32MB", "tool-at-startup"]);
+    // a placeholder the session SET stays defined, '' (Postgres's default of one), however it is asked
+    assert.deepEqual(await shown("SHOW myapp.x; SELECT current_setting('myapp.x'), current_setting('myapp.x', true) FROM public.orders LIMIT 1"), ["", "", ""]);
+    // RESET <name>: the startup's value, reported where it changed; again, nothing changes and nothing is reported
+    assert.deepEqual(statuses(await run("SET TimeZone = 'Asia/Tokyo'; SET work_mem = '1GB'; SET search_path = other")), [["TimeZone", "Asia/Tokyo"], ["search_path", "other"]]);
+    assert.deepEqual(statuses(await run("RESET TimeZone")), [["TimeZone", "UTC"]]);
+    assert.deepEqual(statuses(await run("RESET TimeZone; SET TimeZone = 'UTC'")), [], "nothing changed: nothing reported");
+    assert.deepEqual(statuses(await run("RESET search_path; RESET work_mem")), [["search_path", "startup_path"]]);
+    assert.deepEqual(await shown("SHOW search_path; SHOW work_mem"), ["startup_path", "32MB"]);
+    // SET … TO DEFAULT is RESET's
+    await run("SET application_name = 'x'");
+    assert.deepEqual(statuses(await run("SET application_name TO DEFAULT")), [["application_name", "tool-at-startup"]]);
+    // DISCARD ALL is RESET ALL too, in the extended protocol as in the simple one
+    await run("SET application_name = 'pooled'; SET TimeZone = 'Europe/Berlin'");
+    s.socket.write(wire.extended("DISCARD ALL", [], []));
+    const discarded = await s.untilReady();
+    assert.deepEqual(errors(discarded), []);
+    assert.deepEqual(statuses(discarded), [["TimeZone", "UTC"], ["application_name", "tool-at-startup"]]);
+    assert.ok(discarded.some((m) => m.type === "CommandComplete" && m.tag === "DISCARD ALL"));
+    await run("SET application_name = 'pooled'");
+    assert.deepEqual(statuses(await run("DISCARD ALL")), [["application_name", "tool-at-startup"]]);
+    // DISCARD PLANS holds nothing here: its own tag, nothing reset
+    await run("SET application_name = 'kept'");
+    const plans = await run("DISCARD PLANS");
+    assert.deepEqual([statuses(plans), plans.find((m) => m.type === "CommandComplete")], [[], { type: "CommandComplete", tag: "DISCARD PLANS" }]);
+    assert.deepEqual(await shown("SHOW application_name"), ["kept"]);
+  } finally { s.end(); }
+});
+
 // ONE PLACE PER NODE (src/duck/rewrite.ts `nodesPlacedTwice`, the walker's detector): the walker rewrites a node at its
 // first place only, so a rule that puts one node in two places leaves the second as Postgres wrote it (the json read's
 // column, qualified in the first arm of its CASE alone: a review finding). LAST in this file, so it holds every

@@ -529,6 +529,11 @@ function* matrix(): Generator<Matrixed> {
   yield q("an inet equal to a varchar cast", "SELECT id FROM typed WHERE ip = CAST('10.3.6.45'::varchar AS inet) OR ip = CAST('::1' AS inet) ORDER BY id");
   yield q("make_time of a time's hour", "SELECT make_time(extract(hour from tm)::integer, 0, 0.0) AS h, make_time(extract(hour from tm)::integer, extract(minute from tm)::integer, 0.0), count(*) FROM typed GROUP BY 1, 2 ORDER BY 1, 2");
   yield q("current_setting beside a table", "SELECT id, current_setting('TimeZone') FROM typed WHERE id < 3 ORDER BY id");
+  // the session's settings beside a table, never DuckDB's own (GitHub issue 40): missing_ok's form, a name the session
+  // holds (application_name, the startup's), one it does not (block_size, Postgres's own), one nobody knows
+  yield q("current_setting beside a table, the session's and Postgres's", "SELECT id, current_setting('TimeZone', true), current_setting('search_path'), current_setting('application_name', false), " +
+    "current_setting('block_size'), current_setting('no_such_setting', true) FROM typed WHERE id < 3 AND current_setting('search_path') <> '' ORDER BY id");
+  yield q("current_setting beside a table, written pg_catalog's", "SELECT id, pg_catalog.current_setting('TimeZone'), pg_catalog.current_setting('application_name', true) FROM typed WHERE id < 3 ORDER BY id");
   yield q("log / ln / exp / sqrt / power of a numeric", "SELECT id, log(10, n2), log(n2), ln(n2), log10(n2), exp(n2 / 100), sqrt(n2), power(n2, 2), round(log(n2), 3) FROM typed WHERE n2 BETWEEN 0.01 AND 1000 ORDER BY id");
   yield q("ln / sqrt of an unconstrained numeric, a quotient", "SELECT id, ln(n), sqrt(n), ln(n / 3), sqrt(n2 / 7) FROM typed WHERE n > 0 AND n < 1e6 AND n2 > 0 ORDER BY id");
   yield q("sum / avg of a numeric's ln", "SELECT sum(ln(n2)), avg(sqrt(n2)), sum(exp(n2 / 1000)) FROM typed WHERE n2 BETWEEN 0.01 AND 1000");
