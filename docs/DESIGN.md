@@ -1484,12 +1484,11 @@ round, 38 to 47 on average during it), so these compare arms under the same diso
 |---|---|---|---|
 | 1 | 885 s, 559 s | 4.1, 6.4 | 1 |
 | 2 | 1,026 s, 805 s | 7.0, 9.0 | 3 to 5 |
-| 3 | 1,012 s | 10.7 | about 10 |
+| 3 | 1,012 s | 10.7 | 8 or 9 |
 
 The count leaves out two tests that failed only because the copies shared one index, which is this measurement's fault.
-No run was green: one timing test failed in every run, even alone. From 2 up, the demo's and the executor's tests hit
-their timeouts; at 3, a third of a suite's slow tests were failing or cancelled, and a failed gate is a gate to read and
-run again, so its hour is not a gate. Four at once was stopped, the brief's 1,012 s being that case. The default is 2:
+No run was green: one timing test failed in six of the nine runs, both of those alone among them. From 2 up, the demo's
+and the executor's tests hit their timeouts, and a failed gate is a gate to read and run again, so its hour is not a gate. Four at once was stopped, the brief's 1,012 s being that case. The default is 2:
 the most that still adds gates per hour without the failures taking them back, on a machine that is rarely idle. On an
 idle one 1 may do better (174 s is about 21 gates an hour); `MASON_GATE_SLOTS` changes it. Once sessions queue, a gate
 meets less load than these did, so this deserves measuring again.
