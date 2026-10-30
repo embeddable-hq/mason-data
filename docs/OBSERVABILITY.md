@@ -222,17 +222,32 @@ Each adds fields to a command's `--json` and the endpoint with the same JSON, wi
 6. ✅ **Samples (~2–3 days)**: every N seconds — storage, rows, queries, bytes sent, lag, memory — and each copy's size
    less often.
 
-## Access (open)
+## Access (C built; A and B open)
 
-The managed service reads these from `mason serve`, which today answers `/healthz` alone: the endpoints above are
-`mason start`'s command server (loopback, the run's token). It needs them served from `mason serve` behind a service
-token, and TLS off loopback. Not designed yet: the options, for the owner to choose.
+The managed service reads these from `mason serve`, which answers `/healthz` and `/metrics` (C, below): the endpoints
+above are `mason start`'s command server (loopback, the run's token). It needs them served from `mason serve` behind a
+service token, and TLS off loopback. Not designed yet: options A and B, for the owner to choose.
+
+**C is built (2026-10-30)**: `GET /metrics` on the health port (`MASON_HEALTH_PORT`, beside `/healthz`), Prometheus's
+text format 0.0.4, no credential (src/cli/metrics.ts; deploy/mason-data/README.md "Metrics" has the scrape config). It
+serves numbers only — `mason_ready`, `mason_info{version}`, `mason_uptime_seconds`, `mason_tables{phase}`,
+`mason_copy_bytes`, `mason_copy_rows`, `mason_sync_oldest_age_seconds`, `mason_stream_lag_bytes` /
+`_seconds`, `mason_slot_wal_held_bytes`, `mason_disk_free_bytes`, `mason_sessions_open`,
+`mason_statements_total{outcome}` (a counter since the process started) and `mason_statement_duration_seconds` (a
+summary: the last minute's sample's p50 / p95, the sum and count since the start) — each the number `/api/state` or a
+usage sample already holds (src/cli/run-server.ts `metricsFacts`), a number not known absent rather than 0. A scrape
+never reaches the source: the stream's position and the slot are as the sampler last read them, absent when that is
+more than two samples old. It
+deliberately serves NO name — no table, column, user, client or host, as a value or a label — and no statement text,
+because it takes no credential and a real database's structure is confidential: per-table or per-user detail, and the
+statements, wait for A (or B) behind a secret. While Mason starts or stops it answers 200 with `mason_ready 0` and
+`mason_info` alone: whether it is up is `/healthz`'s to say, and a scrape that errored then would alert on nothing.
 
 | | A. Pull: the endpoints on `mason serve` | B. Push: `mason serve` sends to the service | C. `/metrics` (Prometheus) |
 |---|---|---|---|
 | What | the same `GET /api/*` JSON, read-only, on the health port (`MASON_HEALTH_PORT`) | samples, events and failed statements posted every minute to `MASON_OBSERVE_URL` | numbers only (counts, lag, ages, sizes), no statement text |
-| Auth | a bearer secret, `MASON_OBSERVE_TOKEN`; no token set → the routes answer 404 | the same secret, sent outbound | the same secret, or none (numbers only) |
-| TLS | required off loopback (`MASON_HEALTH_TLS_CERT` / `_KEY`, or the listener's), refused at start without it | the service's HTTPS | as A |
+| Auth | a bearer secret, `MASON_OBSERVE_TOKEN`; no token set → the routes answer 404 | the same secret, sent outbound | none: numbers only, never a name (built) |
+| TLS | required off loopback (`MASON_HEALTH_TLS_CERT` / `_KEY`, or the listener's), refused at start without it | the service's HTTPS | none, as `/healthz` (nothing secret in it) |
 | Network | an inbound port the service reaches | outbound only: works behind NAT and in a VPC that takes no inbound | inbound, scraped |
 | Cost | ~2 days: the routes, the guard, the start check, tests | ~4 days: a buffer that survives restarts, retries, back-off | ~1 day |
 | Risk | the request log's statement text (customer literals) leaves the box when asked | the same, every minute, by default once set | none of the statement text |
@@ -240,7 +255,7 @@ token, and TLS off loopback. Not designed yet: the options, for the owner to cho
 Decisions it needs: pull or push (A or B); whether statement text is served at all or only on a second, narrower
 token; whether actions (Cancel, Sync) are ever served there or read-only for good; one secret or a list of named ones
 (as `mason user` is for the Postgres API). Recommended: **A, read-only, one secret, statement text included, TLS
-required**, then **C** for teams that already run Prometheus.
+required**, then **C** for teams that already run Prometheus. C is built (above); A and B stay open.
 
 ## To come back to
 
@@ -258,7 +273,7 @@ required**, then **C** for teams that already run Prometheus.
   Overview's p95 card links to it; Duration sorts the page shown.
 - **The oracle's measurement fixture** (`tests/fixtures/oracle-duckdb-alone.json`) fails on `main` as on this branch
   against a local Postgres 18.3 (913 exact where it has 850): recorded elsewhere, to regenerate where CI runs.
-- **Access** for the managed service (above): three options written, awaiting the owner's choice.
+- **Access** for the managed service (above): C (`/metrics`) built; A and B written, awaiting the owner's choice.
 - **Rows scanned**: deferred (it may add cost to every statement).
 
 ## Architecture review (2026-10-29)

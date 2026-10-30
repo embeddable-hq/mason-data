@@ -118,7 +118,7 @@ rendered files. It is laid out for scanning:
 
 - **The short version**: one table of the cells worth a glance (the rows sweep's first and last step, the clients
   sweep's last, and the point lookup at the largest cell by p50), each with Postgres's and Mason's time and **Mason is**
-  (`15× faster`, `79× slower`). The README's "Why Mason" carries this table alone, with a link to the rest.
+  (`15× faster`, `79× slower`). The README's "Performance vs Postgres" carries this table alone, with a link to the rest.
 - **As the tables grow** and **as more readers ask at once**: a table each, one row per step of its sweep (for a grid,
   the sizes at the per-statement client count and the client counts at the largest size), p95 and statements/s for
   both engines; the sweep's verdict (where Postgres reached the target, or what stopped it, and its slowest statement

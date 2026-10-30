@@ -210,6 +210,35 @@ test("the slot's WAL is read with the database's position, at most every 30 s, a
   });
 });
 
+test("streamStatus({ refresh: false }) never reaches the database: the position and the slot as last read, or not read yet (GET /metrics' read; a scrape costs the source nothing)", async () => {
+  await aRun(async ({ sync }) => {
+    const s = sync as unknown as { pgOptions: () => unknown; dbPosition: unknown; slotWal: unknown };
+    // every connection the status opens is made with the sync's options: counted here, and refused (no database here)
+    let connects = 0;
+    const options = s.pgOptions.bind(sync);
+    s.pgOptions = () => { connects++; return options(); };
+    s.dbPosition = null;
+    s.slotWal = null;
+    const cold = await (sync.streamStatus as (o?: { refresh?: boolean }) => ReturnType<typeof sync.streamStatus>)({ refresh: false });
+    assert.equal(connects, 0, "nothing read yet, and still no connection");
+    assert.match(String((cold!.database as { error: string }).error), /^not read yet/);
+    assert.equal(cold!.lag.bytes, null, "no position: the lag in bytes is unknown, never a 0");
+    // as last read: the cached position and slot, with when they were read, however old — and no connection
+    const at = Date.now() - 600_000;
+    s.dbPosition = { lsn: 0x500n, at };
+    const wal = { walHeldBytes: 4_096, walStatus: "reserved", safeWalSizeBytes: null, at: new Date(at).toISOString() };
+    s.slotWal = { wal, at };
+    for (let i = 0; i < 5; i++) {
+      const cached = await (sync.streamStatus as (o?: { refresh?: boolean }) => ReturnType<typeof sync.streamStatus>)({ refresh: false });
+      assert.deepEqual([cached!.database, cached!.slotWal], [{ lsn: "0/500", at: new Date(at).toISOString() }, wal]);
+    }
+    assert.equal(connects, 0, "five scrapes of a stale position: no connection");
+    // the default (the sampler, mason status) reads it again: one connection
+    await sync.streamStatus();
+    assert.equal(connects, 1, "the refreshing read connects");
+  });
+});
+
 test("the disk under the copy: free where its file is, by the sync's own measure, and what the copies running are projected to add, as their chunks' check computed it", async () => {
   await aRun(async ({ store, sync }) => {
     const s = sync as unknown as { diskStatus?: () => unknown; diskFree: (dir: string) => number; copyLive: Map<string, Record<string, unknown>>;

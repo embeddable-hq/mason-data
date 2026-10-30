@@ -258,7 +258,7 @@ are `.claude/rules/duckdb.md` "Keeping a copy current". Why each is so:
 | a NAMED publication is read and verified (`checkPublication`), never created, altered or dropped | a read replica takes no CREATE PUBLICATION; on a production primary the slot is the one object Mason creates |
 | a table the publication lacks (or narrows, or filters) is refused alone; insert, update and delete must be published | a filtered row's delete never arrives; one table's gap must not stop the rest |
 | on a standby: a named publication, and Postgres 16+ | a standby decodes only from 16 |
-| `REPLICA IDENTITY NOTHING` and a `key:` table are refused | publishing their updates fails the app's own UPDATEs |
+| `REPLICA IDENTITY NOTHING` and a `key:` table are refused | publishing a table of `REPLICA IDENTITY NOTHING` fails the app's own UPDATEs and DELETEs; a `key:` table's changes carry no key to apply them by |
 | a table joins once caught up by ONE poll; a new slot catches the copies up by one poll from their watermarks | a key's changes replayed in commit order end at its state, so nothing is copied again |
 | a batch (500 ms or 10 k changes) commits with its position before it is acknowledged; idle, the server's position is acknowledged | a run that dies skips what it applied; an idle slot holds no WAL |
 | a large transaction is applied in committed pieces of `PIECE_CHANGES` (10,000) | 607,000 changes in one transaction ran a sync out of a 96 MB heap folded whole; in pieces it ran in 48 MB |
@@ -1258,7 +1258,7 @@ clients that take a static header. The tool code would not change; the transport
 **Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`), `src/api/postgres/catalog.ts`
 (`sourceTypeNames`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
 
-## Observability (2026-10-27 – 2026-10-29)
+## Observability (2026-10-27 – 2026-10-30)
 
 **Decision.** Every run keeps its history in its own file — the request log (below), the sync's events, a usage
 sample a minute and each copy's size every 10 minutes — and the commands (`mason status`, `mason logs`, `mason usage`)
@@ -1287,8 +1287,30 @@ batch's own inserts less its deletes. A copy with no persistent block yet (its r
 measured "0.0 KiB" for 5,000 rows, so it is not measured until it has one; and the file's block size read without
 `current_database()` was the in-memory catalog's 0, which made every copy 0 B.
 
-**Where.** `src/duck/{requests,events,usage,history}.ts`, `src/cli/{run-server,usage,commands}.ts`, `src/web/`;
-`tests/duck-{requests,events,usage,history}.test.ts`, `tests/cli-run-server.test.ts`, `tests/web-page.test.ts`.
+**`/metrics`: numbers only, no auth (2026-10-30).** Of the three ways docs/OBSERVABILITY.md "Access" costed to give a
+DevOps team more than `/healthz`, the owner chose to build C first: `GET /metrics` on `mason serve`'s health port, in
+Prometheus's text format, because a team that runs Prometheus scrapes it with three lines of config and alerts with
+the rules it already writes, and it costs a day where A and B cost two and four. It takes NO credential, as `/healthz`
+takes none: the health port is reached by the platform's probes and scrapers, which carry no secret, and asking for
+one would make it A. That is safe only because it serves numbers alone — counts, lag, ages, sizes — and never a name
+(no table, column, user, client or host, not even as a label) nor a statement's text: a real database's structure is
+confidential, and a label is a value too. Per-table and per-user detail, and the statements, wait for A or B behind a
+secret. Every number is one `/api/state` or a usage sample already computes (`metricsFacts`: `usageFacts`, the
+sampler's counter beside its interval's, fed by the one `record` path, and its last p50 / p95), so a scrape and
+`mason status` cannot disagree; the statements are a counter kept in the process, never counted from the request log
+at each scrape, so it never goes down between two scrapes — it counts every statement the listener answered, so after
+the request log lost rows it could not write (said in the log, `lost` streaks) it exceeds what `mason status` and
+`mason usage` count by those rows. A number not known is absent, never 0 (a stream's lag where nothing streams) and
+never NaN (which no alert compares true): a family is whole or absent. A SCRAPE NEVER REACHES THE SOURCE (the
+review's blocker: the first cut read the stream's position as `mason status` does, a connection and a SELECT on the
+production database per scrape at most every 5 s, from a GET anyone on the health port may loop): the position and
+the slot are read as the sampler last cached them (`streamStatus({ refresh: false })`), and a number cached longer
+ago than two samples, or a p50 / p95 of a sample that could not be taken, is absent rather than stale. While Mason starts or stops it answers 200 with
+`mason_ready 0`: whether it is up is the probe's question, and a scrape that errored during every deploy's first
+seconds would page someone for nothing.
+
+**Where.** `src/duck/{requests,events,usage,history}.ts`, `src/cli/{run-server,usage,commands,metrics}.ts`, `src/web/`;
+`tests/duck-{requests,events,usage,history}.test.ts`, `tests/cli-run-server.test.ts`, `tests/cli-metrics.test.ts`, `tests/web-page.test.ts`.
 
 ## The request log
 

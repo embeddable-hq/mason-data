@@ -252,3 +252,11 @@ test("mason init --help says the demo adds three of its tables and leaves order_
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /\n {2}orders, order_items\): mason start makes it in \.mason\/demo\/ and changes it every few seconds\. Three of its tables are\n {2}added; the fourth is yours to add after mason start \(mason add order_items\), to watch its copy begin\.\n/);
 });
+
+test("mason serve --help lists GET /metrics beside /healthz, on MASON_HEALTH_PORT's line, and says it is numbers only", () => {
+  const r = mason("serve", "--help");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /\n {4}MASON_HEALTH_PORT {7}\/healthz's and \/metrics' port \(default 4140\), on MASON_HEALTH_HOST \(default 0\.0\.0\.0\)\n/);
+  assert.match(r.stdout, /GET \/healthz for the platform's health check,\n {2}GET \/metrics for Prometheus \(numbers only: no name, no statement\)/);
+  assert.doesNotMatch(r.stdout, /duckdb(?!_memory)/i, "nothing a user sees names the engine (MASON_DUCKDB_MEMORY is a setting's name)");
+});

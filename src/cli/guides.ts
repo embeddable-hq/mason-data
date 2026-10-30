@@ -164,7 +164,8 @@ names the tables the server copies, and its url: names the variable that holds t
    Docker Compose: ${REPO}/deploy/mason-data/README.md. One container per volume, never two: the copy lets one process
    write its file, so run one replica, with no autoscaling, and stop the old container before the new one starts.
    GET /healthz on MASON_HEALTH_PORT (4140) answers 503 while it starts and 200 once it serves; the first start takes
-   about 15 seconds before that, then copies the tables.
+   about 15 seconds before that, then copies the tables. GET /metrics on the same port is for Prometheus: numbers only
+   (tables by phase, lag, ages, sizes, statements), never a table's or a user's name, so it needs no secret.
    MEMORY: the copy may use half the container's memory limit by default (else half the machine's RAM); the other
    half is the page cache, Node and the catalog (~820 MB). Give the container enough that the page cache holds the
    columns your dashboards read: a query over a column it does not hold runs at the disk's speed. The benchmark's copy
