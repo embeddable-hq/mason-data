@@ -78,7 +78,7 @@ alias mason-local="node $PWD/src/cli/main.ts"   # from the checkout's root; then
 - **CI green** on the last commit: the check, and the integration suite.
 - **Generated text regenerated, not edited.** `docs/SQL-SUPPORT.md`, `docs/MEASUREMENTS.md` and two short README blocks
   (the headline numbers, the counts of what is answered) are rendered from the code by tests; change the source (`src/duck/gaps.ts`, `src/duck/verified.ts`, the benchmark fixture) and run
-  `UPDATE_FIXTURE=1 npm test`, then read the diff.
+  `UPDATE_FIXTURE=1 npm run check`, then read the diff.
 - **Errors say the way out.** A message a person meets names the file and the key, says what is wrong in their words,
   and gives the fix on one report. `CLAUDE.md` has the rest of the conventions, written for coding agents and people
   alike.

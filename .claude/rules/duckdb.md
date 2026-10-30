@@ -108,7 +108,7 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   where the skeleton cannot show the gain an invariant DuckDB's EXPLAIN ANALYZE measures (the row groups or rows a
   scan read). The oracle is blind to the plan: each of the three forms above was a BI tool's slow path with every
   answer right. A diff of the fixture is a plan changed: a regression is fixed, a better plan regenerated
-  (`UPDATE_FIXTURE=1 npm test`) and said so in the commit. DuckDB's EXPLAIN names a projection by its alias, so what
+  (`UPDATE_FIXTURE=1 npm run check`) and said so in the commit. DuckDB's EXPLAIN names a projection by its alias, so what
   an expression costs (ICU's date_trunc against the arithmetic) is read from the SQL sent: the skeleton lists the time
   functions it calls. DuckDB 2.0 plans a delimiter join as a CTE (`__duckdb_delim_<n>`) joined back to a hash group by
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")

@@ -22,7 +22,7 @@
  *
  * A DIFF MEANS THE PLAN CHANGED. Read it, decide whether the new plan is a REGRESSION (a delimiter join, an expression
  * key under a top N, a full sort, a lost filter, more Mason calls: fix the change) or a BETTER plan (regenerate with
- * `UPDATE_FIXTURE=1 npm test` and READ the diff), and say which in the commit. A DuckDB upgrade that only renames
+ * `UPDATE_FIXTURE=1 npm run check` and READ the diff), and say which in the commit. A DuckDB upgrade that only renames
  * an operator is regenerated and said as such.
  *
  * And for a few shapes an invariant MEASURED by DuckDB's EXPLAIN ANALYZE over the shop's million orders (nine row
@@ -610,13 +610,13 @@ for (const shape of SHAPES) {
     measured.set(shape.name, now);
     if (UPDATE) return;
     const was = fixture.statements.find((s) => s.name === shape.name);
-    assert.ok(was !== undefined, `"${shape.name}" is not in tests/fixtures/duck-plans.json: a new statement — UPDATE_FIXTURE=1 npm test adds it; read its plan`);
-    assert.equal(was.sql, shape.sql, `"${shape.name}": the fixture holds another statement under this name — UPDATE_FIXTURE=1 npm test, then read the diff`);
-    assert.equal(was.zone, shape.zone, `"${shape.name}": the fixture holds it in another zone — UPDATE_FIXTURE=1 npm test, then read the diff`);
-    assert.equal(was.on, shape.on, `"${shape.name}": the fixture holds it planned over another shop — UPDATE_FIXTURE=1 npm test, then read the diff`);
+    assert.ok(was !== undefined, `"${shape.name}" is not in tests/fixtures/duck-plans.json: a new statement — UPDATE_FIXTURE=1 npm run check adds it; read its plan`);
+    assert.equal(was.sql, shape.sql, `"${shape.name}": the fixture holds another statement under this name — UPDATE_FIXTURE=1 npm run check, then read the diff`);
+    assert.equal(was.zone, shape.zone, `"${shape.name}": the fixture holds it in another zone — UPDATE_FIXTURE=1 npm run check, then read the diff`);
+    assert.equal(was.on, shape.on, `"${shape.name}": the fixture holds it planned over another shop — UPDATE_FIXTURE=1 npm run check, then read the diff`);
     const diff = lineDiff(lines(was), lines(now));
     assert.ok(diff.every((l) => l.startsWith("  ")),
-      `the plan of "${shape.name}" changed (- the fixture's, + this run's). A regression (a delimiter join, an expression key under a top N, a full sort, a lost filter, more Mason calls): fix the change. A better plan: UPDATE_FIXTURE=1 npm test, read the diff, and say which in the commit.\n` +
+      `the plan of "${shape.name}" changed (- the fixture's, + this run's). A regression (a delimiter join, an expression key under a top N, a full sort, a lost filter, more Mason calls): fix the change. A better plan: UPDATE_FIXTURE=1 npm run check, read the diff, and say which in the commit.\n` +
       `${shape.sql}${shape.zone === undefined ? "" : `\n(in ${shape.zone})`}${shape.on === undefined ? "" : `\n(${shape.on})`}\n${diff.join("\n")}`);
   });
 }
@@ -630,7 +630,7 @@ test("the fixture holds every statement above and no other (UPDATE_FIXTURE=1 rew
     return;
   }
   const stale = fixture.statements.map((s) => s.name).filter((n) => !SHAPES.some((s) => s.name === n));
-  assert.deepEqual(stale, [], "the fixture holds statements this file no longer asks: UPDATE_FIXTURE=1 npm test removes them");
+  assert.deepEqual(stale, [], "the fixture holds statements this file no longer asks: UPDATE_FIXTURE=1 npm run check removes them");
 });
 
 // --------------------------------------------------------------------------------------------- what the plans read

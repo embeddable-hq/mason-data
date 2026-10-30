@@ -155,8 +155,10 @@ reads.
   on timing or load. The skip goes in its own commit, `test("…", { skip: "quarantined: #<issue>" }, …)`, and the issue
   is filed as "What a session finds" says, titled `Flaky: <test>`, with the failure's text. It says what is not known,
   because a flake can be a real fault; the fix is that issue's, and removes the skip. Never quarantined: an oracle
-  statement, a wrong answer, a crash. Detector: `tests/conventions.test.ts` holds every quarantine to its issue and
-  their number to a ceiling, so past it the next PR's `checks` is red until one is fixed; `ℹ skipped` counts them.
+  statement, a wrong answer, a crash. Detector: `tests/conventions.test.ts` holds every skip or todo that
+  no run decides, in any spelling and any case, to a quarantine naming its issue (one the run decides, such as no
+  `IT_POSTGRES_URL`, is not a quarantine), and their number to a ceiling, so past it the next PR's `checks` is red until
+  one is fixed.
 - **Node: CI's decides.** CI runs Node 26, and never 24: `.github/workflows/ci.yml` says why (V8's abort at a process's
   exit, nodejs/node#66366). A laptop may run 24, whose `# Check failed: jit_page_->allocations_.erase(addr) == 1` after
   every test passed is that bug, not the change's fault and not a reason to run it again; `Check failed: end > addr`
@@ -223,8 +225,8 @@ scripts/gate-slot.ts <command>        # runs a command in one of the machine's s
 - **The oracle is the arbiter** (`tests/integration/duck-oracle.itest.ts`): every statement Mason answers is held equal to
   what a real Postgres answers — names, OIDs, text, order, SQLSTATE. A fix for a class of statement adds a statement to
   it; `UPDATE_VERIFIED=1` regenerates the allowlist from what it verified.
-- **Golden fixtures are change-detectors: update them with `UPDATE_FIXTURE=1 npm test`, then READ THE DIFF**
-  (`docs/SQL-SUPPORT.md` is one, rendered from `src/duck/gaps.ts` and `src/duck/verified.ts`).
+- **Golden fixtures are change-detectors: update them with `UPDATE_FIXTURE=1 npm run check`, then READ THE
+  DIFF** (`docs/SQL-SUPPORT.md` is one, rendered from `src/duck/gaps.ts` and `src/duck/verified.ts`).
 - **Watch every test fail before you trust it.** When the fix is already in the tree, `scripts/fails-without.ts <commit>
   <test-file>` runs the test with `src/` as it was at that commit, in a copy of the tree that leaves this one free to
   edit, and exits 0 only when a test that passes here fails there BY NAME (`--test-name-pattern` narrows it to one test).
