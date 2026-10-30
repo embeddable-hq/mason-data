@@ -815,22 +815,47 @@ test("the bare-refusal guard catches the real thing", () => {
 
 /**
  * WHAT A SESSION SAYS A PARAMETER IS, ONE READER (src/api/postgres/server.ts `sessionSetting`; a fact derived in several
- * places): `SHOW <name>`, SHOW ALL's row of that name and the ParameterStatus the startup reports each read it, so a tool
- * reads one string however it asks. `fixedParameter` is called by that reader alone.
+ * places): `SHOW <name>`, SHOW ALL's row of that name, the ParameterStatus the startup and every SET / RESET report, and
+ * `current_setting(name)` — in the catalog (every request carries `sessionSettings`, catalog.ts asSession) and beside a
+ * copied table (`duckSession`, read by src/duck/rewrite.ts `settingRead`) — each read it, so a tool reads one string
+ * however it asks (GitHub issues 40, 41: the catalog's `current_setting` was a fourth reader, answering its own values
+ * after a SET). `fixedParameter` is called by that reader alone; a request to the catalog that does not carry the
+ * session's settings is one of the few that cannot meet a `current_setting` of the session's; and DuckDB's own
+ * `current_setting` is read for the TimeZone alone (which the settle sets from the session's).
  */
-test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through one reader (sessionSetting)", () => {
+test("SHOW, SHOW ALL, the reported parameters and current_setting read a parameter through one reader (sessionSetting)", () => {
   const server = "src/api/postgres/server.ts";
   const src = fs.readFileSync(path.join(ROOT, server), "utf8");
-  for (const start of ["private async showStatement(", "private async showAll(", "private reportedParameters("]) {
+  const bodyOf = (start: string): string => {
     const at = src.indexOf(start);
     assert.ok(at >= 0, `${server} has no ${start}`);
-    const body = src.slice(at, src.indexOf("\n  }\n", at));
-    assert.match(body, /this\.sessionSetting\(/, `${start}…): read the value through sessionSetting`);
-    // and through it alone: no session variable, TLS table or fixed value read beside it
-    assert.deepEqual([...body.matchAll(/this\.vars\.\w+|\btlsParameters\(|\bfixedParameter\(/g)].map((m) => m[0]), [], `${start}…): a value read beside sessionSetting`);
+    return src.slice(at, src.indexOf("\n  }\n", at));
+  };
+  // through it alone: no session variable, TLS table or fixed value read beside it
+  const beside = /this\.vars\.\w+|\btlsParameters\(|\bfixedParameter\(|\bFIXED\.get\(/g;
+  for (const start of ["private async showStatement(", "private async showAll(", "private reportedParameters(", "private async catalogAs(", "private async duckSession("]) {
+    const body = bodyOf(start);
+    assert.match(body, /this\.sessionSettings?\(/, `${start}…): read the value through sessionSetting`);
+    assert.deepEqual([...body.matchAll(beside)].map((m) => m[0]), [], `${start}…): a value read beside sessionSetting`);
   }
+  // every setting the session holds, each sessionSetting's: its NAMES may be read from the tables, never a value
+  const settings = bodyOf("private sessionSettings(");
+  assert.match(settings, /this\.sessionSetting\(/, "sessionSettings reads each value through sessionSetting");
+  assert.deepEqual([...settings.matchAll(/this\.vars\.(?!other\.keys\(\))\w+(?:\.\w+)?|\bfixedParameter\(|\bFIXED\.get\(|tlsParameters\([^)]*\)\[/g)].map((m) => m[0]), [], "sessionSettings reads a value beside sessionSetting");
+  // every catalog request of a session carries its settings: one that does not is a method named here, each of which
+  // reads no current_setting of the session's (a close, a SET's validation, SHOW's own reads, a plan's analysis, the
+  // catalog's own settings)
+  const enclosing = (at: number): string => [...src.slice(0, at).matchAll(/\n {2}(?:private |readonly |static )*(?:async )?(\w+)\(/g)].at(-1)?.[1] ?? "?";
+  const direct = [...new Set([...src.matchAll(/catalog\.run\(/g)].map((m) => enclosing(m.index)))].sort();
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "duckPlan", "duckValues", "end", "explaining", "showAll", "showStatement", "validateElsewhere"].sort(),
+    "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
+  // DuckDB's own current_setting is the TimeZone's alone (the session's, set by src/duck/store.ts settle); a statement's
+  // current_setting is the session's map (`settingRead`)
+  const rewrite = fs.readFileSync(path.join(ROOT, "src/duck/rewrite.ts"), "utf8");
+  assert.deepEqual([...rewrite.matchAll(/fn\("current_setting", \[([^\]]*)\]/g)].map((m) => m[1]).filter((a) => a !== 'strConst("TimeZone")'), [], "DuckDB's current_setting read for another name than TimeZone");
+  assert.match(rewrite, /case "current_setting": return [^\n]*settingRead\(/, "a statement's current_setting is the session's (settingRead)");
 });
 
 /**

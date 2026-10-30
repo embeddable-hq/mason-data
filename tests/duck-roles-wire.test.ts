@@ -370,25 +370,30 @@ test("the catalog answers for the role: information_schema and the privilege fun
   } finally { await a.end(); await n.end(); }
 });
 
-test("the review of #35: no way around the role's catalog view (set_config revoked), SET ROLE / SESSION AUTHORIZATION refused as Postgres refuses them, session_user is the session's user, pg_catalog is no copied table", async () => {
+test("the review of #35: no way around the role's catalog view (set_config never reaches the catalog), SET ROLE / SESSION AUTHORIZATION refused as Postgres refuses them, session_user is the session's user, pg_catalog is no copied table", async () => {
   await wire();
   const a = await connect("agent", addUser("agent", "agent"));
   const n = await connect("plain", addUser("plain"));
   // a token is no user and holds no role: its catalog requests are the superuser's
   const t = await connect("whoever", mintToken(API_KEY, 600).token, "psql");
   try {
-    // set_config('role', 'none') inside ONE catalog statement was a permitted RESET ROLE: the statement's later targets ran as the superuser
+    // set_config('role', 'none') inside ONE catalog statement was a permitted RESET ROLE: the statement's later targets ran
+    // as the superuser. Now set_config never reaches the catalog: beside anything else it is refused by name
+    // (set-config-forms), and alone it is the session's SET, held to its user as SET ROLE is
     const escape = "SELECT set_config('role', 'none', false) AS a, (SELECT count(*) FROM information_schema.tables WHERE table_name = 'events') AS b, current_user AS u";
     const e = await refused(a, escape);
-    assert.deepEqual([e.code, e.message], ["42501", "permission denied for function set_config"]);
-    for (const sql of ["SELECT set_config('session_authorization', 'postgres', false)", "SELECT set_config('role', 'wide', false)",
-      "WITH x AS (SELECT set_config('role', 'none', false)) SELECT count(*) FROM x, information_schema.columns WHERE table_name = 'orders'"]) {
-      assert.equal((await refused(a, sql)).code, "42501", sql);
+    assert.deepEqual([e.code, /Mason gap set-config-forms/.test(e.message)], ["0A000", true]);
+    assert.equal((await refused(a, "WITH x AS (SELECT set_config('role', 'none', false)) SELECT count(*) FROM x, information_schema.columns WHERE table_name = 'orders'")).code, "0A000");
+    for (const [sql, message] of [["SELECT set_config('session_authorization', 'postgres', false)", 'permission denied to set session authorization "postgres"'],
+      ["SELECT set_config('role', 'wide', false)", 'permission denied to set role "wide"']] as const) {
+      const r = await refused(a, sql);
+      assert.deepEqual([r.code, r.message], ["42501", message], sql);
     }
-    assert.equal((await refused(a, { text: "SELECT set_config('role', $1, false)", values: ["none"] })).code, "42501", "the extended protocol too");
+    assert.equal((await refused(a, { text: "SELECT set_config('role', $1, false)", values: ["none"] })).code, "0A000", "the extended protocol too");
+    assert.deepEqual((await a.query("SELECT set_config('role', 'none', false) AS s")).rows, [{ s: "none" }], "alone: SET ROLE NONE, a no-op");
     assert.equal((await a.query("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = 'events'")).rows[0].n, 0, "the next statement is the role's still");
     assert.deepEqual((await t.query("SELECT set_config('application_name', 'x', false) AS s")).rows, [{ s: "x" }], "a token's session is the superuser's: set_config kept");
-    assert.equal((await refused(n, "SELECT set_config('application_name', 'x', false)")).code, "42501", "a user under the default role is that role: refused as it is");
+    assert.deepEqual((await n.query("SELECT set_config('application_name', 'x', false) AS s")).rows, [{ s: "x" }], "a user under the default role: its session's SET, as Postgres lets any role");
     // SET ROLE / SET SESSION AUTHORIZATION: its own name, NONE and RESET are no-ops; any other name is Postgres's refusal
     for (const sql of ["SET ROLE agent", "SET ROLE NONE", "RESET ROLE", "SET SESSION AUTHORIZATION agent", "SET SESSION AUTHORIZATION DEFAULT", "SET LOCAL ROLE agent"]) await a.query(sql);
     for (const [sql, message] of [["SET ROLE postgres", 'permission denied to set role "postgres"'], ["SET ROLE wide", 'permission denied to set role "wide"'], ["SET role = 'wide'", 'permission denied to set role "wide"'],
@@ -404,7 +409,12 @@ test("the review of #35: no way around the role's catalog view (set_config revok
       for (const sql of ["SET ROLE agent", "SET LOCAL ROLE agent", "SET role = 'agent'"]) await bot.query(sql);
       assert.deepEqual((await bot.query("SELECT current_user AS who")).rows, [{ who: "agent" }]);
       for (const sql of ["SET ROLE wide", "SET ROLE everything", "SET SESSION AUTHORIZATION agent"]) assert.equal((await refused(bot, sql)).code, "42501", sql);
-      assert.equal((await refused(bot, "SELECT set_config('role', 'agent', false)")).code, "42501", "set_config('role') still refused");
+      // set_config('role') is SET ROLE: to the role it already is a no-op, answered as SHOW role answers (one reader),
+      // to any other Postgres's refusal
+      assert.deepEqual((await bot.query("SELECT set_config('role', 'agent', false) AS s")).rows, (await bot.query("SHOW role")).rows.map((r) => ({ s: r.role })), "set_config('role') to its own role: SET ROLE's no-op");
+      assert.deepEqual((await bot.query("SELECT current_user AS who")).rows, [{ who: "agent" }]);
+      const other = await refused(bot, "SELECT set_config('role', 'wide', false)");
+      assert.deepEqual([other.code, other.message], ["42501", 'permission denied to set role "wide"']);
     } finally { await bot.end(); }
     await n.query("SET ROLE everything");
     assert.deepEqual((await n.query("SELECT current_user AS who")).rows, [{ who: "everything" }], "the default's session sets the default, a no-op");
@@ -520,7 +530,7 @@ test("no default: a user with no role reads nothing — refused 42501 with the t
     assert.deepEqual([ex.code, ex.detail], ["42501", `the user "dflt" has no role and ${ROLES_PATH} names no default`], "an Execute of a statement prepared before");
     assert.deepEqual((await c.query("SELECT 1 AS one")).rows, [{ one: 1 }], "a statement that reads no copied table is answered");
     // THE CATALOG ANSWERS AS FOR A LOGIN WITH NO GRANT (the review of #44): information_schema lists nothing, every
-    // privilege function is false, the user names itself, set_config is refused — never the catalog's superuser view
+    // privilege function is false, the user names itself, set_config is its session's SET — never the catalog's superuser view
     assert.deepEqual((await c.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")).rows, [], "no table, no view");
     assert.deepEqual((await c.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'orders'")).rows, []);
     assert.deepEqual((await c.query("SELECT has_table_privilege('orders', 'SELECT') AS t, has_any_column_privilege('orders', 'SELECT') AS a, has_column_privilege('orders', 'status', 'SELECT') AS c")).rows,
@@ -528,7 +538,8 @@ test("no default: a user with no role reads nothing — refused 42501 with the t
     assert.deepEqual((await c.query("SELECT current_user, current_role, user, session_user, upper(current_user::text) AS up")).rows,
       [{ current_user: "dflt", current_role: "dflt", user: "dflt", session_user: "dflt", up: "DFLT" }], "its own name, never the catalog's role");
     assert.deepEqual((await c.query({ text: "SELECT current_user AS who, $1::text AS p", values: ["v"] })).rows, [{ who: "dflt", p: "v" }], "the extended protocol too");
-    assert.equal((await refused(c, "SELECT set_config('application_name', 'x', false)")).code, "42501", "set_config refused, as to a role's session");
+    assert.deepEqual((await c.query("SELECT set_config('application_name', 'x', false) AS s")).rows, [{ s: "x" }], "set_config is the session's SET, never the catalog's");
+    assert.deepEqual((await c.query("SELECT current_user AS who")).rows, [{ who: "dflt" }], "and the catalog's role is unmoved");
     assert.deepEqual((await token.query("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")).rows, [{ n: 3 }], "a token sees every table");
     assert.deepEqual((await token.query("SELECT current_user AS who")).rows, [{ who: "postgres" }], "a token's catalog is the catalog's own");
     assert.equal((await token.query("SELECT notes FROM orders")).rows.length, 3, "a token reads every copied table in every state");

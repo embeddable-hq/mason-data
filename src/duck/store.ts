@@ -21,12 +21,12 @@ import { DuckDBInstance, version, type DuckDBConnection, type DuckDBPreparedStat
 import { Executor, type DuckConnection } from "./executor.ts";
 import { beginStatement, cancelStatement, slotName, statementCancelled } from "./cancel.ts";
 import type { PgSession } from "../api/postgres/encode.ts";
-import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner, type ExplainHow } from "../api/postgres/server.ts";
+import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner, type DuckSession, type ExplainHow } from "../api/postgres/server.ts";
 import { duckParameters, missingRelationHint, planDuck, quoteDuckKeywords } from "./plan.ts";
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
 import { VERIFIED } from "./verified.ts";
-import { msSinceCall, registerFunctions, SESSION_VARIABLE } from "./functions.ts";
+import { msSinceCall, registerFunctions, SESSION_VARIABLE, SETTINGS_VARIABLE } from "./functions.ts";
 import { duckCollation, type DuckCollation } from "./rewrite.ts";
 import { decodeLibcOrder, encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
 import { dataRow } from "../api/postgres/protocol.ts";
@@ -384,6 +384,7 @@ export class SessionRunner implements DuckRunner {
   private readonly log: (line: string) => void;
   private zone: string | null = null;
   private path: string | null = null;
+  private settings: string | null = null;
   private constructor(conn: DuckDBConnection, log: (line: string) => void, slot: number, cancels: Int32Array) {
     this.conn = conn; this.log = log; this.slot = slot; this.cancels = cancels;
   }
@@ -400,7 +401,7 @@ export class SessionRunner implements DuckRunner {
     return new SessionRunner(conn, log, slot, cancels);
   }
 
-  private async settle(session: { timeZone: string; searchPath: string }): Promise<void> {
+  private async settle(session: DuckSession): Promise<void> {
     if (session.timeZone !== this.zone) { await this.conn.run(`SET TimeZone = ${quoteLiteral(session.timeZone)}`); this.zone = session.timeZone; }
     // Postgres skips a schema of the path that does not exist; DuckDB refuses the SET (and with it every statement):
     // the path is the schemas DuckDB has (a table added later in a new schema is found at the next statement)
@@ -408,6 +409,13 @@ export class SessionRunner implements DuckRunner {
     const wanted = duckSearchPath(session.searchPath).split(",").filter((n) => have.has(n));
     const path = (wanted.length > 0 ? wanted : ["main"]).join(",");
     if (path !== this.path) { await this.conn.run(`SET search_path = ${quoteLiteral(path)}`); this.path = path; }
+    // what `current_setting(name)` reads (src/duck/rewrite.ts `settingRead`): the session's settings, as one map
+    const settings = JSON.stringify(session.settings);
+    if (settings !== this.settings) {
+      const entries = Object.entries(session.settings).map(([k, v]) => `${quoteLiteral(k)}: ${quoteLiteral(v)}`).join(", ");
+      await this.conn.run(`SET VARIABLE ${SETTINGS_VARIABLE} = MAP {${entries}}::MAP(VARCHAR, VARCHAR)`);
+      this.settings = settings;
+    }
   }
 
   private async prepare(sql: string): Promise<DuckDBPreparedStatement> {
@@ -423,7 +431,7 @@ export class SessionRunner implements DuckRunner {
    * else on it until the result is read or closed) and the signal's interrupt until it ends: read to the end, failed,
    * or closed.
    */
-  async run(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  async run(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null = null, exact: readonly ExactColumn[] = []): Promise<DuckAnswer> {
     return (await this.track(this.streamed(sql, params, session, signal, fields, exact))).answer;
   }
@@ -438,7 +446,7 @@ export class SessionRunner implements DuckRunner {
   /** `run`, and where its time goes as it is read: DuckDB's (its prepare, which plans; each chunk it computes) and
    *  Mason's (the exact numerics, the encoding), ms — what an EXPLAIN ANALYZE says. `profile`: the file DuckDB's
    *  profiler writes this statement's profile to (EXPLAIN ANALYZE), turned on here, after the settle */
-  private async streamed(planned: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  private async streamed(planned: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     fields: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact: readonly ExactColumn[],
     profile: string | null = null): Promise<{ answer: DuckAnswer; timing: { prepareMs: number; duckdbMs: number; masonMs: number } }> {
     const sql = planned.text;
@@ -625,12 +633,12 @@ export class SessionRunner implements DuckRunner {
    * encoded, none sent — with DuckDB's profiler writing each operator's rows and time to a file of its own, read after.
    * Then the copies its scans read: their rows, and how each is kept current as the sync says it (`how.copies`).
    */
-  explain(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  explain(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     how: ExplainHow): Promise<string[]> {
     return this.track(this.explained(sql, params, session, signal, how));
   }
 
-  private async explained(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  private async explained(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     how: ExplainHow): Promise<string[]> {
     await Promise.all([...this.releasing]);
     const o = how.options;
@@ -671,7 +679,7 @@ export class SessionRunner implements DuckRunner {
   }
 
   /** DuckDB's `EXPLAIN (FORMAT JSON)` of the planned SQL, its parameters bound: its plan, estimates only */
-  private async plainPlan(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal): Promise<PlanNode[]> {
+  private async plainPlan(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal): Promise<PlanNode[]> {
     try { await this.settle(session); }
     catch (e) { throw pgErrorOf(e, sql.text); }
     const p = await this.prepare(`EXPLAIN (FORMAT JSON) ${sql.text}`);

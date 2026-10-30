@@ -74,7 +74,8 @@ export const NO_ROLES: RolesLive = { file: null, grants: new Map(), problem: nul
 /**
  * THE CATALOG'S ROLE OF A USER THE FILE HOLDS TO NOTHING (no role of its own, no `default:`): a Postgres role with no
  * grant, so its catalog requests answer as Postgres answers a login with none — information_schema lists none of the
- * copied tables or views, every `has_*_privilege` is false, `set_config` is refused (revoked while any role exists).
+ * copied tables or views, every `has_*_privilege` is false, `set_config` is revoked (while any role exists; a session's
+ * own `set_config` never reaches the catalog, src/api/postgres/translate.ts setConfig).
  * Named outside the file's namespace: `ROLE_NAME_RE` (src/cli/roles.ts) forbids a leading underscore, so no role of the
  * file can ever be it.
  */

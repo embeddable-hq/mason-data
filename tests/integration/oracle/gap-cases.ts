@@ -10,6 +10,8 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "libc-uncovered", sql: "SELECT id FROM coll ORDER BY s, id" },
   { gap: "libc-symbol-punctuation", sql: "SELECT s FROM coll WHERE id BETWEEN 50 AND 59 ORDER BY s" },
   { gap: "explain-option", sql: "EXPLAIN (FORMAT XML) SELECT id FROM typed" },
+  // is_local: Postgres's change ends with the statement's own transaction, so the session's state is the same after
+  { gap: "set-config-forms", sql: "SELECT set_config('application_name', 'gap-case', true) FROM public.one" },
   { gap: "setop-ordinal-star", sql: "SELECT * FROM (SELECT id, t FROM typed) s UNION SELECT id, t FROM typed ORDER BY 1" },
   { gap: "with-ties-distinct", sql: "SELECT DISTINCT i4 FROM typed ORDER BY i4 FETCH FIRST 2 ROWS WITH TIES" },
   { gap: "collation-unknown", sql: "SELECT id FROM typed ORDER BY t COLLATE \"en_US.utf8\", id" },
