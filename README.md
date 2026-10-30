@@ -380,7 +380,7 @@ Mason's goal is to answer every query exactly as Postgres would. That means the 
 OIDs, the same text, the same row order and the same SQLSTATE error codes. So you can keep the SQL you already have.
 
 If Mason can't answer a query exactly, it refuses it. The error says what isn't supported and what to write instead.
-In a few cases, Mason answers differently from Postgres on purpose. Each of these cases is listed, with the reason.
+In [a few cases](docs/SQL-SUPPORT.md#answered-differently), Mason answers differently from Postgres on purpose. Each of these cases is listed, with the reason.
 Mason never gives a different answer silently.
 
 ### How a query is answered
