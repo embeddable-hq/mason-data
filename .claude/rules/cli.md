@@ -242,7 +242,14 @@ CLI lacks).
   infrastructure platform; src/cli/serve.ts, docs/DESIGN.md "On a server"): it writes
   `MASON_DATA/.mason/config.json` from the environment at every start and runs `mason start --attach`'s run through
   its `serve` hooks (src/cli/dev.ts `ServeHooks`), never a second run. Every setting missing or wrong is ONE report; a
-  project `mason init` made is never taken over; `/healthz` takes no credential, so it says counts, never a name.
+  project `mason init` made is never taken over; `/healthz` takes no credential, so it says counts, never a name. **`GET
+  /metrics` beside it (src/cli/metrics.ts) serves numbers only** — counts, lag, ages, sizes, never a table's, user's,
+  client's or host's name nor a statement, as a value or a label — for the same reason, rendered from the facts the state
+  and the usage sampler already compute (`metricsFacts`), never a second computation, and **a scrape never reaches the
+  source** (its rate is anyone's: the stream's position and the slot as cached, `streamStatus({ refresh: false })`,
+  absent when older than two samples). Detectors: `MetricLabel` (a label of another name does not compile) and
+  tests/conventions.test.ts (every label key literal); tests/cli-metrics.test.ts holds the renderer's reads to a closed
+  list of numbers; tests/duck-sync-facts.test.ts counts the connections a cached status opens (none).
 - **`sync: replication` is the production change path on a laptop, per table** (src/cli/replication-mode.ts): the
   sources file alone decides — `mason start --replication`, `--poll` and `--publication` are gone, each answered with
   the line to write and exit 2 before anything starts (`removedStartFlags`, src/lib/table-sync.ts), and `MASON_CHANGES`

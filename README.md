@@ -136,7 +136,7 @@ examples. [`cli/README.md`](cli/README.md) documents every command and option.
 In production, you deploy only the project folder: `mason/`, which holds the sources file and `mason.yml`.
 (`mason.yml` records the Mason version the project was written for.) Mason runs as one container with `mason serve`.
 You configure it with environment variables, and it keeps its synced data on one volume. Your platform can check its health
-at `/healthz`. Run `mason help production` to read this section offline.
+at `/healthz`, and Prometheus can scrape `/metrics` (numbers only, no names, no secrets). Run `mason help production` to read this section offline.
 
 Start from the project you made in [Try with your data](#try-with-your-data). Its `mason/` folder already names
 your tables and how each one syncs, so there is nothing to add again on the server:

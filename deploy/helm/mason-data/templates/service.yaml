@@ -1,4 +1,4 @@
-# the Postgres API (TCP, Mason's own TLS) and /healthz (cluster only): deploy/kubernetes/service.yaml
+# the Postgres API (TCP, Mason's own TLS) and /healthz and /metrics (cluster only): deploy/kubernetes/service.yaml
 apiVersion: v1
 kind: Service
 metadata:
@@ -29,6 +29,12 @@ metadata:
   name: {{ include "mason.name" . }}-health
   labels:
     {{- include "mason.labels" . | nindent 4 }}
+  {{- if .Values.metrics.annotations }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "4140"
+    prometheus.io/path: "/metrics"
+  {{- end }}
 spec:
   type: ClusterIP
   selector:
