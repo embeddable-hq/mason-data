@@ -258,13 +258,14 @@ export function bindFilter(f: RowFilter, types: ReadonlyMap<string, string>, val
 
 /**
  * THE ATTRIBUTE WHOSE VALUE ITS TYPE REFUSES, read when a filtered statement's analysis raised a data exception: only a
- * bound value can be `--set tenant=abc` on an integer, and only here is the attribute still known. Null: every value is
- * good, so the exception is the statement's own. `mason user add` cannot refuse it at the door: the type is the catalog's
+ * bound value can be `--set tenant=abc` on an integer, and only here is the attribute still known. `tables`: the filters
+ * this statement reads, for a value it never binds is no cause of its error. Null: every value is good, so the exception
+ * is the statement's own. `mason user add` cannot refuse it at the door: the type is the catalog's
  * inference, and a role changed since is met here anyway.
  */
-export async function attributeRefused(run: Catalog, rows: ReadonlyMap<string, BoundFilter>): Promise<{ name: string; type: string; at: string; where: string; problem: string } | null> {
-  for (const f of rows.values()) {
-    for (const a of f.attributes ?? []) {
+export async function attributeRefused(run: Catalog, rows: ReadonlyMap<string, BoundFilter>, tables: readonly string[]): Promise<{ name: string; type: string; at: string; where: string; problem: string } | null> {
+  for (const table of tables) {
+    for (const a of rows.get(table)?.attributes ?? []) {
       const r = await analyze(run, `SELECT ${a.sql}`, [], "public");
       if ("refused" in r) return { name: a.name, type: a.type, at: a.at, where: a.where, problem: r.refused.M ?? "Postgres refused it" };
     }
@@ -421,6 +422,81 @@ export function filteredSql(table: string, filters: ReadonlyMap<string, BoundFil
   return walled(`SELECT * FROM ${tableSql(table)} WHERE EXISTS (SELECT 1 FROM (${filteredSql(t.parent, filters, depth + 1)}) AS ${p} WHERE ${p}.${quoteIdent(t.parentColumn)} = ${tableSql(table)}.${quoteIdent(t.column)})`);
 }
 
+/** the items a select's FROM reads itself: never a subquery's, through its JOINs */
+function fromItems(from: unknown): Body[] {
+  if (Array.isArray(from)) return from.flatMap(fromItems);
+  if (!isObject(from)) return [];
+  const j = isObject(from.JoinExpr) ? from.JoinExpr : null;
+  if (j !== null) return [...fromItems(j.larg), ...fromItems(j.rarg)];
+  return isObject(from.RangeVar) ? [from.RangeVar] : [];
+}
+
+/**
+ * A GROUP BY OF A FILTERED TABLE'S PRIMARY KEY KEEPS WHAT THE KEY DECIDES. Postgres accepts `SELECT o.id, o.status … GROUP
+ * BY o.id` by functional dependency on the table's key, and a table turned into a subquery has no key, so the filtered
+ * text alone would be refused 42803. So each column of the table the select reads outside an aggregate joins its GROUP
+ * BY. The key is grouped whole, so a group holds one row of the table and no column added can change a group; the gate
+ * is the key, never Postgres's acceptance, since `GROUP BY lower(status)` also reads a column ungrouped. A grouping set
+ * is left alone and refused by name (plan.ts), as is a column no type's equality can group.
+ */
+async function carryKeyDependency(catalog: Catalog, tree: Body, reads: ReadonlyArray<{ range: Body; table: string }>, analysis: PgAnalysis, oids: ReadonlyMap<string, number>): Promise<void> {
+  const selects = nodes(tree).filter((n) => n.kind === "SelectStmt" && Array.isArray(n.body.groupClause) && n.body.groupClause.length > 0);
+  if (selects.length === 0) return;
+  const aliasOf = (r: Body): string => ((r.alias as Body | undefined)?.aliasname ?? r.relname) as string;
+  const keys = new Map<string, { key: string[]; columns: string[] }>();
+  const shape = async (table: string): Promise<{ key: string[]; columns: string[] }> => {
+    const known = keys.get(table);
+    if (known !== undefined) return known;
+    const rows = await catalogRows(catalog, `SELECT a.attname, COALESCE(a.attnum = ANY(i.indkey), false)::text FROM pg_attribute a LEFT JOIN pg_index i ON i.indrelid = a.attrelid AND i.indisprimary ` +
+      `WHERE a.attrelid = ${Math.trunc(oids.get(table)!)} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`);
+    const got = { key: rows.filter(([, k]) => k === "true").map(([c]) => c!), columns: rows.map(([c]) => c!) };
+    keys.set(table, got);
+    return got;
+  };
+  for (const { body: s } of selects) {
+    const groups = s.groupClause as unknown[];
+    if (groups.some((g) => isObject(g) && "GroupingSet" in g)) continue;
+    const own = new Set(fromItems(s.fromClause));
+    const here = reads.filter((r) => own.has(r.range));
+    if (here.length === 0) continue;
+    const targets = (s.targetList ?? []) as Body[];
+    // what the GROUP BY groups, by name: a column, an output name of one, or a position of one
+    const columnOf = (n: unknown): string[] | null => isObject(n) && isObject(n.ColumnRef) ? (n.ColumnRef.fields as unknown[]).map(sval).filter((x): x is string => x !== null) : null;
+    const target = (t: Body | undefined): unknown => isObject(t?.ResTarget) ? t.ResTarget.val : undefined;
+    const grouped = groups.map((g) => {
+      const c = columnOf(g);
+      if (c?.length === 1) { const named = targets.find((t) => isObject(t.ResTarget) && t.ResTarget.name === c[0]); if (named !== undefined) return columnOf(target(named)); return c; }
+      const at = isObject(g) && isObject(g.A_Const) && isObject(g.A_Const.ival) ? Number(g.A_Const.ival.ival) : null;
+      return at !== null ? columnOf(target(targets[at - 1])) : c;
+    }).filter((c): c is string[] => c !== null);
+    // what the select reads outside an aggregate, of itself or from a subquery's correlation
+    const read: Array<{ of: string | null; name: string | null }> = [];
+    const walk = (v: unknown): void => {
+      if (Array.isArray(v)) { v.forEach(walk); return; }
+      if (!isObject(v)) return;
+      const call = isObject(v.FuncCall) ? v.FuncCall : null;
+      if (call !== null && call.over === undefined && analysis.types.get(call.location as number)?.some((t) => t.node === "AGGREF")) return;
+      if (isObject(v.ColumnRef)) {
+        const fields = v.ColumnRef.fields as unknown[];
+        const star = isObject(fields[fields.length - 1]) && "A_Star" in (fields[fields.length - 1] as Body);
+        const names = fields.map(sval);
+        read.push({ of: fields.length >= 2 ? names[fields.length - 2]! : null, name: star ? null : names[fields.length - 1]! });
+        return;
+      }
+      Object.values(v).forEach(walk);
+    };
+    walk([s.targetList, s.havingClause, s.sortClause, s.windowClause]);
+    for (const { range, table } of here) {
+      const alias = aliasOf(range);
+      const { key, columns } = await shape(table);
+      const groupedHere = grouped.filter((c) => c.length === 1 || c[c.length - 2] === alias).map((c) => c[c.length - 1]!);
+      if (key.length === 0 || !key.every((k) => groupedHere.includes(k))) continue;
+      const add = columns.filter((c) => !groupedHere.includes(c) && read.some((r) => (r.of === null || r.of === alias) && (r.name === null || r.name === c)));
+      groups.push(...add.map((c) => ({ ColumnRef: { fields: [{ String: { sval: alias } }, { String: { sval: c } }] } })));
+    }
+  }
+}
+
 /**
  * The statement with every read of a filtered table replaced by its filtered read, printed; null when it reads no
  * filtered table. Throws a StatementError (gap roles) where the replacement could read otherwise than Postgres's row
@@ -478,6 +554,7 @@ export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: P
     if (n.kind === "CommonTableExpr") return [n.body.ctename as string];
     return typeof alias === "string" && ["RangeSubselect", "RangeFunction", "RangeTableFunc", "JoinExpr"].includes(n.kind) ? [alias] : [];
   });
+  await carryKeyDependency(catalog, tree, [...asFiltered].map(([i, table]) => ({ range: ranges[i]!.body, table })), analysis, new Map([...filteredRead].map(([oid, v]) => [v.table, oid])));
   const qualified = new Set<string>();
   const parsedOf = new Map<string, unknown>();
   const wall = wallName(tree);

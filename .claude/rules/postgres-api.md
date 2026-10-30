@@ -122,6 +122,11 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   visible keys over a wide range, about half the table visible**, or the engine's join filter hides the leak. RESPONSE:
   on a DuckDB upgrade these fail before the leak ships; the barrier's form changes, never the guarantee. Timing is out of
   scope, and the docs say so.
+- **A filtered read keeps what the table's key decides** (`carryKeyDependency`, `src/duck/row-filter.ts`): a subquery has no
+  key, so a column a `GROUP BY` of the primary key decides joins the GROUP BY, only when the key is grouped whole (no added
+  column can then split a group). Why: the filtered text is analysed again, and 42803 there is Mason's doing, never the
+  statement's. DETECTOR: the oracle's `GROUP BY the key` shapes, and `GROUP BY an expression` beside them. RESPONSE: what it
+  cannot carry is refused by the gap `roles` with the way out.
 - **A table's statistics reach nothing a filtered user reads** (`wallStatistics`, `src/duck/row-filter.ts`;
   docs/DESIGN.md "Roles: rows per user"): the filtered read ends in `try(col)` of every column, which this engine carries no
   statistics through (an observation, not a guarantee, so it has its detector), its select found by a name chosen after

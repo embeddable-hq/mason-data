@@ -1312,9 +1312,16 @@ It now plans the filter's own read too, every attribute NULL, the one value of e
 
 **A value its type refuses is the attribute's problem.** `filterProbe` cannot see a value: `--set tenant=abc` on an integer
 passed, and every statement of the filtered table answered `22P02` naming no attribute. A data exception on a filtered
-statement now re-reads the bound values (`attributeRefused`), and one the type refuses is 42501 with the attribute, the user
+statement now re-reads the bound values of the filters that statement reads (`attributeRefused`), and one the type refuses is 42501 with the attribute, the user
 and the `mason user add` line; a statement's own bad literal stays Postgres's. `mason user add` does not refuse it at the
 door: the type is the catalog's inference, a run's, and the command also works with Mason stopped.
+
+**A GROUP BY of a filtered table's key.** A table turned into a subquery has no primary key, so `SELECT o.id, o.status … GROUP
+BY o.id`, which Postgres accepts under row security, failed the filtered text's analysis with 42803. Each column the select
+reads outside an aggregate now joins the GROUP BY (`carryKeyDependency`), gated on the key being grouped whole: a group is
+then one row of the table and no added column can split it. The gate is the key and never Postgres's acceptance, because
+`GROUP BY lower(status)` reads a column ungrouped too. What the carrying does not reach (a grouping set, a `json` column) is
+a 42803 only the wrap can cause, so it is refused by the gap `roles`, with the way out.
 
 **`SHOW ALL`** lists no `mason.attr.*`, and that is Postgres's answer: a placeholder is `GUC_NO_SHOW_ALL`, and the oracle
 holds it, for a `SET myapp.x` and for an attribute `ALTER ROLE` set.

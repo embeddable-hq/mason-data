@@ -137,6 +137,15 @@ export function referenceSql(tag: string, login: (key: string) => string): strin
 
 /** every shape the brief names, over the three tables and the view: asked as every user but `hidden` */
 export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: string[]; prepared?: string[] }> = [
+  { name: "GROUP BY the key: a column it decides", sql: "SELECT o.id, o.status FROM shop.orders o GROUP BY o.id ORDER BY o.id" },
+  { name: "GROUP BY the key: *, beside an aggregate", sql: "SELECT o.*, count(*) FROM shop.orders o GROUP BY o.id ORDER BY o.id" },
+  { name: "GROUP BY the key: unqualified, with an aggregate", sql: "SELECT id, status, count(*), sum(amount) FROM shop.orders GROUP BY id ORDER BY id" },
+  { name: "GROUP BY the key: an output name", sql: "SELECT id AS k, status FROM shop.orders GROUP BY k ORDER BY k" },
+  { name: "GROUP BY the key: a position", sql: "SELECT id, status FROM shop.orders GROUP BY 1 ORDER BY 1" },
+  { name: "GROUP BY the key: HAVING and ORDER BY read what it decides", sql: "SELECT id, sum(amount) FROM shop.orders GROUP BY id HAVING status = 'paid' ORDER BY placed_on, id" },
+  { name: "GROUP BY the key: a correlated subquery reads what it decides", sql: "SELECT o.id, (SELECT o.status) FROM shop.orders o GROUP BY o.id ORDER BY o.id" },
+  { name: "GROUP BY two keys, of two filtered tables", sql: "SELECT o.id, o.status, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id GROUP BY o.id, c.id ORDER BY o.id" },
+  { name: "GROUP BY an expression of a column: the column joins nothing", sql: "SELECT lower(status), count(*) FROM shop.orders GROUP BY lower(status) ORDER BY 1" },
   { name: "SELECT * of a filtered table", sql: "SELECT * FROM shop.customers ORDER BY id" },
   { name: "count, sum, avg, count DISTINCT", sql: "SELECT count(*), sum(amount), avg(amount), count(DISTINCT customer_id) FROM shop.orders" },
   { name: "through: two levels, aggregated", sql: "SELECT count(*), sum(quantity * unit_price), count(DISTINCT order_id) FROM shop.order_items" },

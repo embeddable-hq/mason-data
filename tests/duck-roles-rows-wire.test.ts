@@ -99,6 +99,12 @@ roles:
       customers: { where: "region = ANY(:regions)" }
       orders: { through: customers }
       order_items: { through: orders }
+  # two attributes, each read by one table's filter
+  mixed:
+    attributes: [tenant, region]
+    tables:
+      orders: { where: "tenant_id = :tenant" }
+      customers: { where: "region = :region" }
   # a list of integers, and <> ALL: every tenant but these
   others:
     attributes: { tenants: list }
@@ -346,6 +352,14 @@ test("a value its type refuses is refused naming the attribute, the user and the
   const l = await refusal(list, "SELECT count(*) FROM orders");
   assert.equal(l.code, "42501", JSON.stringify(l));
   assert.match(l.message, /has a value for the attribute tenants that is not of type integer\[\]/);
+  // a value this statement never binds is no cause of its error: only the filters it reads are asked
+  const mixed = await connect("typed_mixed", addUser("typed_mixed", "mixed", { tenant: "1", region: "not-a-uuid" }));
+  for (const [sql, code] of [["SELECT regexp_match(status, 'a', 'g') FROM orders", "22023"], ["SELECT count(*) FROM orders WHERE id = 'abc'::int", "22P02"]] as const) {
+    const r = await refusal(mixed, sql);
+    assert.equal(r.code, code, `${sql}: ${JSON.stringify(r)}`);
+    assert.doesNotMatch(r.message, /attribute/, sql);
+  }
+  assert.match((await refusal(mixed, "SELECT count(*) FROM customers")).message, /the attribute region that is not of type uuid/);
   // a user whose values are good, a statement whose own is not: Postgres's own refusal
   const good = await connect("typed_good", addUser("typed_good", "tenant", { tenant: "1" }));
   const own = await refusal(good, "SELECT count(*) FROM orders WHERE id = 'abc'::int");
@@ -494,7 +508,7 @@ test("a literal that spells what the engine's text is printed from answers as it
     assert.deepEqual(await rows(open, `SELECT ${quoted} FROM products LIMIT 1`), [[literal]], `unfiltered: ${literal}`);
     assert.deepEqual(await rows(filtered, `SELECT ${quoted} FROM products LIMIT 1`), [[literal]], `a filtered user, no filtered table: ${literal}`);
     assert.deepEqual(await rows(filtered, `SELECT ${quoted} FROM orders LIMIT 1`), [[literal]], `a filtered table: ${literal}`);
-    assert.deepEqual(await rows(filtered, `SELECT ${quoted}, count(*) FROM orders GROUP BY id ORDER BY id LIMIT 1`), [[literal, "1"]], `grouped by a key, its star an any_value(COLUMNS): ${literal}`);
+    assert.deepEqual(await rows(filtered, `SELECT ${quoted}, count(*) FROM orders GROUP BY id ORDER BY id LIMIT 1`), [[literal, "1"]], `grouped by a key: ${literal}`);
   }
 });
 
@@ -520,6 +534,29 @@ test("a table's statistics reach no statement: what the engine would prove from 
   }
   // NULL: a hidden row's null is in the table's null count, and a table with none proves IS NULL false
   assert.equal(await outcome(c, "SELECT count(*) FROM order_items WHERE 1/(id - id) > 0 AND order_id IS NULL"), await outcome(c, "SELECT count(*) FROM order_items WHERE 1/(id - id) > 0 AND id IS NULL"));
+});
+
+test("a GROUP BY of a filtered table's key answers what the key decides, as Postgres under row security does; a group it does not decide is never split", async () => {
+  await wire();
+  const c = await connect("keyed", addUser("keyed", "tenant", { tenant: "1" }));
+  const statuses = [["10", "paid"], ["11", "pending"], ["13", "paid"], ["16", "paid"]];
+  assert.deepEqual(await rows(c, "SELECT o.id, o.status FROM orders o GROUP BY o.id ORDER BY o.id"), statuses);
+  assert.deepEqual(await rows(c, "SELECT id, status, count(*) FROM orders GROUP BY id ORDER BY id"), statuses.map((r) => [...r, "1"]));
+  assert.deepEqual(await rows(c, "SELECT c.*, count(*) FROM customers c GROUP BY c.id ORDER BY c.id"), [["1", "1", EU, "Ann", "1"], ["2", "1", US, "Bo", "1"]], "a star beside an aggregate");
+  assert.deepEqual(await rows(c, "SELECT id AS k, status FROM orders GROUP BY k ORDER BY k LIMIT 1"), [["10", "paid"]], "an output name of the key");
+  assert.deepEqual(await rows(c, "SELECT id, status FROM orders GROUP BY 1 ORDER BY 1 LIMIT 1"), [["10", "paid"]], "a position of the key");
+  assert.deepEqual(await rows(c, "SELECT o.id, (SELECT o.status) FROM orders o GROUP BY o.id ORDER BY o.id LIMIT 1"), [["10", "paid"]], "a correlated subquery's column");
+  assert.deepEqual(await rows(c, "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY o.id, c.id ORDER BY o.id"), [["10", "Ann"], ["11", "Bo"]], "two filtered keys");
+  assert.deepEqual(await rows(c, "SELECT id, sum(amount) FROM orders GROUP BY id HAVING status = 'paid' ORDER BY id"), [["10", "100"], ["13", "30"], ["16", "5"]], "HAVING");
+  // not the key: the groups are the statement's, and nothing joins them
+  assert.deepEqual(await rows(c, "SELECT lower(status), count(*) FROM orders GROUP BY lower(status) ORDER BY 1"), [["paid", "3"], ["pending", "1"]]);
+  assert.deepEqual(await rows(c, "SELECT lower(status) AS k, count(*) FROM orders GROUP BY k ORDER BY 1"), [["paid", "3"], ["pending", "1"]]);
+  assert.deepEqual(await rows(c, "SELECT count(*) FROM (SELECT status, count(id) FROM orders GROUP BY status) s"), [["2"]]);
+  // a grouping set keeps its refusal by name, with the way out
+  const sets = await refusal(c, "SELECT id, status FROM orders GROUP BY GROUPING SETS ((id))");
+  assert.equal(sets.code, "0A000", JSON.stringify(sets));
+  assert.match(`${sets.message} ${sets.detail ?? ""}`, /a GROUP BY of a key of a table its role filters.*Mason gap roles/);
+  assert.match(sets.hint ?? "", /name each column it reads in the GROUP BY/);
 });
 
 test("a catalog that cannot check the filters: every statement refused, the line said once a streak, the recovery said", async () => {

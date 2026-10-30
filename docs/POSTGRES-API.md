@@ -245,6 +245,10 @@ whichever side of a hidden row's value 500 falls.
   filter, naming the attribute and the `mason user add` line, where Postgres's policy would answer `22P02`;
 - a whole row of a filtered table, in any spelling (`SELECT c`, `row(c.*)`, `to_json(c.*)`), and a `TABLESAMPLE` of one
   are refused `0A000`, naming the gap `roles`;
+- a grouping set that relies on a filtered table's primary key for a column it does not group, and such a column no type's
+  equality can group (`json`), are refused `0A000`, naming the gap `roles`: name the column in the GROUP BY, or read it in an
+  aggregate. A plain `GROUP BY` of the key answers as Postgres does;
+- `FETCH FIRST n ROWS WITH TIES` over a filtered table is refused `0A000`: write `ORDER BY … LIMIT n` where ties do not matter;
 - `SET`, `RESET` and `set_config` of `mason.attr.*` are refused `42501`;
 - a statement verified for an unfiltered user can be refused `0A000` unverified for a filtered one: what reaches the
   allowlist is the statement with its filters in place.

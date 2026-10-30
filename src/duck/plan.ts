@@ -233,12 +233,17 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
       catch (e) {
         if (!(e instanceof StatementError)) throw e;
         // a data exception may be a bound value's, not the statement's: `--set tenant=abc` on an integer
-        const bad = e.fields.code.startsWith("22") ? await attributeRefused(catalog, grants.rows) : null;
+        const bad = e.fields.code.startsWith("22") && e.gap === null ? await attributeRefused(catalog, grants.rows, filtered.tables) : null;
         if (bad !== null) {
           const user = JSON.stringify(grants.rowsUser ?? "");
           throw new StatementError({ code: "42501", message: `permission denied: the user ${user} has a value for the attribute ${bad.name} that is not of type ${bad.type}, which the role ${grants.name} filters rows by`,
             detail: `${bad.at} reads :${bad.name} as ${bad.type} (${bad.where}): ${bad.problem}`,
             hint: `mason user remove ${grants.rowsUser ?? "<user>"} && mason user add ${grants.rowsUser ?? "<user>"} --role ${grants.name} --set ${bad.name}=<a value of type ${bad.type}>` }, text);
+        }
+        // the statement as written passed this check above, so what fails it is the table being a subquery (carryKeyDependency)
+        if (e.fields.code === "42803" || /could not identify an equality operator/.test(e.fields.message)) {
+          throw gapRefusal("roles", `Mason cannot yet answer a GROUP BY of a key of a table its role filters here: ${e.fields.message}`,
+            "name each column it reads in the GROUP BY, or read it in an aggregate", text);
         }
         const { position: _p, ...fields } = e.fields;
         throw new StatementError(fields, text, e.gap);
