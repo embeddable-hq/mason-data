@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1600" height="1060" viewBox="0 0 1600 1060" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
 <title id="title">How Mason works</title>
-<desc id="desc">Mason copies the tables and columns the sources file names out of a Postgres and keeps them current by the poll or the stream. One process holds the copy, in a columnar engine, and answers the Postgres wire protocol: a real Postgres resolves each statement, a verified statement is rewritten and run on the copy, and anything not verified exact is refused by name. An oracle decides what is exact.</desc>
+<desc id="desc">Mason syncs the tables and columns you choose from a Postgres. Each table stays in sync on demand (mason sync, the default), by polling, or by logical replication. One process holds the synced tables in a columnar engine and answers the Postgres wire protocol. Each connection is a user, and its role limits the tables, columns and rows it can read. A real Postgres resolves each query. A verified query is rewritten into the form the engine runs fastest and run on the columnar tables, and anything not verified exact is refused by name. Every query is logged. An oracle decides what is exact.</desc>
 <rect x="0" y="0" width="1600" height="1060" rx="0" fill="#0b1220"/>
 <text x="800" y="88" font-size="56" fill="#f1f5f9" font-weight="800" text-anchor="middle" letter-spacing="-1">How Mason works</text>
-<text x="800" y="134" font-size="26" fill="#94a3b8" text-anchor="middle">A drop-in replacement for a Postgres read replica, built for analytical queries</text>
+<text x="800" y="134" font-size="26" fill="#94a3b8" text-anchor="middle">A drop-in replacement for a Postgres read replica, built for exceptionally fast analytical queries</text>
 <rect x="24" y="164" width="452" height="136" rx="16" fill="#0f2142" stroke="#24406e" stroke-width="1"/>
 <circle cx="70" cy="208" r="22" fill="#2563eb"/>
 <text x="70" y="217" font-size="24" fill="#ffffff" font-weight="700" text-anchor="middle">1</text>
 <text x="104" y="218" font-size="28" fill="#60a5fa" font-weight="800" letter-spacing="0.5">— DATA SYNC</text>
-<text x="48" y="256" font-size="18" fill="#cbd5e1">Copy the tables you name out of your</text>
-<text x="48" y="282" font-size="18" fill="#cbd5e1">Postgres, and keep them in sync</text>
+<text x="48" y="256" font-size="18" fill="#cbd5e1">Sync the tables you choose from your</text>
+<text x="48" y="282" font-size="18" fill="#cbd5e1">Postgres, and keep them up to date</text>
 <rect x="24" y="316" width="200" height="444" rx="14" fill="#0f1b33" stroke="#24406e" stroke-width="1"/>
 <text x="124" y="358" font-size="22" fill="#e5e7eb" font-weight="800" text-anchor="middle">SOURCE</text>
 <text x="124" y="386" font-size="22" fill="#e5e7eb" font-weight="800" text-anchor="middle">POSTGRES</text>
@@ -25,41 +25,43 @@
 <text x="360" y="366" font-size="17" fill="#60a5fa" font-weight="700" text-anchor="middle">the sources file names</text>
 <line x1="226" y1="384" x2="482" y2="384" stroke="#60a5fa" stroke-width="3"/>
 <path d="M494,384 L479,376 L479,392 Z" fill="#60a5fa"/>
-<rect x="240" y="404" width="236" height="216" rx="12" fill="#0f2142" stroke="#24406e" stroke-width="1"/>
+<rect x="240" y="404" width="236" height="262" rx="12" fill="#0f2142" stroke="#24406e" stroke-width="1"/>
 <g transform="translate(256,420)" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><path d="M0,0 H15 L22,7 V28 H0 Z"/><path d="M15,0 V7 H22"/><line x1="5" y1="13" x2="17" y2="13"/><line x1="5" y1="18" x2="17" y2="18"/><line x1="5" y1="23" x2="12" y2="23"/></g>
-<text x="290" y="434" font-size="16" fill="#e5e7eb" font-weight="700">the first copy,</text>
+<text x="290" y="434" font-size="16" fill="#e5e7eb" font-weight="700">the first sync,</text>
 <text x="290" y="454" font-size="16" fill="#cbd5e1">in chunks,</text>
 <text x="290" y="475" font-size="16" fill="#cbd5e1">resumable</text>
 <g transform="translate(255,500)" fill="none" stroke="#60a5fa" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5,11 A10.5,10.5 0 0 1 21.5,6.5"/><path d="M22.5,0.5 V7 H16"/><path d="M24.5,17 A10.5,10.5 0 0 1 6.5,21.5"/><path d="M5.5,27.5 V21 H12"/></g>
-<text x="290" y="514" font-size="16" fill="#cbd5e1">then kept current by</text>
-<text x="290" y="535" font-size="16" fill="#cbd5e1"><tspan font-weight="700" fill="#e5e7eb">the poll</tspan> (SELECTs on</text>
-<text x="290" y="556" font-size="16" fill="#cbd5e1">xmin, the default)</text>
-<text x="290" y="577" font-size="16" fill="#cbd5e1">or <tspan font-weight="700" fill="#e5e7eb">the stream</tspan></text>
-<text x="290" y="598" font-size="16" fill="#cbd5e1">(logical replication)</text>
-<text x="248" y="652" font-size="15" fill="#94a3b8">configured by</text>
-<text x="248" y="674" font-size="15" fill="#e5e7eb" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">mason/sources/&lt;name&gt;.yml</text>
-<rect x="496" y="184" width="680" height="668" rx="16" fill="#111a2e"/>
-<path d="M496,276 V200 A16,16 0 0 1 512,184 H1160 A16,16 0 0 1 1176,200 V276 Z" fill="#1a2540"/>
-<rect x="496" y="184" width="680" height="668" rx="16" fill="none" stroke="#3b4b6e" stroke-width="3"/>
-<text x="836" y="228" font-size="28" fill="#f8fafc" font-weight="800" text-anchor="middle"><tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-weight="700">mason start</tspan> — one process</text>
-<text x="836" y="260" font-size="17" fill="#94a3b8" text-anchor="middle">the sync, the copy and the Postgres API; <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">mason serve</tspan> on a server</text>
-<rect x="512" y="292" width="648" height="124" rx="12" fill="#0c2a1c" stroke="#1d5a3a" stroke-width="1"/>
+<text x="290" y="514" font-size="16" fill="#cbd5e1">then, per table:</text>
+<text x="290" y="541" font-size="16" fill="#cbd5e1"><tspan font-weight="700" fill="#e5e7eb">on demand</tspan> (default)</text>
+<text x="290" y="561" font-size="15" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">mason sync &lt;table&gt;</text>
+<text x="290" y="587" font-size="16" fill="#e5e7eb" font-weight="700">polling</text>
+<text x="290" y="607" font-size="15" fill="#94a3b8">at an interval you set</text>
+<text x="290" y="633" font-size="16" fill="#e5e7eb" font-weight="700">replication</text>
+<text x="290" y="653" font-size="15" fill="#94a3b8">logical, in seconds</text>
+<text x="248" y="696" font-size="15" fill="#94a3b8">chosen per table in</text>
+<text x="248" y="718" font-size="15" fill="#e5e7eb" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">mason/sources/&lt;name&gt;.yml</text>
+<rect x="496" y="184" width="632" height="668" rx="16" fill="#111a2e"/>
+<path d="M496,276 V200 A16,16 0 0 1 512,184 H1112 A16,16 0 0 1 1128,200 V276 Z" fill="#1a2540"/>
+<rect x="496" y="184" width="632" height="668" rx="16" fill="none" stroke="#3b4b6e" stroke-width="3"/>
+<text x="812" y="228" font-size="28" fill="#f8fafc" font-weight="800" text-anchor="middle"><tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-weight="700">mason start</tspan> — one process</text>
+<text x="812" y="260" font-size="17" fill="#94a3b8" text-anchor="middle">the sync, the tables and the Postgres API; <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">mason serve</tspan> on a server</text>
+<rect x="512" y="292" width="600" height="124" rx="12" fill="#0c2a1c" stroke="#1d5a3a" stroke-width="1"/>
 <circle cx="560" cy="354" r="30" fill="#16a34a"/>
 <g fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linejoin="round"><rect x="545" y="341" width="30" height="26" rx="3"/><line x1="555" y1="341" x2="555" y2="367"/><line x1="565" y1="341" x2="565" y2="367"/></g>
-<text x="606" y="336" font-size="24" fill="#86efac" font-weight="800" letter-spacing="0.5">THE COPY</text>
+<text x="606" y="336" font-size="24" fill="#86efac" font-weight="800" letter-spacing="0.5">SYNCED TABLES</text>
 <text x="606" y="364" font-size="18" fill="#e5e7eb">a columnar engine (DuckDB)</text>
 <text x="606" y="390" font-size="15" fill="#94a3b8">stored in <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#e5e7eb">.mason/duck.db</tspan></text>
-<g fill="none" stroke="#4ade80" stroke-width="1.8" stroke-linejoin="round"><rect x="888" y="322" width="44" height="34" rx="3" fill="#111a2e"/><rect x="888" y="322" width="44" height="9" rx="3" fill="#14452c"/><line x1="888" y1="342" x2="932" y2="342"/><line x1="903" y1="331" x2="903" y2="356"/><line x1="917" y1="331" x2="917" y2="356"/></g>
-<g fill="none" stroke="#4ade80" stroke-width="1.8" stroke-linejoin="round"><rect x="896" y="330" width="44" height="34" rx="3" fill="#111a2e"/><rect x="896" y="330" width="44" height="9" rx="3" fill="#14452c"/><line x1="896" y1="350" x2="940" y2="350"/><line x1="911" y1="339" x2="911" y2="364"/><line x1="925" y1="339" x2="925" y2="364"/></g>
-<g fill="none" stroke="#4ade80" stroke-width="1.8" stroke-linejoin="round"><rect x="904" y="338" width="44" height="34" rx="3" fill="#111a2e"/><rect x="904" y="338" width="44" height="9" rx="3" fill="#14452c"/><line x1="904" y1="358" x2="948" y2="358"/><line x1="919" y1="347" x2="919" y2="372"/><line x1="933" y1="347" x2="933" y2="372"/></g>
-<text x="966" y="340" font-size="16" fill="#cbd5e1">only the tables and</text>
-<text x="966" y="361" font-size="16" fill="#cbd5e1">columns named</text>
-<text x="966" y="382" font-size="16" fill="#cbd5e1">are copied</text>
-<rect x="512" y="432" width="648" height="404" rx="12" fill="#1a1636" stroke="#3b2f6b" stroke-width="1"/>
+<g fill="none" stroke="#4ade80" stroke-width="1.8" stroke-linejoin="round"><rect x="856" y="322" width="44" height="34" rx="3" fill="#111a2e"/><rect x="856" y="322" width="44" height="9" rx="3" fill="#14452c"/><line x1="856" y1="342" x2="900" y2="342"/><line x1="871" y1="331" x2="871" y2="356"/><line x1="885" y1="331" x2="885" y2="356"/></g>
+<g fill="none" stroke="#4ade80" stroke-width="1.8" stroke-linejoin="round"><rect x="864" y="330" width="44" height="34" rx="3" fill="#111a2e"/><rect x="864" y="330" width="44" height="9" rx="3" fill="#14452c"/><line x1="864" y1="350" x2="908" y2="350"/><line x1="879" y1="339" x2="879" y2="364"/><line x1="893" y1="339" x2="893" y2="364"/></g>
+<g fill="none" stroke="#4ade80" stroke-width="1.8" stroke-linejoin="round"><rect x="872" y="338" width="44" height="34" rx="3" fill="#111a2e"/><rect x="872" y="338" width="44" height="9" rx="3" fill="#14452c"/><line x1="872" y1="358" x2="916" y2="358"/><line x1="887" y1="347" x2="887" y2="372"/><line x1="901" y1="347" x2="901" y2="372"/></g>
+<text x="936" y="340" font-size="16" fill="#cbd5e1">only the tables and</text>
+<text x="936" y="361" font-size="16" fill="#cbd5e1">columns you name</text>
+<text x="936" y="382" font-size="16" fill="#cbd5e1">are synced</text>
+<rect x="512" y="432" width="600" height="404" rx="12" fill="#1a1636" stroke="#3b2f6b" stroke-width="1"/>
 <text x="528" y="466" font-size="21" fill="#c4b5fd" font-weight="800">Postgres decides, the engine computes</text>
-<rect x="528" y="484" width="188" height="206" rx="12" fill="#111a2e" stroke="#3b2f6b" stroke-width="1.2"/>
-<rect x="742" y="484" width="188" height="206" rx="12" fill="#111a2e" stroke="#3b2f6b" stroke-width="1.2"/>
-<rect x="956" y="484" width="188" height="206" rx="12" fill="#111a2e" stroke="#3b2f6b" stroke-width="1.2"/>
+<rect x="528" y="484" width="174" height="206" rx="12" fill="#111a2e" stroke="#3b2f6b" stroke-width="1.2"/>
+<rect x="725" y="484" width="174" height="206" rx="12" fill="#111a2e" stroke="#3b2f6b" stroke-width="1.2"/>
+<rect x="922" y="484" width="174" height="206" rx="12" fill="#111a2e" stroke="#3b2f6b" stroke-width="1.2"/>
 <g transform="translate(544,498)" fill="none" stroke="#a78bfa" stroke-width="2.2"><ellipse cx="13" cy="5" rx="12" ry="4.5"/><path d="M1,5 V25 A12,4.5 0 0 0 25,25 V5"/><path d="M1,15 A12,4.5 0 0 0 25,15"/></g>
 <text x="584" y="520" font-size="17" fill="#e5e7eb" font-weight="800">the catalog</text>
 <text x="542" y="560" font-size="16" fill="#a78bfa" font-weight="700">a real Postgres</text>
@@ -68,52 +70,66 @@
 <text x="542" y="628" font-size="16" fill="#cbd5e1">result's columns</text>
 <text x="542" y="649" font-size="16" fill="#cbd5e1">(definitions,</text>
 <text x="542" y="670" font-size="16" fill="#cbd5e1">no rows)</text>
-<g transform="translate(759,498)" fill="none" stroke="#a78bfa" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"><path d="M0,0 H16 L23,7 V30 H0 Z"/><path d="M16,0 V7 H23"/><path d="M5,17 L10,22 L18,13"/></g>
-<text x="798" y="520" font-size="17" fill="#e5e7eb" font-weight="800">verified?</text>
-<text x="756" y="560" font-size="16" fill="#a78bfa" font-weight="700">rewrite</text>
-<text x="756" y="586" font-size="16" fill="#cbd5e1">checked against the</text>
-<text x="756" y="607" font-size="16" fill="#cbd5e1">oracle's allowlist,</text>
-<text x="756" y="628" font-size="16" fill="#cbd5e1">rewritten for</text>
-<text x="756" y="649" font-size="16" fill="#cbd5e1">the engine</text>
-<circle cx="988" cy="514" r="16" fill="#16a34a"/>
-<g fill="none" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"><rect x="979" y="506" width="18" height="16" rx="2"/><line x1="985" y1="506" x2="985" y2="522"/><line x1="991" y1="506" x2="991" y2="522"/></g>
-<text x="1012" y="520" font-size="17" fill="#e5e7eb" font-weight="800">the engine</text>
-<text x="970" y="560" font-size="16" fill="#a78bfa" font-weight="700">runs it</text>
-<text x="970" y="586" font-size="16" fill="#cbd5e1">on the columnar</text>
-<text x="970" y="607" font-size="16" fill="#cbd5e1">copy, answered with</text>
-<text x="970" y="628" font-size="16" fill="#cbd5e1">Postgres's column</text>
-<text x="970" y="649" font-size="16" fill="#cbd5e1">names, type OIDs</text>
-<text x="970" y="670" font-size="16" fill="#cbd5e1">and text</text>
-<line x1="718" y1="587" x2="728" y2="587" stroke="#a78bfa" stroke-width="2.5"/>
-<path d="M740,587 L725,579 L725,595 Z" fill="#a78bfa"/>
-<line x1="932" y1="587" x2="942" y2="587" stroke="#a78bfa" stroke-width="2.5"/>
-<path d="M954,587 L939,579 L939,595 Z" fill="#a78bfa"/>
-<line x1="1100" y1="484" x2="1100" y2="428" stroke="#4ade80" stroke-width="2.5"/>
-<path d="M1100,418 L1093,431 L1107,431 Z" fill="#4ade80"/>
-<line x1="836" y1="690" x2="836" y2="714" stroke="#f87171" stroke-width="2.5" stroke-dasharray="5 4"/>
-<path d="M836,724 L829,711 L843,711 Z" fill="#f87171"/>
-<rect x="700" y="724" width="272" height="88" rx="10" fill="#2a1216" stroke="#6b2a2f" stroke-width="1.5"/>
-<circle cx="726" cy="760" r="14" fill="#dc2626"/>
-<path d="M720.5,754.5 L731.5,765.5 M731.5,754.5 L720.5,765.5" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round"/>
-<text x="750" y="750" font-size="16" fill="#f87171" font-weight="800">not verified exact</text>
-<text x="750" y="772" font-size="16" fill="#fca5a5">refused by name, saying</text>
-<text x="750" y="793" font-size="16" fill="#fca5a5">what to write instead</text>
-<rect x="1196" y="164" width="380" height="136" rx="16" fill="#1a1636" stroke="#3b2f6b" stroke-width="1"/>
-<circle cx="1240" cy="208" r="22" fill="#7c3aed"/>
-<text x="1240" y="217" font-size="24" fill="#ffffff" font-weight="700" text-anchor="middle">2</text>
-<text x="1274" y="218" font-size="28" fill="#a78bfa" font-weight="800" letter-spacing="0.5">— SQL QUERIES</text>
-<text x="1218" y="256" font-size="18" fill="#cbd5e1">Clients send the SQL they send</text>
-<text x="1218" y="282" font-size="18" fill="#cbd5e1">Postgres, and get the same answers</text>
-<text x="1250" y="498" font-size="16" fill="#a78bfa" font-weight="700" text-anchor="middle">the Postgres</text>
-<text x="1250" y="518" font-size="16" fill="#a78bfa" font-weight="700" text-anchor="middle">wire protocol</text>
-<text x="1250" y="538" font-size="16" fill="#a78bfa" font-weight="700" text-anchor="middle">(port 5433)</text>
-<line x1="1322" y1="560" x2="1190" y2="560" stroke="#a78bfa" stroke-width="3"/>
-<path d="M1178,560 L1193,552 L1193,568 Z" fill="#a78bfa"/>
-<line x1="1178" y1="610" x2="1310" y2="610" stroke="#a78bfa" stroke-width="3"/>
-<path d="M1322,610 L1307,602 L1307,618 Z" fill="#a78bfa"/>
-<text x="1250" y="642" font-size="16" fill="#a78bfa" font-weight="700" text-anchor="middle">Postgres's</text>
-<text x="1250" y="662" font-size="16" fill="#a78bfa" font-weight="700" text-anchor="middle">answers</text>
-<g transform="translate(1232,678)" fill="none" stroke="#a78bfa" stroke-width="1.8" stroke-linejoin="round"><rect x="0" y="0" width="36" height="30" rx="3"/><line x1="0" y1="8" x2="36" y2="8"/><line x1="0" y1="15.5" x2="36" y2="15.5"/><line x1="0" y1="23" x2="36" y2="23"/><line x1="12" y1="0" x2="12" y2="30"/><line x1="24" y1="0" x2="24" y2="30"/></g>
+<g transform="translate(742,498)" fill="none" stroke="#a78bfa" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"><path d="M0,0 H16 L23,7 V30 H0 Z"/><path d="M16,0 V7 H23"/><path d="M5,17 L10,22 L18,13"/></g>
+<text x="781" y="520" font-size="17" fill="#e5e7eb" font-weight="800">verified?</text>
+<text x="739" y="560" font-size="16" fill="#a78bfa" font-weight="700">exact rewrite</text>
+<text x="739" y="586" font-size="16" fill="#cbd5e1">checked against the</text>
+<text x="739" y="607" font-size="16" fill="#cbd5e1">oracle's allowlist,</text>
+<text x="739" y="628" font-size="16" fill="#cbd5e1">rewritten into the</text>
+<text x="739" y="649" font-size="16" fill="#cbd5e1">form the engine</text>
+<text x="739" y="670" font-size="16" fill="#cbd5e1">runs fastest</text>
+<circle cx="954" cy="514" r="16" fill="#16a34a"/>
+<g fill="none" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"><rect x="945" y="506" width="18" height="16" rx="2"/><line x1="951" y1="506" x2="951" y2="522"/><line x1="957" y1="506" x2="957" y2="522"/></g>
+<text x="978" y="520" font-size="17" fill="#e5e7eb" font-weight="800">the engine</text>
+<text x="936" y="560" font-size="16" fill="#a78bfa" font-weight="700">runs it</text>
+<text x="936" y="586" font-size="16" fill="#cbd5e1">on the columnar</text>
+<text x="936" y="607" font-size="16" fill="#cbd5e1">tables, answered</text>
+<text x="936" y="628" font-size="16" fill="#cbd5e1">with Postgres's</text>
+<text x="936" y="649" font-size="16" fill="#cbd5e1">column names,</text>
+<text x="936" y="670" font-size="16" fill="#cbd5e1">type OIDs and text</text>
+<line x1="704" y1="587" x2="712" y2="587" stroke="#a78bfa" stroke-width="2.5"/>
+<path d="M723,587 L708,579 L708,595 Z" fill="#a78bfa"/>
+<line x1="901" y1="587" x2="909" y2="587" stroke="#a78bfa" stroke-width="2.5"/>
+<path d="M920,587 L905,579 L905,595 Z" fill="#a78bfa"/>
+<line x1="1060" y1="484" x2="1060" y2="428" stroke="#4ade80" stroke-width="2.5"/>
+<path d="M1060,418 L1053,431 L1067,431 Z" fill="#4ade80"/>
+<line x1="812" y1="690" x2="812" y2="714" stroke="#f87171" stroke-width="2.5" stroke-dasharray="5 4"/>
+<path d="M812,724 L805,711 L819,711 Z" fill="#f87171"/>
+<rect x="676" y="724" width="272" height="88" rx="10" fill="#2a1216" stroke="#6b2a2f" stroke-width="1.5"/>
+<circle cx="702" cy="760" r="14" fill="#dc2626"/>
+<path d="M696.5,754.5 L707.5,765.5 M707.5,754.5 L696.5,765.5" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round"/>
+<text x="726" y="750" font-size="16" fill="#f87171" font-weight="800">not verified exact</text>
+<text x="726" y="772" font-size="16" fill="#fca5a5">refused by name, saying</text>
+<text x="726" y="793" font-size="16" fill="#fca5a5">what to write instead</text>
+<g transform="translate(968,737)" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><rect x="0" y="0" width="22" height="28" rx="3"/><line x1="5" y1="8" x2="17" y2="8"/><line x1="5" y1="14" x2="17" y2="14"/><line x1="5" y1="20" x2="13" y2="20"/></g>
+<text x="1000" y="750" font-size="16" fill="#e5e7eb" font-weight="800">every query</text>
+<text x="1000" y="772" font-size="16" fill="#cbd5e1">is logged</text>
+<text x="1000" y="793" font-size="15" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">mason logs</text>
+<rect x="1152" y="164" width="424" height="136" rx="16" fill="#1a1636" stroke="#3b2f6b" stroke-width="1"/>
+<circle cx="1196" cy="208" r="22" fill="#7c3aed"/>
+<text x="1196" y="217" font-size="24" fill="#ffffff" font-weight="700" text-anchor="middle">2</text>
+<text x="1230" y="218" font-size="28" fill="#a78bfa" font-weight="800" letter-spacing="0.5">— SQL QUERIES</text>
+<text x="1174" y="256" font-size="18" fill="#cbd5e1">Clients send the SQL they send</text>
+<text x="1174" y="282" font-size="18" fill="#cbd5e1">Postgres, and get the same answers</text>
+<text x="1226" y="402" font-size="16" fill="#a78bfa" font-weight="700" text-anchor="middle">the Postgres</text>
+<text x="1226" y="422" font-size="16" fill="#a78bfa" font-weight="700" text-anchor="middle">wire protocol</text>
+<text x="1226" y="442" font-size="16" fill="#a78bfa" font-weight="700" text-anchor="middle">(port 5433)</text>
+<rect x="1150" y="462" width="152" height="186" rx="12" fill="#1a1636" stroke="#3b2f6b" stroke-width="1.2"/>
+<g transform="translate(1213,476)" fill="none" stroke="#a78bfa" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="8" r="7"/><path d="M0,30 C0,21 6,17 13,17 C20,17 26,21 26,30"/></g>
+<text x="1226" y="530" font-size="15" fill="#e5e7eb" font-weight="800" text-anchor="middle">each connection</text>
+<text x="1226" y="550" font-size="15" fill="#e5e7eb" font-weight="800" text-anchor="middle">is a user</text>
+<text x="1226" y="576" font-size="15" fill="#cbd5e1" text-anchor="middle">its role limits</text>
+<text x="1226" y="595" font-size="15" fill="#cbd5e1" text-anchor="middle">the tables,</text>
+<text x="1226" y="614" font-size="15" fill="#cbd5e1" text-anchor="middle">columns and rows</text>
+<text x="1226" y="633" font-size="15" fill="#cbd5e1" text-anchor="middle">it can read</text>
+<line x1="1322" y1="555" x2="1314" y2="555" stroke="#a78bfa" stroke-width="3"/>
+<path d="M1304,555 L1317,548 L1317,562 Z" fill="#a78bfa"/>
+<line x1="1148" y1="555" x2="1142" y2="555" stroke="#a78bfa" stroke-width="3"/>
+<path d="M1131,555 L1144,548 L1144,562 Z" fill="#a78bfa"/>
+<line x1="1130" y1="676" x2="1310" y2="676" stroke="#a78bfa" stroke-width="3"/>
+<path d="M1322,676 L1307,668 L1307,684 Z" fill="#a78bfa"/>
+<text x="1226" y="706" font-size="16" fill="#a78bfa" font-weight="700" text-anchor="middle">Postgres's answers</text>
+<g transform="translate(1208,720)" fill="none" stroke="#a78bfa" stroke-width="1.8" stroke-linejoin="round"><rect x="0" y="0" width="36" height="30" rx="3"/><line x1="0" y1="8" x2="36" y2="8"/><line x1="0" y1="15.5" x2="36" y2="15.5"/><line x1="0" y1="23" x2="36" y2="23"/><line x1="12" y1="0" x2="12" y2="30"/><line x1="24" y1="0" x2="24" y2="30"/></g>
 <rect x="1324" y="316" width="252" height="444" rx="14" fill="#1a1636" stroke="#3b2f6b" stroke-width="1"/>
 <text x="1450" y="354" font-size="22" fill="#e5e7eb" font-weight="800" text-anchor="middle">CLIENTS</text>
 <rect x="1336" y="372" width="228" height="374" rx="10" fill="#111a2e" stroke="#3b2f6b" stroke-width="1"/>
@@ -124,7 +140,7 @@
 <g fill="none" stroke="#e5e7eb" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="1350" y="500" width="30" height="24" rx="7"/><line x1="1365" y1="500" x2="1365" y2="493"/><line x1="1347" y1="508" x2="1347" y2="516"/><line x1="1383" y1="508" x2="1383" y2="516"/><line x1="1360" y1="518" x2="1370" y2="518"/></g>
 <g fill="#e5e7eb"><circle cx="1365" cy="491" r="2.6"/><circle cx="1359" cy="510" r="2.6"/><circle cx="1371" cy="510" r="2.6"/></g>
 <text x="1396" y="506" font-size="18" fill="#e5e7eb" font-weight="700">AI agents</text>
-<text x="1396" y="528" font-size="16" fill="#94a3b8">that write SQL</text>
+<text x="1396" y="528" font-size="16" fill="#94a3b8">over SQL or MCP</text>
 <g fill="none" stroke="#e5e7eb" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"><rect x="1351" y="580" width="28" height="19" rx="2"/><path d="M1345,605 H1385 L1382,609 H1348 Z"/></g>
 <text x="1396" y="592" font-size="18" fill="#e5e7eb" font-weight="700">your app's</text>
 <text x="1396" y="614" font-size="16" fill="#94a3b8">analytics code</text>
@@ -138,6 +154,6 @@
 <circle cx="434" cy="954" r="28" fill="#16a34a"/>
 <path d="M421,955 L430,964 L448,945" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 <text x="486" y="932" font-size="24" fill="#e5e7eb" font-weight="800">What is exact is decided by an oracle</text>
-<text x="486" y="966" font-size="18" fill="#cbd5e1">Tens of thousands of statements run on a real Postgres and on Mason and diffed, offline;</text>
+<text x="486" y="966" font-size="18" fill="#cbd5e1">Tens of thousands of queries are run on a real Postgres and on Mason and compared, offline;</text>
 <text x="486" y="992" font-size="18" fill="#cbd5e1">only what came back identical is allowed.</text>
 </svg>
