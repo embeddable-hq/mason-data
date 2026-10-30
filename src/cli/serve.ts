@@ -28,6 +28,7 @@ import { parseSource } from "./preflight.ts";
 import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir, sourcesTop } from "./sources.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
+import { imagePinProblem, PIN_FILE } from "../lib/project-version.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { version } from "./version.ts";
@@ -198,6 +199,16 @@ export function serveConfig(s: ServeSettings, existing: Project | BrokenProject 
 }
 
 /**
+ * THE PROJECT'S PIN, AS THE IMAGE HOLDS IT (src/lib/project-version.ts), read from the project folder (MASON_PROJECT):
+ * before anything is written or connected, so a project of another release line leaves a volume as it found it, and a
+ * person reads the image to run, never the mason command's way out. A build that is no release checks nothing.
+ */
+export function servePin(s: ServeSettings, running: string): Failure | null {
+  const p = imagePinProblem(s.project, running);
+  return p && { message: p.problem, code: "refused", fix: p.wayOut ?? `correct ${PIN_FILE} in the project folder (MASON_PROJECT), then start it again` };
+}
+
+/**
  * THE PROJECT FOLDER'S SOURCES FILE, for a serve: one there is checked as the run reads it (src/cli/sources.ts
  * readSource: its URL resolved from this environment, every mistake on one report); a folder with none gets the file
  * `mason init` writes, `url: ${DATABASE_URL}` and no table, when DATABASE_URL is set — else what to set is said.
@@ -291,6 +302,8 @@ export async function serve(argv: string[]): Promise<number> {
   if (f.positionals.length) return failed("serve", { message: "it takes no arguments: its settings are the environment's", code: "usage", usage: SERVE.usage }, { json });
   const s = serveSettings(process.env, process.cwd());
   if ("message" in s) return failed("serve", s, { json });
+  const pinned = servePin(s, version());
+  if (pinned) return failed("serve", pinned, { json });
   // the project folder: its sources file is the list of what is copied, one with no table written when there is none
   const made = serveSource(s, process.env);
   if ("message" in made) return failed("serve", made, { json });

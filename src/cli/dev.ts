@@ -209,7 +209,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     try { demoChangeMs = demoSettings(process.env).changeMs; }
     catch (e) { say(`mason start: ${(e as Error).message}`); return 1; }
   }
-  const pinned = cliPinProblem(folder, o.version);
+  // mason serve has held the project to the image's pin already, before it wrote anything (src/cli/serve.ts servePin)
+  const pinned = o.serve ? null : cliPinProblem(folder, o.version);
   if (pinned) { say(`mason start: ${pinned}`); return 1; }
   // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
   const pollMs = pollMsRetired(process.env, () => sourcesTop(project.root, project.folder));

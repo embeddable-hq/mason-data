@@ -13,7 +13,9 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as serveModule from "../src/cli/serve.ts";
+import { cliPinProblem } from "../src/cli/pin.ts";
 import { newConfig, readProject, writeConfig } from "../src/cli/project.ts";
+import { imagePinProblem } from "../src/lib/project-version.ts";
 import type { CopyState } from "../src/duck/sync.ts";
 import { unassignedPort } from "./test-ports.ts";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
@@ -395,6 +397,113 @@ test("MASON_REQUEST_LOG_DAYS is MASON_HISTORY_DAYS now: set, it refuses mason se
     assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message: "MASON_REQUEST_LOG_DAYS=30 is no longer read", why, fix });
     assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+/** A project mounted at MASON_PROJECT, pinned as `pin` says (no mason.yml for null), its sources file there, and a data
+ *  folder of its own holding a mason/ that pins something else: a check reading the folder serve runs in sees that one. */
+function mounted(dir: string, pin: string | null): { project: string; data: string; file: string } {
+  const project = path.join(dir, "mounted"), data = path.join(dir, "volume");
+  fs.mkdirSync(path.join(project, "sources"), { recursive: true });
+  fs.mkdirSync(path.join(data, "mason"), { recursive: true });
+  fs.writeFileSync(path.join(data, "mason", "mason.yml"), "version: 0.6.1\n");
+  if (pin !== null) fs.writeFileSync(path.join(project, "mason.yml"), pin);
+  fs.writeFileSync(path.join(project, "sources", "app.yml"), "kind: postgres\nurl: ${DATABASE_URL}\ntables: {}\n");
+  return { project, data, file: path.join(project, "mason.yml") };
+}
+
+/** Everything a serve needs but a database: its URL names a port nothing listens on, so a run that gets past the checks
+ *  fails at Connecting to. `version` is the image's MASON_VERSION; undefined is a checkout's `dev`. */
+async function serveEnv(dir: string, m: { project: string; data: string }, version: string | undefined): Promise<Record<string, string>> {
+  return matrixEnv({ HOME: dir, DATABASE_URL: "postgres://mason:secret@127.0.0.1:1/app", MASON_API_KEY: KEY, MASON_PROJECT: m.project, MASON_DATA: m.data,
+    MASON_HEALTH_HOST: "127.0.0.1", MASON_HEALTH_PORT: String(await unassignedPort()), MASON_PG_PORT: String(await unassignedPort()),
+    ...(version === undefined ? {} : { MASON_VERSION: version }) });
+}
+
+const IMAGE_WAY_OUT = (p: string): string => `Run the image the project names (ghcr.io/embeddable-hq/mason-data:${p}).`;
+/** each direction a project can be pinned from image 0.6.1, as the image's whole message and way out */
+const PIN_DIRECTIONS: ReadonlyArray<{ name: string; pin: string; message: (file: string) => string; fix: string }> = [
+  { name: "a newer release line", pin: "0.7.0", message: (f) => `${f} pins Mason 0.7.0, and this mason image is 0.6.1: the project is written for a newer Mason`, fix: IMAGE_WAY_OUT("0.7.0") },
+  { name: "an older release line", pin: "0.5.2", message: (f) => `${f} pins Mason 0.5.2, and this mason image is 0.6.1, a newer release line than 0.5.x, which may read the project differently`,
+    fix: `${IMAGE_WAY_OUT("0.5.2")} Or upgrade the project: read the release notes of every version after 0.5.2 up to 0.6.1 (their "Before you upgrade"), change what they say, then set version: 0.6.1 in mason.yml.` },
+  { name: "the same line at a later patch", pin: "0.6.3", message: (f) => `${f} pins Mason 0.6.3, and this mason image is 0.6.1, older than it: the project may use a fix or a key 0.6.1 does not have`, fix: IMAGE_WAY_OUT("0.6.3") },
+];
+
+for (const d of PIN_DIRECTIONS) {
+  test(`mason serve refuses a project pinned to ${d.name} in its own failure shape, text and --json, the mounted project's file named, before anything is written or connected`, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-pin-"));
+    try {
+      const m = mounted(dir, `version: ${d.pin}\n`);
+      // no sources file: one the serve would write in the project folder is written after the check, or never
+      fs.rmSync(path.join(m.project, "sources"), { recursive: true });
+      const env = await serveEnv(dir, m, "v0.6.1");
+      const said = await runMason(dir, ["serve"], env);
+      assert.equal(said.code, 1, said.stdout + said.stderr);
+      assert.equal(said.stderr, `✗ mason serve: ${d.message(m.file)}\n  fix   ${d.fix}\n`);
+      assert.equal(said.stdout, "", "no start line: it refused before it began");
+      const json = await runMason(dir, ["serve", "--json"], env);
+      assert.equal(json.code, 1, json.stdout + json.stderr);
+      assert.deepEqual(JSON.parse(json.stdout), { error: { code: "refused", message: d.message(m.file), fix: d.fix }, next: [] });
+      assert.equal(json.stderr, "");
+      assert.deepEqual(fs.readdirSync(m.data), ["mason"], "the volume as it was: no .mason/");
+      assert.deepEqual(fs.readdirSync(m.project), ["mason.yml"], "the project folder as it was: no sources file written");
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
+test("mason serve refuses a mason.yml it cannot read in its own failure shape, naming the file, before anything is written", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-pin-"));
+  try {
+    const m = mounted(dir, "version: soon\n");
+    const j = await runMason(dir, ["serve", "--json"], await serveEnv(dir, m, "v0.6.1"));
+    assert.equal(j.code, 1, j.stdout + j.stderr);
+    assert.deepEqual(JSON.parse(j.stdout), { error: { code: "refused", message: `${m.file}: version "soon" is not a version (x.y.z, e.g. 0.5.1)`,
+      fix: "correct mason.yml in the project folder (MASON_PROJECT), then start it again" }, next: [] });
+    assert.deepEqual(fs.readdirSync(m.data), ["mason"]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("mason serve starts on a project it may run: the same line at the pin's patch or later, and no mason.yml; a build that is no release checks nothing, whatever the file says", async () => {
+  const cases: Array<[string | undefined, string | null]> = [["v0.6.1", "version: 0.6.1\n"], ["v0.6.1", "version: 0.6.0\n"], ["v0.6.1", null],
+    [undefined, "version: 9.9.9\n"], ["main-abc1234", "version: 9.9.9\n"], ["main-abc1234", "version: soon\n"]];
+  for (const [version, pin] of cases) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-pin-"));
+    try {
+      const p = await runMason(dir, ["serve"], await serveEnv(dir, mounted(dir, pin), version));
+      // past the check: stopped by the database nothing listens for, the state written
+      assert.match(p.stdout, /▸ Connecting to /, `${version} on ${pin}:\n${p.stdout}${p.stderr}`);
+      assert.doesNotMatch(p.stdout + p.stderr, /pins Mason|mason start:/);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("the image's check: one rule from 1.0 too, its major the line; a project with no mason.yml and a build that is no release answer null", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-pin-"));
+  try {
+    const { project: at, file } = mounted(dir, "version: 1.2.0\n");
+    assert.equal(imagePinProblem(at, "1.9.0"), null, "a later minor is the same line from 1.0");
+    assert.deepEqual(imagePinProblem(at, "2.0.0"), { problem: `${file} pins Mason 1.2.0, and this mason image is 2.0.0, a newer release line than 1.x, which may read the project differently`,
+      wayOut: `${IMAGE_WAY_OUT("1.2.0")} Or upgrade the project: read the release notes of every version after 1.2.0 up to 2.0.0 (their "Before you upgrade"), change what they say, then set version: 2.0.0 in mason.yml.` });
+    assert.equal(imagePinProblem(at, "dev"), null);
+    assert.equal(imagePinProblem(at, "main-abc1234"), null);
+    assert.equal(imagePinProblem(path.join(dir, "volume"), "9.0.0"), null, "no mason.yml is unpinned");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("mason start's words stay the command's: one line, its own way out, in each direction", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-start-pin-"));
+  try {
+    const { project: at, file } = mounted(dir, "version: 0.7.0\n");
+    const npm = (p: string): string => `Run the mason command it names: npm i -g @mason-data/cli@${p} (or npx @mason-data/cli@${p} …).`;
+    assert.equal(cliPinProblem(at, "0.6.1"), `${file} pins Mason 0.7.0, and this mason command is 0.6.1: the project is written for a newer Mason. ${npm("0.7.0")}`);
+    fs.writeFileSync(file, "version: 0.5.2\n");
+    assert.equal(cliPinProblem(at, "0.6.1"), `${file} pins Mason 0.5.2, and this mason command is 0.6.1, a newer release line than 0.5.x, which may read the project differently. ${npm("0.5.2")} ` +
+      `Or upgrade the project: read the release notes of every version after 0.5.2 up to 0.6.1 (their "Before you upgrade"), change what they say, then set version: 0.6.1 in mason.yml.`);
+    fs.writeFileSync(file, "version: 0.6.3\n");
+    assert.equal(cliPinProblem(at, "0.6.1"), `${file} pins Mason 0.6.3, and this mason command is 0.6.1, older than it: the project may use a fix or a key 0.6.1 does not have. ${npm("0.6.3")}`);
+    fs.writeFileSync(file, "version: soon\n");
+    assert.equal(cliPinProblem(at, "0.6.1"), `${file}: version "soon" is not a version (x.y.z, e.g. 0.5.1)`);
+    assert.equal(cliPinProblem(at, "dev"), null);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("mason serve --help lists every setting a server sets: PG_PUBLICATION beside DATABASE_URL, with its default; MASON_CHANGES no more", () => {

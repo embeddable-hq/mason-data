@@ -7,10 +7,11 @@
  *
  * Before 1.0 a minor version may change the project's format with no compatibility (CLAUDE.md "No backwards
  * compatibility before v1.0"), so a project written for 0.5 and run by 0.6 would fail on whatever key moved, in words
- * that never say the versions differ. The pin turns that into one refusal that does: the image of the ClickHouse stack
- * this was cut from refused to start on a project of another minor version, or of a newer patch than itself
- * (`imagePinProblem` below), and `mason init` / `mason start` refuse a CLI that is (src/cli/pin.ts). The way out is
- * always the same pair: run the version the project names, or read the release notes and move the pin.
+ * that never say the versions differ. The pin turns that into one refusal that does: the image refuses to start on a
+ * project of another release line, or of a newer patch than itself (`imagePinProblem` below, `mason serve`'s check,
+ * src/cli/serve.ts), and `mason init` / `mason start` refuse a CLI that is (src/cli/pin.ts). ONE rule (`pinProblem`), in
+ * each reader's words. The way out is always the same pair: run the version the project names, or read the release notes
+ * and move the pin.
  *
  * A build that is no release (`dev` from a checkout, `main-<sha>` from main) checks nothing: it has no version to hold
  * a project to. A project with no `mason.yml` (made by an older `mason init`) is unpinned and runs; `mason start` writes one.
@@ -46,36 +47,45 @@ export function sameLine(a: Version, b: Version): boolean {
 const older = (a: Version, b: Version): boolean =>
   a.major !== b.major ? a.major < b.major : a.minor !== b.minor ? a.minor < b.minor : a.patch < b.patch;
 
+/** Why a project may not run: what is wrong, and the way out; null way out when the file itself is the problem, which
+ *  says what to write. A person's `mason start` says them as one line, `mason serve` as a Failure's message and fix. */
+export interface PinRefusal { problem: string; wayOut: string | null }
+
+/** What reads the project: `what` names it in the message ("this mason image", "this mason command"), `run` says how to
+ *  run the pinned version instead. */
+export interface PinReader { what: string; run: (pinned: string) => string }
+
 /**
  * Why `running` (what reads the project: the image, or the CLI) may not run a project pinned to `pin`, or null.
- * Allowed: the same release line, at the pin's patch or later. `what` names the reader in the message ("the mason
- * image", "this mason command"); `run` says how to run the pinned version instead.
+ * Allowed: the same release line, at the pin's patch or later.
  */
-export function pinProblem(pin: Version, running: Version, file: string, what: string, run: string): string | null {
+function pinProblem(pin: Version, running: Version, file: string, reader: PinReader): PinRefusal | null {
   if (sameLine(pin, running) && !older(running, pin)) return null;
-  const p = versionText(pin), r = versionText(running);
+  const p = versionText(pin), r = versionText(running), { what } = reader, run = reader.run(p);
   if (sameLine(pin, running)) {
-    return `${file} pins Mason ${p}, and ${what} is ${r}, older than it: the project may use a fix or a key ${r} does not have. ${run}`;
+    return { problem: `${file} pins Mason ${p}, and ${what} is ${r}, older than it: the project may use a fix or a key ${r} does not have`, wayOut: run };
   }
   const line = pin.major > 0 ? `${pin.major}.x` : `${pin.major}.${pin.minor}.x`;
   return older(running, pin)
-    ? `${file} pins Mason ${p}, and ${what} is ${r}: the project is written for a newer Mason. ${run}`
-    : `${file} pins Mason ${p}, and ${what} is ${r}, a newer release line than ${line}, which may read the project differently. ` +
-      `${run} Or upgrade the project: read the release notes of every version after ${p} up to ${r} (their "Before you upgrade"), ` +
-      `change what they say, then set version: ${r} in ${path.basename(file)}.`;
+    ? { problem: `${file} pins Mason ${p}, and ${what} is ${r}: the project is written for a newer Mason`, wayOut: run }
+    : { problem: `${file} pins Mason ${p}, and ${what} is ${r}, a newer release line than ${line}, which may read the project differently`,
+        wayOut: `${run} Or upgrade the project: read the release notes of every version after ${p} up to ${r} (their "Before you upgrade"), ` +
+          `change what they say, then set version: ${r} in ${path.basename(file)}.` };
 }
 
 /**
- * The image's check, as the ClickHouse stack's service ran it at its start: the project's pin against the image's
- * MASON_VERSION, or null.
- * An image that is no release (`dev`, `main-<sha>`) holds no project to a version.
+ * THE ONE CHECK: the project's pin against the version of what reads it, or null. A build that is no release (`dev`,
+ * `main-<sha>`) holds no project to a version, and reads no mason.yml.
  */
-export function imagePinProblem(project: string, imageVersion: string | undefined): string | null {
-  const running = parseVersion(imageVersion ?? "");
+export function projectPinProblem(project: string, version: string, reader: PinReader): PinRefusal | null {
+  const running = parseVersion(version);
   if (running === null) return null;
   const read = readPin(project);
-  if ("problem" in read) return read.problem;
-  if (read.pin === null) return null;
-  const p = versionText(read.pin);
-  return pinProblem(read.pin, running, read.file, "this mason image", `Run the image the project names (ghcr.io/embeddable-hq/mason-data:${p}).`);
+  if ("problem" in read) return { problem: read.problem, wayOut: null };
+  return read.pin === null ? null : pinProblem(read.pin, running, read.file, reader);
+}
+
+/** The image's check, its version what `mason serve` runs as (src/cli/version.ts): the words of someone running a container. */
+export function imagePinProblem(project: string, imageVersion: string): PinRefusal | null {
+  return projectPinProblem(project, imageVersion, { what: "this mason image", run: (p) => `Run the image the project names (ghcr.io/embeddable-hq/mason-data:${p}).` });
 }

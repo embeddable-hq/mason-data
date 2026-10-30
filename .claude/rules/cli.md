@@ -265,8 +265,9 @@ CLI lacks).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the
   README's "Going to production", `mason help production` offline). Only the project folder
   travels. **`mason.yml` pins the version** the project is written for (src/lib/project-version.ts: init writes it,
-  start adds it to an older project; the image refuses another release line or a newer patch; `dev` and `main-<sha>`
-  check nothing).
+  start adds it to an older project; the image refuses another release line or a newer patch, as `mason serve`'s own
+  failure before it writes anything, with the image to run (`servePin`, src/cli/serve.ts; one rule, `pinProblem`, in each
+  reader's words); `dev` and `main-<sha>` check nothing).
 
 ## Errors
 

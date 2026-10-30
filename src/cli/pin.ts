@@ -6,17 +6,13 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseVersion, pinFileText, pinProblem, readPin, versionText, PIN_FILE } from "../lib/project-version.ts";
+import { parseVersion, pinFileText, projectPinProblem, PIN_FILE } from "../lib/project-version.ts";
 
 /** Why this mason command may not run the project in `folder`, or null (a checkout's `dev` checks nothing). */
 export function cliPinProblem(folder: string, cliVersion: string): string | null {
-  const running = parseVersion(cliVersion);
-  if (running === null) return null;
-  const read = readPin(folder);
-  if ("problem" in read) return read.problem;
-  if (read.pin === null) return null;
-  const p = versionText(read.pin);
-  return pinProblem(read.pin, running, read.file, "this mason command", `Run the mason command it names: npm i -g @mason-data/cli@${p} (or npx @mason-data/cli@${p} …).`);
+  const r = projectPinProblem(folder, cliVersion, { what: "this mason command",
+    run: (p) => `Run the mason command it names: npm i -g @mason-data/cli@${p} (or npx @mason-data/cli@${p} …).` });
+  return r === null ? null : r.wayOut === null ? r.problem : `${r.problem}. ${r.wayOut}`;
 }
 
 /**
