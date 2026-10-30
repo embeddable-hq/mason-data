@@ -19,7 +19,7 @@ import { datumText, masonCalls, rewrite, treeDifference, Unrewritable, type Duck
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
 import { distinctCountTables, distinctKeyCounts, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
 import { enforceGrants, type RoleGrants } from "./grants.ts";
-import { expandRowFilters } from "./row-filter.ts";
+import { expandRowFilters, printedWall, wallStatistics } from "./row-filter.ts";
 import type { PgAnalysis } from "./analyze.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802;
@@ -158,11 +158,12 @@ export function missingRelationHint(relation: string, copies: readonly CopyState
 /** A statement's plan. `wireBound`: its rows are bounded by a row count an Execute sets on the wire, which its SQL
  *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so).
  *  `grants`: the session's role (src/duck/grants.ts), held after the analysis; null for a session with no role where
- *  roles exist (the plan still names its reads, for an Execute under a role given later); undefined with no roles at all */
+ *  roles exist (the plan still names its reads, for an Execute under a role given later); undefined with no roles at all.
+ *  `filteredReads`: `text` is the statement with its filtered reads in place (expandRowFilters), which the wall ends */
 export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: Node, base: number,
   paramOids: readonly number[], searchPath: string, timeZone: string, collation: DuckCollation, verified: ReadonlyMap<string, string> | null,
   userTypes: ReadonlyMap<string, number> = new Map(), copies: () => readonly CopyState[] = () => [], depth = 0, kept: KeptRoutes | null = null,
-  wireBound = false, grants: RoleGrants | null | undefined = undefined): Promise<DuckPlan> {
+  wireBound = false, grants: RoleGrants | null | undefined = undefined, filteredReads = false): Promise<DuckPlan> {
   const started = performance.now();
   const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
   if ("refused" in analysis) {
@@ -179,7 +180,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const expanded = await expandViews(catalog, stmt, analysis, pathSql(searchPath));
   if (expanded !== null) {
     if (depth >= MAX_VIEW_DEPTH) throw viewRefused(`Mason cannot yet answer views read through more than ${MAX_VIEW_DEPTH} other views`, "read the tables the views read");
-    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, grants); }
+    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, grants, filteredReads); }
     catch (e) {
       if (!(e instanceof StatementError)) throw e;
       const { position: _p, ...fields } = e.fields;
@@ -199,7 +200,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
     const filtered = await expandRowFilters(catalog, stmt, analysis, pathSql(searchPath), grants.rows);
     if (filtered !== null) {
       let inner: DuckPlan;
-      try { inner = await planDuck(catalog, filtered.text, filtered.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, undefined); }
+      try { inner = await planDuck(catalog, filtered.text, filtered.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, undefined, true); }
       catch (e) {
         if (!(e instanceof StatementError)) throw e;
         const { position: _p, ...fields } = e.fields;
@@ -287,7 +288,9 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   }
   // DuckDB's COLUMNS(t.*) (decidedByKey's star) is an expression only unquoted; the deparser quotes the keyword. No
   // statement Postgres accepted calls a function "columns" (Postgres has none), and the read-back below checks the text
-  const sql = deparseSync(tree as Node, { pretty: false }).replaceAll('any_value("columns"(', "any_value(COLUMNS(");
+  // the filtered reads of a role's statement, only: no other statement's text changes, whatever it names its subqueries
+  if (filteredReads) wallStatistics(tree);
+  const sql = printedWall(deparseSync(tree as Node, { pretty: false }).replaceAll('any_value("columns"(', "any_value(COLUMNS("));
   // THE PRINTED TEXT MUST READ BACK AS THE TREE: a printing gap (the deparser drops or respells something) would run
   // another statement than the one Postgres analysed — refused instead, by name
   const back = (await parseSql(sql)).stmts?.[0]?.stmt;

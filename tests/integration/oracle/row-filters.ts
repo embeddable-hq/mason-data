@@ -11,9 +11,11 @@
  * THE BARRIER (`BARRIER_SHAPES`, src/duck/row-filter.ts BARRIER): `shop.invoices` and `shop.invoice_lines` are built to show
  * a statement's own expression reaching a hidden row: 40,000 rows, ids spread over 2 M, so more than 50 visible keys over a
  * wide range (below that, or over a narrow range, the engine's dynamic join filter prunes hidden rows by itself and a leak
- * passes unseen). Every even invoice is tenant 4's, region U2, seen by no filtered user here, and every hundredth of them
- * carries the value the statement's expression raises on; every visible row holds 1. Postgres, whose policies are security
- * barriers, answers each; so must Mason, for a scalar where:, a list, a uuid list and through:, and `open` is refused alike.
+ * passes unseen), and about half of them visible to each filtered user: at a sixth the join's filter prunes the hidden
+ * rows too, which hid the leak from the `tenant` and integer-list users' shapes. Every even invoice is tenant 4's, region
+ * U2, seen by no filtered user here, and every hundredth of them carries the value the statement's expression raises on;
+ * every visible row holds 1. Postgres, whose policies are security barriers, answers each; so must Mason, for a scalar
+ * where:, a list, a uuid list and through:, and `open` is refused alike.
  */
 
 const U1 = "11111111-1111-4111-8111-111111111111", U2 = "22222222-2222-4222-8222-222222222222", U3 = "33333333-3333-4333-8333-333333333333";
@@ -35,7 +37,7 @@ CREATE TYPE shop.tier AS ENUM ('free', 'pro', 'max');
 CREATE TABLE shop.accounts (id int PRIMARY KEY, tier shop.tier NOT NULL, tenant_id int NOT NULL, name text);
 INSERT INTO shop.accounts SELECT g, (ARRAY['free', 'pro', 'max'])[g % 3 + 1]::shop.tier, g % 5, 'account ' || g FROM generate_series(1, 90) g;
 CREATE TABLE shop.invoices (id bigint PRIMARY KEY, tenant_id int NOT NULL, region uuid NOT NULL, marker int NOT NULL);
-INSERT INTO shop.invoices SELECT g * 50 + (g % 2), CASE WHEN g % 2 = 0 THEN 4 ELSE g % 3 + 1 END, CASE WHEN g % 2 = 0 THEN '${U2}'::uuid WHEN g % 3 = 0 THEN '${U1}'::uuid ELSE '${U3}'::uuid END,
+INSERT INTO shop.invoices SELECT g * 50 + (g % 2), CASE WHEN g % 2 = 1 THEN 3 WHEN g % 200 = 2 THEN 1 ELSE 4 END, CASE WHEN g % 2 = 0 THEN '${U2}'::uuid WHEN g % 3 = 0 THEN '${U1}'::uuid ELSE '${U3}'::uuid END,
   CASE WHEN g % 200 = 0 THEN 99 ELSE 1 END FROM generate_series(0, 39999) g;
 CREATE TABLE shop.invoice_lines (id bigint PRIMARY KEY, invoice_id bigint REFERENCES shop.invoices (id), qty int NOT NULL);
 INSERT INTO shop.invoice_lines SELECT 100000 + g, g * 50 + (g % 2), CASE WHEN g % 200 = 0 THEN 99 ELSE 1 END FROM generate_series(0, 39999) g;

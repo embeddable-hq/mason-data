@@ -12,7 +12,8 @@
  *     BY, HAVING, ORDER BY, a window, a subquery's own WHERE, a derived table's column filtered outside it, a view, a
  *     correlated subquery, a LATERAL, and a statement reading two filtered tables;
  *   - the same expression on a VISIBLE row still raises (22012): the barrier hides rows, never errors;
- *   - the engine's plan holds the statement's expression ABOVE the role's filter and in no scan's own filters;
+ *   - the engine's plan of what is sent holds the statement's expression ABOVE the role's filter and in no scan's own
+ *     filters (a filtered user's EXPLAIN shows no plan, so the test asks the engine);
  *   - a statement that cannot raise answers, with the rows a filter keeps.
  * The filter's modules are imported inside the tests, so a tree without them fails each test by name.
  */
@@ -25,6 +26,7 @@ import pg from "pg";
 import { DuckStore } from "../src/duck/store.ts";
 import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.ts";
 import type { PgSchema } from "../src/api/postgres/schema.ts";
+import { planNodes, type PlanNode } from "../src/duck/explain.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-roles-barrier-"));
 const FILE = "mason/roles.yml";
@@ -148,9 +150,21 @@ test("the barrier hides rows, never errors: the same expression raises on a visi
   assert.deepEqual(await rows("scalar", "SELECT id FROM orders ORDER BY id LIMIT 2"), [["51"], ["151"]]);
 });
 
-test("the engine's plan: the statement's expression is above the role's filter, in no scan's own filters, the barrier in what is sent", async () => {
-  const { BARRIER } = await import("../src/duck/row-filter.ts");
-  const planOf = async (user: string, sql: string): Promise<string[]> => (await rows(user, `EXPLAIN (VERBOSE) ${sql}`)).map((r) => r[0]!);
+test("the engine's plan of what is sent: the statement's expression is above the role's filter, in no scan's own filters, the barrier and the wall in the text", async () => {
+  const { BARRIER, STATISTICS_WALL } = await import("../src/duck/row-filter.ts");
+  // a filtered user reads no plan (EXPLAIN says what is sent, and no more), so the engine is asked directly
+  const sentOf = async (user: string, sql: string): Promise<string> => {
+    const line = (await rows(user, `EXPLAIN ${sql}`)).map((r) => r[0]!).find((l) => l.includes("Sent to the engine: "));
+    assert.ok(line !== undefined, `${sql}: what is sent is said`);
+    return line.slice(line.indexOf("Sent to the engine: ") + "Sent to the engine: ".length);
+  };
+  const planOf = async (sent: string): Promise<string[]> => {
+    const out = await store.writer.runAndReadAll(`EXPLAIN (FORMAT JSON) ${sent}`);
+    const lines: string[] = [];
+    const walk = (n: PlanNode): void => { lines.push(`${n.type} ${Object.entries(n.extra).map(([k, v]) => `${k}: ${String(v)}`).join("; ")}`); n.children.forEach(walk); };
+    planNodes(JSON.parse(String(out.getRowsJS()[0]?.[1] ?? "[]"))).forEach(walk);
+    return lines;
+  };
   // the limit itself may be gone from the plan: statistics propagation drops it once it has stopped the filter pushdown,
   // which runs first, so what is held is what the limit is for — where the statement's expression runs
   for (const [user, sql, role] of [
@@ -159,13 +173,12 @@ test("the engine's plan: the statement's expression is above the role's filter, 
     ["scalar", `SELECT count(*) FROM orders WHERE ${RAISES("marker")} > 0`, /Filters: .*tenant_id/],
     ["list", `SELECT count(*) FROM orders WHERE ${RAISES("marker")} > 0`, /tenant_id/],
   ] as const) {
-    const plan = await planOf(user, sql);
-    const sentAt = plan.findIndex((l) => l.includes("Sent to the engine"));
-    assert.ok(plan[sentAt]?.includes(BARRIER), `the statement sent holds the barrier: ${plan[sentAt]}`);
-    const tree = plan.slice(plan.findIndex((l) => l.includes("Computed by Mason")) + 1);
-    const own = tree.findIndex((l) => /Expression: .*CASE/.test(l));
-    const filter = tree.findIndex((l, i) => i > own && role.test(l));
+    const sent = await sentOf(user, sql);
+    assert.ok(sent.includes(BARRIER) && sent.includes(STATISTICS_WALL), `the statement sent holds the barrier and the wall: ${sent}`);
+    const plan = await planOf(sent);
+    const own = plan.findIndex((l) => /CASE/.test(l));
+    const filter = plan.findIndex((l, i) => i > own && role.test(l));
     assert.ok(own >= 0 && filter > own, `the statement's expression above the role's filter:\n${plan.join("\n")}`);
-    assert.deepEqual(tree.filter((l) => /Filters: .*CASE/.test(l)), [], `the statement's expression in no scan:\n${plan.join("\n")}`);
+    assert.deepEqual(plan.filter((l) => /TABLE_SCAN.*Filters: .*CASE/i.test(l)), [], `the statement's expression in no scan:\n${plan.join("\n")}`);
   }
 });

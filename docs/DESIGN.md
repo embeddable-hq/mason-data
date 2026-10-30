@@ -1218,7 +1218,7 @@ pushdown does not cross a LIMIT, which would change what it keeps. **The limit n
 propagation runs after the pushdown and drops a limit above the table's row count, so most plans hold no limit node, and
 the statement's expression stays above the role's filter all the same; that is also why the barrier costs so little. So
 the detector reads where the expression runs, never whether a Limit is there (`tests/duck-roles-barrier-wire.test.ts`).
-Removing the barrier fails three of that file's four tests and fifteen of the oracle's shapes, each `22012`.
+Removing the barrier fails three of that file's four tests and, per user, the shapes the second review counted below.
 
 Measured on DuckDB 2.0, ten cores, a file of 30 M orders and 60 M items, a user keeping half the rows, min of five (three
 for the last three rows), ms. One thing changed per column:
@@ -1245,6 +1245,62 @@ the same reproduction raised 22012 through it, read once or twice, and it costs 
 1,319). **What the barrier costs is the
 statement's own pruning**: every shape is within noise but those whose WHERE a zone map would have pruned, the worst five
 times over on a `through:`, 400 ms on 60 M rows.
+
+**A table's statistics (the second review of PR 51).** The review found EXPLAIN telling a filtered user what the engine
+knew of the whole table: `Empty Result` and the first line's `answered reading no synced table` for `WHERE secret > N`
+above the column's maximum, a binary search on a hidden row, and `rows=` and `actual rows=` beside it. Then a probe with no
+EXPLAIN in it did the same: `WHERE 1/(id - id) > 0 AND secret > N` raised 22012 below the hidden maximum and answered 0
+above it, because the engine proved the condition false from the column's statistics and took the Filter away, the
+division with it. The limit stops a filter, not a fact: statistics pass up through it, through a UNION ALL's arms, `[x][1]`,
+struct and unnest, `any_value`, `try_cast`, `list_concat`, `flatten`, `struct_pack` and `row()`. So hiding EXPLAIN was not
+enough, and turning off the engine's `statistics_propagation` is not open: `disabled_optimizers` is global, visible from
+another connection, so a per-statement setting would race every other session.
+
+**Two things hold it.** The filtered read ends in `SELECT try(COLUMNS(*)) AS "\0" FROM (… LIMIT max)` (`wallStatistics`):
+`try(col)` is opaque to the propagation (the plan was identical either side of N), and it keeps every column's name and
+type, every type a copy holds checked. Postgres has no `COLUMNS(*)`, so `filteredSql` writes `*`, Postgres analyses that, and
+the list is replaced after the rewrite, where the read-back check holds the text. And an EXPLAIN of a statement that reads
+a filtered table never shows the statement to the engine: the tables are `plan.reads`, the first line constant, `Plan` a
+constant node so a viewer and `mason mcp` keep reading `Mason.Tables`, and ANALYZE is refused by the gap `roles`, since a
+profile is a count of what the engine read and there is nothing left to run it for. A session with no filter is untouched.
+
+Each of the two walls alone stops the filter pushdown on every shape the oracle asks (`try` is not pushed through); only
+`try` stops the statistics, and only the wire test can show it, since Postgres itself raises 22012 by written order on that
+statement. Both stay: the LIMIT's guarantee is the engine's own semantics, what `try` does to the pushdown is an observation.
+
+The oracle's data had to change with this. At a sixth of the invoices visible (`tenant`) or a third (`list2`), the join's own
+filter pruned the hidden rows and the barrier shapes passed with the barrier removed. At about half visible, removing both
+walls fails 7 shapes of `tenant` and of `list1`, 14 of `list2` and 15 of `regions`. The rest of a scalar's shapes cannot fail:
+one value is a table filter in the scan, which runs before the statement's Filter with no barrier at all.
+
+Measured on the same file, the same run, DuckDB 2.0, min of five (three for the last three rows), ms. **The machine was
+loaded** (load average about 40), so compare across a row and never with the table above, whose rows are a quiet machine's:
+
+| Statement over the filtered read | No barrier | `LIMIT` max | `LIMIT` and `try` |
+|---|---:|---:|---:|
+| `count(*)` | 7 | 7 | 8 |
+| `sum`, `avg` over every row | 14 | 38 | 29 |
+| GROUP BY with a WHERE of its own | 64 | 53 | 72 |
+| the same, the filter a 50-value list | 43 | 103 | 146 |
+| a WHERE a zone map would prune (`id BETWEEN`) | 1 | 14 | 22 |
+| `through:`, an aggregate | 2,210 | 2,366 | 2,008 |
+| `through:`, a WHERE a zone map would prune | 334 | 2,070 | 2,109 |
+| a join of two filtered tables | 84 | 65 | 62 |
+| that join, a selective WHERE | 11 | 32 | 32 |
+| ORDER BY … LIMIT 10 | 46 | 30 | 54 |
+| 15 M rows returned | 375 | 136 | 463 |
+| a window, a WHERE of its own | 25 | 69 | 167 |
+| `count(*)` of a DISTINCT | 342 | 211 | 406 |
+
+`try` costs per row read (each column is evaluated through it), so it shows where a statement returns or sorts many rows,
+up to about twice the limit's, and nothing where the time is the join's.
+
+**A `where:` the rewrite cannot send is the file's problem.** `checkRoles` ran Postgres's analysis only, so a predicate
+Postgres read and Mason cannot answer (a value of a type not verified) reached each user as 0A000, statement by statement.
+It now plans the filter's own read too, every attribute NULL, the one value of every type (`filterProbe`).
+
+**`SHOW ALL`** lists no `mason.attr.*`, and that is Postgres's answer: a placeholder is `GUC_NO_SHOW_ALL`, and the oracle
+holds it, for a `SET myapp.x` and for an attribute `ALTER ROLE` set.
 
 **No leakproof gate.** Postgres omits the barrier for a leakproof condition, and the "No barrier" column is the most a
 gate could win back. It was not built: a gate must judge what reaches the engine, not what the user wrote, and Mason's

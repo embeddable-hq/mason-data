@@ -640,8 +640,17 @@ export class SessionRunner implements DuckRunner {
 
   private async explained(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     how: ExplainHow): Promise<string[]> {
-    await Promise.all([...this.releasing]);
     const o = how.options;
+    // A STATEMENT THAT READS A FILTERED TABLE IS NEVER SHOWN TO THE ENGINE: its plan says what it proved from the table's
+    // statistics (docs/DESIGN.md "Roles: rows per user"), so the tables are the statement's and its filters' (a through:'s
+    // parents), and the rest is Mason's plan
+    if ((how.rowFilters ?? []).length > 0) {
+      const tables = [...new Set([...(how.reads ?? []), ...(how.rowFilters ?? []).map((f) => f.table)])].map((t) => { const dot = t.indexOf("."); return { schema: t.slice(0, dot), name: t.slice(dot + 1) }; });
+      const explained: Explained = { copies: await this.copies(tables, how.copies, how.rowFilters ?? []), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
+        functions: [...sql.functions], plan: [], filtered: true };
+      return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
+    }
+    await Promise.all([...this.releasing]);
     let plan: PlanNode[];
     let analyzed: Explained["analyzed"];
     if (!o.analyze) plan = await this.plainPlan(sql, params, session, signal);
@@ -702,7 +711,7 @@ export class SessionRunner implements DuckRunner {
     for (const { schema, name } of tables) {
       // the sync's source is the two names as they are; EXPLAIN says the table as a statement writes it (qualifiedName)
       const filter = filters.find((f) => f.table === `${schema}.${name}`)?.words;
-      // a table the role filters: its estimate is every row's, not the role's, and is never read here
+      // a table the role filters: its counts are every row's, not the role's, and are never read or said here
       const rows = filter !== undefined ? null : (await this.conn.runAndReadAll("SELECT estimated_size FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2", [schema, name])).getRowsJS()[0]?.[0];
       out.push({ table: qualifiedName({ schema, name }), rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === `${schema}.${name}`) ?? null,
         ...(filter !== undefined ? { filter } : {}) });

@@ -268,7 +268,8 @@ export const TOOLS = [
     name: "explain",
     title: "How Mason answers a statement",
     description: "How Mason answers one statement, as its EXPLAIN prints it: each synced table the statement reads with its rows and how current it is, " +
-      "the SQL Mason runs for it, and the plan. analyze: true runs the statement too and adds each step's rows and time.",
+      "the SQL Mason runs for it, and the plan. analyze: true runs the statement too and adds each step's rows and time. " +
+      "For a statement that reads a table your role filters: no plan and no row counts, and analyze is refused.",
     inputSchema: { type: "object", properties: {
       sql: { type: "string", description: "one statement, in Postgres's SQL (without EXPLAIN)" },
       analyze: { type: "boolean", default: false, description: "run it, and say each step's rows and time" },

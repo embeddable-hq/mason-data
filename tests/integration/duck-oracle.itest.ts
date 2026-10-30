@@ -167,8 +167,15 @@ export function verdict(want: Answer, got: Answer, inOrder: boolean): { kind: "v
  * search_path, application_name (the startup's), DateStyle.
  */
 const SESSION_SET = ["TimeZone", "search_path", "application_name", "DateStyle"];
-function showAllHolds(want: Answered, got: Answered): string | null {
+/** a session's own settings SHOW ALL would list (`SET myapp.x`, a user's `mason.attr.x`): Postgres lists none, GUC_NO_SHOW_ALL */
+const ownSettings = (a: Answered): string => a.rows.map((r) => r[0]).filter((n) => /^(myapp|mason)\./.test(n ?? "")).join(", ");
+function showAllOwn(want: Answered, got: Answered): string | null {
   if (JSON.stringify([want.names, want.oids]) !== JSON.stringify([got.names, got.oids])) return `fields ${JSON.stringify([got.names, got.oids])} where Postgres sends ${JSON.stringify([want.names, want.oids])}`;
+  return ownSettings(got) === ownSettings(want) ? null : `the session's own settings [${ownSettings(got)}] where Postgres lists [${ownSettings(want)}]`;
+}
+function showAllHolds(want: Answered, got: Answered): string | null {
+  const own = showAllOwn(want, got);
+  if (own !== null) return own;
   const setting = (a: Answered, name: string): string | null | undefined => a.rows.find((r) => r[0] === name)?.[1];
   const parted = SESSION_SET.filter((n) => setting(want, n) === undefined || setting(got, n) !== setting(want, n));
   return parted.length === 0 ? null : parted.map((n) => `${n}: ${JSON.stringify(setting(got, n))} where Postgres has ${JSON.stringify(setting(want, n))}`).join(", ");
@@ -612,7 +619,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     const name = (user: string, shape: string): string => `row filter: ${user}: ${shape}`;
     const shapesOfUser = (key: string): ReadonlyArray<{ name: string; sql: string; values?: string[]; prepared?: string[] }> =>
       key === "hidden" ? HIDDEN_SHAPES : key === "tiers" ? TIER_SHAPES : key === "open" ? [...ROW_SHAPES, ...BARRIER_SHAPES, ...TIER_SHAPES] : [...ROW_SHAPES, ...BARRIER_SHAPES];
-    const users = ROWS_USERS.filter((u) => ONLY === null || [...shapesOfUser(u.key), { name: "EXPLAIN" }].some((q) => ONLY.test(name(u.key, q.name))));
+    const users = ROWS_USERS.filter((u) => ONLY === null || [...shapesOfUser(u.key), { name: "EXPLAIN" }, { name: "SHOW ALL" }].some((q) => ONLY.test(name(u.key, q.name))));
     if (users.length === 0) return;
     const r = await import("../../src/cli/roles.ts");
     const file = r.parseRolesText(ROWS_ROLES, ROLE_FILE);
@@ -657,6 +664,13 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         const [want, got] = [await ask(source, q.sql, q.values), await ask(mason, q.sql, q.values)];
         hold(n, q.sql, want, got);
         answers.set(n, got);
+      }
+      // SHOW ALL: an attribute is a placeholder, listed by neither
+      if (ONLY === null || ONLY.test(name(u.key, "SHOW ALL"))) {
+        const [want, got] = [await ask(source, "SHOW ALL"), await ask(mason, "SHOW ALL")];
+        asked++;
+        const broken = "code" in want || "code" in got ? `${JSON.stringify(got).slice(0, 300)} where Postgres ${JSON.stringify(want).slice(0, 300)}` : showAllOwn(want, got);
+        if (broken !== null) differences.push({ phase: "row filters", group: "row filter", kind: "value", name: name(u.key, "SHOW ALL"), detail: broken, sql: "SHOW ALL" });
       }
       // EXPLAIN: Postgres's shape (one QUERY PLAN column of text), the filter said on each table read where there is one
       const n = name(u.key, "EXPLAIN");
@@ -737,6 +751,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       { name: "a placeholder not set", sql: "SELECT current_setting('myapp.flag')" },
       { name: "SET a placeholder", sql: "SET myapp.flag = 'on'" },
       { name: "a placeholder set", sql: "SELECT current_setting('myapp.flag'), current_setting('myapp.flag', true) FROM public.one" },
+      { name: "SHOW ALL with a placeholder set", sql: "SHOW ALL" },
       { name: "a name nobody knows, beside a table", sql: "SELECT current_setting('no_such_setting') FROM public.one" },
       { name: "a name nobody knows, in the catalog", sql: "SELECT current_setting('no_such_setting')" },
       { name: "RESET TimeZone", sql: "RESET TimeZone" },
@@ -782,6 +797,12 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     let refusedAlike = 0;
     for (const q of cases) {
       const [want, got] = [await ask(sourceS, q.sql, q.values, q.named), await ask(masonS, q.sql, q.values, q.named)];
+      // SHOW ALL lists the two servers' own settings: held on the session's part, as `showAllHolds` holds it
+      if (q.sql === "SHOW ALL") {
+        const broken = "code" in want || "code" in got ? `${JSON.stringify(got).slice(0, 300)} where Postgres ${JSON.stringify(want).slice(0, 300)}` : showAllHolds(want, got);
+        if (broken !== null) differences.push({ phase: "settings", group: "setting case", kind: "value", name: `setting case: ${q.name}`, detail: broken, sql: q.sql });
+        continue;
+      }
       const v = verdict(want, got, ordered(q.sql));
       if (v !== null) { differences.push({ phase: "settings", group: "setting case", kind: v.kind, name: `setting case: ${q.name}`, detail: v.detail, sql: q.sql }); continue; }
       if ("code" in want && "code" in got) {

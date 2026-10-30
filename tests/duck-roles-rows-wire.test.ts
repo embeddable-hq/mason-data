@@ -22,6 +22,10 @@
  *   - an EMPTY list counts as a missing value, for an integer list and a uuid list, never as a filter keeping no row;
  *   - `<> ALL(:list)` through a real where:; every whole-row spelling refused by the gap's name;
  *   - EXPLAIN says no row count for a filtered table, in text or JSON (`Row Filter` there), and one for an unfiltered one;
+ *   - EXPLAIN of a statement reading a filtered table says Mason's lines alone, byte-identical whatever the statistics
+ *     prove, for where:, a list, through: and a join, in text and JSON; ANALYZE refused by the gap's name, the way out said;
+ *   - a table's statistics reach no statement: a condition they would prove false answers the same on either side of a
+ *     hidden row's value, an unfiltered user's plan unchanged;
  *   - a catalog that cannot check the filters fails closed, said once a streak, and its recovery said.
  * The roles modules are imported inside the tests, so a tree without them fails each test by name (scripts/fails-without.ts).
  */
@@ -286,6 +290,15 @@ test("a where: Postgres cannot read is the roles' problem at its key; through: w
     fs.writeFileSync(rolesFile, ROLES.replace(`region = ANY(:regions)`, `region = :regions`));
     const listed = await refusal(acme, "SELECT count(*) FROM orders");
     assert.match(listed.message, /roles\.regions\.tables\.customers\.where: operator does not exist: uuid = uuid\[\].*:regions is a list, read here as one uuid — write = ANY\(:regions\)/);
+    // a where: Postgres reads and Mason's rewrite cannot send: the file's problem at its key, never the engine's words at each statement
+    for (const [where, said] of [["ctid IS NOT NULL", /which Mason has not verified/], ["tenant_id = :tenant AND ctid IS NOT NULL", /which Mason has not verified/]] as const) {
+      fs.writeFileSync(rolesFile, ROLES.replace(`orders: { columns: [id, customer_id, status, amount], where: "tenant_id = :tenant" }`, `orders: { columns: [id, customer_id, status, amount], where: "${where}" }`));
+      const sent = await refusal(acme, "SELECT count(*) FROM products");
+      assert.equal(sent.code, "57P03", `${where}: ${JSON.stringify(sent)}`);
+      assert.match(sent.message, /roles\.tenant\.tables\.orders\.where: /);
+      assert.match(sent.message, said);
+      assert.match(sent.message, /the predicate is read as SELECT 1 FROM public\.orders WHERE /);
+    }
     // through: with two foreign keys, and with none: the explicit form as the way out
     const two = r.parseRolesText(`roles:\n  t:\n    attributes: [tenant]\n    tables:\n      orders: { where: "tenant_id = :tenant" }\n      refunds: { through: orders }\n`, rolesFile);
     assert.ok(!("problems" in two));
@@ -367,6 +380,96 @@ test("EXPLAIN says no row count for a filtered table, as text or JSON, where the
   assert.equal("Estimated Rows" in orders, false);
   assert.equal(products["Estimated Rows"], 3);
   assert.equal("Row Filter" in products, false);
+});
+
+/** every form of EXPLAIN, and what a filtered table's hidden rows would show in each */
+const PLAN_FORMS = ["EXPLAIN", "EXPLAIN (COSTS OFF)", "EXPLAIN (VERBOSE)", "EXPLAIN (FORMAT JSON)", "EXPLAIN (FORMAT JSON, COSTS OFF, VERBOSE)"];
+const ENGINE_LINE = /rows=\d+|"Plan Rows"|actual rows=|"Actual Rows"|Empty Result|EMPTY_RESULT|answered reading no synced table|Table Scan|TABLE_SCAN|Seq Scan/i;
+// the statements' hidden rows hold the table's maximum: a column's visible maximum, a value between the two, one above
+const FILTERED_READS = [
+  { name: "where:", user: ["plan_tenant", "tenant", { tenant: "1" }], sql: (n: string) => `SELECT 1 FROM orders WHERE amount > ${n}`, between: "500", above: "5000" },
+  { name: "a list", user: ["plan_list", "others", { tenants: ["1"] }], sql: (n: string) => `SELECT 1 FROM orders WHERE amount > ${n}`, between: "500", above: "5000" },
+  { name: "through:", user: ["plan_through", "tenant", { tenant: "2" }], sql: (n: string) => `SELECT 1 FROM order_items WHERE qty > ${n}`, between: "6", above: "80" },
+  { name: "a join of two filtered tables", user: ["plan_join", "tenant", { tenant: "1" }], sql: (n: string) => `SELECT 1 FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.amount > ${n}`, between: "500", above: "5000" },
+] as const;
+
+test("EXPLAIN of a statement that reads a filtered table says Mason's lines alone, the same whatever the table's statistics prove", async () => {
+  await wire();
+  for (const r of FILTERED_READS) {
+    const c = await connect(r.user[0], addUser(...(r.user as unknown as [string, string, Record<string, string | string[]>])));
+    // the literal is in what is sent, and nothing else may differ
+    const plain = async (form: string, n: string): Promise<string> => (await rows(c, `${form} ${r.sql(n)}`)).map((x) => x[0]).join("\n").replaceAll(`> ${n}`, "> N");
+    for (const form of PLAN_FORMS) {
+      const between = await plain(form, r.between);
+      assert.equal(between, await plain(form, r.above), `${r.name}, ${form}: between the visible and the hidden maximum, and above the hidden one`);
+      assert.doesNotMatch(between, ENGINE_LINE, `${r.name}, ${form}`);
+      assert.match(between, /filtered by the role \w+: /, `${r.name}, ${form}`);
+      assert.match(between, /Sent [Tt]o (the )?[Ee]ngine/, `${r.name}, ${form}: what is sent is Mason's`);
+      assert.match(between, /a user with no row filter reads the full plan/, `${r.name}, ${form}: the way out`);
+    }
+    // a parameter: byte for byte, the literal not in the text
+    const bound = async (n: string): Promise<string> => (await rows(c, `EXPLAIN (COSTS OFF) ${r.sql("$1")}`, [Number(n)])).map((x) => x[0]).join("\n");
+    assert.equal(await bound(r.between), await bound(r.above), `${r.name}: a bound value`);
+    for (const form of ["EXPLAIN ANALYZE", "EXPLAIN (ANALYZE, FORMAT JSON)", "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)"]) {
+      for (const n of [r.between, r.above]) {
+        const refused = await refusal(c, `${form} ${r.sql(n)}`);
+        assert.equal(refused.code, "0A000", `${r.name}, ${form}: ${JSON.stringify(refused)}`);
+        assert.match(`${refused.message} ${refused.detail ?? ""}`, /EXPLAIN ANALYZE is not answered .*a table the role filters .*Mason gap roles/, `${r.name}, ${form}`);
+        assert.match(refused.hint ?? "", /a user with no row filter reads the full plan/, `${r.name}, ${form}: the way out`);
+        assert.doesNotMatch(JSON.stringify(refused), ENGINE_LINE);
+      }
+    }
+  }
+});
+
+test("a filtered read's first line and JSON tables are the statement's, with no table named by the engine; an unfiltered user's plan is the engine's, whole", async () => {
+  await wire();
+  const c = await connect("plan_first", addUser("plan_first", "tenant", { tenant: "1" }));
+  // a statement the engine answers reading nothing, a filtered table it never scans, and two tables
+  assert.match((await rows(c, "EXPLAIN SELECT 1 FROM orders WHERE false"))[0]![0]!, /^Mason: answered from the synced table public\.orders \(.*filtered by the role tenant/);
+  const two = (await rows(c, "EXPLAIN SELECT 1 FROM orders o JOIN products p ON p.sku = o.status")).map((r) => r[0]!);
+  assert.deepEqual(two.slice(0, 1), ["Mason: answered from the synced tables"]);
+  assert.match(two.join("\n"), /public\.orders \((?!about)[^\n]*filtered by the role tenant/);
+  assert.match(two.join("\n"), /public\.products \(about 3 rows/, "a table no filter holds keeps its count");
+  const json = JSON.parse((await rows(c, "EXPLAIN (FORMAT JSON) SELECT 1 FROM orders"))[0]![0]!) as Array<{ Plan: Record<string, unknown>; Mason: { Tables: Array<Record<string, unknown>>; "Answered By": string } }>;
+  assert.deepEqual(json[0]!.Plan, { "Node Type": "Plan Not Shown" });
+  assert.equal(json[0]!.Mason["Answered By"], "the engine");
+  assert.deepEqual(json[0]!.Mason.Tables.map((t) => t.Table), ["public.orders"], "mason mcp reads a copy's facts here");
+  // the same user, a statement that reads no filtered table: the engine's plan
+  assert.match((await rows(c, "EXPLAIN SELECT * FROM products")).map((r) => r[0]).join("\n"), /Seq Scan on public\.products|Scan on public\.products/);
+  const open = await connect("plan_open", addUser("plan_open", "everything"));
+  const full = (await rows(open, "EXPLAIN (COSTS OFF) SELECT 1 FROM orders WHERE amount > 500")).map((r) => r[0]).join("\n");
+  assert.match(full, /Scan on public\.orders/, "an operator reads the full plan as a user with no row filter");
+  assert.doesNotMatch(full, /Note: the engine's plan is not shown|__mason_barrier/);
+  assert.match((await rows(open, "EXPLAIN ANALYZE SELECT count(*) FROM orders")).map((r) => r[0]).join("\n"), /actual rows=/);
+  // a statement of its own, whatever it names its subquery: its text is not Mason's filtered read
+  const own = (await rows(open, "EXPLAIN SELECT a FROM (SELECT id AS a FROM orders) AS __mason_barrier")).map((r) => r[0]).join("\n");
+  assert.doesNotMatch(own, /try\(/);
+  assert.deepEqual(await rows(c, "SELECT count(a) FROM (SELECT id AS a FROM products p, (VALUES (1)) v(id)) AS __mason_barrier"), [["3"]], "as a filtered user, a statement reading no filtered table");
+});
+
+test("a table's statistics reach no statement: what the engine would prove from them answers alike on either side of a hidden row's value", async () => {
+  await wire();
+  const outcome = async (c: pg.Client, sql: string): Promise<string> => {
+    try { return JSON.stringify(await rows(c, sql)); }
+    catch (e) { return (e as pg.DatabaseError).code ?? "no code"; }
+  };
+  const c = await connect("stats_tenant", addUser("stats_tenant", "tenant", { tenant: "1" }));
+  const list = await connect("stats_list", addUser("stats_list", "others", { tenants: ["1"] }));
+  const through = await connect("stats_through", addUser("stats_through", "tenant", { tenant: "2" }));
+  for (const [who, sql, between, above] of [
+    // a condition proved false from a column's maximum takes the other conditions with it: 22012 or an answer, a binary search
+    [c, (n: string) => `SELECT count(*) FROM orders WHERE 1/(id - id) > 0 AND amount > ${n}`, "500", "5000"],
+    [list, (n: string) => `SELECT count(*) FROM orders WHERE 1/(id - id) > 0 AND amount > ${n}`, "500", "5000"],
+    [through, (n: string) => `SELECT count(*) FROM order_items WHERE 1/(id - id) > 0 AND qty > ${n}`, "6", "80"],
+    [c, (n: string) => `SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE 1/(o.id - o.id) > 0 AND o.amount > ${n}`, "500", "5000"],
+    // a range no value of the other side falls in
+    [c, (n: string) => `SELECT count(*) FROM orders o JOIN (VALUES (${n}::bigint)) v(x) ON o.amount = v.x WHERE 1/(o.id - o.id) > 0`, "999", "5000"],
+  ] as const) {
+    assert.equal(await outcome(who, sql(between)), await outcome(who, sql(above)), sql("N"));
+  }
+  // NULL: a hidden row's null is in the table's null count, and a table with none proves IS NULL false
+  assert.equal(await outcome(c, "SELECT count(*) FROM order_items WHERE 1/(id - id) > 0 AND order_id IS NULL"), await outcome(c, "SELECT count(*) FROM order_items WHERE 1/(id - id) > 0 AND id IS NULL"));
 });
 
 test("a catalog that cannot check the filters: every statement refused, the line said once a streak, the recovery said", async () => {

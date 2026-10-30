@@ -115,10 +115,23 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   pushdown cannot cross, for a `where:`, a list and a `through:`, with no gate, because `proleakproof` on the analysed
   tree says nothing about what the rewrite sends. Why: below a filter's SEMI join an expression that raises answers "does
   a hidden row satisfy P?" for any P. DETECTOR: `tests/duck-roles-barrier-wire.test.ts` (both reproductions; the
-  expression above the role's filter and in no scan, read from the plan, never "a Limit is there", which statistics
-  propagation drops) and the oracle's `BARRIER_SHAPES`. **A test of this needs more than 50 visible keys over a wide
-  range**, or the engine's dynamic join filter hides the leak. RESPONSE: on a DuckDB upgrade these fail before the leak
-  ships; the barrier's form changes, never the guarantee. Timing is out of scope, and the docs say so.
+  expression above the role's filter and in no scan, read from the engine's plan of what is sent, never "a Limit is
+  there", which statistics propagation drops) and the oracle's `BARRIER_SHAPES`. **A test of this needs more than 50
+  visible keys over a wide range, about half the table visible**, or the engine's join filter hides the leak. RESPONSE:
+  on a DuckDB upgrade these fail before the leak ships; the barrier's form changes, never the guarantee. Timing is out of
+  scope, and the docs say so.
+- **A table's statistics reach nothing a filtered user reads** (`wallStatistics`, `src/duck/row-filter.ts`;
+  docs/DESIGN.md "Roles: rows per user"): the filtered read ends in `try(col)` of every column, which the engine carries no
+  statistics through, and an EXPLAIN of a statement that reads a filtered table never shows it to the engine: the tables
+  are the statement's (`plan.reads`, never the engine's plan's), no line varies with the data, `FORMAT JSON` keeps its
+  shape, and ANALYZE is refused by the gap `roles`, the way out said (a user with no row filter reads the full plan).
+  Why: a column's table-wide maximum proves a condition false, and whether it was proved is a binary search on a hidden
+  row, as `Empty Result`, as the plan's `rows=`, or as an error that did not happen. A session with no filter, and a
+  statement that reads no filtered table, are unchanged. DETECTOR: `tests/duck-roles-rows-wire.test.ts`, the same
+  statement either side of a hidden row's value answers byte-identical text in every form for `where:`, a list,
+  `through:` and a join, and an ordinary SELECT alike. RESPONSE: a read whose list is no longer the `*` the wall replaces
+  is refused (`wallStatistics`); a DuckDB upgrade that carries statistics through `try` fails the SELECT test. Nothing new
+  may print the engine's plan or scanned tables for a plan with `rowFilters`.
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
   `application_name`, a token's NAME (never the token) or the user's name, and the registry entry that refused it

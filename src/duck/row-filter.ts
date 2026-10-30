@@ -253,6 +253,16 @@ export function bindFilter(f: RowFilter, types: ReadonlyMap<string, string>, val
   return { table: f.table, predicate, words };
 }
 
+/**
+ * THE FILTERED READ `checkRoles` PLANS, so a `where:` Mason's rewrite cannot send is the file's problem at its key, never
+ * a refusal at every statement of its users: the one read a statement meets (`filteredSql`), every attribute NULL, the
+ * one value of every type.
+ */
+export function filterProbe(f: RowFilter, types: ReadonlyMap<string, string>, shapes: ReadonlyMap<string, AttributeShape>): string {
+  const predicate = renderWhere(f.where!.parts, (a) => `CAST(${shapes.get(a) === "list" ? "ARRAY[NULL]" : "NULL"} AS ${types.get(a) ?? "text"})`);
+  return filteredSql(f.table, new Map([[f.table, { table: f.table, predicate, words: "" }]]));
+}
+
 /** whether a user holds a value of an attribute: an empty list is none, never a filter that keeps no row (a user
  *  written by hand: `mason user add` refuses one), which would be the silent zero rows this refuses */
 const hasValue = (v: string | readonly string[] | undefined): boolean => v !== undefined && (typeof v === "string" || v.length > 0);
@@ -314,19 +324,55 @@ function refused(message: string, hint: string): StatementError {
  * (docs/DESIGN.md "Roles: rows per user"): `LIMIT <the largest bigint>` beside `OFFSET 0`, which runs a serial operator
  * under the default settings, and with no gate: every filtered read has it. A filter's own reads (the parents of a
  * `through:`) hold nothing of the statement's, so only the outermost read needs it.
+ *
+ * THE LIMIT STOPS A FILTER, NOT A FACT: the engine carries each column's table-wide minimum, maximum and null count up
+ * through a limit, and proves a condition false from them. `WHERE 1/(id-id) > 0 AND secret > N` then raises for N below
+ * the table's maximum and answers nothing above it, a binary search on a hidden row with no EXPLAIN in it. So the read
+ * ends in a projection the engine carries no statistics through, `try(col)` of every column (`STATISTICS_WALL`; a
+ * column's name and type pass through it): what the statement meets knows nothing of the table. Disabling the
+ * optimiser pass per statement is not open: the engine's setting is global, so it would race the other sessions.
  */
 export const BARRIER = "LIMIT 9223372036854775807";
+/** the name of the select around the barrier, whose list `wallStatistics` replaces */
+const WALL = "__mason_barrier";
+/** the select list's call of `try(col)` on every column, as the engine reads it; `AS "\0"` keeps each column's name */
+export const STATISTICS_WALL = "try(COLUMNS(*))";
+
+/**
+ * THE WALL'S SELECT LIST, in place of the `*` `filteredSql` wrote around the barrier, once the rewrite is done: Postgres
+ * has no `COLUMNS(*)`, so it is the engine's text, never the analysed one. A filtered read's `*` was left a `*`, or
+ * this refuses: a read with no wall answers a statement the statistics of a whole table.
+ */
+export function wallStatistics(tree: unknown): void {
+  if (Array.isArray(tree)) { tree.forEach(wallStatistics); return; }
+  if (typeof tree !== "object" || tree === null) return;
+  const node = tree as Record<string, unknown>;
+  const walled = node.fromClause as Array<{ RangeSubselect?: { alias?: { aliasname?: string } } }> | undefined;
+  if (walled?.length === 1 && walled[0]?.RangeSubselect?.alias?.aliasname === WALL) {
+    const list = node.targetList as Array<{ ResTarget?: { val?: { ColumnRef?: { fields?: Array<Record<string, unknown>> } } } }> | undefined;
+    const fields = list?.length === 1 ? list[0]?.ResTarget?.val?.ColumnRef?.fields : undefined;
+    if (fields?.length !== 1 || fields[0]?.A_Star === undefined) {
+      throw new StatementError({ code: "XX000", message: "a filtered read's select list is not the one Mason wrote (a Mason bug: report it, with the statement)" });
+    }
+    const columns = { FuncCall: { funcname: [{ String: { sval: "columns" } }], agg_star: true } };
+    node.targetList = [{ ResTarget: { name: "\\0", val: { FuncCall: { funcname: [{ String: { sval: "try" } }], args: [columns] } } } }];
+  }
+  Object.values(node).forEach(wallStatistics);
+}
+/** a wall as the deparser prints it, and as the engine reads it (`COLUMNS` is an expression only unquoted) */
+export const printedWall = (sql: string): string => sql.replaceAll('try("columns"(*))', STATISTICS_WALL);
 
 /** the filtered read of `table` as SQL: its rows the filter keeps, `through:` read through its parent's filtered read;
  *  behind the barrier at its outermost (`depth` 1), where the statement meets it */
 export function filteredSql(table: string, filters: ReadonlyMap<string, BoundFilter>, depth = 1): string {
   const f = filters.get(table);
   if (f === undefined) return `SELECT * FROM ${tableSql(table)}`;
-  const barrier = depth === 1 ? ` ${BARRIER}` : "";
-  if (f.predicate !== undefined) return `SELECT * FROM ${tableSql(table)} WHERE (${f.predicate})${barrier}`;
+  // the select around the barrier, for the wall (`wallStatistics`)
+  const walled = (read: string): string => depth === 1 ? `SELECT * FROM (${read} ${BARRIER}) AS ${WALL}` : read;
+  if (f.predicate !== undefined) return walled(`SELECT * FROM ${tableSql(table)} WHERE (${f.predicate})`);
   const t = f.through!;
   const p = `__mason_parent${depth}`;
-  return `SELECT * FROM ${tableSql(table)} WHERE EXISTS (SELECT 1 FROM (${filteredSql(t.parent, filters, depth + 1)}) AS ${p} WHERE ${p}.${quoteIdent(t.parentColumn)} = ${tableSql(table)}.${quoteIdent(t.column)})${barrier}`;
+  return walled(`SELECT * FROM ${tableSql(table)} WHERE EXISTS (SELECT 1 FROM (${filteredSql(t.parent, filters, depth + 1)}) AS ${p} WHERE ${p}.${quoteIdent(t.parentColumn)} = ${tableSql(table)}.${quoteIdent(t.column)})`);
 }
 
 /**

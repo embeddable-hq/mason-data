@@ -50,7 +50,7 @@ test("the filtered read is behind the barrier at its outermost only, for a scala
   const filters = new Map([["public.orders", orders], ["public.order_items", items], ["public.lines", lines]]);
   for (const t of filters.keys()) {
     const sql = filteredSql(t, filters);
-    assert.ok(sql.endsWith(` ${BARRIER}`), sql);
+    assert.ok(sql.endsWith(` ${BARRIER}) AS __mason_barrier`), sql);
     assert.equal(sql.split(BARRIER).length - 1, 1, `one barrier, the outermost: ${sql}`);
   }
   assert.equal(filteredSql("public.products", filters), 'SELECT * FROM "public"."products"', "a table no filter holds has no rows to hide");

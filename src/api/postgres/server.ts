@@ -60,7 +60,7 @@ import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
 import { asRole, asSession, catalogPolicies, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
-import { attributeSetting, bindFilter, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
+import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
 import { parseSql, PostgresSyntaxError, stopParser } from "./parser.ts";
@@ -168,8 +168,11 @@ export interface ExplainHow {
   exact: readonly ExactColumn[];
   planning: { analysisMs: number; rewriteMs: number };
   copies: readonly CopyFacts[];
-  /** the tables the session's role filters that the statement reads, the filter in words (DuckPlan.rowFilters) */
+  /** the tables the session's role filters that the statement reads, the filter in words (DuckPlan.rowFilters): none
+   *  given, the engine's plan is said; given, the statement is not shown to the engine at all (`Explained.filtered`) */
   rowFilters?: ReadonlyArray<{ table: string; words: string }>;
+  /** every table the statement reads, for a statement with row filters: its table lines, never the engine's plan's */
+  reads?: readonly string[];
 }
 /** A statement's DuckDB plan (src/duck/plan.ts): Postgres's analysis of it, and the DuckDB SQL that answers it alike. */
 export interface DuckPlan {
@@ -1522,15 +1525,22 @@ class Session {
   private async duckExplain(e: { options: ExplainOptions; plan: DuckPlan }, params: readonly (string | null)[], resultFormats: number[], clock: { parse: number; exec: number },
     controller: AbortController): Promise<{ field: FieldDescription; rows: Buffer[] }> {
     this.heldToRole(e.plan);
+    // ANALYZE RUNS THE STATEMENT AND REPORTS WHAT THE ENGINE DID, which is a count of what it read and what it proved
+    // of the whole table: nothing of it can be said to a filtered user, so there is nothing left to run it for
+    const filtered = e.plan.rowFilters ?? [];
+    if (e.options.analyze && filtered.length > 0) {
+      throw gapRefusal("roles", `EXPLAIN ANALYZE is not answered for a statement that reads a table the role filters (${filtered.map((f) => f.table).join(", ")})`,
+        "EXPLAIN without ANALYZE says the tables and what is sent to the engine; a user with no row filter reads the full plan and its rows");
+    }
     await this.readAside();
     const runner = await this.duck();
     this.running = controller;
     try {
-      const values = await this.duckValues(e.plan, params, clock);
+      const values = filtered.length > 0 ? [] : await this.duckValues(e.plan, params, clock);
       const lines = await runner.explain(e.plan.sql, values, await this.duckSession(), controller.signal,
         { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
           // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
-          copies: copyFacts(this.server.options.duck.copies?.() ?? []), ...(e.plan.rowFilters !== undefined ? { rowFilters: e.plan.rowFilters } : {}) });
+          copies: copyFacts(this.server.options.duck.copies?.() ?? []), ...(filtered.length > 0 ? { rowFilters: filtered, reads: (e.plan.reads ?? []).map((r) => r.table) } : {}) });
       return { field: explainField(e.options, formatAt(resultFormats, 0)), rows: lines.map((l) => dataRow([Buffer.from(l)])) };
     } finally { this.settled(); }
   }
@@ -2470,7 +2480,17 @@ class Server {
           for (const f of g.filters.values()) {
             if (f.where === undefined || !copied.has(f.table)) continue;
             const r = await filterTypes((b) => this.catalog.run(b), f, g.attributes ?? new Map());
-            if ("problem" in r) problems.push(r.problem); else types.set(f.table, r.types);
+            if ("problem" in r) { problems.push(r.problem); continue; }
+            types.set(f.table, r.types);
+            // Postgres read it; the rewrite must too, or each of the role's users would meet the refusal, statement by statement
+            const probe = filterProbe(f, r.types, g.attributes ?? new Map());
+            const stmt = (await parseSql(probe)).stmts?.[0]?.stmt;
+            if (stmt === undefined) throw new Error(`a filter's read does not parse: ${probe}`);
+            try { await this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined); }
+            catch (e) {
+              if (!(e instanceof StatementError)) throw e;
+              problems.push(`${f.at}.where: ${e.fields.message}${e.fields.hint !== undefined ? ` (${e.fields.hint})` : ""} — the predicate is read as SELECT 1 FROM ${f.table} WHERE ${f.where.text}`);
+            }
           }
           typed.set(g.name, { ...g, filterTypes: types });
         }

@@ -930,12 +930,13 @@ test("the Node guard catches the real thing", () => {
   assert.deepEqual(one("# node-version: '24' in a comment\n"), [], "a comment is no setting");
 });
 
-/** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line */
+/** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line. One
+ *  has no session: `checkRoles` plans a filter's own read (`filterProbe`), which is no user's statement and answers nothing */
 const planCallsWithoutGrants = (source: string): string[] => {
   const file = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true);
   const out: string[] = [];
   const visit = (n: ts.Node): void => {
-    if (ts.isCallExpression(n) && /\bduck\.plan$/.test(n.expression.getText(file)) && n.arguments.at(-1)?.getText(file) !== "grants") out.push(n.getText(file).split("\n")[0]!);
+    if (ts.isCallExpression(n) && /\bduck\.plan$/.test(n.expression.getText(file)) && n.arguments.at(-1)?.getText(file) !== "grants" && n.arguments[1]?.getText(file) !== "probe") out.push(n.getText(file).split("\n")[0]!);
     ts.forEachChild(n, visit);
   };
   visit(file);
@@ -952,6 +953,7 @@ test("the duck.plan guard would catch the real thing", () => {
   assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false);"), ["this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false)"]);
   assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false, undefined);").length, 1, "an explicit undefined is no grants");
   assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false, grants);"), []);
+  assert.deepEqual(planCallsWithoutGrants("await this.options.duck.plan(run, probe, stmt, 0, [], path, zone, types, false, undefined);"), [], "the roles' check of a filter");
 });
 
 /**

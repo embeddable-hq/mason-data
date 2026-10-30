@@ -203,14 +203,20 @@ mason user add emea --role regions --set regions=eu --set regions=uk --set plan=
 - **The catalog holds the same filters as Postgres row security**: each filtered table has `ROW LEVEL SECURITY`
   enabled and one `CREATE POLICY … FOR SELECT TO <role> USING (…)` per role reading it, the `where:` reading
   `current_setting('mason.attr.<name>')` (a list split on commas into the column's array type), so `pg_policies` lists
-  them. A session's attributes are settings it cannot change: `SHOW mason.attr.tenant` and
+  them: every role's policies, their names and `where:` text, to every user, as Postgres's does. A session's attributes are settings it cannot change: `SHOW mason.attr.tenant` and
   `current_setting('mason.attr.tenant')` answer the user's value (a list comma-joined), and `SET mason.attr.…` is
   Postgres's refusal (`42501 permission denied to set parameter`).
-- **EXPLAIN says each table's filter** on the table's line, in words: `answered from the synced table public.orders (…;
-  filtered by the role tenant: tenant_id = 42)`, a list as `tenant_id = ANY(12, 41)` (its first five values, then
-  `… and N more`), a `through:` as `a row of orders it references by order_id is visible`; `FORMAT JSON` carries it as
-  the table's `Row Filter`. A filtered table says no row count there (`about N rows`, `Estimated Rows`: the estimate is
-  every row's). `EXPLAIN ANALYZE`'s scan still shows the rows it read, as Postgres's `Rows Removed by Filter` does.
+- **EXPLAIN of a statement that reads a filtered table says Mason's lines alone**, in every form, with no plan of the
+  engine's: the tables it reads (never the engine's count of them), each filter in words on its table's line
+  (`answered from the synced table public.orders (…; filtered by the role tenant: tenant_id = 42)`, a list as
+  `tenant_id = ANY(12, 41)` with its first five values then `… and N more`, a `through:` as
+  `a row of orders it references by order_id is visible`), what is sent to the engine, and a note. `FORMAT JSON` keeps its
+  shape: `Plan` is the constant `{"Node Type": "Plan Not Shown"}`, `Mason.Tables` the tables, each filter its `Row Filter`.
+  No line depends on the data, because an engine's plan does: its row estimates are the whole table's, and its
+  `Empty Result` says what it proved from a column's maximum, a binary search on a hidden row. `EXPLAIN ANALYZE` of such a
+  statement is refused `0A000` by the gap `roles`: a profile is a count of what the engine read. A table with no filter
+  beside one keeps its line, and **a statement that reads no filtered table is answered as ever, whole. An operator reads
+  the full plan as a user with no row filter.** The tables a `through:` reads are listed with the filter that reads them.
 - **The request log records the values**: `attributes` in `_mason.requests` (JSON, beside `role`; null for a user with
   none and for a token).
 
@@ -220,6 +226,10 @@ subquery, a view, a statement reading two filtered tables — for a `where:`, a 
 that fails on a hidden row's value (`'x'::int`, a division by zero) never fails: it never met that row. Every filtered read
 has the barrier, with no exception for a statement that looks harmless. **What is not guaranteed is timing**: how long a
 statement takes depends on the table's size and on rows it cannot read, on Mason as on Postgres.
+
+**Nor do a table's statistics reach a statement**: what the engine knows of the whole table (a column's minimum, maximum
+and null count) never decides an answer a filtered user reads, so `WHERE 1/(id - id) > 0 AND secret > 500` answers alike
+whichever side of a hidden row's value 500 falls.
 
 **Where Mason is deliberately stricter than Postgres row security**, each refused where Postgres would answer:
 
