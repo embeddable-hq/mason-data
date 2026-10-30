@@ -155,7 +155,7 @@ reads.
 - **Who merges what.** A PR that changes nothing under `src/` merges without the owner's word once its Fable review has
   no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release,
   merge on the owner's word. Once that is so, `gh pr merge <n> --auto --merge` queues it for the checks still running,
-  and a push after it needs reading again. PR 89 had not merged itself 3.5 minutes after its last check went green and
+  and a push after it needs reading again. PR 89 had not merged itself some while after its last check went green and
   was merged by hand, so confirm a PR landed.
 - **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
   to fix, or it is a flake, the next rule. Nothing detects it; the gate could compare the tree's hash, and does not.
