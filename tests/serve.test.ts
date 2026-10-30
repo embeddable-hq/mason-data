@@ -104,6 +104,30 @@ test("the config: new on an empty volume, resumed over what the runs recorded; a
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("MASON_PG_DATABASE names the database a tool connects with where the sources file does not, is never MASON_NAME's, and the two never disagree", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-db-"));
+  try {
+    const project = path.join(dir, "project");
+    const env = { DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_DATA: dir, MASON_PROJECT: project, MASON_NAME: "shop" };
+    const s = serveSettings(env, "/");
+    assert.ok(!("message" in s));
+    // no file: the one a serve writes names no database, and the setting says it
+    assert.equal((serveSource(s, env) as { database: string }).database, "mason", "MASON_NAME is the project's, never the database a tool connects with");
+    assert.equal((serveSource(s, { ...env, MASON_PG_DATABASE: "Production" }) as { database: string }).database, "Production");
+    assert.doesNotMatch(fs.readFileSync(path.join(project, "sources", "app.yml"), "utf8"), /^database:/m, "the setting is the setting's: nothing written");
+    const bad = serveSettings({ ...env, MASON_PG_DATABASE: "${DB}" }, "/");
+    assert.ok("message" in bad);
+    assert.match(bad.message, /^a setting is missing or wrong: MASON_PG_DATABASE: "\$\{DB\}" is a variable/);
+    // a sources file's own name: the setting may repeat it, and may not contradict it
+    fs.writeFileSync(path.join(project, "sources", "app.yml"), "kind: postgres\nurl: ${DATABASE_URL}\ndatabase: production\ntables: {}\n");
+    assert.ok(!("message" in serveSettings({ ...env, MASON_PG_DATABASE: "production" }, "/")));
+    assert.equal((serveSource(s, env) as { database: string }).database, "production", "the file's, with no setting");
+    const both = serveSettings({ ...env, MASON_PG_DATABASE: "reporting" }, "/");
+    assert.ok("message" in both);
+    assert.equal(both.message, "a setting is missing or wrong: MASON_PG_DATABASE=\"reporting\", and the sources file says database: production: keep one");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("the sources file: one a folder lacks is written from DATABASE_URL, without it the way out is said; one there is read as the run reads it", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-src-"));
   try {
@@ -114,9 +138,9 @@ test("the sources file: one a folder lacks is written from DATABASE_URL, without
     assert.deepEqual([unset.code, unset.message], ["bad_config", "DATABASE_URL is not set, and the project folder has no sources file to name the database another way"]);
     assert.ok(!fs.existsSync(path.join(dir, "project", "sources")), "nothing written");
     const made = serveSource(s, { DATABASE_URL: URL_ });
-    assert.deepEqual(made, { wrote: path.join(dir, "project", "sources", "app.yml") });
+    assert.deepEqual(made, { wrote: path.join(dir, "project", "sources", "app.yml"), database: "mason" });
     // the file there now: read as the run reads it, its URL from this environment
-    assert.deepEqual(serveSource(s, { DATABASE_URL: URL_ }), { wrote: null });
+    assert.deepEqual(serveSource(s, { DATABASE_URL: URL_ }), { wrote: null, database: "mason" });
     const gone = serveSource(s, {});
     assert.ok("message" in gone);
     assert.match(gone.message, /: url: \$\{DATABASE_URL\} is not set — not in the environment, \.env\.local or \.env$/);

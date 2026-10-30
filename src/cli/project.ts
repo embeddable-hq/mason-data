@@ -19,13 +19,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Failure, Problem } from "./command.ts";
-import { readSource, type ProjectSource } from "./sources.ts";
+import { connectDatabase } from "../lib/database-name.ts";
+import { readSource, writtenDatabase, type ProjectSource } from "./sources.ts";
 
 export const STATE_DIR = ".mason";
 const CONFIG = "config.json";
 
-/** A project's name: the database name a tool connects to on the Postgres API, and (with the source's) what its
- *  replication slot is named for. */
+/** A project's name: what its commands call it and (with the source's) what its replication slot is named for. Never
+ *  the database name a tool connects with: src/lib/database-name.ts. */
 export const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
 
 export interface RunningState {
@@ -209,4 +210,13 @@ export function ignoresStateDir(gitignore: string): boolean {
  */
 export function projectSource(p: Project, env: NodeJS.ProcessEnv = process.env, o: { shellFirst?: boolean } = {}): ProjectSource | Failure {
   return readSource(p.folder, p.root, env, o);
+}
+
+/**
+ * THE DATABASE NAME THE PROJECT'S NEXT RUN WILL ANSWER AS, with Mason stopped (a run's is in its URL: `postgresLink`): by
+ * the one rule, from the sources file's one key, so it needs neither the database's URL nor the rest of the file right.
+ */
+export function projectDatabase(p: Project, env: NodeJS.ProcessEnv = process.env): string | Failure {
+  const written = writtenDatabase(p.folder, p.root);
+  return "message" in written ? written : connectDatabase(written, p.config, env);
 }

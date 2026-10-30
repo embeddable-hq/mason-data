@@ -26,7 +26,8 @@ import { failed, parseCommand, type CommandSpec, type Failure } from "./command.
 import { dev } from "./dev.ts";
 import { parseSource } from "./preflight.ts";
 import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
-import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir, sourcesTop } from "./sources.ts";
+import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir, sourcesTop, writtenDatabase } from "./sources.ts";
+import { connectDatabase, DATABASE_SETTING, databaseNameProblem } from "../lib/database-name.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
 import { imagePinProblem, PIN_FILE } from "../lib/project-version.ts";
 import { commandPinProblem } from "./pin.ts";
@@ -61,7 +62,10 @@ export const SERVE: CommandSpec = {
     MASON_API_KEY           what the users' passwords are made with (mason user add), at least 32 characters (required)
     MASON_PROJECT           the project folder: sources/, mason.yml (default ./mason)
     MASON_DATA              the folder whose .mason/ holds the synced data and the state: the volume (default .)
-    MASON_NAME              the project's name, the database name clients connect to (default mason)
+    MASON_NAME              the project's name, which the replication slot is named for (default mason); renaming it
+                            over the same synced data is refused
+    MASON_PG_DATABASE       the database name a tool connects with, for a sources file with no database: (default mason;
+                            the two must agree when both are set)
     MASON_HEALTH_PORT       /healthz's and /metrics' port (default 4140), on MASON_HEALTH_HOST (default 0.0.0.0)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
@@ -109,6 +113,8 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   else if (apiKey.length < MIN_API_KEY) wrong.push(`MASON_API_KEY is ${apiKey.length} characters: at least ${MIN_API_KEY}, as openssl rand -hex 24 makes`);
   const name = env.MASON_NAME || "mason";
   if (!NAME_RE.test(name)) wrong.push(`MASON_NAME=${JSON.stringify(name)} is not a project name: lower case letters, digits, - and _, at most 48`);
+  // the database name a tool connects with: the sources file's, else this, and never two names at once
+  wrong.push(...databaseSettingProblems(project, env));
   // how each table is kept current, and how often a table is polled, are the sources file's sync: now, per table
   // (src/lib/table-sync.ts): the old settings refused HERE with the others, before anything is written or connected
   const top = (): SourcesTop => sourcesTop(path.dirname(project), project);
@@ -137,6 +143,20 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   };
 }
 
+
+/**
+ * THE DATABASE NAME AS A SETTING (src/lib/database-name.ts): a name, and one the sources file does not contradict, since
+ * two names for one thing would have to be chosen between. A file that cannot be read is serveSource's to say.
+ */
+function databaseSettingProblems(project: string, env: Readonly<Record<string, string | undefined>>): string[] {
+  const set = env[DATABASE_SETTING];
+  if (!set) return [];
+  const bad = databaseNameProblem(set);
+  if (bad !== null) return [`${DATABASE_SETTING}: ${bad}`];
+  const written = writtenDatabase(project, path.dirname(project));
+  if ("message" in written || written.database === null || written.database === set) return [];
+  return [`${DATABASE_SETTING}=${JSON.stringify(set)}, and the sources file says database: ${written.database}: keep one`];
+}
 
 /**
  * THE DATABASE'S URL AS A SETTING (the review of the sources file: an unset URL was found only after the other
@@ -168,8 +188,8 @@ function urlSettingProblems(project: string, data: string, env: Readonly<Record<
 /**
  * THE CONFIG A SERVE RUNS ON, written from its settings at every start, over what the runs before recorded (the server
  * the copy was taken from, the publication, the certificate): the environment is the operator's, the rest the run's. A
- * project `mason init` made is a developer's and is never taken over; a name that moved would be another slot and
- * another database name over the same copy, so it is refused.
+ * project `mason init` made is a developer's and is never taken over; a name that moved would be another slot over the
+ * same copy, so it is refused.
  */
 export function serveConfig(s: ServeSettings, existing: Project | BrokenProject | null): { config: ProjectConfig; said: string[] } | Failure {
   const dir = path.join(s.data, STATE_DIR);
@@ -189,7 +209,7 @@ export function serveConfig(s: ServeSettings, existing: Project | BrokenProject 
   }
   if (was.name !== s.name) {
     return { message: `the synced data in ${dir} is the project ${was.name}, and MASON_NAME says ${s.name}`, code: "refused",
-      why: "the name is the database name clients connect to and names the replication slot: another name over the same synced data is another project",
+      why: "the name names the replication slot: another name over the same synced data is another project (the database name a tool connects with is not this: MASON_PG_DATABASE, or database: in the sources file)",
       fix: `set MASON_NAME=${was.name} again, or give the new name a new MASON_DATA (an empty volume), which syncs again` };
   }
   const said: string[] = [`the synced data in ${dir}, resumed`];
@@ -215,7 +235,7 @@ export function servePin(s: ServeSettings, running: RunningVersion): Failure | n
  * readSource: its URL resolved from this environment, every mistake on one report); a folder with none gets the file
  * `mason init` writes, `url: ${DATABASE_URL}` and no table, when DATABASE_URL is set — else what to set is said.
  */
-export function serveSource(s: ServeSettings, env: NodeJS.ProcessEnv): { wrote: string | null } | Failure {
+export function serveSource(s: ServeSettings, env: NodeJS.ProcessEnv): { wrote: string | null; database: string } | Failure {
   let wrote: string | null = null;
   if (sourceFileNames(s.project).length === 0 && !fs.existsSync(path.join(s.project, OLD_TABLES_DIR))) {
     const url = env.DATABASE_URL ?? "";
@@ -234,7 +254,7 @@ export function serveSource(s: ServeSettings, env: NodeJS.ProcessEnv): { wrote: 
     wrote = file;
   }
   const r = readSource(s.project, s.data, env, { shellFirst: true });
-  return "message" in r ? r : { wrote };
+  return "message" in r ? r : { wrote, database: connectDatabase(r, { served: true }, env) };
 }
 
 /** Where a serve is: what /healthz and /metrics say. Once ready, `metrics` reads the run's numbers (src/cli/run-server.ts
@@ -330,6 +350,7 @@ export async function serve(argv: string[]): Promise<number> {
   say(`mason serve: ${s.name}, the project in ${s.project}, the state in ${path.join(s.data, STATE_DIR)}`);
   if (made.wrote) say(`  wrote ${made.wrote}: the database (url: \${DATABASE_URL}), no table yet (mason add beside it adds one)`);
   for (const l of c.said) say(`  ${l}`);
+  say(`  database  ${made.database}, what a tool connects with`);
   say(`  health    http://${s.health.host}:${s.health.port}/healthz`);
   say(`  metrics   http://${s.health.host}:${s.health.port}/metrics`);
   // the run reads the project of the folder it runs in (src/cli/project.ts): the data folder's

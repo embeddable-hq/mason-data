@@ -4,6 +4,8 @@
  */
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { sourceMove } from "../src/cli/dev.ts";
 import type { ServerFacts } from "../src/cli/replication-checks.ts";
 
@@ -25,6 +27,19 @@ test("replication's objects are the project's and the source's names", async () 
   assert.equal(projectReplication("shop", "Shop-Dev").slot, "mason_dev_shop_shop_dev", "lower case, as a slot's name must be");
   assert.equal(dropStatements(projectReplication("shop", "app")),
     "SELECT pg_drop_replication_slot('mason_dev_shop_app') FROM pg_replication_slots WHERE slot_name = 'mason_dev_shop_app' AND NOT active; DROP PUBLICATION IF EXISTS mason_dev_shop_app;");
+});
+
+test("two projects both answering as mason keep a slot each: the slot is the project's name, never the database a tool connects with", async () => {
+  const { projectReplication } = await import("../src/cli/replication-mode.ts");
+  const { connectDatabase } = await import("../src/lib/database-name.ts");
+  assert.equal(connectDatabase({ database: null }, {}, {}), "mason", "the same name to every tool, whatever the project's");
+  const [a, b] = ["shop", "billing"].map((name) => projectReplication(name, "app"));
+  assert.notEqual(a!.slot, b!.slot, "two projects on one source: a shared slot would hand each the other's changes");
+  assert.notEqual(a!.publication, b!.publication);
+  // the run gives the slot the project's name and everything a tool reads the other: read from the run's own lines
+  const dev = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "cli", "dev.ts"), "utf8");
+  assert.match(dev, /projectReplication\(cfg\.name, src\.name,/);
+  assert.match(dev, /postgresApiUrl\(pgAddress, database,/);
 });
 
 test("a slot's name past Postgres's 63 bytes is a readable prefix and a hash of the whole name: never cut, never shared", async () => {

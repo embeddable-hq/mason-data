@@ -30,7 +30,7 @@ import { qualifiedName, type TableName } from "../duck/explain.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 
 /** The URL a client is shown in the help: a user's, as mason user add prints it. */
-const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/shop";
+const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/mason";
 
 export const MCP: CommandSpec = {
   name: "mcp",

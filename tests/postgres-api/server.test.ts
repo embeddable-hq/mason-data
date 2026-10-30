@@ -103,11 +103,14 @@ describe("the handshake", () => {
     assert.equal(bad.code, "28P01");
   });
 
-  test("the database must be the project's (3D000, naming it)", async () => {
+  test("the database must be the one this Mason answers as (3D000: the right name, how to say it, where it is set)", async () => {
     const e = await refused(connect({ database: "postgres" }));
     assert.equal(e.code, "3D000");
     assert.match(e.message, /database "postgres" does not exist/);
-    assert.match(e.hint ?? "", /database=shop/);
+    assert.equal(e.hint, "this Mason answers as the database \"shop\": connect with database=shop, the last part of a postgres:// URL. " +
+      "It is set by database: in the project's sources file (sources/<name>.yml), or MASON_PG_DATABASE on a server");
+    // Postgres compares a database's name exactly: a tool that says another case is on another database
+    assert.equal((await refused(connect({ database: "Shop" }))).code, "3D000");
   });
 
   test("the server reports itself as Postgres 18.6 and the session's parameters", async () => {

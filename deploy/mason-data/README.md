@@ -31,6 +31,10 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
   CA signed.
 - **The first start takes about 15 seconds** before `/healthz` answers 200 (minutes on a heavily loaded machine; the
   image's health check allows 2), a restart under a second: the run reads how the database orders text once and keeps it.
+- **A tool connects with the database name `mason`**, whatever the project is called: one moving from your Postgres
+  changes its host, port and database name, or keeps its name with `database: <name>` in the sources file
+  (`MASON_PG_DATABASE` does it where the file is not yours to edit, as on a platform that writes it to the volume).
+  `MASON_NAME` is the project's name, which names the replication slot, and is not this.
 - **A BI tool or an app connects as a user**: `mason user add <name>` prints its password once (it never expires),
   `mason user list` says the users, `mason user remove <name>` refuses its next connection and ends its sessions at
   their next statement, without a restart. The list is `.mason/users.json` on the volume (no passwords in it).
@@ -131,6 +135,7 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 
 | Setting | Default | Change it when |
 |---|---|---|
+| `MASON_PG_DATABASE` | `mason` | the sources file has no `database:` and a tool must keep the database name it has (a different `database:` in the file is refused) |
 | `MASON_DUCKDB_MEMORY` | half the container's memory limit | the container's limit is not what the copy should have half of ("Memory") |
 | `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a copy is slow |
 | `MASON_STATEMENT_TIMEOUT` | `5min` (0 for none) | a dashboard's statement may rightly take longer, or a runaway one should stop sooner |

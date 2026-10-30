@@ -466,9 +466,9 @@ test("catalogDdl: two foreign keys from one column are named as Postgres names t
   assert.deepEqual(fks.map((s) => /CONSTRAINT "([^"]+)"/.exec(s)?.[1]), ["customers_id_fkey", "customers_id_fkey1"]);
 });
 
-// the catalog's database is the project's name, whatever it is — one of PGlite's own (`template1`, `template0`) too:
+// the catalog's database is the name a tool connects with, whatever it is — one of PGlite's own (`template1`, `template0`) too:
 // pg_database's names are unique, so the one already there is moved aside first, never a failed index (#484's review)
-for (const name of ["shop", "template1", "template0", "postgres", "o'brien"]) {
+for (const name of ["mason", "shop", "template1", "template0", "postgres", "o'brien", "Production", "my db", "a-b.c"]) {
   test(`the catalog's database is named ${JSON.stringify(name)}`, async () => {
     const own = new PgCatalog({ database: name, tables: [] }, { log: () => undefined, setup: databaseNameSql(name) });
     try {

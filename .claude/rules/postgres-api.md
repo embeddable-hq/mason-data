@@ -36,14 +36,21 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   (`ignore_till_sync`; without it one refused Parse silenced the catalog for every session), and a `SET` it validates
   runs inside a transaction it rolls back. A view or default of the source the catalog cannot hold is said in one
   log line, by name, never silently dropped.
-- **The password is a user's or a token's, the project is the database** (`authenticate`; `listenerLogins`,
+- **The password is a user's or a token's** (`authenticate`; `listenerLogins`,
   src/duck/users.ts): a `mason user`'s password (`mason_<id>_<mac>`, the MAC over its NAME and id keyed by the API key,
   so the startup packet's user name must be the user's and every statement is attributed), or a token minted from the
   API key; a refused one is `28P01` as a wrong password is, with the reason in the log; a DISABLED user's, its password
-  right, is `28000` "role … is not permitted to log in", as Postgres refuses a role without LOGIN (`user_disabled`); the
-  wrong database is `3D000`.
+  right, is `28000` "role … is not permitted to log in", as Postgres refuses a role without LOGIN (`user_disabled`).
   The users file is re-read before every statement of a user's session (`recheckMs: 0`), so `mason user remove` (and `disable`) ends
   a session at its next statement. Fail closed: a users file that cannot be read refuses every user (`57P03`).
+- **The database a tool connects with has ONE rule, and it is not the project's name** (`src/lib/database-name.ts`
+  `connectDatabase`: the sources file's `database:`, else on a server `MASON_PG_DATABASE`, else `mason`; docs/DESIGN.md
+  "The database name a tool connects with"): the listener compares it exactly, the wrong one is `3D000` whose hint
+  (`wrongDatabaseHint`) says the right name, how to say it and where it is set, and never the sources file's path (a
+  client reads it before any password, and that file is named for the source's database). The catalog renames its own
+  database to it (`databaseNameSql`, which moves PGlite's `template1` / `postgres` aside), so `current_database()` and
+  `pg_database` agree. The project's name names the slot alone. DETECTOR: `tests/conventions.test.ts`,
+  `tests/database-name.test.ts`.
 - **What a tool sets is honoured or refused, never silently ignored**: `TimeZone` moves every timestamptz the session
   sends; `extra_float_digits` below 1, a `client_encoding` other than UTF8 and a `DateStyle` other than ISO are
   refused; a parameter Mason has no opinion on is given to the catalog Postgres to validate (an unknown name is

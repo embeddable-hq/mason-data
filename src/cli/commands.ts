@@ -19,7 +19,7 @@ import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
 import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
-import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectDatabase, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresFacts, postgresLink, type PostgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
@@ -420,7 +420,12 @@ export async function status(argv: string[]): Promise<number> {
   const run = r0.run;
   return guarded("status", json, async () => {
     const st = styleOut();
-    const s = await readState(run);
+    const read = await readState(run);
+    // the name is read at the start, so an edit of the sources file's database: is said here until the run takes it
+    const fileSays = projectDatabase(r0.project);
+    const answersAs = postgresLink(run.postgresUrl).database;
+    const s = typeof fileSays === "string" && fileSays !== answersAs
+      ? { ...read, warnings: [...read.warnings, `the sources file now says tools connect with ${fileSays}, and this run answers as ${answersAs}: mason stop && mason start takes it`] } : read;
     const r = readiness(s);
     // the statements the Postgres API answered slowly, and the ones it refused, with the reason (src/duck/requests.ts)
     const slowReply = await callRun(run, "GET", "/api/slow");
@@ -709,6 +714,9 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const src = projectSource(project);
   const tables = "message" in src ? [] : src.tables.map((e) => e.table);
   const database = "message" in src ? null : maskedUrl(src.resolved);
+  // the name a tool connects with once it starts: null when the file cannot say it (`source.error` says why)
+  const connect = projectDatabase(project);
+  const connectName = typeof connect === "string" ? connect : null;
   const duckFile = path.join(project.dir, DUCK_FILE);
   // the copy's file, when a run has made one: its size says what the next mason start resumes with
   const bytes = fs.existsSync(duckFile) ? fs.statSync(duckFile).size : null;
@@ -719,6 +727,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const state = hung === null ? "not running" : "hung";
   if (json) {
     out(jsonText(STATUS, { running: false, ...(hung === null ? {} : { hung: { pid: hung.run.pid, problem: hung.problem.problem, why: hung.problem.why } }),
+      postgres: { database: connectName },
       project: { name: project.config.name, folder: project.folder },
       source: { name: "message" in src ? null : src.name, file: "message" in src ? null : src.file, url: database, error: "message" in src ? errorJson(src) : null },
       engine: { file: duckFile, bytes, restarts }, tables: tables.map((table) => ({ table })),
@@ -734,7 +743,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
       : `${version()}, pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],
     ["Synced data", bytes === null ? "none yet (mason start makes it)" : `${duckFile} · ${fileSize(bytes)}`],
     ...restartsRows(restarts),
-    ["Postgres API", hung === null ? "not running" : `${withPlaceholders(hung.run.postgresUrl)}  (held by the hung run; it may not answer)`],
+    ["Postgres API", hung === null ? `not running${connectName === null ? "" : ` (a tool connects with the database ${connectName})`}` : `${withPlaceholders(hung.run.postgresUrl)}  (held by the hung run; it may not answer)`],
   ] }, st));
   out("");
   if (!tables.length) out("No table added yet.");

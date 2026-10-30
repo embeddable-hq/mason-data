@@ -23,7 +23,7 @@ import { exampleRole, noRoleWayOut, problemText, rolesProblemText, readRoles, RO
 import { readSource, shownPath } from "./sources.ts";
 import { readState, type RunState } from "./commands.ts";
 import type { DevRun } from "./runs.ts";
-import type { Project } from "./project.ts";
+import { projectDatabase, type Project } from "./project.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 
@@ -511,7 +511,10 @@ export async function user(argv: string[]): Promise<number> {
     const problem = roleToAdd(role, roles);
     if (problem !== null) return failed("user", problem, { json });
   }
-  const r = addUser(file, apiKey, name!, { link, database: project.config.name, roles, ...(role !== undefined ? { role } : {}) });
+  // the name it connects with: the run's, or with Mason stopped what the project says it will be
+  const database = link?.database ?? projectDatabase(project);
+  if (typeof database !== "string") return failed("user", database, { json });
+  const r = addUser(file, apiKey, name!, { link, database, roles, ...(role !== undefined ? { role } : {}) });
   if ("message" in r) return failed("user", r, { json });
   const { replaced, ...added } = r;
   const next = addedNext(r.user, link !== null);

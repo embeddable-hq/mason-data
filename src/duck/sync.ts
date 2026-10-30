@@ -855,7 +855,6 @@ export class Sync {
   /** the source attached for this many users (a pass, a rebuild): DETACHed when the last ends (`detach`) */
   private sourceUsers = 0;
   private currentSchema: PgSchema;
-  private readonly database: string;
   /** what the catalog last built from: replaced (a new object) only when it changes */
   private schemaKey = "";
   /** REPLICATION, WHERE THE STREAM IS (`streamStatus`, the stream's log): the changes it applied this run by table, and
@@ -909,7 +908,7 @@ export class Sync {
       json?: Partial<KeptOptions>; onReplication?: (made: boolean) => void;
       /** each failure and notable event of the sync, as it happens (src/duck/events.ts): the run records them */
       onEvent?: (e: SyncEventInput) => void } = {}) {
-    this.store = store; this.source = source; this.database = database; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
+    this.store = store; this.source = source; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
     this.streamReportMs = options.streamReportMs ?? 60_000;
     this.copyChunkRows = options.copyChunkRows ?? COPY_CHUNK_ROWS;
     this.copyParallel = options.copyParallel ?? COPY_PARALLEL;
@@ -1644,7 +1643,7 @@ export class Sync {
    */
   private async verifyPublication(pg: PgConnection, tables: readonly AddedTable[], identities: ReadonlyMap<string, string>): Promise<void> {
     const name = this.replication!.publication;
-    const v = namedPublicationVerdict(await readNamedPublication(pg, name, tables, this.database), tables, identities);
+    const v = namedPublicationVerdict(await readNamedPublication(pg, name, tables), tables, identities);
     if (v.refused !== null) throw new Error(v.refused);
     this.unpublished.clear();
     for (const [source, m] of v.tables) this.unpublished.set(source, m);
@@ -3349,7 +3348,7 @@ export class Sync {
     }
     const views = this.views;
     const key = JSON.stringify([tables, views]);
-    if (key !== this.schemaKey) { this.schemaKey = key; this.currentSchema = { database: this.database, tables, ...(views.length > 0 ? { views } : {}) }; }
+    if (key !== this.schemaKey) { this.schemaKey = key; this.currentSchema = { database: this.currentSchema.database, tables, ...(views.length > 0 ? { views } : {}) }; }
   }
 }
 

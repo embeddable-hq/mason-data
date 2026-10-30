@@ -344,6 +344,15 @@ test("the import guard reads static and dynamic imports, and nothing else", () =
     ["./a.ts", "../b.mjs", "./c.ts"]);
 });
 
+// ------------------------------------------------------------------ the database a tool connects with
+
+test("the database a tool connects with has ONE rule: src/ never makes it from the project's name", () => {
+  const made = /\bdatabase: *(?:cfg|config|project\.config|p\.config|s)\.name\b|postgresApiUrl\([^,)]*, *[\w.]*\.name\b|databaseNameSql\([\w.]*\.name\b/;
+  assert.ok(made.test("database: cfg.name") && made.test("postgresApiUrl(a, project.config.name, {") && !made.test("name: cfg.name"), "the guard reads the real thing");
+  const offenders = scannedFiles(["src"]).filter((f) => made.test(f.src)).map((f) => f.name);
+  assert.deepEqual(offenders, [], "src/lib/database-name.ts `connectDatabase` is the rule; the project's name names the slot");
+});
+
 // ------------------------------------------------------------------ column names in SQL text
 
 test("no test replaces process.stdout across an await: the runner reports through it, and a swallowed report hides a failure", () => {

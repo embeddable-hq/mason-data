@@ -37,6 +37,7 @@ import { liveRun } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
 import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
+import { connectDatabase, databaseSettingRefusal } from "../lib/database-name.ts";
 import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, SELF_SIGNED_FILES } from "./pg-tls.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
 import { RequestLedger, REQUESTS_TABLE } from "../duck/requests.ts";
@@ -215,6 +216,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
   const pollMs = pollMsRetired(process.env, () => sourcesTop(project.root, project.folder));
   if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: false });
+  // the name a tool connects with is the sources file's: a server's setting for it names nothing on a project
+  const databaseSetting = o.serve === undefined ? databaseSettingRefusal(process.env, sourcesTop(project.root, project.folder).shown) : null;
+  if (databaseSetting !== null) return failed("start", { code: "refused", ...databaseSetting }, { json: false });
   // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused, named), read
   // before anything opens (src/duck/history.ts); every history below keeps them
   const keptDays = historyDaysSetting(process.env);
@@ -294,6 +298,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     return checked.exit === 2 ? 1 : checked.exit;
   }
   const { source, warnings } = checked;
+  // THE DATABASE A TOOL CONNECTS WITH (src/lib/database-name.ts): never the project's name, which names the slot below
+  const database = connectDatabase(src, cfg, process.env);
   done(`Connected to ${db}: Postgres ${checked.facts.versionText}${checked.facts.standby ? " (a read replica)" : ""}, ${checked.facts.tables.length} table(s) this user can read`);
   for (const w of warnings) say(`  ! ${w}`);
   // HOW THE CHANGES ARE READ (src/cli/replication-mode.ts): each table as its sync: in the sources file says — the tables
@@ -412,7 +418,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // each table is kept current as its own sync: says (the sources file's); the sync's interval is how soon a failed pass
   // is tried again (and MASON_DUCK_SYNC=recopy's whole copies). The slot and publication are the run's whenever a table
   // is replicated, now or after a mason add --sync replication (the demo database has no change log: none)
-  const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^synced |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
+  const sync = new Sync(store, source, database, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^synced |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
     cfg.demo === true ? null : repl, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths }, onEvent: (e) => events.record(e),
       // what the run made on the database, recorded as it is made and dropped: mason destroy drops it by that name
       onReplication: (made) => {
@@ -438,7 +444,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
 
   if (pg.said) say(`  ${pg.said}`);
   const pgAddress = { host: listen.host, port: listen.port };
-  const postgresUrl = postgresApiUrl(pgAddress, cfg.name, { tls: pgTls.tls !== null });
+  const postgresUrl = postgresApiUrl(pgAddress, database, { tls: pgTls.tls !== null });
   // A LIBC COLLATION'S ORDER IS READ FROM THE DATABASE (src/duck/libc-order.ts): once, a few read-only SELECTs, kept in
   // the copy and read again when the database's collation version moves (an OS upgrade's glibc)
   let libc: LibcOrder | undefined;
@@ -489,7 +495,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let api: PgApiServer;
   try {
     api = await startPostgresApi({
-      port: pgAddress.port, host: pgAddress.host, tls: pgTls.tls, database: cfg.name, masonVersion: o.version, product: "mason-data", statementTimeoutMs,
+      port: pgAddress.port, host: pgAddress.host, tls: pgTls.tls, database, masonVersion: o.version, product: "mason-data", statementTimeoutMs,
       ...listenerLogins(users, cfg.apiKey),
       roles: () => liveRoles.now(),
       schema: () => sync.schema(),
@@ -531,7 +537,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the web page (mason ui) is mason start's alone: mason serve's run serves none (src/cli/run-server.ts RunContext.page)
     page: o.serve === undefined,
     demo: cfg.demo === true,
-    users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database: cfg.name, postgresUrl },
+    users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database, postgresUrl },
     roles: () => liveRoles.now(),
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,

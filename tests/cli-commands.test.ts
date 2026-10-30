@@ -759,6 +759,17 @@ test("stage 1b, the roles file decides a user added without --role: its default 
     assert.match((await run(["status"])).stdout, /^ {2}Roles +agent, everything {2}\(mason\/roles\.yml; no default: a user with no role reads nothing\)$/m);
     assert.deepEqual(roleOf(JSON.parse((await run(["user", "add", "tableau", "--json"])).stdout) as User), { role: undefined, roleFrom: "none", readsNothing: true });
     // the listener's roles say which is of tables: all (/api/state's roles.all): the way out names it, as with Mason stopped
+    // THE DATABASE NAME IS READ AT THE START: an edit of database: is said until the run takes it, and the run's name is what a user is told
+    const sourcesFile = path.join(folder, "sources", "shop.yml");
+    const asWritten = fs.readFileSync(sourcesFile, "utf8");
+    const moved = "Warning +the sources file now says tools connect with reporting, and this run answers as shop: mason stop && mason start takes it";
+    fs.writeFileSync(sourcesFile, asWritten.replace("tables:", "database: shop\ntables:"));
+    assert.doesNotMatch((await run(["status"])).stdout, /tools connect with/, "the file and the run agree");
+    fs.writeFileSync(sourcesFile, asWritten.replace("tables:", "database: reporting\ntables:"));
+    assert.match((await run(["status"])).stdout, new RegExp(`^ {2}${moved}$`, "m"));
+    assert.ok((JSON.parse((await run(["status", "--json"])).stdout) as { warnings: string[] }).warnings.some((w) => /this run answers as shop/.test(w)));
+    assert.equal((JSON.parse((await run(["user", "add", "metrics", "--json"])).stdout) as { database: string }).database, "shop", "what the run answers as, not what the file will say");
+    fs.writeFileSync(sourcesFile, asWritten);
     assert.match((await run(["user", "add", "mode"])).stdout, /Tip: Its statements are refused until it has a role: write default: everything at the top of mason\/roles\.yml, or mason user remove mode and mason user add mode --role everything\./);
   } finally { config(null); server.close(); }
 });

@@ -132,7 +132,8 @@ CLI lacks).
 - **What a project syncs is ONE sources file** (a `sources` folder, each file a source to sync, naming the tables and
   columns to sync): `mason/sources/<name>.yml`, its name the
   source's — `kind: postgres` (any other kind refused by name, "not yet"), `url:` a literal URL or `${NAME}` (read by
-  `appEnvValue`, src/lib/dotenv.ts: `.env.local`, `.env`, the shell; unset is refused with the way out), `tables:` a MAP
+  `appEnvValue`, src/lib/dotenv.ts: `.env.local`, `.env`, the shell; unset is refused with the way out), `database:` the
+  name a tool connects with (optional, written out, none is `mason`: `src/lib/database-name.ts`), `tables:` a MAP
   of entries: `{}` every column, `columns:` those (the key always copied), `exclude:` every column but those (never
   both), `sync:` how it is kept current (`off`, `poll <interval>`, `replication`; the file's top `sync:` is every entry's
   default, and none written is `off`, said at `mason start`), `key:` only for a table with no primary key (refused on
@@ -196,6 +197,13 @@ CLI lacks).
   (`sourceServer`); the same name on another server resets the poll's watermarks (the old server's transaction ids mean
   nothing there), so every row is read and compared and only the changed ones written; another name is refused
   (`sourceMove`: `mason destroy`, then `mason start`). An identifier this user may not read (42501) is said, never guessed.
+- **The database name is read by ONE rule, and never from the project's name** (src/lib/database-name.ts; `.claude/rules/postgres-api.md`):
+  the run derives it once (`connectDatabase`, src/cli/dev.ts) and records it in `running.postgresUrl`, which every command
+  reads (`postgresLink`); with Mason stopped, `projectDatabase` (src/cli/project.ts) reads the sources file's one key,
+  so `mason user add` needs neither the URL nor the rest of the file, and a file that cannot say it is refused, never
+  guessed. A name is read at the start: `mason status` warns when the file has moved since. `MASON_PG_DATABASE` is
+  `mason serve`'s (the sources file's first, the two refused when they disagree) and `mason start` refuses it. Keep
+  `mason init` writing no key: the default stays a default.
 - **`mason user add|list|disable|enable|remove` is the login a tool keeps** (src/cli/user.ts, src/duck/users.ts, the rules
   in .claude/rules/duckdb.md "Users"): a BI tool stores ONE password that does not expire. `add` prints the password
   ONCE with the URL (one builder, `connectionUrl`), when the run is up; the command needs the project, never the run (it

@@ -72,7 +72,7 @@ test("every mistake in the file is told its key, what is wrong and the way out �
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\n"), ["tables: missing — write tables: {} (mason add adds a table to it)"]);
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\ntables: [orders]\n"), ["tables: is one entry per table, like tables: { orders: {}, customers: { columns: [id, name] } }"]);
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\ntable: {}\n"), [
-    "unexpected key table — did you mean `tables`? — a source file takes kind, url, sync, publication, tables", "tables: missing — write tables: {} (mason add adds a table to it)"]);
+    "unexpected key table — did you mean `tables`? — a source file takes kind, url, database, sync, publication, tables", "tables: missing — write tables: {} (mason add adds a table to it)"]);
   assert.deepEqual(problems(`kind: postgres
 url: \${DATABASE_URL}
 tables:
@@ -193,7 +193,7 @@ test("publication: at the top names the publication replication reads, a ${VARIA
   const problems = (text: string): string[] => (parse(text) as { problems: string[] }).problems;
   assert.deepEqual(problems("kind: postgres\nurl: x\npublication: $PG_PUBLICATION\ntables: {}\n"), ['publication: "$PG_PUBLICATION" — write ${NAME} alone, like ${PG_PUBLICATION}, or the publication\'s name']);
   assert.deepEqual(problems("kind: postgres\nurl: x\npublication: ''\ntables: {}\n"), ["publication: write publication: ${PG_PUBLICATION}, or a publication's name (leave it out and Mason makes its own)"]);
-  assert.deepEqual(problems("kind: postgres\nurl: x\npublcation: app_pub\ntables: {}\n"), ["unexpected key publcation — did you mean `publication`? — a source file takes kind, url, sync, publication, tables"]);
+  assert.deepEqual(problems("kind: postgres\nurl: x\npublcation: app_pub\ntables: {}\n"), ["unexpected key publcation — did you mean `publication`? — a source file takes kind, url, database, sync, publication, tables"]);
 });
 
 test("the file read: one source per project, its URL from .env.local, .env or the shell — or what to write", () => {
@@ -435,7 +435,7 @@ test("sync: every mistake on one report, at its key, with the line to write — 
   // on an entry, at the entry's key
   assert.equal(one("poll", "entry"), "tables.orders.sync: poll needs its interval: write poll 5s, poll 5m or poll 1h (at least 1s)");
   // the key misspelt, at the top and on an entry: did you mean
-  assert.deepEqual(problems(`${head}synk: off\ntables: {}\n`), ["unexpected key synk — did you mean `sync`? — a source file takes kind, url, sync, publication, tables"]);
+  assert.deepEqual(problems(`${head}synk: off\ntables: {}\n`), ["unexpected key synk — did you mean `sync`? — a source file takes kind, url, database, sync, publication, tables"]);
   assert.deepEqual(problems(`${head}tables:\n  orders:\n    Sync: off\n`), ["tables.orders: unexpected key Sync — did you mean `sync`? — a table takes columns, exclude, key and sync"]);
   // all of a file's mistakes on ONE report
   assert.deepEqual(problems(`${head}sync: poll\ntables:\n  orders: { sync: polling 5s }\n  customers: { sync: poll 500ms }\n`), [

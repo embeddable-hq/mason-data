@@ -77,11 +77,11 @@ function isForeignKey(schema: PgSchema, table: PgTable, join: PgJoin): boolean {
 const joinNote = (join: PgJoin): string => `joins ${join.table} on ${join.on[1]} (${join.relationship})`;
 
 /**
- * THE CATALOG'S DATABASE IS THE ONE A TOOL CONNECTED TO (the deployment): current_database(), pg_database — pgjdbc's
+ * THE CATALOG'S DATABASE IS THE ONE A TOOL CONNECTED TO (src/lib/database-name.ts): current_database(), pg_database — pgjdbc's
  * getCatalogs and every TABLE_CAT, DBeaver's navigator — once said the sidecar's own `postgres`. The current
  * database's row is renamed (ALTER DATABASE refuses the current one; the catalog row does not), after moving aside any
  * OTHER database already holding the name — PGlite's `template0` / `template1` — since pg_database's names are unique
- * (#484's review: a deployment named `template1` failed on pg_database_datname_index and the catalog never started).
+ * (#484's review: a name of `template1` failed on pg_database_datname_index and the catalog never started).
  */
 export function databaseNameSql(name: string): string[] {
   const q = `'${name.replaceAll("'", "''")}'`;
