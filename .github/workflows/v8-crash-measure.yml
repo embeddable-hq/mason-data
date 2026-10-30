@@ -1,0 +1,47 @@
+# TEMPORARY measurement for the V8 wasm teardown crash (never merged). v2: the WebAssembly-loading test files in a loop
+# for ~12 minutes per job on CI's runner, at CI's test concurrency (3 on 4 cores); one line per test-file process.
+name: v8-crash-measure
+on:
+  push:
+    branches: [claude/ci-v8-wasm-exit-crash-measure]
+permissions:
+  contents: read
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        arm: [node24, node24-stress-code-gc, node26-stress-code-gc, node24-no-wasm-code-gc]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ startsWith(matrix.arm, 'node26') && '26' || '24.22.1' }}
+          cache: npm
+      - run: npm ci
+      - name: loop
+        shell: bash
+        run: |
+          node --version
+          case "${{ matrix.arm }}" in
+            *stress-code-gc) flags="--stress-wasm-code-gc" ;;
+            *no-wasm-code-gc) flags="--no-wasm-code-gc" ;;
+            *) flags="" ;;
+          esac
+          files="tests/duck-json-columns.test.ts tests/postgres-api/catalog.test.ts tests/postgres-api/server.test.ts tests/duck-wire.test.ts tests/duck-jsonb-order.test.ts tests/duck-distinct-key.test.ts"
+          end=$(( $(date +%s) + 720 )); i=0; procs=0; checks=0; segvs=0; otherfail=0
+          while [ $(date +%s) -lt $end ]; do
+            i=$((i+1))
+            set +e; node --test --test-concurrency=3 $flags $files > it.log 2>&1; rc=$?; set -e
+            c=$(grep -c 'allocations_.erase' it.log || true); s=$(grep -cE 'SIGSEGV|Segmentation fault' it.log || true)
+            f=$(grep -E '^ℹ fail ' it.log | awk '{print $3}')
+            procs=$((procs+6)); checks=$((checks+c)); segvs=$((segvs+s))
+            echo "ITER $i rc=$rc check=$c segv=$s fail=$f files=[$(grep -E '^✖ tests/' it.log | sed 's/ (.*//' | tr '\n' ' ')]"
+            if [ "$c" != 0 ] || [ "$s" != 0 ]; then grep -B3 -A14 'Fatal error\|SIGSEGV' it.log | head -40; fi
+            if [ "$rc" != 0 ] && [ "$c" = 0 ] && [ "$s" = 0 ]; then otherfail=$((otherfail+1)); grep -E '^✖' it.log | head -5; fi
+          done
+          echo "MEASURE arm=${{ matrix.arm }} shard=${{ matrix.shard }} iterations=$i file_processes=$procs check=$checks segv=$segvs other_failed_iterations=$otherfail"
+          [ "$checks" = 0 ] && [ "$segvs" = 0 ]
