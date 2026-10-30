@@ -2,7 +2,7 @@
  * `mason serve` AGAINST A REAL POSTGRES (src/cli/serve.ts): the server's whole life as a platform sees it. Started with
  * its settings in the environment and nothing else, /healthz turns 200 once it answers; a table added beside it with
  * `mason add` (as `docker compose exec mason mason add …` does) is copied and counted; the Postgres API answers a token
- * minted from MASON_API_KEY; SIGTERM stops it with exit 0, the run recorded stopped and the copy kept; a second serve
+ * minted from MASON_API_KEY; GET /metrics says the run's numbers and no name; SIGTERM stops it with exit 0, the run recorded stopped and the copy kept; a second serve
  * over the same data folder resumes that copy instead of copying again.
  *
  * What it needs: IT_POSTGRES_URL (any wal_level), psql on PATH, and DuckDB's postgres extension (downloaded once per
@@ -104,6 +104,20 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
     const token = mintToken(KEY, 600).token;
     const count = psql(`postgresql://anyone:${token}@127.0.0.1:${pgPort}/served`, "SELECT count(*) FROM public.items");
     assert.equal(count, "500");
+
+    // GET /metrics beside /healthz, once it serves: the run's numbers (src/cli/run-server.ts metricsFacts through the
+    // run's serve hook), the statement just answered counted, and no name of the database in it (it takes no credential)
+    const scrape = await fetch(`http://127.0.0.1:${health}/metrics`);
+    assert.deepEqual([scrape.status, scrape.headers.get("content-type")], [200, "text/plain; version=0.0.4; charset=utf-8"]);
+    const metrics = await scrape.text();
+    assert.match(metrics, /^mason_ready 1$/m);
+    assert.match(metrics, /^mason_tables\{phase="copied"\} 1$/m);
+    assert.match(metrics, /^mason_copy_rows 500$/m);
+    assert.match(metrics, /^mason_copy_bytes \d+$/m);
+    assert.match(metrics, /^mason_disk_free_bytes \d+$/m);
+    assert.ok(Number(/^mason_statements_total\{outcome="completed"\} (\d+)$/m.exec(metrics)?.[1]) >= 1, `the count(*) is counted:\n${metrics}`);
+    assert.doesNotMatch(metrics, /^mason_stream_lag/m, "polled: no stream, so no lag (absent, never 0)");
+    assert.doesNotMatch(metrics, new RegExp(`items|${tag}|anyone|count\\(`), "never a table, a database, a user or a statement");
   } finally {
     first.child.kill("SIGTERM");
   }
