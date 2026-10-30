@@ -930,13 +930,12 @@ test("the Node guard catches the real thing", () => {
   assert.deepEqual(one("# node-version: '24' in a comment\n"), [], "a comment is no setting");
 });
 
-/** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line. One
- *  has no session: `checkRoles` plans a filter's own read (`filterProbe`), which is no user's statement and answers nothing */
+/** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line */
 const planCallsWithoutGrants = (source: string): string[] => {
   const file = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true);
   const out: string[] = [];
   const visit = (n: ts.Node): void => {
-    if (ts.isCallExpression(n) && /\bduck\.plan$/.test(n.expression.getText(file)) && n.arguments.at(-1)?.getText(file) !== "grants" && n.arguments[1]?.getText(file) !== "probe") out.push(n.getText(file).split("\n")[0]!);
+    if (ts.isCallExpression(n) && /\bduck\.plan$/.test(n.expression.getText(file)) && n.arguments.at(-1)?.getText(file) !== "grants") out.push(n.getText(file).split("\n")[0]!);
     ts.forEachChild(n, visit);
   };
   visit(file);
@@ -946,14 +945,16 @@ const planCallsWithoutGrants = (source: string): string[] => {
 test("every caller of duck.plan passes the session's grants: a statement planned without them reads no role's filter and no role's columns", () => {
   const planned = scannedFiles().filter((f) => f.name.endsWith(".ts") && /\bduck\.plan\(/.test(f.src));
   assert.ok(planned.some((f) => f.name === "src/api/postgres/server.ts"), `the guard reads the listener: ${planned.map((f) => f.name).join(", ")}`);
-  assert.deepEqual(planned.flatMap((f) => planCallsWithoutGrants(f.src).map((c) => `${f.name}: ${c}`)), []);
+  // one call has no session: `checkRoles` plans a filter's own read (`filterProbe`), no user's statement, and answers
+  // nothing. Named whole, so any other call without them, a second of its kind included, fails here
+  assert.deepEqual(planned.flatMap((f) => planCallsWithoutGrants(f.src).map((c) => `${f.name}: ${c}`)),
+    ['src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined)']);
 });
 
 test("the duck.plan guard would catch the real thing", () => {
   assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false);"), ["this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false)"]);
   assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false, undefined);").length, 1, "an explicit undefined is no grants");
   assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false, grants);"), []);
-  assert.deepEqual(planCallsWithoutGrants("await this.options.duck.plan(run, probe, stmt, 0, [], path, zone, types, false, undefined);"), [], "the roles' check of a filter");
 });
 
 /**

@@ -20,6 +20,8 @@
  *   - every statement's request-log row carries the user's attributes beside its role;
  *   - a prepared statement Executed after the roles file's `where:` was edited is planned again under the new filter;
  *   - an EMPTY list counts as a missing value, for an integer list and a uuid list, never as a filter keeping no row;
+ *   - a value its type refuses is refused naming the attribute, the user and the way out;
+ *   - a filtered user's own subquery named as the wall answers Postgres's rows; a literal spelling the engine's text answers;
  *   - `<> ALL(:list)` through a real where:; every whole-row spelling refused by the gap's name;
  *   - EXPLAIN says no row count for a filtered table, in text or JSON (`Row Filter` there), and one for an unfiltered one;
  *   - EXPLAIN of a statement reading a filtered table says Mason's lines alone, byte-identical whatever the statistics
@@ -328,6 +330,29 @@ test("a prepared statement Executed after its role's where: was edited answers u
   assert.equal(await run(), "10,13,16", "the edit undone: the old filter again");
 });
 
+test("a value its type refuses is refused naming the attribute, the user and the way out, at a statement that reads the filter; a statement's own bad value stays its own", async () => {
+  await wire();
+  const abc = await connect("typed_abc", addUser("typed_abc", "tenant", { tenant: "abc" }));
+  for (const sql of ["SELECT count(*) FROM orders", "EXPLAIN SELECT count(*) FROM orders", "SELECT count(*) FROM order_items"]) {
+    const r = await refusal(abc, sql);
+    assert.equal(r.code, "42501", `${sql}: ${JSON.stringify(r)}`);
+    assert.equal(r.message, 'permission denied: the user "typed_abc" has a value for the attribute tenant that is not of type integer, which the role tenant filters rows by');
+    assert.match(r.detail ?? "", /roles\.tenant\.tables\.\w+\.where reads :tenant as integer \(tenant_id = :tenant\): invalid input syntax for type integer: "abc"/);
+    assert.equal(r.hint, "mason user remove typed_abc && mason user add typed_abc --role tenant --set tenant=<a value of type integer>");
+  }
+  assert.deepEqual(await rows(abc, "SELECT count(*) FROM products"), [["3"]], "no filter reads it here");
+  // a list, one of its values
+  const list = await connect("typed_list", addUser("typed_list", "others", { tenants: ["1", "x"] }));
+  const l = await refusal(list, "SELECT count(*) FROM orders");
+  assert.equal(l.code, "42501", JSON.stringify(l));
+  assert.match(l.message, /has a value for the attribute tenants that is not of type integer\[\]/);
+  // a user whose values are good, a statement whose own is not: Postgres's own refusal
+  const good = await connect("typed_good", addUser("typed_good", "tenant", { tenant: "1" }));
+  const own = await refusal(good, "SELECT count(*) FROM orders WHERE id = 'abc'::int");
+  assert.equal(own.code, "22P02");
+  assert.equal(own.message, 'invalid input syntax for type integer: "abc"');
+});
+
 test("an empty list is a missing value, on an integer list and a uuid list: refused loudly, never a filter keeping no row", async () => {
   await wire();
   const empty: Array<[string, string, string]> = [["none_int", "others", "tenants"], ["none_uuid", "regions", "regions"]];
@@ -446,6 +471,31 @@ test("a filtered read's first line and JSON tables are the statement's, with no 
   const own = (await rows(open, "EXPLAIN SELECT a FROM (SELECT id AS a FROM orders) AS __mason_barrier")).map((r) => r[0]).join("\n");
   assert.doesNotMatch(own, /try\(/);
   assert.deepEqual(await rows(c, "SELECT count(a) FROM (SELECT id AS a FROM products p, (VALUES (1)) v(id)) AS __mason_barrier"), [["3"]], "as a filtered user, a statement reading no filtered table");
+  // ... and as a filtered user, over the filtered table: Postgres's rows, the wall named by what the statement does not hold
+  const visible = [["10"], ["11"], ["13"], ["16"]];
+  for (const [form, sql] of [
+    ["a list of its own", "SELECT a FROM (SELECT id AS a FROM orders) AS __mason_barrier ORDER BY a"],
+    ["a *", "SELECT * FROM (SELECT id FROM orders) AS __mason_barrier ORDER BY 1"],
+    ["a * of a *", "SELECT id FROM (SELECT * FROM (SELECT id FROM orders) AS __mason_barrier) AS __mason_barrier_1 ORDER BY 1"],
+    ["a unicode escape of the name", `SELECT a FROM (SELECT id AS a FROM orders) AS U&"__mason\\005fbarrier" ORDER BY a`],
+    ["the name as a literal", "SELECT id FROM orders WHERE '__mason_barrier' <> '' ORDER BY id"],
+    ["as a WITH query", "WITH __mason_barrier AS (SELECT id FROM orders) SELECT id FROM __mason_barrier ORDER BY id"],
+  ] as const) assert.deepEqual(await rows(c, sql), visible, form);
+  const sent = (await rows(c, "EXPLAIN SELECT a FROM (SELECT id AS a FROM orders) AS __mason_barrier")).map((r) => r[0]).join("\n");
+  assert.match(sent, /AS __mason_barrier_1\b/, "the wall takes a name the statement does not hold");
+});
+
+test("a literal that spells what the engine's text is printed from answers as itself, for any user", async () => {
+  await wire();
+  const filtered = await connect("spelled_filtered", addUser("spelled_filtered", "tenant", { tenant: "1" }));
+  const open = await connect("spelled_open", addUser("spelled_open", "everything"));
+  for (const literal of ['try("columns"(*))', 'any_value("columns"(', "__mason_columns_0(", "__mason_columns_0(*) __mason_columns_1("]) {
+    const quoted = `'${literal}'`;
+    assert.deepEqual(await rows(open, `SELECT ${quoted} FROM products LIMIT 1`), [[literal]], `unfiltered: ${literal}`);
+    assert.deepEqual(await rows(filtered, `SELECT ${quoted} FROM products LIMIT 1`), [[literal]], `a filtered user, no filtered table: ${literal}`);
+    assert.deepEqual(await rows(filtered, `SELECT ${quoted} FROM orders LIMIT 1`), [[literal]], `a filtered table: ${literal}`);
+    assert.deepEqual(await rows(filtered, `SELECT ${quoted}, count(*) FROM orders GROUP BY id ORDER BY id LIMIT 1`), [[literal, "1"]], `grouped by a key, its star an any_value(COLUMNS): ${literal}`);
+  }
 });
 
 test("a table's statistics reach no statement: what the engine would prove from them answers alike on either side of a hidden row's value", async () => {

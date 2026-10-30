@@ -62,6 +62,8 @@ export interface RoleGrants {
   /** THE SESSION'S FILTERS, BOUND to its user's attribute values (src/duck/row-filter.ts bindFilter), by `schema.table`:
    *  set on the role a session hands the plan (src/api/postgres/server.ts `grants`), never on the roles file's */
   rows?: ReadonlyMap<string, BoundFilter>;
+  /** the user `rows` were bound for, as a refusal of one of its values says it */
+  rowsUser?: string;
 }
 
 /**

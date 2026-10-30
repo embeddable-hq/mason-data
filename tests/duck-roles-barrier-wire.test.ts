@@ -102,15 +102,17 @@ const rows = async (user: string, sql: string): Promise<string[][]> =>
   (await client(user).query({ text: sql, rowMode: "array", types: { getTypeParser: () => (v: string) => v } } as pg.QueryConfig)).rows as string[][];
 const one = async (user: string, sql: string): Promise<string> => (await rows(user, sql))[0]!.join(":");
 
-test("the reviewer's two statements: a condition that raises on a hidden row answers, through: a SEMI join (a list and a scalar); the control alike", async () => {
+/** the reviewer's two statements and every place an expression can sit; `tag` keeps a run's statements its own */
+async function reviewersStatements(tag = ""): Promise<void> {
   for (const user of ["scalar", "list"]) {
-    assert.equal(await one(user, `SELECT count(*) FROM order_items WHERE ${RAISES("qty")} > 0`), String(VISIBLE), `${user}: qty 99 is on hidden rows alone`);
-    assert.equal(await one(user, "SELECT count(*) FROM order_items WHERE id >= 100000 AND 1/(order_id % 2) > 0"), String(VISIBLE), `${user}: an even order_id is a hidden row's`);
+    assert.equal(await one(user, `SELECT count(*) FROM order_items WHERE ${RAISES("qty")} > 0${tag}`), String(VISIBLE), `${user}: qty 99 is on hidden rows alone`);
+    assert.equal(await one(user, `SELECT count(*) FROM order_items WHERE id >= 100000 AND 1/(order_id % 2) > 0${tag}`), String(VISIBLE), `${user}: an even order_id is a hidden row's`);
     assert.equal(await one(user, "SELECT count(*) FROM order_items WHERE 1/(CASE WHEN qty = 98 THEN 0 ELSE 1 END) > 0"), String(VISIBLE), `${user}: the control`);
   }
-});
+}
+test("the reviewer's two statements: a condition that raises on a hidden row answers, through: a SEMI join (a list and a scalar); the control alike", () => reviewersStatements());
 
-test("a scalar where:, a list and through: hold in every place an expression can sit", async () => {
+async function everyPlace(tag = ""): Promise<void> {
   const R = RAISES("marker"), Q = RAISES("qty");
   const n = String(VISIBLE);
   for (const user of ["scalar", "list"]) {
@@ -138,9 +140,10 @@ test("a scalar where:, a list and through: hold in every place an expression can
       ["a table read twice, one side's expression", `SELECT count(*) FROM orders a, orders b WHERE a.id = b.id AND ${RAISES("b.marker")} > 0`, n],
       ["UNION ALL branches", `SELECT count(*) FROM (SELECT id FROM orders WHERE ${R} > 0 UNION ALL SELECT id FROM order_items WHERE ${Q} > 0) u`, String(2 * VISIBLE)],
     ];
-    for (const [name, sql, want] of cases) assert.equal(await one(user, sql), want, `${user}: ${name}`);
+    for (const [name, sql, want] of cases) assert.equal(await one(user, `${sql}${tag}`), want, `${user}: ${name}`);
   }
-});
+}
+test("a scalar where:, a list and through: hold in every place an expression can sit", () => everyPlace());
 
 test("the barrier hides rows, never errors: the same expression raises on a visible row, and a statement that cannot raise answers", async () => {
   await assert.rejects(client("scalar").query("SELECT count(*) FROM orders WHERE 1/(id % 2 - 1) > 0"), (e: pg.DatabaseError) => e.code === "22012", "every visible id is odd");
@@ -150,8 +153,10 @@ test("the barrier hides rows, never errors: the same expression raises on a visi
   assert.deepEqual(await rows("scalar", "SELECT id FROM orders ORDER BY id LIMIT 2"), [["51"], ["151"]]);
 });
 
-test("the engine's plan of what is sent: the statement's expression is above the role's filter, in no scan's own filters, the barrier and the wall in the text", async () => {
-  const { BARRIER, STATISTICS_WALL } = await import("../src/duck/row-filter.ts");
+/** where the engine runs the statement's expression, read from its plan of what is sent: never "a Limit is there", which
+ *  statistics propagation drops once it has stopped the pushdown */
+async function expressionAboveTheFilter(wall: boolean): Promise<void> {
+  const { STATISTICS_WALL } = await import("../src/duck/row-filter.ts");
   // a filtered user reads no plan (EXPLAIN says what is sent, and no more), so the engine is asked directly
   const sentOf = async (user: string, sql: string): Promise<string> => {
     const line = (await rows(user, `EXPLAIN ${sql}`)).map((r) => r[0]!).find((l) => l.includes("Sent to the engine: "));
@@ -174,11 +179,30 @@ test("the engine's plan of what is sent: the statement's expression is above the
     ["list", `SELECT count(*) FROM orders WHERE ${RAISES("marker")} > 0`, /tenant_id/],
   ] as const) {
     const sent = await sentOf(user, sql);
-    assert.ok(sent.includes(BARRIER) && sent.includes(STATISTICS_WALL), `the statement sent holds the barrier and the wall: ${sent}`);
+    assert.equal(sent.includes(STATISTICS_WALL), wall, `the wall in what is sent: ${sent}`);
     const plan = await planOf(sent);
     const own = plan.findIndex((l) => /CASE/.test(l));
     const filter = plan.findIndex((l, i) => i > own && role.test(l));
     assert.ok(own >= 0 && filter > own, `the statement's expression above the role's filter:\n${plan.join("\n")}`);
     assert.deepEqual(plan.filter((l) => /TABLE_SCAN.*Filters: .*CASE/i.test(l)), [], `the statement's expression in no scan:\n${plan.join("\n")}`);
   }
+}
+test("the engine's plan of what is sent: the statement's expression is above the role's filter and in no scan's own filters, the wall in the text", () => expressionAboveTheFilter(true));
+
+/**
+ * THE LIMIT'S DETECTOR. `try` also stops the pushdown, as an observation of this engine, so with it on nothing here can
+ * tell whether the LIMIT holds anything (with `BARRIER` empty every other test of this file passes). Off, the LIMIT is all
+ * that stands between the statement and the hidden rows: every shape must still answer, and its guarantee is the engine's
+ * own semantics, since a filter pushed through a LIMIT would change what it keeps. `try`'s detector for the statistics is
+ * tests/duck-roles-rows-wire.test.ts.
+ */
+test("the LIMIT alone holds every shape, the try wall off by its test-only switch", async () => {
+  const { wallSwitch } = await import("../src/duck/row-filter.ts");
+  wallSwitch.statistics = false;
+  try {
+    const tag = " /* the limit alone */";
+    await reviewersStatements(tag);
+    await everyPlace(tag);
+    await expressionAboveTheFilter(false);
+  } finally { wallSwitch.statistics = true; }
 });

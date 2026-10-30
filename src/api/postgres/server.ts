@@ -1332,7 +1332,7 @@ class Session {
       }
       rows.set(f.table, bindFilter(f, types, values));
     }
-    const bound = { ...g, rows };
+    const bound = { ...g, rows, ...(user !== undefined ? { rowsUser: user } : {}) };
     this.boundRows = { of: g, values, bound };
     return bound;
   }

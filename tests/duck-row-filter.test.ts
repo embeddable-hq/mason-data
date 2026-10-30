@@ -11,10 +11,12 @@
  *     answers the catalog's `mason.attr.<name>`, a list comma-joined, and no other setting.
  * The module is imported inside each test, so a tree without it fails each test by name (scripts/fails-without.ts).
  */
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
+import { stopParser } from "../src/api/postgres/parser.ts";
 
 const rf = async () => await import("../src/duck/row-filter.ts");
+after(() => stopParser());
 
 test("whereParts: :name is an attribute in the SQL, never in a string, an identifier, a dollar quote, a comment or a cast", async () => {
   const { whereParts, whereAttributes } = await rf();
@@ -54,6 +56,19 @@ test("the filtered read is behind the barrier at its outermost only, for a scala
     assert.equal(sql.split(BARRIER).length - 1, 1, `one barrier, the outermost: ${sql}`);
   }
   assert.equal(filteredSql("public.products", filters), 'SELECT * FROM "public"."products"', "a table no filter holds has no rows to hide");
+});
+
+test("wallStatistics walls exactly the reads Mason wrote, and refuses by the gap's name when they are not all there", async () => {
+  const { wallStatistics } = await rf();
+  const { parseSql } = await import("../src/api/postgres/parser.ts");
+  const tree = async (sql: string): Promise<unknown> => (await parseSql(sql)).stmts?.[0]?.stmt;
+  const one = await tree("SELECT * FROM (SELECT * FROM (SELECT 1 AS a LIMIT 1) AS w) AS mine");
+  wallStatistics(one, { alias: "w", reads: 1 });
+  assert.match(JSON.stringify(one), /"sval":"try"/);
+  for (const [sql, reads] of [["SELECT * FROM (SELECT 1 AS a LIMIT 1) AS w", 2], ["SELECT a FROM (SELECT 1 AS a LIMIT 1) AS w", 1], ["SELECT * FROM (SELECT 1 AS a LIMIT 1) AS other", 1]] as const) {
+    const t = await tree(sql);
+    assert.throws(() => wallStatistics(t, { alias: "w", reads }), (e: { gap?: string; fields?: { code: string; hint?: string } }) => e.gap === "roles" && e.fields?.code === "0A000" && (e.fields.hint ?? "") !== "", sql);
+  }
 });
 
 test("bindFilter: a scalar binds as a typed CAST, a list as a typed ARRAY; EXPLAIN's words bound to five values", async () => {

@@ -1218,7 +1218,8 @@ pushdown does not cross a LIMIT, which would change what it keeps. **The limit n
 propagation runs after the pushdown and drops a limit above the table's row count, so most plans hold no limit node, and
 the statement's expression stays above the role's filter all the same; that is also why the barrier costs so little. So
 the detector reads where the expression runs, never whether a Limit is there (`tests/duck-roles-barrier-wire.test.ts`).
-Removing the barrier fails three of that file's four tests and, per user, the shapes the second review counted below.
+With the `try` wall off (`wallSwitch`, below), removing it fails that file's limit test and, per user, the shapes counted
+below; with `try` on, nothing fails, which is why the limit has a test of its own.
 
 Measured on DuckDB 2.0, ten cores, a file of 30 M orders and 60 M items, a user keeping half the rows, min of five (three
 for the last three rows), ms. One thing changed per column:
@@ -1257,16 +1258,25 @@ enough, and turning off the engine's `statistics_propagation` is not open: `disa
 another connection, so a per-statement setting would race every other session.
 
 **Two things hold it.** The filtered read ends in `SELECT try(COLUMNS(*)) AS "\0" FROM (… LIMIT max)` (`wallStatistics`):
-`try(col)` is opaque to the propagation (the plan was identical either side of N), and it keeps every column's name and
-type, every type a copy holds checked. Postgres has no `COLUMNS(*)`, so `filteredSql` writes `*`, Postgres analyses that, and
-the list is replaced after the rewrite, where the read-back check holds the text. And an EXPLAIN of a statement that reads
+`try(col)` is opaque to the propagation (the plan was identical either side of N), and it keeps every column's name, type
+and text, 34 types and 16 odd names held by `tests/duck-roles-try-types.test.ts`. Postgres has no `COLUMNS(*)`, so
+`filteredSql` writes `*`, Postgres analyses that, and the list is replaced after the rewrite, where the read-back check
+holds the text. **The wall's select is found by a name chosen after reading the statement**, the first of
+`__mason_barrier`, `__mason_barrier_1`, … that no string of it holds, with the count of reads Mason wrote: a fixed name
+counted a user's own subquery as Mason's, and a mismatch is refused by the gap `roles`. `COLUMNS` is printed the same way,
+from calls marked in the tree under a name the text holds nowhere else, never by replacing characters a literal could
+spell. And an EXPLAIN of a statement that reads
 a filtered table never shows the statement to the engine: the tables are `plan.reads`, the first line constant, `Plan` a
 constant node so a viewer and `mason mcp` keep reading `Mason.Tables`, and ANALYZE is refused by the gap `roles`, since a
 profile is a count of what the engine read and there is nothing left to run it for. A session with no filter is untouched.
 
-Each of the two walls alone stops the filter pushdown on every shape the oracle asks (`try` is not pushed through); only
-`try` stops the statistics, and only the wire test can show it, since Postgres itself raises 22012 by written order on that
-statement. Both stay: the LIMIT's guarantee is the engine's own semantics, what `try` does to the pushdown is an observation.
+**What guarantees what.** The LIMIT's guarantee is the engine's semantics: a filter pushed through a LIMIT would change
+what it keeps. `try` stopping the pushdown and `try` stopping statistics are both observations of this engine, not
+guarantees: a later version could carry a minimum and a maximum through it. So each has its own detector. With `try` on, the
+pushdown stops at `try` and a test cannot tell whether the LIMIT holds anything (`BARRIER` empty passed every test of the
+two wire files), so `tests/duck-roles-barrier-wire.test.ts` runs every shape with the `try` wall off by a test-only switch
+(`wallSwitch`), where the LIMIT stands alone. `tests/duck-roles-rows-wire.test.ts`'s statistics test is `try`'s detector, on the
+wire because Postgres itself raises 22012 by written order on that statement, so the oracle cannot hold it. Both stay.
 
 The oracle's data had to change with this. At a sixth of the invoices visible (`tenant`) or a third (`list2`), the join's own
 filter pruned the hidden rows and the barrier shapes passed with the barrier removed. At about half visible, removing both
@@ -1293,11 +1303,18 @@ loaded** (load average about 40), so compare across a row and never with the tab
 | `count(*)` of a DISTINCT | 342 | 211 | 406 |
 
 `try` costs per row read (each column is evaluated through it), so it shows where a statement returns or sorts many rows,
-up to about twice the limit's, and nothing where the time is the join's.
+up to about twice the limit's, and nothing where the time is the join's. A point lookup of a wide column costs 26 ms
+against 0.9 ms on 150,000 visible 2 KB rows, and that is the LIMIT's, not `try`'s: the statement's own pruning, as above.
 
 **A `where:` the rewrite cannot send is the file's problem.** `checkRoles` ran Postgres's analysis only, so a predicate
 Postgres read and Mason cannot answer (a value of a type not verified) reached each user as 0A000, statement by statement.
 It now plans the filter's own read too, every attribute NULL, the one value of every type (`filterProbe`).
+
+**A value its type refuses is the attribute's problem.** `filterProbe` cannot see a value: `--set tenant=abc` on an integer
+passed, and every statement of the filtered table answered `22P02` naming no attribute. A data exception on a filtered
+statement now re-reads the bound values (`attributeRefused`), and one the type refuses is 42501 with the attribute, the user
+and the `mason user add` line; a statement's own bad literal stays Postgres's. `mason user add` does not refuse it at the
+door: the type is the catalog's inference, a run's, and the command also works with Mason stopped.
 
 **`SHOW ALL`** lists no `mason.attr.*`, and that is Postgres's answer: a placeholder is `GUC_NO_SHOW_ALL`, and the oracle
 holds it, for a `SET myapp.x` and for an attribute `ALTER ROLE` set.

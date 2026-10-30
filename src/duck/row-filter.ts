@@ -227,6 +227,8 @@ export interface BoundFilter {
   predicate?: string;
   through?: { parent: string; column: string; parentColumn: string };
   words: string;
+  /** each attribute it reads as it was bound, so a value its type refuses is said by the attribute (`attributeRefused`) */
+  attributes?: ReadonlyArray<{ name: string; type: string; sql: string; at: string; where: string }>;
 }
 
 /** a value as EXPLAIN says it: a number bare, anything else quoted */
@@ -244,13 +246,30 @@ export function bindFilter(f: RowFilter, types: ReadonlyMap<string, string>, val
   }
   const parts = f.where!.parts;
   const valueOf = (a: string): string | readonly string[] => values[a] ?? "";
-  const predicate = renderWhere(parts, (a) => {
+  const bound = (a: string): string => {
     const v = valueOf(a);
     const type = types.get(a) ?? "text";
     return typeof v === "string" ? `CAST(${literal(v)} AS ${type})` : `CAST(ARRAY[${v.map(literal).join(", ")}] AS ${type})`;
-  });
+  };
   const words = renderWhere(parts, (a) => { const v = valueOf(a); return typeof v === "string" ? shownValue(v) : shownList(v); }).replace(/\s+/g, " ").trim();
-  return { table: f.table, predicate, words };
+  const attributes = whereAttributes(parts).map((a) => ({ name: a, type: types.get(a) ?? "text", sql: bound(a), at: `${f.at}.where`, where: f.where!.text }));
+  return { table: f.table, predicate: renderWhere(parts, bound), words, attributes };
+}
+
+/**
+ * THE ATTRIBUTE WHOSE VALUE ITS TYPE REFUSES, read when a filtered statement's analysis raised a data exception: only a
+ * bound value can be `--set tenant=abc` on an integer, and only here is the attribute still known. Null: every value is
+ * good, so the exception is the statement's own. `mason user add` cannot refuse it at the door: the type is the catalog's
+ * inference, and a role changed since is met here anyway.
+ */
+export async function attributeRefused(run: Catalog, rows: ReadonlyMap<string, BoundFilter>): Promise<{ name: string; type: string; at: string; where: string; problem: string } | null> {
+  for (const f of rows.values()) {
+    for (const a of f.attributes ?? []) {
+      const r = await analyze(run, `SELECT ${a.sql}`, [], "public");
+      if ("refused" in r) return { name: a.name, type: a.type, at: a.at, where: a.where, problem: r.refused.M ?? "Postgres refused it" };
+    }
+  }
+  return null;
 }
 
 /**
@@ -333,42 +352,69 @@ function refused(message: string, hint: string): StatementError {
  * optimiser pass per statement is not open: the engine's setting is global, so it would race the other sessions.
  */
 export const BARRIER = "LIMIT 9223372036854775807";
-/** the name of the select around the barrier, whose list `wallStatistics` replaces */
+/** the name of the select around the barrier, unless the statement holds it (`wallsOf`) */
 const WALL = "__mason_barrier";
 /** the select list's call of `try(col)` on every column, as the engine reads it; `AS "\0"` keeps each column's name */
 export const STATISTICS_WALL = "try(COLUMNS(*))";
+/** FOR TESTS ALONE (tests/duck-roles-barrier-wire.test.ts): `statistics` false leaves `try` out, so the LIMIT is shown to
+ *  hold the barrier's shapes by itself. Nothing in src/ sets it */
+export const wallSwitch = { statistics: true };
+
+/** the walls Mason wrote into a statement: their select's name, which nothing the statement wrote holds, and how many */
+export interface Walls { alias: string; reads: number }
+
+/** a name for the walls that no string of the statement holds (its names, its literals), so nothing of the user's can be
+ *  taken for Mason's: a name is no proof of whose a subquery is unless it is chosen after reading the statement. The
+ *  same statement chooses the same name, so what EXPLAIN says of it does not vary */
+function wallName(tree: unknown): string {
+  const strings = new Set<string>();
+  const collect = (v: unknown): void => {
+    if (typeof v === "string") strings.add(v);
+    else if (Array.isArray(v)) v.forEach(collect);
+    else if (isObject(v)) Object.values(v).forEach(collect);
+  };
+  collect(tree);
+  let name = WALL;
+  for (let i = 1; strings.has(name); i++) name = `${WALL}_${i}`;
+  return name;
+}
 
 /**
  * THE WALL'S SELECT LIST, in place of the `*` `filteredSql` wrote around the barrier, once the rewrite is done: Postgres
- * has no `COLUMNS(*)`, so it is the engine's text, never the analysed one. A filtered read's `*` was left a `*`, or
- * this refuses: a read with no wall answers a statement the statistics of a whole table.
+ * has no `COLUMNS(*)`, so it is the engine's text, never the analysed one. Exactly the reads Mason wrote, or the statement
+ * is refused: a read with no wall would answer a statement from the statistics of a whole table.
  */
-export function wallStatistics(tree: unknown): void {
-  if (Array.isArray(tree)) { tree.forEach(wallStatistics); return; }
-  if (typeof tree !== "object" || tree === null) return;
-  const node = tree as Record<string, unknown>;
-  const walled = node.fromClause as Array<{ RangeSubselect?: { alias?: { aliasname?: string } } }> | undefined;
-  if (walled?.length === 1 && walled[0]?.RangeSubselect?.alias?.aliasname === WALL) {
-    const list = node.targetList as Array<{ ResTarget?: { val?: { ColumnRef?: { fields?: Array<Record<string, unknown>> } } } }> | undefined;
-    const fields = list?.length === 1 ? list[0]?.ResTarget?.val?.ColumnRef?.fields : undefined;
-    if (fields?.length !== 1 || fields[0]?.A_Star === undefined) {
-      throw new StatementError({ code: "XX000", message: "a filtered read's select list is not the one Mason wrote (a Mason bug: report it, with the statement)" });
+export function wallStatistics(tree: unknown, walls: Walls): void {
+  let placed = 0;
+  const visit = (v: unknown): void => {
+    if (Array.isArray(v)) { v.forEach(visit); return; }
+    if (!isObject(v)) return;
+    const from = v.fromClause as Array<{ RangeSubselect?: { alias?: { aliasname?: string } } }> | undefined;
+    if (from?.length === 1 && from[0]?.RangeSubselect?.alias?.aliasname === walls.alias) {
+      const list = v.targetList as Array<{ ResTarget?: { val?: { ColumnRef?: { fields?: Array<Record<string, unknown>> } } } }> | undefined;
+      const fields = list?.length === 1 ? list[0]?.ResTarget?.val?.ColumnRef?.fields : undefined;
+      if (fields?.length === 1 && fields[0]?.A_Star !== undefined) {
+        const columns = { FuncCall: { funcname: [{ String: { sval: "columns" } }], agg_star: true } };
+        v.targetList = [{ ResTarget: { name: "\\0", val: { FuncCall: { funcname: [{ String: { sval: "try" } }], args: [columns] } } } }];
+        placed++;
+      }
     }
-    const columns = { FuncCall: { funcname: [{ String: { sval: "columns" } }], agg_star: true } };
-    node.targetList = [{ ResTarget: { name: "\\0", val: { FuncCall: { funcname: [{ String: { sval: "try" } }], args: [columns] } } } }];
+    Object.values(v).forEach(visit);
+  };
+  visit(tree);
+  if (placed !== walls.reads) {
+    throw refused(`Mason cannot yet answer this statement over the tables its role filters: it holds ${placed} of the ${walls.reads} filtered reads Mason wrote (a Mason gap: report it, with the statement)`,
+      "read the filtered table in a simpler form");
   }
-  Object.values(node).forEach(wallStatistics);
 }
-/** a wall as the deparser prints it, and as the engine reads it (`COLUMNS` is an expression only unquoted) */
-export const printedWall = (sql: string): string => sql.replaceAll('try("columns"(*))', STATISTICS_WALL);
 
 /** the filtered read of `table` as SQL: its rows the filter keeps, `through:` read through its parent's filtered read;
  *  behind the barrier at its outermost (`depth` 1), where the statement meets it */
-export function filteredSql(table: string, filters: ReadonlyMap<string, BoundFilter>, depth = 1): string {
+export function filteredSql(table: string, filters: ReadonlyMap<string, BoundFilter>, depth = 1, wall = WALL): string {
   const f = filters.get(table);
   if (f === undefined) return `SELECT * FROM ${tableSql(table)}`;
   // the select around the barrier, for the wall (`wallStatistics`)
-  const walled = (read: string): string => depth === 1 ? `SELECT * FROM (${read} ${BARRIER}) AS ${WALL}` : read;
+  const walled = (read: string): string => depth === 1 ? `SELECT * FROM (${read} ${BARRIER}) AS ${wall}` : read;
   if (f.predicate !== undefined) return walled(`SELECT * FROM ${tableSql(table)} WHERE (${f.predicate})`);
   const t = f.through!;
   const p = `__mason_parent${depth}`;
@@ -381,7 +427,7 @@ export function filteredSql(table: string, filters: ReadonlyMap<string, BoundFil
  * security: a filtered table's whole row (a subquery's is a record), a name both a WITH query and a filtered table, a
  * TABLESAMPLE of one, a column qualified by its schema beside another item of the table's name.
  */
-export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: PgAnalysis, searchPathSql: string, filters: ReadonlyMap<string, BoundFilter>): Promise<{ text: string; stmt: Node; tables: string[] } | null> {
+export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: PgAnalysis, searchPathSql: string, filters: ReadonlyMap<string, BoundFilter>): Promise<{ text: string; stmt: Node; walls: Walls; tables: string[] } | null> {
   const read = relationsRead(analysis.tree);
   if (read.size === 0 || filters.size === 0) return null;
   const names = await catalogRows(catalog, `SELECT c.oid::text, n.nspname || '.' || c.relname, c.reltype::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid IN (${[...read].join(", ")})`);
@@ -434,11 +480,12 @@ export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: P
   });
   const qualified = new Set<string>();
   const parsedOf = new Map<string, unknown>();
+  const wall = wallName(tree);
   for (const [i, table] of asFiltered) {
     const r = ranges[i]!;
     let sub = parsedOf.get(table);
     if (sub === undefined) {
-      const s = (await parseSql(filteredSql(table, filters))).stmts?.[0]?.stmt;
+      const s = (await parseSql(filteredSql(table, filters, 1, wall))).stmts?.[0]?.stmt;
       if (s === undefined) throw new Error(`the filtered read of ${table} did not parse: report it`);
       parsedOf.set(table, s);
       sub = s;
@@ -466,5 +513,5 @@ export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: P
   const tables = new Set<string>();
   const reach = (t: string): void => { if (tables.has(t)) return; const f = filters.get(t); if (f === undefined) return; tables.add(t); if (f.through) reach(f.through.parent); };
   for (const t of found) reach(t);
-  return { text, stmt: back as Node, tables: [...tables] };
+  return { text, stmt: back as Node, walls: { alias: wall, reads: asFiltered.size }, tables: [...tables] };
 }

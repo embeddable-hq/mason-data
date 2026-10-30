@@ -642,7 +642,7 @@ interface CopyRow { Table: string; "Estimated Rows": number | null; "Kept Curren
 function copyFacts(c: CopyRow | { error: string } | undefined): Record<string, unknown> {
   if (c === undefined) return { rows_about: null, kept: "how it is kept current is unknown: Mason has not synced it" };
   if ("error" in c) return { rows_about: null, kept: `how it is kept current could not be read: ${c.error}` };
-  return { rows_about: c["Estimated Rows"], kept: c["Kept Current"], kept_current_by: c["Kept Current By"],
+  return { rows_about: c["Estimated Rows"] ?? null, kept: c["Kept Current"], kept_current_by: c["Kept Current By"],
     ...(c.Sync !== undefined ? { sync: c.Sync, last_synced: c["Last Synced"] ?? null } : {}) };
 }
 

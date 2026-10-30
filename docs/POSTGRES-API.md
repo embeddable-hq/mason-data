@@ -231,9 +231,18 @@ statement takes depends on the table's size and on rows it cannot read, on Mason
 and null count) never decides an answer a filtered user reads, so `WHERE 1/(id - id) > 0 AND secret > 500` answers alike
 whichever side of a hidden row's value 500 falls.
 
+**Two limits of a filtered statement**, each answered exactly, more slowly than the same statement of an unfiltered user:
+
+- it answers from the JSON documents, never a stored JSON column: a filtered read lists every column of its table, and a
+  statement that lists a table's columns reads none of its stored paths;
+- `count(DISTINCT id)` is the slow form: the key's DISTINCT cannot be dropped over a filtered read, so it is kept. Over a
+  key, `count(id)` answers the same.
+
 **Where Mason is deliberately stricter than Postgres row security**, each refused where Postgres would answer:
 
 - a user missing an attribute is refused at every statement, `SELECT 1` and unfiltered tables included;
+- a user whose value its type refuses (`--set tenant=abc` on an integer) is refused `42501` at each statement reading the
+  filter, naming the attribute and the `mason user add` line, where Postgres's policy would answer `22P02`;
 - a whole row of a filtered table, in any spelling (`SELECT c`, `row(c.*)`, `to_json(c.*)`), and a `TABLESAMPLE` of one
   are refused `0A000`, naming the gap `roles`;
 - `SET`, `RESET` and `set_config` of `mason.attr.*` are refused `42501`;
