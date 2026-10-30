@@ -172,6 +172,15 @@ export function conflictMarkers(src: string): number[] {
     .filter((n) => n > 0);
 }
 
+test("every synchronous close on the engine's thread is one read against the rule (it never waits for DuckDB's tasks: .claude/rules/duckdb.md)", () => {
+  // a close of an open result waits for the query's tasks, and a task inside a Mason function waits for this thread
+  const closes = (file: string): string[] => fs.readFileSync(path.join(ROOT, file), "utf8").split("\n").filter((l) => /\.closeSync\(\)/.test(l)).map((l) => l.trim());
+  assert.deepEqual(closes("src/duck/store.ts"), ["result?.closeSync();", "this.conn.closeSync();"]);
+  assert.deepEqual(closes("src/duck/executor-worker.ts"), ["try { c?.closeSync(); }", "for (const [n, c] of [...conns].reverse()) { conns.delete(n); c.closeSync(); }", "instance?.closeSync();"]);
+  // and a test beside a running engine never blocks the main thread: its watch's ticks are that thread's
+  assert.doesNotMatch(fs.readFileSync(path.join(ROOT, "tests/duck-executor.test.ts"), "utf8"), /\bspawnSync\(/);
+});
+
 test("no source file carries a committed merge-conflict marker", () => {
   const hits: string[] = [];
   for (const { name, src } of scannedFiles()) {
@@ -342,6 +351,15 @@ test("every relative import in a tracked .ts / .mjs file resolves to a file", ()
 test("the import guard reads static and dynamic imports, and nothing else", () => {
   assert.deepEqual(relativeImports(`import { a } from "./a.ts";\nimport "../b.mjs";\nconst c = await import('./c.ts');\nconst u = "./not-an-import.ts";`),
     ["./a.ts", "../b.mjs", "./c.ts"]);
+});
+
+// ------------------------------------------------------------------ the database a tool connects with
+
+test("the database a tool connects with has ONE rule: src/ never makes it from the project's name", () => {
+  const made = /\bdatabase: *(?:cfg|config|project\.config|p\.config|s)\.name\b|postgresApiUrl\([^,)]*, *[\w.]*\.name\b|databaseNameSql\([\w.]*\.name\b/;
+  assert.ok(made.test("database: cfg.name") && made.test("postgresApiUrl(a, project.config.name, {") && !made.test("name: cfg.name"), "the guard reads the real thing");
+  const offenders = scannedFiles(["src"]).filter((f) => made.test(f.src)).map((f) => f.name);
+  assert.deepEqual(offenders, [], "src/lib/database-name.ts `connectDatabase` is the rule; the project's name names the slot");
 });
 
 // ------------------------------------------------------------------ column names in SQL text
@@ -614,6 +632,32 @@ test("the path guard would catch the real thing", () => {
 });
 
 /**
+ * A FILE THE RECIPES AND THE FLOW MAPS NAME EXISTS: an agent follows them step by step, so a name gone stale sends it
+ * to read what is not there. The path guard above reads only a path from a root it knows; these documents also name a file
+ * by its bare name (`store.ts`) and under `.claude/` or `cli/`. Whether a name is whole is the reader's: a bare one is any
+ * tracked file of that name.
+ */
+const FILE_NAMING_DOCS = ["docs/RECIPES.md", "docs/FLOWS.md"];
+export function namedFiles(text: string): string[] {
+  return [...text.matchAll(/`([\w./-]+\.(?:ts|js|md|yml|json|html|css))`/g)].map((m) => m[1]!);
+}
+const fileThere = (name: string, tracked: readonly string[]): boolean => fs.existsSync(path.join(ROOT, name)) || tracked.some((f) => f.endsWith(`/${name}`));
+
+test("a file the recipes and the flow maps name exists in this tree", () => {
+  const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean);
+  const missing = FILE_NAMING_DOCS.flatMap((doc) => namedFiles(fs.readFileSync(path.join(ROOT, doc), "utf8")).filter((n) => !fileThere(n, tracked)).map((n) => `${doc}: ${n}`));
+  assert.deepEqual(missing, [], "a file these documents name is gone: name the one that replaced it");
+});
+
+test("the recipes' file guard catches the real thing", () => {
+  assert.deepEqual(namedFiles("read `store.ts`, `.claude/rules/cli.md` and `src/cli/dev.ts`; not `sync`, `/api/state` or `a b.ts`"), ["store.ts", ".claude/rules/cli.md", "src/cli/dev.ts"]);
+  const tracked = ["src/duck/store.ts"];
+  assert.equal(fileThere("store.ts", tracked), true);
+  assert.equal(fileThere("tore.ts", tracked), false, "a name is a whole file name, never the end of one");
+  assert.equal(fileThere("nowhere.ts", tracked), false);
+});
+
+/**
  * The lines of a TypeScript `src` where a STRING (a message, a log line, a JSON value, a hint) names the engine:
  * "Nothing a user sees is named for DuckDB" (CLAUDE.md "Who this is for"). Comments, identifiers and imports are the
  * code's; inside a string, the engine's own names are too when they are PART of one token: SQL it defines
@@ -847,7 +891,8 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
   // catalog's own settings)
   const enclosing = (at: number): string => [...src.slice(0, at).matchAll(/\n {2}(?:private |readonly |static )*(?:async )?(\w+)\(/g)].at(-1)?.[1] ?? "?";
   const direct = [...new Set([...src.matchAll(/catalog\.run\(/g)].map((m) => enclosing(m.index)))].sort();
-  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "duckPlan", "duckValues", "end", "explaining", "showAll", "showStatement", "validateElsewhere"].sort(),
+  // (checkRoles: the roles' row filters analysed once per roles file, as the catalog's own, never a session's request)
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "showAll", "showStatement", "validateElsewhere"].sort(),
     "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
@@ -856,6 +901,30 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
   const rewrite = fs.readFileSync(path.join(ROOT, "src/duck/rewrite.ts"), "utf8");
   assert.deepEqual([...rewrite.matchAll(/fn\("current_setting", \[([^\]]*)\]/g)].map((m) => m[1]).filter((a) => a !== 'strConst("TimeZone")'), [], "DuckDB's current_setting read for another name than TimeZone");
   assert.match(rewrite, /case "current_setting": return [^\n]*settingRead\(/, "a statement's current_setting is the session's (settingRead)");
+});
+
+/**
+ * A TRANSACTION ENDS IN ONE PLACE, AND THE SETTINGS IT MOVED WITH IT (GitHub issue 47; a fact decided in several places:
+ * the four sites that each failed a transaction would each have had to undo its settings, and an implicit transaction
+ * has no statement of its own to do it in). `abortTransaction` alone fails a block, `endTransaction` and `resetAll` alone
+ * replace `vars`, the one store every reader reads, and what moves a value is `applySetting` (a RESET ALL's `resetAll`),
+ * so no SET escapes what a transaction must undo. The startup, before any transaction, is the one exception.
+ */
+test("a transaction's end is one method, and every SET reaches the settings through the one that lets it undo them", () => {
+  const server = "src/api/postgres/server.ts";
+  const src = fs.readFileSync(path.join(ROOT, server), "utf8");
+  const enclosing = (at: number): string => [...src.slice(0, at).matchAll(/\n {2}(?:private |readonly |static )*(?:async )?(\w+)\(/g)].at(-1)?.[1] ?? "?";
+  const callers = (pattern: RegExp): string[] => [...new Set([...src.matchAll(pattern)].map((m) => enclosing(m.index)))].sort();
+  assert.deepEqual(callers(/\bthis\.tx = "failed"/g), ["abortTransaction"], "a block failed beside abortTransaction: its settings stay");
+  assert.deepEqual(callers(/\bthis\.vars = /g), ["endTransaction", "resetAll"], "the settings replaced beside a transaction's end");
+  assert.deepEqual(callers(/\bthis\.setParameter\(/g), ["applySetting", "commandLineOptions", "resetParameter", "startup"], "a setting moved beside applySetting: a transaction cannot undo it");
+  assert.deepEqual(callers(/\bthis\.resetParameter\(/g), ["applySetting"]);
+  assert.deepEqual(callers(/\bthis\.resetAll\(/g), ["applySetting", "discard"]);
+  assert.deepEqual(callers(/\bthis\.settingsTx\b/g), ["endTransaction", "settingsAtStart"], "what a transaction restores is read for no answer");
+  // a failed block is held at every entrance a statement has, by one check (a catalog statement's Bind and its rows went past the old one)
+  assert.deepEqual(callers(/\bthis\.heldToFailedBlock\(/g), ["bindMessage", "executeMessage", "parseMessage", "runSimple"], "an entrance a failed block does not hold");
+  assert.deepEqual(callers(/\bthis\.describedInFailedBlock\(/g), ["describeMessage"]);
+  assert.equal([...src.matchAll(/"25P02"/g)].length, 1, "25P02 said beside `aborted`");
 });
 
 /**
@@ -927,6 +996,33 @@ test("the Node guard catches the real thing", () => {
   assert.deepEqual(one("node-version: lts/*\n"), ["w.yml:1 node-version lts/*"], "a moving alias names no major: refused");
   assert.deepEqual(one("node-version: '26'\nnode-version: 26.13.0\nnode-version: '22'\n"), [], "26 carries the fix; 22's V8 never shared the wrappers");
   assert.deepEqual(one("# node-version: '24' in a comment\n"), [], "a comment is no setting");
+});
+
+/** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line */
+const planCallsWithoutGrants = (source: string): string[] => {
+  const file = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true);
+  const out: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && /\bduck\.plan$/.test(n.expression.getText(file)) && n.arguments.at(-1)?.getText(file) !== "grants") out.push(n.getText(file).split("\n")[0]!);
+    ts.forEachChild(n, visit);
+  };
+  visit(file);
+  return out;
+};
+
+test("every caller of duck.plan passes the session's grants: a statement planned without them reads no role's filter and no role's columns", () => {
+  const planned = scannedFiles().filter((f) => f.name.endsWith(".ts") && /\bduck\.plan\(/.test(f.src));
+  assert.ok(planned.some((f) => f.name === "src/api/postgres/server.ts"), `the guard reads the listener: ${planned.map((f) => f.name).join(", ")}`);
+  // one call has no session: `checkRoles` plans a filter's own read (`filterProbe`), no user's statement, and answers
+  // nothing. Named whole, so any other call without them, a second of its kind included, fails here
+  assert.deepEqual(planned.flatMap((f) => planCallsWithoutGrants(f.src).map((c) => `${f.name}: ${c}`)),
+    ['src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined)']);
+});
+
+test("the duck.plan guard would catch the real thing", () => {
+  assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false);"), ["this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false)"]);
+  assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false, undefined);").length, 1, "an explicit undefined is no grants");
+  assert.deepEqual(planCallsWithoutGrants("await this.server.options.duck.plan(run, text, stmt, 0, oids, path, zone, types, false, grants);"), []);
 });
 
 /**

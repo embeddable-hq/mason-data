@@ -12,7 +12,7 @@
  *   - THE PASSWORD IS VERIFIED BY `authenticate` (a `mason user`'s password, or a token minted from the API key,
  *     src/duck/users.ts `listenerLogins`): a refused one is `28P01` as a wrong password is; a DISABLED user's (its
  *     password right) is `28000`, as Postgres refuses a role without LOGIN. The database a tool names
- *     must be the project's: a tool connecting to the wrong Mason learns so at once (`3D000`).
+ *     must be the one this Mason answers as (src/lib/database-name.ts): a tool connecting with another learns so at once (`3D000`).
  *   - WHAT A TOOL SETS IS HONOURED OR REFUSED, never silently ignored: `TimeZone` moves every timestamptz the session
  *     sends; `extra_float_digits` below 1 would print a float with FEWER digits than this listener sends and is
  *     refused; a `client_encoding` other than UTF8 is refused; a `DateStyle` other than ISO is refused. A parameter
@@ -25,8 +25,8 @@
  *     sessions' unnamed statements never meet.
  *   - A TRANSACTION IS POSTGRES'S: `BEGIN` opens one (ReadyForQuery says `T`), an error inside it aborts it (`E`,
  *     and every statement until `ROLLBACK` is `25P02`, as a driver with autocommit off expects), `COMMIT` of an
- *     aborted one is a `ROLLBACK`. Nothing is ever written, so a transaction holds nothing — the states exist because
- *     a driver reads them.
+ *     aborted one is a `ROLLBACK`. Nothing is ever written, so all a transaction holds is the session's settings
+ *     (`settingsTx`): its end, explicit or implicit, keeps or undoes them; the states exist because a driver reads them.
  *   - "NOW" IS THE TRANSACTION'S: the session holds the instant its transaction began (`txNow`), which a plan reads as
  *     a parameter (`DuckPlan.clock`). A transaction begins as Postgres's does: at a simple Query's arrival (every
  *     statement of one Query message is one implicit transaction, and a transaction begun by a later statement of it
@@ -64,7 +64,9 @@ import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request
 import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
-import { asRole, asSession, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
+import { asRole, asSession, catalogPolicies, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
+import { wrongDatabaseHint } from "../../lib/database-name.ts";
+import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
 import { parseSql, PostgresSyntaxError, stopParser } from "./parser.ts";
@@ -76,7 +78,8 @@ import {
   cstr, int16, int32, frame, decodeBackend, decodeNoticeFrame, splitFrames, MAX_MESSAGE_LENGTH,
 } from "./protocol.ts";
 import { typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
-import { Unsupported, duckTranslate, type Translation } from "./translate.ts";
+import { Unsupported, duckTranslate, endsFailedBlock, type Translation } from "./translate.ts";
+import type { Node } from "libpg-query";
 
 /** what a statement is: one the session or the catalog Postgres answers (translate.ts), one DuckDB answers, or an
  *  EXPLAIN of one */
@@ -172,6 +175,11 @@ export interface ExplainHow {
   exact: readonly ExactColumn[];
   planning: { analysisMs: number; rewriteMs: number };
   copies: readonly CopyFacts[];
+  /** the tables the session's role filters that the statement reads, the filter in words (DuckPlan.rowFilters): none
+   *  given, the engine's plan is said; given, the statement is not shown to the engine at all (`Explained.filtered`) */
+  rowFilters?: ReadonlyArray<{ table: string; words: string }>;
+  /** every table the statement reads, for a statement with row filters: its table lines, never the engine's plan's */
+  reads?: readonly string[];
 }
 /** A statement's DuckDB plan (src/duck/plan.ts): Postgres's analysis of it, and the DuckDB SQL that answers it alike. */
 export interface DuckPlan {
@@ -199,6 +207,21 @@ export interface DuckPlan {
   /** the copied tables and columns Postgres's analysis says it reads (src/duck/grants.ts), where roles exist: what an
    *  Execute is held to under the session's role of that moment */
   reads?: readonly ResolvedRead[];
+  /** the tables whose rows the session's role filters that the statement reads (its filtered tables and the parents they
+   *  are read through), each with the filter in words: EXPLAIN's per-table line (src/duck/row-filter.ts) */
+  rowFilters?: ReadonlyArray<{ table: string; words: string }>;
+  /** the row filters it was made under, bound (`rowsKeyOf`): an Execute under others plans it again (executeDuck) */
+  rowsKey?: string;
+}
+
+/** whether any role of the file filters rows (src/duck/row-filter.ts): nothing is checked, bound or keyed where none does */
+const filtersRows = (live: RolesLive): boolean => [...live.grants.values()].some((g) => g.filters !== undefined && g.filters.size > 0);
+
+/** the row filters a session's role holds, bound to its user's values, as one string: a plan's key and its `rowsKey`;
+ *  "" where it holds none */
+function rowsKeyOf(g: RoleGrants | null | undefined): string {
+  if (g?.rows === undefined || g.rows.size === 0) return "";
+  return JSON.stringify([...g.rows.values()].map((f) => [f.table, f.predicate ?? null, f.through ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
 }
 /** the DuckDB halves the listener calls: a session's connection, and a statement's plan */
 export interface DuckOptions {
@@ -267,7 +290,9 @@ export function versionText(product: string, version: string): string {
  * which every statement over a table and every catalog read is held to; a session with none reads every copied table.
  * (`filters` and `subject` are always empty: src/duck/users.ts still writes them.)
  */
-export interface PgToken { filters?: readonly []; subject?: undefined; jti?: string | undefined; user?: string | undefined; role?: string | undefined }
+export interface PgToken { filters?: readonly []; subject?: undefined; jti?: string | undefined; user?: string | undefined; role?: string | undefined;
+  /** the user's attribute values (`mason user add … --set tenant=42`), which its role's row filters read (src/duck/row-filter.ts) */
+  attributes?: AttributeValues | undefined }
 
 /**
  * How often a user's session asks again whether its user is still live (`PgApiOptions.recheck`) when `recheckMs` is
@@ -286,7 +311,7 @@ export interface PgApiOptions {
   catalogStatementMs?: number;
   /** PEM cert and key: offered on SSLRequest or a direct TLS start, and required of every connection; null for a plain listener */
   tls: { cert: Buffer; key: Buffer } | null;
-  /** the database a tool must name: the project's name */
+  /** the database a tool must name (src/lib/database-name.ts) */
   database: string;
   /** what `version()` reports beside `PostgreSQL 18.6` (`versionText`): the release, `main-<sha>` or `dev` */
   masonVersion: string;
@@ -368,6 +393,11 @@ export interface PgApiServer {
   close(): Promise<void>;
   /** opens a second socket (`ShareDoor`); closed by its own `close`, or with the server's */
   openShare(door: ShareDoor): Promise<ShareSocket>;
+  /** the roles as the listener holds them now, their row filters checked by the catalog Postgres (`checkRoles`): a filter
+   *  Postgres refuses is the roles' `problem`. What `/api/state` says of the roles, and `mason user add` is held to */
+  roles(): RolesLive;
+  /** the roles with every row filter checked by the catalog Postgres now (it starts it where needed): `mason start`'s line */
+  checkRoles(): Promise<RolesLive>;
   /** sessions open now (every connection, its login under way included) */
   readonly sessions: number;
   /** the sessions logged in now, by user and client, and how many of each run a statement (`/api/state` `sessions`) */
@@ -528,6 +558,17 @@ interface Vars {
 const defaultVars = (): Vars => ({ timeZone: "UTC", applicationName: "", searchPath: '"$user", public', other: new Map() });
 const copyVars = (v: Vars): Vars => ({ ...v, other: new Map(v.other) });
 
+/** One parameter's value carried from one set of values to another, from where `setParameter` keeps it. */
+function copySetting(name: string, from: Vars, to: Vars): void {
+  switch (name) {
+    case "timezone": case "time zone": to.timeZone = from.timeZone; return;
+    case "application_name": to.applicationName = from.applicationName; return;
+    case "search_path": to.searchPath = from.searchPath; return;
+  }
+  const value = from.other.get(name);
+  if (value === undefined) to.other.delete(name); else to.other.set(name, value);
+}
+
 /** A placeholder's name as Postgres's `valid_custom_variable_name` reads it: two or more simple identifiers, dotted. */
 function placeholderName(name: string): void {
   if (/^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*(\.[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*)+$/.test(name)) return;
@@ -623,6 +664,9 @@ interface Portal {
 }
 
 type TxState = "none" | "open" | "failed";
+
+/** Postgres's answer to anything but a failed block's end */
+const aborted = (): PgError => new PgError({ code: "25P02", message: "current transaction is aborted, commands ignored until end of transaction block" });
 
 /**
  * A DuckDB result being sent: read from DuckDB a chunk at a time, so a result of any size holds one chunk (`pending`,
@@ -726,6 +770,15 @@ class Session {
   /** each reported parameter's value as the client was last told it (`reportChanges`) */
   readonly reported = new Map<string, string>();
   tx: TxState = "none";
+  /**
+   * WHAT THE TRANSACTION WOULD LEAVE OF THE SESSION'S SETTINGS, from its first SET: `rollback`, the values it found, and
+   * `commit`, those with its SETs and none of its LOCALs. Neither is ever read for an answer: `vars` is what is in force,
+   * and `endTransaction` replaces it with one of these. Null: nothing was set since the transaction began.
+   */
+  settingsTx: { rollback: Vars; commit: Vars } | null = null;
+  /** the statement runs in an IMPLICIT transaction block, as Postgres's IsTransactionBlock reads one: a Query of several
+   *  statements, or a Sync's batch once an Execute completed (`extended`). A plain transaction of one statement is none */
+  implicitBlock = false;
   /** the instant the transaction began (Postgres's `now()`), null between transactions */
   txNow: number | null = null;
   /** the instant of the statement being run (`statement_timestamp()`): its Query's arrival or its Bind */
@@ -877,9 +930,13 @@ class Session {
     if ((m.type === "Query" || m.type === "Parse" || m.type === "Execute") && !(m.type !== "Query" && this.skipToSync)) {
       const refused = await this.stillLive(m.type);
       if (this.phase === "closed") return;
+      // the roles' row filters checked by the catalog Postgres for the roles as they are now, before any statement is
+      // held to them (Server.checkRoles: once per roles file and copied tables; nothing to do where no role filters rows)
+      await this.server.checkRoles();
+      if ((this.phase as string) === "closed") return;
       if (refused !== null) {
         this.refuse(refused, m.type === "Execute" ? this.sqlOf(m) : m.sql);
-        if (this.tx === "open") this.tx = "failed";
+        this.abortTransaction();
         if (m.type === "Query") this.send(...this.ready());
         else this.skipToSync = true;
         return;
@@ -896,10 +953,6 @@ class Session {
         this.fatal("08P01", `unsupported frontend message type '${m.code}' (a FunctionCall or COPY message): this API answers the simple and extended query protocols only`);
         return;
     }
-  }
-
-  private databaseHint(): string {
-    return `this Mason serves the project "${this.server.database}": connect with database=${this.server.database}`;
   }
 
   private fatal(code: string, message: string, hint?: string): void {
@@ -937,7 +990,7 @@ class Session {
         if (database !== this.server.database) {
           // a share's socket is public: refused here, a wrong name and the right one would answer apart before any
           // password, so a stranger could guess the project's. It is refused after the login, as Postgres does
-          if (!this.door.public) { this.fatal("3D000", `database "${database}" does not exist`, this.databaseHint()); return; }
+          if (!this.door.public) { this.fatal("3D000", `database "${database}" does not exist`, wrongDatabaseHint(this.server.database)); return; }
           this.wrongDatabase = database;
         }
         const encoding = m.params.client_encoding;
@@ -1039,7 +1092,7 @@ class Session {
     }
     if (this.phase !== "password") return;   // the socket closed while the ledger was read
     this.door.logins?.settled(this);
-    if (this.wrongDatabase !== null) { this.fatal("3D000", `database "${this.wrongDatabase}" does not exist`, this.databaseHint()); return; }
+    if (this.wrongDatabase !== null) { this.fatal("3D000", `database "${this.wrongDatabase}" does not exist`, wrongDatabaseHint(this.server.database)); return; }
     this.token = token;
     this.presented = m.password;
     this.verifiedAt = this.server.now();
@@ -1140,8 +1193,11 @@ class Session {
   private async resetAll(): Promise<void> {
     const placeholders: string[] = [];
     for (const name of this.vars.other.keys()) if (await this.isPlaceholder(name)) placeholders.push(name);
+    const tx = this.settingsAtStart();
     this.vars = copyVars(this.startupVars);
     for (const name of placeholders) if (!this.vars.other.has(name)) this.vars.other.set(name, "");
+    // a SET of every parameter: it overrides each LOCAL before it, and a ROLLBACK undoes it
+    tx.commit = copyVars(this.vars);
   }
 
   /** a custom placeholder (`SET myapp.x`): a dotted name the catalog Postgres does not list (an extension's, `plpgsql.*`, it lists) */
@@ -1170,10 +1226,54 @@ class Session {
    * A REQUEST'S END: the reported parameters it changed, then its ReadyForQuery — where Postgres 14+ reports them
    * (`ReportChangedGUCOptions` in PostgresMain, just before ReadyForQuery): after the statement's CommandComplete, and
    * ONCE per parameter per Query string or Sync, its last value (`SET application_name = 'a'; SET application_name =
-   * 'b'` reports 'b' alone). A request that failed half-way reports what its earlier statements moved, as Postgres does.
+   * 'b'` reports 'b' alone). With no block open the request's implicit transaction ends here, so what it reverted is
+   * what is reported: a SET LOCAL told nothing, a block's revert is told by the ReadyForQuery that ends the block.
    */
   private ready(): Buffer[] {
+    if (this.tx === "none") this.endTransaction(true);
     return [...this.reportChanges(), readyForQuery(this.txStatus())];
+  }
+
+  /**
+   * A TRANSACTION'S END, explicit or implicit: the session's settings become what it leaves (`settingsTx`), as Postgres's
+   * AtEOXact_GUC restores them, one level, since a SAVEPOINT is refused here. A placeholder a transaction defined stays
+   * defined (`applySetting`); a transaction that set nothing changes nothing.
+   */
+  private endTransaction(committed: boolean): void {
+    this.implicitBlock = false;
+    if (this.settingsTx === null) return;
+    this.vars = committed ? this.settingsTx.commit : this.settingsTx.rollback;
+    this.settingsTx = null;
+  }
+
+  /**
+   * A FAILED BLOCK ACCEPTS NOTHING BUT ITS END, on every message: Postgres checks a Query's statement, a Parse, a Bind and
+   * an Execute (`IsTransactionExitStmt`), each before the statement is classified or sent anywhere, so 25P02 is said
+   * where Mason's own refusal of it (an INSERT's 25006) or the catalog's answer would be. Undefined: an empty statement,
+   * which a Bind refuses as it refuses any other. A Parse of an empty string passes (`parseMessage`), a Describe has its
+   * own rule (`describedInFailedBlock`), and a Close always runs.
+   */
+  private heldToFailedBlock(stmt: Node | undefined): void {
+    if (this.tx === "failed" && (stmt === undefined || !endsFailedBlock(stmt))) throw aborted();
+  }
+
+  /** A Describe in a failed block: refused where it would describe a result (Postgres reads the catalog for a
+   *  RowDescription, which an aborted transaction cannot), answered otherwise, so a driver that describes all it sends
+   *  can still send its ROLLBACK. */
+  private describedInFailedBlock(statement: Statement): void {
+    const kind = statement.shape?.kind;
+    if (this.tx === "failed" && kind !== undefined && ["catalog", "duckdb", "explain", "show", "set_config"].includes(kind)) throw aborted();
+  }
+
+  /**
+   * A STATEMENT FAILED, the one way a transaction fails: an open block is failed (25P02 until its end), and in every
+   * case what the transaction set is undone NOW, as Postgres's AbortTransaction does at the error, never at the ROLLBACK
+   * that follows — so the failed block's own ReadyForQuery reports the revert, and an implicit transaction's SET (`SET a;
+   * SELECT 1/0`, or a pipeline's before its Sync) never took.
+   */
+  private abortTransaction(): void {
+    if (this.tx === "open") this.tx = "failed";
+    this.endTransaction(false);
   }
 
   /** The catalog Postgres validates a parameter this server has no opinion on; its own error is the answer. Inside a
@@ -1198,6 +1298,7 @@ class Session {
       await this.simpleStatements(sql);
     } finally {
       if (this.tx === "none") this.txNow = null;
+      this.implicitBlock = false;
     }
   }
 
@@ -1214,7 +1315,7 @@ class Session {
     } catch (err) {
       const e = asPgError(err, sql);
       this.refuse(e, sql);
-      if (this.tx === "open") this.tx = "failed";
+      this.abortTransaction();
       this.send(...this.ready());
       return;
     }
@@ -1222,13 +1323,15 @@ class Session {
     for (const raw of stmts) {
       const text = statementText(sql, raw);
       this.asked = { sql: text, method: "QUERY", startedAt: Date.now(), sentAt: this.sentBytes };
+      // at every statement, as Postgres's BeginImplicitTransactionBlock: a COMMIT among them ended the block before it
+      if (stmts.length > 1) this.implicitBlock = true;
       try {
         const out = await this.runSimple(raw, text, sql);
         this.sendAll(out);
       } catch (err) {
         const e = asPgError(err, sql);
         this.refuse(e, text);
-        if (this.tx === "open") this.tx = "failed";
+        this.abortTransaction();
         break;
       }
     }
@@ -1280,6 +1383,7 @@ class Session {
       caller: hashCaller(this.presented), bytesSent,
       ...(user !== undefined ? { user } : {}),
       ...(role !== undefined ? { role } : {}),
+      ...(this.token?.attributes !== undefined && Object.keys(this.token.attributes).length > 0 ? { attributes: this.token.attributes } : {}),
       ...(asked?.jsonReads !== undefined && asked.jsonReads.length > 0 ? { jsonReads: asked.jsonReads } : {}),
       ...(answer instanceof PgError
         ? { status: answer.status, sqlstate: answer.fields.code, error: answer.fields.message,
@@ -1303,10 +1407,8 @@ class Session {
   private async runSimple(raw: RawStmt, text: string, whole: string): Promise<Buffer[]> {
     if (raw.stmt === undefined) return [emptyQueryResponse()];
     const now = this.txStart(this.statementNow);
+    this.heldToFailedBlock(raw.stmt);
     const t = this.classify(raw.stmt, text);
-    if (this.tx === "failed" && !(t.kind === "transaction" && t.tag !== "BEGIN" && t.tag !== "START TRANSACTION")) {
-      throw new PgError({ code: "25P02", message: "current transaction is aborted, commands ignored until end of transaction block" });
-    }
     switch (t.kind) {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
@@ -1323,7 +1425,8 @@ class Session {
       }
       case "catalog": return this.forwardSimple(this.spliced(text, raw));
       case "set": return this.setStatement(t);
-      case "set_config": return this.setConfigStatement(t);
+      // its RowDescription first, as Postgres's: a value it refuses is refused after it
+      case "set_config": this.send(this.setConfigDescription(t, 0)); return this.setConfigStatement(t);
       case "show": return this.showStatement(t.name);
       case "transaction": return [...this.transaction(t.tag)];
       case "discard": return this.discard(t.target);
@@ -1358,10 +1461,14 @@ class Session {
     const { searchPath, timeZone } = under;
     const grants = this.grants();
     // the plan cache's key is the role the plan is held to: the effective one (a default's plans are that role's), and
-    // a user with no role under a file with no default its own key, never a token's ("")
-    const key = grants?.noRole !== undefined ? "\u0000no role" : this.roleName() ?? "";
-    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, key, () =>
-      this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound, grants));
+    // a user with no role under a file with no default its own key, never a token's ("") — and, where the role filters
+    // rows, the filters bound to the user's values (a plan holds them as literals)
+    const rowsKey = rowsKeyOf(grants);
+    const key = `${grants?.noRole !== undefined ? "\u0000no role" : this.roleName() ?? ""}${rowsKey === "" ? "" : `\u0000${rowsKey}`}`;
+    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, key, async () => {
+      const plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound, grants);
+      return rowsKey === "" ? plan : { ...plan, rowsKey };
+    });
   }
 
   /**
@@ -1378,7 +1485,54 @@ class Session {
    * refused with the two ways out, src/duck/grants.ts noRoleRefusal). A token, which is no user, reads every copied table.
    */
   private grants(): RoleGrants | null | undefined {
-    const live = this.server.rolesNow();
+    const g = this.ownGrants();
+    return g === null || g === undefined ? g : this.withRows(g);
+  }
+
+  /**
+   * THE ROLE'S ROW FILTERS BOUND TO THIS SESSION'S USER (src/duck/row-filter.ts): each table's `where:` with the user's
+   * attribute values as literals of the types the catalog inferred (`Server.checkRoles`), each `through:` read through
+   * its parent. A USER WITHOUT A VALUE ITS ROLE'S FILTERS READ IS REFUSED, LOUDLY, at every statement — never answered
+   * with no rows (a user added before the roles file gained the attribute): 42501, the attribute and the filter in the
+   * DETAIL, the exact commands in the HINT. A filter not checked yet (the catalog a step behind the file) refuses the
+   * statement, said: fail closed.
+   */
+  private withRows(g: RoleGrants): RoleGrants {
+    if (g.filters === undefined || g.filters.size === 0) return g;
+    const values = this.token?.attributes ?? {};
+    const cached = this.boundRows;
+    if (cached !== null && cached.of === g && cached.values === values) return cached.bound;
+    const user = this.token?.user ?? this.user;
+    const missing = missingAttributes(g.filters.values(), values);
+    if (missing.length > 0) {
+      const sets = missing.map((m) => `--set ${m.attr}=<value>`).join(" ");
+      const shapes = g.attributes ?? new Map();
+      throw new PgError({ code: "42501", message: `permission denied: the user ${JSON.stringify(user)} has no value for the attribute ${missing.map((m) => m.attr).join(", ")}, which the role ${g.name} filters rows by`,
+        detail: missing.map((m) => `${m.at} reads :${m.attr} (${m.where})${shapes.get(m.attr) === "list" ? `, a list: one --set ${m.attr}=… per value` : ""}`).join("; ") + `; the user was added without it, and Mason refuses rather than answer no rows`,
+        hint: `mason user remove ${user} && mason user add ${user} --role ${g.name} ${sets}` }, 403);
+    }
+    const rows = new Map<string, BoundFilter>();
+    for (const f of g.filters.values()) {
+      if (f.where === undefined) { rows.set(f.table, bindFilter(f, new Map(), values)); continue; }
+      const types = g.filterTypes?.get(f.table);
+      // a table not copied yet has no types (nothing reads it: the statement is Postgres's 42P01); a copied one must
+      if (types === undefined) {
+        if (g.filterTypes === undefined) {
+          throw new PgError({ code: "57P03", message: `the role ${g.name}'s row filters are being checked by the catalog: run the statement again in a moment`, hint: "the catalog Postgres checks each where: of the roles file as it changes" }, 503);
+        }
+        continue;
+      }
+      rows.set(f.table, bindFilter(f, types, values));
+    }
+    const bound = { ...g, rows, ...(user !== undefined ? { rowsUser: user } : {}) };
+    this.boundRows = { of: g, values, bound };
+    return bound;
+  }
+  private boundRows: { of: RoleGrants; values: AttributeValues; bound: RoleGrants } | null = null;
+
+  /** the role the session is held to now, its filters unbound (`grants` binds them) */
+  private ownGrants(): RoleGrants | null | undefined {
+    const live = this.server.rolesChecked();
     const own = this.token?.role;
     const user = this.token?.user ?? this.user;
     if (own === undefined) {
@@ -1459,6 +1613,11 @@ class Session {
     }
     const refused = grantRefusal(plan.reads, grants);
     if (refused !== null) throw refused;
+    // a plan holds the filters it was made under as literals: one made under others (the roles file edited since its
+    // Parse) never runs — executeDuck plans it again first, so this is the last guard
+    if ((plan.rowsKey ?? "") !== rowsKeyOf(grants)) {
+      throw new PgError({ code: "42501", message: "permission denied: the statement was prepared under other row filters of its role", hint: "prepare the statement again: it is then held to the role's filters as they are now" }, 403);
+    }
   }
 
   /**
@@ -1539,8 +1698,12 @@ class Session {
     if (found === null) throw new PgError({ code: "0A000", message: "Mason cannot find the statement this EXPLAIN explains in its text (a Mason gap: report it, with the statement)" });
     let plan: DuckPlan;
     try {
+      const grants = this.grants();
       plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), found.text, t.query, base + Buffer.byteLength(text.slice(0, found.offset)), paramOids,
-        this.vars.searchPath, this.vars.timeZone, this.server.userTypes(), false, this.grants());
+        this.vars.searchPath, this.vars.timeZone, this.server.userTypes(), false, grants);
+      // the row filters it was made under, as every plan of a session carries them (Session.duckPlan)
+      const rowsKey = rowsKeyOf(grants);
+      if (rowsKey !== "") plan = { ...plan, rowsKey };
     } catch (e) {
       // a refusal of the statement explained is placed as Postgres places it: in the whole text, past `EXPLAIN …`
       if (!(e instanceof StatementError) || e.fields.position === undefined) throw e;
@@ -1554,15 +1717,22 @@ class Session {
   private async duckExplain(e: { options: ExplainOptions; plan: DuckPlan }, params: readonly (string | null)[], resultFormats: number[], clock: { parse: number; exec: number },
     controller: AbortController): Promise<{ field: FieldDescription; rows: Buffer[] }> {
     this.heldToRole(e.plan);
+    // ANALYZE RUNS THE STATEMENT AND REPORTS WHAT THE ENGINE DID, which is a count of what it read and what it proved
+    // of the whole table: nothing of it can be said to a filtered user, so there is nothing left to run it for
+    const filtered = e.plan.rowFilters ?? [];
+    if (e.options.analyze && filtered.length > 0) {
+      throw gapRefusal("roles", `EXPLAIN ANALYZE is not answered for a statement that reads a table the role filters (${filtered.map((f) => f.table).join(", ")})`,
+        "EXPLAIN without ANALYZE says the tables and what is sent to the engine; a user with no row filter reads the full plan and its rows");
+    }
     await this.readAside();
     const runner = await this.duck();
     this.running = controller;
     try {
-      const values = await this.duckValues(e.plan, params, clock);
+      const values = filtered.length > 0 ? [] : await this.duckValues(e.plan, params, clock);
       const lines = await runner.explain(e.plan.sql, values, await this.duckSession(), controller.signal,
         { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
           // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
-          copies: copyFacts(this.server.options.duck.copies?.() ?? []) });
+          copies: copyFacts(this.server.options.duck.copies?.() ?? []), ...(filtered.length > 0 ? { rowFilters: filtered, reads: (e.plan.reads ?? []).map((r) => r.table) } : {}) });
       return { field: explainField(e.options, formatAt(resultFormats, 0)), rows: lines.map((l) => dataRow([Buffer.from(l)])) };
     } finally { this.settled(); }
   }
@@ -1725,9 +1895,20 @@ class Session {
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
   }
 
+  /** SET and RESET as statements. SET LOCAL and SET TRANSACTION (`local`) outside a block are Postgres's WARNING, said
+   *  before the value is read, so an invalid value is refused after it. The value still holds to the end of its own
+   *  transaction: to the Sync, in a batch. */
   private async setStatement(t: Extract<Translation, { kind: "set" }>): Promise<Buffer[]> {
+    if (t.local && this.tx === "none" && !this.implicitBlock) {
+      this.send(noticeResponse({ severity: "WARNING", code: "25P01", message: `${t.name === "transaction" ? "SET TRANSACTION" : "SET LOCAL"} can only be used in transaction blocks` }));
+    }
+    return this.applySetting(t);
+  }
+
+  /** A SET's effect, whoever asked (a statement, `set_config`): `vars` is moved, and a plain SET stays for the
+   *  transaction's COMMIT (`settingsTx`, the transaction's first one snapshots it). */
+  private async applySetting(t: Extract<Translation, { kind: "set" }>): Promise<Buffer[]> {
     if (t.name === "all") { await this.resetAll(); return [commandComplete("RESET")]; }
-    const tag = t.value === null ? "RESET" : "SET";
     // SET ROLE and SET SESSION AUTHORIZATION: a session is its user and becomes no one else — RESET, NONE and its own
     // name are Postgres's no-ops, any other name Postgres's refusal. Never the catalog's to validate: that is one
     // superuser connection, which accepted `SET ROLE postgres` silently (a review finding of #35)
@@ -1736,24 +1917,38 @@ class Session {
       // current_user says), which Postgres always allows; SET SESSION AUTHORIZATION is the login's name alone
       const own = t.value === null || t.value === this.user || (t.name === "role" && (t.value.toLowerCase() === "none" || t.value === this.roleName()));
       if (!own) throw new PgError({ code: "42501", message: `permission denied to set ${t.name === "role" ? "role" : "session authorization"} "${t.value}"` }, 403);
-      return [commandComplete(tag)];
+      return [commandComplete(t.tag)];
     }
+    // a user's attributes are the users file's (mason user add --set), never the session's to change: Postgres's refusal
+    // of a parameter a role may not set
+    if (t.name.toLowerCase().startsWith("mason.attr.")) throw new PgError({ code: "42501", message: `permission denied to set parameter "${t.name}"`, hint: "a user's attributes are set by mason user add --set, never by the session" }, 403);
     // a placeholder (`myapp.x`) is validated here: a SET the catalog validated left it DEFINED there, with '', for every
     // session (a `current_setting` of it answered '' where Postgres's is 42704) — its rollback undoes the value, not that
-    if (await this.isPlaceholder(t.name)) placeholderName(t.name);
+    const placeholder = await this.isPlaceholder(t.name);
+    if (placeholder) placeholderName(t.name);
     else if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
+    const tx = this.settingsAtStart();
     if (t.value === null) await this.resetParameter(t.name); else this.setParameter(t.name, t.value);
-    return [commandComplete(tag)];
+    if (!t.local) copySetting(t.name, this.vars, tx.commit);
+    // once named a placeholder stays defined, '', whichever way the transaction ends: its definition is no value it undoes
+    if (placeholder) for (const v of [tx.rollback, tx.commit]) if (!v.other.has(t.name)) v.other.set(t.name, "");
+    return [commandComplete(t.tag)];
   }
 
-  /** `SELECT set_config(name, value, false)` alone (translate.ts setConfig): the session's SET, answered as Postgres
-   *  answers the function — one text row, the value as `SHOW` then answers it (its own DataRow: one reader), the column
-   *  named `set_config` or as aliased (an Execute drops the RowDescription: a portal's is its Describe's). */
+  /** what the transaction found, kept at its first SET (`settingsTx`) */
+  private settingsAtStart(): { rollback: Vars; commit: Vars } {
+    return this.settingsTx ??= { rollback: copyVars(this.vars), commit: copyVars(this.vars) };
+  }
+
+  /** `SELECT set_config(name, value, is_local)` alone (translate.ts setConfig): the session's SET or SET LOCAL, answered
+   *  as Postgres answers the function — one text row, the value as `SHOW` then answers it (its own DataRow: one reader),
+   *  the column named `set_config` or as aliased. Its RowDescription is the caller's: a Query's, an Execute's Describe's.
+   *  Unlike SET LOCAL it warns of nothing outside a block: Postgres's function does not. */
   private async setConfigStatement(t: Extract<Translation, { kind: "set_config" }>): Promise<Buffer[]> {
-    await this.setStatement({ kind: "set", name: t.name, value: t.value, local: false });
+    await this.applySetting({ kind: "set", name: t.name, value: t.value, local: t.local, tag: "SET" });
     const row = (await this.showStatement(t.name)).find((f) => f[0] === DATA_ROW);
     if (row === undefined) throw new PgError({ code: "XX000", message: `SHOW ${t.name} answered no row after set_config (Mason bug: report it)` }, 500);
-    return [this.setConfigDescription(t, 0), row, commandComplete("SELECT 1")];
+    return [row, commandComplete("SELECT 1")];
   }
 
   private setConfigDescription(t: Extract<Translation, { kind: "set_config" }>, format: 0 | 1): Buffer {
@@ -1764,9 +1959,12 @@ class Session {
    *  SEQUENCES and TEMP find nothing of theirs here */
   private async discard(target: string): Promise<Buffer[]> {
     if (target !== "ALL") return [commandComplete(`DISCARD ${target}`)];
+    if (this.tx !== "none" || this.implicitBlock) throw new PgError({ code: "25001", message: "DISCARD ALL cannot run inside a transaction block" });
     this.statements.clear();
     this.dropPortals();
     await this.resetAll();
+    // it commits at once, what follows it in a batch being a transaction of its own (XACT_FLAGS_NEEDIMMEDIATECOMMIT)
+    this.endTransaction(true);
     return [commandComplete("DISCARD ALL")];
   }
 
@@ -1784,7 +1982,7 @@ class Session {
    */
   private sessionSetting(name: string): string | null {
     const n = name.toLowerCase();
-    return tlsParameters(this.socket instanceof tls.TLSSocket)[n] ?? fixedParameter(n, this.vars, this.user) ?? this.vars.other.get(n) ?? null;
+    return tlsParameters(this.socket instanceof tls.TLSSocket)[n] ?? fixedParameter(n, this.vars, this.user) ?? attributeSetting(n, this.token?.attributes) ?? this.vars.other.get(n) ?? null;
   }
 
   /**
@@ -1793,7 +1991,10 @@ class Session {
    * `SHOW <name>` answers, however a tool asks (GitHub issue 40). The names are those `sessionSetting` reads from.
    */
   private sessionSettings(): Map<string, string> {
-    const names = new Set([...Object.keys(tlsParameters(this.socket instanceof tls.TLSSocket)), ...FIXED.keys(), ...this.vars.other.keys()]);
+    const names = new Set([...Object.keys(tlsParameters(this.socket instanceof tls.TLSSocket)), ...FIXED.keys(), ...this.vars.other.keys(),
+      // the user's attributes, as `mason.attr.<name>` (a list's values joined by commas): what the catalog's row security
+      // policies read (catalog.ts catalogPolicies), as Postgres's read `current_setting('mason.attr.tenant')`
+      ...Object.keys(this.token?.attributes ?? {}).map((a) => `mason.attr.${a}`)]);
     const out = new Map<string, string>();
     for (const n of names) { const v = this.sessionSetting(n); if (v !== null) out.set(n, v); }
     return out;
@@ -1849,8 +2050,10 @@ class Session {
       this.tx = "open";
       return [commandComplete(tag)];
     }
-    if (this.tx === "none") { return [noticeResponse({ severity: "WARNING", code: "25P01", message: "there is no transaction in progress" }), commandComplete(tag)]; }
+    // the implicit transaction's end too: `SET a; ROLLBACK` in one Query undoes the SET, with the same warning
     const wasFailed = this.tx === "failed";
+    this.endTransaction(tag === "COMMIT" && !wasFailed);
+    if (this.tx === "none") { return [noticeResponse({ severity: "WARNING", code: "25P01", message: "there is no transaction in progress" }), commandComplete(tag)]; }
     this.tx = "none";
     // the transaction's "now" ends with it; a statement after it in the same Query begins the next at the Query's arrival
     this.txNow = null;
@@ -1879,14 +2082,24 @@ class Session {
         case "Parse": return this.sendAll(await this.parseMessage(m));
         case "Bind": return this.sendAll(await this.bindMessage(m));
         case "Describe": return this.sendAll(await this.describeMessage(m));
-        case "Execute": return this.sendAll(await this.executeMessage(m));
+        case "Execute": {
+          const out = await this.executeMessage(m);
+          this.sendAll(out);
+          // AN EXECUTE LEAVES ITS TRANSACTION OPEN UNTIL THE SYNC, and what follows it runs in an implicit block, as
+          // Postgres 18's does, a portal suspended at a row count included: a later SET LOCAL warns of nothing, a later
+          // DISCARD ALL is refused. Not after a transaction statement, which ended it, nor a DISCARD ALL, whose portal
+          // it dropped
+          const kind = this.portals.get(m.portal)?.statement.shape?.kind;
+          if (kind !== undefined && kind !== "transaction") this.implicitBlock = true;
+          return;
+        }
         case "Close": return this.sendAll(await this.closeMessage(m));
       }
     } catch (err) {
       const e = asPgError(err, sql);
       this.refuse(e, sql, m.type);
       this.skipToSync = true;
-      if (this.tx === "open") this.tx = "failed";
+      this.abortTransaction();
     }
   }
 
@@ -1921,10 +2134,11 @@ class Session {
   }
 
   private async parseMessage(m: Extract<FrontendMessage, { type: "Parse" }>): Promise<Buffer[]> {
-    if (m.name !== "" && this.statements.has(m.name)) throw new PgError({ code: "42P05", message: `prepared statement "${m.name}" already exists` });
     const stmts = (await parseSql(m.sql)).stmts ?? [];
     if (stmts.length > 1) throw new PgError({ code: "42601", message: "cannot insert multiple commands into a prepared statement" });
     const raw = stmts[0] ?? null;
+    if (raw?.stmt !== undefined) this.heldToFailedBlock(raw.stmt);
+    if (m.name !== "" && this.statements.has(m.name)) throw new PgError({ code: "42P05", message: `prepared statement "${m.name}" already exists` });
     const statement: Statement = { sql: m.sql, raw, paramOids: [...m.paramTypes], shape: null, catalogName: null };
     if (raw?.stmt !== undefined) {
       statement.shape = this.classify(raw.stmt, statementText(m.sql, raw));
@@ -1959,6 +2173,8 @@ class Session {
   private async bindMessage(m: Extract<FrontendMessage, { type: "Bind" }>): Promise<Buffer[]> {
     const statement = this.statements.get(m.statement);
     if (statement === undefined) throw new PgError({ code: "26000", message: `prepared statement "${m.statement}" does not exist` });
+    // before anything runs: a catalog statement is run whole at its Bind
+    this.heldToFailedBlock(statement.raw?.stmt);
     if (m.portal !== "" && this.portals.has(m.portal)) throw new PgError({ code: "42P03", message: `cursor "${m.portal}" already exists` });
     if (statement.catalogName !== null) {
       // bound, described, run whole and closed in one call, Sync included (the Portal's `catalog`): nothing of this
@@ -2002,6 +2218,7 @@ class Session {
     if (m.kind === "S") {
       const statement = this.statements.get(m.name);
       if (statement === undefined) throw new PgError({ code: "26000", message: `prepared statement "${m.name}" does not exist` });
+      this.describedInFailedBlock(statement);
       if (statement.catalogName !== null) return this.catalogRun(frame("D", Buffer.from("S"), cstr(statement.catalogName)));
       const shape = statement.shape;
       if (shape?.kind === "show") return [parameterDescription([]), ...await this.showDescription(shape.name)];
@@ -2019,6 +2236,7 @@ class Session {
     }
     const portal = this.portals.get(m.name);
     if (portal === undefined) throw new PgError({ code: "34000", message: `portal "${m.name}" does not exist` });
+    this.describedInFailedBlock(portal.statement);
     if (portal.catalog !== undefined) return [portal.catalog.description];
     const shape = portal.statement.shape;
     if (shape?.kind === "show") return this.showDescription(shape.name);
@@ -2032,6 +2250,10 @@ class Session {
   private async executeMessage(m: Extract<FrontendMessage, { type: "Execute" }>): Promise<Buffer[]> {
     const portal = this.portals.get(m.portal);
     if (portal === undefined) throw new PgError({ code: "34000", message: `portal "${m.portal}" does not exist` });
+    const statement = portal.statement;
+    if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
+    // a catalog portal's rows are held here since its Bind: a block that failed after it answers none of them
+    this.heldToFailedBlock(statement.raw.stmt);
     if (portal.catalog !== undefined) {
       const c = portal.catalog;
       const take = m.maxRows > 0 ? Math.min(m.maxRows, c.rows.length - c.sent) : c.rows.length - c.sent;
@@ -2041,17 +2263,12 @@ class Session {
     }
     // what its earlier Executes sent is this one's row's too (`bytesFor`)
     if (this.asked !== null) this.asked.carried = portal.bytes;
-    const statement = portal.statement;
-    if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
     const t = statement.shape ?? this.classify(statement.raw.stmt, statementText(statement.sql, statement.raw));
-    if (this.tx === "failed" && !(t.kind === "transaction" && t.tag !== "BEGIN" && t.tag !== "START TRANSACTION")) {
-      throw new PgError({ code: "25P02", message: "current transaction is aborted, commands ignored until end of transaction block" });
-    }
     switch (t.kind) {
       case "empty": return [emptyQueryResponse()];
       case "catalog": throw new PgError({ code: "XX000", message: "a catalog statement bound as a query (Mason bug: report it)" }, 500);
       case "set": return this.setStatement(t);
-      case "set_config": return (await this.setConfigStatement(t)).filter((f) => f[0] !== ROW_DESCRIPTION);
+      case "set_config": return this.setConfigStatement(t);
       // as Postgres: the extended protocol's Execute sends the rows and the tag, the RowDescription is the Describe's
       case "show": return (await this.showStatement(t.name)).filter((f) => f[0] !== ROW_DESCRIPTION);
       case "transaction": return this.transaction(t.tag);
@@ -2114,6 +2331,13 @@ class Session {
     if (statement.duck !== undefined) this.readsOf(statement.duck);
     if (portal.cursor === undefined) {
       if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a statement without its plan: report it (Mason's Postgres listener)" });
+      // A ROLE'S ROW FILTERS MOVED SINCE THE PARSE (the roles file edited): planned again under them, as Postgres plans a
+      // prepared statement again after its policies change — where its columns and parameters are what the Parse said
+      if (statement.raw !== null && (statement.duck.rowsKey ?? "") !== rowsKeyOf(this.grants())) {
+        const again = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.vars);
+        const shape = (p: DuckPlan): string => JSON.stringify([p.params, p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null]);
+        if (shape(again) === shape(statement.duck)) { statement.duck = again; delete statement.duckOnWire; }
+      }
       // a row count on the wire bounds the rows: the plan made for it where it differs (boundOnWire)
       const plan = m.maxRows > 0 ? await this.boundOnWire(statement, statement.duck, controller) : statement.duck;
       const exec = this.txNow ??= this.server.now();
@@ -2465,6 +2689,80 @@ class Server {
     return this.lastRoles;
   }
 
+  /**
+   * THE ROLES WITH THEIR ROW FILTERS CHECKED BY THE CATALOG POSTGRES (src/duck/row-filter.ts filterTypes): each `where:`
+   * of a copied table analysed as `SELECT 1 FROM <table> WHERE <it>`, the type of each attribute it reads taken from
+   * Postgres's inference (the ONE derivation: every binding and the catalog's policies read it), and a filter Postgres
+   * refuses made the roles' `problem` — said once in the log, at its key, and every statement of a user held to a role
+   * refused until it is fixed (fail closed, as for any mistake of the file). The catalog's row security policies are
+   * written from the same types (catalog.ts catalogPolicies). Once per roles object and copied tables; nothing where no
+   * role filters rows. A check that could not run (the catalog failed) is said as the problem and tried again next time.
+   */
+  async checkRoles(): Promise<RolesLive> {
+    const raw = this.rolesNow();
+    const schema = this.lastSchema;
+    if (!filtersRows(raw)) return raw;
+    if (this.checked?.of === raw && this.checked.schema === schema) return this.checked.live;
+    if (this.checking?.of === raw && this.checking.schema === schema) return this.checking.done;
+    const done = (async (): Promise<RolesLive> => {
+      const copied = new Set(schema.tables.map((t) => `${t.schema ?? "public"}.${t.name}`));
+      const problems: string[] = [];
+      const typed = new Map<string, RoleGrants>();
+      try {
+        for (const g of raw.grants.values()) {
+          if (g.filters === undefined) { typed.set(g.name, g); continue; }
+          const types = new Map<string, ReadonlyMap<string, string>>();
+          for (const f of g.filters.values()) {
+            if (f.where === undefined || !copied.has(f.table)) continue;
+            const r = await filterTypes((b) => this.catalog.run(b), f, g.attributes ?? new Map());
+            if ("problem" in r) { problems.push(r.problem); continue; }
+            types.set(f.table, r.types);
+            // Postgres read it; the rewrite must too, or each of the role's users would meet the refusal, statement by statement
+            const probe = filterProbe(f, r.types, g.attributes ?? new Map());
+            const stmt = (await parseSql(probe)).stmts?.[0]?.stmt;
+            if (stmt === undefined) throw new Error(`a filter's read does not parse: ${probe}`);
+            try { await this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined); }
+            catch (e) {
+              if (!(e instanceof StatementError)) throw e;
+              problems.push(`${f.at}.where: ${e.fields.message}${e.fields.hint !== undefined ? ` (${e.fields.hint})` : ""} — the predicate is read as SELECT 1 FROM ${f.table} WHERE ${f.where.text}`);
+            }
+          }
+          typed.set(g.name, { ...g, filterTypes: types });
+        }
+        await this.catalog.policies(catalogPolicies(schema, catalogRolesOf({ ...raw, grants: typed })));
+      } catch (e) {
+        const problem = `the roles' row filters could not be checked by the catalog: ${e instanceof Error ? e.message : String(e)}`;
+        // tried again at every statement of every session, so said once a streak: the line a streak's end answers
+        if (!this.rolesCheckFailing) { this.rolesCheckFailing = true; this.log(`roles: ${problem} — tried again at each statement, every statement of a user held to a role refused until then`); }
+        return { ...raw, problem: raw.problem ?? problem };
+      }
+      if (this.rolesCheckFailing) { this.rolesCheckFailing = false; this.log("roles: the catalog checks the row filters again"); }
+      const problem = raw.problem ?? (problems.length === 0 ? null : `${raw.file ?? "the roles file"}: ${problems.join("; ")}`);
+      if (problem !== null && raw.problem === null && problem !== this.saidProblem) {
+        this.saidProblem = problem;
+        this.log(`roles: ${problem} — every statement of a user held to a role is refused until it is fixed`);
+      }
+      const live: RolesLive = { ...raw, grants: typed, problem };
+      if (this.lastRoles === raw && this.lastSchema === schema) this.checked = { of: raw, schema, live };
+      return live;
+    })();
+    this.checking = { of: raw, schema, done };
+    try { return await done; }
+    finally { if (this.checking?.done === done) this.checking = null; }
+  }
+  private checked: { of: RolesLive; schema: PgSchema; live: RolesLive } | null = null;
+  private checking: { of: RolesLive; schema: PgSchema; done: Promise<RolesLive> } | null = null;
+  private saidProblem: string | null = null;
+  private rolesCheckFailing = false;
+
+  /** the roles now, their row filters checked where the check for them is done (`checkRoles`), else as read: a
+   *  session's `grants` refuses a filter not checked yet */
+  rolesChecked(): RolesLive {
+    const raw = this.rolesNow();
+    if (!filtersRows(raw)) return raw;
+    return this.checked?.of === raw && this.checked.schema === this.lastSchema ? this.checked.live : raw;
+  }
+
   forget(s: Session): void { this.sessions.delete(s.id); }
 
   /** A CancelRequest: the session's statement stopped when the key is the session's (`interrupt`) and it arrived on
@@ -2576,6 +2874,8 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
       };
     },
     get sessions() { return server.sessions.size; },
+    roles: () => server.rolesChecked(),
+    checkRoles: () => server.checkRoles(),
     openSessions: () => server.openSessions(),
     running: () => server.running(),
     cancel: (session, statement) => server.cancelSession(session, statement),

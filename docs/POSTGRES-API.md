@@ -179,7 +179,7 @@ is the role's once its copy is served. A table key `all` under `tables:` is refu
   filtered in this stage**: `pg_class` and `pg_attribute` still list every copied column to every role (as they do on
   Postgres, which filters neither), while a read of a hidden one is refused. **Every role may see every view** of the
   source: reading one is held to the tables it reads, so a view over a hidden column is refused when read — stricter
-  than Postgres, where a view's owner's grants apply. No row filter yet (the gap `roles` in docs/SQL-SUPPORT.md).
+  than Postgres, where a view's owner's grants apply. A role's rows are filtered too (below).
 - **A session is its user and becomes no one else**: `SET ROLE` and `SET SESSION AUTHORIZATION` to its own name,
   `NONE` or `RESET` are no-ops, and so is `SET ROLE` to the role it already is (its own, or the file's default: what
   `current_user` says), as Postgres always allows; any other name is Postgres's refusal (`42501 permission denied to
@@ -193,6 +193,115 @@ is the role's once its copy is served. A table key `all` under `tables:` is refu
   statement).
 - **Every refusal is a row of the request log with the role it was held to** (`role` in `_mason.requests`: the user's
   own, or the file's default; empty for a token and for a user held to nothing).
+
+#### Rows per user
+
+**A role can limit which ROWS a user reads**, by values carried with the user: `attributes:` on the role names them,
+`where:` on a table is a Postgres condition over the table's columns reading them as `:name`, and `through:` makes a
+table's rows visible when the row of another table of the role they reference is:
+
+```yaml
+roles:
+  tenant:
+    attributes: [tenant]                       # each one value (a scalar)
+    tables:
+      customers: { where: "tenant_id = :tenant" }
+      orders: { exclude: [notes], where: "tenant_id = :tenant" }
+      order_items: { through: orders }         # by the foreign key from order_items to orders
+  regions:
+    attributes: { regions: list, plan: scalar }
+    tables:
+      customers: { where: "region = ANY(:regions) AND plan <> :plan" }
+      orders: { through: { customers: customer_id } }   # the column named: two foreign keys, or none
+      order_items: { through: orders }                  # two levels deep
+```
+
+```bash
+mason user add acme --role tenant --set tenant=42
+mason user add emea --role regions --set regions=eu --set regions=uk --set plan=trial
+```
+
+- **An attribute is a scalar or a list.** `attributes: [tenant]` declares scalars; `{ tenant: scalar, regions: list }`
+  says each. A list is set by repeating `--set` (there is no comma grammar: a comma is legal in a scalar), used as an
+  array (`= ANY(:regions)`, `<> ALL(:regions)`), and bound as one of the column's type (`ARRAY['12','41']::int[]`,
+  `uuid[]` for a uuid column). **An empty list is not expressible** (`--set regions=` is refused, and one written into
+  `.mason/users.json` by hand counts as a missing value): a user who should read no row of a role is a user of another
+  role. A value holding a NUL byte is refused. A scalar given twice, an attribute the role does not declare (with
+  the closest name), or one missing is refused by `mason user add`, naming the attribute, the role, the `where:` that
+  reads it and the exact `--set` to add.
+- **The file is checked when it is read**, each mistake at its key on one report: a `:name` the role does not declare
+  (with the line that declares it), a `$1` (a `where:` reads attributes, never a statement's parameter), `where:` beside `through:`, a `through:` to a table the role lacks or to one with no
+  filter of its own, a cycle of `through:`s, and the `where:` itself analysed by the catalog Postgres against the copy's
+  columns — a column the copy lacks, a type that does not compare, a list used as a scalar or the reverse is Postgres's
+  own error with the key and the character (`roles.regions.tables.customers.where: operator does not exist: uuid =
+  uuid[] … :regions is a list, read here as one uuid — write = ANY(:regions)`). A subquery in a `where:` is refused
+  (use `through:`). A `through:` follows the foreign key from the table to its parent as the source's catalog reports
+  it; with none, or several, it is refused with the explicit form `through: { orders: <column> }` as the way out, which
+  compares the column named with the parent's one-column key.
+- **A user without a value its role reads is refused loudly, never answered with no rows**: every statement is
+  `42501 permission denied: the user "acme" has no value for the attribute tenant, which the role tenant filters rows
+  by`, the DETAIL the `where:` that reads it, the HINT `mason user remove acme && mason user add acme --role tenant
+  --set tenant=<value>`. Such a user is one added before the role gained the attribute: `mason start` and `mason user
+  list` name each.
+- **Every read of a filtered table is filtered, wherever it is**: after the catalog Postgres has analysed a statement
+  (views expanded) and after the role's grants are held, each read of a filtered table — in a view, a CTE, a subquery,
+  EXISTS, a UNION branch, a lateral, either side of a join, a prepared statement's every Execute — is replaced by the
+  table filtered by the user's values, and the result analysed again and rewritten like any statement (one grammar:
+  the predicate is SQL the catalog read, never text pasted into the statement). A whole-row reference to a filtered
+  table (`SELECT o FROM orders o`) is refused by name (the gap `roles`). A prepared statement executed after its role's
+  `where:` changed is planned again under the new filter.
+- **The catalog holds the same filters as Postgres row security**: each filtered table has `ROW LEVEL SECURITY`
+  enabled and one `CREATE POLICY … FOR SELECT TO <role> USING (…)` per role reading it, the `where:` reading
+  `current_setting('mason.attr.<name>')` (a list split on commas into the column's array type), so `pg_policies` lists
+  them: every role's policies, their names and `where:` text, to every user, as Postgres's does. A session's attributes are settings it cannot change: `SHOW mason.attr.tenant` and
+  `current_setting('mason.attr.tenant')` answer the user's value (a list comma-joined), and `SET mason.attr.…` is
+  Postgres's refusal (`42501 permission denied to set parameter`).
+- **EXPLAIN of a statement that reads a filtered table says Mason's lines alone**, in every form, with no plan of the
+  engine's: the tables it reads (never the engine's count of them), each filter in words on its table's line
+  (`answered from the synced table public.orders (…; filtered by the role tenant: tenant_id = 42)`, a list as
+  `tenant_id = ANY(12, 41)` with its first five values then `… and N more`, a `through:` as
+  `a row of orders it references by order_id is visible`), what is sent to the engine, and a note. `FORMAT JSON` keeps its
+  shape: `Plan` is the constant `{"Node Type": "Plan Not Shown"}`, `Mason.Tables` the tables, each filter its `Row Filter`.
+  No line depends on the data, because an engine's plan does: its row estimates are the whole table's, and its
+  `Empty Result` says what it proved from a column's maximum, a binary search on a hidden row. `EXPLAIN ANALYZE` of such a
+  statement is refused `0A000` by the gap `roles`: a profile is a count of what the engine read. A table with no filter
+  beside one keeps its line, and **a statement that reads no filtered table is answered as ever, whole. An operator reads
+  the full plan as a user with no row filter.** The tables a `through:` reads are listed with the filter that reads them.
+- **The request log records the values**: `attributes` in `_mason.requests` (JSON, beside `role`; null for a user with
+  none and for a token).
+
+**The filter is a security barrier, as a Postgres policy is**: a statement's own expressions run only on the rows the
+filter keeps, in every place they can sit — WHERE, JOIN ON, the SELECT list, GROUP BY, HAVING, ORDER BY, a window, a
+subquery, a view, a statement reading two filtered tables — for a `where:`, a list and a `through:` alike. So an expression
+that fails on a hidden row's value (`'x'::int`, a division by zero) never fails: it never met that row. Every filtered read
+has the barrier, with no exception for a statement that looks harmless. **What is not guaranteed is timing**: how long a
+statement takes depends on the table's size and on rows it cannot read, on Mason as on Postgres.
+
+**Nor do a table's statistics reach a statement**: what the engine knows of the whole table (a column's minimum, maximum
+and null count) never decides an answer a filtered user reads, so `WHERE 1/(id - id) > 0 AND secret > 500` answers alike
+whichever side of a hidden row's value 500 falls.
+
+**Two limits of a filtered statement**, each answered exactly, more slowly than the same statement of an unfiltered user:
+
+- it answers from the JSON documents, never a stored JSON column: a filtered read lists every column of its table, and a
+  statement that lists a table's columns reads none of its stored paths;
+- `count(DISTINCT id)` is the slow form: the key's DISTINCT cannot be dropped over a filtered read, so it is kept. Over a
+  key, `count(id)` answers the same.
+
+**Where Mason is deliberately stricter than Postgres row security**, each refused where Postgres would answer:
+
+- a user missing an attribute is refused at every statement, `SELECT 1` and unfiltered tables included;
+- a user whose value its type refuses (`--set tenant=abc` on an integer) is refused `42501` at each statement reading the
+  filter, naming the attribute and the `mason user add` line, where Postgres's policy would answer `22P02`;
+- a whole row of a filtered table, in any spelling (`SELECT c`, `row(c.*)`, `to_json(c.*)`), and a `TABLESAMPLE` of one
+  are refused `0A000`, naming the gap `roles`;
+- a grouping set that relies on a filtered table's primary key for a column it does not group, and such a column no type's
+  equality can group (`json`), are refused `0A000`, naming the gap `roles`: name the column in the GROUP BY, or read it in an
+  aggregate. A plain `GROUP BY` of the key answers as Postgres does;
+- `FETCH FIRST n ROWS WITH TIES` over a filtered table is refused `0A000`: write `ORDER BY … LIMIT n` where ties do not matter;
+- `SET`, `RESET` and `set_config` of `mason.attr.*` are refused `42501`;
+- a statement verified for an unfiltered user can be refused `0A000` unverified for a filtered one: what reaches the
+  allowlist is the statement with its filters in place.
 
 `mason start` listens on 5433 when it is free on every address (127.0.0.1, 0.0.0.0, `::` and `::1`: a port another
 Postgres holds on any of them would send a container or a driver trying `::1` first to that server), else on the next
@@ -236,12 +345,18 @@ connection that opens with a ClientHello and says why in its log (it has no cert
 **The parts of the URL**, for a driver's form:
 
 ```
-postgres://<user>:<password>@<host>:5433/<project>
+postgres://<user>:<password>@<host>:5433/mason
 ```
 
 - **The password is a `mason user`'s** (above). The project's API key is refused as a password (28P01, saying so).
   `application_name` is logged with every request.
-- **The database is the project's name.** A connection to any other database is refused (3D000) naming the right one.
+- **The database is `mason`**, unless the sources file says another: `database: production` at its top keeps the name a
+  tool already has, so moving a tool to Mason changes only its host and port (with no such line, its database name too).
+  The name is exact, capitals included, as on Postgres, and a name Postgres would take works, `postgres` among them; on a
+  server whose sources file has no such line, `MASON_PG_DATABASE` sets it (the two must agree when both are set). A
+  connection to any other database is refused (3D000), the hint saying the right name and where it is set.
+  `current_database()` and `pg_database` answer the same name. The project's name is not involved: it names the
+  replication slot.
 - **The port is the project's** (above; `MASON_PG_PORT`), the address `MASON_PG_HOST` (default 127.0.0.1).
 - **TLS or a declared private network.** With `MASON_PG_TLS_CERT` and `MASON_PG_TLS_KEY` (PEM files) both set,
   TLS is required: a client that does not ask for it is refused (asked by SSLRequest or by a direct TLS start,
@@ -332,7 +447,7 @@ or column 42703, a type mismatch 42883) is refused with Postgres's own error: Du
 | a construct Mason knows it cannot answer as Postgres does | 0A000, `Mason gap <id>` in the detail and what to write instead in the hint ([docs/SQL-SUPPORT.md](SQL-SUPPORT.md) "Refused") |
 | `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `COPY`, `TRUNCATE`, DDL, `GRANT`, `VACUUM`, `SET … READ WRITE` | 25006: a read-only copy |
 | `PREPARE` / `EXECUTE` (the SQL forms) | 0A000: use the protocol's prepared statements (every driver does) |
-| `SAVEPOINT`, `PREPARE TRANSACTION` | 0A000: BEGIN, COMMIT and ROLLBACK are accepted and do nothing |
+| `SAVEPOINT`, `PREPARE TRANSACTION` | 0A000: BEGIN, COMMIT and ROLLBACK are accepted, and a ROLLBACK undoes the block's `SET`s |
 | `LISTEN`, and any other statement that is not a SELECT, an EXPLAIN, a catalog query, SET, SHOW or a transaction no-op | 0A000, naming what is answered |
 | an unknown `SET` | 42704, as Postgres |
 | `SET TimeZone = 'CET'` (an abbreviation or a fixed offset) | 22023: an IANA zone name (`Europe/London`) or UTC |
@@ -369,14 +484,32 @@ the session started with — its startup packet's `application_name` and `option
 session is told a ParameterStatus for each reported parameter whose value changed, as Postgres tells a driver that
 caches them (pgjdbc, npgsql): once per request and parameter, its last value, after the statements' CommandComplete
 and before the ReadyForQuery (a SET, a RESET or RESET ALL that moves nothing reports nothing).
-`SELECT set_config('name', 'value', false)` on its own is the session's `SET`, answered with the value as `SHOW` then
-answers it. Forwarded to the embedded Postgres, which every session shares, it stayed there for every session. Any
-other form — beside another column or a table, with an expression, a parameter or NULL, with `is_local` true, under
-EXPLAIN — is refused (`set-config-forms`). Not yet Postgres's: a `SET LOCAL`, and a SET inside a transaction that is
-rolled back, change the session's value for good (GitHub issue 47).
+`SELECT set_config('name', 'value', false)` on its own is the session's `SET`, and with `true` its `SET LOCAL` (less
+the warning, as Postgres's function), answered with the value as `SHOW` then answers it. Forwarded to the embedded
+Postgres, which every session shares, it stayed there for every session. Any other form — beside another column or a
+table, with an expression, a parameter or NULL, under EXPLAIN — is refused (`set-config-forms`).
 
-`BEGIN`, `COMMIT` and `ROLLBACK` are accepted and write nothing — there is nothing to write. A failed statement inside
-a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it.
+**A session's settings are transactional, as Postgres's are.** Inside `BEGIN … COMMIT`, a `SET` (a `RESET`, `RESET ALL`,
+`set_config`) is kept by `COMMIT` and undone by `ROLLBACK`; a `SET LOCAL` lasts until the block ends, either way, and a
+`SET` and a `SET LOCAL` of one name leave the `SET`'s value at `COMMIT`. A failed statement undoes what the block set AT
+THE ERROR, so the ParameterStatus of the revert comes with that statement's ReadyForQuery, and the block's `ROLLBACK`
+tells nothing. Outside a block, `SET LOCAL` and `SET TRANSACTION` answer Postgres's `WARNING 25P01 … can only be used in
+transaction blocks`, and the value is gone with its statement: nothing is reported. Every statement has a transaction
+of its own, and the statements of one Query, or of one batch of Executes up to its Sync, share one: in such a Query
+`SET LOCAL` warns of nothing and holds to its end, in such a batch the first does warn (an Execute that completed makes
+the rest of the batch a block, as on Postgres 18), a `SET` before an error or a `ROLLBACK` in them is undone, and a
+`BEGIN` among them takes in what ran before it. `DISCARD ALL` is refused in a block, explicit or implicit (25001). A
+placeholder (`myapp.x`) a transaction named stays defined, `''`, however it ended, as on Postgres. A prepared statement
+reads the settings in force when it runs, never the ones it was parsed under, and an unqualified table in it is found
+under the `search_path` in force then, as on Postgres (a path that no longer finds it is 42P01, and the path restored
+finds it again). What it does not do is analyse the statement again: its columns and types stay those of its Parse.
+There are no savepoints (`SAVEPOINT` is refused, above), so a block has one level to undo.
+
+`BEGIN`, `COMMIT` and `ROLLBACK` are accepted and write nothing — there is nothing to write, and what they keep or undo
+is the session's settings. A failed statement inside
+a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it. A
+failed block accepts nothing but its end, in either protocol: a Query, a Parse, a Bind, an Execute of a portal bound
+before the failure, and a Describe of anything with a result are each 25P02, and a Close still closes.
 `CancelRequest` cancels the statement running on that session's backend.
 
 **What "now" is**: Postgres's, the start of the TRANSACTION. `now()`, `current_timestamp`, `current_date` and a
@@ -418,6 +551,7 @@ whatever the session runs at that moment is stopped, as a `CancelRequest` stops 
 | `MASON_PG_PORT` | 5433, then the project's | the listener's port |
 | `MASON_PG_HOST` | 127.0.0.1 | the listener's address |
 | `MASON_PG_TLS_CERT`, `MASON_PG_TLS_KEY` | unset (plain) | PEM files; both or neither; with them TLS is required |
+| `MASON_PG_DATABASE` | `mason` | `mason serve`: the database name a tool connects with, for a sources file with no `database:`; the two must agree when both are set, and `mason start` refuses it (the sources file is what says it on a project) |
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |
 | `MASON_PG_CATALOG_TIMEOUT_MS` | 10000 | how long a catalog statement may take before the embedded Postgres is discarded and the statement refused |
 | `MASON_STATEMENT_TIMEOUT` | 5min | the longest one statement may run (Postgres's units; 0 for none); a session's `statement_timeout` may only shorten it |

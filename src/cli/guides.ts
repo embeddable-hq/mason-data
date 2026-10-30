@@ -80,6 +80,7 @@ ${codes}
   THE SOURCES FILE, mason/sources/<name>.yml (mason init writes it; one per project for now), is what Mason syncs:
     kind: postgres
     url: \${DATABASE_URL}          a variable from .env.local, .env or the shell; a literal URL is allowed for local dev
+    database: production          optional: the database name a tool connects with (none: mason), to keep the name it has
     sync: off                     how each table is kept current after its first sync: off (the default; mason sync
                                   <table> reads it again), poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h) or
                                   replication (the change log: a primary key, wal_level = logical)
@@ -180,15 +181,19 @@ names the tables the server syncs, and its url: names the variable that holds th
 3. CONNECT THE TOOLS: beside the server (docker compose exec mason …), a user is a password a tool keeps:
      mason user add metabase                        its URL and password, printed once
      mason user add agent --role agent              a user held to a role of mason/roles.yml: the tables and columns it reads
+     mason user add acme --role tenant --set tenant=42   and the rows: a role whose where: reads :tenant
      mason user list
      mason user remove metabase                     ends it at once, without a restart
-   The tool connects to the Postgres API (5433) as to a read replica, each added table a table. Changing
+   The tool connects to the Postgres API (5433) as to a read replica, each added table a table, in the database
+   mason: a tool moving from your Postgres changes its host, port and database name, or database: <name> in the sources
+   file keeps its name (MASON_PG_DATABASE on a server whose sources file has no such line). Changing
    MASON_API_KEY removes every user. mason/roles.yml ships with mason/ (mason help user shows the file): a user with
    a role is refused anything past it as Postgres refuses it (42501), and information_schema and mason mcp list it only
    what it may read; a user added without --role reads as the file's default: (mason init writes default:
-   everything, tables: all — every synced table), and nothing when the file names no default. A roles file from
-   before this release names no default: write default: <role> at its top before upgrading, or its roleless users
-   read nothing.
+   everything, tables: all — every synced table), and nothing when the file names no default. A role's where: and
+   through: filter its tables' rows by the values each user carries (--set), every read of them filtered; a user
+   missing a value is refused at every statement, never answered with no rows. A roles file from before this release
+   names no default: write default: <role> at its top before upgrading, or its roleless users read nothing.
 
 4. CHANGE IT: ship mason/ with your release and restart the container; a table added or removed is synced or dropped
    at the next start, or beside the server:

@@ -36,14 +36,21 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   (`ignore_till_sync`; without it one refused Parse silenced the catalog for every session), and a `SET` it validates
   runs inside a transaction it rolls back. A view or default of the source the catalog cannot hold is said in one
   log line, by name, never silently dropped.
-- **The password is a user's or a token's, the project is the database** (`authenticate`; `listenerLogins`,
+- **The password is a user's or a token's** (`authenticate`; `listenerLogins`,
   src/duck/users.ts): a `mason user`'s password (`mason_<id>_<mac>`, the MAC over its NAME and id keyed by the API key,
   so the startup packet's user name must be the user's and every statement is attributed), or a token minted from the
   API key; a refused one is `28P01` as a wrong password is, with the reason in the log; a DISABLED user's, its password
-  right, is `28000` "role … is not permitted to log in", as Postgres refuses a role without LOGIN (`user_disabled`); the
-  wrong database is `3D000`.
+  right, is `28000` "role … is not permitted to log in", as Postgres refuses a role without LOGIN (`user_disabled`).
   The users file is re-read before every statement of a user's session (`recheckMs: 0`), so `mason user remove` (and `disable`) ends
   a session at its next statement. Fail closed: a users file that cannot be read refuses every user (`57P03`).
+- **The database a tool connects with has ONE rule, and it is not the project's name** (`src/lib/database-name.ts`
+  `connectDatabase`: the sources file's `database:`, else on a server `MASON_PG_DATABASE`, else `mason`; docs/DESIGN.md
+  "The database name a tool connects with"): the listener compares it exactly, the wrong one is `3D000` whose hint
+  (`wrongDatabaseHint`) says the right name, how to say it and where it is set, and never the sources file's path (a
+  client reads it before any password, and that file is named for the source's database). The catalog renames its own
+  database to it (`databaseNameSql`, which moves another database holding the name, PGlite's `template0` / `template1`, aside), so `current_database()` and
+  `pg_database` agree. The project's name names the slot alone. DETECTOR: `tests/conventions.test.ts`,
+  `tests/database-name.test.ts`.
 - **What a tool sets is honoured or refused, never silently ignored**: `TimeZone` moves every timestamptz the session
   sends; `extra_float_digits` below 1, a `client_encoding` other than UTF8 and a `DateStyle` other than ISO are
   refused; a parameter Mason has no opinion on is given to the catalog Postgres to validate (an unknown name is
@@ -56,15 +63,30 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   (`asSession`, catalog.ts; the catalog is one connection every session shares), and beside a copied table, where
   the rewrite reads the map the session's statement runs under (`settingRead`, `SETTINGS_VARIABLE`), never DuckDB's
   own. RESET restores the startup's values (`startupVars`: its packet's `application_name` and `options`).
-  `set_config` is a SET, so the listener's (translate.ts `setConfig`: alone in a SELECT, else `set-config-forms`):
-  forwarded, it ran on the one shared catalog connection and stayed for every session. The changed parameters are
+  `set_config` is a SET, or under `is_local` a SET LOCAL, so the listener's (translate.ts `setConfig`: alone in a
+  SELECT, else `set-config-forms`): forwarded, it ran on the one shared catalog connection and stayed for every session.
+  The changed parameters are
   told once per request, before its ReadyForQuery (`ready`). The
   catalog's `current_setting` was a fourth reader answering its own values after a SET (issues 40, 41). DETECTOR:
   `tests/conventions.test.ts` (one reader; every catalog request carries the settings or is named), `tests/duck-wire.test.ts`
   and the oracle's setting cases.
+- **A session's settings are transactional, and `vars` stays the one store** (issue 47; docs/DESIGN.md "A session's
+  settings are transactional"): a transaction keeps only what to restore (`settingsTx`: `rollback`, the values it found;
+  `commit`, those with its SETs and none of its LOCALs), read for no answer, and its end replaces `vars` with one of
+  them (`endTransaction`). Every SET passes `applySetting`, every failure `abortTransaction`, which undoes them AT THE
+  ERROR, as Postgres's AbortTransaction does (the failed block's ReadyForQuery reports the revert, its ROLLBACK nothing),
+  and a request that ends with no block open commits its implicit transaction in `ready`. **An implicit transaction is
+  one too**: `SET a; SELECT 1/0` in one Query, or in one batch before its Sync, undoes the SET, and `implicitBlock` says
+  where Postgres's IsTransactionBlock is true (a Query of several statements; a batch once an Execute completed), which
+  is what `SET LOCAL`'s warning and `DISCARD ALL`'s 25001 read. No savepoints, so one level. DETECTOR:
+  `tests/conventions.test.ts` (one end, one way in), `tests/duck-wire.test.ts`, the oracle's `oracle/setting-scripts.ts`
+  (each step's whole reply equal to Postgres's: warnings, ParameterStatus, tags, status).
 - **A transaction is Postgres's**: `BEGIN` opens one (ReadyForQuery `T`), an error inside it aborts it (`E`, every
   statement until `ROLLBACK` is `25P02`, as a driver with autocommit off expects), `COMMIT` of an aborted one is a
-  `ROLLBACK`. Nothing is ever written, so a transaction holds nothing — the states exist because a driver reads them.
+  `ROLLBACK`. Nothing is ever written, so all a transaction holds is the session's settings — the states exist because
+  a driver reads them. **A failed block accepts nothing but its end on every message** (`heldToFailedBlock`, read before
+  a statement is classified or sent to the catalog: a catalog statement runs whole at its Bind, and its rows were once
+  answered past the check; `describedInFailedBlock` for a Describe, refused only where it has a result).
   **"Now" is the transaction's** (`txNow`: a simple Query's arrival or the first Bind since Sync, kept by `BEGIN`),
   read by the plan as a parameter, so two statements in one transaction see one instant.
 - **Where the listener is comes from ONE reader** (`listener.ts` `pgListenerAddress`: `MASON_PG_PORT`, `MASON_PG_HOST`),
@@ -110,6 +132,48 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   privilege functions are false, `current_user` / `current_role` / `user` spliced to the user's name, `set_config`
   refused), never as the catalog's superuser. A token reads every copied table. Why: a default in the code is a grant nobody committed. DETECTOR:
   `tests/duck-roles-wire.test.ts` (stage 1b's tests), `tests/cli-roles.test.ts`.
+- **A role's rows are filtered by REPLACING every read of a filtered table on the analysed tree, never by text, and a
+  user missing a value is refused, never answered with no rows** (`src/duck/row-filter.ts` `expandRowFilters`,
+  `server.ts` `withRows`; docs/DESIGN.md "Roles: rows per user"): each read of the table — a view's, a CTE's, a
+  subquery's, a join side's — becomes its filtered read (`through:` an EXISTS over the parent's filtered read), the
+  attributes bound as typed literals the catalog inferred, and the result goes through the grants, rewrite and
+  allowlist again (one grammar). The plan cache is keyed by role AND bound filters; an Execute whose filters moved is
+  planned again. The catalog holds the same filters as `CREATE POLICY`, reading `current_setting('mason.attr.…')`,
+  which the session may SHOW but never SET. Why: zero rows for a missing value is a silent wrong answer, and a filter
+  in the text misses the read a view or a CTE hides. DETECTOR: `tests/duck-roles-rows-wire.test.ts`, the oracle's
+  `rowFilterCases` (Postgres logins under the same policies). Every `duck.plan` caller passes the session's `grants`
+  (`tests/conventions.test.ts`).
+- **A filtered read is a SECURITY BARRIER: a statement's own expression never runs on a hidden row** (`BARRIER`,
+  `src/duck/row-filter.ts`; docs/DESIGN.md "Roles: rows per user"): the outermost filtered read ends in a LIMIT the filter
+  pushdown cannot cross, for a `where:`, a list and a `through:`, with no gate, because `proleakproof` on the analysed
+  tree says nothing about what the rewrite sends. Why: below a filter's SEMI join an expression that raises answers "does
+  a hidden row satisfy P?" for any P. The LIMIT is the guarantee (a filter pushed through it would change what it keeps);
+  `try` stops the pushdown too, but only as an observation. DETECTOR: `tests/duck-roles-barrier-wire.test.ts`, every shape
+  with the `try` wall off by `wallSwitch`, so the LIMIT stands alone (with `try` on, no test can tell), the expression
+  above the role's filter and in no scan, read from the engine's plan of what is sent, never "a Limit is there", which
+  statistics propagation drops, nor the text; and the oracle's `BARRIER_SHAPES`. **A test of this needs more than 50
+  visible keys over a wide range, about half the table visible**, or the engine's join filter hides the leak. RESPONSE:
+  on a DuckDB upgrade these fail before the leak ships; the barrier's form changes, never the guarantee. Timing is out of
+  scope, and the docs say so.
+- **A filtered read keeps what the table's key decides** (`carryKeyDependency`, `src/duck/row-filter.ts`): a subquery has no
+  key, so a column a `GROUP BY` of the primary key decides joins the GROUP BY, only when the key is grouped whole (no added
+  column can then split a group). Why: the filtered text is analysed again, and 42803 there is Mason's doing, never the
+  statement's. DETECTOR: the oracle's `GROUP BY the key` shapes, and `GROUP BY an expression` beside them. RESPONSE: what it
+  cannot carry is refused by the gap `roles` with the way out.
+- **A table's statistics reach nothing a filtered user reads** (`wallStatistics`, `src/duck/row-filter.ts`;
+  docs/DESIGN.md "Roles: rows per user"): the filtered read ends in `try(col)` of every column, which this engine carries no
+  statistics through (an observation, not a guarantee, so it has its detector), its select found by a name chosen after
+  reading the statement and the count of reads Mason wrote, never by a fixed name; and an EXPLAIN of a statement that reads a filtered table never shows it to the engine: the tables
+  are the statement's (`plan.reads`, never the engine's plan's), no line varies with the data, `FORMAT JSON` keeps its
+  shape, and ANALYZE is refused by the gap `roles`, the way out said (a user with no row filter reads the full plan).
+  Why: a column's table-wide maximum proves a condition false, and whether it was proved is a binary search on a hidden
+  row, as `Empty Result`, as the plan's `rows=`, or as an error that did not happen. A session with no filter, and a
+  statement that reads no filtered table, are unchanged. DETECTOR: `tests/duck-roles-rows-wire.test.ts`, the same
+  statement either side of a hidden row's value answers byte-identical text in every form for `where:`, a list,
+  `through:` and a join, and an ordinary SELECT alike. `tests/duck-roles-try-types.test.ts` holds name, type and text through the wall.
+  RESPONSE: reads walled other than the ones Mason wrote are refused by the gap `roles` (`wallStatistics`); a DuckDB upgrade
+  that carries statistics through `try` fails the SELECT test, and the wall's form changes. Nothing new
+  may print the engine's plan or scanned tables for a plan with `rowFilters`.
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
   `application_name`, a token's NAME (never the token) or the user's name, and the registry entry that refused it

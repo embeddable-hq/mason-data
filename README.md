@@ -109,11 +109,16 @@ polled, or replicated (see [Choosing what to sync](#choosing-what-to-sync)).
 **2. Connect a tool.**
 
 ```bash
-mason user add metabase              # prints postgres://metabase:<password>@127.0.0.1:5433/your-app (shown only once)
+mason user add metabase              # prints postgres://metabase:<password>@127.0.0.1:5433/mason (shown only once)
 ```
 
 Paste this URL into your tool's Postgres connection form. Each synced table appears as a table in a database named
-after your project. The port stays the same every time Mason starts, so saved connections keep working.
+`mason`. The port stays the same every time Mason starts, so saved connections keep working.
+
+To move a tool that already reads your Postgres, change three things: its host, its port and its database name. To
+keep the database name it has, write that name in the sources file (`database: production`), and it changes only its
+host and port.
+
 [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) explains how tools connect and which SQL Mason answers.
 
 Is your BI tool in the cloud? `mason share` opens a temporary public address for an hour's evaluation, with TLS all the
@@ -485,7 +490,7 @@ server to Claude Code, run this in the project's folder while Mason is running:
 
 ```bash
 mason user add claude --role agent   # prints the URL (shown only once)
-claude mcp add mason --env MASON_URL="postgres://claude:<password>@127.0.0.1:5433/shop" -- mason mcp
+claude mcp add mason --env MASON_URL="postgres://claude:<password>@127.0.0.1:5433/mason" -- mason mcp
 ```
 
 The MCP server talks to Mason only over the Postgres protocol. So it works the same with `mason start` on your

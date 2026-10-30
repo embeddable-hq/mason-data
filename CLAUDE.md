@@ -195,6 +195,9 @@ code, read its rules file:**
 - `web-ui.md` — the web page (`mason ui`): rendered from the command server's JSON in the CLI's words, no framework or
   build, served from an allowlist under the run's guard, `mason start`'s only, and what the full UI adds.
 
+**How a common change is done**, step by step with what its tests must hold: `docs/RECIPES.md`. How a statement and `Sync`
+run, and what waits on which thread: `docs/FLOWS.md`.
+
 **Where a new rule goes**: a rule about one subsystem goes in its rules file, never here; this file holds only what
 every session needs. Write the rule and one sentence of why; the incident, the measurement and the dated decision go in
 `docs/DESIGN.md`.

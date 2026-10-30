@@ -87,6 +87,7 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
     const up = await healthUntil(health, first, (status) => status === 200);
     assert.deepEqual(up.tables, { total: 0, copied: 0, copying: 0, waiting: 0, failed: 0 });
     assert.match(first.out(), /^mason serve: served, the project in .*project, the state in .*data\/\.mason$/m);
+    assert.match(first.out(), /^ {2}database {2}mason, what a tool connects with$/m, "MASON_NAME is the project's, never the database's");
     assert.match(first.out(), /mason start: ready/);
     assert.match(first.out(), /\[sync\]|\[engine\]/, "the run's log is on stdout");
     assert.doesNotMatch(first.out(), new RegExp(KEY), "the API key is never printed");
@@ -100,9 +101,9 @@ test("mason serve: healthy once it answers, a table added beside it copied, stop
     const copied = await healthUntil(health, first, (_s, b) => (b.tables as { copied: number }).copied === 1);
     assert.deepEqual(copied.tables, { total: 1, copied: 1, copying: 0, waiting: 0, failed: 0 });
 
-    // the Postgres API, with a token minted from MASON_API_KEY, over the database the name names
+    // the Postgres API, with a token minted from MASON_API_KEY, over the database a tool connects with
     const token = mintToken(KEY, 600).token;
-    const count = psql(`postgresql://anyone:${token}@127.0.0.1:${pgPort}/served`, "SELECT count(*) FROM public.items");
+    const count = psql(`postgresql://anyone:${token}@127.0.0.1:${pgPort}/mason`, "SELECT count(*) FROM public.items");
     assert.equal(count, "500");
 
     // GET /metrics beside /healthz, once it serves: the run's numbers (src/cli/run-server.ts metricsFacts through the

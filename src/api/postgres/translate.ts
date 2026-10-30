@@ -31,9 +31,10 @@ export class Unsupported extends Error {
 /** A statement the session or the catalog Postgres answers (a SELECT over a table is `duckTranslate`'s `duckdb`). */
 export type Translation =
   | { kind: "catalog" }
-  | { kind: "set"; name: string; value: string | null; local: boolean }
+  /** `local`: for the transaction alone; `tag`: its CommandComplete, `SET x TO DEFAULT` being a SET whose value is null */
+  | { kind: "set"; name: string; value: string | null; local: boolean; tag: "SET" | "RESET" }
   | { kind: "show"; name: string }
-  | { kind: "set_config"; name: string; value: string; column: string }
+  | { kind: "set_config"; name: string; value: string; local: boolean; column: string }
   | { kind: "transaction"; tag: string }
   | { kind: "discard"; target: string }
   | { kind: "deallocate" }
@@ -66,6 +67,14 @@ function collect(n: unknown, kind: string, out: Node[] = []): Node[] {
 const INFORMATION_SCHEMA = "information_schema";
 const PG_CATALOG = "pg_catalog";
 
+/** Postgres's IsTransactionExitStmt: what a failed block still accepts. `ROLLBACK TO` and `PREPARE TRANSACTION` are among
+ *  them, each then refused here for being what it is, a savepoint or a prepared transaction, never for the block. */
+export function endsFailedBlock(stmt: Node): boolean {
+  if (kindOf(stmt) !== "TransactionStmt") return false;
+  const k = bodyOf<{ kind?: string }>(stmt).kind;
+  return k === "TRANS_STMT_COMMIT" || k === "TRANS_STMT_ROLLBACK" || k === "TRANS_STMT_ROLLBACK_TO" || k === "TRANS_STMT_PREPARE";
+}
+
 // ------------------------------------------------------------------ entry
 
 /** A statement other than a SELECT or an EXPLAIN (`duckTranslate` takes those): the session's, or refused by name. */
@@ -77,7 +86,7 @@ function sessionStatement(stmt: Node): Translation {
     case "TransactionStmt": {
       const k = bodyOf<{ kind?: string }>(stmt).kind;
       const tag = k === "TRANS_STMT_BEGIN" ? "BEGIN" : k === "TRANS_STMT_START" ? "START TRANSACTION" : k === "TRANS_STMT_COMMIT" ? "COMMIT" : k === "TRANS_STMT_ROLLBACK" ? "ROLLBACK" : null;
-      if (tag === null) throw new Unsupported(`${String(k).replace("TRANS_STMT_", "").toLowerCase()}: this connection is read-only and has no transactions; BEGIN, COMMIT and ROLLBACK are accepted and do nothing`, null);
+      if (tag === null) throw new Unsupported(`${String(k).replace("TRANS_STMT_", "").toLowerCase()}: this connection is read-only and has no savepoints or prepared transactions; BEGIN, COMMIT and ROLLBACK are accepted, and a ROLLBACK undoes the block's SETs`, null);
       return { kind: "transaction", tag };
     }
     case "DiscardStmt": return { kind: "discard", target: String(bodyOf<{ target?: string }>(stmt).target ?? "DISCARD_ALL").replace(/^DISCARD_/, "") };
@@ -128,10 +137,11 @@ export function duckTranslate(stmt: Node, text: string): Translation | { kind: "
  * 'search_path', 'zzz', false)` moved the catalog's resolution of `current_setting` and `version()` to Postgres's own,
  * and a `myapp.x` one session set another read (a review finding of #46). So every call of it is the session's or
  * refused, wherever it is in the statement (an EXPLAIN ANALYZE's included): alone in a SELECT of no table, its
- * arguments literals and `is_local` false (what a tool sends: pgAdmin's `bytea_output`, an ORM's `search_path`), it is
- * `SET name = value` answered as the function's row; any other form is the `set-config-forms` gap. null: no call of it.
+ * arguments literals (what a tool sends: pgAdmin's `bytea_output`, an ORM's `search_path`), it is `SET name = value`,
+ * or `SET LOCAL` under `is_local`, answered as the function's row; any other form is the `set-config-forms` gap. null:
+ * no call of it.
  */
-function setConfig(stmt: Node): { kind: "set_config"; name: string; value: string; column: string } | null {
+function setConfig(stmt: Node): { kind: "set_config"; name: string; value: string; local: boolean; column: string } | null {
   const named = (n: Node): boolean => {
     const parts = strings(bodyOf<{ funcname?: Node[] }>(n).funcname);
     return parts[parts.length - 1] === "set_config" && (parts.length === 1 || (parts.length === 2 && parts[0] === PG_CATALOG));
@@ -139,7 +149,7 @@ function setConfig(stmt: Node): { kind: "set_config"; name: string; value: strin
   const calls = collect(stmt, "FuncCall").filter(named);
   if (calls.length === 0) return null;
   const refuse = (at: number | null): never => {
-    throw new Unsupported(`set_config() is answered by Mason only alone in a SELECT, with literal arguments and is_local false (${gapMark("set-config-forms")})`,
+    throw new Unsupported(`set_config() is answered by Mason only alone in a SELECT, with literal arguments (${gapMark("set-config-forms")})`,
       at, "0A000", "write SET name = 'value', or SELECT set_config('name', 'value', false) on its own", "set-config-forms");
   };
   const at = loc(calls[0]);
@@ -154,8 +164,8 @@ function setConfig(stmt: Node): { kind: "set_config"; name: string; value: strin
   const args = ((call.args ?? []) as Node[]).map((a) => kindOf(a) === "A_Const" ? bodyOf<Any>(a) : null);
   const text = (c: Any | null): string | null => typeof (c?.sval as { sval?: unknown } | undefined)?.sval === "string" ? (c!.sval as { sval: string }).sval : null;
   const [name, value, local] = [text(args[0] ?? null), text(args[1] ?? null), args[2]?.boolval as { boolval?: boolean } | undefined];
-  if (args.length !== 3 || name === null || value === null || local === undefined || local.boolval === true) return refuse(at);
-  return { kind: "set_config", name: name.toLowerCase(), value, column: target.name ?? "set_config" };
+  if (args.length !== 3 || name === null || value === null || local === undefined) return refuse(at);
+  return { kind: "set_config", name: name.toLowerCase(), value, local: local.boolval === true, column: target.name ?? "set_config" };
 }
 
 /**
@@ -249,16 +259,18 @@ function figureColname(n: Node): [string | null, number] {
 
 function setStatement(s: VariableSetStmt): Translation {
   const name = String(s.name ?? "").toLowerCase();
-  if (s.kind === "VAR_RESET" || s.kind === "VAR_SET_DEFAULT") return { kind: "set", name, value: null, local: s.is_local === true };
-  if (s.kind === "VAR_RESET_ALL") return { kind: "set", name: "all", value: null, local: false };
-  if (s.kind === "VAR_SET_MULTI") return { kind: "set", name, value: "", local: s.is_local === true };   // SET SESSION CHARACTERISTICS …
+  if (s.kind === "VAR_RESET") return { kind: "set", name, value: null, local: false, tag: "RESET" };
+  if (s.kind === "VAR_SET_DEFAULT") return { kind: "set", name, value: null, local: s.is_local === true, tag: "SET" };
+  if (s.kind === "VAR_RESET_ALL") return { kind: "set", name: "all", value: null, local: false, tag: "RESET" };
+  // SET TRANSACTION is for the transaction alone, whichever way it is spelt; SET SESSION CHARACTERISTICS is the session's
+  if (s.kind === "VAR_SET_MULTI") return { kind: "set", name, value: "", local: name === "transaction", tag: "SET" };
   if (s.kind !== "VAR_SET_VALUE") throw new Unsupported(`SET ${name}: ${String(s.kind)} is not supported`, s.location ?? null);
   const parts = (s.args ?? []).map((a) => {
     if (kindOf(a) === "A_Const") return constText(bodyOf<A_Const>(a));
     if (kindOf(a) === "TypeCast") { const c = bodyOf<TypeCast>(a); if (c.arg !== undefined && kindOf(c.arg) === "A_Const") return constText(bodyOf<A_Const>(c.arg)); }
     throw new Unsupported(`SET ${name}: a value of kind ${kindOf(a)} is not supported (a literal is)`, loc(a));
   });
-  return { kind: "set", name, value: parts.join(", "), local: s.is_local === true };
+  return { kind: "set", name, value: parts.join(", "), local: s.is_local === true, tag: "SET" };
 }
 
 function constText(c: A_Const): string {

@@ -42,7 +42,7 @@ import { NumericError } from "../lib/pg-numeric.ts";
 import type { PlannedSql } from "./plan.ts";
 import type { ExactColumn } from "./rewrite.ts";
 import type { LibcOrder } from "./libc-order.ts";
-import { CANCEL_SLOTS, cancelStatement, cancelTable, resetSlot } from "./cancel.ts";
+import { beats, CANCEL_SLOTS, cancelStatement, cancelTable, resetSlot } from "./cancel.ts";
 // a cycle (store.ts opens the executor): read at run time only
 import { failureOf } from "./store.ts";
 
@@ -199,12 +199,17 @@ export interface ExecutorOptions {
  * EVERY CALL TO THE WORKER SETTLES (under load the worker deadlocked inside DuckDB, src/duck/store.ts
  * `cleanUp`, and every request to it — the session's statements, the store's close, the test's after-hook — waited for
  * ever, 0 % CPU). Two bounds:
- * - THE WORKER MUST BE HEARD: while a request is pending the executor pings it every `PING_MS`, and a worker that has
- *   said nothing (no answer, no log line, no pong) for `SILENT_MS` is declared stopped — every request in flight and
- *   later is told 57P02, and the run is told (`onCrash`), as for a crash. Not shorter: a statement calling a Mason
- *   function holds the worker's turn for up to a thousand calls at a time (seconds on a loaded machine), and closing a
- *   call-free result waits for DuckDB to honour an interrupt (~10 s for one join, docs/DESIGN.md "The executor
- *   worker"); a deadlock is for ever, so a longer bound only says it later.
+ * - THE WORKER MUST BE HEARD: while a request is pending the executor pings it every `PING_MS`, and a worker of which
+ *   nothing was heard (no answer, no log line, no pong, no beat) for `SILENT_MS` is declared stopped — every request in
+ *   flight and later is told 57P02, and the run is told (`onCrash`), as for a crash. THE TIME IS THIS THREAD'S OWN, its
+ *   ticks counted and never the clock's: a main thread blocked or a process frozen past the bound (a test's spawnSync, a
+ *   SIGSTOP, a paused container) counted against a healthy worker, whose answer sat unread in the port when the tick
+ *   fired (docs/DESIGN.md "The watch"). THE BEAT (src/duck/cancel.ts) is the worker's JavaScript running with no turn of
+ *   its loop: a statement calling a Mason function holds that loop for a thousand calls at a time, 999 × 322 ms over
+ *   20 kB documents, and such a statement ran 1,151 s without a pong and answered. What is left is a thread that neither
+ *   turned its loop nor ran a row of a Mason function for 60 s: blocked inside the engine, since nothing on it waits for
+ *   the engine's tasks any more (src/duck/store.ts `cleanUp`), or spinning. A deadlock is for ever, so a longer bound
+ *   only says it later.
  * - THE CLOSE IS BOUNDED: `close` gives the worker's shutdown `CLOSE_GRACE_MS` (a calling statement stops at its next
  *   call, milliseconds; a call-free one at DuckDB's interrupt; and the whole stop must fit inside a platform's 10 s
  *   before SIGKILL and `mason stop`'s 15 s), then declares it stopped the same way and resolves; the thread is ended
@@ -242,8 +247,10 @@ export class Executor {
   /** the cancel table, shared with the worker (src/duck/cancel.ts), and its free slots */
   readonly cancels = cancelTable();
   private readonly free: number[] = Array.from({ length: CANCEL_SLOTS }, (_, i) => CANCEL_SLOTS - 1 - i);
-  /** when the worker last said anything (performance.now()) */
-  private heard = performance.now();
+  /** pings sent since the worker last said anything or beat: the watch's count, of this thread's own ticks */
+  private unanswered = 0;
+  /** the worker's beat at the watch's last look */
+  private beat = 0;
   private readonly watch: NodeJS.Timeout;
   private readonly silentMs: number;
   /** why the worker was given up on without exiting (`close`'s bound, the silence), once it was: its instance may
@@ -263,7 +270,7 @@ export class Executor {
     // a request is in flight (`call`)
     this.worker.unref();
     this.worker.on("message", (m: Reply) => {
-      this.heard = performance.now();
+      this.unanswered = 0;
       if ("pong" in m) return;
       if ("log" in m) { this.log(m.log); return; }
       if (m.id === this.shutdownId) {
@@ -286,15 +293,20 @@ export class Executor {
       this.shutdownAnswered();
       resolve();
     }));
-    // the watch (see SILENT_MS): only while a request is pending — an idle worker has nothing to answer
+    // the watch (see SILENT_MS): only while a request is pending — an idle worker has nothing to answer — and never
+    // sooner than the bound after its first ping, whatever the moment the request came: the count is checked, then raised
+    const tick = Math.min(PING_MS, this.silentMs / 4);
+    const bound = Math.ceil(this.silentMs / tick);
     this.watch = setInterval(() => {
-      if (this.gone !== null || this.pending.size === 0) { this.heard = performance.now(); return; }
-      if (performance.now() - this.heard > this.silentMs) {
-        this.abandon(`it answered nothing for ${Math.round(this.silentMs / 1000)} s with ${this.pending.size} request(s) waiting (stuck inside the engine: Mason bug, report it with mason logs)`);
+      const beat = beats(this.cancels);
+      if (this.gone !== null || this.pending.size === 0 || beat !== this.beat) { this.beat = beat; this.unanswered = 0; return; }
+      if (this.unanswered >= bound) {
+        this.abandon(`it answered nothing for ${Math.round(this.silentMs / 1000)} s and ran no Mason function, with ${this.pending.size} request(s) waiting (stuck inside the engine: Mason bug, report it with mason logs)`);
         return;
       }
+      this.unanswered++;
       this.worker.postMessage({ op: "ping" });
-    }, Math.min(PING_MS, this.silentMs / 4));
+    }, tick);
     this.watch.unref();
   }
 

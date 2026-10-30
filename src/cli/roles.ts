@@ -37,6 +37,7 @@ import { closest, didYouMean } from "../lib/did-you-mean.ts";
 import type { Failure } from "./command.ts";
 import { entryName, shownPath, sourceOf, tableNameProblem } from "./sources.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive, type TableGrant } from "../duck/grants.ts";
+import { ATTRIBUTE_NAME_RE, ATTRIBUTE_NAME_RULE, missingAttributes, whereAttributes, whereParts, type AttributeShape, type RowFilter, type WherePart } from "../duck/row-filter.ts";
 export { exampleRole, noRoleWayOut } from "../duck/grants.ts";
 
 export const ROLES_FILE = "roles.yml";
@@ -49,8 +50,8 @@ export const ROLE_NAME_RULE = "1 to 63 lower case letters, digits, \"_\" or \"-\
 const roleNameProblem = (name: string): string | null =>
   !ROLE_NAME_RE.test(name) ? `is not a role name: ${ROLE_NAME_RULE}` : name === "postgres" || name === "public" || name.startsWith("pg_") ? `is a name Postgres keeps for itself: choose another` : null;
 
-const ROLE_KEYS = ["tables"] as const;
-const TABLE_KEYS = ["columns", "exclude"] as const;
+const ROLE_KEYS = ["tables", "attributes"] as const;
+const TABLE_KEYS = ["columns", "exclude", "where", "through"] as const;
 
 /** A table of a role, as the file names it. */
 export interface RoleTable {
@@ -61,9 +62,15 @@ export interface RoleTable {
   /** the columns it may read; null: every copied column but `exclude` */
   columns: string[] | null;
   exclude: string[];
+  /** `where:`: the rows it may read, a Postgres boolean expression over the table's columns and the role's `:attributes` */
+  where?: { text: string; parts: WherePart[] };
+  /** `through:`: a row is visible when the row of `table` (a table of the same role, `name` as written) it references is;
+   *  `column` the explicit form's (`through: { orders: order_id }`), null where the foreign key decides */
+  through?: { name: string; table: string; column: string | null };
 }
-/** A role as the file names it: its tables, or `all` (every synced table and column, resolved at every read). */
-export interface RoleEntry { name: string; tables: RoleTable[] | "all" }
+/** A role as the file names it: its tables, or `all` (every synced table and column, resolved at every read), and the
+ *  attributes its users carry (absent: none declared). */
+export interface RoleEntry { name: string; tables: RoleTable[] | "all"; attributes?: Map<string, AttributeShape> }
 /** `default`: the role of a user with no role of its own; null where the file names none (such a user reads nothing). */
 export interface RolesFile { file: string; roles: RoleEntry[]; default: string | null }
 
@@ -81,6 +88,49 @@ function nameList(v: unknown, at: string, what: string): string[] | string {
   const twice = v.find((x, i) => v.indexOf(x) !== i);
   if (twice !== undefined) return `${at}: names ${String(twice)} twice`;
   return v as string[];
+}
+
+/** A role's `attributes:`, or the problem with it: `[tenant]` (every one a scalar) or `{ tenant: scalar, tenants: list }`. */
+function attributesOf(v: unknown, at: string): Map<string, AttributeShape> | string | undefined {
+  if (v === undefined) return undefined;
+  const shape = `is the attributes its users carry: [tenant] (each one value), or { tenant: scalar, tenants: list }`;
+  const out = new Map<string, AttributeShape>();
+  const entries: Array<[unknown, unknown]> = Array.isArray(v) ? v.map((x) => [x, "scalar"]) : isPlain(v) ? Object.entries(v) : [];
+  if (entries.length === 0) return `${at}: ${shape}`;
+  for (const [name, kind] of entries) {
+    if (typeof name !== "string") return `${at}: ${yamlRead(name)} — ${shape}`;
+    if (!ATTRIBUTE_NAME_RE.test(name)) return `${at}: ${name} is not an attribute's name: ${ATTRIBUTE_NAME_RULE}`;
+    if (out.has(name)) return `${at}: names ${name} twice`;
+    if (kind !== "scalar" && kind !== "list") return `${at}.${name}: is scalar (one value: --set ${name}=42) or list (several: --set ${name}=12 --set ${name}=41)${typeof kind === "string" ? didYouMean(kind, ["scalar", "list"]) : ""}`;
+    out.set(name, kind);
+  }
+  return out;
+}
+
+/** A table's `where:` and `through:` (never both), or the problem with them: each `:name` an attribute of the role. */
+function rowsOf(e: Record<string, unknown>, tat: string, attributes: ReadonlyMap<string, AttributeShape>): Pick<RoleTable, "where" | "through"> | string {
+  if (e.where !== undefined && e.through !== undefined) return `${tat}: where and through together — where: filters this table's rows by its own columns, through: by another table's; keep one`;
+  if (e.where !== undefined) {
+    if (typeof e.where !== "string" || e.where.trim() === "") return `${tat}.where: is a Postgres condition on the table's columns, quoted: where: "tenant_id = :tenant"`;
+    const parts = whereParts(e.where);
+    if ("problem" in parts) return `${tat}.where: ${parts.problem}`;
+    const declared = [...attributes.keys()];
+    for (const a of whereAttributes(parts)) {
+      if (!attributes.has(a)) return `${tat}.where: :${a} is not an attribute of the role${didYouMean(a, declared)} — declare it beside tables: attributes: [${[...declared, a].join(", ")}]`;
+    }
+    return { where: { text: e.where, parts } };
+  }
+  if (e.through !== undefined) {
+    const form = `is the table whose visible rows make this one's visible: through: orders, or through: { orders: order_id } naming the column that references it`;
+    let name: string, column: string | null = null;
+    if (typeof e.through === "string") name = e.through;
+    else if (isPlain(e.through) && Object.keys(e.through).length === 1 && typeof Object.values(e.through)[0] === "string") [name, column] = Object.entries(e.through)[0] as [string, string];
+    else return `${tat}.through: ${form}`;
+    const bad = tableNameProblem(name);
+    if (bad !== null) return `${tat}.through: ${bad}`;
+    return { through: { name, table: sourceOf(name), column } };
+  }
+  return {};
 }
 
 /** The file's text read as a roles file: its shape, never the copied tables (that is `resolveRoles`'s). */
@@ -114,17 +164,22 @@ export function parseRolesText(text: string, file: string): RolesFile | { proble
       if (bad !== null) { problems.push(`${at}: ${name} ${bad}`); continue; }
       if (!isPlain(raw)) { problems.push(`${at}: is { tables: { … } }, the tables the role may read`); continue; }
       const stray = Object.keys(raw).filter((k) => !(ROLE_KEYS as readonly string[]).includes(k));
-      for (const k of stray) problems.push(`${at}: unexpected key ${k}${didYouMean(k, ROLE_KEYS)} — a role takes tables`);
+      for (const k of stray) problems.push(`${at}: unexpected key ${k}${didYouMean(k, ROLE_KEYS)} — a role takes tables and attributes`);
+      // ATTRIBUTES: what each of its users carries (mason user add … --set tenant=42), read by its where:s as :tenant
+      const attrs = attributesOf(raw.attributes, `${at}.attributes`);
+      if (typeof attrs === "string") problems.push(attrs);
+      const attributes = typeof attrs === "string" ? undefined : attrs;
+      const withAttrs = attributes === undefined || attributes.size === 0 ? {} : { attributes };
       if (raw.tables === undefined) { problems.push(`${at}.tables: missing — write tables: all (every synced table) or tables: { orders: {} }, the tables the role may read (a role with no table reads nothing: remove it instead)`); continue; }
       const tablesShape = `${at}.tables: is all (every synced table and column) or one entry per table the role may read, like tables: { orders: {}, customers: { exclude: [email] } }`;
       // `tables: all`: every synced table and every column, those the sources file adds later included (resolveRoles)
-      if (raw.tables === "all") { if (stray.length === 0) roles.push({ name, tables: "all" }); continue; }
+      if (raw.tables === "all") { if (stray.length === 0 && typeof attrs !== "string") roles.push({ name, tables: "all", ...withAttrs }); continue; }
       if (typeof raw.tables === "string") { problems.push(`${tablesShape} — ${raw.tables} is neither${didYouMean(raw.tables, ["all"])}`); continue; }
       if (Array.isArray(raw.tables)) { problems.push(`${tablesShape} — not a list: tables: all, or a key per table`); continue; }
       if (!isPlain(raw.tables) || Object.keys(raw.tables).length === 0) { problems.push(`${tablesShape} — a role with no table reads nothing: remove it instead`); continue; }
       const tables: RoleTable[] = [];
       const seen = new Map<string, string>();
-      let ok = stray.length === 0;
+      let ok = stray.length === 0 && typeof attrs !== "string";
       for (const [key, entry] of Object.entries(raw.tables)) {
         const tat = `${at}.tables.${key}`;
         // `all` is the file's word for every table: a key of that name is a mistake either way, said with both meanings
@@ -135,19 +190,34 @@ export function parseRolesText(text: string, file: string): RolesFile | { proble
         const before = seen.get(table);
         if (before !== undefined) { problems.push(`${tat}: ${table} is named twice (as ${before} too) — keep one`); ok = false; continue; }
         seen.set(table, key);
-        if (entry !== null && !isPlain(entry)) { problems.push(`${tat}: is {} (every column), { columns: [...] } or { exclude: [...] }`); ok = false; continue; }
+        if (entry !== null && !isPlain(entry)) { problems.push(`${tat}: is {} (every column), { columns: [...] }, { exclude: [...] }, and where: or through: for the rows`); ok = false; continue; }
         const e = entry ?? {};
         const odd = Object.keys(e).filter((k) => !(TABLE_KEYS as readonly string[]).includes(k));
-        for (const k of odd) problems.push(`${tat}: unexpected key ${k}${didYouMean(k, TABLE_KEYS)} — a table takes columns or exclude`);
+        for (const k of odd) problems.push(`${tat}: unexpected key ${k}${didYouMean(k, TABLE_KEYS)} — a table takes columns or exclude, and where or through`);
         const both = e.columns !== undefined && e.exclude !== undefined;
         if (both) problems.push(`${tat}: columns and exclude together — columns names what the role reads, exclude what it may not read of every column; keep one`);
         const columns = e.columns === undefined ? null : nameList(e.columns, `${tat}.columns`, "the columns the role reads");
         const exclude = e.exclude === undefined ? [] : nameList(e.exclude, `${tat}.exclude`, "the columns the role may not read");
         for (const x of [columns, exclude]) if (typeof x === "string") problems.push(x);
-        if (typeof columns === "string" || typeof exclude === "string" || odd.length || both) { ok = false; continue; }
-        tables.push({ name: key, table, columns, exclude });
+        const rows = rowsOf(e, tat, attributes ?? new Map());
+        if (typeof rows === "string") problems.push(rows);
+        if (typeof columns === "string" || typeof exclude === "string" || odd.length || both || typeof rows === "string") { ok = false; continue; }
+        tables.push({ name: key, table, columns, exclude, ...rows });
       }
-      if (ok) roles.push({ name, tables });
+      // a through: names a table of this role that has a where: or a through: of its own, and never comes back round
+      for (const t of tables) {
+        if (t.through === undefined) continue;
+        const tat = `${at}.tables.${t.name}.through`;
+        const parent = tables.find((x) => x.table === t.through!.table);
+        if (parent === undefined) { problems.push(`${tat}: ${t.through.name} is not a table of the role ${name}${didYouMean(t.through.name, tables.map((x) => x.name))} — add it with a where: (a row of ${t.name} is visible when the row of ${t.through.name} it references is)`); ok = false; continue; }
+        if (parent.where === undefined && parent.through === undefined) { problems.push(`${tat}: ${t.through.name} has no where: or through: of its own, so every row of it is visible — filter it (where: "…"), or remove the through: (every row of ${t.name} is visible then)`); ok = false; continue; }
+        const seen = [t.table];
+        for (let p: RoleTable | undefined = parent; p?.through !== undefined; p = tables.find((x) => x.table === p!.through!.table)) {
+          if (seen.includes(p.table)) { problems.push(`${tat}: comes back round (${[...seen, p.table].map((x) => tables.find((y) => y.table === x)?.name ?? x).join(" → ")}) — one of them needs a where: instead`); ok = false; break; }
+          seen.push(p.table);
+        }
+      }
+      if (ok) roles.push({ name, tables, ...withAttrs });
     }
   }
   if (problems.length) return { problems };
@@ -180,7 +250,46 @@ export function readRoles(folder: string, root: string): RolesFile | null | Fail
 }
 
 /** A copied table as the roles are resolved against it: its columns, when known (a sources file's entry knows none). */
-export interface CopiedTable { source: string; columns: ReadonlyArray<{ name: string }> | null }
+export interface CopiedTable {
+  source: string; columns: ReadonlyArray<{ name: string }> | null;
+  /** its foreign keys as the database's catalog reports them (src/cli/preflight.ts), when known: what `through:` follows */
+  foreignKeys?: ReadonlyArray<{ column: string; target: string; targetColumn: string }>;
+  /** its primary key's columns, when known: what an explicit `through: { orders: order_id }` with no foreign key compares */
+  key?: readonly string[];
+}
+
+/**
+ * THE COLUMNS A `through:` COMPARES: the child's column and the parent's it references — by the foreign key from the
+ * child to the parent as the database's catalog reports it, or the column named (`through: { orders: order_id }`) and
+ * the foreign key on it, else the parent's one-column primary key. Null where the foreign keys are not known (a
+ * sources file read without the database: the run holds it). One problem, at its key, with the way out otherwise.
+ */
+export function throughColumns(t: RoleTable, at: string, copied: readonly CopiedTable[]): { column: string; parentColumn: string } | string | null {
+  const th = t.through!;
+  const child = copied.find((x) => x.source === t.table), parent = copied.find((x) => x.source === th.table);
+  if (child === undefined || parent === undefined || child.foreignKeys === undefined) return null;
+  const tat = `${at}.through`;
+  const fks = child.foreignKeys.filter((f) => f.target === th.table);
+  const explicit = `through: { ${th.name}: <column> }`;
+  let column: string, parentColumn: string;
+  if (th.column !== null) {
+    const have = child.columns?.map((c) => c.name);
+    if (have !== undefined && !have.includes(th.column)) return `${tat}.${th.name}: the synced ${t.table} has no column ${th.column}${didYouMean(th.column, have)} (its columns: ${have.join(", ")})`;
+    column = th.column;
+    const fk = fks.find((f) => f.column === th.column);
+    if (fk !== undefined) parentColumn = fk.targetColumn;
+    else if (parent.key !== undefined && parent.key.length === 1) parentColumn = parent.key[0]!;
+    else return `${tat}.${th.name}: ${th.column} references ${th.table} by no foreign key, and ${th.table} has no one-column primary key to compare it with — a through: compares one column with the parent's key`;
+  } else {
+    if (fks.length === 0) return `${tat}: ${t.table} has no foreign key to ${th.table} (as the database's catalog reports them) — name the column that references it: ${explicit.replace("<column>", `<a column of ${t.name}>`)}`;
+    if (fks.length > 1) return `${tat}: ${t.table} references ${th.table} by ${fks.length} foreign keys (${fks.map((f) => f.column).join(", ")}) — name the one: ${fks.map((f) => `through: { ${th.name}: ${f.column} }`).join(" or ")}`;
+    column = fks[0]!.column; parentColumn = fks[0]!.targetColumn;
+  }
+  const childHave = child.columns?.map((c) => c.name), parentHave = parent.columns?.map((c) => c.name);
+  if (childHave !== undefined && !childHave.includes(column)) return `${tat}: the synced ${t.table} has no column ${column}, which references ${th.table} — sync it (the sources file's columns: for ${t.name})`;
+  if (parentHave !== undefined && !parentHave.includes(parentColumn)) return `${tat}: the synced ${th.table} has no column ${parentColumn}, which ${t.table}.${column} references — sync it (the sources file's columns: for ${th.name})`;
+  return { column, parentColumn };
+}
 
 /**
  * Why a role's tables are not the copy's, each at its key: a table the sources file does not copy (refused by name:
@@ -198,6 +307,10 @@ export function roleProblems(roles: RolesFile, copied: readonly CopiedTable[]): 
       if (c === undefined) {
         problems.push(`${at}: ${t.table} is not a table the sources file syncs${nearestEntry(t.name, names)} — a role reads synced tables only (${names.length ? `synced: ${names.join(", ")}` : "none is synced yet"}; mason add ${t.name} syncs it)`);
         continue;
+      }
+      if (t.through !== undefined) {
+        const th = throughColumns(t, at, copied);
+        if (typeof th === "string") problems.push(th);
       }
       if (c.columns === null) continue;
       const have = c.columns.map((x) => x.name);
@@ -235,16 +348,25 @@ export function resolveRoles(roles: RolesFile, copied: readonly (CopiedTable & {
       // every table copied NOW, every column: resolved again whenever the copied tables move (LiveRoles), so a table
       // the sources file adds later is the role's at the next statement
       for (const c of copied) tables.set(c.source, { table: c.source, all: true, columns: c.columns.map((x) => x.name) });
-      out.set(r.name, { name: r.name, file, tables, all: true });
+      out.set(r.name, { name: r.name, file, tables, all: true, ...(r.attributes !== undefined ? { attributes: r.attributes } : {}) });
       continue;
     }
+    const filters = new Map<string, RowFilter>();
     for (const t of r.tables) {
       const have = copied.find((x) => x.source === t.table)!.columns.map((x) => x.name);
       const all = t.columns === null && t.exclude.length === 0;
       const columns = all ? have : t.columns !== null ? have.filter((c) => t.columns!.includes(c)) : have.filter((c) => !t.exclude.includes(c));
       tables.set(t.table, { table: t.table, all, columns });
+      const at = `roles.${r.name}.tables.${t.name}`;
+      if (t.where !== undefined) filters.set(t.table, { table: t.table, at, where: t.where });
+      if (t.through !== undefined) {
+        // held by roleProblems above; foreign keys not known here are none, so an implicit through: is refused there
+        const th = throughColumns(t, at, copied.map((c) => ({ ...c, foreignKeys: c.foreignKeys ?? [] })));
+        if (th === null || typeof th === "string") return rolesFailure(roles.file, root, [th ?? `${at}.through: the synced tables are not known`]);
+        filters.set(t.table, { table: t.table, at, through: { parent: t.through.table, ...th } });
+      }
     }
-    out.set(r.name, { name: r.name, file, tables, all: false });
+    out.set(r.name, { name: r.name, file, tables, all: false, ...(r.attributes !== undefined ? { attributes: r.attributes } : {}), ...(filters.size > 0 ? { filters } : {}) });
   }
   return out;
 }
@@ -307,6 +429,28 @@ export const problemText = (f: Failure): string => `${f.message}${f.why ? `: ${f
 export function usersWithoutRole(users: ReadonlyArray<{ name: string; role?: string | undefined }>, roles: ReadonlySet<string>): Array<{ name: string; role: string }> {
   return users.flatMap((u) => u.role !== undefined && !roles.has(u.role) ? [{ name: u.name, role: u.role }] : []);
 }
+
+/**
+ * THE USERS WITHOUT A VALUE THEIR ROLE'S ROW FILTERS READ (a user added before the file gained the attribute) — said at
+ * the start and by `mason user list`, as the listener refuses their every statement (src/api/postgres/server.ts
+ * withRows): each with its role, the attributes it lacks, and the commands that make it again with them.
+ */
+export function usersMissingAttributes(users: ReadonlyArray<{ name: string; role?: string | undefined; attributes?: Readonly<Record<string, unknown>> | undefined }>,
+  live: Pick<RolesLive, "file" | "default" | "problem" | "grants">): Array<{ name: string; role: string; missing: string[] }> {
+  if (live.problem !== null) return [];
+  return users.flatMap((u) => {
+    const role = userRole(u, live).role;
+    const g = role === undefined ? undefined : live.grants.get(role);
+    if (g?.filters === undefined) return [];
+    const missing = missingAttributes(g.filters.values(), (u.attributes ?? {}) as Record<string, string>).map((m) => m.attr);
+    return missing.length === 0 ? [] : [{ name: u.name, role: g.name, missing }];
+  });
+}
+
+/** a user without a value its role's filters read, as `mason start` and `mason user list` say it: ONE wording */
+export const missingAttributesText = (u: { name: string; role: string; missing: readonly string[] }): string =>
+  `the user ${u.name} has no value for ${u.missing.join(", ")}, which the role ${u.role} filters rows by: its statements are refused — ` +
+  `mason user remove ${u.name} && mason user add ${u.name} --role ${u.role} ${u.missing.map((a) => `--set ${a}=<value>`).join(" ")}`;
 
 /** How a user's role is decided: its own (`mason user add --role`, "file"), the roles file's `default:` ("default"), or
  *  none ("none": no roles file, where it reads every synced table, or a file with no default, where it reads nothing). */

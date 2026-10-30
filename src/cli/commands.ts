@@ -19,7 +19,7 @@ import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
 import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
-import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, STATE_DIR, databaseMoved, isProject, projectDatabase, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresFacts, postgresLink, type PostgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
@@ -118,7 +118,9 @@ export interface RunState {
   ui?: boolean;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
-  roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[] };
+  roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[];
+    /** each role's attributes and their shapes, and its where:s (src/duck/row-filter.ts): what mason user add --set is held to */
+    attributes?: Record<string, Record<string, "scalar" | "list">>; wheres?: Record<string, Array<{ table: string; at: string; where: string }>> };
   /** the share open now (mason share, src/cli/share-run.ts), or null; a run from before it has none */
   share?: ShareState | null;
 }
@@ -424,7 +426,12 @@ export async function status(argv: string[]): Promise<number> {
   const run = r0.run;
   return guarded("status", json, async () => {
     const st = styleOut();
-    const s = await readState(run);
+    const read = await readState(run);
+    // the name is read at the start, so an edit of the sources file's database: is said here until the run takes it
+    const answersAs = postgresLink(run.postgresUrl).database;
+    const fileSays = databaseMoved(r0.project, answersAs);
+    const s = fileSays !== null
+      ? { ...read, warnings: [...read.warnings, `the sources file now says tools connect with ${fileSays}, and this run answers as ${answersAs}: mason stop && mason start takes it`] } : read;
     const r = readiness(s);
     // the statements the Postgres API answered slowly, and the ones it refused, with the reason (src/duck/requests.ts)
     const slowReply = await callRun(run, "GET", "/api/slow");
@@ -725,6 +732,9 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const src = projectSource(project);
   const tables = "message" in src ? [] : src.tables.map((e) => e.table);
   const database = "message" in src ? null : maskedUrl(src.resolved);
+  // the name a tool connects with once it starts: null when the file cannot say it (`source.error` says why)
+  const connect = projectDatabase(project);
+  const connectName = typeof connect === "string" ? connect : null;
   const duckFile = path.join(project.dir, DUCK_FILE);
   // the copy's file, when a run has made one: its size says what the next mason start resumes with
   const bytes = fs.existsSync(duckFile) ? fs.statSync(duckFile).size : null;
@@ -735,6 +745,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const state = hung === null ? "not running" : "hung";
   if (json) {
     out(jsonText(STATUS, { running: false, ...(hung === null ? {} : { hung: { pid: hung.run.pid, problem: hung.problem.problem, why: hung.problem.why } }),
+      postgres: { database: connectName },
       project: { name: project.config.name, folder: project.folder },
       source: { name: "message" in src ? null : src.name, file: "message" in src ? null : src.file, url: database, error: "message" in src ? errorJson(src) : null },
       engine: { file: duckFile, bytes, restarts }, tables: tables.map((table) => ({ table })),
@@ -750,7 +761,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
       : `${version()}, pid ${hung.run.pid} · running but does not answer its commands: ${hung.problem.why}`],
     ["Synced data", bytes === null ? "none yet (mason start makes it)" : `${duckFile} · ${fileSize(bytes)}`],
     ...restartsRows(restarts),
-    ["Postgres API", hung === null ? "not running" : `${withPlaceholders(hung.run.postgresUrl)}  (held by the hung run; it may not answer)`],
+    ["Postgres API", hung === null ? `not running${connectName === null ? "" : ` (a tool connects with the database ${connectName})`}` : `${withPlaceholders(hung.run.postgresUrl)}  (held by the hung run; it may not answer)`],
   ] }, st));
   out("");
   if (!tables.length) out("No table added yet.");
@@ -1395,7 +1406,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --running        the statements running now (Mason must be running)
   --json           as data: { lines: [{ at, text }] } (the log's entries, oldest first; at is null for a line with no
                    time); with --requests { requests: [{ requestId, startedAt, endedAt, session, applicationName,
-                   tokenName, user (the mason user), method, outcome (ok, refused, failed, cancelled), status
+                   tokenName, user (the mason user), role, attributes (the user's values its role's row filters read, or
+                   null), method, outcome (ok, refused, failed, cancelled), status
                    (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
                    bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
                    or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,

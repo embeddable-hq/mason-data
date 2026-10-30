@@ -16,7 +16,6 @@
  * (src/duck/sync.ts attach), so the store itself opens offline.
  */
 import * as os from "node:os";
-import { setTimeout as sleep } from "node:timers/promises";
 import { DuckDBInstance, version, type DuckDBConnection, type DuckDBPreparedStatement, type DuckDBResult, type DuckDBValue } from "@duckdb/node-api";
 import { Executor, type DuckConnection } from "./executor.ts";
 import { beginStatement, cancelStatement, slotName, statementCancelled } from "./cancel.ts";
@@ -26,7 +25,7 @@ import { duckParameters, missingRelationHint, planDuck, quoteDuckKeywords } from
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
 import { VERIFIED } from "./verified.ts";
-import { msSinceCall, registerFunctions, SESSION_VARIABLE, SETTINGS_VARIABLE } from "./functions.ts";
+import { registerFunctions, SESSION_VARIABLE, SETTINGS_VARIABLE } from "./functions.ts";
 import { duckCollation, type DuckCollation } from "./rewrite.ts";
 import { decodeLibcOrder, encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
 import { dataRow } from "../api/postgres/protocol.ts";
@@ -358,12 +357,8 @@ function postgresWording(kind: string, message: string): { code: string; message
   return null;
 }
 
-/** how long no call of a session must have been answered before a result of its that did not end is closed: a task
- *  waiting for a call is answered within a turn of the worker's loop (microseconds when it is free), and the work a task
- *  does between two calls is one vector's (2,048 rows) — milliseconds; 50 ms leaves an order of magnitude over both */
-const CALLS_QUIET_MS = 50;
-/** when the wait for a statement's calls to stop is said in the log */
-const CALLS_SLOW_MS = 5_000;
+/** when the wait for a statement to end is said in the log */
+const ENDING_SLOW_MS = 5_000;
 
 /** One wire session's DuckDB connection, with the session's zone and search_path applied before each statement. Runs
  *  on the executor worker (src/duck/executor-worker.ts), its statements asked by the listener's RemoteRunner. */
@@ -470,13 +465,10 @@ export class SessionRunner implements DuckRunner {
     const p = await this.prepare(sql);
     timing.prepareMs = performance.now() - t0;
     // HOW A STATEMENT IS CANCELLED (src/duck/functions.ts "every call carries its session"; the test
-    // server's hung process). One that calls no Mason function is interrupted, and its result closed at once: the
-    // close is what cancels the executor's tasks, and a close put off lets the session's next statement take the
-    // connection first, after which the close waits for the cancelled query to run to its end (38 s, in
-    // tests/duck-wire.test.ts "statement_timeout"). One that does is cancelled through its session — its next call
-    // raises — AND interrupted (its tasks stop at their next chunk, so a call-free rest past its last call stops too),
-    // and its result is closed only once DuckDB has handed it back (the fetch's own path, or `drain`) and its calls
-    // have stopped (`cleanUp`: a task still inside a call waits for this thread, which a close would hold). Whether it calls
+    // server's hung process). It is interrupted — its tasks stop at their next chunk — and, if it calls a Mason
+    // function, cancelled through its session as well: its next call raises, so a task of it does not call on. Its
+    // result is closed only once DuckDB ended the query, on a thread that is not this one (`cleanUp`: a task still
+    // inside a call waits for this thread, which a close would hold). Whether it calls
     // one is the PLAN's (src/duck/plan.ts PlannedSql `functions`, read off the rewritten tree), never a match on its
     // text: a stored JSON path's column and the view of a copy's visible columns are named `__mason_…` too, and
     // read as calls, every `SELECT *` over such a copy was cancelled only by a call it never made (a review
@@ -497,10 +489,13 @@ export class SessionRunner implements DuckRunner {
     let total = 0;
     let result: DuckDBResult | null = null;
     let closed = false, fetching = false, released = false, said = false;
+    /** DuckDB ended the query: a fetch failed, or read its end (`cleanUp` says why that is what `release` waits for) */
+    let ended = false;
+    let ending = false;
     // ITS LINE IS SAID WHEN IT ENDS, before its client hears the end, never when its result is released: that waits for
-    // its calls to stop (`cleanUp`, 50 ms and more), by when its client is gone and the next session's statements are
-    // running, and a reader of the log took the late line for theirs (`tests/duck-wire.test.ts`, 1 run in 100 under
-    // load). The worker's port keeps the order: a line posted before the answer is read before it
+    // DuckDB to end it (`cleanUp`), by when its client is gone and the next session's statements are running, and a
+    // reader of the log took the late line for theirs (`tests/duck-wire.test.ts`, 1 run in 100 under load). The
+    // worker's port keeps the order: a line posted before the answer is read before it
     const say = (): void => {
       if (said) return;
       said = true;
@@ -515,49 +510,27 @@ export class SessionRunner implements DuckRunner {
       p.destroySync();
       say();
     };
-    // A CALLING STATEMENT THAT DID NOT RUN TO ITS END (it failed, its cancel raised, it was closed early) IS CLOSED
-    // ONLY ONCE ITS CALLS HAVE STOPPED (the suite hung for good, 0 % CPU). DuckDB hands back a failed chunk
-    // while another of the query's tasks may still wait INSIDE a call — for this thread, which runs every Mason
-    // function — and closing the result waits for that task (Executor::CancelTasks): this thread waited for the task,
-    // the task for this thread, and every later request to the copy with them (`cleanUp`). One that calls no function,
-    // or one read to its end, has no task left to wait for and is released at once
-    const releaseAfterCleanup = (): void => {
-      if (!callsFunctions || released) { release(); return; }
-      say();
-      const done = (async () => { await this.cleanUp(seq, sql); release(); })();
+    // A STATEMENT THAT DID NOT RUN TO ITS END (it failed, its cancel raised, it was closed early) IS CLOSED ONLY ONCE
+    // DuckDB ENDED IT OFF THIS THREAD (`cleanUp`), the session's next statement waiting for that (`releasing`). One read
+    // to its end has no task left, and is released at once
+    const endOffThisThread = (): void => {
+      if (released || ending) return;
+      ending = true;
+      const done = (async () => { await this.cleanUp(seq, sql, callsFunctions, ended ? null : result); release(); })();
       this.releasing.add(done);
       void done.finally(() => this.releasing.delete(done));
     };
-    // a result closed before its end while no fetch is in flight: a statement calling no function is released at
-    // once (the close cancels the executor); one that does is read on until DuckDB hands it back refused (its next
-    // call raises) or read to its end, then released — the session's next statement waits for that (`releasing`)
+    // it ended with an answer its client is about to hear: said now
+    const releaseAfterCleanup = (): void => { if (!released) say(); endOffThisThread(); };
+    // a result closed before its end while no fetch is in flight: no end its client hears, so its line is its release's
     const drain = (): void => {
-      const r = result;
       // CLOSED WHILE DuckDB STILL STARTS IT (its `stream()` pending: an aggregate computes there whole): nothing is
       // released under the pending start — that destroyed the prepared statement under it and, its release done, let the
       // start's own failure skip `cleanUp`, so the connection and the instance closed while its other tasks still had
       // calls queued for this thread, and the thread's end met them (Linux CI: `FATAL ERROR: Error::Error
       // napi_define_properties`, 7 runs in 30 of a stop under a calling count). The start's own path releases it: its
       // failure through `releaseAfterCleanup`, its answer drained once handed back (below `stream()`)
-      if (r === null) return;
-      if (!callsFunctions) { release(); return; }
-      const done = (async () => {
-        // read on until the next call raises or the result ends — an EMPTY chunk, as `fetch` reads it: past its end a
-        // streamed result hands back empty chunks for ever, never null, and a result closed after its last row but
-        // before its end was read here without end, a thread spinning and the session's close waiting on it
-        try { for (let c = await r.fetchChunk(); c !== null && c.rowCount > 0; c = await r.fetchChunk()) { /* its rows are nobody's */ } }
-        catch (e) {
-          // the cancel's own refusal (its next call raised, 57014) is what the drain waits for. Anything else is the
-          // statement's real error, met after the listener let go of its answer: no one reads it any more, and a
-          // rethrow here would reach no caller (it would end this thread, and with it every session), so it is said
-          if (pgErrorOf(e, sql).fields.code !== "57014") this.log(`a statement closed before its end failed while it was drained: ${e instanceof Error ? e.message : String(e)} — ${oneLine(sql)}`);
-          // it failed, so a task of it may still be inside a call: closed once its calls have stopped
-          await this.cleanUp(seq, sql);
-        }
-        release();
-      })();
-      this.releasing.add(done);
-      void done.finally(() => this.releasing.delete(done));
+      if (result !== null) endOffThisThread();
     };
     // an early end by the listener (a portal closed half read, the session gone): cancelled, and released — by the
     // fetch in flight once DuckDB hands the chunk back, else by `drain`
@@ -577,14 +550,14 @@ export class SessionRunner implements DuckRunner {
       const t1 = performance.now();
       try { result = await p.stream(); }
       catch (e) { throw failure(e); }
-      // CLOSED WHILE IT STARTED (`drain` above), now that DuckDB handed it back. The two differ: one that calls no
-      // function is released at once (its close cancels the executor) and so is never read after — told the cancel
-      // here, before a column of a destroyed result is asked (DuckDB answers 0 columns for one: a review finding, an
-      // XX000 "report it" where the session had closed); one that calls is drained, which holds the result open until
-      // its calls stop, so its answer below is built from a live result and its fetch tells the cancel
+      // CLOSED WHILE IT STARTED (`drain` above), now that DuckDB handed it back, and drained. One that calls no function
+      // is told the cancel here, its release done first, before a column of a destroyed result is asked (DuckDB
+      // answers 0 columns for one: a review finding, an XX000 "report it" where the session had closed); one that calls
+      // holds its result open until DuckDB ended it, so its answer below is built from a live result and its fetch
+      // tells the cancel
       if (closed) {
-        if (!callsFunctions) { release(); throw cancelled(); }
         drain();
+        if (!callsFunctions) { await Promise.all([...this.releasing]); throw cancelled(); }
       }
       timing.duckdbMs += performance.now() - t1;
       const r = result;
@@ -609,8 +582,9 @@ export class SessionRunner implements DuckRunner {
             const c0 = performance.now();
             fetching = true;
             try { chunk = await this.track(r.fetchChunk()); }
-            catch (e) { throw failure(e); }
+            catch (e) { ended = true; throw failure(e); }
             finally { fetching = false; }
+            ended = chunk === null || chunk.rowCount === 0;
             if (closed) { drain(); return null; }
             const c1 = performance.now();
             timing.duckdbMs += c1 - c0;
@@ -650,8 +624,17 @@ export class SessionRunner implements DuckRunner {
 
   private async explained(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     how: ExplainHow): Promise<string[]> {
-    await Promise.all([...this.releasing]);
     const o = how.options;
+    // A STATEMENT THAT READS A FILTERED TABLE IS NEVER SHOWN TO THE ENGINE: its plan says what it proved from the table's
+    // statistics (docs/DESIGN.md "Roles: rows per user"), so the tables are the statement's and its filters' (a through:'s
+    // parents), and the rest is Mason's plan
+    if ((how.rowFilters ?? []).length > 0) {
+      const tables = [...new Set([...(how.reads ?? []), ...(how.rowFilters ?? []).map((f) => f.table)])].map((t) => { const dot = t.indexOf("."); return { schema: t.slice(0, dot), name: t.slice(dot + 1) }; });
+      const explained: Explained = { copies: await this.copies(tables, how.copies, how.rowFilters ?? []), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
+        functions: [...sql.functions], plan: [], filtered: true };
+      return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
+    }
+    await Promise.all([...this.releasing]);
     let plan: PlanNode[];
     let analyzed: Explained["analyzed"];
     if (!o.analyze) plan = await this.plainPlan(sql, params, session, signal);
@@ -666,7 +649,7 @@ export class SessionRunner implements DuckRunner {
           timing = s.timing;
           try { for (let chunk = await s.answer.fetch([], { timeZone: session.timeZone }); chunk !== null; chunk = await s.answer.fetch([], { timeZone: session.timeZone })) rows += chunk.length; }
           finally { s.answer.close(); }
-        } finally { await this.conn.run("PRAGMA disable_profiling"); }
+        } finally { await Promise.all([...this.releasing]); await this.conn.run("PRAGMA disable_profiling"); }
         // THE PROFILE IS HELD TO THE STATEMENT, never assumed its: DuckDB writes one when the result is read to its end,
         // naming the statement it timed. None: DuckDB ran no operator (it answered while planning — a count(*) of a
         // whole table is the table's row count), and its plan is its EXPLAIN, the rows the ones it answered
@@ -683,7 +666,7 @@ export class SessionRunner implements DuckRunner {
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }
     // what it calls is the plan's (src/duck/plan.ts PlannedSql), the list that decides how it is cancelled
-    const explained: Explained = { copies: await this.copies(scannedTables(plan), how.copies), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
+    const explained: Explained = { copies: await this.copies(scannedTables(plan), how.copies, how.rowFilters ?? []), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
       functions: [...sql.functions], plan, ...(analyzed === undefined ? {} : { analyzed }) };
     return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
   }
@@ -707,40 +690,61 @@ export class SessionRunner implements DuckRunner {
 
   /** each copy's rows, and the sync's facts of it (how it is kept current: src/duck/sync.ts `KeptCurrent`, never the
    *  poll's ledger read here — a project switched to logical replication still holds its last poll there) */
-  private async copies(tables: readonly TableName[], facts: readonly CopyFacts[]): Promise<Copy[]> {
+  private async copies(tables: readonly TableName[], facts: readonly CopyFacts[], filters: ReadonlyArray<{ table: string; words: string }> = []): Promise<Copy[]> {
     const out: Copy[] = [];
     for (const { schema, name } of tables) {
-      const rows = (await this.conn.runAndReadAll("SELECT estimated_size FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2", [schema, name])).getRowsJS()[0]?.[0];
       // the sync's source is the two names as they are; EXPLAIN says the table as a statement writes it (qualifiedName)
-      out.push({ table: qualifiedName({ schema, name }), rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === `${schema}.${name}`) ?? null });
+      const filter = filters.find((f) => f.table === `${schema}.${name}`)?.words;
+      // a table the role filters: its counts are every row's, not the role's, and are never read or said here
+      const rows = filter !== undefined ? null : (await this.conn.runAndReadAll("SELECT estimated_size FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2", [schema, name])).getRowsJS()[0]?.[0];
+      out.push({ table: qualifiedName({ schema, name }), rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === `${schema}.${name}`) ?? null,
+        ...(filter !== undefined ? { filter } : {}) });
     }
     return out;
   }
 
   /**
-   * A CALLING STATEMENT THAT DID NOT RUN TO ITS END, WAITED FOR UNTIL ITS CALLS HAVE STOPPED, before its result is
-   * closed (`releaseAfterCleanup` in `streamed` says why). Every close is synchronous on this thread (DuckDB's node API
-   * has no other, and refuses a second query on a connection with a result open), so the close must find no task of the
-   * query inside, or waiting for, a call. The statement is marked cancelled (each call it still makes raises at once)
-   * and interrupted (its tasks stop at their next chunk), and this thread stays free — a task waiting for a call is
-   * answered within a turn of its loop — until no call of this session has been answered for `CALLS_QUIET_MS`. Never a
-   * deadline: a close while calls still come is the deadlock itself, and the calls end (each raises); a wait past
-   * `CALLS_SLOW_MS` is said once.
+   * A STATEMENT THAT DID NOT RUN TO ITS END, ENDED BY DuckDB OFF THIS THREAD before its result is closed. THIS THREAD
+   * NEVER WAITS FOR THE ENGINE'S TASKS: every close is synchronous here, a close of an open result waits for the query's
+   * tasks (Executor::CancelTasks), and this thread runs every Mason function, so a task inside a call waits for it (the
+   * suite hung for good at 0 % CPU; `tests/duck-executor.test.ts` "a vector slower than"). Waiting for quiet instead —
+   * no call for 50 ms, as this did — was no proof: a vector whose native work outlasts the window has made no call yet.
+   * And a call-free statement's tasks hold this thread as long as DuckDB's vector takes, with every session behind it.
+   *
+   * WHAT WAITS IS A FETCH (read in DuckDB 2.0's source, `ClientContext::EndQueryInternal`, and held by the test above).
+   * Every end of a query runs `CancelTasks` on the thread that ends it, and a fetch runs on libuv's pool. Interrupted
+   * first, the next fetch does not compute: it fails at once (`BufferedData::Participate`), ending the query there, its
+   * tasks waited for while this thread answers their calls; or it reads the end, or the end was read already (`r`
+   * null). So the wait is bounded by DuckDB's next chunk, on a statement that never ends by itself too, and an EMPTY chunk
+   * is the end, as `fetch` reads it: past its end a streamed result hands back empty chunks for ever, never null.
+   *
+   * THE PROBE PROVES IT (a statement performs no wait: while a result holds the connection DuckDB refuses it, "connection
+   * has an open result", before anything else). So a `SELECT 1` that ran is proof that nothing of the statement is left,
+   * and the close finds nothing to wait for. Refused, the reading above no longer holds: said as a Mason bug, and closed
+   * all the same, the watch (src/duck/executor.ts SILENT_MS) catching the deadlock if there is one. A wait past
+   * `ENDING_SLOW_MS` is said once.
    */
-  private async cleanUp(seq: number, sql: string): Promise<void> {
-    cancelStatement(this.cancels, this.slot, seq);
+  private async cleanUp(seq: number, sql: string, calls: boolean, r: DuckDBResult | null): Promise<void> {
+    if (calls) cancelStatement(this.cancels, this.slot, seq);
     this.conn.interrupt();
-    const t0 = performance.now();
-    let said = false;
-    // ONE WHOLE WINDOW BEFORE THE FIRST LOOK: a call a task has queued for this thread but that has not run yet leaves
-    // `msSinceCall` at the previous call's time — long ago, when this thread was busy with another connection's close
-    // (an interrupt honoured, ~10 s for one join) — so a check made synchronously here could pass with that call still
-    // waiting, and the close deadlock on it the same way. A sleep of the window lets every queued call run first.
-    for (;;) {
-      await sleep(CALLS_QUIET_MS);
-      if (msSinceCall(this.slot) >= CALLS_QUIET_MS) break;
-      if (!said && performance.now() - t0 > CALLS_SLOW_MS) { said = true; this.log(`a statement that did not run to its end still calls Mason's functions after ${CALLS_SLOW_MS / 1000} s; its result is closed once they stop — ${oneLine(sql)}`); }
-    }
+    const slow = setTimeout(() => this.log(`a statement that did not run to its end has not stopped after ${ENDING_SLOW_MS / 1000} s; its result is closed once the engine ended it — ${oneLine(sql)}`), ENDING_SLOW_MS);
+    try {
+      if (r !== null) {
+        try { for (let c = await r.fetchChunk(); c !== null && c.rowCount > 0; c = await r.fetchChunk()) { /* its rows are nobody's */ } }
+        catch (e) {
+          // the cancel's own refusal (the interrupt, or its next call raised, 57014) is what this waits for. Anything else
+          // is the statement's real error, met after the listener let go of its answer: no one reads it any more, and a
+          // rethrow here would reach no caller (it would end this thread, and with it every session), so it is said
+          if (pgErrorOf(e, sql).fields.code !== "57014") this.log(`a statement closed before its end failed while it was drained: ${e instanceof Error ? e.message : String(e)} — ${oneLine(sql)}`);
+        }
+      }
+      // an abort landing now interrupts the probe past DuckDB's check, which is its proof all the same
+      try { await this.conn.run("SELECT 1"); }
+      catch (e) {
+        if (/open result/.test(String(e))) this.log(`a statement's result is still open after the engine failed or ended it (Mason bug, report it with mason logs): closed all the same — ${oneLine(sql)}`);
+        else if (pgErrorOf(e, "SELECT 1").fields.code !== "57014") this.log(`the check that a statement ended failed: ${e instanceof Error ? e.message : String(e)} — ${oneLine(sql)}`);
+      }
+    } finally { clearTimeout(slow); }
   }
 
   /** Closes the connection once nothing runs on it: an answer left open drained (its statement cancelled), every

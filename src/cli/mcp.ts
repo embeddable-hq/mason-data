@@ -30,7 +30,7 @@ import { qualifiedName, type TableName } from "../duck/explain.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 
 /** The URL a client is shown in the help: a user's, as mason user add prints it. */
-const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/shop";
+const EXAMPLE_URL = "postgres://claude:<password>@127.0.0.1:5433/mason";
 
 export const MCP: CommandSpec = {
   name: "mcp",
@@ -126,7 +126,7 @@ function connect(s: Source, applicationName: string): Promise<PgConnection> {
 }
 
 /** Why a connection failed, in the failure shape: nothing listening, a password refused, a database it does not serve. */
-function connectFailure(e: unknown, s: Source): Failure {
+export function connectFailure(e: unknown, s: Source): Failure {
   const where = `${s.host}:${s.port}`;
   if (e instanceof PgError) {
     const hint = e.fields.H;
@@ -136,7 +136,9 @@ function connectFailure(e: unknown, s: Source): Failure {
         next: [["mason user list", "the users, beside the run"], ADD_STEP] };
     }
     return { message: `${where} refused the connection: ${e.fields.M ?? e.message}${e.code ? ` (${e.code})` : ""}`, code: "refused", why: hint ?? e.detail,
-      fix: "the URL mason user add printed: its database is the project's", next: [HELP_STEP] };
+      // a URL from before the name moved is the likely one: the hint is the listener's, and says the right name
+      fix: e.code === "3D000" ? "the last part of the URL is the database: change it to the one the hint names, or use the URL mason user add printed"
+        : "the URL mason user add printed", next: [HELP_STEP] };
   }
   const reason = e instanceof Error ? socketErrorText(e) : String(e);
   const said = /ECONNREFUSED/.test(reason) ? `nothing is listening on ${where}` : reason.replace(/^connecting to \S+: /, "");
@@ -268,7 +270,8 @@ export const TOOLS = [
     name: "explain",
     title: "How Mason answers a statement",
     description: "How Mason answers one statement, as its EXPLAIN prints it: each synced table the statement reads with its rows and how current it is, " +
-      "the SQL Mason runs for it, and the plan. analyze: true runs the statement too and adds each step's rows and time.",
+      "the SQL Mason runs for it, and the plan. analyze: true runs the statement too and adds each step's rows and time. " +
+      "For a statement that reads a table your role filters: no plan and no row counts, and analyze is refused.",
     inputSchema: { type: "object", properties: {
       sql: { type: "string", description: "one statement, in Postgres's SQL (without EXPLAIN)" },
       analyze: { type: "boolean", default: false, description: "run it, and say each step's rows and time" },
@@ -641,7 +644,7 @@ interface CopyRow { Table: string; "Estimated Rows": number | null; "Kept Curren
 function copyFacts(c: CopyRow | { error: string } | undefined): Record<string, unknown> {
   if (c === undefined) return { rows_about: null, kept: "how it is kept current is unknown: Mason has not synced it" };
   if ("error" in c) return { rows_about: null, kept: `how it is kept current could not be read: ${c.error}` };
-  return { rows_about: c["Estimated Rows"], kept: c["Kept Current"], kept_current_by: c["Kept Current By"],
+  return { rows_about: c["Estimated Rows"] ?? null, kept: c["Kept Current"], kept_current_by: c["Kept Current By"],
     ...(c.Sync !== undefined ? { sync: c.Sync, last_synced: c["Last Synced"] ?? null } : {}) };
 }
 

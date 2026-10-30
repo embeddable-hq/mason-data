@@ -163,7 +163,7 @@ const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; 
   clientsTotal: o.clientsTotal ?? { clients: (o.clients ?? CLIENTS).length, sessions: (o.clients ?? CLIENTS).reduce((a: number, c) => a + (c as { sessions: number }).sessions, 0) } });
 const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s" };
 const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
-const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", tokenName: "", user: "metabase", role: "",
+const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", tokenName: "", user: "metabase", role: "", attributes: null,
   method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: "relation \"nope\" does not exist\nLINE 1", detail: null, hint: null, rows: null, durationMs: 3,
   endedAt: "2026-10-27T09:02:00.503Z", bytesSent: 120, query: "SELECT *\n  FROM nope", queryTruncated: false };
 const FAILED_REQUESTS = { requests: [REQUEST, { ...REQUEST, requestId: "0b9e5c1e-0000-4000-8000-000000000002", applicationName: "", user: "", outcome: "cancelled", sqlstate: "57014",
@@ -419,6 +419,20 @@ test("the users: a user's role (mason user add --role) in its own column; one th
     { name: "bare", id: "0000000000000004", ...at, roleFrom: "none", readsNothing: true }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
   assert.match(textOf(html), /^User Role Status Added Last used agent id 0000000000000001 agent Active .* old id 0000000000000002 gone not in the roles file: its statements are refused Active /);
   assert.match(textOf(html), /dflt id 0000000000000003 everything \(default\) Active .* bare id 0000000000000004 no role, and the roles file names no default: its statements are refused Active /);
+});
+
+test("the users: a user's attributes beside its role in mason user list's words; one its role's filters read and it lacks, said refused", async () => {
+  const renderUsers = fn<[unknown, string | null, number?], string>("renderUsers");
+  const attributesText = fn<[Record<string, string | string[]>], string>("attributesText");
+  const cli = await import("../src/cli/user.ts");
+  const values = { tenant: "42", regions: ["eu", "uk"] };
+  assert.equal(attributesText(values), cli.attributesText(values), "the page's words are the CLI's");
+  assert.equal(attributesText(values), "tenant=42, regions=[eu, uk]");
+  const at = { addedAt: "2026-10-29T08:00:00.000Z", removedAt: null, live: true, lastUsedAt: null, url: null };
+  const html = renderUsers({ users: [{ name: "acme", id: "0000000000000001", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: values },
+    { name: "stale", id: "0000000000000002", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: { tenant: "7" }, missingAttributes: ["regions"] }],
+    lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
+  assert.match(textOf(html), /acme id 0000000000000001 tenant tenant=42, regions=\[eu, uk\] Active .* stale id 0000000000000002 tenant tenant=7 no value for regions: its statements are refused Active /);
 });
 
 test("the users: a row each, active first then removed without Remove; Remove asks first; none is said", () => {
