@@ -915,7 +915,7 @@ test("a named publication is never altered by a sync change: a replicated table 
     sync.start();
     await until(() => sync.state().find((s) => s.source === "public.b")?.error?.startsWith("replication: ") === true && settled(sync, ["public.a", "public.c"])(), "b refused, a and c kept", logged);
     const b = sync.state().find((s) => s.source === "public.b")!;
-    assert.match(b.error!, /^replication: publication owners_pub does not carry what Mason's copy of the table holds\.\n/);
+    assert.match(b.error!, /^replication: publication owners_pub does not carry what Mason's synced table holds\.\n/);
     assert.match(b.error!, /\n {2}ALTER PUBLICATION owners_pub ADD TABLE\n {4}public\.b \(id, v\);\n/);
     assert.match(b.error!, /give the table's entry sync: poll <interval> in the sources file/);
     psql(url, "UPDATE a SET v = 'streamed' WHERE id = 1; UPDATE c SET v = 'polled' WHERE id = 1");
