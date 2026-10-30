@@ -469,8 +469,10 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
   test("the tunnel's output not understood: a clear failure in the time given, nothing left open", async () => {
     mode("noisy");
     try {
+      const began = Date.now();
       const s = startShare(["--timeout", "1"]);
       assert.equal(await s.exited, 1);
+      assert.ok(Date.now() - began < 20_000, `the time given is 1 s, and it took ${Date.now() - began} ms`);
       assert.match(s.stderr(), /^✗ mason share: the tunnel gave no address in 1 s$/m);
       assert.match(s.stderr(), /why +ssh printed: the new format of a tunnel service/);
       assert.match(s.stderr(), /--via bore is another tunnel/);
