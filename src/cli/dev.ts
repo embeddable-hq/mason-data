@@ -411,7 +411,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // each table is kept current as its own sync: says (the sources file's); the sync's interval is how soon a failed pass
   // is tried again (and MASON_DUCK_SYNC=recopy's whole copies). The slot and publication are the run's whenever a table
   // is replicated, now or after a mason add --sync replication (the demo database has no change log: none)
-  const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^copied |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
+  const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^synced |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
     cfg.demo === true ? null : repl, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths }, onEvent: (e) => events.record(e),
       // what the run made on the database, recorded as it is made and dropped: mason destroy drops it by that name
       onReplication: (made) => {
@@ -591,7 +591,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // no handler would end the run with the default action, never recording `running: null`
   let stopping = false;
   const stopped = new Promise<number>((resolve) => {
-    // a crash of the copy's thread: the run exits 1 with its reason in V8's fatal form, which the supervisor reads
+    // a crash of the engine's thread: the run exits 1 with its reason in V8's fatal form, which the supervisor reads
     // (src/cli/supervise.ts crashReason), and its config still says it runs, so the supervisor starts it again
     crash = (reason: string): void => {
       if (stopping) return;

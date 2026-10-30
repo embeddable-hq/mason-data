@@ -192,7 +192,7 @@ const shown = (table: string): string => table.startsWith("public.") ? table.sli
 export function grantRefusal(reads: readonly ResolvedRead[], role: RoleGrants): StatementError | null {
   if (role.noRole !== undefined) return reads.length === 0 ? null : noRoleRefusal(reads[0]!.table, role.file, role.noRole);
   const tablesOf = (): string => {
-    if (role.all) return "every copied table (tables: all)";
+    if (role.all) return "every synced table (tables: all)";
     const names = [...role.tables.keys()].map(shown); return names.length ? names.join(", ") : "none";
   };
   for (const r of reads) {

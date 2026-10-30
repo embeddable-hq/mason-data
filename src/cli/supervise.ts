@@ -65,7 +65,7 @@ export function restartsFact(home: string, read: () => Restart[] = () => readRes
 
 /** Why a run died, in the words a person reads: V8's own fatal line when it printed one */
 export function crashReason(code: number | null, signal: NodeJS.Signals | null, fatal: string | null): string {
-  // Mason's own fatal line (src/cli/dev.ts: the copy's thread stopped) is said as Mason said it
+  // Mason's own fatal line (src/cli/dev.ts: the engine's thread stopped) is said as Mason said it
   if (fatal !== null) return /heap out of memory/i.test(fatal) && !fatal.startsWith("Mason: ") ? "it ran out of JavaScript heap (V8: heap out of memory)"
     : fatal.startsWith("Mason: ") ? fatal.slice("Mason: ".length) : `V8: ${fatal}`;
   if (signal === "SIGKILL") return "it was killed (SIGKILL: often the system out of memory)";

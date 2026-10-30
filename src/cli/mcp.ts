@@ -9,7 +9,7 @@
  * `--url`, else `MASON_URL`), so it works the same beside `mason start` and against a `mason serve` elsewhere, and every
  * statement is a row of the request log under `application_name` `mason-mcp/<client>`. Everything it reads comes over
  * that wire: the tables and columns from the catalog (a real Postgres), the rows and how current each copy is from
- * EXPLAIN (FORMAT JSON)'s `Mason.Copies` — the sync's own words, the same line `mason status` prints.
+ * EXPLAIN (FORMAT JSON)'s `Mason.Tables` — the sync's own words, the same line `mason status` prints.
  *
  * STDOUT IS THE PROTOCOL'S: newline-delimited JSON-RPC 2.0 frames and nothing else (`CommandSpec.stdout`: no --json,
  * every failure on stderr); what it says goes to stderr. A tool's failure is Mason's refusal (SQLSTATE, message,
@@ -484,7 +484,7 @@ class McpServer {
   }
 
   /**
-   * HOW EACH COPY IS KEPT CURRENT, and its rows: EXPLAIN (FORMAT JSON)'s `Mason.Copies`, the sync's own words (what
+   * HOW EACH COPY IS KEPT CURRENT, and its rows: EXPLAIN (FORMAT JSON)'s `Mason.Tables`, the sync's own words (what
    * `mason status` prints), read over the wire so a remote mason serve answers as a local run does. One EXPLAIN a table
    * (a union of them all failed whole for one table it could not plan, and left a refusal in the request log the agent
    * never sent), several at once on connections of this call's. In a run the catalog lists only the tables copied
@@ -499,10 +499,10 @@ class McpServer {
       try { r = await on.extended(`EXPLAIN (FORMAT JSON) SELECT 1 FROM ${pgIdent(t.schema)}.${pgIdent(t.name)}`, 0); }
       catch (e) { if (!(e instanceof PgError)) throw e; out.set(key, { error: e.fields.M ?? e.message }); return; }
       const text = r.rows.map((row) => row[0] ?? "").join("\n");
-      let doc: Array<{ Mason?: { Copies?: CopyRow[] } }>;
+      let doc: Array<{ Mason?: { Tables?: CopyRow[] } }>;
       try { doc = JSON.parse(text) as typeof doc; }
       catch (e) { throw new BadAnswer(`EXPLAIN (FORMAT JSON) of ${key} is not JSON (${(e as Error).message}): ${text.slice(0, 200)}`); }
-      const copy = doc[0]?.Mason?.Copies?.find((c) => c.Table === key);
+      const copy = doc[0]?.Mason?.Tables?.find((c) => c.Table === key);
       if (copy !== undefined) out.set(key, copy);
     };
     const queue = [...tables];

@@ -319,7 +319,7 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
 - `tables` and `describe` read the catalog (`pg_class`, `pg_attribute`, `pg_index`, `pg_constraint`, filtered by
   `has_table_privilege` / `has_any_column_privilege` and `has_column_privilege`, so a user with a role is shown what
   it may read, "Roles" above) and, for each
-  copy's rows and how it is kept current, `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` — one EXPLAIN a table, a few at
+  copy's rows and how it is kept current, `EXPLAIN (FORMAT JSON)`'s `Mason.Tables` — one EXPLAIN a table, a few at
   once, so a remote `mason serve` answers as a local run does; a table is named as EXPLAIN names it, as a statement
   writes it (`public."Clients"`);
 - `query` sends ONE statement through the extended protocol (a second is Postgres's 42601), its `max_rows` the

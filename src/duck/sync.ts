@@ -359,11 +359,11 @@ export type AddedTableStatus = { source: string } & ({ copy: string } | { behind
 export function addedText(tables: readonly AddedTableStatus[]): string {
   const groups = new Map<string, { rank: number; sources: string[] }>();
   for (const t of tables) {
-    const [rank, state] = "copy" in t ? [3, `copied at the next pass (${t.copy})`]
-      : "behind" in t ? [2, `already copied, caught up by one poll first (${t.behind})`]
-      : "refused" in t ? [4, `not copied or streamed (${t.refused})`]
-      : t.off ? [1, `already copied, ${t.kept}`]
-      : [0, `already copied and ${t.kept}`];
+    const [rank, state] = "copy" in t ? [3, `synced at the next pass (${t.copy})`]
+      : "behind" in t ? [2, `already synced, caught up by one poll first (${t.behind})`]
+      : "refused" in t ? [4, `not synced or streamed (${t.refused})`]
+      : t.off ? [1, `already synced, ${t.kept}`]
+      : [0, `already synced and ${t.kept}`];
     const g = groups.get(state) ?? { rank, sources: [] };
     g.sources.push(t.source);
     groups.set(state, g);
@@ -402,8 +402,8 @@ export function copyChunkSecondsOf(env: NodeJS.ProcessEnv): number {
   if (v === undefined || v === "") return COPY_CHUNK_SECONDS;
   const n = Number(v);
   if (!/^\d+(\.\d+)?$/.test(v.trim()) || n < COPY_CHUNK_SECONDS_MIN || n > COPY_CHUNK_SECONDS_MAX) {
-    throw new Error(`MASON_COPY_CHUNK_SECONDS=${JSON.stringify(v)} is not a number of seconds from ${COPY_CHUNK_SECONDS_MIN} to ${COPY_CHUNK_SECONDS_MAX}: each of a copy's chunks is sized to take ` +
-      `about that long to read, and a stop reads at most that much again, so set it lower for a copy that moves more often or higher for fewer, larger chunks, or unset it for ${COPY_CHUNK_SECONDS}`);
+    throw new Error(`MASON_COPY_CHUNK_SECONDS=${JSON.stringify(v)} is not a number of seconds from ${COPY_CHUNK_SECONDS_MIN} to ${COPY_CHUNK_SECONDS_MAX}: each of a first sync's chunks is sized to take ` +
+      `about that long to read, and a stop reads at most that much again, so set it lower for a first sync that moves more often or higher for fewer, larger chunks, or unset it for ${COPY_CHUNK_SECONDS}`);
   }
   return n;
 }
@@ -637,7 +637,7 @@ export function copyParallelOf(env: NodeJS.ProcessEnv): number {
   if (v === undefined || v === "") return COPY_PARALLEL;
   const n = Number(v);
   if (!/^\d+$/.test(v.trim()) || n < 1 || n > COPY_PARALLEL_MAX) {
-    throw new Error(`MASON_COPY_PARALLEL=${JSON.stringify(v)} is not a number of readers from 1 to ${COPY_PARALLEL_MAX}: each reads a copy's chunks on a backend of the database's own, ` +
+    throw new Error(`MASON_COPY_PARALLEL=${JSON.stringify(v)} is not a number of readers from 1 to ${COPY_PARALLEL_MAX}: each reads a first sync's chunks on a backend of the database's own, ` +
       `so set it to 1 (one at a time, the lightest on the database) up to ${COPY_PARALLEL_MAX}, or unset it for ${COPY_PARALLEL}`);
   }
   return n;
@@ -698,7 +698,7 @@ const pq = (sql: string): string => `postgres_query(${literal(SRC)}, ${literal(s
  * differ (`1` beside `1.50`); the copy answers them all with s decimals, also said.
  */
 const NUMERIC_TYPE = /^numeric(?:\((\d+)(?:,\s*(\d+))?\))?$/;
-const WIDER = "mason: a numeric value wider than its copy";
+const WIDER = "mason: a numeric value wider than its synced column";
 
 /** a source numeric the extension reads as a DOUBLE: no precision, or more than DuckDB's 38 digits */
 function readsAsDouble(type: string): boolean {
@@ -914,10 +914,10 @@ export class Sync {
     this.copyChunkRows = options.copyChunkRows ?? COPY_CHUNK_ROWS;
     this.copyParallel = options.copyParallel ?? COPY_PARALLEL;
     if (!Number.isInteger(this.copyParallel) || this.copyParallel < 1 || this.copyParallel > COPY_PARALLEL_MAX) {
-      throw new Error(`a copy reads with 1 to ${COPY_PARALLEL_MAX} readers, not ${this.copyParallel} (Mason bug: report it; copyParallelOf reads MASON_COPY_PARALLEL)`);
+      throw new Error(`a first sync reads with 1 to ${COPY_PARALLEL_MAX} readers, not ${this.copyParallel} (Mason bug: report it; copyParallelOf reads MASON_COPY_PARALLEL)`);
     }
     this.copyChunkSeconds = options.copyChunkSeconds ?? COPY_CHUNK_SECONDS;
-    if (!(this.copyChunkSeconds > 0)) throw new Error(`a copy's chunk takes a positive number of seconds, not ${this.copyChunkSeconds} (Mason bug: report it; copyChunkSecondsOf reads MASON_COPY_CHUNK_SECONDS)`);
+    if (!(this.copyChunkSeconds > 0)) throw new Error(`a first sync's chunk takes a positive number of seconds, not ${this.copyChunkSeconds} (Mason bug: report it; copyChunkSecondsOf reads MASON_COPY_CHUNK_SECONDS)`);
     this.onChunk = options.onChunk;
     this.onEvent = options.onEvent ?? (() => undefined);
     this.diskFree = options.diskFree ?? ((dir) => { const st = fs.statfsSync(dir); return st.bavail * st.bsize; });
@@ -1062,13 +1062,13 @@ export class Sync {
         this.switched.add(t.source);
       }
       // said, and recorded as the sync's event (src/duck/events.ts): what a table's sync was is history the log alone loses
-      const switched = `sync: ${was} → ${now}: its copy is kept, and caught up by one poll now${this.replicated(t) ? ", then streamed" : ""}`;
+      const switched = `sync: ${was} → ${now}: its synced data is kept, and caught up by one poll now${this.replicated(t) ? ", then streamed" : ""}`;
       this.log(`${t.source}: ${switched}`);
       this.event({ kind: "sync_changed", table: t.source, message: switched });
     }
     // loud: the copy goes with the table's entry, and comes back only by reading the source again (the test server: a 53 GB
     // copy, 21 minutes of a production replica, dropped by a project file moved aside)
-    if (removed.length) this.log(`removed ${removed.join(", ")}: no longer added, so ${removed.length === 1 ? "its copy is" : "their copies are"} DROPPED at the next pass — mason add copies ${removed.length === 1 ? "it" : "them"} again from the source, whole`);
+    if (removed.length) this.log(`removed ${removed.join(", ")}: no longer added, so ${removed.length === 1 ? "its synced data is" : "their synced data is"} DROPPED at the next pass — mason add syncs ${removed.length === 1 ? "it" : "them"} again from the source, whole`);
     for (const t of tables) if (!this.states.has(t.source)) this.states.set(t.source, { source: t.source, phase: "waiting", rows: null, bytes: t.bytes, seconds: null, copiedAt: null, error: null });
     // a failed copy whose table changed (its columns or key) is tried at once: the change may be its fix
     const shape = (t: AddedTable): string => JSON.stringify([columnsKey(t.columns), t.key]);
@@ -1087,15 +1087,15 @@ export class Sync {
     const firstLine = (s: string | null): string => (s ?? "mason logs says why").split("\n")[0]!;
     // a named publication's gap is said again by the pass, which refuses the table by name until its owner adds it
     if (st?.error?.startsWith("replication: ")) return { source: t.source, refused: firstLine(st.error.slice("replication: ".length)) };
-    const copy = st === undefined ? "never copied"
-      : st.phase === "failed" ? `its last copy failed: ${firstLine(st.error)}`
-      : st.phase !== "copied" ? "its copy has not finished"
-      : this.retired.has(t.source) ? "its copy is in an older Mason's layout, key order with an index"
+    const copy = st === undefined ? "never synced"
+      : st.phase === "failed" ? `its first sync failed: ${firstLine(st.error)}`
+      : st.phase !== "copied" ? "its first sync has not finished"
+      : this.retired.has(t.source) ? "it is in an older Mason's layout, key order with an index"
       : this.readAgainWhy(t);
     if (copy !== null) return { source: t.source, copy };
     const b = this.behind.get(t.source);
     if (b !== undefined) return { source: t.source, behind: b.why };
-    if (this.replicated(t) && this.replication !== null && !this.slotKnown) return { source: t.source, behind: `slot ${this.replication.slot} is new to this copy` };
+    if (this.replicated(t) && this.replication !== null && !this.slotKnown) return { source: t.source, behind: `slot ${this.replication.slot} is new to the synced data` };
     const off = this.mode !== "recopy" && this.syncOf(t).mode === "off";
     return { source: t.source, kept: this.keptWords(t), off };
   }
@@ -1104,7 +1104,7 @@ export class Sync {
   private keptWords(t: AddedTable): string {
     const every = `${Number((this.intervalMs / 1000).toFixed(1))} s`;
     const s = this.syncOf(t);
-    return this.mode === "recopy" ? `copied again whole every ${every}`
+    return this.mode === "recopy" ? `read again whole every ${every}`
       : s.mode === "replication" ? `streamed from ${formatLsn(this.appliedLsn)}`
       : s.mode === "off" ? `sync: off (read again only by mason sync ${t.source})` : syncWords(s);
   }
@@ -1568,7 +1568,7 @@ export class Sync {
       const slot = await readSlot(pg, r.slot);
       let made = false;
       if (slot.exists && slot.walStatus === "lost") {
-        this.log(`replication slot ${r.slot} was invalidated by the database (wal_status lost: it held more WAL than max_slot_wal_keep_size), so changes are missing from it: made again, and the copies caught up by one poll`);
+        this.log(`replication slot ${r.slot} was invalidated by the database (wal_status lost: it held more WAL than max_slot_wal_keep_size), so changes are missing from it: made again, and the synced tables caught up by one poll`);
         if (slot.active) throw new Error(`replication slot ${r.slot} is lost and still in use by pid ${slot.activePid}`);
         await dropSlot(pg, r.slot);
       } else if (slot.exists && slot.plugin !== "pgoutput") {
@@ -1619,7 +1619,7 @@ export class Sync {
       const gap = this.unpublished.get(t.source);
       if (gap !== undefined) {
         const error = `replication: ${gap}`;
-        if (st.error !== error) { this.log(`${t.source} is not copied or streamed: ${error}`); this.event({ kind: "stream_failed", table: t.source, message: `not copied or streamed: ${error}` }); }
+        if (st.error !== error) { this.log(`${t.source} is not synced or streamed: ${error}`); this.event({ kind: "stream_failed", table: t.source, message: `not synced or streamed: ${error}` }); }
         this.gapErrors.set(t.source, error);
         await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error });
         continue;
@@ -1649,7 +1649,7 @@ export class Sync {
     this.unpublished.clear();
     for (const [source, m] of v.tables) this.unpublished.set(source, m);
     if (v.noTruncate && !this.truncateSaid) {
-      this.log(`publication ${name} does not publish truncate: a TRUNCATE on the database does not reach the copy (the poll's count would see it: sync: poll <interval> on its entry)`);
+      this.log(`publication ${name} does not publish truncate: a TRUNCATE on the database does not reach the synced data (the poll's count would see it: sync: poll <interval> on its entry)`);
       this.truncateSaid = true;
     }
   }
@@ -1754,7 +1754,7 @@ export class Sync {
     if (this.reportTimer === null) { this.reportTimer = setInterval(() => this.reportStream(), this.streamReportMs); this.reportTimer.unref(); }
     const joined = [...this.streamed.keys()].filter((x) => !this.held.has(x));
     this.log(`streaming ${joined.length ? joined.join(", ") : "no table yet"} from slot ${r.slot} (publication ${r.publication}), applied through ${formatLsn(this.appliedLsn)}` +
-      `${joined.length < this.replicatedTables().length ? "; a table copied or caught up meanwhile joins it once current" : ""}`);
+      `${joined.length < this.replicatedTables().length ? "; a table synced or caught up meanwhile joins it once current" : ""}`);
     void s.done.then(async (e) => {
       if (this.stream === s) this.stream = null;
       if (e === null || this.stopped) return;
@@ -1766,7 +1766,7 @@ export class Sync {
       if (wider !== undefined && n <= 3) {
         this.widened.set(wider.source, n);
         await this.onWriter(async () => { this.snapshots.delete(wider.source); this.refreshStreamed(); });
-        this.log(`replication: ${wider.source} has a numeric value wider than its copy's DECIMAL: it is copied again, then streamed`);
+        this.log(`replication: ${wider.source} has a numeric value wider than its synced DECIMAL column: it is read again whole, then streamed`);
         this.startStream();
         this.kick();
         return;
@@ -1779,10 +1779,10 @@ export class Sync {
       // a timer may fire a little early: the pass it kicks starts the stream
       this.streamAt = Date.now() + wait - 50;
       this.streamFailure = { error: m, retryAt: this.streamAt };
-      this.log(`${m} (the stream starts again in ${wait / 1000} s, failure ${this.streamFailures} in a row; the copies serve as they are)`);
+      this.log(`${m} (the stream starts again in ${wait / 1000} s, failure ${this.streamFailures} in a row; the synced tables serve as they are)`);
       // one event for the stream, never one per table it kept current (each table's error says it); its failures in a
       // row are left out of the words, so a stream failing for good is one event, not one per restart
-      this.event({ kind: "stream_failed", table: null, message: `${m} (the stream starts again by itself; the copies serve as they are)` });
+      this.event({ kind: "stream_failed", table: null, message: `${m} (the stream starts again by itself; the synced tables serve as they are)` });
       this.wholeFailure.stream = m;
       // on the tables the stream kept current when it failed (one being caught up says its own)
       await this.onWriter(async () => { for (const source of this.streamed.keys()) if (!this.held.has(source)) await this.record({ ...this.states.get(source)!, error: m }); });
@@ -1810,9 +1810,9 @@ export class Sync {
       this.held.delete(source);
       const when = this.backOff(source, 0);
       const pub = this.replication!.publication;
-      const m = `replication: the stream no longer carries ${source}'s ${cols}, which its copy holds (a column dropped or renamed on the database, or the publication's column list narrowed), ` +
+      const m = `replication: the stream no longer carries ${source}'s ${cols}, which its synced table holds (a column dropped or renamed on the database, or the publication's column list narrowed), ` +
         `so its changes are not applied: it is caught up by one poll again after ${when}. The way out: remove ${cols} from its columns in the sources file (mason add ${source} --columns … ` +
-        `picks the columns it has; it is copied again at once)${this.replication!.owned ? "" : `, or publish ${missing.length === 1 ? "it" : "them"} again (ALTER PUBLICATION ${pub} …)`}`;
+        `picks the columns it has; it is read again whole at once)${this.replication!.owned ? "" : `, or publish ${missing.length === 1 ? "it" : "them"} again (ALTER PUBLICATION ${pub} …)`}`;
       this.log(`${source}: ${m}`);
       this.event({ kind: "stream_failed", table: source, message: m });
       await this.record({ ...this.states.get(source)!, error: m });
@@ -2260,7 +2260,7 @@ export class Sync {
       // and offline the first copy fails here saying why
       if (!this.loaded) {
         const x = this.store.extensions;
-        if (!x.shipped) this.log(`the copy's extensions are not installed with Mason here: ${x.why}. The first copy on this machine downloads its postgres extension`);
+        if (!x.shipped) this.log(`Mason's extensions are not installed with it here: ${x.why}. The first sync on this machine downloads its postgres extension`);
         try { await this.store.writer.run(loadPostgresSql(x)); }
         catch (e) { throw new Error(extensionFailure(x, (e as Error).message)); }
         this.loaded = true;
@@ -2316,7 +2316,7 @@ export class Sync {
       this.copiedColumns.delete(source);
       this.states.delete(source);
       this.synced.delete(source);
-      this.log(`dropped ${source}'s copy: it is no longer added (mason add ${source} copies it again from the source, whole)`);
+      this.log(`dropped ${source}'s synced data: it is no longer added (mason add ${source} syncs it again from the source, whole)`);
     }
     // REPLICATION, as the tables' syncs say: the publication and slot made ready for the replicated tables and the stream
     // started — or, when none is replicated any more, the slot dropped (verified gone). Its failure is the replicated
@@ -2388,7 +2388,7 @@ export class Sync {
       if (this.replicated(t) && !replicationReady) continue;
       if (this.mode !== "recopy" && !this.needsCopy(t)) continue;
       if (this.queued.has(t.source) || this.rebuildingNow?.source === t.source) continue;
-      if (this.states.get(t.source)?.phase === "copied" && this.copiedAs.get(t.source) !== columnsKey(t.columns)) this.log(`${t.source}: its columns are not the ones it was copied with: it is copied again`);
+      if (this.states.get(t.source)?.phase === "copied" && this.copiedAs.get(t.source) !== columnsKey(t.columns)) this.log(`${t.source}: its columns are not the ones it was synced with: it is read again whole`);
       this.enqueue(t.source, { kind: "copy" });
     }
     // a table copied and not yet caught up (a slot new to the copy, or a run that stopped first): its one poll
@@ -2410,13 +2410,13 @@ export class Sync {
         const found = await this.onWriter(async () => this.rebuildingNow?.source !== t.source && !this.behind.has(t.source) ? this.poll(this.writerLane, [t]) : []);
         for (const f of found) this.polledNow(t, f.ms);
       } catch (e) {
-        if (e instanceof Stopping) { this.log("poll stopped: Mason is stopping (rolled back; the copies serve as they were)"); return; }
+        if (e instanceof Stopping) { this.log("poll stopped: Mason is stopping (rolled back; the synced tables serve as they were)"); return; }
         // tried again after its interval (an `off` table whose sync changed: after the sync's), never at every pass
         const s = this.syncOf(t);
         this.due.set(t.source, Date.now() + (s.mode === "poll" ? s.seconds * 1000 : this.intervalMs));
         // the table serves its copy as it was, and says why it is not current (mason status reads the ledger); the other
         // tables are polled as ever
-        const m = `the poll failed, and is tried again at the next one (the copy serves as it was): ${e instanceof Error ? e.message : String(e)}`;
+        const m = `the poll failed, and is tried again at the next one (the synced data serves as it was): ${e instanceof Error ? e.message : String(e)}`;
         this.log(`${t.source}: ${m}`);
         this.event({ kind: "poll_failed", table: t.source, message: m });
         await this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
@@ -2519,7 +2519,7 @@ export class Sync {
     // mason status — and is caught up again then: what was held is read again by that poll (still behind, nothing lost)
     const failed = (what: string, e: unknown): Promise<void> => {
       const when = this.backOff(t.source, Date.now() - started);
-      const m = `${what} (the copy serves as it was; it is caught up by one poll again after ${when}): ${e instanceof Error ? e.message : String(e)}`;
+      const m = `${what} (the synced data serves as it was; it is caught up by one poll again after ${when}): ${e instanceof Error ? e.message : String(e)}`;
       this.log(`${t.source}: ${m}`);
       this.event({ kind: "catch_up_failed", table: t.source, message: m });
       return this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
@@ -2551,7 +2551,7 @@ export class Sync {
           // a numeric wider than its copy: copied again (`needsCopy`), and caught up after that copy
           if (m.includes(`${WIDER} [${t.source}]`)) {
             this.snapshots.delete(t.source);
-            this.log(`${t.source}: the changes the stream held during its catch-up could not be applied: it is copied again, wider (${m})`);
+            this.log(`${t.source}: the changes the stream held during its catch-up could not be applied: it is read again whole, wider (${m})`);
             return "copy again";
           }
           heldFailure = e;
@@ -2670,12 +2670,12 @@ export class Sync {
     // (`adds`: the keys a stage still to be written adds to DuckDB's count)
     const reconcile = async (t: AddedTable, target: string, from: string, adds = 0n): Promise<{ rows: number; deleted: number; countMs: number }> => {
       const c0 = Date.now();
-      doing = `${t.source}: counting its rows on the source and in the copy`;
+      doing = `${t.source}: counting its rows on the source and in the synced table`;
       const counts = (await w.runAndReadAll(`SELECT (SELECT count FROM ${pq(`SELECT count(*) AS count FROM ${from}`)}), (SELECT count(*) FROM ${target})`)).getRowsJS()[0] as [bigint, bigint];
       const countMs = Date.now() - c0;
       let deleted = 0;
       if (counts[0] !== counts[1] + adds) {
-        doing = `${t.source}: deleting the keys the source no longer holds (its keys anti-joined with the copy's)`;
+        doing = `${t.source}: deleting the keys the source no longer holds (its keys anti-joined with the synced table's)`;
         const on = t.key.map((k) => `t.${ident(k)} = k.${ident(k)}`).join(" AND ");
         const gone = await w.run(`DELETE FROM ${target} WHERE rowid IN (SELECT t.rowid FROM ${target} t ANTI JOIN ${pq(`SELECT ${t.key.map(pgIdent).join(", ")} FROM ${from}`)} k ON ${on})`);
         deleted = Number(gone.rowsChanged);
@@ -2708,7 +2708,7 @@ export class Sync {
             `${pq(`SELECT ${pgCols} FROM ${from} WHERE ${xmin8Sql(xmax)} >= ${watermark}`)}) AS polled(${t.columns.map((_, i) => `c${i}`).join(", ")})`)).rowsChanged);
           if (staged > POLL_PIECE_ROWS) {
             const c1 = Date.now();
-            doing = `${t.source}: counting the keys its ${staged} changed row(s) add to the copy (the stage anti-joined with the copy's keys)`;
+            doing = `${t.source}: counting the keys its ${staged} changed row(s) add to the synced table (the stage anti-joined with its keys)`;
             const on = t.key.map((k) => `s.${ident(`c${t.columns.findIndex((c) => c.name === k)}`)} = t.${ident(k)}`).join(" AND ");
             const adds = (await w.runAndReadAll(`SELECT count(*) FROM ${stage} s ANTI JOIN ${target} t ON ${on}`)).getRowsJS()[0]![0] as bigint;
             const { rows, deleted, countMs } = await reconcile(t, target, from, adds);
@@ -2739,7 +2739,7 @@ export class Sync {
       // matched against the tables' own names (a name may hold a space)
       const wider = e instanceof Error ? tables.find((t) => e.message.includes(`${WIDER} [${t.source}]`))?.source : undefined;
       if (wider !== undefined && this.snapshots.delete(wider)) {
-        this.log(`poll: ${wider} has a numeric value wider than its copy's DECIMAL: it is copied again at the next pass`);
+        this.log(`poll: ${wider} has a numeric value wider than its synced DECIMAL column: it is read again whole at the next pass`);
         return [];
       }
       throw named(e);
@@ -2845,17 +2845,17 @@ export class Sync {
       if (resumed === null) {
         // the stream (or the other tables' polls) goes on: the slot holds no WAL for this copy, and the table joins once
         // caught up from the copy's snapshot
-        const beside = this.replicated(t) ? "beside the stream, which goes on keeping the other tables current: it is streamed once caught up by one poll from the copy's snapshot"
-          : this.mode !== "recopy" ? "beside the other tables' polls: it is caught up by one poll from the copy's snapshot once copied" : "beside the other tables";
-        const again = this.retired.has(t.source) ? `, again (its copy is ${RETIRED_LAYOUT})` : "";
-        this.log(`copying ${t.source}${again}: ${t.rows === null ? "rows unknown" : `about ${t.rows} row(s)`}, ${t.bytes} source bytes, ${beside}`);
+        const beside = this.replicated(t) ? "beside the stream, which goes on keeping the other tables current: it is streamed once caught up by one poll from the snapshot it was read at"
+          : this.mode !== "recopy" ? "beside the other tables' polls: once read, it is caught up by one poll from the snapshot it was read at" : "beside the other tables";
+        const again = this.retired.has(t.source) ? `, again (it is ${RETIRED_LAYOUT})` : "";
+        this.log(`syncing ${t.source}${again}: ${t.rows === null ? "rows unknown" : `about ${t.rows} row(s)`}, ${t.bytes} source bytes, ${beside}`);
       }
       let read: { rows: number; seconds: number; progress: CopyProgress };
       try { read = await this.readChunks(t, side, kept, (p) => { kept = p; }); }
       catch (e) {
         if (!(e instanceof StartOver)) throw e;
         // once: a second reason to start over is the copy's failure
-        this.log(`starting the copy of ${t.source} over, from its first page: ${e.message}`);
+        this.log(`starting the sync of ${t.source} over, from its first page: ${e.message}`);
         kept = await this.forgetCopy(t, side);
         read = await this.readChunks(t, side, null, (p) => { kept = p; });
       }
@@ -2867,7 +2867,7 @@ export class Sync {
         const [rows, keys] = (await w.runAndReadAll(`SELECT count(*), count(DISTINCT (${t.key.map(ident).join(", ")})) FROM ${side}`)).getRowsJS()[0] as [bigint, bigint];
         if (rows !== keys) {
           kept = await this.forgetCopy(t, side);
-          throw new Error(`its copy holds ${rows} rows but ${keys} distinct keys (Mason bug: report it, with mason logs): it was not swapped in, and is copied again from its first page`);
+          throw new Error(`its synced data holds ${rows} rows but ${keys} distinct keys (Mason bug: report it, with mason logs): it was not swapped in, and is read again from its first page`);
         }
       }
       // its stored JSON paths filled, so the table swapped in has every one whole (src/duck/kept.ts fillSide)
@@ -2875,17 +2875,17 @@ export class Sync {
       // THE SWAP, on the writer's turn: one transaction, between two of the stream's or the polls'. It carries the copy's
       // watermark (its first snapshot), removes its progress, and leaves the table behind until its catch-up (none in
       // recopy mode: no poll)
-      await this.onWriter(() => this.swap(t, side, { snapshot: p.snapshot, behind: p.snapshot === null ? null : "after its copy" }));
+      await this.onWriter(() => this.swap(t, side, { snapshot: p.snapshot, behind: p.snapshot === null ? null : "after its whole read" }));
       this.copyLive.delete(t.source);
       kept = null;
       this.retries.delete(t.source);
       const seconds = (Date.now() - started) / 1000;
-      this.log(`copied ${t.source}: ${p.rows} row(s), ${t.bytes} source bytes, in ${seconds.toFixed(2)} s (read in ${read.seconds.toFixed(2)} s` +
+      this.log(`synced ${t.source}: ${p.rows} row(s), ${t.bytes} source bytes, in ${seconds.toFixed(2)} s (read in ${read.seconds.toFixed(2)} s` +
         `${resumed === null ? "" : `, resumed at page ${readThrough(resumed.done) ?? p.pages} of ${resumed.pages}${pastPages(resumed.done)} with ${resumed.rows} row(s) in`}), stored as the source's scan delivered them, with no index`);
       const copiedAt = new Date().toISOString();
       await this.record({ source: t.source, phase: "copied", rows: p.rows, bytes: t.bytes, seconds, copiedAt, error: null }, t.columns, w);
       this.synced.set(t.source, { at: copiedAt, seconds, by: "copy" });
-      this.event({ kind: "copied", table: t.source, message: `copied: ${p.rows.toLocaleString("en-US")} row(s) in ${seconds.toFixed(2)} s` });
+      this.event({ kind: "copied", table: t.source, message: `synced: ${p.rows.toLocaleString("en-US")} row(s) in ${seconds.toFixed(2)} s` });
       this.copiedAs.set(t.source, columnsKey(t.columns));
       // in the catalog at once: a pass's other copies may take hours
       await this.rebuildSchema();
@@ -2897,14 +2897,14 @@ export class Sync {
       // snapshot), as when the beginning and the first chunk were one transaction
       if (k !== null && k.done.length === 0) {
         try { k = await this.forgetCopy(t, side); }
-        catch (f) { this.log(`the copy of ${t.source} could not drop what it began (its next attempt continues it): ${f instanceof Error ? f.message : String(f)}`); }
+        catch (f) { this.log(`the sync of ${t.source} could not drop what it began (its next attempt continues it): ${f instanceof Error ? f.message : String(f)}`); }
       }
       const through = k === null ? null : readThrough(k.done);
       const where = k === null ? null : through === null ? "with every page read (its swap is next)" : `at page ${through} of ${k.pages}${pastPages(k.done)}, ${k.rows} row(s) in`;
       if (e instanceof Stopping) {
         // the chunks in flight rolled back: a table never copied continues at the next start, one copied before serves its
         // copy as it was meanwhile
-        this.log(`copy of ${t.source} stopped: Mason is stopping (${where === null ? "rolled back; it is copied at the next start" : `the chunks in flight rolled back; it continues ${where} at the next start`})`);
+        this.log(`sync of ${t.source} stopped: Mason is stopping (${where === null ? "rolled back; it is synced at the next start" : `the chunks in flight rolled back; it continues ${where} at the next start`})`);
         if (first) await this.record({ ...was, phase: "waiting", error: null }, undefined, w);
         return;
       }
@@ -2917,7 +2917,7 @@ export class Sync {
       this.retries.set(t.source, { failures, at });
       const when = `tried again after ${new Date(at).toISOString().slice(11, 16)} UTC (failure ${failures} in a row), or at once when Mason starts again or its columns or key change` +
         (where === null ? "" : `; it continues ${where}`);
-      this.log(`copy of ${t.source} failed: ${m}; ${when}`);
+      this.log(`sync of ${t.source} failed: ${m}; ${when}`);
       this.event({ kind: "copy_failed", table: t.source, message: `${m}; ${when}` });
       // a table that was copied keeps serving its last copy; one never copied is failed
       await this.record({ ...this.states.get(t.source)!, phase: first ? "failed" : "copied", error: `${m} (${when})` }, undefined, w);
@@ -2930,7 +2930,7 @@ export class Sync {
     const needed = [...this.copyLive.values()].map((l) => l.diskNeeded).filter((n): n is number => n !== null);
     const projectedBytes = needed.length ? Math.round(needed.reduce((a, b) => a + b, 0)) : null;
     try { return { path: dir, freeBytes: this.diskFree(dir), projectedBytes }; }
-    catch (e) { return { path: dir, freeBytes: null, projectedBytes, error: `the free space where the copy is could not be read: ${e instanceof Error ? e.message : String(e)}` }; }
+    catch (e) { return { path: dir, freeBytes: null, projectedBytes, error: `the free space where the synced data is could not be read: ${e instanceof Error ? e.message : String(e)}` }; }
   }
 
   /** The DuckDB file's bytes with its write-ahead log's (what a copy adds lands in the log until a checkpoint). */
@@ -2952,7 +2952,7 @@ export class Sync {
     if (projected === null) return null;
     const free = this.diskFree(path.dirname(this.store.file));
     if (projected.needed <= free) return null;
-    return `the copy of ${t.source} would need about ${humanBytes(projected.needed)} more on disk than is free (${humanBytes(free)} free where ${this.store.file} is; ` +
+    return `the sync of ${t.source} would need about ${humanBytes(projected.needed)} more on disk than is free (${humanBytes(free)} free where ${this.store.file} is; ` +
       `${pagesRead(p.done, p.pages)} of ${p.pages} pages read, ${humanBytes(bytesNow - disk.bytesAtStart)} added): free some disk, mason remove ${t.source}, or mason add ${t.source} --columns … with fewer columns`;
   }
 
@@ -3075,7 +3075,7 @@ export class Sync {
               const node = Number((await c.runAndReadAll(`SELECT * FROM ${pq(`SELECT pg_relation_filenode(${pgLiteral(pgFrom)}::regclass)::bigint`)}`)).getRowsJS()[0]![0]);
               filenode ??= node;
               if (node !== filenode) {
-                throw new StartOver(`the source rewrote ${t.source} since its copy began (its file changed: a VACUUM FULL, CLUSTER, TRUNCATE or column type change), so its rows moved between pages`);
+                throw new StartOver(`the source rewrote ${t.source} since its sync began (its file changed: a VACUUM FULL, CLUSTER, TRUNCATE or column type change), so its rows moved between pages`);
               }
               const n = Number(r.rowsChanged);
               await this.onChunk?.({ ...told, rows: n, phase: "read" });
@@ -3104,7 +3104,7 @@ export class Sync {
             if (at >= 0) live.reading.splice(at, 1);
             if (inTx) {
               try { await c.run("ROLLBACK"); }
-              catch (r) { this.log(`a chunk of ${t.source}'s copy could not be rolled back after it failed (its connection is closed with the copy): ${r instanceof Error ? r.message : String(r)}`); }
+              catch (r) { this.log(`a chunk of ${t.source}'s sync could not be rolled back after it failed (its connection is closed with the sync): ${r instanceof Error ? r.message : String(r)}`); }
             }
             fail(e);
             return;
@@ -3115,7 +3115,7 @@ export class Sync {
           if (short !== null) { fail(new Error(short)); return; }
           const at = readThrough(p.done);
           if (Date.now() - lineAt >= 60_000 && at !== null) {
-            this.log(`copying ${t.source}: page ${at} of ${p.pages}${pastPages(p.done)}, ${p.rows.toLocaleString("en-US")} row(s) in; ${chunks} chunk(s) in the last minute on ${readers} reader(s), ` +
+            this.log(`syncing ${t.source}: page ${at} of ${p.pages}${pastPages(p.done)}, ${p.rows.toLocaleString("en-US")} row(s) in; ${chunks} chunk(s) in the last minute on ${readers} reader(s), ` +
               `${(chunkMs / chunks / 1000).toFixed(1)} s each` + (rate === null ? "" : `; a reader reads ~${Math.round(rate.rowsPerSecond).toLocaleString("en-US")} rows/s ` +
               `(${humanBytes(rate.bytesPerSecond)}/s of the table's pages), so the next chunk is ${live.chunkPages} page(s), ~${this.copyChunkSeconds} s (MASON_COPY_CHUNK_SECONDS; at most ${ceiling})`));
             lineAt = Date.now(); chunks = 0; chunkMs = 0;
@@ -3157,7 +3157,7 @@ export class Sync {
     const ceiling = chunkPages(pages, t.rows, this.copyChunkRows);
     const firstSize = nextChunkPages(ceiling, null, this.copyChunkSeconds);
     const readers = this.mode === "recopy" ? 1 : Math.min(this.copyParallel, Math.max(1, Math.ceil(pages / firstSize)));
-    this.log(`copying ${t.source}${snapshot === null ? "" : ` as of the source's snapshot ${snapshot}: what commits after it is caught up by one poll once copied`}; ` +
+    this.log(`syncing ${t.source}${snapshot === null ? "" : ` as of the source's snapshot ${snapshot}: what commits after it is caught up by one poll once read`}; ` +
       `${pages} page(s) in chunks sized to ~${this.copyChunkSeconds} s of reading each at the rate measured here (MASON_COPY_CHUNK_SECONDS; at most ${ceiling} page(s)), ` +
       `the first of ${firstSize} page(s) to measure it, ${readers === 1 ? "one at a time" : `${readers} at a time (MASON_COPY_PARALLEL), each a backend on the database`}`);
     return { snapshot, columns: columnsKey(t.columns), exact, filenode: null, pages, done: [], rows: 0 };
@@ -3185,7 +3185,7 @@ export class Sync {
     const there = (await w.runAndReadAll(`SELECT count(*) FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = ${literal(t.schema)} AND table_name = ${literal(`${t.table}${SIDE_SUFFIX}`)}`)).getRowsJS()[0]![0] === 1n;
     const row = r[0] as [string | null, string, string, bigint] | undefined;
     if (row === undefined || row[0] === null || row[1] !== columnsKey(t.columns) || !there) {
-      if (row !== undefined) this.log(`starting the copy of ${t.source} over, from its first page: ${!there ? "the table it was filling is gone" : row[0] === null ? "it was begun as a recopy" : "its columns are not the ones its copy was begun with"}`);
+      if (row !== undefined) this.log(`starting the sync of ${t.source} over, from its first page: ${!there ? "the table it was filling is gone" : row[0] === null ? "it was begun as a recopy" : "its columns are not the ones its sync was begun with"}`);
       return this.forgetCopy(t, side);
     }
     const chunks = (await w.runAndReadAll(`SELECT first_page, end_page, "rows", filenode FROM ${MASON_SCHEMA}.copy_chunks WHERE source = ${literal(t.source)} ORDER BY first_page`)).getRowsJS() as Array<[bigint, bigint | null, bigint, bigint]>;
@@ -3193,8 +3193,8 @@ export class Sync {
     const rows = chunks.reduce((n, c) => n + Number(c[2]), 0);
     const p: CopyProgress = { snapshot: row[0], columns: row[1], exact: new Map(JSON.parse(row[2]) as Array<[string, number]>), filenode: chunks.length ? Number(chunks[0]![3]) : null, pages: Number(row[3]), done, rows };
     const at = readThrough(done);
-    this.log(at === null ? `resuming the copy of ${t.source} with every page read (${rows} row(s) in): its swap is next`
-      : `resuming the copy of ${t.source} at page ${at} of ${p.pages}${pastPages(done)}, ${rows} row(s) in, held to its first snapshot ${p.snapshot}: the pages read before are not read again`);
+    this.log(at === null ? `resuming the sync of ${t.source} with every page read (${rows} row(s) in): its swap is next`
+      : `resuming the sync of ${t.source} at page ${at} of ${p.pages}${pastPages(done)}, ${rows} row(s) in, held to its first snapshot ${p.snapshot}: the pages read before are not read again`);
     const now = this.states.get(t.source);
     if (now !== undefined && now.phase === "copying") this.states.set(t.source, { ...now, rowsSoFar: rows, rowsEstimate: t.rows });
     return p;
@@ -3216,7 +3216,7 @@ export class Sync {
         `WHERE snapshot IS NOT NULL AND filenode IS NOT NULL AND (next_page IS NULL OR next_page > 0)`)).rowsChanged);
       for (const gone of ["filenode", "next_page", "rows"]) await w.run(`ALTER TABLE ${MASON_SCHEMA}.copy_progress DROP COLUMN IF EXISTS ${ident(gone)}`);
       await w.run("COMMIT");
-      if (moved > 0) this.log(`${moved} copy(ies) in progress were begun by a Mason that read one chunk at a time: each continues where it was`);
+      if (moved > 0) this.log(`${moved} sync(s) in progress were begun by a Mason that read one chunk at a time: each continues where it was`);
     } catch (e) {
       await w.run("ROLLBACK");
       throw e;
@@ -3244,7 +3244,7 @@ export class Sync {
     for (const [source] of r.getRowsJS() as Array<[string]>) {
       if (this.states.get(source)?.phase !== "copied") continue;
       this.retired.add(source);
-      this.log(`${source}: its copy is ${RETIRED_LAYOUT} — its rows are sorted on disk, and only the source has them in its own order, so it is read again whole; the copy serves as it was until then`);
+      this.log(`${source}: it is ${RETIRED_LAYOUT} — its rows are sorted on disk, and only the source has them in its own order, so it is read again whole; its synced data serves as it was until then`);
     }
   }
 
@@ -3254,7 +3254,7 @@ export class Sync {
     const dir = path.dirname(this.store.file), base = `${path.basename(this.store.file)}.stage-`;
     for (const f of fs.readdirSync(dir).filter((x) => x.startsWith(base))) {
       fs.rmSync(path.join(dir, f), { recursive: true, force: true });
-      this.log(`removed ${f}: a copy's stage, from an older Mason (a copy now reads the source once, straight into its table)`);
+      this.log(`removed ${f}: a sync's stage, from an older Mason (a sync now reads the source once, straight into its table)`);
     }
   }
 
@@ -3277,8 +3277,8 @@ export class Sync {
       const declared = NUMERIC_TYPE.exec(c.type)!;
       const scale = declared[1] !== undefined ? used ?? 0 : maxScale ?? 0;
       const width = (digits ?? 1) + scale;
-      if ((special ?? 0) > 0) { this.log(`${t.source}.${c.name}: ${special} value(s) NaN or Infinity, which the copy's DECIMAL cannot hold: copied as a double`); return; }
-      if (scale > 38 || width > 38) { this.log(`${t.source}.${c.name}: values of ${digits ?? 1} digit(s) and ${scale} decimal(s) do not fit the copy's DECIMAL(38): copied as a double (15 significant digits)`); return; }
+      if ((special ?? 0) > 0) { this.log(`${t.source}.${c.name}: ${special} value(s) NaN or Infinity, which the synced table's DECIMAL cannot hold: synced as a double`); return; }
+      if (scale > 38 || width > 38) { this.log(`${t.source}.${c.name}: values of ${digits ?? 1} digit(s) and ${scale} decimal(s) do not fit the synced table's DECIMAL(38): synced as a double (15 significant digits)`); return; }
       if (declared[1] === undefined && minScale !== null && minScale !== maxScale) this.log(`${t.source}.${c.name}: values of ${minScale} to ${maxScale} decimals: Mason answers each with ${scale}, Postgres with its own`);
       out.set(c.name, scale);
     });
@@ -3309,7 +3309,7 @@ export class Sync {
       `${s.copiedAt === null ? "NULL" : `${literal(s.copiedAt)}::TIMESTAMPTZ`}, ${v(s.error)}, ${columns ? `${literal(JSON.stringify(columns))}::JSON` : `(SELECT columns FROM ${MASON_SCHEMA}.copy_state WHERE source = ${literal(s.source)})`})`;
     // the ledger is the record the commands read: a failed write is said, never silent, and the copy itself stands
     try { await c.run(sql); }
-    catch (e) { this.log(`recording ${s.source}'s copy state failed: ${e instanceof Error ? e.message : String(e)}`); }
+    catch (e) { this.log(`recording ${s.source}'s sync state failed: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
   /** the catalog rebuilt (`schemaBuilt`), after any rebuild already under way */

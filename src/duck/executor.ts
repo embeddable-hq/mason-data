@@ -93,7 +93,7 @@ export function typeFromJson(j: Json): DuckDBType {
     case T.GEOMETRY: return duck.DuckDBGeometryType.create(alias, typeof o.crs === "string" ? o.crs : undefined);
   }
   const simple = SIMPLE_TYPES.get(id);
-  if (simple === undefined) throw new Error(`a type of the copy that Mason cannot carry between threads: ${JSON.stringify(j)} (Mason bug: report it)`);
+  if (simple === undefined) throw new Error(`a type of the engine's that Mason cannot carry between threads: ${JSON.stringify(j)} (Mason bug: report it)`);
   return simple(alias);
 }
 /** every type of no parameters, by its id: each class's `create(alias)` */
@@ -180,7 +180,7 @@ function plainValues(values: readonly unknown[] | undefined): unknown[] | undefi
   if (values === undefined) return undefined;
   for (const v of values) {
     if (v === null || typeof v !== "object" || Array.isArray(v) || ArrayBuffer.isView(v) || v instanceof Date) continue;
-    if (Object.getPrototypeOf(v) !== Object.prototype) throw new Error(`a ${(v as object).constructor.name} cannot be sent to the copy's thread: pass its text or a plain value (Mason bug: report it)`);
+    if (Object.getPrototypeOf(v) !== Object.prototype) throw new Error(`a ${(v as object).constructor.name} cannot be sent to the engine's thread: pass its text or a plain value (Mason bug: report it)`);
   }
   return [...values];
 }
@@ -267,7 +267,7 @@ export class Executor {
       if ("pong" in m) return;
       if ("log" in m) { this.log(m.log); return; }
       if (m.id === this.shutdownId) {
-        if (!m.ok) this.log(`closing the copy failed: ${errorOf(m.error).message}`);
+        if (!m.ok) this.log(`closing the engine failed: ${errorOf(m.error).message}`);
         this.shutdownAnswered();
         return;
       }
@@ -290,7 +290,7 @@ export class Executor {
     this.watch = setInterval(() => {
       if (this.gone !== null || this.pending.size === 0) { this.heard = performance.now(); return; }
       if (performance.now() - this.heard > this.silentMs) {
-        this.abandon(`it answered nothing for ${Math.round(this.silentMs / 1000)} s with ${this.pending.size} request(s) waiting (stuck inside the copy: Mason bug, report it with mason logs)`);
+        this.abandon(`it answered nothing for ${Math.round(this.silentMs / 1000)} s with ${this.pending.size} request(s) waiting (stuck inside the engine: Mason bug, report it with mason logs)`);
         return;
       }
       this.worker.postMessage({ op: "ping" });
@@ -321,7 +321,7 @@ export class Executor {
       this.worker.postMessage({ op: "shutdown", id: this.shutdownId });
     }
     void this.shutdown.then(async () => { if (!this.hasExited) await this.worker.terminate(); })
-      .catch((e: unknown) => this.log(`ending the copy's thread failed: ${(e as Error).message}`));
+      .catch((e: unknown) => this.log(`ending the engine's thread failed: ${(e as Error).message}`));
     return this.shutdown;
   }
 
@@ -341,7 +341,7 @@ export class Executor {
     clearInterval(this.watch);
     const err = new ExecutorGone(reason, stopped);
     for (const [id, p] of [...this.pending]) { this.settle(id); p.reject(err); }
-    if (!stopped) { this.log(`the copy's engine stopped: ${reason}`); if (!this.closing) for (const f of this.crashed) f(reason); }
+    if (!stopped) { this.log(`the engine stopped: ${reason}`); if (!this.closing) for (const f of this.crashed) f(reason); }
   }
 
   private settle(id: number): void {
@@ -387,7 +387,7 @@ export class Executor {
   /** a wire session's connection: a slot of the cancel table, its connection on the worker */
   async runner(): Promise<DuckRunner> {
     const slot = this.free.pop();
-    if (slot === undefined) throw new StatementError({ code: "53300", message: `too many sessions are reading the copy at once (${CANCEL_SLOTS})`, hint: "close idle connections (a pool's size), then connect again" });
+    if (slot === undefined) throw new StatementError({ code: "53300", message: `too many sessions are reading the synced data at once (${CANCEL_SLOTS})`, hint: "close idle connections (a pool's size), then connect again" });
     resetSlot(this.cancels, slot);
     try { return new RemoteRunner(this, await this.call<number>({ op: "runner.open", slot }), slot); }
     catch (e) { this.free.push(slot); throw e instanceof ExecutorGone ? goneError(e, "") : e; }
@@ -410,7 +410,7 @@ export class Executor {
     const closed = (async () => { await this.shutDown(); await this.exited; return "closed" as const; })();
     try {
       if (await Promise.race([closed, late]) === "late") {
-        this.log(`the copy's thread did not close within ${graceMs / 1000} s: given up on (its sessions are told 57P02); it ends once its shutdown finishes, and the process waits for it (a thread stuck inside the copy needs a SIGKILL)`);
+        this.log(`the engine's thread did not close within ${graceMs / 1000} s: given up on (its sessions are told 57P02); it ends once its shutdown finishes, and the process waits for it (a thread stuck inside the engine needs a SIGKILL)`);
         this.abandon(`it did not close within ${graceMs / 1000} s`);
       }
     } finally { clearTimeout(timer); }
@@ -465,7 +465,7 @@ const reasonOf = (signal: AbortSignal): { fields?: StatementError["fields"] } | 
 /** what a session is told when the worker is gone mid-statement */
 function goneError(e: ExecutorGone, sql: string): StatementError {
   if (e.stopped) return new StatementError(STOPPING, sql);
-  return new StatementError({ code: "57P02", message: "terminating connection because the copy's engine stopped", detail: e.message,
+  return new StatementError({ code: "57P02", message: "terminating connection because the engine stopped", detail: e.message,
     hint: "Mason starts again by itself: reconnect in a few seconds and repeat the statement (mason status says when it is back)" }, sql);
 }
 

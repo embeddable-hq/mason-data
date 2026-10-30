@@ -309,11 +309,11 @@ test("copying: the bar's share, the rows, the chunks, the rate and the time left
 
 test("a copy the poll does not keep current is the page's warning, as mason status paints it: its line's words equal, its state unsynced", () => {
   const BEHIND = stateOf([{ ...copied("public.orders", 2_000_000, "2026-10-27T09:00:09.000Z"),
-    kept: { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: "2026-10-27T09:00:09.000Z", nextAt: null, pending: "caught up by one poll first (after its copy)" } }]);
+    kept: { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: "2026-10-27T09:00:09.000Z", nextAt: null, pending: "caught up by one poll first (after its whole read)" } }]);
   const t = BEHIND.tables.find((x) => x.table === "public.orders")!;
   const line = fn<[unknown], { state: string; what: string }>("tableLine")(t);
   assert.equal(line.state, "unsynced", "the page's warning colour (app.css .t-unsynced), never done's");
-  assert.match(line.what, /^2,000,000 rows · synced · NOT kept current \(last synced .* ago\): caught up by one poll first \(after its copy\)$/);
+  assert.match(line.what, /^2,000,000 rows · synced · NOT kept current \(last synced .* ago\): caught up by one poll first \(after its whole read\)$/);
   // the CLI paints the same words yellow (paintBar): the same text, the same warning
   const cli = commands.tableLines(BEHIND).find((l) => l.startsWith("public.orders"))!;
   assert.ok(cli.endsWith(line.what), `${cli}\n${line.what}`);

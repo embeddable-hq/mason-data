@@ -362,31 +362,31 @@ test("a table ADDED and not yet served is refused with where its copy is, never 
   try {
     copies = [state({ phase: "copying", rowsSoFar: 1200, rowsEstimate: 4800 })];
     assert.equal(await hint("SELECT * FROM customers"),
-      "public.customers is added and being copied (about 1200 of ~4800 rows so far, 25%): it is served once its copy commits; mason wait waits for it (mason status shows how far it is)");
+      "public.customers is added and being synced (about 1200 of ~4800 rows so far, 25%): it is served once its first sync commits; mason wait waits for it (mason status shows how far it is)");
     // past the source's estimate (Postgres's statistics lag the table), with the chunks' progress: the share is of the
     // heap's pages and the count says it is past the estimate; without the progress, the count alone says so — a share
     // that fell to 0 once past it is the bug mason wait's bar had
     copies = [state({ phase: "copying", rowsSoFar: 21_385_158, rowsEstimate: 20_126_276,
       progress: { chunksDone: 9, chunksTotal: 11, reading: 2, readingSeconds: 40, rowsReading: 100_000, rowsPerSecond: 12_000, bytesPerSecond: 1e6, secondsLeft: 100, share: 0.87 } })];
     assert.equal(await hint("SELECT * FROM customers"),
-      "public.customers is added and being copied (87% of its pages read, 21485158 rows so far, past the ~20126276 estimated): it is served once its copy commits; mason wait waits for it (mason status shows how far it is)");
+      "public.customers is added and being synced (87% of its pages read, 21485158 rows so far, past the ~20126276 estimated): it is served once its first sync commits; mason wait waits for it (mason status shows how far it is)");
     copies = [state({ phase: "copying", rowsSoFar: 5000, rowsEstimate: 4800 })];
     assert.equal(await hint("SELECT * FROM customers"),
-      "public.customers is added and being copied (5000 rows so far, past the ~4800 estimated): it is served once its copy commits; mason wait waits for it (mason status shows how far it is)");
+      "public.customers is added and being synced (5000 rows so far, past the ~4800 estimated): it is served once its first sync commits; mason wait waits for it (mason status shows how far it is)");
     // qualified, as a tool writes it; DuckDB's progress not read yet
     copies = [state({ phase: "copying" })];
-    assert.match(await hint("SELECT * FROM public.customers"), /^public\.customers is added and being copied \(its rows are being read\): it is served once its copy commits/);
+    assert.match(await hint("SELECT * FROM public.customers"), /^public\.customers is added and being synced \(its rows are being read\): it is served once its first sync commits/);
     copies = [state({ phase: "waiting" })];
-    assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added and waits its turn to be copied: it is served once its copy commits; mason wait waits for it/);
+    assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added and waits its turn to be synced: it is served once its first sync commits; mason wait waits for it/);
     copies = [state({ phase: "failed", error: "permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …)" })];
     assert.equal(await hint("SELECT * FROM customers"),
-      "public.customers is added, but its copy failed: permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …); mason logs says more");
+      "public.customers is added, but its first sync failed: permission denied for table customers (tried again after 14:05 UTC (failure 1 in a row), …); mason logs says more");
     // another schema's table of that name is not this one
     copies = [state({ source: "sales.customers", phase: "copying" }), state({ phase: "waiting" })];
     assert.match(await hint("SELECT * FROM customers"), /^public\.customers is added and waits its turn/);
     // a table nobody added is the `mason add` away
     copies = [];
-    assert.match(await hint("SELECT * FROM customers"), /^a table is in Mason once it is added: mason add customers copies it/);
+    assert.match(await hint("SELECT * FROM customers"), /^a table is in Mason once it is added: mason add customers syncs it/);
   } finally { copies = []; await c.end(); }
 });
 
@@ -1368,7 +1368,7 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
     const plain = await explained(0);
     assert.deepEqual(await explained(1), plain);
     // the SQL sent is the join's, and DuckDB plans its delimiter join
-    assert.match(plain.join("\n"), /Sent to the copy: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
+    assert.match(plain.join("\n"), /Sent to the engine: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
     assert.doesNotMatch(plain.join("\n"), /CROSS JOIN LATERAL/, plain.join("\n"));
 
     // planned again under the search_path and TimeZone of its Parse, never a later SET's
@@ -1705,9 +1705,9 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     assert.deepEqual(p.fields, [["QUERY PLAN", 25]]);
     assert.equal(p.command, "EXPLAIN");
     // no sync here (`copies` is empty): how it is kept current is said unknown, never guessed
-    assert.equal(p.lines[0], "Mason: answered from its copy of public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
-    assert.equal(p.lines[1], "  Sent to the copy: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
-    assert.equal(p.lines[2], "  Computed by Mason after the copy: nothing");
+    assert.equal(p.lines[0], "Mason: answered from the synced table public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
+    assert.equal(p.lines[1], "  Sent to the engine: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
+    assert.equal(p.lines[2], "  Computed by Mason after the engine: nothing");
     // a preview's late materialization (14a1a831), as DuckDB plans it: the top two by the key, then the other columns
     // read for those rows only
     assert.ok(p.lines.some((l) => /^ +->  Hash Join {2}\(rows=3\)$/.test(l)) && p.lines.some((l) => /^ +Join Type: SEMI$/.test(l)), p.lines.join("\n"));
@@ -1720,16 +1720,16 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     const v = await plan("EXPLAIN (VERBOSE, COSTS false, BUFFERS) SELECT id FROM orders WHERE status = $1", ["paid"]);
     assert.ok(v.lines.some((l) => /^\s+Projections: /.test(l)) && v.lines.some((l) => /^\s+Filters: /.test(l)), v.lines.join("\n"));
     assert.ok(!v.lines.some((l) => /rows=/.test(l)), v.lines.join("\n"));
-    assert.ok(v.lines.includes("  Note: BUFFERS has no meaning to the copy: ignored"), v.lines.join("\n"));
+    assert.ok(v.lines.includes("  Note: BUFFERS has no meaning to the engine: ignored"), v.lines.join("\n"));
     // what Mason computes after DuckDB, and its functions DuckDB calls
     const x = await plan("EXPLAIN SELECT sum(amount) / 7 FROM orders");
-    assert.match(x.lines[2]!, /^ {2}Computed by Mason after the copy: column 1 "\?column\?": Postgres's exact numeric, from \d of the copy's value\(s\)$/);
+    assert.match(x.lines[2]!, /^ {2}Computed by Mason after the engine: column 1 "\?column\?": Postgres's exact numeric, from \d of the engine's value\(s\)$/);
     // a function is what DuckDB calls, never the cells Mason computes from (`__mason_cell_0` is a column's name)
-    const called = (await plan("EXPLAIN SELECT sum(amount::text::numeric) FROM orders")).lines.find((l) => /^ {2}Mason's functions the copy calls: /.test(l));
+    const called = (await plan("EXPLAIN SELECT sum(amount::text::numeric) FROM orders")).lines.find((l) => /^ {2}Mason's functions the engine calls: /.test(l));
     assert.ok(called !== undefined && /__mason_numeric_exact/.test(called) && !/__mason_cell_/.test(called), called);
     // a catalog statement is the catalog Postgres's, said so first
     const k = await plan("EXPLAIN SELECT relname FROM pg_class WHERE relname = 'orders'");
-    assert.match(k.lines[0]!, /^Mason: answered by the catalog Postgres \(Mason's own, PGlite\), not the copy/);
+    assert.match(k.lines[0]!, /^Mason: answered by the catalog Postgres \(Mason's own, PGlite\), not the synced data/);
     assert.ok(k.lines.length > 1);
     assert.match((await plan("EXPLAIN SELECT relname FROM pg_class", [])).lines[0]!, /^Mason: answered by the catalog Postgres/);
   } finally { await c.end(); }
@@ -1744,9 +1744,9 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
   const c = await client();
   const header = async (sql = "EXPLAIN SELECT id FROM orders"): Promise<string> => String((await c.query({ text: sql, rowMode: "array" })).rows[0]![0]);
   const json = async (): Promise<Record<string, unknown>> =>
-    (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>)[0]!.Mason.Copies[0]!;
+    (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Tables: Array<Record<string, unknown>> } }>)[0]!.Mason.Tables[0]!;
   const copied = (kept: CopyState["kept"]): CopyState => ({ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 0.1, copiedAt: "2026-10-27 19:00:00+00", error: null, ...(kept ? { kept } : {}) });
-  const head = "Mason: answered from its copy of public.orders (about 3 rows; ";
+  const head = "Mason: answered from the synced table public.orders (about 3 rows; ";
   // the copy's age is said for a streamed table too: the last moment the stream had everything the database wrote
   const syncedAt = new Date(Date.now() - 3 * 60_000).toISOString();
   const synced = `last synced 3 min ago (${syncedAt.slice(0, 19).replace("T", " ")} UTC)`;
@@ -1766,8 +1766,8 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     assert.equal(await header(), `${head}streamed by logical replication (slot mason_shop), replicated, at 0/1A2B3C4D, ${synced}, no change applied this run; NOT kept current now, the stream is not running: the database closed the connection · it starts again after 08:16 UTC)`);
     await jsonSays(null, { ...stream, "Stream State": "streamed", "Last Change Committed": null, "Stream Not Running": "the database closed the connection · it starts again after 08:16 UTC" });
     // a table being caught up, or left out of the publication, is said as status says it, and no mode is said at work
-    copies = [copied({ ...streamed, state: "catching-up", why: "caught up by one poll after its copy" })];
-    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: caught up by one poll after its copy)`);
+    copies = [copied({ ...streamed, state: "catching-up", why: "caught up by one poll after its whole read" })];
+    assert.equal(await header(), `${head}logical replication (slot mason_shop), not streamed yet: caught up by one poll after its whole read)`);
     await jsonSays(null, { ...stream, "Stream State": "catching-up" });
     copies = [copied({ ...streamed, state: "left-out", why: "the publication mason_pub does not publish public.orders" })];
     assert.equal(await header(), `${head}NOT kept current: left out of logical replication (slot mason_shop): the publication mason_pub does not publish public.orders)`);
@@ -1795,13 +1795,13 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     await jsonSays(null, { Sync: "poll 30s", "Last Synced": daysAgo, "Next Poll": null });
     // a copy under way or failed says so before how it would be kept current
     copies = [{ ...copied(streamed), phase: "copying", rowsSoFar: 1200 }];
-    assert.equal(await header(), `${head}being copied (1,200 rows so far): kept current once copied)`);
+    assert.equal(await header(), `${head}being read whole (1,200 rows so far): kept current once synced)`);
     copies = [{ ...copied(streamed), phase: "failed", error: "permission denied for table orders\n(tried again after 14:05 UTC)" }];
-    assert.equal(await header(), `${head}its last copy failed: permission denied for table orders)`);
+    assert.equal(await header(), `${head}its first sync failed: permission denied for table orders)`);
     // a statement over two copies says each on a line of its own
     copies = [copied(streamed), { ...copied({ by: "poll", sync: every30, syncedAt: null, nextAt: null }), source: "sales.invoices" }];
     const two = (await c.query({ text: "EXPLAIN SELECT o.id FROM orders o JOIN sales.invoices i ON i.id = o.id", rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
-    assert.equal(two[0], "Mason: answered from its copies of");
+    assert.equal(two[0], "Mason: answered from the synced tables");
     assert.ok(two.includes(`  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), replicated, at 0/1A2B3C4D, ${synced}, last change committed 2026-10-29 08:15:02 UTC)`), two.join("\n"));
     assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; polled every 30s, not polled yet\)$/.test(l)), two.join("\n"));
   } finally {
@@ -1822,10 +1822,10 @@ test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's
     assert.ok(lines.some((l) => /^ {2}->  Order By {2}\(rows=\d+\) \(actual rows=2, thread time=\d+\.\d{3} ms\)$/.test(l)), lines.join("\n"));
     assert.ok(lines.some((l) => /->  Table Scan on public\.orders {2}\(rows=\d+\) \(actual rows=2, thread time=\d+\.\d{3} ms\)$/.test(l)), lines.join("\n"));
     // the time is DuckDB's thread time, said so once: never Postgres's elapsed `actual time` (the Fable review of #517)
-    assert.ok(lines.includes("  Note: an operator's thread time is the copy's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time"), lines.join("\n"));
+    assert.ok(lines.includes("  Note: an operator's thread time is the engine's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time"), lines.join("\n"));
     assert.ok(!lines.some((l) => /actual time=/.test(l)), lines.join("\n"));
-    assert.match(lines.at(-2)!, /^Planning Time: \d+\.\d{3} ms \(Postgres's analysis \d+\.\d{3}, Mason's rewrite \d+\.\d{3}, the copy's planning \d+\.\d{3}\)$/);
-    assert.match(lines.at(-1)!, /^Execution Time: \d+\.\d{3} ms \(the copy \d+\.\d{3}, Mason's conversion and exact numerics \d+\.\d{3}\)$/);
+    assert.match(lines.at(-2)!, /^Planning Time: \d+\.\d{3} ms \(Postgres's analysis \d+\.\d{3}, Mason's rewrite \d+\.\d{3}, the engine's planning \d+\.\d{3}\)$/);
+    assert.match(lines.at(-1)!, /^Execution Time: \d+\.\d{3} ms \(the engine \d+\.\d{3}, Mason's conversion and exact numerics \d+\.\d{3}\)$/);
     // it ran, through the same runner (its log line), and the plan's rows are all the client got
     assert.ok(finished("2 row(s)"), logged.join("\n"));
 
@@ -1854,14 +1854,14 @@ test("EXPLAIN ANALYZE reports the statement's own profile, never another stateme
       assert.ok(!l.some((x) => /schemas/i.test(x)), l.join("\n"));
       // DuckDB's plan of the count (its EXPLAIN: a scan of the one row it computed), the rows it answered, no times
       assert.deepEqual(plan, ["Column Data Scan  (rows=1) (actual rows=1)"], l.join("\n"));
-      assert.ok(l.includes("  Note: the copy's profiler recorded no operator of this statement: the copy answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered"), l.join("\n"));
+      assert.ok(l.includes("  Note: the engine's profiler recorded no operator of this statement: the engine answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered"), l.join("\n"));
       assert.ok(!l.some((x) => /thread time/.test(x)), l.join("\n"));
       assert.match(l.at(-1)!, /^Execution Time: \d+\.\d{3} ms /);
     }
     // FORMAT JSON says the same
     const [doc] = JSON.parse(String((await c.query({ text: "EXPLAIN (ANALYZE, FORMAT JSON) SELECT count(*) FROM big", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown> }>;
-    assert.deepEqual([doc!.Plan["Node Type"], doc!.Plan["Actual Rows"], doc!.Plan["DuckDB Thread Time"]], ["Column Data Scan", 1, undefined]);
-    assert.match(String(doc!.Mason.Note), /^the copy's profiler recorded no operator of this statement/);
+    assert.deepEqual([doc!.Plan["Node Type"], doc!.Plan["Actual Rows"], doc!.Plan["Engine Thread Time"]], ["Column Data Scan", 1, undefined]);
+    assert.match(String(doc!.Mason.Note), /^the engine's profiler recorded no operator of this statement/);
     // a statement the profiler does time is its own, after one it did not and after one of another table's; one that
     // scans a copy says its scan's rows and time
     for (const [sql, scans] of [["SELECT count(*) FROM big WHERE id > 7", "big"], ["SELECT count(*) FROM orders WHERE qty > 1", "orders"], ["SELECT 1", null], ["SELECT id FROM orders WHERE false", null]] as const) {
@@ -1885,12 +1885,12 @@ test("EXPLAIN (FORMAT JSON) is Postgres's plan document, DuckDB's operators in i
     const [doc] = JSON.parse(String((r.rows as unknown[][])[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown>; "Planning Time": number; "Execution Time": number }>;
     assert.equal(doc!.Plan["Node Type"], "Top N");
     assert.equal(doc!.Plan["Actual Rows"], 2);
-    assert.equal(typeof doc!.Plan["Copy Thread Time"], "number");
+    assert.equal(typeof doc!.Plan["Engine Thread Time"], "number");
     assert.equal(doc!.Plan["Actual Total Time"], undefined, "a plan viewer draws Actual Total Time as elapsed: DuckDB's is thread time");
     const scan = (doc!.Plan.Plans as Array<Record<string, unknown>>)[0]!;
     assert.deepEqual([scan["Node Type"], scan["Relation Name"], scan["Schema"], scan["Plan Rows"]], ["Table Scan", "orders", "public", 3]);
-    assert.equal(doc!.Mason["Answered By"], "the copy");
-    assert.deepEqual(doc!.Mason.Copies, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": null, "Kept Current": "how it is kept current is unknown: the sync has no record of it" }]);
+    assert.equal(doc!.Mason["Answered By"], "the engine");
+    assert.deepEqual(doc!.Mason.Tables, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": null, "Kept Current": "how it is kept current is unknown: the sync has no record of it" }]);
     assert.ok(typeof doc!["Planning Time"] === "number" && typeof doc!["Execution Time"] === "number");
     // FORMAT XML and YAML are refused by name; Postgres's own errors for an option it does not have, or one that needs ANALYZE
     await assert.rejects(c.query("EXPLAIN (FORMAT XML) SELECT id FROM orders"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap explain-option/.test(e.message));
@@ -2007,7 +2007,7 @@ test("a source's view is answered by its definition over the copied tables, as P
     await assert.rejects(c.query("SELECT paid_orders FROM paid_orders"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap view-forms/.test(e.detail ?? ""));
     await assert.rejects(c.query("SELECT * FROM lost"), (e: pg.DatabaseError) => e.code === "42P01");
     // one line naming the view and what it reads, never its definition (tests/postgres-api/catalog.test.ts)
-    assert.ok(everLogged.some((l) => l.endsWith("catalog: view public.lost left out: it reads public.nowhere, which is not copied")), everLogged.filter((l) => l.includes("left out")).join("\n"));
+    assert.ok(everLogged.some((l) => l.endsWith("catalog: view public.lost left out: it reads public.nowhere, which is not synced")), everLogged.filter((l) => l.includes("left out")).join("\n"));
   } finally { await c.end(); }
 });
 
@@ -2047,7 +2047,7 @@ test("a ->> of a column is DuckDB's own read where it is Postgres's answer, the 
     assert.deepEqual(got.fields, want.fields);
     // the hops: a read of strings alone makes none; a number, an index, the json itself, a json document holding a key
     // twice (row 1's j, at the root and in o: DuckDB reads the first, Postgres the last), a literal's, do
-    // (the count is the copy's thread's, where the functions run: src/duck/executor.ts functionCalls)
+    // (the count is the engine's thread's, where the functions run: src/duck/executor.ts functionCalls)
     const calls = async (): Promise<number> => (await store.functionCalls()).get("__mason_json_get") ?? 0;
     const hops = async (read: string, where = ""): Promise<number> => {
       const before = await calls();

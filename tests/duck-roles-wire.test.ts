@@ -25,7 +25,7 @@
  *   - the catalog answers FOR THE ROLE: information_schema.tables / .columns list what it may read, has_table_privilege
  *     and has_column_privilege answer as Postgres's would for its grants, a session with no role sees everything, and
  *     two sessions' catalog requests interleaved never see each other's view (`SET ROLE` in the one request); pg_catalog
- *     itself still lists every copied column (said in the docs: not filtered in this stage);
+ *     itself still lists every synced column (said in the docs: not filtered in this stage);
  *   - every refusal and answer is a row of the request log with the user's ROLE.
  * The roles modules are imported inside the tests, so a tree without them fails each test by name (scripts/fails-without.ts).
  */

@@ -360,9 +360,9 @@ const descendants = (n: JsonNode): JsonNode[] => (n.Plans ?? []).flatMap((c) => 
  */
 function delimiterJoin(cte: JsonNode): boolean {
   if (opOf(cte) !== "CTE") return false;
-  if (/^__duckdb_delim/.test(String(cte["Copy CTE Name"] ?? ""))) return true;
-  const index = cte["Copy Table Index"];
-  const scansIt = (n: JsonNode): boolean => opOf(n) === "CTE_SCAN" && n["Copy CTE Index"] === index;
+  if (/^__duckdb_delim/.test(String(cte["Engine CTE Name"] ?? ""))) return true;
+  const index = cte["Engine Table Index"];
+  const scansIt = (n: JsonNode): boolean => opOf(n) === "CTE_SCAN" && n["Engine CTE Index"] === index;
   const outer = (n: JsonNode): boolean => scansIt(n) || (opOf(n) === "PROJECTION" && (n.Plans ?? []).length === 1 && outer(n.Plans![0]!));
   const distinct = (n: JsonNode): boolean => [n, ...descendants(n)].some((d) => /^(PERFECT_)?HASH_GROUP_BY$/.test(opOf(d)) && under(d, scansIt));
   return index !== undefined && descendants(cte).some((j) => /JOIN/.test(opOf(j)) && (j.Plans ?? []).some((a) => outer(a) && (j.Plans ?? []).some((b) => b !== a && distinct(b))));
@@ -416,18 +416,18 @@ function skeletonOf(root: JsonNode, calls: readonly string[], sent: string): Ske
     if (op === "ORDER_BY" && !under(n, (c) => /^(TOP_N|LIMIT|STREAMING_LIMIT)$/.test(opOf(c)))) sort = true;
     // a top N with its keys counted: a sort key folded or not (the nulls idiom: `x IS NULL, x` against one key with its
     // NULLS placed, nullsKeyFolded) is a key more or less, where a jsonb's key is never a top N's filter to tell it by
-    const sortKeys = strings(n["Copy Order By"]).flatMap((s) => s.split("\n")).filter((s) => s.trim() !== "").length;
+    const sortKeys = strings(n["Engine Order By"]).flatMap((s) => s.split("\n")).filter((s) => s.trim() !== "").length;
     const parts = [op === "TOP_N" ? `TOP_N (${sortKeys === 0 ? "keys not said" : `${sortKeys} key${sortKeys === 1 ? "" : "s"}`})` : op];
     if (typeof n["Relation Name"] === "string") parts.push(`${String(n.Schema)}.${n["Relation Name"]}`);
     // a scan's filters: DuckDB's top N pushes its bound into the scan as an optional Dynamic Filter, which skips a row
     // group whose zone map cannot beat it; any other filter is checked against the zone maps too, where it compares
     // a bare column with a constant (said per filter: a cast around the column keeps the filter and loses the pruning)
-    const filters = strings(n["Copy Filters"]).map(storedName);
+    const filters = strings(n["Engine Filters"]).map(storedName);
     const dynamic = filters.flatMap((f) => [...f.matchAll(/Dynamic Filter \(([^()]*)\)/g)].map((m) => m[1]!));
     if (dynamic.length > 0) parts.push(`[top-N filter: ${dynamic.join(", ")}]`);
     const others = filters.flatMap(filterOf);
     if (others.length > 0) parts.push(`[zone-map filter: ${others.join("; ")}]`);
-    const called = [...new Set(Object.entries(n).filter(([k]) => k.startsWith("Copy ")).flatMap(([, v]) => strings(v)).flatMap((s) => [...s.matchAll(/(__mason_\w+)\(/g)].map((m) => m[1]!)))].sort();
+    const called = [...new Set(Object.entries(n).filter(([k]) => k.startsWith("Engine ")).flatMap(([, v]) => strings(v)).flatMap((s) => [...s.matchAll(/(__mason_\w+)\(/g)].map((m) => m[1]!)))].sort();
     if (called.length > 0) parts.push(`calls ${called.join(", ")}`);
     plan.push(`${"  ".repeat(depth)}${parts.join(" ")}`);
     for (const c of n.Plans ?? []) walk(c, depth + 1);
@@ -598,8 +598,8 @@ after(async () => {
 async function explained(sql: string, zone = "UTC", { c }: Target = shop): Promise<{ plan: JsonNode; sent: string; functions: string[] }> {
   await c.query(`SET TimeZone = '${zone}'`);
   const r = await c.query({ text: `EXPLAIN (VERBOSE, COSTS false, FORMAT JSON) ${sql}`, rowMode: "array", types: { getTypeParser: () => (v: string) => v } } as pg.QueryConfig);
-  const [doc] = JSON.parse(String((r.rows[0] as unknown[])[0])) as Array<{ Plan: JsonNode; Mason: { "Sent To Copy": string; "Mason Functions Copy Calls": string[] } }>;
-  return { plan: doc!.Plan, sent: doc!.Mason["Sent To Copy"], functions: doc!.Mason["Mason Functions Copy Calls"] };
+  const [doc] = JSON.parse(String((r.rows[0] as unknown[])[0])) as Array<{ Plan: JsonNode; Mason: { "Sent To Engine": string; "Mason Functions Engine Calls": string[] } }>;
+  return { plan: doc!.Plan, sent: doc!.Mason["Sent To Engine"], functions: doc!.Mason["Mason Functions Engine Calls"] };
 }
 
 for (const shape of SHAPES) {

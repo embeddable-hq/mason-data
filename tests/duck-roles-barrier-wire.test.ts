@@ -160,7 +160,7 @@ test("the engine's plan: the statement's expression is above the role's filter, 
     ["list", `SELECT count(*) FROM orders WHERE ${RAISES("marker")} > 0`, /tenant_id/],
   ] as const) {
     const plan = await planOf(user, sql);
-    const sentAt = plan.findIndex((l) => l.includes("Sent to the copy"));
+    const sentAt = plan.findIndex((l) => l.includes("Sent to the engine"));
     assert.ok(plan[sentAt]?.includes(BARRIER), `the statement sent holds the barrier: ${plan[sentAt]}`);
     const tree = plan.slice(plan.findIndex((l) => l.includes("Computed by Mason")) + 1);
     const own = tree.findIndex((l) => /Expression: .*CASE/.test(l));

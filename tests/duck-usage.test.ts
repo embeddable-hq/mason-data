@@ -165,7 +165,7 @@ test("each copy's own bytes are its blocks: a copy served is measured, by its sc
   assert.equal(first!.at, "2026-10-28T11:00:00.000Z");
   const used = Number((await store.writer.runAndReadAll("SELECT used_blocks * block_size FROM pragma_database_size()")).getRowsJS()[0]![0]);
   assert.ok(first!.bytes > 1_000_000 && first!.bytes <= used, `its blocks, within the file's: ${first!.bytes} of ${used}`);
-  assert.match(said.join("\n"), /^usage: measured 1 copies' own size in \d+ ms \(every 10 min\)$/m);
+  assert.match(said.join("\n"), /^usage: measured 1 synced tables' own size in \d+ ms \(every 10 min\)$/m);
   // not again before its interval; again after it, and the latest is the one read
   clock += 60_000;
   await u.sample();

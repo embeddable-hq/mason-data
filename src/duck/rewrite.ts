@@ -69,11 +69,11 @@ export function duckCollation(provider: string, collate: string, locale: string 
   if (/^(C|POSIX)([.].*)?$/i.test(collate) && provider !== "i") return { kind: "bytes", ascii: true };
   if (provider === "i") {
     const name = icuName(locale ?? collate);
-    if (name === null) throw new Error(`the source database's ICU locale ${JSON.stringify(locale ?? collate)} has no collation in the copy: Mason cannot sort text as it does`);
+    if (name === null) throw new Error(`the source database's ICU locale ${JSON.stringify(locale ?? collate)} has no collation in the engine: Mason cannot sort text as it does`);
     return { kind: "icu", name };
   }
   const name = icuName(collate);
-  if (name === null) throw new Error(`the source database's collation ${JSON.stringify(collate)} has no collation in the copy to follow: Mason cannot sort text as it does`);
+  if (name === null) throw new Error(`the source database's collation ${JSON.stringify(collate)} has no collation in the engine to follow: Mason cannot sort text as it does`);
   return { kind: "libc", icu: name };
 }
 
@@ -728,7 +728,7 @@ class Rewriter {
     const alias = String(bodyOf(fields[0]!).sval);
     const table = this.rowTypes.get(t.type);
     if (table !== undefined) return table.map((c) => ({ name: c.name, value: this.typedRef([alias, c.name], c.type, c.typmod), type: c.type }));
-    if (t.type !== RECORD) throw new Unrewritable(`a row of ${this.userTypes.get(t.type)?.replace(/^rowtype:/, "") ?? "a table"} is not supported by Mason: Mason copied the table in part`, "name its columns instead", "row-value");
+    if (t.type !== RECORD) throw new Unrewritable(`a row of ${this.userTypes.get(t.type)?.replace(/^rowtype:/, "") ?? "a table"} is not supported by Mason: Mason synced the table in part`, "name its columns instead", "row-value");
     const source = this.fromSources(select).filter((q) => q.alias === alias);
     if (source.length !== 1) throw new Unrewritable("a row of this FROM item is not supported by Mason", "name its columns instead", "row-value");
     let q = bodyOf(source[0]!.query);
@@ -968,7 +968,7 @@ class Rewriter {
    * same order and leaves the rank out (`* EXCLUDE`, DuckDB's).
    */
   private withTies(b: Body): AstNode {
-    if (b.distinctClause !== undefined) throw new Unrewritable("FETCH … WITH TIES over a SELECT DISTINCT is not supported by Mason (the copy has no WITH TIES)", "select the DISTINCT rows in a subquery and FETCH … WITH TIES from it", "with-ties-distinct");
+    if (b.distinctClause !== undefined) throw new Unrewritable("FETCH … WITH TIES over a SELECT DISTINCT is not supported by Mason (the engine has no WITH TIES)", "select the DISTINCT rows in a subquery and FETCH … WITH TIES from it", "with-ties-distinct");
     const order = (b.sortClause as AstNode[] | undefined) ?? [];
     const count = b.limitCount as AstNode;
     delete b.limitCount;
