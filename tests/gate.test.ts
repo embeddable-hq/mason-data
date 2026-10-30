@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { ALWAYS, CI_FILE, GateRefusal, NODE_PIN, ORACLE, UsageError, buildPlan, chooseTests, ciFacts, ensureNode, importsOf, oracleAskedNothing, parseArgs, parseMappedPort, pinProblem, runGate, type Config, type Plan, type Step } from "../scripts/gate.ts";
+import { ALWAYS, CI_FILE, GateRefusal, NODE_PIN, ORACLE, UsageError, buildPlan, changedFiles, chooseTests, ciFacts, ensureNode, importsOf, oracleAskedNothing, parseArgs, parseMappedPort, pinProblem, runGate, type Config, type Plan, type Step } from "../scripts/gate.ts";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** The file names below are invented, under t/ and p/: a real-looking path to nothing fails the conventions' path guard. */
@@ -146,6 +146,26 @@ test("a change never picks the oracle: it is said left out, and --oracle or nami
   assert.equal(subset.oracleLeftOut, null);
   const whole = choose([], [ORACLE]);
   assert.deepEqual(whole.integration, [{ file: ORACLE, why: "named by hand" }]);
+});
+
+test("the changed files are what left origin/main: committed, staged, unstaged, untracked; no origin/main says to fetch", () => {
+  const repo = tmp();
+  const git = (...args: string[]): void => { execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: repo, stdio: "ignore" }); };
+  const write = (f: string): void => { fs.writeFileSync(path.join(repo, f), f); };
+  git("init", "-q", "-b", "main");
+  for (const f of ["old", "unstaged", "staged", "same"]) write(f);
+  git("add", ".");
+  git("commit", "-qm", "base");
+  assert.throws(() => changedFiles(repo), /no merge base with origin\/main.*git fetch origin main/s);
+  git("update-ref", "refs/remotes/origin/main", "HEAD");
+  write("committed");
+  git("add", "committed");
+  git("commit", "-qm", "work");
+  fs.appendFileSync(path.join(repo, "unstaged"), "x");
+  fs.appendFileSync(path.join(repo, "staged"), "x");
+  git("add", "staged");
+  write("untracked");
+  assert.deepEqual(changedFiles(repo).changed, ["committed", "staged", "unstaged", "untracked"]);
 });
 
 test("the plan: typecheck first, one file at a time, IT_ORACLE_ONLY only with --oracle, npm ci only without node_modules", () => {
