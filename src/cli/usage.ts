@@ -21,8 +21,8 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
   What Mason was and did over time, from a sample it takes every minute and keeps MASON_HISTORY_DAYS days
   (default 7): a line each span — the statements of the Postgres API (how many, how many were refused, failed or
   cancelled — the errors column —, the completed ones' p95 duration, the rows sent), the copy's size and rows, the
-  tables whose sync is failing, how old the stalest copy was, the stream's lag (with --replication), and the memory
-  of the process and of the copy against its limit (MASON_DUCKDB_MEMORY). Then each copy's own size, measured every
+  tables whose sync is failing, how old the stalest copy was, the stream's lag (a table under sync: replication), and
+  the memory of the process and of the copy against its limit (MASON_DUCKDB_MEMORY). Then each copy's own size, measured every
   10 minutes. A span sums its statements and shows each level at its highest. Read through the running Mason.
 
     mason usage                        the last hour, 5 minutes a line

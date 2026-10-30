@@ -269,8 +269,8 @@ that implements it, and fix the doc in the same change. This file included.
 ## Hard-won gotchas (violating these costs hours)
 
 - **A replication slot outlives its reader**, and holds the source's WAL while nobody reads it — for ever, whatever the
-  disk. So the SOURCE caps it: `max_slot_wal_keep_size` (Postgres 13+). `mason stop` says the slot stays; `mason destroy`
-  and `--poll` drop it, verified gone. A deployment torn down for good must drop its slot.
+  disk. So the SOURCE caps it: `max_slot_wal_keep_size` (Postgres 13+). `mason stop` says the slot stays; `mason destroy`,
+  and a start whose sources file has no table with `sync: replication`, drop it, verified gone. A deployment torn down for good must drop its slot.
 - **One process per DuckDB file.** The store opens the file once; `mason user` edits `.mason/users.json` beside it and
   the listener re-reads the file, because a second process cannot open the store. A platform runs ONE replica.
 - **`pgrep -f <pattern>` matches itself** inside a shell string; **never kill by a broad pattern** — kill by a checked PID.

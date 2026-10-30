@@ -1,5 +1,5 @@
 /**
- * WHAT A DATABASE NEEDS BEFORE MASON READS ITS CHANGE LOG (`mason start --replication`; src/cli/replication-mode.ts):
+ * WHAT A DATABASE NEEDS BEFORE MASON READS ITS CHANGE LOG (a table whose `sync:` is `replication`; src/cli/replication-mode.ts):
  * wal_level = logical, a user that may replicate, a free slot and WAL sender, a cap on the WAL a slot may hold
  * (`max_slot_wal_keep_size`). READ-ONLY: settings, the catalog and the statistics views — never a row of data, and
  * nothing is created, changed or granted. Each check that fails says what the database's owner runs to fix it.

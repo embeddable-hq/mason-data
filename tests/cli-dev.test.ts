@@ -19,11 +19,8 @@ test("the server under the database: recorded at the first start, the same datab
   assert.match(refused.refuse, /copy is of the database shop, and \.mason\/config\.json now names shop_staging\. .*mason destroy \(removes the copy; your files stay\), then mason start copies it/);
 });
 
-test("the change mode is the flag, else the project's, else polling; replication's objects are the project's and the source's names", async () => {
-  const { changesOf, projectReplication, dropStatements } = await import("../src/cli/replication-mode.ts");
-  assert.equal(changesOf(null, undefined), "poll");
-  assert.equal(changesOf(null, "replication"), "replication", "kept between starts");
-  assert.equal(changesOf("poll", "replication"), "poll", "--poll takes it back");
+test("replication's objects are the project's and the source's names", async () => {
+  const { projectReplication, dropStatements } = await import("../src/cli/replication-mode.ts");
   assert.deepEqual(projectReplication("my-shop", "app"), { publication: "mason_dev_my_shop_app", slot: "mason_dev_my_shop_app", owned: true });
   assert.equal(projectReplication("shop", "Shop-Dev").slot, "mason_dev_shop_shop_dev", "lower case, as a slot's name must be");
   assert.equal(dropStatements(projectReplication("shop", "app")),
@@ -48,7 +45,7 @@ test("a slot's name past Postgres's 63 bytes is a readable prefix and a hash of 
   assert.match(deploymentOf(p48, s48), /^[a-z0-9_]+$/, "a valid lower-case identifier");
 });
 
-test("what --poll and mason destroy drop is what the start recorded, never the name computed again", async () => {
+test("what a start replicating no table and mason destroy drop is what the start recorded, never the name computed again", async () => {
   const { madeReplication } = await import("../src/cli/replication-mode.ts");
   const recorded = { slot: "mason_dev_shop", publication: "mason_dev_shop", owned: true };
   assert.deepEqual(madeReplication({ name: "shop", publication: null, replication: recorded }, "app"), recorded, "a slot made under another rule is the one dropped");
@@ -57,16 +54,15 @@ test("what --poll and mason destroy drop is what the start recorded, never the n
 });
 
 // a publication the operator names is the database owner's — read as it is, never altered or dropped
-test("a named publication is the sources file's, else the flag's, else PG_PUBLICATION — never the one a start recorded; it is never Mason's to drop, and the slot stays the project's", async () => {
+test("a named publication is the sources file's, else PG_PUBLICATION — never the one a start recorded; it is never Mason's to drop, and the slot stays the project's", async () => {
   const { namedPublication, projectReplication, dropStatements } = await import("../src/cli/replication-mode.ts");
   const none = { publicationName: null };
-  assert.deepEqual(namedPublication({ publicationName: "file_pub" }, null, { PG_PUBLICATION: "env_pub" }), { name: "file_pub", from: "file" }, "the file first");
-  assert.deepEqual(namedPublication(none, "app_pub", { PG_PUBLICATION: "env_pub" }), { name: "app_pub", from: "flag" });
-  assert.deepEqual(namedPublication(none, null, { PG_PUBLICATION: "env_pub" }), { name: "env_pub", from: "env" });
+  assert.deepEqual(namedPublication({ publicationName: "file_pub" }, { PG_PUBLICATION: "env_pub" }), { name: "file_pub", from: "file" }, "the file first");
+  assert.deepEqual(namedPublication(none, { PG_PUBLICATION: "env_pub" }), { name: "env_pub", from: "env" });
   // a start recorded owners_pub (config.json publication), then publication: was taken out of the file: Mason's own,
   // never the record — the function takes no record to fall back to
-  assert.equal(namedPublication(none, null, {}), null, "none named: Mason's own");
-  assert.deepEqual(projectReplication("shop", "app", namedPublication(none, null, {})?.name ?? null).owned, true, "a file naming none starts owned");
+  assert.equal(namedPublication(none, {}), null, "none named: Mason's own");
+  assert.deepEqual(projectReplication("shop", "app", namedPublication(none, {})?.name ?? null).owned, true, "a file naming none starts owned");
   const named = projectReplication("shop", "app", "app_pub");
   assert.deepEqual(named, { publication: "app_pub", slot: "mason_dev_shop_app", owned: false });
   assert.equal(dropStatements(named), "SELECT pg_drop_replication_slot('mason_dev_shop_app') FROM pg_replication_slots WHERE slot_name = 'mason_dev_shop_app' AND NOT active;",
@@ -96,7 +92,7 @@ test("the readiness check: REPLICATION, a superuser or RDS's rds_replication may
   assert.match(v.refused[0]!.detail, /^this database is a read replica, where Mason cannot make its publication mason_dev_shop \(CREATE PUBLICATION is refused on a standby\)\. Create one on the primary for the tables whose sync: is replication, then name it: publication: <name> at the top of the sources file$/);
   assert.deepEqual(refused(standby, named), []);
   assert.deepEqual(refused(facts({ standby: true, replication: true, version: 150004, versionText: "15.4" }), named), ["standby"], "before 16 a standby decodes nothing");
-  // the way out to polling is the table's sync:, never --poll (refused whenever a table replicates; a review finding)
+  // the way out to polling is the table's sync:, never --poll (gone; a review finding)
   const detail = (f: ServerFacts, name: string): string => readinessVerdict(f, "mason_dev_shop", null, named).refused.find((c) => c.name === name)!.detail;
   assert.match(detail(facts({ replication: true, walLevel: "replica" }), "wal_level"), /Or poll the table instead: give its entry sync: poll <interval> in the sources file \(SELECTs alone, no change log\)$/);
   assert.match(detail(facts({ standby: true, replication: true, version: 150004, versionText: "15.4" }), "standby"), /or poll the table: give its entry sync: poll <interval> in the sources file$/);

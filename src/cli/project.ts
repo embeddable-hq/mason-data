@@ -54,13 +54,15 @@ export interface ProjectConfig {
   apiKey: string;
   /** the server the copy was taken from, recorded at the first start: a database moved to another server is read again */
   sourceServer?: { systemIdentifier: string | null; database: string } | null;
-  /** how the run reads the database's changes: polling (the default) or logical replication (mason start --replication) */
+  /** how an OLDER Mason read the whole project's changes (its `mason start --replication` / `--poll`, both gone): never
+   *  written now, read only so a start whose sources file replicates nothing drops that older run's slot and says why,
+   *  and so mason destroy drops it; deleted by the first start (src/cli/dev.ts) */
   changes?: "poll" | "replication";
-  /** replication mode: the publication an operator named (`mason start --replication --publication`, or PG_PUBLICATION),
-   *  read as it is and never altered; absent or null when the run reads Mason's own (src/cli/replication-mode.ts) */
+  /** replication: the publication an operator named (the sources file's `publication:`, or PG_PUBLICATION), read as it
+   *  is and never altered; absent or null when the run reads Mason's own (src/cli/replication-mode.ts) */
   publication?: string | null;
   /** replication mode: the slot this copy reads and its publication (`owned`: Mason's own, which it drops with the slot),
-   *  as the start that made them named them — what `--poll` and `mason destroy` drop, never recomputed
+   *  as the start that made them named them — what a start replicating no table and `mason destroy` drop, never recomputed
    *  (src/cli/replication-mode.ts madeReplication); null once they are dropped */
   replication?: { slot: string; publication: string; owned: boolean } | null;
   /** `mason start --self-signed-tls` made it (src/cli/pg-tls.ts): the certificate and key in `.mason/` its listener serves,

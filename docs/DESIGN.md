@@ -218,8 +218,8 @@ watermark, then polled as its sync says. When no table is replicated any more th
 publication with it, VERIFIED gone (`retireReplication`: the stream stopped first, the slot waited inactive), at the
 start that finds none and live when the last one leaves; the project's config records what was made
 (`config.replication`) through the run's hook, so `mason destroy` drops what exists, never a name computed again.
-`mason start --replication` / `--poll` / `MASON_CHANGES` are taken only where they agree with the file and refused
-otherwise, naming the `sync:` line to write; PR 3 removes them.
+`mason start --replication` / `--poll` / `MASON_CHANGES` were taken only where they agreed with the file and refused
+otherwise, naming the `sync:` line to write, until PR 3 removed them (below).
 
 **Why.** One decision per project made the developer choose between a slot that decodes every table's writes (a busy
 log table the dashboards never read included) and polls that scan every table; the file already weighs each table's
@@ -229,8 +229,24 @@ what Mason reads. The slot is dropped when unused because it holds the source's 
 instant the stream was known current (`kept.syncedAt`: the later of its last poll and the stream's last keepalive or
 flush with nothing pending), said as `replicated, at <lsn>, <age>` on its line, so a stopped stream's copy is never
 read as current. **Where.** `src/duck/sync.ts` (`replicated`, `streams`, `ensurePublication`, `retireReplication`),
-`src/cli/replication-mode.ts` (`changesAgreement`, `publicationConflict`), `src/cli/sources.ts`; `tests/cli-sources.test.ts`,
+`src/cli/replication-mode.ts`, `src/cli/sources.ts`; `tests/cli-sources.test.ts`,
 `tests/integration/duck-stream.itest.ts` (a mixed project, a switch each way, a named publication, REPLICA IDENTITY NOTHING).
+
+**The flags and `MASON_CHANGES` gone** (2026-10-30, PR 3 of 3). `mason start --replication`, `--poll` and
+`--publication`, and `MASON_CHANGES` on a server, are removed: each flag answers, before the options are parsed and
+before anything starts, with the line to write at the top of the sources file (`sync: replication`, `sync: poll 5m`,
+`publication: <name>`) and exit 2, on one report however many are given; `MASON_CHANGES` set is one line of `mason
+serve`'s settings report, naming its `sync:` line (`removedStartFlags`, `changesRetired`, `src/lib/table-sync.ts`).
+The way out names the EDIT, read from the file (`sourcesTop`, `topEdit`): every file `mason init` writes has a `sync:`
+line at its top already, so "write `sync: replication` at the top" made a second one, a file the run refuses (the
+independent review); it says "change `sync: poll 5s` … to `sync: replication`", "keep", or "write" only where the file
+has no such line — `MASON_POLL_MS`'s too. A test applies each way out to an init-made file as written and parses it.
+**Why.** Taken where they agreed with the file (PR 2) they said nothing the file did not, and two places to say how a
+table is kept current is one more than production can be held to: the committed file is what runs. A removed setting
+refuses rather than runs a default (CLAUDE.md "Conventions"). `config.json`'s `changes`, the mode an older Mason
+recorded, is still READ — never written — so a start whose file replicates nothing drops that older run's slot and says
+why, and `mason destroy` drops it; the first start deletes it. **Where.** `src/cli/registry.ts`, `src/cli/serve.ts`,
+`src/lib/table-sync.ts`; `tests/cli-commands.test.ts`, `tests/serve.test.ts`.
 
 ### Logical replication
 
@@ -1273,7 +1289,7 @@ is left out of the sources file (2026-10-28, `DEMO_TABLE_TO_ADD` in `src/demo/se
 after `mason start` is a real `mason add` (or the web page's Add), and they see a copy begin; its foreign keys' targets
 are among the three, so it joins cleanly when it lands, and the writer keeps inserting into it in the database meanwhile. The port is chosen free at init and kept
 in that URL alone; the run reads it back from the resolved URL (`src/cli/demo.ts` `demoPort`). It is read by polling
-only: `--replication` on a demo project is refused before anything starts.
+only: a table whose `sync:` is `replication` in a demo project's sources file is refused before anything starts.
 
 **Why.** A first try should need nothing installed: no Docker, no Postgres, no database of one's own to point at.
 PGlite is a real Postgres (its catalog, its types, its `xmin`) already in the package, where a fixture of rows would be a
@@ -1290,7 +1306,7 @@ so the next start seeds it again. **Where.** `src/cli/demo.ts`, `src/demo/source
 ### On a server: `mason serve` and the image
 
 **Decision.** `mason serve` is `mason start --attach`'s run configured by the environment alone (`DATABASE_URL`,
-`MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_CHANGES`, `MASON_PG_*`), every bad setting on one
+`MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_PG_*`), every bad setting on one
 report, the log on stdout, SIGTERM its stop (tini PID 1). `GET /healthz` (`MASON_HEALTH_PORT`, 4140) is 503 until the run
 answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:24-slim with the
 copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress

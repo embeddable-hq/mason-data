@@ -3,7 +3,9 @@
  * command's summary, in this order — so a command cannot exist without being listed, and tests/cli-help.test.ts holds
  * each one to src/cli/command.ts's rules (its own --help, an example, every option documented).
  */
-import { failed, parseCommand, reportText, type Command, type CommandSpec, type NextStep } from "./command.ts";
+import { failed, parseCommand, reportText, wantsJson, type Command, type CommandSpec, type NextStep } from "./command.ts";
+import { removedStartFlags, type SourcesTop } from "../lib/table-sync.ts";
+import { sourcesTop } from "./sources.ts";
 import { dev } from "./dev.ts";
 import { devInBackground } from "./background.ts";
 import { ADD, LOGS, REMOVE, STATUS, STOP, TABLES, WAIT, add, logs, remove, status, stop, tables, wait } from "./commands.ts";
@@ -31,7 +33,7 @@ export const DEV: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "start",
   summary: "start Mason for this folder's project, in the background (mason init makes the project)",
-  usage: `usage: mason start [--attach] [--replication [--publication <name>] | --poll] [--self-signed-tls] [--port <n>] [--json]
+  usage: `usage: mason start [--attach] [--self-signed-tls] [--port <n>] [--json]
 
   Starts Mason for the project of this folder (mason init made it): one process, which copies the tables you add
   (mason add) from the project's database into its own file, keeps them current as the sources file says, and answers
@@ -54,9 +56,8 @@ export const DEV: CommandSpec & { needs: "project" } = {
   is the database owner's: it is read as it is, verified to carry every replicated table and column, and never
   created, altered or dropped — Mason makes only its slot. A read replica needs one (it takes no CREATE PUBLICATION).
 
-  --replication, --poll and --publication are taken only where they say what the sources file says (--replication:
-  every table's sync is replication; --poll: none is), and are refused otherwise with the sync: line to write; they
-  go in the next release.
+  --replication, --poll and --publication are gone: each answers with the line to write at the top of the sources
+  file (sync: replication, sync: poll 5m, publication: <name>) and exit 2, and starts nothing.
 
   The Postgres API's port is the project's: the first start takes 5433, or the next port free on every address when a
   second Postgres holds it, and records it; every later start listens on the same port, so a BI tool's saved connection
@@ -76,10 +77,6 @@ export const DEV: CommandSpec & { needs: "project" } = {
     MASON_PG_HOST=0.0.0.0 mason start --self-signed-tls   the Postgres API for other machines, over TLS
 
   --attach            stay in the foreground (Ctrl-C stops Mason)
-  --replication       taken only when every table's sync: is replication (the sources file decides; goes in the next release)
-  --publication <name>  the publication the replicated tables are read through, the owner's, never altered (the
-                      sources file's publication: says it instead; not both); default: Mason's own
-  --poll              taken only when no table's sync: is replication (the sources file decides; goes in the next release)
   --self-signed-tls   the Postgres API requires TLS, from a certificate made for this project in .mason/ (kept and
                       served again by every later start with the flag); not with MASON_PG_TLS_CERT / _KEY
   --port <n>          the port the mason commands reach it on (default 4039, or the next free one)
@@ -87,27 +84,36 @@ export const DEV: CommandSpec & { needs: "project" } = {
 `,
   options: {
     port: { type: "string" }, attach: { type: "boolean", default: false }, json: { type: "boolean", default: false },
-    replication: { type: "boolean", default: false }, poll: { type: "boolean", default: false }, publication: { type: "string" },
     "self-signed-tls": { type: "boolean", default: false },
   },
   json: ["running", "pid", "postgres", "next"],
 };
 
 async function runDev(argv: string[]): Promise<number> {
+  // --replication, --poll and --publication are gone (issue 33): each answered with the edit to make in the sources
+  // file, exit 2, before the options are parsed (it would be an unknown option there) and before anything starts. The
+  // file is read only when one is given. A decision: `mason start --replication --help` answers the refusal, not the
+  // usage — the flag is wrong whatever else the line asks
+  const removed = removedStartFlags(argv, () => startSourcesTop(process.cwd()));
+  if (removed !== null) return failed("start", { code: "usage", ...removed, next: [["mason start", "each table kept current as its sync: says"], ["mason help production", "sync: and publication:, and what each needs"]] }, { json: wantsJson(argv, DEV) });
   const f = parseCommand(DEV, argv);
   if (typeof f === "number") return f;
-  const v = f.values as { port?: string; attach: boolean; json: boolean; replication: boolean; poll: boolean; publication?: string; "self-signed-tls": boolean };
-  if (v.replication && v.poll) return failed("start", { message: "--replication or --poll, not both", code: "usage", usage: DEV.usage }, { json: v.json });
-  if (v.publication !== undefined && v.poll) return failed("start", { message: "--publication goes with --replication, not --poll", code: "usage", usage: DEV.usage }, { json: v.json });
-  if (v.publication !== undefined && !/^\S+$/.test(v.publication)) return failed("start", { message: `--publication must name a publication, not ${JSON.stringify(v.publication)}`, code: "usage", usage: DEV.usage }, { json: v.json });
+  const v = f.values as { port?: string; attach: boolean; json: boolean; "self-signed-tls": boolean };
   if (f.positionals.length) {
     // the database is the project's now: a URL here is the old habit, answered with the new way
     return failed("start", { message: "it takes no database URL: the project has one", code: "usage", why: "mason init <url> made it; .mason/config.json holds it", usage: DEV.usage }, { json: v.json });
   }
   const port = v.port === undefined ? 4039 : Number(v.port);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return failed("start", { message: `--port must be a port number (1-65535), not ${JSON.stringify(v.port)}`, code: "usage" }, { json: v.json });
-  if (!v.attach) return devInBackground(argv, { json: v.json, selfSignedTls: v["self-signed-tls"], changes: v.replication ? "replication" : v.poll ? "poll" : null, publication: v.publication ?? null });
-  return dev({ port, version: version(), changes: v.replication ? "replication" : v.poll ? "poll" : null, publication: v.publication ?? null, selfSignedTls: v["self-signed-tls"] });
+  if (!v.attach) return devInBackground(argv, { json: v.json, selfSignedTls: v["self-signed-tls"] });
+  return dev({ port, version: version(), selfSignedTls: v["self-signed-tls"] });
+}
+
+/** The project's sources file as a person names it (`mason/sources/app.yml`), for a removed flag's answer: the one file
+ *  of the project of this folder, else the name every project's has. */
+function startSourcesTop(cwd: string): SourcesTop {
+  const t = theProject(cwd);
+  return "problem" in t ? { shown: "mason/sources/<name>.yml", sync: null, publication: null } : sourcesTop(t.project.root, t.project.folder);
 }
 
 export const HELP: CommandSpec = {

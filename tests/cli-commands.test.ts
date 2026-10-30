@@ -1002,3 +1002,49 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
   assert.deepEqual(plain && { role: plain.role, roleKnown: "roleKnown" in plain, roleFrom: (plain as { roleFrom?: string }).roleFrom, readsNothing: (plain as { readsNothing?: boolean }).readsNothing },
     { role: undefined, roleKnown: false, roleFrom: "none", readsNothing: true }, JSON.stringify(plain));
 });
+
+test("mason start --replication, --poll and --publication are gone: each answers with the line to write in the sources file and exit 2, as a person and with --json, and starts nothing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-start-gone-"));
+  try {
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:secret@127.0.0.1:1/shop\ntables:\n  orders: {}\n");
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "gone", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null }), { mode: 0o600 });
+    const syncWhy = "how each table is kept current is its sync: in the sources file (at the top for every table, on an entry for that one), so what runs is what is committed";
+    const next = [{ command: "mason start", what: "each table kept current as its sync: says" }, { command: "mason help production", what: "sync: and publication:, and what each needs" }];
+    const cases: Array<[string[], { message: string; why: string; fix: string }]> = [
+      [["--replication"], { message: "--replication is gone: the sources file says it now", why: syncWhy,
+        fix: "write sync: replication at the top of mason/sources/shop.yml, then mason start" }],
+      [["--poll"], { message: "--poll is gone: the sources file says it now", why: syncWhy,
+        fix: "write sync: poll 5m at the top of mason/sources/shop.yml (any interval: poll 5s, poll 1h; or sync: off, the default, and mason sync <table> when you need it), then mason start" }],
+      [["--publication", "app_pub"], { message: "--publication is gone: the sources file says it now",
+        why: "the publication replication reads is the sources file's publication:, so what runs is what is committed",
+        fix: "write publication: app_pub at the top of mason/sources/shop.yml, with sync: replication on the entries of the tables it carries, then mason start" }],
+      // a publication goes with replication: one coherent way out, never "poll every table" and "replicate some" at once
+      [["--poll", "--publication", "app_pub"], { message: "--poll and --publication are gone: the sources file says it now",
+        why: `${syncWhy.replace(/, so what runs is what is committed$/, "")}, and the publication replication reads is its publication:, so what runs is what is committed`,
+        fix: "a publication goes with replication: write publication: app_pub at the top of mason/sources/shop.yml, with sync: replication on the entries of the tables it carries " +
+          "and sync: poll 5m (any interval) on the others, then mason start" }],
+      // several on ONE report, --attach or not: never run
+      [["--replication", "--publication=app_pub", "--attach"], { message: "--replication and --publication are gone: the sources file says it now",
+        why: `${syncWhy.replace(/, so what runs is what is committed$/, "")}, and the publication replication reads is its publication:, so what runs is what is committed`,
+        fix: "write sync: replication and publication: app_pub at the top of mason/sources/shop.yml, then mason start" }],
+    ];
+    for (const [flags, want] of cases) {
+      const person = await runMason(root, ["start", ...flags], matrixEnv());
+      assert.equal(person.code, 2, person.stdout + person.stderr);
+      assert.equal(person.stdout, "");
+      assert.equal(person.stderr, `✗ mason start: ${want.message}\n  why   ${want.why}\n  fix   ${want.fix}\n\nNext:\n` +
+        `  mason start                                   each table kept current as its sync: says\n  mason help production                         sync: and publication:, and what each needs\n`);
+      const json = await runMason(root, ["start", ...flags, "--json"], matrixEnv());
+      assert.equal(json.code, 2, json.stdout + json.stderr);
+      assert.deepEqual(JSON.parse(json.stdout), { error: { code: "usage", ...want }, next });
+    }
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8")).running, null, "nothing runs");
+    // outside a project: the file every project has, by its place
+    const away = await runMason(os.tmpdir(), ["start", "--poll", "--json"], matrixEnv());
+    assert.equal(away.code, 2, away.stdout + away.stderr);
+    assert.match((JSON.parse(away.stdout) as { error: { fix: string } }).error.fix, /^write sync: poll 5m at the top of mason\/sources\/<name>\.yml /);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
