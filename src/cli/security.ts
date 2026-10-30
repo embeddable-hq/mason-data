@@ -22,13 +22,15 @@
  * no Origin: a browser sends an Authorization header across sites only after a CORS preflight, which these servers
  * never approve, so a page on another site cannot send one at all.
  *
- * Cookies are per host, not per port, so one cookie serves every page of a run; a page of another run, or one
- * the token does not match, is refused. Pure over the request's headers, so the refusals are unit-tested
+ * A browser keeps cookies per host, never per port, so the cookie is NAMED for the run's port (`cookieName`,
+ * `mason_dev_<port>`): two runs on one machine each keep their own, and opening one's page never logs the other's out
+ * (one name for every run did). A page of another run, or one the token does not match, is refused. Pure over the request's headers, so the refusals are unit-tested
  * (tests/cli-security.test.ts).
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
-export const COOKIE = "mason_dev";
+/** The cookie of the run whose server is on `port`: one per run, as a browser shares a host's cookies across ports. */
+export const cookieName = (port: number): string => `mason_dev_${port}`;
 
 export function newToken(): string { return randomBytes(32).toString("hex"); }
 
@@ -38,7 +40,7 @@ export function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export function cookieOf(header: string | undefined, name = COOKIE): string | null {
+export function cookieOf(header: string | undefined, name: string): string | null {
   for (const part of (header ?? "").split(";")) {
     const eq = part.indexOf("=");
     if (eq > 0 && part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
@@ -46,8 +48,8 @@ export function cookieOf(header: string | undefined, name = COOKIE): string | nu
   return null;
 }
 
-export function setCookieHeader(token: string): string {
-  return `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/`;
+export function setCookieHeader(token: string, port: number): string {
+  return `${cookieName(port)}=${token}; HttpOnly; SameSite=Strict; Path=/`;
 }
 
 export interface GuardRequest {
@@ -77,9 +79,9 @@ export function guard(req: GuardRequest, port: number, token: string): GuardVerd
   if (offered !== null) {
     if (!sameSecret(offered, token)) return { ok: false, status: 403, reason: "the token in the URL is not this run's" };
     url.searchParams.delete("token");
-    return { ok: false, status: 303, location: url.pathname + (url.search || "") + url.hash, setCookie: setCookieHeader(token) };
+    return { ok: false, status: 303, location: url.pathname + (url.search || "") + url.hash, setCookie: setCookieHeader(token, port) };
   }
-  const cookie = cookieOf(req.cookie);
+  const cookie = cookieOf(req.cookie, cookieName(port));
   if (cookie === null || !sameSecret(cookie, token)) {
     return { ok: false, status: 403, reason: "this is mason start's command server for the mason command: a request carries the run's token (Authorization: Bearer, from .mason/config.json)" };
   }

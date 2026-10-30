@@ -17,8 +17,8 @@ DuckDB runs INSIDE the `mason start` process, on a worker thread of its own (`sr
 one instance. **Postgres decides, DuckDB
 computes**: the catalog Postgres (PGlite, the copied tables' definitions, no rows) analyses each statement, the rewrite
 makes it DuckDB's, and DuckDB runs it (`src/duck/plan.ts`). Each added table is copied whole from the source, then kept
-current as its `sync:` says — `off` (the default: read again only at `mason sync`) or Mason's xmin poll at its interval
-— or, for every table, by logical replication (`mason start --replication`, `src/duck/stream.ts`).
+current as its `sync:` says — `off` (the default: read again only at `mason sync`), Mason's xmin poll at its interval,
+or logical replication (`replication`, `src/duck/stream.ts`), mixed in one project.
 
 ## A statement
 
@@ -440,7 +440,9 @@ current as its `sync:` says — `off` (the default: read again only at `mason sy
   attempt read 1 % of the heap, what the pages left would add (from what its pages added to the file and its log) is
   held to what is free where the file is; past it the copy FAILS with the way out (free disk, `mason remove`, `mason add
   --columns`), its chunks kept, and is tried again as a failed copy is — at the retry, or at once at the next start.
-  Nothing warns before 1 %; a table whose late pages are wider than its early ones is under-projected.
+  Nothing warns before 1 %; a table whose late pages are wider than its early ones is under-projected. What the check
+  last projected is kept on the copy's live state and said, never computed a second way (`diskStatus`: `/api/state`
+  `disk`, `mason status`'s Disk line, beside the bytes free by the same `diskFree`).
 
 ## Keeping a copy current
 
@@ -505,15 +507,35 @@ current as its `sync:` says — `off` (the default: read again only at `mason sy
   line each with the position, found in ONE place (`refreshStreamed`), never a line per batch; a periodic line at most
   once a minute when something moved (`reportStream`); `mason status` / `wait` / `--json` show the position, the
   database's (a connection at most every 5 s, never the keepalive's: that is the walsender's read position), the lag in
-  bytes and as the newest change's age, and each table's state and changes applied (`streamStatus`). A new state of a
-  table is a state there too. ("Logical replication")
-- **The slot outlives `mason stop` and holds the source's WAL** (said at the stop); `--poll` and `mason destroy` drop
-  the slot, and Mason's own publication, verified gone. A `REPLICA IDENTITY NOTHING` table is refused by name: publishing
-  its updates would fail the app's own UPDATEs.
+  bytes and as the newest change's age, the WAL the slot holds on the database (`stream.slotWal`: one row of
+  `pg_replication_slots` on that same connection, at most every 30 s, `SLOT_READ_MS` — its status, and the cap left, or
+  that `max_slot_wal_keep_size` is unset and nothing caps it), and each table's state and changes applied
+  (`streamStatus`). A new state of a table is a state there too. ("Logical replication")
+- **A table is streamed only when its `sync:` is `replication`; the others are polled beside the stream, or `off`**
+  (`Sync.replicated`, `Sync.streams`): one slot and ONE publication per project, the publication carrying the
+  replicated tables ALONE — Mason's own `SET TABLE` to exactly that list, verified against `pg_publication_tables`
+  afterwards (a polled table's writes in the slot's WAL are WAL held for nothing), a named one never altered. A `key:`
+  table and a `REPLICA IDENTITY NOTHING` one under `replication` are refused at the file's read with the line to write
+  (`entryProblems`; the stream cannot apply a keyless change, and publishing NOTHING fails the app's own UPDATEs).
+  A sync change keeps the copy in every direction: into replication it is marked behind in `_mason.catch_up` and caught
+  up by one poll while the stream holds its changes; out of it, it leaves the stream and is caught up by one poll.
+  `mason start --replication` / `--poll` / `--publication` and `MASON_CHANGES` are gone: each answers with the line to
+  write in the sources file, starting nothing (`removedStartFlags`, `changesRetired`, src/lib/table-sync.ts). **A table set to `replication` while the run is
+  up, in a run that never checked the database for it, is held to the start's own checks first** (`checkReplication`,
+  src/cli/dev.ts; `liveReadinessFailure`): refused with what the database lacks and the line that polls it, the file put
+  back byte for byte — a review finding: on `wal_level = replica` the add said success and the table, polled until then,
+  was frozen for ever; the engine's own failure to set replication up says the same way out on the table's line.
+  DETECTOR: `tests/integration/duck-stream.itest.ts` (a mixed project, the publication's list, a switch each way held to
+  the ledger), `tests/cli-run-server.test.ts` (the live refusal). ("Each table's sync")
+- **The slot outlives `mason stop` and holds the source's WAL** (said at the stop); it is dropped, with Mason's own
+  publication, VERIFIED gone, when no table's sync is `replication` any more (`retireReplication`: at the start, and live
+  when the last one leaves) and at `mason destroy`, from what the config records (`config.replication`).
 - **A NAMED publication is read and verified, never created, altered or dropped; Mason makes its own only when none is
   named** (a read replica takes no CREATE PUBLICATION, and on a production primary the slot is the one
-  object Mason creates). Named by `--publication`, else `PG_PUBLICATION` (`replicationNames`), else the one recorded in
-  `.mason/config.json`; verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
+  object Mason creates). Named by `publication:` at the top of the sources file (`${PG_PUBLICATION}` allowed, read by
+  `readSource`), else `PG_PUBLICATION` (`namedPublication`) — never the one a
+  start recorded, so a file that takes `publication:` out gets Mason's own; Mason's own one left behind by a switch to a
+  named one is dropped, verified gone, before the record moves (`staleReplication`); verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
   second verifier. A gap in one table refuses that table alone, the others stream on; the way out is the found
   publication plus the gap as `ALTER PUBLICATION … ADD TABLE …`. On a standby a named one is required, refused before
   any slot is made. ("Logical replication")
@@ -526,11 +548,55 @@ current as its `sync:` says — `off` (the default: read again only at `mason sy
   and nothing could be found afterwards; the run passed `record: () => undefined`). The listener builds the row
   (`recordRequest`, src/api/postgres/server.ts: SQLSTATE, message, DETAIL, HINT, rows, session, application_name, a
   token's NAME, never the token, a `mason user`'s name and its ROLE), `RequestLedger` (src/duck/requests.ts) writes it in batches on a connection of its
-  own — never the sync's writer turn — and keeps `MASON_REQUEST_LOG_DAYS` days (7). A failed write is said once and
+  own — never the sync's writer turn — and keeps `MASON_HISTORY_DAYS` days (7). A failed write is said once and
   fails no statement. `mason logs --requests` and `mason status` read it through the run's command server, never the
   file. **Its order is `started_at`, then `seq`** (the row's number in arrival order, continuing across restarts):
   `request_id` is a random uuid and the clock a millisecond, so a refused login and the statement before it read back
-  in either order until a number broke the tie. ("The request log")
+  in either order until a number broke the tie; a page's cursor is that order's position (`requestCursor`). **An
+  outcome is ONE rule** (`outcomeOf`, src/api/request-log.ts: ok, refused, failed, cancelled = 57014), read as SQL by
+  the ledger's filters and summary through `outcomeSql`, held equal code for code by tests/duck-requests.test.ts. Every
+  row carries the bytes the listener sent for the statement (`bytes_sent`), and a refusal by a registry entry its id
+  (`gap`): taken from the error as the refusal was built (`gapRefusal`, src/api/postgres/server.ts; an `EncodeError`'s,
+  `NumericError`'s or `Unsupported`'s own `gap`), read from the text (`gapIn`) only where a refusal crossed DuckDB as
+  its message (src/duck/store.ts `pgErrorOf`), and carried across the executor's worker (`WireError`); a re-wrap of an
+  error keeps it (tests/duck-wire.test.ts holds every path). `unsupported` groups by it (`/api/unsupported`, `mason
+  status`). ("The request log")
+- **Every sync failure is a row of `_mason.sync_events`, kept as the request log is** (src/duck/events.ts: a failure
+  was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
+  says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy
+  finished, a table current again — the last detected in `record`, the one place an error is cleared — and a sync asked
+  by hand, `synced`, in the words mason sync answers: a scheduled poll that succeeds is no event, and without it a
+  person who synced read the list as a sync lost), `SyncEvents`
+  writes them in batches on a connection of its own, never the writer's turn, a failed write said once and never
+  failing the sync; a failure repeated word for word within an hour is one event unless it was over between — a
+  table's when it is current again (`recovered`) or copied anew (`copied`), the whole sync's (`table: null`) when the
+  sync says so (`recovered` of no table: the stream applied a batch WITH A POSITION, the publication and slot were made
+  ready, the database attached — `wholeFailure`); never a failure whose end nothing says. **A copy's replication error
+  is over only when the stream applies a batch with a position** (`applyChanges`: every table it keeps current is current
+  as of it), never at a pass's publication check (`settlePrepared`, which runs while the stream waits out its back-off)
+  nor at a piece of a large transaction; the check clears only what it owns — a named publication's gap once the table is
+  carried again, and its own failure on a table never copied.
+  The supervisor's restarts stay in `.mason/restarts.json` (a process of its own cannot open the file) and are merged
+  when read (`withRestarts`). `mason logs --events` and `mason status` (`recentErrors`) read them through the command
+  server's `/api/events`.
+- **Usage over time is a row of `_mason.usage` a minute, and each copy's own bytes a row of `_mason.copy_sizes` every 10
+  minutes, kept as the request log is** (src/duck/usage.ts `UsageSampler`; the run had only the moment): on connections
+  of their own, never the writer's turn, a failed take or write said once and never failing anything (a sample not
+  taken keeps its counts for the next). A sample computes NOTHING a second time: the copies' facts are `/api/state`'s
+  at that moment (`usageFacts`, src/cli/run-server.ts), the statements are counted as the listener records them (the one
+  `record`, by the summary's rules: no CONNECT, `outcomeOf`, the completed ones' `quantile_cont`, held equal to DuckDB's
+  by tests/duck-usage.test.ts) — so a statement is in the interval it ENDED in, which a query by `started_at` would miss.
+  An interval keeps at most `DURATIONS_KEPT` completed durations (a sample not taken carries its interval on, for as
+  long as samples fail): exact up to it, a uniform reservoir past it.
+  The copy's memory is `duckdb_memory()`; a copy's bytes are its distinct blocks from `pragma_storage_info`
+  (metadata only, but it grows with rows × columns, so never per request; docs/DESIGN.md "Observability" has the
+  measurement). `mason usage` and `GET /api/usage` read them.
+- **A copy's `rows` is its count after every write that changes it** (`CopyState.rows`): the copy's own count at the
+  swap, the poll's reconciled count at its commit, and after every stream batch the rows its writes inserted less the
+  rows they deleted (`rowsChanged`, `writeByKey`) — never a `count(*)` per batch (a write by key's deletes make it a
+  scan) — written to `copy_state` IN the batch's transaction. When it was last brought current, and how,
+  is `CopyState.synced` (`Synced`: the swap, a poll's commit, the stream's last batch); `/api/state` derives each
+  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked.
 
 ## Users (`mason user`, src/duck/users.ts)
 
@@ -546,6 +612,13 @@ current as its `sync:` says — `off` (the default: read again only at `mason sy
   DuckDB's file lock): no secret in it; changed under a lock file and renamed into place; the listener stats it at every
   connection and before EVERY statement of a user's session (`recheckMs: 0`), so a removal takes effect without a
   restart. Fail closed: a file that cannot be read refuses every user (57P03), never "live"; no file is no users.
+- **A removed user is KEPT in the file with `removedAt`** (the list shows Active / Removed): only entries without one are live,
+  and the listener (`LiveUsers`) reads only those, so a removal refuses as before; a removed name can be added again (a new
+  id); `mason user list` gives each user `lastUsedAt` (`RequestLedger.lastUsed`, within the user's own window) and its URL
+  without the password (`connectionUrl`, the one builder).
+- **A disabled user is KEPT with `disabledAt` and its id** (`mason user disable`): `LiveUsers` still holds it, so its
+  login is judged whole first — a wrong password stays 28P01 — and only then refused `user_disabled` (the listener's
+  28000); its sessions end at their next statement; `enable` deletes the field, so the same password connects again.
 
 ## Testing
 

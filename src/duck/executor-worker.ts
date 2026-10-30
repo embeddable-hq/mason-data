@@ -15,7 +15,7 @@ import type { DuckDBConnection, DuckDBInstance, DuckDBValue } from "@duckdb/node
 import { openDuck, SessionRunner } from "./store.ts";
 import { FUNCTION_CALLS, FUNCTION_ROWS, registerLibcOrder, useCancelTable } from "./functions.ts";
 import { stopPgEval } from "./pg-eval.ts";
-import { StatementError, type DuckAnswer } from "../api/postgres/server.ts";
+import { StatementError, type DuckAnswer, type DuckSession } from "../api/postgres/server.ts";
 import { STOPPING, wireError, type Reply } from "./executor.ts";
 
 const { cancels } = workerData as { cancels: Int32Array };
@@ -134,7 +134,7 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       statements.set(k, s);
       runner.next = Number(m.seq);
       try {
-        const a = await runner.run(m.sql as never, m.params as (string | null)[], m.session as { timeZone: string; searchPath: string }, s.controller.signal,
+        const a = await runner.run(m.sql as never, m.params as (string | null)[], m.session as DuckSession, s.controller.signal,
           m.fields as never, m.exact as never);
         s.answer = a;
         return { value: a.columns.map((c) => ({ name: c.name, oid: c.oid, size: c.size })) };
@@ -180,7 +180,7 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       if (m.aborted !== null) abortWith(s.controller, m.aborted as { fields?: StatementError["fields"] });
       statements.set(k, s);
       runner.next = Number(m.seq);
-      try { return { value: await runner.explain(m.sql as never, m.params as (string | null)[], m.session as { timeZone: string; searchPath: string }, s.controller.signal, m.how as never) }; }
+      try { return { value: await runner.explain(m.sql as never, m.params as (string | null)[], m.session as DuckSession, s.controller.signal, m.how as never) }; }
       finally { statements.delete(k); }
     }
     case "runner.close": {

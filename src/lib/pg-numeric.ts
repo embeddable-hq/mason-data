@@ -25,6 +25,7 @@
  * Pure and dependency-free: tests/pg-numeric.test.ts holds every operation to PGlite's own numeric over generated values.
  */
 import { Buffer } from "node:buffer";
+import { gapMark, type GapId } from "../duck/gaps.ts";
 
 /** A numeric value: `unscaled × 10^-scale`, with `scale` its display scale (`dscale`: the decimals `numeric_out` writes). */
 export interface PgNumeric { unscaled: bigint; scale: number }
@@ -32,7 +33,9 @@ export interface PgNumeric { unscaled: bigint; scale: number }
 /** A value this module cannot compute as Postgres does, or an operation Postgres refuses: with Postgres's SQLSTATE. */
 export class NumericError extends Error {
   readonly sqlstate: string;
-  constructor(message: string, sqlstate: string) { super(message); this.sqlstate = sqlstate; }
+  /** the registry entry that refused it (src/duck/gaps.ts): the request log's `gap`; null for Postgres's own error */
+  readonly gap: GapId | null;
+  constructor(message: string, sqlstate: string, gap: GapId | null = null) { super(message); this.sqlstate = sqlstate; this.gap = gap; }
 }
 
 /** Postgres's limits on a numeric's scale (numeric.h): a quotient's scale is held between these */
@@ -445,7 +448,7 @@ function specialOf(p: NumericProgram, row: Readonly<Record<string, unknown>>): s
   }
   for (const key of cellsOf(p)) {
     const v = row[key];
-    if (typeof v === "string" && SPECIAL.test(v)) throw new NumericError(`arithmetic on a numeric ${v} is not supported by Mason (Mason gap numeric-special)`, "0A000");
+    if (typeof v === "string" && SPECIAL.test(v)) throw new NumericError(`arithmetic on a numeric ${v} is not supported by Mason (${gapMark("numeric-special")})`, "0A000", "numeric-special");
   }
   return undefined;
 }

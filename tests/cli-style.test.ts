@@ -42,7 +42,7 @@ test("mason --help on a terminal: the steps bold, the commands cyan, a summary w
   const plain = text.replace(/\x1b\[[0-9;]*m/g, "");
   for (const line of plain.split("\n")) assert.ok(line.length <= 90, `wider than the terminal: ${line}`);
   // a summary's next line starts under the summaries, never under the command names
-  assert.match(plain, /\n {4}mason init {6}make this folder a Mason project on your Postgres: mason init\n {20}\(DATABASE_URL/);
+  assert.match(plain, /\n {4}mason init {6}make this folder a Mason project on your Postgres: mason init \(its\n {20}URL from \.env\)/);
   assert.equal(topUsage(PLAIN), topUsage(PLAIN).replace(/\x1b/g, ""), "plain has no codes");
 });
 

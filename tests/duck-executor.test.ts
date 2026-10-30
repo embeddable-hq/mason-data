@@ -70,10 +70,13 @@ before(async () => {
   assert.ok("source" in parsed);
   const ctx: RunContext = {
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [],
-    slot: "", changes: "poll", port: 0, token: TOKEN, page: false, users: { file: path.join(dir, "users.json"), apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" }, folder: () => null, root: dir, sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined,
-    readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined,
-    duck: { copies: () => [], file: path.join(dir, "duck.db"), poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
+    replication: () => null, port: 0, token: TOKEN, page: false, users: { file: path.join(dir, "users.json"), apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" }, folder: () => null, root: dir, home: dir, version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined,
+    readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined, listener: api,
+    logs: { capacity: 2000, recent: () => [] },
+    duck: { copies: () => [], file: path.join(dir, "duck.db"), poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null, disk: () => ({ path: dir, freeBytes: null, projectedBytes: null }),
+      requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map(), 
+        lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
+      usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [], statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null }, restarts: () => [] },
   };
   control = createRunServer(ctx);
   await new Promise<void>((r) => control.listen(0, "127.0.0.1", () => r()));
@@ -128,7 +131,7 @@ test("a statement calling a Mason function on every row starves no one but its t
     assert.ok(pinged.ms < 1000, `the command server's /api/ping took ${Math.round(pinged.ms)} ms during the calling statement`);
     assert.equal(other.value, 1);
     assert.equal(pinged.value, 200);
-    // what still waits for the copy's thread, said and not held: a statement over a copied table is a request to it
+    // what still waits for the engine's thread, said and not held: a statement over a copied table is a request to it
     const copied = await timed(async () => { const c = await client(); try { return (await c.query("SELECT count(*) AS n FROM small")).rows[0].n as string; } finally { await c.end(); } });
     t.diagnostic(`a statement over a copied table: ${Math.round(copied.ms)} ms (the calling statement had run ${Date.now() - t0} ms when it was answered)`);
     assert.equal(copied.value, "10");
@@ -136,7 +139,7 @@ test("a statement calling a Mason function on every row starves no one but its t
   } finally { await a.end(); }
 });
 
-test("a client leaving mid-statement cancels its function-calling statement within about a second, however busy the copy's thread", { timeout: 120_000 }, async (t) => {
+test("a client leaving mid-statement cancels its function-calling statement within about a second, however busy the engine's thread", { timeout: 120_000 }, async (t) => {
   const a = await client();
   a.on("error", () => undefined);   // pg reports the socket torn down below as an error event: what the test does
   const from = logged.length;
@@ -172,7 +175,7 @@ test("a function-calling statement's answer closed after its last row and before
     const store = await DuckStore.open(${JSON.stringify(file)}, () => undefined);
     await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(10)");
     const r = await store.runner();
-    const session = { timeZone: "UTC", searchPath: "public" };
+    const session = { timeZone: "UTC", searchPath: "public", settings: {} };
     // the rewrite's call of json's -> (src/duck/rewrite.ts fn): the session first
     // a planned statement (src/duck/plan.ts PlannedSql): its text, and the functions its plan says it calls
     const a = await r.run({ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL",
@@ -195,13 +198,13 @@ test("a function-calling statement's answer closed after its last row and before
 // THE COPY'S THREAD DYING (V8 out of heap there, an uncaught error: src/duck/executor.ts). Every statement in flight and
 // every later one is told 57P02 with the reason and the way out, never left waiting, and the run is told (src/cli/dev.ts
 // exits for its supervisor). The worker is ended from outside here, as either would end it: the executor's is private.
-// The statement in flight is HELD on the copy's thread, never started in DuckDB: a thread ended while DuckDB has a
+// The statement in flight is HELD on the engine's thread, never started in DuckDB: a thread ended while DuckDB has a
 // statement in flight aborts the whole process — at once when its threads were inside a Mason function call, and later
 // (DuckDB's answer reaching a dead thread) even under a call-free one: measured, a call-free join ended this way aborted
 // the test process 2 times in 12, `libc++abi: terminating due to uncaught exception of type Napi::Error` (src/duck/
 // executor.ts "NOTHING ENDS THE WORKER'S JAVASCRIPT"). The copy's own worker, its `runner.run` of a statement naming
 // `held` taken off its port (said in the log) so nothing of DuckDB's is pending when it is ended.
-test("the copy's thread dying mid-statement is said to the session (57P02, why, reconnect) and to the run, never a hang", { timeout: 60_000 }, async () => {
+test("the engine's thread dying mid-statement is said to the session (57P02, why, reconnect) and to the run, never a hang", { timeout: 60_000 }, async () => {
   const holding = path.join(dir, "holding-worker.mjs");
   fs.writeFileSync(holding, `import { parentPort } from "node:worker_threads";
 const on = parentPort.on.bind(parentPort);
@@ -229,7 +232,7 @@ await import(${JSON.stringify(fileURLToPath(new URL("../src/duck/executor-worker
   const c = await connect();
   try {
     const running = c.query("SELECT count(*) AS held FROM gen").then(() => null, (e: pg.DatabaseError) => e);
-    for (const t = Date.now(); !ownLog.some((l) => l.startsWith("held: ")); await sleep(20)) if (Date.now() - t > 20_000) throw new Error(`the statement did not reach the copy's thread within 20 s\n${ownLog.join("\n")}`);
+    for (const t = Date.now(); !ownLog.some((l) => l.startsWith("held: ")); await sleep(20)) if (Date.now() - t > 20_000) throw new Error(`the statement did not reach the engine's thread within 20 s\n${ownLog.join("\n")}`);
     await (own as unknown as { executor: { worker: Worker } }).executor.worker.terminate();
     const gone = (e: pg.DatabaseError | null): boolean => e !== null && e.code === "57P02" && /the engine stopped/.test(e.message) &&
       /exited with code 1/.test(e.detail ?? "") && /reconnect/.test(e.hint ?? "");
@@ -436,11 +439,11 @@ test("a timeout that lands after a statement's last function call is 57014, neve
 // statements, the after-hook's close. Cancelled a few hundred times, a statement calling a function on every row met
 // it within a minute on a laptop; a result that did not end is now closed only once the session's calls have stopped
 // (src/duck/store.ts cleanUp). In a process of its own: a deadlock is a kill, and a test process that cannot end.
-test("cancelling a function-calling statement again and again never deadlocks the copy's thread: every one is 57014, and the copy closes", { timeout: 240_000 }, () => {
+test("cancelling a function-calling statement again and again never deadlocks the engine's thread: every one is 57014, and the copy closes", { timeout: 240_000 }, () => {
   const r = inProcess("cancels", `
     await store.writer.run("CREATE TABLE public.calls AS SELECT range::INTEGER AS id, '{\\"n\\": ' || range || '}' AS j FROM range(2000000)");
     const runner = await store.runner();
-    const S = { timeZone: "UTC", searchPath: "public" };
+    const S = { timeZone: "UTC", searchPath: "public", settings: {} };
     // a planned statement (src/duck/plan.ts PlannedSql) calling json's -> on every row, as the rewrite writes it
     const calling = { text: "SELECT count(*) FROM calls WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL", functions: ["__mason_json_get"] };
     const told = {};
@@ -517,7 +520,7 @@ parentPort.on("message", (m) => {
 // 134, the libc++abi line or `FATAL ERROR: Error::Error napi_define_properties` from DuckDB's scalar-function callback).
 // The same abort met a process that simply ENDED while a closed answer was still drained — nothing was asked of the
 // worker, so nothing held the process (4 in 4). Each in a process of its own, which must end by itself, exit 0.
-test("a copy closed past its grace under a function-calling statement, or a process ending while an answer is drained, never ends the copy's thread under a call: the process ends by itself, exit 0", { timeout: 180_000 }, () => {
+test("a copy closed past its grace under a function-calling statement, or a process ending while an answer is drained, never ends the engine's thread under a call: the process ends by itself, exit 0", { timeout: 180_000 }, () => {
   const at = (p: string): string => JSON.stringify(fileURLToPath(new URL(p, import.meta.url)));
   const run = (name: string, body: string): { status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string } => {
     const file = path.join(dir, `${name}.mjs`);
@@ -527,7 +530,7 @@ test("a copy closed past its grace under a function-calling statement, or a proc
       const store = await DuckStore.open(${JSON.stringify(path.join(dir, `${name}.db`))}, () => undefined, { closeGraceMs: 1 });
       await store.writer.run("CREATE TABLE public.t AS SELECT range AS id, '{\\"n\\": ' || range || '}' AS j FROM range(4000000)");
       const r = await store.runner();
-      const S = { timeZone: "UTC", searchPath: "public" };
+      const S = { timeZone: "UTC", searchPath: "public", settings: {} };
       // the rewrite's call of json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
       const call = "__mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false)";
       ${body}
@@ -537,7 +540,7 @@ test("a copy closed past its grace under a function-calling statement, or a proc
   const closed = run("grace", `
     const told = r.run({ text: "SELECT count(*) FROM t WHERE " + call + " IS NOT NULL", functions: ["__mason_json_get"] }, [], S, new AbortController().signal)
       .then(async (a) => { await a.fetch([], { timeZone: "UTC" }); return "answered"; }).catch((e) => e.fields?.code ?? e.message);
-    // its calls under way (4 M rows: seconds of them; a request to the copy's thread would wait them out, so a time):
+    // its calls under way (4 M rows: seconds of them; a request to the engine's thread would wait them out, so a time):
     // a statement already answered here would make the test vacuous, and is said as its failure ("told answered")
     await sleep(500);
     await store.close();
@@ -550,7 +553,7 @@ test("a copy closed past its grace under a function-calling statement, or a proc
   const left = run("leave", `
     const a = await r.run({ text: "SELECT " + call + " FROM t", functions: ["__mason_json_get"] }, [], S, new AbortController().signal);
     const rows = await a.fetch([], { timeZone: "UTC" });
-    a.close();   // drained on the copy's thread, its calls raising: nothing else is asked of it, and the script ends
+    a.close();   // drained on the engine's thread, its calls raising: nothing else is asked of it, and the script ends
     console.log("left after " + rows.length + " row(s)");
   `);
   assert.equal(left.signal, null, `a process ending while an answer is drained did not end by itself (${left.signal})\n${left.stderr}`);
@@ -566,7 +569,7 @@ test("a copy closed past its grace under a function-calling statement, or a proc
 // waited on: the connection and the instance closed under its running tasks, and the thread's end met their queued
 // calls. A session closed before its statement's start even began (its zone being set) left the answer opened after it
 // the same way. Now a start's answer is drained once handed back, and a session's close closes an answer opened while
-// it waits. Told apart by ORDER, which the copy's thread's one port keeps: the statement is answered (its start), then
+// it waits. Told apart by ORDER, which the engine's thread's one port keeps: the statement is answered (its start), then
 // released — never released before it was even answered, nor never released. Each in a process of its own: the old
 // code may abort or hang.
 // THE CLOSE LANDS IN THE WINDOW BY AN EVENT, NEVER A TIMER (this test failed under load, CI and two local full checks:
@@ -612,7 +615,7 @@ await import(${at("../src/duck/executor-worker.ts")});
       // a count calling json's -> on every row (src/duck/rewrite.ts fn), its plan's list of calls
       const asked = r.run(${calls
         ? `{ text: "SELECT count(*) FROM t WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL", functions: ["__mason_json_get"] }`
-        : `{ text: "SELECT count(*) FROM t", functions: [] }`}, [], { timeZone: "UTC", searchPath: "public" }, new AbortController().signal${calls ? "" : `, [{ name: "count", oid: 20 }]`})
+        : `{ text: "SELECT count(*) FROM t", functions: [] }`}, [], { timeZone: "UTC", searchPath: "public", settings: {} }, new AbortController().signal${calls ? "" : `, [{ name: "count", oid: 20 }]`})
         .then(() => order.push("answered"), (e) => order.push("refused " + (e.fields?.code ?? e.message)));
       ${before}
       await r.close();

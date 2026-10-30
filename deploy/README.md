@@ -12,7 +12,8 @@ gives those three things; this folder has a guide for each that does, and says w
   EFS, Azure Files) is not supported. Losing the volume costs a new copy of the tables, not data.
 - **Two ports**: raw TCP 5433 for the Postgres API, public, with Mason's own TLS (`MASON_PG_SELF_SIGNED_TLS=1`, or a
   certificate a CA signed); HTTP 4140 for `GET /healthz`, 503 while it starts (~15 s; the first start can take minutes
-  on a loaded machine) and 200 once it serves. A platform that routes only HTTP cannot carry the Postgres protocol.
+  on a loaded machine) and 200 once it serves, and `GET /metrics` ("Metrics", below). A platform that routes only HTTP
+  cannot carry the Postgres protocol.
 - **SIGTERM with 60 s of grace**, `DATABASE_URL` and `MASON_API_KEY` (at least 32 characters) in the environment, and a
   memory limit with `MASON_DUCKDB_MEMORY` at about half of it ([memory](mason-data/README.md#memory)).
 
@@ -31,6 +32,25 @@ gives those three things; this folder has a guide for each that does, and says w
 
 Each guide is a runnable configuration with every platform claim cited to the platform's documentation, plus a README of
 what to run and what to decide; what it does not verify, it says.
+
+## Metrics
+
+Every platform gets `GET /metrics` on the health port (4140), beside `/healthz`: Mason's numbers in Prometheus's text
+format (tables by phase, the copy's size, the stalest copy's age, the stream's lag, disk free, sessions, statements by
+outcome and their p50 / p95). It is numbers only and needs no secret — no table, user, client or host name and no
+statement text, not even as a label — so it can stay on the cluster-only port with no auth. A scrape costs your
+database nothing: it reads what Mason already holds, never a connection or a query on the source, however often it
+is asked. A three-line scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: mason
+    static_configs: [{ targets: ["mason-health:4140"] }]
+```
+
+The Kubernetes Service and the Helm chart carry the `prometheus.io/scrape`, `/port` and `/path` annotations
+(`metrics.annotations` in the chart's values). Per-table or per-user detail would need a credential and is not served
+there: `mason status` and `mason usage` beside the server say it.
 
 ## Where each "no" is from
 

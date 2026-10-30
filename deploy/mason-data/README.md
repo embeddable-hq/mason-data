@@ -36,14 +36,36 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
   their next statement, without a restart. The list is `.mason/users.json` on the volume (no passwords in it).
   **Changing `MASON_API_KEY` removes every user at once**: add each again.
 
+## Metrics
+
+`GET /metrics` on the health port (4140, beside `/healthz`) is Mason's numbers in Prometheus's text format: tables by
+phase, the copy's size, how old the stalest copy is, the stream's lag and the WAL its slot holds, disk free, sessions
+open, statements by outcome (a counter) and their p50 / p95 (`curl -s localhost:4140/metrics` lists each with its
+help). It is **numbers only and needs no secret**: no table, column, user, client or host name and no statement text
+appears in it, not even as a label. A scrape costs your database nothing: it reads what Mason already holds (the
+stream's position as last sampled, once a minute), never a connection or a query on the source, however often it is
+asked. While Mason starts it answers 200 with `mason_ready 0`; `/healthz` is the probe.
+A Prometheus beside the container scrapes it with:
+
+```yaml
+scrape_configs:
+  - job_name: mason
+    static_configs: [{ targets: ["mason:4140"] }]
+```
+
+Per-table or per-user detail (which table is stale, who sent what) would need a credential and is not served there:
+`docker compose exec mason mason status` and `mason usage` say it.
+
 ## Your database
 
 - **Polling** (the default) needs a user that can SELECT the tables. Each table is read once, then as the sources
   file's `sync:` says: `off` (the default) only at `mason sync <table>` (`docker compose exec mason mason sync orders`,
   from cron), `poll 5m` every five minutes — each poll a scan of that table on the database. It works on a read replica.
-- **Replication** (`MASON_CHANGES=replication`) needs `wal_level=logical`, a user with REPLICATION, and either a
-  publication you name (`PG_PUBLICATION`) or the right to create one. The slot holds the database's WAL while Mason is
+- **Replication** (a table's `sync: replication`) needs `wal_level=logical`, a user with REPLICATION, and either a
+  publication you name (`publication: ${PG_PUBLICATION}` at the top of the sources file) or the right to create one. The slot holds the database's WAL while Mason is
   down: cap it with `max_slot_wal_keep_size`.
+- **No setting chooses it**: how each table is kept current is the committed sources file's alone. `MASON_CHANGES`
+  is gone, and set it refuses the start, naming the `sync:` line to write in the sources file.
 - **The network**: the container must reach the database. Run it in the same private network, or allow the server's
   outbound address in the database's firewall.
 
@@ -111,7 +133,6 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
 |---|---|---|
 | `MASON_DUCKDB_MEMORY` | half the container's memory limit | the container's limit is not what the copy should have half of ("Memory") |
 | `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a copy is slow |
-| `MASON_CHANGES` | `poll` | a big table must be current within seconds, or the polls' scans cost the database too much (how often each table is polled is its `sync:` in the sources file, never a setting): `replication`, with `PG_PUBLICATION` naming one, and `max_slot_wal_keep_size` set on the database ("Your database") |
 | `MASON_STATEMENT_TIMEOUT` | `5min` (0 for none) | a dashboard's statement may rightly take longer, or a runaway one should stop sooner |
-| `MASON_REQUEST_LOG_DAYS` | 7 | you want the request log (`mason logs --requests`, kept in the copy) longer or shorter |
+| `MASON_HISTORY_DAYS` | 7 | you want Mason's history — the request log (`mason logs --requests`), the sync's events, the usage samples (`mason usage`), all kept in the copy — longer or shorter (it was `MASON_REQUEST_LOG_DAYS`, which now refuses the start) |
 | `MASON_STORE_JSON_PATHS` | `on` | you want the copy to hold only the columns you named: `off` stores no JSON path as a column, and drops what was stored at the next start |

@@ -20,6 +20,7 @@ import { matrixEnv, runMason } from "./cli-matrix.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 const { serveSettings, serveConfig, serveSource, healthBody } = serveModule as unknown as typeof import("../src/cli/serve.ts");
+const { healthServer } = serveModule as unknown as typeof import("../src/cli/serve.ts");
 // imported when the tests run: the file loads at a commit without the module, and a test that needs it fails by name
 const sourcesModule = await import("../src/cli/sources.ts" as string).catch(() => ({})) as Record<string, unknown>;
 const readSource = (sourcesModule.readSource ?? (() => ({ message: "no sources module at this commit" }))) as typeof import("../src/cli/sources.ts").readSource;
@@ -40,20 +41,23 @@ test("the settings: every one missing or wrong said at once, each with what to s
     MASON_PG_SELF_SIGNED_TLS: "yes", MASON_HEALTH_PORT: "99999", MASON_POLL_MS: "30000" }, "/srv");
   assert.ok("message" in wrong);
   for (const said of [/DATABASE_URL: the URL's scheme is mysql/, /MASON_API_KEY is 5 characters: at least 32/, /MASON_NAME="Big Name" is not a project name/,
-    /MASON_CHANGES="cdc": poll or replication/, /MASON_PG_SELF_SIGNED_TLS="yes": 1, or 0/, /MASON_HEALTH_PORT="99999": a port number/]) assert.match(wrong.message, said);
+    /MASON_PG_SELF_SIGNED_TLS="yes": 1, or 0/, /MASON_HEALTH_PORT="99999": a port number/]) assert.match(wrong.message, said);
   // a setting that is no longer read refuses the start, naming the line to write instead (never runs a default)
   assert.ok(wrong.message.includes("MASON_POLL_MS=30000 is no longer read: how often each table is polled is its sync: in the sources file — " +
-    "write sync: poll 30s at its top (every table) or on a table's entry, then unset MASON_POLL_MS"), wrong.message);
+    "write sync: poll 30s at the top of mason/sources/<name>.yml (every table; a table's entry may say its own), then unset MASON_POLL_MS"), wrong.message);
+  assert.ok(wrong.message.includes("MASON_CHANGES=cdc is no longer read: how each table is kept current is its sync: in the sources file (at the top for every table, " +
+    "on an entry for that one), so what runs is what is committed — write sync: replication or sync: poll 5m at the top of mason/sources/<name>.yml (every table; " +
+    "a table's entry may say its own), then unset MASON_CHANGES"), wrong.message);
   assert.match(wrong.message, /^7 settings are missing or wrong/);
 
   const s = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY }, "/srv");
   assert.ok(!("message" in s));
-  assert.deepEqual(s, { name: "mason", apiKey: KEY, changes: null, selfSignedTls: false, project: "/srv/mason", data: "/srv",
+  assert.deepEqual(s, { name: "mason", apiKey: KEY, selfSignedTls: false, project: "/srv/mason", data: "/srv",
     health: { host: "0.0.0.0", port: 4140 } });
   const t = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_PROJECT: "/mason/project", MASON_DATA: "/mason/data", MASON_NAME: "shop",
-    MASON_CHANGES: "replication", MASON_PG_SELF_SIGNED_TLS: "1", MASON_HEALTH_PORT: "8080", MASON_HEALTH_HOST: "127.0.0.1" }, "/srv");
+    MASON_PG_SELF_SIGNED_TLS: "1", MASON_HEALTH_PORT: "8080", MASON_HEALTH_HOST: "127.0.0.1" }, "/srv");
   assert.ok(!("message" in t));
-  assert.deepEqual([t.project, t.data, t.name, t.changes, t.selfSignedTls, t.health], ["/mason/project", "/mason/data", "shop", "replication", true, { host: "127.0.0.1", port: 8080 }]);
+  assert.deepEqual([t.project, t.data, t.name, t.selfSignedTls, t.health], ["/mason/project", "/mason/data", "shop", true, { host: "127.0.0.1", port: 8080 }]);
 });
 
 test("the config: new on an empty volume, resumed over what the runs recorded; a developer's project and a renamed copy refused", () => {
@@ -139,10 +143,74 @@ test("/healthz: 503 while it starts and stops, 200 once it answers whatever its 
   assert.deepEqual({ ...starting.body, version: "-" }, { status: "starting", version: "-", uptimeSeconds: 5 });
   assert.equal(healthBody({ phase: "stopping" }, t0, t0).status, 503);
   const copy = (source: string, phase: CopyState["phase"]): CopyState => ({ source, phase, rows: null, bytes: null, seconds: null, copiedAt: null, error: phase === "failed" ? "boom" : null });
-  const ready = healthBody({ phase: "ready", tables: () => [copy("public.orders", "copied"), copy("public.users", "copying"), copy("sales.secret_ledger", "failed")] }, t0, t0 + 60_000);
+  const ready = healthBody({ phase: "ready", tables: () => [copy("public.orders", "copied"), copy("public.users", "copying"), copy("sales.secret_ledger", "failed")],
+    metrics: async () => { throw new Error("/healthz never reads the metrics"); } }, t0, t0 + 60_000);
   assert.equal(ready.status, 200, "a table that failed leaves the rest served");
   assert.deepEqual(ready.body.tables, { total: 3, copied: 1, copying: 1, waiting: 0, failed: 1 });
   assert.doesNotMatch(JSON.stringify(ready.body), /orders|users|secret_ledger|boom/, "the endpoint takes no credential");
+});
+
+test("GET /metrics on the health port: 200 in Prometheus's text format while it starts and once it serves; /healthz as it was; another path 404", async () => {
+  const t0 = Date.now() - 90_000;
+  const copy = (source: string, phase: CopyState["phase"]): CopyState => ({ source, phase, rows: null, bytes: null, seconds: null, copiedAt: null, error: null });
+  const usage = { copyBytes: 4_096, totals: { added: 2, copied: 1, failed: 0, rows: 10 }, oldestSyncSeconds: 3, streamLag: null, copied: ["public.secret_orders"],
+    slotWalHeldBytes: null, diskFreeBytes: 1_000_000, sessionsOpen: 2, tables: { total: 2, copied: 1, copying: 1, waiting: 0, failed: 0 },
+    streamLagReadAt: null, slotWalReadAt: null };
+  const statements = { completed: 5, refused: 1, failed: 0, cancelled: 0, completedMs: 50 };
+  let broken = false;
+  type Phase = Parameters<typeof healthBody>[0];
+  let state: Phase = { phase: "starting" };
+  const logged: string[] = [];
+  const server = healthServer(() => state, t0, (l: string) => { logged.push(l); });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const base = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
+  const get = async (p: string, method = "GET"): Promise<{ status: number; type: string | null; body: string }> => {
+    const r = await fetch(`${base}${p}`, { method });
+    return { status: r.status, type: r.headers.get("content-type"), body: await r.text() };
+  };
+  const TYPE = "text/plain; version=0.0.4; charset=utf-8";
+  try {
+    const starting = await get("/metrics");
+    assert.deepEqual([starting.status, starting.type], [200, TYPE], "a scrape never fails while Mason starts");
+    assert.match(starting.body, /^mason_ready 0$/m);
+    assert.match(starting.body, /^mason_info\{version="[^"]+"\} 1$/m);
+    assert.doesNotMatch(starting.body, /^mason_(tables|uptime_seconds|statements_total)/m, "nothing of the run before it serves");
+    // /healthz as it was: 503 and JSON while it starts
+    const health = await get("/healthz");
+    assert.deepEqual([health.status, health.type, (JSON.parse(health.body) as { status: string }).status], [503, "application/json", "starting"]);
+    state = { phase: "ready", tables: () => [copy("public.secret_orders", "copied"), copy("public.users", "copying")],
+      metrics: async () => { if (broken) throw new Error("the copy of public.secret_orders on db.internal could not be read"); return { usage, statements, durations: null, at: Date.now(), freshSeconds: 120 }; } };
+    const ready = await get("/metrics");
+    assert.deepEqual([ready.status, ready.type], [200, TYPE]);
+    assert.match(ready.body, /^mason_ready 1$/m);
+    assert.match(ready.body, /^mason_tables\{phase="copying"\} 1$/m);
+    assert.match(ready.body, /^mason_statements_total\{outcome="completed"\} 5$/m);
+    const up = Number(/^mason_uptime_seconds (\d+)$/m.exec(ready.body)?.[1]);
+    const healthy = await get("/healthz");
+    const h = JSON.parse(healthy.body) as { status: string; uptimeSeconds: number; tables: unknown };
+    assert.deepEqual([healthy.status, h.status, h.tables], [200, "ready", { total: 2, copied: 1, copying: 1, waiting: 0, failed: 0 }]);
+    assert.ok(Math.abs(up - h.uptimeSeconds) <= 1 && up >= 90, `/metrics' uptime is /healthz's: ${up}, ${h.uptimeSeconds}`);
+    assert.ok(!ready.body.includes("secret_orders") && !healthy.body.includes("secret_orders"), "never a table's name");
+    const head = await get("/metrics", "HEAD");
+    assert.deepEqual([head.status, head.type, head.body], [200, TYPE, ""]);
+    assert.equal((await get("/metrics", "POST")).status, 405);
+    // the run's numbers that cannot be read fail the scrape, said in the log; the error's text (a name) never in the answer
+    broken = true;
+    const failed = await get("/metrics");
+    assert.equal(failed.status, 500);
+    assert.doesNotMatch(failed.body, /secret_orders|db\.internal/);
+    assert.deepEqual(logged.map((l) => /secret_orders/.test(l)), [true], "said once, in the log");
+    // stopping: as starting
+    state = { phase: "stopping" };
+    const stopping = await get("/metrics");
+    assert.deepEqual([stopping.status, /^mason_ready 0$/m.test(stopping.body)], [200, true]);
+    assert.equal((await get("/healthz")).status, 503);
+    // any other path: 404, as before
+    for (const p of ["/", "/metrics/", "/api/state"]) assert.equal((await get(p)).status, 404, p);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
 });
 
 test("a serve answers /healthz before its database does: 503 starting while it connects; refused settings exit 1 in the failure shape", async () => {
@@ -178,6 +246,12 @@ test("a serve answers /healthz before its database does: 503 starting while it c
     assert.equal(answer.status, 503);
     assert.equal(answer.body.status, "starting");
     assert.equal((await fetch(`http://127.0.0.1:${health}/`)).status, 404);
+    // /metrics beside it, on the same port: 200 while it starts, the run not ready yet
+    const scrape = await fetch(`http://127.0.0.1:${health}/metrics`);
+    assert.deepEqual([scrape.status, scrape.headers.get("content-type")], [200, "text/plain; version=0.0.4; charset=utf-8"]);
+    assert.match(await scrape.text(), /^mason_ready 0$/m);
+    for (let i = 0; i < 50 && !out.includes("/metrics"); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.match(out, new RegExp(`\\n  health    http://127\\.0\\.0\\.1:${health}/healthz\\n  metrics   http://127\\.0\\.0\\.1:${health}/metrics\\n`), "its start says both");
     assert.match(fs.readFileSync(path.join(env.MASON_PROJECT, "sources", "app.yml"), "utf8"), /\nurl: \$\{DATABASE_URL\}.*\n[^]*\ntables: \{\}\n$/, "the project's sources file made, no table until one is added");
     const cfg = readProject(env.MASON_DATA);
     assert.ok(cfg && !("broken" in cfg) && cfg.config.served === true, "the state written to MASON_DATA");
@@ -205,6 +279,8 @@ test("mason start refuses MASON_POLL_MS too, before it spawns and in the run its
   try {
     fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
     fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    // the file has its sync: line already (as every file mason init writes): the way out changes it, never adds a second
+    fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:secret@127.0.0.1:1/shop\nsync: off\ntables: {}\n");
     fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({
       name: "shop", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false, apiKey: KEY,
       sourceServer: null, lastRun: null, running: null,
@@ -213,14 +289,116 @@ test("mason start refuses MASON_POLL_MS too, before it spawns and in the run its
     for (const attach of [false, true]) {
       const p = await runMason(root, ["start", ...(attach ? ["--attach"] : [])], env);
       assert.equal(p.code, 1, p.stdout + p.stderr);
-      assert.match(p.stderr, /^✗ mason start: MASON_POLL_MS=30000 is no longer read\n {2}why {3}how often each table is polled is its sync: in the sources file\n {2}fix {3}write sync: poll 30s at its top \(every table\) or on a table's entry, then unset MASON_POLL_MS$/m,
+      assert.match(p.stderr, /^✗ mason start: MASON_POLL_MS=30000 is no longer read\n {2}why {3}how often each table is polled is its sync: in the sources file\n {2}fix {3}change sync: off at the top of mason\/sources\/shop\.yml to sync: poll 30s \(every table; a table's entry may say its own\), then unset MASON_POLL_MS$/m,
         `${attach ? "the run itself" : "before it spawns"}:\n${p.stdout}${p.stderr}`);
       assert.doesNotMatch(p.stdout + p.stderr, /Connecting to/, "refused before the database is connected to");
     }
     const j = await runMason(root, ["start", "--json"], env);
     assert.equal(j.code, 1, j.stdout + j.stderr);
     assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message: "MASON_POLL_MS=30000 is no longer read",
-      why: "how often each table is polled is its sync: in the sources file", fix: "write sync: poll 30s at its top (every table) or on a table's entry, then unset MASON_POLL_MS" });
+      why: "how often each table is polled is its sync: in the sources file",
+      fix: "change sync: off at the top of mason/sources/shop.yml to sync: poll 30s (every table; a table's entry may say its own), then unset MASON_POLL_MS" });
     assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("MASON_CHANGES set is refused with the other settings, naming the sync: line to write in the project's sources file, before anything is written or connected; mason serve exits 1 in the failure shape", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-changes-"));
+  try {
+    fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "mason", "sources", "app.yml"), "kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\ntables:\n  orders: {}\n");
+    const env = { DATABASE_URL: URL_, MASON_API_KEY: KEY };
+    // whatever it says, even what the file says: the setting is gone, never read where it agrees
+    // the file's top says sync: replication already: kept for replication, changed for poll — never a second sync: line
+    const line = (v: string, edit: string): string => `a setting is missing or wrong: MASON_CHANGES=${v} is no longer read: how each table is kept current is its sync: in the sources file ` +
+      `(at the top for every table, on an entry for that one), so what runs is what is committed — ${edit} (every table; a table's entry may say its own), then unset MASON_CHANGES`;
+    const edits = { replication: "keep sync: replication at the top of mason/sources/app.yml", poll: "change sync: replication at the top of mason/sources/app.yml to sync: poll 5m" };
+    for (const [v, sync] of Object.entries(edits)) {
+      const refused = serveSettings({ ...env, MASON_CHANGES: v }, dir);
+      assert.ok("message" in refused, v);
+      assert.deepEqual([refused.code, refused.message], ["bad_config", line(v, sync)]);
+    }
+    assert.ok(!("message" in serveSettings({ ...env, MASON_CHANGES: "" }, dir)), "set empty is unset");
+    assert.equal(fs.readdirSync(dir).join(","), "mason", "nothing written beside the project: no .mason/");
+    const child = spawn(process.execPath, [MAIN, "serve", "--json"], { cwd: dir, env: { PATH: process.env.PATH, HOME: dir, ...env, MASON_CHANGES: "replication" }, stdio: ["ignore", "pipe", "pipe"] });
+    let json = "";
+    child.stdout.on("data", (d) => { json += String(d); });
+    const code = await new Promise<number | null>((r) => child.once("exit", r));
+    assert.equal(code, 1, json);
+    const v = JSON.parse(json) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string }> };
+    assert.deepEqual([v.error.code, v.error.message], ["bad_config", line("replication", edits.replication)]);
+    assert.deepEqual(v.next.map((n) => n.command), ["mason serve --help"]);
+    assert.equal(fs.readdirSync(dir).join(","), "mason", "mason serve wrote nothing: no .mason/");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a MASON_HISTORY_DAYS that is not a number of days refuses mason serve (on its one report) and mason start (before it spawns, in the run, and --json) in the Failure shape, before anything opens", async () => {
+  const why = "it is how many days Mason keeps its history (the request log, the sync's events, the usage samples and the synced tables' sizes): a whole number, 1 or more";
+  const fix = "write MASON_HISTORY_DAYS=7 (the default, as when it is unset) or another whole number of days";
+  for (const bad of ["abc", "0", "-1"]) {
+    const served = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_HISTORY_DAYS: bad }, "/srv");
+    assert.ok("message" in served, `${bad}: refused`);
+    assert.equal(served.message, `a setting is missing or wrong: MASON_HISTORY_DAYS=${JSON.stringify(bad)} is not a number of days: ${why} — ${fix}`, bad);
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-history-days-bad-"));
+  try {
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({
+      name: "shop", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false, apiKey: KEY,
+      sourceServer: null, lastRun: null, running: null,
+    }), { mode: 0o600 });
+    const env = matrixEnv({ HOME: path.join(root, "home"), PATH: path.dirname(process.execPath), MASON_HISTORY_DAYS: "abc" });
+    const message = 'MASON_HISTORY_DAYS="abc" is not a number of days';
+    for (const attach of [false, true]) {
+      const p = await runMason(root, ["start", ...(attach ? ["--attach"] : [])], env);
+      assert.equal(p.code, 1, p.stdout + p.stderr);
+      assert.ok(p.stderr.includes(`✗ mason start: ${message}\n  why   ${why}\n  fix   ${fix}\n`),
+        `${attach ? "the run itself" : "before it spawns"}:\n${p.stdout}${p.stderr}`);
+      assert.doesNotMatch(p.stdout + p.stderr, /Connecting to|Opening the copy/, "refused before the database or the copy is touched");
+    }
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "duck.db")), "the copy's file was never opened");
+    const j = await runMason(root, ["start", "--json"], env);
+    assert.equal(j.code, 1, j.stdout + j.stderr);
+    assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message, why, fix });
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("MASON_REQUEST_LOG_DAYS is MASON_HISTORY_DAYS now: set, it refuses mason serve (on its one report) and mason start (before it spawns and in the run), naming the line to write — never runs the default", async () => {
+  const why = "it was renamed MASON_HISTORY_DAYS, since the days it keeps are every history's (the request log, the sync's events, the usage samples and the synced tables' sizes)";
+  const fix = "write MASON_HISTORY_DAYS=30 instead, then unset MASON_REQUEST_LOG_DAYS";
+  const served = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_REQUEST_LOG_DAYS: "30" }, "/srv");
+  assert.ok("message" in served, "refused");
+  assert.equal(served.message, `a setting is missing or wrong: MASON_REQUEST_LOG_DAYS=30 is no longer read: ${why} — ${fix}`);
+  assert.ok(!("message" in serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_HISTORY_DAYS: "30" }, "/srv")), "the new name is taken");
+  assert.match(serveModule.SERVE.usage, /\n {4}MASON_HISTORY_DAYS {6}how many days Mason keeps its history: the request log, the sync's events, the usage\n/);
+  assert.ok(!serveModule.SERVE.usage.includes("MASON_REQUEST_LOG_DAYS"), "the old name is not offered");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-history-days-"));
+  try {
+    fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+    fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({
+      name: "shop", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false, apiKey: KEY,
+      sourceServer: null, lastRun: null, running: null,
+    }), { mode: 0o600 });
+    const env = matrixEnv({ HOME: path.join(root, "home"), PATH: path.dirname(process.execPath), MASON_REQUEST_LOG_DAYS: "30" });
+    for (const attach of [false, true]) {
+      const p = await runMason(root, ["start", ...(attach ? ["--attach"] : [])], env);
+      assert.equal(p.code, 1, p.stdout + p.stderr);
+      assert.ok(p.stderr.includes(`✗ mason start: MASON_REQUEST_LOG_DAYS=30 is no longer read\n  why   ${why}\n  fix   ${fix}\n`),
+        `${attach ? "the run itself" : "before it spawns"}:\n${p.stdout}${p.stderr}`);
+      assert.doesNotMatch(p.stdout + p.stderr, /Connecting to/, "refused before the database is connected to");
+    }
+    const j = await runMason(root, ["start", "--json"], env);
+    assert.equal(j.code, 1, j.stdout + j.stderr);
+    assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message: "MASON_REQUEST_LOG_DAYS=30 is no longer read", why, fix });
+    assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason serve --help lists every setting a server sets: PG_PUBLICATION beside DATABASE_URL, with its default; MASON_CHANGES no more", () => {
+  const usage = (serveModule as unknown as { SERVE: { usage: string } }).SERVE.usage;
+  assert.match(usage, /^ {4}DATABASE_URL .*\n.*\n {4}PG_PUBLICATION {10}the publication the tables under sync: replication are read through, the database owner's,\n {28}never altered: the sources file's publication: first \(publication: \$\{PG_PUBLICATION\} reads\n {28}this one\), else this; default none: Mason makes its own\n/m);
+  assert.doesNotMatch(usage, /MASON_CHANGES/);
 });

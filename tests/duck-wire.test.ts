@@ -24,6 +24,7 @@ import { TABLES_SQL } from "../src/cli/preflight.ts";
 import { jsonbText } from "../src/duck/jsonb.ts";
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { CopyState } from "../src/duck/sync.ts";
+import type { ApiLogRow } from "../src/api/request-log.ts";
 import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
@@ -212,6 +213,8 @@ const schema: PgSchema = {
 /** the sync's copy state the listener reads for a table the catalog does not hold (`Sync.state` in a run) */
 let copies: CopyState[] = [];
 const logged: string[] = [];
+/** the request log's rows as the listener built them (src/api/request-log.ts ApiLogRow) */
+const recorded: ApiLogRow[] = [];
 /** every line, never cleared (a test that reads a line said once, at the catalog's start, cannot know when that was) */
 const everLogged: string[] = [];
 
@@ -234,7 +237,7 @@ before(async () => {
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "0.6.1", product: "mason-data",
     authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
     schema: () => schema,
-    record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
+    record: (r) => { recorded.push(r); }, log: (l) => (logged.push(l), everLogged.push(l)),
     duck: await store.listener(undefined, undefined, undefined, () => copies),
   });
 });
@@ -662,17 +665,21 @@ test("the BI-tools test: a sum over a CASE has the scale of the arms its rows to
 
 /** One session over a raw socket, its reading in the test's hands (`pg` reads every reply as it comes); `startup` adds
  *  to its startup packet, and `reported` is the ParameterStatus the startup answered. */
-async function rawSession(port = api.port, startup: Record<string, string> = {}): Promise<{ socket: net.Socket; pid: number; secret: number; reported: Map<string, string>; untilReady(): Promise<BackendMessage[]>; end(): void }> {
+async function rawSession(port = api.port, startup: Record<string, string> = {}): Promise<{ socket: net.Socket; pid: number; secret: number; reported: Map<string, string>; untilReady(): Promise<BackendMessage[]>; end(): void; readonly bytes: number }> {
   const socket = net.connect(port, "127.0.0.1");
   await new Promise<void>((r) => socket.once("connect", () => r()));
   let chunks: Buffer[] = [];
   let tail = Buffer.alloc(0);
   let wake: (() => void) | null = null;
+  /** the bytes the last untilReady read, ReadyForQuery included */
+  let bytes = 0;
   socket.on("data", (d: Buffer) => { chunks.push(d); tail = Buffer.concat([tail, d]).subarray(-6); wake?.(); });
   const ready = (): boolean => tail.length === 6 && tail[0] === 0x5a && tail.readInt32BE(1) === 5;
   const untilReady = async (): Promise<BackendMessage[]> => {
     while (!ready()) await new Promise<void>((r) => { wake = r; });
-    const ms = wire.replies(Buffer.concat(chunks));
+    const all = Buffer.concat(chunks);
+    bytes = all.length;
+    const ms = wire.replies(all);
     chunks = []; tail = Buffer.alloc(0);
     return ms;
   };
@@ -683,7 +690,7 @@ async function rawSession(port = api.port, startup: Record<string, string> = {})
   const started = await untilReady();
   const key = started.find((m) => m.type === "BackendKeyData") as Extract<BackendMessage, { type: "BackendKeyData" }>;
   const reported = new Map(started.flatMap((m) => m.type === "ParameterStatus" ? [[m.name, m.value] as const] : []));
-  return { socket, pid: key.pid, secret: key.secret, reported, untilReady, end: () => { socket.destroy(); } };
+  return { socket, pid: key.pid, secret: key.secret, reported, untilReady, end: () => { socket.destroy(); }, get bytes() { return bytes; } };
 }
 const dataRows = (ms: BackendMessage[]): Array<Extract<BackendMessage, { type: "DataRow" }>> => ms.filter((m) => m.type === "DataRow") as Array<Extract<BackendMessage, { type: "DataRow" }>>;
 const finished = (word: string): boolean => logged.some((l) => l.startsWith("statement:") && l.includes(word));
@@ -1361,7 +1368,7 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
     const plain = await explained(0);
     assert.deepEqual(await explained(1), plain);
     // the SQL sent is the join's, and DuckDB plans its delimiter join
-    assert.match(plain.join("\n"), /Sent to DuckDB: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
+    assert.match(plain.join("\n"), /Sent to the engine: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
     assert.doesNotMatch(plain.join("\n"), /CROSS JOIN LATERAL/, plain.join("\n"));
 
     // planned again under the search_path and TimeZone of its Parse, never a later SET's
@@ -1698,9 +1705,9 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     assert.deepEqual(p.fields, [["QUERY PLAN", 25]]);
     assert.equal(p.command, "EXPLAIN");
     // no sync here (`copies` is empty): how it is kept current is said unknown, never guessed
-    assert.equal(p.lines[0], "Mason: answered by DuckDB from the synced table public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
-    assert.equal(p.lines[1], "  Sent to DuckDB: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
-    assert.equal(p.lines[2], "  Computed by Mason after DuckDB: nothing");
+    assert.equal(p.lines[0], "Mason: answered from the synced table public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
+    assert.equal(p.lines[1], "  Sent to the engine: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
+    assert.equal(p.lines[2], "  Computed by Mason after the engine: nothing");
     // a preview's late materialization (14a1a831), as DuckDB plans it: the top two by the key, then the other columns
     // read for those rows only
     assert.ok(p.lines.some((l) => /^ +->  Hash Join {2}\(rows=3\)$/.test(l)) && p.lines.some((l) => /^ +Join Type: SEMI$/.test(l)), p.lines.join("\n"));
@@ -1713,16 +1720,16 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     const v = await plan("EXPLAIN (VERBOSE, COSTS false, BUFFERS) SELECT id FROM orders WHERE status = $1", ["paid"]);
     assert.ok(v.lines.some((l) => /^\s+Projections: /.test(l)) && v.lines.some((l) => /^\s+Filters: /.test(l)), v.lines.join("\n"));
     assert.ok(!v.lines.some((l) => /rows=/.test(l)), v.lines.join("\n"));
-    assert.ok(v.lines.includes("  Note: BUFFERS has no DuckDB meaning: ignored"), v.lines.join("\n"));
+    assert.ok(v.lines.includes("  Note: BUFFERS has no meaning to the engine: ignored"), v.lines.join("\n"));
     // what Mason computes after DuckDB, and its functions DuckDB calls
     const x = await plan("EXPLAIN SELECT sum(amount) / 7 FROM orders");
-    assert.match(x.lines[2]!, /^ {2}Computed by Mason after DuckDB: column 1 "\?column\?": Postgres's exact numeric, from \d of DuckDB's value\(s\)$/);
+    assert.match(x.lines[2]!, /^ {2}Computed by Mason after the engine: column 1 "\?column\?": Postgres's exact numeric, from \d of the engine's value\(s\)$/);
     // a function is what DuckDB calls, never the cells Mason computes from (`__mason_cell_0` is a column's name)
-    const called = (await plan("EXPLAIN SELECT sum(amount::text::numeric) FROM orders")).lines.find((l) => /^ {2}Mason's functions DuckDB calls: /.test(l));
+    const called = (await plan("EXPLAIN SELECT sum(amount::text::numeric) FROM orders")).lines.find((l) => /^ {2}Mason's functions the engine calls: /.test(l));
     assert.ok(called !== undefined && /__mason_numeric_exact/.test(called) && !/__mason_cell_/.test(called), called);
     // a catalog statement is the catalog Postgres's, said so first
     const k = await plan("EXPLAIN SELECT relname FROM pg_class WHERE relname = 'orders'");
-    assert.match(k.lines[0]!, /^Mason: answered by the catalog Postgres \(Mason's own, PGlite\), not DuckDB/);
+    assert.match(k.lines[0]!, /^Mason: answered by the catalog Postgres \(Mason's own, PGlite\), not the synced data/);
     assert.ok(k.lines.length > 1);
     assert.match((await plan("EXPLAIN SELECT relname FROM pg_class", [])).lines[0]!, /^Mason: answered by the catalog Postgres/);
   } finally { await c.end(); }
@@ -1737,23 +1744,26 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
   const c = await client();
   const header = async (sql = "EXPLAIN SELECT id FROM orders"): Promise<string> => String((await c.query({ text: sql, rowMode: "array" })).rows[0]![0]);
   const json = async (): Promise<Record<string, unknown>> =>
-    (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>)[0]!.Mason.Copies[0]!;
+    (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Tables: Array<Record<string, unknown>> } }>)[0]!.Mason.Tables[0]!;
   const copied = (kept: CopyState["kept"]): CopyState => ({ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 0.1, copiedAt: "2026-10-27 19:00:00+00", error: null, ...(kept ? { kept } : {}) });
-  const head = "Mason: answered by DuckDB from the synced table public.orders (about 3 rows; ";
-  const streamed = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C4D", lastCommit: "2026-10-29T08:15:02.512Z", notRunning: null } as const;
-  const stream = { Slot: "mason_shop", "Applied Through": "0/1A2B3C4D", "Last Change Committed": "2026-10-29T08:15:02.512Z", "Stream Not Running": null };
+  const head = "Mason: answered from the synced table public.orders (about 3 rows; ";
+  // the copy's age is said for a streamed table too: the last moment the stream had everything the database wrote
+  const syncedAt = new Date(Date.now() - 3 * 60_000).toISOString();
+  const synced = `last synced 3 min ago (${syncedAt.slice(0, 19).replace("T", " ")} UTC)`;
+  const streamed = { by: "replication", slot: "mason_shop", state: "streamed", why: null, position: "0/1A2B3C4D", lastCommit: "2026-10-29T08:15:02.512Z", notRunning: null, syncedAt } as const;
+  const stream = { Sync: "replication", Slot: "mason_shop", "Applied Through": "0/1A2B3C4D", "Last Synced": syncedAt, "Last Change Committed": "2026-10-29T08:15:02.512Z", "Stream Not Running": null };
   /** the JSON says what the text says, and names a mode only for a copy that mode keeps current now */
   const jsonSays = async (by: string | null, more: Record<string, unknown>): Promise<void> =>
     assert.deepEqual(await json(), { Table: "public.orders", "Estimated Rows": 3, "Kept Current By": by, "Kept Current": (await header()).slice(head.length, -1), ...more });
   try {
     copies = [copied(streamed)];
     const h = await header();
-    assert.equal(h, `${head}kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)`);
+    assert.equal(h, `${head}kept current by logical replication (slot mason_shop), replicated, at 0/1A2B3C4D, ${synced}, last change committed 2026-10-29 08:15:02 UTC)`);
     assert.doesNotMatch(h, /polling|last poll/);
     await jsonSays("logical replication", { ...stream, "Stream State": "streamed" });
     // the stream down, nothing applied yet this run: said with why, NOT kept current now, still never the poll
     copies = [copied({ ...streamed, lastCommit: null, notRunning: "the database closed the connection · it starts again after 08:16 UTC" })];
-    assert.equal(await header(), `${head}streamed by logical replication (slot mason_shop), applied through 0/1A2B3C4D, no change applied this run; NOT kept current now, the stream is not running: the database closed the connection · it starts again after 08:16 UTC)`);
+    assert.equal(await header(), `${head}streamed by logical replication (slot mason_shop), replicated, at 0/1A2B3C4D, ${synced}, no change applied this run; NOT kept current now, the stream is not running: the database closed the connection · it starts again after 08:16 UTC)`);
     await jsonSays(null, { ...stream, "Stream State": "streamed", "Last Change Committed": null, "Stream Not Running": "the database closed the connection · it starts again after 08:16 UTC" });
     // a table being caught up, or left out of the publication, is said as status says it, and no mode is said at work
     copies = [copied({ ...streamed, state: "catching-up", why: "caught up by one poll after its whole read" })];
@@ -1791,8 +1801,8 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     // a statement over two copies says each on a line of its own
     copies = [copied(streamed), { ...copied({ by: "poll", sync: every30, syncedAt: null, nextAt: null }), source: "sales.invoices" }];
     const two = (await c.query({ text: "EXPLAIN SELECT o.id FROM orders o JOIN sales.invoices i ON i.id = o.id", rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
-    assert.equal(two[0], "Mason: answered by DuckDB from the synced tables");
-    assert.ok(two.includes("  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), applied through 0/1A2B3C4D, last change committed 2026-10-29 08:15:02 UTC)"), two.join("\n"));
+    assert.equal(two[0], "Mason: answered from the synced tables");
+    assert.ok(two.includes(`  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), replicated, at 0/1A2B3C4D, ${synced}, last change committed 2026-10-29 08:15:02 UTC)`), two.join("\n"));
     assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; polled every 30s, not polled yet\)$/.test(l)), two.join("\n"));
   } finally {
     copies = [];
@@ -1812,10 +1822,10 @@ test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's
     assert.ok(lines.some((l) => /^ {2}->  Order By {2}\(rows=\d+\) \(actual rows=2, thread time=\d+\.\d{3} ms\)$/.test(l)), lines.join("\n"));
     assert.ok(lines.some((l) => /->  Table Scan on public\.orders {2}\(rows=\d+\) \(actual rows=2, thread time=\d+\.\d{3} ms\)$/.test(l)), lines.join("\n"));
     // the time is DuckDB's thread time, said so once: never Postgres's elapsed `actual time` (the Fable review of #517)
-    assert.ok(lines.includes("  Note: an operator's thread time is DuckDB's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time"), lines.join("\n"));
+    assert.ok(lines.includes("  Note: an operator's thread time is the engine's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time"), lines.join("\n"));
     assert.ok(!lines.some((l) => /actual time=/.test(l)), lines.join("\n"));
-    assert.match(lines.at(-2)!, /^Planning Time: \d+\.\d{3} ms \(Postgres's analysis \d+\.\d{3}, Mason's rewrite \d+\.\d{3}, DuckDB's planning \d+\.\d{3}\)$/);
-    assert.match(lines.at(-1)!, /^Execution Time: \d+\.\d{3} ms \(DuckDB \d+\.\d{3}, Mason's conversion and exact numerics \d+\.\d{3}\)$/);
+    assert.match(lines.at(-2)!, /^Planning Time: \d+\.\d{3} ms \(Postgres's analysis \d+\.\d{3}, Mason's rewrite \d+\.\d{3}, the engine's planning \d+\.\d{3}\)$/);
+    assert.match(lines.at(-1)!, /^Execution Time: \d+\.\d{3} ms \(the engine \d+\.\d{3}, Mason's conversion and exact numerics \d+\.\d{3}\)$/);
     // it ran, through the same runner (its log line), and the plan's rows are all the client got
     assert.ok(finished("2 row(s)"), logged.join("\n"));
 
@@ -1844,14 +1854,14 @@ test("EXPLAIN ANALYZE reports the statement's own profile, never another stateme
       assert.ok(!l.some((x) => /schemas/i.test(x)), l.join("\n"));
       // DuckDB's plan of the count (its EXPLAIN: a scan of the one row it computed), the rows it answered, no times
       assert.deepEqual(plan, ["Column Data Scan  (rows=1) (actual rows=1)"], l.join("\n"));
-      assert.ok(l.includes("  Note: DuckDB's profiler recorded no operator of this statement: DuckDB answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered"), l.join("\n"));
+      assert.ok(l.includes("  Note: the engine's profiler recorded no operator of this statement: the engine answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered"), l.join("\n"));
       assert.ok(!l.some((x) => /thread time/.test(x)), l.join("\n"));
       assert.match(l.at(-1)!, /^Execution Time: \d+\.\d{3} ms /);
     }
     // FORMAT JSON says the same
     const [doc] = JSON.parse(String((await c.query({ text: "EXPLAIN (ANALYZE, FORMAT JSON) SELECT count(*) FROM big", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown> }>;
     assert.deepEqual([doc!.Plan["Node Type"], doc!.Plan["Actual Rows"], doc!.Plan["DuckDB Thread Time"]], ["Column Data Scan", 1, undefined]);
-    assert.match(String(doc!.Mason.Note), /^DuckDB's profiler recorded no operator of this statement/);
+    assert.match(String(doc!.Mason.Note), /^the engine's profiler recorded no operator of this statement/);
     // a statement the profiler does time is its own, after one it did not and after one of another table's; one that
     // scans a copy says its scan's rows and time
     for (const [sql, scans] of [["SELECT count(*) FROM big WHERE id > 7", "big"], ["SELECT count(*) FROM orders WHERE qty > 1", "orders"], ["SELECT 1", null], ["SELECT id FROM orders WHERE false", null]] as const) {
@@ -1875,12 +1885,12 @@ test("EXPLAIN (FORMAT JSON) is Postgres's plan document, DuckDB's operators in i
     const [doc] = JSON.parse(String((r.rows as unknown[][])[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown>; "Planning Time": number; "Execution Time": number }>;
     assert.equal(doc!.Plan["Node Type"], "Top N");
     assert.equal(doc!.Plan["Actual Rows"], 2);
-    assert.equal(typeof doc!.Plan["DuckDB Thread Time"], "number");
+    assert.equal(typeof doc!.Plan["Engine Thread Time"], "number");
     assert.equal(doc!.Plan["Actual Total Time"], undefined, "a plan viewer draws Actual Total Time as elapsed: DuckDB's is thread time");
     const scan = (doc!.Plan.Plans as Array<Record<string, unknown>>)[0]!;
     assert.deepEqual([scan["Node Type"], scan["Relation Name"], scan["Schema"], scan["Plan Rows"]], ["Table Scan", "orders", "public", 3]);
-    assert.equal(doc!.Mason["Answered By"], "DuckDB");
-    assert.deepEqual(doc!.Mason.Copies, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": null, "Kept Current": "how it is kept current is unknown: the sync has no record of it" }]);
+    assert.equal(doc!.Mason["Answered By"], "the engine");
+    assert.deepEqual(doc!.Mason.Tables, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": null, "Kept Current": "how it is kept current is unknown: the sync has no record of it" }]);
     assert.ok(typeof doc!["Planning Time"] === "number" && typeof doc!["Execution Time"] === "number");
     // FORMAT XML and YAML are refused by name; Postgres's own errors for an option it does not have, or one that needs ANALYZE
     await assert.rejects(c.query("EXPLAIN (FORMAT XML) SELECT id FROM orders"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap explain-option/.test(e.message));
@@ -2037,7 +2047,7 @@ test("a ->> of a column is DuckDB's own read where it is Postgres's answer, the 
     assert.deepEqual(got.fields, want.fields);
     // the hops: a read of strings alone makes none; a number, an index, the json itself, a json document holding a key
     // twice (row 1's j, at the root and in o: DuckDB reads the first, Postgres the last), a literal's, do
-    // (the count is the copy's thread's, where the functions run: src/duck/executor.ts functionCalls)
+    // (the count is the engine's thread's, where the functions run: src/duck/executor.ts functionCalls)
     const calls = async (): Promise<number> => (await store.functionCalls()).get("__mason_json_get") ?? 0;
     const hops = async (read: string, where = ""): Promise<number> => {
       const before = await calls();
@@ -2178,6 +2188,221 @@ test("a #> path element is an array index exactly where Postgres reads one, on a
   } finally { await c.end(); }
 });
 
+// CURRENT_SETTING IS THE SESSION'S (GitHub issue 40): the catalog Postgres's `current_setting()` was a fourth reader of
+// the session's parameters and answered its own values after a SET (`TimeZone` UTC, `search_path` the catalog's), and
+// beside a copied table DuckDB's own `current_setting` answered DuckDB's settings. Each now answers the string `SHOW`
+// answers — in a statement the catalog answers and in one DuckDB does, in a WHERE, a CTE and a prepared statement
+// executed after a later SET — and a name the session does not hold is the catalog Postgres's own.
+test("current_setting answers the session's value of every name it holds, as SHOW does, in the catalog and beside a copied table", async () => {
+  const c = new pg.Client({ host: "127.0.0.1", port: api.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token, application_name: "tool-at-startup" });
+  await c.connect();
+  const one = async (sql: string, values?: unknown[]): Promise<unknown> => (await answer(c, sql, values)).rows[0]?.[0];
+  const code = async (sql: string): Promise<string> => { try { await c.query(sql); return "answered"; } catch (e) { return `${(e as pg.DatabaseError).code} ${(e as pg.DatabaseError).message}`; } };
+  try {
+    // read before any SET, prepared under a name: executed again after the SETs below, it reads the session of then
+    const prepared = { name: "setting_of", text: "SELECT current_setting($1) AS s FROM public.orders LIMIT 1", rowMode: "array" as const, types: raw };
+    assert.equal(((await c.query({ ...prepared, values: ["TimeZone"] })).rows[0] as unknown[])[0], "UTC");
+    await c.query("SET TimeZone = 'Europe/Berlin'; SET search_path = sales, public; SET work_mem = '64MB'; SET statement_timeout = '5s'; SET myapp.x = 'v1'");
+    const names = ["TimeZone", "search_path", "work_mem", "application_name", "statement_timeout", "myapp.x", "DateStyle", "IntervalStyle",
+      "server_version", "client_encoding", "is_superuser", "ssl", "standard_conforming_strings", "extra_float_digits"];
+    const wrong: string[] = [];
+    for (const name of names) {
+      const shown = await one(`SHOW "${name}"`);
+      const reads: Array<[string, string, unknown[]?]> = [
+        ["the catalog", `SELECT current_setting('${name}')`], ["any case", `SELECT current_setting('${name.toUpperCase()}')`],
+        ["missing_ok", `SELECT current_setting('${name}', true)`], ["missing_ok false", `SELECT current_setting('${name}', false)`],
+        ["a parameter", "SELECT current_setting($1)", [name]],
+        ["beside a table", `SELECT current_setting('${name}') FROM public.orders LIMIT 1`],
+        ["beside a table, missing_ok", `SELECT current_setting('${name}', true) FROM public.orders LIMIT 1`],
+        ["beside a table, a parameter", "SELECT current_setting($1) FROM public.orders LIMIT 1", [name]],
+        ["qualified", `SELECT pg_catalog.current_setting('${name}')`], ["qualified, beside a table", `SELECT pg_catalog.current_setting('${name}', false) FROM public.orders LIMIT 1`],
+        ["a CTE", `WITH s AS (SELECT current_setting('${name}') AS v) SELECT v FROM s`],
+        ["a CTE over a table", `WITH s AS (SELECT id, current_setting('${name}') AS v FROM public.orders) SELECT v FROM s LIMIT 1`],
+      ];
+      for (const [how, sql, values] of reads) { const got = await one(sql, values); if (got !== shown) wrong.push(`${name} (${how}): ${String(got)} where SHOW says ${String(shown)}`); }
+      // a WHERE, in the catalog and over a table
+      if (await one(`SELECT count(*) FROM pg_catalog.pg_class WHERE current_setting('${name}') = $1 AND relname = 'pg_class'`, [shown]) !== "1") wrong.push(`${name}: a catalog WHERE`);
+      if (await one(`SELECT count(*) > 0 FROM public.orders WHERE current_setting('${name}') = $1`, [shown]) !== "t") wrong.push(`${name}: a WHERE over a table`);
+    }
+    assert.deepEqual(wrong, []);
+    assert.equal(await one("SELECT current_setting('search_path')"), "sales, public");
+    assert.equal(await one("SELECT current_setting('timezone') FROM public.orders LIMIT 1"), "Europe/Berlin");
+    assert.equal(await one("SELECT current_setting('application_name')"), "tool-at-startup");
+    // the prepared statement, executed after the SETs: the session of its Execute
+    assert.equal(((await c.query({ ...prepared, values: ["TimeZone"] })).rows[0] as unknown[])[0], "Europe/Berlin");
+    await c.query("SET work_mem = '128MB'");
+    assert.equal(((await c.query({ ...prepared, values: ["work_mem"] })).rows[0] as unknown[])[0], "128MB");
+    // a name the session does not hold: the catalog Postgres's own, in both
+    const blockSize = (await postgres("SELECT current_setting('block_size')")).rows[0]![0];
+    assert.equal(await one("SELECT current_setting('block_size')"), blockSize);
+    assert.equal(await one("SELECT current_setting('block_size') FROM public.orders LIMIT 1"), blockSize);
+    // a name nobody holds: Postgres's 42704, or NULL under missing_ok; NULL in, NULL out (strict)
+    const unknown = await (async () => { try { await truth.query("SELECT current_setting('no_such_setting')"); return "answered"; } catch (e) { return `${(e as { code: string }).code} ${(e as Error).message}`; } })();
+    assert.equal(unknown, '42704 unrecognized configuration parameter "no_such_setting"');
+    assert.equal(await code("SELECT current_setting('no_such_setting')"), unknown);
+    assert.equal(await code("SELECT current_setting('no_such_setting') FROM public.orders"), unknown);
+    assert.equal(await one("SELECT current_setting('no_such_setting', true) IS NULL"), "t");
+    assert.equal(await one("SELECT current_setting('no_such_setting', true) IS NULL FROM public.orders LIMIT 1"), "t");
+    assert.deepEqual((await answer(c, "SELECT current_setting(NULL), current_setting(NULL, true), current_setting('TimeZone', NULL) FROM public.orders LIMIT 1")).rows, [[null, null, null]]);
+    assert.deepEqual((await answer(c, "SELECT current_setting(NULL), current_setting(NULL, true), current_setting('TimeZone', NULL)")).rows, [[null, null, null]]);
+    // a placeholder's name is Postgres's to read: two or more simple identifiers, dotted (42602 otherwise)
+    assert.equal(await code('SET "my app".x = 1'), '42602 invalid configuration parameter name "my app.x"');
+    // DuckDB's own settings are never a session's: a name only DuckDB knows is Postgres's 42704
+    assert.match(await code("SELECT current_setting('memory_limit') FROM public.orders"), /^42704 /);
+  } finally { await c.end(); }
+});
+
+// THE CATALOG IS ONE CONNECTION EVERY SESSION SHARES (src/api/postgres/catalog.ts asSession): each request carries its
+// session's settings and RESETs them after, so two sessions interleaved each read their own, and none is left behind —
+// after an error too (the RESET follows the Sync the request carries)
+test("two sessions' current_setting read their own settings however their requests interleave; none is left in the catalog", async () => {
+  const [a, b] = [await client(), await client()];
+  try {
+    await a.query("SET search_path = alpha_schema, public; SET myapp.who = 'a'");
+    await b.query("SET search_path = beta_schema, public; SET myapp.who = 'b'");
+    const reads = (c: pg.Client, want: string, who: string): Array<Promise<string | null>> => Array.from({ length: 12 }, async (_, i) => {
+      const sql = i % 3 === 0 ? "SELECT current_setting('search_path') || '/' || current_setting('myapp.who')"
+        : i % 3 === 1 ? "SELECT current_setting('search_path') || '/' || current_setting('myapp.who') FROM public.orders LIMIT 1"
+        : "SELECT current_setting('no_such_setting')";
+      try { const v = (await answer(c, sql)).rows[0]?.[0] as string; return v === `${want}/${who}` ? null : `${who}: ${v}`; }
+      catch (e) { return i % 3 === 2 && (e as pg.DatabaseError).code === "42704" ? null : `${who}: ${(e as Error).message}`; }
+    });
+    const wrong = (await Promise.all([...reads(a, "alpha_schema, public", "a"), ...reads(b, "beta_schema, public", "b")])).filter((x) => x !== null);
+    assert.deepEqual(wrong, []);
+    // nothing of either session stays in the catalog: a third session reads its own default
+    const c = await client();
+    try {
+      assert.deepEqual((await answer(c, "SELECT current_setting('search_path'), current_setting('myapp.who', true)")).rows, [['"$user", public', null]]);
+      // a placeholder another session SET is not this one's, however it asks (Postgres's 42704)
+      for (const sql of ["SHOW myapp.who", "SELECT current_setting('myapp.who')", "SELECT current_setting('myapp.who') FROM public.orders"]) {
+        await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "42704" && e.message === 'unrecognized configuration parameter "myapp.who"', sql);
+      }
+    } finally { await c.end(); }
+  } finally { await a.end(); await b.end(); }
+});
+
+// SET_CONFIG IS A SET, AND A SET IS THE SESSION'S (a review finding of #46): forwarded, it ran on the catalog's one
+// connection as its superuser and stayed there for every session — A's `set_config('search_path', 'zzz', false)` moved
+// the catalog off the overrides (B's `version()` answered the engine's own string, B's current_setting('TimeZone') the
+// catalog's UTC after a SET) and A's placeholder was B's. Now alone in a SELECT it is the session's SET, answered as
+// the function's row, and any other form is refused by its registry entry; the carrier of a session's settings in the
+// catalog is no name a tool writes (`current_setting('mason.session')` answered the carrier's JSON)
+test("set_config alone is the session's SET, answered as Postgres answers it; another session never sees it; its other forms are refused by name", async () => {
+  const [a, b] = [await client(), await client()];
+  const one = async (c: pg.Client, sql: string): Promise<unknown> => (await answer(c, sql)).rows[0]?.[0];
+  const code = async (c: pg.Client, sql: string, values?: unknown[]): Promise<string> => {
+    try { await c.query(sql, values); return "answered"; } catch (e) { return `${(e as pg.DatabaseError).code} ${(e as pg.DatabaseError).message}`; }
+  };
+  try {
+    assert.deepEqual(await answer(a, "SELECT set_config('search_path', 'zzz', false)"), { fields: [["set_config", 25]], rows: [["zzz"]] });
+    assert.deepEqual([await one(a, "SHOW search_path"), await one(a, "SELECT current_setting('search_path')"), await one(a, "SELECT current_setting('search_path') FROM public.orders LIMIT 1")],
+      ["zzz", "zzz", "zzz"], "A's own value, however A asks");
+    // B is untouched: the catalog's overrides still win, B's own SET is B's
+    assert.match(String(await one(b, "SELECT version()")), /^PostgreSQL 18\.6 \(mason-data /);
+    await b.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual((await answer(b, "SELECT current_setting('TimeZone'), current_setting('search_path')")).rows, [["Asia/Tokyo", '"$user", public']]);
+    // a placeholder: A's alone; the value answered as SHOW answers it (the time zone's own spelling), aliased
+    assert.deepEqual(await answer(a, "SELECT set_config('myapp.leak', 'from-a', false) AS v"), { fields: [["v", 25]], rows: [["from-a"]] });
+    assert.equal(await one(a, "SELECT current_setting('myapp.leak')"), "from-a");
+    assert.equal(await one(b, "SELECT current_setting('myapp.leak', true)"), null);
+    assert.equal(await one(a, "SELECT pg_catalog.set_config('TimeZone', 'europe/berlin', false)"), "Europe/Berlin");
+    assert.equal(await one(a, "SHOW TimeZone"), "Europe/Berlin");
+    // the extended protocol, a named statement: Describe and Execute answer alike
+    const r = await a.query({ name: "configure", text: "SELECT set_config('work_mem', '64MB', false)", rowMode: "array", types: raw } as pg.QueryConfig);
+    assert.deepEqual([r.fields.map((f) => [f.name, f.dataTypeID]), r.rows], [[["set_config", 25]], [["64MB"]]]);
+    assert.equal(await one(a, "SHOW work_mem"), "64MB");
+    // a name Postgres does not know is its 42704, as SET's; a value it refuses is its refusal
+    assert.equal(await code(a, "SELECT set_config('no_such_setting', 'x', false)"), '42704 unrecognized configuration parameter "no_such_setting"');
+    assert.match(await code(a, "SELECT set_config('work_mem', 'lots', false)"), /^22023 /);
+    // every other form is refused by name, and changes nothing
+    for (const sql of ["SELECT set_config('search_path', 'yyy', false), 1", "SELECT set_config('search_path', 'yyy', true)", "SELECT set_config('search_path', NULL, false)",
+      "SELECT set_config('search_path', 'y' || 'yy', false)", "SELECT x FROM (SELECT set_config('search_path', 'yyy', false) AS x) AS s",
+      "SELECT set_config('search_path', 'yyy', false) FROM public.orders LIMIT 1", "SELECT set_config('search_path', 'yyy', false) FROM pg_catalog.pg_class LIMIT 1",
+      "EXPLAIN ANALYZE SELECT set_config('search_path', 'yyy', false)", "SELECT 1 WHERE set_config('search_path', 'yyy', false) IS NOT NULL"]) {
+      assert.match(await code(b, sql), /^0A000 set_config\(\) is answered by Mason only alone .*Mason gap set-config-forms/, sql);
+    }
+    assert.match(await code(b, "SELECT set_config($1, 'yyy', false)", ["search_path"]), /^0A000 .*Mason gap set-config-forms/);
+    assert.equal(await one(b, "SHOW search_path"), '"$user", public');
+    // the carrier of the session's settings in the catalog is none of a tool's names: Postgres's 42704 however asked
+    for (const sql of ["SELECT current_setting('mason.session')", "SELECT current_setting('mason.session') FROM public.orders LIMIT 1", "SHOW mason.session"]) {
+      assert.equal(await code(a, sql), '42704 unrecognized configuration parameter "mason.session"', sql);
+    }
+    assert.equal(await one(a, "SELECT current_setting('mason.session', true)"), null);
+  } finally { await a.end(); await b.end(); }
+  // the ParameterStatus of a reported parameter set_config moved: after its row and its tag, before the ReadyForQuery
+  const s = await rawSession();
+  try {
+    s.socket.write(wire.query("SELECT set_config('application_name', 'via-config', false)"));
+    const ms = await s.untilReady();
+    assert.deepEqual(ms.map((m) => m.type), ["RowDescription", "DataRow", "CommandComplete", "ParameterStatus", "ReadyForQuery"]);
+    assert.deepEqual(ms.find((m) => m.type === "ParameterStatus"), { type: "ParameterStatus", name: "application_name", value: "via-config" });
+  } finally { s.end(); }
+});
+
+// RESET ALL IS POSTGRES'S (GitHub issue 41): every parameter back to the session's start — the startup packet's
+// `application_name` and `options` included, which RESET ALL once kept (application_name) or dropped (`-c`) — and a
+// ParameterStatus for each REPORTED parameter that changed, as Postgres reports one (`ReportChangedGUCOptions`: a driver
+// that caches them, pgjdbc and npgsql, was left with the SET's values). `RESET <name>` and DISCARD ALL alike; a SET or a
+// RESET that changes nothing reports nothing
+test("RESET ALL, RESET <name> and DISCARD ALL restore the startup's values and report each reported parameter that changed", async () => {
+  const s = await rawSession(api.port, { application_name: "tool-at-startup", options: "-c work_mem=32MB -c search_path=startup_path" });
+  const statuses = (ms: BackendMessage[]): Array<[string, string]> => ms.flatMap((m) => m.type === "ParameterStatus" ? [[m.name, m.value] as [string, string]] : []).sort();
+  const errors = (ms: BackendMessage[]): BackendMessage[] => ms.filter((m) => m.type === "ErrorResponse");
+  const shown = async (sql: string): Promise<Array<string | null>> => {
+    s.socket.write(wire.query(sql));
+    const ms = await s.untilReady();
+    assert.deepEqual(errors(ms), [], sql);
+    return dataRows(ms).flatMap((r) => r.values.map((v) => v?.toString("utf8") ?? null));
+  };
+  const run = async (sql: string): Promise<BackendMessage[]> => { s.socket.write(wire.query(sql)); const ms = await s.untilReady(); assert.deepEqual(errors(ms), [], sql); return ms; };
+  try {
+    assert.equal(s.reported.get("application_name"), "tool-at-startup");
+    assert.equal(s.reported.get("search_path"), "startup_path", "the startup's options reported");
+    const set = await run("SET TimeZone = 'Europe/Berlin'; SET application_name = 'after-set'; SET search_path = sales, public; SET work_mem = '64MB'; SET IntervalStyle = postgres; SET myapp.x = 'v'");
+    assert.deepEqual(statuses(set), [["TimeZone", "Europe/Berlin"], ["application_name", "after-set"], ["search_path", "sales, public"]], "a SET reports what it changed (IntervalStyle did not)");
+    const reset = await run("RESET ALL");
+    assert.deepEqual(statuses(reset), [["TimeZone", "UTC"], ["application_name", "tool-at-startup"], ["search_path", "startup_path"]]);
+    // where Postgres 14+ sends them (ReportChangedGUCOptions, just before ReadyForQuery): after the RESET's
+    // CommandComplete, in Postgres's spelling
+    assert.deepEqual(reset.map((m) => m.type), ["CommandComplete", "ParameterStatus", "ParameterStatus", "ParameterStatus", "ReadyForQuery"]);
+    // ONCE per parameter per request, its last value; a value moved and moved back within one request is not told;
+    // a request that fails half-way tells what its earlier statements moved
+    assert.deepEqual(statuses(await run("SET application_name = 'a'; SET application_name = 'b'; SET TimeZone = 'Asia/Tokyo'; SET TimeZone = 'UTC'")), [["application_name", "b"]]);
+    s.socket.write(wire.query("SET application_name = 'before-error'; SELECT 1 / 0"));
+    const failed = await s.untilReady();
+    assert.deepEqual(failed.map((m) => m.type), ["CommandComplete", "ErrorResponse", "ParameterStatus", "ReadyForQuery"]);
+    assert.deepEqual(statuses(failed), [["application_name", "before-error"]]);
+    assert.deepEqual(statuses(await run("RESET ALL")), [["application_name", "tool-at-startup"]]);
+    assert.deepEqual(await shown("SHOW application_name; SHOW search_path; SHOW TimeZone; SHOW work_mem; SELECT current_setting('work_mem'), current_setting('application_name')"),
+      ["tool-at-startup", "startup_path", "UTC", "32MB", "32MB", "tool-at-startup"]);
+    // a placeholder the session SET stays defined, '' (Postgres's default of one), however it is asked
+    assert.deepEqual(await shown("SHOW myapp.x; SELECT current_setting('myapp.x'), current_setting('myapp.x', true) FROM public.orders LIMIT 1"), ["", "", ""]);
+    // RESET <name>: the startup's value, reported where it changed; again, nothing changes and nothing is reported
+    assert.deepEqual(statuses(await run("SET TimeZone = 'Asia/Tokyo'; SET work_mem = '1GB'; SET search_path = other")), [["TimeZone", "Asia/Tokyo"], ["search_path", "other"]]);
+    assert.deepEqual(statuses(await run("RESET TimeZone")), [["TimeZone", "UTC"]]);
+    assert.deepEqual(statuses(await run("RESET TimeZone; SET TimeZone = 'UTC'")), [], "nothing changed: nothing reported");
+    assert.deepEqual(statuses(await run("RESET search_path; RESET work_mem")), [["search_path", "startup_path"]]);
+    assert.deepEqual(await shown("SHOW search_path; SHOW work_mem"), ["startup_path", "32MB"]);
+    // SET … TO DEFAULT is RESET's
+    await run("SET application_name = 'x'");
+    assert.deepEqual(statuses(await run("SET application_name TO DEFAULT")), [["application_name", "tool-at-startup"]]);
+    // DISCARD ALL is RESET ALL too, in the extended protocol as in the simple one
+    await run("SET application_name = 'pooled'; SET TimeZone = 'Europe/Berlin'");
+    s.socket.write(wire.extended("DISCARD ALL", [], []));
+    const discarded = await s.untilReady();
+    assert.deepEqual(errors(discarded), []);
+    assert.deepEqual(statuses(discarded), [["TimeZone", "UTC"], ["application_name", "tool-at-startup"]]);
+    assert.ok(discarded.some((m) => m.type === "CommandComplete" && m.tag === "DISCARD ALL"));
+    await run("SET application_name = 'pooled'");
+    assert.deepEqual(statuses(await run("DISCARD ALL")), [["application_name", "tool-at-startup"]]);
+    // DISCARD PLANS holds nothing here: its own tag, nothing reset
+    await run("SET application_name = 'kept'");
+    const plans = await run("DISCARD PLANS");
+    assert.deepEqual([statuses(plans), plans.find((m) => m.type === "CommandComplete")], [[], { type: "CommandComplete", tag: "DISCARD PLANS" }]);
+    assert.deepEqual(await shown("SHOW application_name"), ["kept"]);
+  } finally { s.end(); }
+});
+
 // ONE PLACE PER NODE (src/duck/rewrite.ts `nodesPlacedTwice`, the walker's detector): the walker rewrites a node at its
 // first place only, so a rule that puts one node in two places leaves the second as Postgres wrote it (the json read's
 // column, qualified in the first arm of its CASE alone: a review finding). LAST in this file, so it holds every
@@ -2186,4 +2411,167 @@ test("no rewrite of the statements above placed one of their nodes twice", async
   const rewrite = await import("../src/duck/rewrite.ts") as { nodesPlacedTwice?: () => readonly string[] };
   assert.ok(rewrite.nodesPlacedTwice !== undefined, "the rewrite has no detector of a node placed twice");
   assert.deepEqual(rewrite.nodesPlacedTwice(), [], "a rule placed a node in two places: clone it per use (Rewriter.cp)");
+});
+
+// THE BYTES SENT, per statement (src/api/request-log.ts bytesSent): what the client read for it, every frame from its
+// first to its CommandComplete or ErrorResponse — the ReadyForQuery after it is the protocol's, not the statement's
+test("the request log's bytes are the bytes the client read for the statement: an answer's rows and its tag, a refusal's ErrorResponse, a 150,000-row stream", async () => {
+  const s = await rawSession();
+  try {
+    const READY = 6;
+    const asked = async (sql: string): Promise<{ read: number; row: ApiLogRow }> => {
+      const from = recorded.length;
+      s.socket.write(wire.query(sql));
+      await s.untilReady();
+      const row = recorded.slice(from).find((r) => r.session === s.pid);
+      assert.ok(row !== undefined, `a row for ${sql}`);
+      return { read: s.bytes - READY, row };
+    };
+    for (const sql of ["SELECT count(*) FROM big", "SELECT * FROM nope"]) {
+      const { read, row } = await asked(sql);
+      assert.equal(row.bytesSent, read, sql);
+    }
+    const wide = await asked("SELECT v || repeat('z', 200) AS bytes_wide FROM big");
+    assert.equal(wide.row.bytesSent, wide.read);
+    assert.ok(wide.read > 30_000_000, "the stream's 30 MB, counted whole");
+  } finally { s.end(); }
+});
+
+// THE REQUEST LOG RECORDS WHICH ENTRY REFUSED A STATEMENT (ApiLogRow.gap, src/duck/gaps.ts): taken from the refusal as
+// it was built (StatementError.gap), on each path a refusal takes — the rewrite's and the allowlist's at plan time, a
+// view's from the plan of its expansion, a refusal raised inside DuckDB from the worker — and none for any other refusal
+test("the request log records the registry entry that refused a statement, on every path a refusal takes; another refusal has none", async () => {
+  const c = await client();
+  try {
+    const refusedBy = async (sql: string): Promise<{ code: string; gap: string | undefined }> => {
+      const e = await c.query(sql).then(() => assert.fail(`${sql} was answered`), (x: pg.DatabaseError) => x);
+      const rows = recorded.filter((r) => r.payload === sql);
+      assert.equal(rows.length, 1, `one row for ${sql}`);
+      assert.equal(rows[0]!.sqlstate, e.code);
+      return { code: e.code!, gap: rows[0]!.gap };
+    };
+    assert.deepEqual(await refusedBy("SELECT degrees(qty) FROM orders WHERE id > -1"), { code: "0A000", gap: "unverified" }, "the allowlist's");
+    assert.deepEqual(await refusedBy("SELECT paid_orders FROM paid_orders WHERE true"), { code: "0A000", gap: "view-forms" }, "a view's, from the plan of what it expands to");
+    assert.deepEqual(await refusedBy("SELECT json_agg(DISTINCT id) FROM orders"), { code: "0A000", gap: "json-agg-distinct" }, "the rewrite's");
+    assert.deepEqual(await refusedBy("EXPLAIN (FORMAT XML) SELECT id FROM orders WHERE id > -2"), { code: "0A000", gap: "explain-option" }, "the translation's");
+    assert.deepEqual(await refusedBy("SELECT width_bucket(qty, 10, 0, 5) FROM orders"), { code: "0A000", gap: "width-bucket-forms" }, "raised by DuckDB, as its text alone");
+    await c.query("SET TimeZone = 'Europe/Rome'");
+    assert.deepEqual(await refusedBy("SELECT timestamptz '0044-03-15 12:00:00+00 BC' FROM orders WHERE id = 2"), { code: "0A000", gap: "bc-timestamptz-zone" },
+      "raised inside DuckDB, across the executor's worker");
+    assert.deepEqual(await refusedBy("SELECT * FROM nope_gapless"), { code: "42P01", gap: undefined }, "a missing table is no entry's");
+    assert.deepEqual(await refusedBy("SELEC 1 gapless"), { code: "42601", gap: undefined }, "nor a syntax error");
+  } finally { await c.end(); }
+});
+
+// A PAGED PORTAL'S BYTES ARE ITS OWN (src/api/postgres/server.ts `bytesFor`, `Portal.bytes`): its pages and its tag,
+// however many statements ran between two of its Executes — it was counted as the session's bytes since its first
+// Execute, so a portal paged around another statement counted that statement's bytes twice (a review finding)
+test("a paged portal's bytes are its own Executes' frames, never those of a statement run between two of them", async () => {
+  const s = await rawSession();
+  try {
+    const READY = 6;
+    const PARSE_BIND = 5 + 5;
+    s.socket.write(wire.query("BEGIN"));
+    await s.untilReady();
+    const from = recorded.length;
+    // portal a: two rows of five, suspended
+    s.socket.write(Buffer.concat([wire.parse("a", "SELECT v FROM big WHERE id < 5"), wire.bind("pa", "a", [], []), wire.execute("pa", 2), wire.sync()]));
+    const first = await s.untilReady();
+    assert.ok(first.some((m) => m.type === "PortalSuspended"), JSON.stringify(first.map((m) => m.type)));
+    let a = s.bytes - READY - PARSE_BIND;
+    // portal b, run whole between two Executes of a
+    s.socket.write(Buffer.concat([wire.parse("b", "SELECT v || repeat('z', 100) AS w FROM big WHERE id < 50"), wire.bind("pb", "b", [], []), wire.execute("pb", 0), wire.sync()]));
+    await s.untilReady();
+    const b = s.bytes - READY - PARSE_BIND;
+    // the rest of a
+    s.socket.write(Buffer.concat([wire.execute("pa", 0), wire.sync()]));
+    const rest = await s.untilReady();
+    assert.equal(dataRows(rest).length, 3);
+    a += s.bytes - READY;
+    const rows = recorded.slice(from).filter((r) => r.session === s.pid);
+    assert.deepEqual(rows.map((r) => [r.rows, r.bytesSent]), [[50, b], [5, a]], "b's bytes are b's alone, a's its two Executes'");
+    s.socket.write(wire.query("COMMIT"));
+    await s.untilReady();
+  } finally { s.end(); }
+});
+
+// THE SESSIONS LOGGED IN NOW (`openSessions`, `/api/state` `sessions`): from the listener's sessions in memory, by user
+// and client, with how many run a statement
+test("the sessions logged in now, by user and client, and how many of each run a statement; a closed one is gone", async () => {
+  const has = (api as unknown as { openSessions?: unknown }).openSessions;
+  assert.equal(typeof has, "function", "src/api/postgres/server.ts PgApiServer.openSessions");
+  // other tests' sessions may still be closing: these are told apart by their application_name
+  const a = await rawSession(), b = await rawSession(), c = await rawSession();
+  try {
+    for (const [x, name] of [[a, "obs-two"], [b, "obs-two"], [c, "obs-one"]] as const) { x.socket.write(wire.query(`SET application_name = '${name}'`)); await x.untilReady(); }
+    const group = (client: string): unknown => api.openSessions().byClient.find((g) => g.client === client);
+    const open = api.openSessions();
+    assert.ok(open.open >= 3 && open.open === open.byClient.reduce((n, g) => n + g.open, 0), JSON.stringify(open));
+    assert.deepEqual(group("obs-two"), { user: "", client: "obs-two", open: 2, running: 0 }, "a token's sessions: no user");
+    assert.deepEqual(group("obs-one"), { user: "", client: "obs-one", open: 1, running: 0 });
+    a.socket.write(wire.query(SLOW));
+    for (const deadline = Date.now() + 10_000; (group("obs-two") as { running: number } | undefined)?.running !== 1;) {
+      if (Date.now() > deadline) throw new Error("the statement never showed as running");
+      await sleep(20);
+    }
+    api.cancel(a.pid);
+    await a.untilReady();
+    c.end();
+    for (const deadline = Date.now() + 5_000; group("obs-one") !== undefined;) {
+      if (Date.now() > deadline) throw new Error(`a closed session is still counted: ${JSON.stringify(api.openSessions())}`);
+      await sleep(20);
+    }
+  } finally { a.end(); b.end(); c.end(); }
+});
+
+// THE STATEMENTS RUNNING NOW, AND A CANCEL BY SESSION (`/api/running`, `POST /api/cancel`): the listener's own, and the
+// cancel is the CancelRequest's path — the client told 57014 "due to user request", recorded cancelled, the session on
+test("the statements running now, by session; a cancel by session stops one as a CancelRequest does, and says when there is nothing to stop", async () => {
+  const s = await rawSession();
+  try {
+    assert.deepEqual(api.running().filter((r) => r.session === s.pid), [], "an idle session runs nothing");
+    const from = recorded.length;
+    const t0 = Date.now();
+    s.socket.write(wire.query(SLOW));
+    let running = api.running().find((r) => r.session === s.pid);
+    for (const deadline = Date.now() + 10_000; running === undefined; running = api.running().find((r) => r.session === s.pid)) {
+      if (Date.now() > deadline) throw new Error("the statement never showed as running");
+      await sleep(20);
+    }
+    assert.deepEqual({ ...running, statement: 0, startedAt: "", runningMs: 0 }, { session: s.pid, statement: 0, user: "", applicationName: "", method: "QUERY", startedAt: "", runningMs: 0, rows: 0,
+      query: SLOW, queryTruncated: false });
+    assert.ok(Date.parse(running.startedAt) >= t0 - 5 && running.runningMs >= 0);
+    assert.ok(Number.isInteger(running.statement) && running.statement >= 1, JSON.stringify(running));
+    assert.equal(api.running().find((r) => r.session === s.pid)?.statement, running.statement, "one statement, one number however often it is listed");
+    // a cancel naming ANOTHER statement (the one listed ended, and the session began this one): nothing is cancelled
+    const other = api.cancel(s.pid, running.statement + 1000);
+    assert.ok("other" in other && other.other.statement === running.statement && other.asked === running.statement + 1000, JSON.stringify(other));
+    assert.ok(api.running().some((r) => r.session === s.pid), "still running");
+    const answer = api.cancel(s.pid, running.statement);
+    assert.ok("cancelled" in answer && answer.cancelled.session === s.pid && answer.cancelled.query === SLOW, JSON.stringify(answer));
+    const ms = await s.untilReady();
+    const error = ms.find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+    assert.deepEqual([error?.fields.C, error?.fields.M], ["57014", "canceling statement due to user request"]);
+    assert.ok(Date.now() - t0 < 10_000, `stopped after ${Date.now() - t0} ms`);
+    const row = recorded.slice(from).find((r) => r.session === s.pid);
+    assert.equal(row?.sqlstate, "57014", "recorded, as cancelled");
+    assert.ok(logged.some((l) => l === `[postgres] session ${s.pid}: its statement cancelled by mason cancel`), "the log says who cancelled it");
+    assert.ok(logged.some((l) => l.startsWith(`[postgres] session ${s.pid} cancelled: 57014 canceling statement due to user request — ${SLOW}`)), "its refusal line says cancelled");
+    assert.deepEqual(api.cancel(s.pid), { idle: s.pid }, "nothing running: nothing cancelled");
+    assert.deepEqual(api.cancel(s.pid, running.statement), { idle: s.pid }, "its statement ended: nothing to cancel");
+    assert.deepEqual(api.cancel(999_999), { unknown: 999_999 });
+    s.socket.write(wire.query("SELECT count(*) FROM big"));
+    assert.equal(String(dataRows(await s.untilReady())[0]!.values[0]), "150000", "the session goes on");
+    // the next statement of the session is another number: a cancel of the first one never stops it
+    s.socket.write(wire.query(SLOW));
+    let next = api.running().find((r) => r.session === s.pid);
+    for (const deadline = Date.now() + 10_000; next === undefined; next = api.running().find((r) => r.session === s.pid)) {
+      if (Date.now() > deadline) throw new Error("the second statement never showed as running");
+      await sleep(20);
+    }
+    assert.notEqual(next.statement, running.statement);
+    assert.ok("other" in api.cancel(s.pid, running.statement), "the first statement's cancel does not stop the second");
+    assert.ok("cancelled" in api.cancel(s.pid));
+    await s.untilReady();
+  } finally { s.end(); }
 });

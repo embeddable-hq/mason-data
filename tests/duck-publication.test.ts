@@ -29,7 +29,7 @@ const ITEMS: CopiedTable = { source: "public.items", columns: [{ name: "id" }, {
 const LATER: CopiedTable = { source: "public.later", columns: [{ name: "id" }, { name: "v" }] };
 const KEYED = new Map([["public.items", "d"], ["public.later", "d"]]);
 
-test("a publication carrying every copied table and column passes, a generated column and the owner's extra table aside", () => {
+test("a publication carrying every synced table and column passes, a generated column and the owner's extra table aside", () => {
   const v = namedPublicationVerdict(described(), [ITEMS, LATER], KEYED);
   assert.deepEqual(v, { refused: null, tables: new Map(), noTruncate: false });
 });
@@ -58,7 +58,7 @@ test("a table the publication does not carry is refused ON ITS OWN, with the ADD
     "    public.items (id, v, n)",
     "",
     "Mason reads a publication it is given as it is, never altering it: once its owner has run that, the next mason start (or mason add) checks it again. " +
-      "Or mason start --replication without --publication, where Mason makes its own (not on a read replica), or mason start --poll, which needs no publication.",
+      "Or give the table's entry sync: poll <interval> in the sources file, which needs no publication; or take publication: out of it, where Mason makes its own, carrying the replicated tables alone (not on a read replica).",
   ].join("\n"));
 });
 
@@ -72,7 +72,7 @@ test("a column list without a copied column: the table dropped and added again i
   assert.deepEqual([...v.tables.keys()], ["public.items"]);
 });
 
-test("a row filter on a copied table is refused: a filtered row's delete never arrives", () => {
+test("a row filter on a synced table is refused: a filtered row's delete never arrives", () => {
   const v = namedPublicationVerdict(described({ rowFilters: { "public.later": "(v <> 'draft')" } }), [ITEMS, LATER], KEYED);
   const m = v.tables.get("public.later")!;
   assert.match(m, /row filter: public\.later is published WHERE \(v <> 'draft'\); a row the filter leaves out never arrives, and neither does its delete/);

@@ -17,8 +17,8 @@
  *  - THE TYPE MATRIX (oracle/type-matrix.ts): every common column type sorted, grouped, compared, computed, cast and
  *    aggregated, over edge values (NaN, infinities, -0, a bigint past 2^53);
  *  - THE GAP CASES (oracle/gap-cases.ts): one statement for each entry of src/duck/gaps.ts nothing else meets;
- *  - every copied table, whole, as text: the copy itself is held to the source;
- * after the first copy, and again after each round of changes (oracle/data.ts `mutations`) the poll carries. After
+ *  - every synced table, whole, as text: the copy itself is held to the source;
+ * after the first sync, and again after each round of changes (oracle/data.ts `mutations`) the poll carries. After
  * the copy, each statement both answered alike is asked again in THE SHAPES a tool wraps it in (oracle/shapes.ts: a
  * subquery, a CTE, a UNION ALL, its filter's values as parameters, its columns by Postgres's names, its ORDER BY
  * outside the derived table; `IT_ORACLE_SHAPES=0` leaves them out).
@@ -80,6 +80,11 @@ const tag = `it_duckoracle_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 /** the Postgres LOGIN role of the role cases (`roleCases`): a role is the cluster's, not the database's, so it is named
  *  for this run and dropped with the database */
 const ROLE_LOGIN = `${tag}_agent`;
+/** the Postgres LOGIN role of the `tables: all` role cases (stage 1b): GRANT SELECT ON ALL TABLES IN SCHEMA public */
+const ROLE_ALL = `${tag}_all`;
+/** the Postgres LOGIN of the no-role cases (stage 1b): CONNECT and USAGE only, against a Mason user with no role under a
+ *  roles file with no default: */
+const ROLE_NONE = `${tag}_none`;
 const dbUrl = adminUrl ? (() => { const u = new URL(adminUrl); u.pathname = `/${tag}`; return u.toString(); })() : "";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-duck-oracle-"));
 const report = path.join(process.env.IT_LOG_DIR ?? os.tmpdir(), "duck-oracle-differences.txt");
@@ -105,9 +110,9 @@ const throughOne = (sql: string): string => sql.replaceAll(T, viaOne(T)).replace
 
 type Answer = { names: string[]; oids: number[]; rows: (string | null)[][] } | { code: string; message: string; detail?: string | undefined };
 const raw = { getTypeParser: () => (v: string) => v };
-async function ask(c: pg.Client, sql: string, values?: string[]): Promise<Answer> {
+async function ask(c: pg.Client, sql: string, values?: string[], name?: string): Promise<Answer> {
   try {
-    const r = await c.query({ text: sql, ...(values === undefined ? {} : { values }), rowMode: "array", types: raw } as pg.QueryConfig);
+    const r = await c.query({ text: sql, ...(values === undefined ? {} : { values }), ...(name === undefined ? {} : { name }), rowMode: "array", types: raw } as pg.QueryConfig);
     return { names: r.fields.map((f) => f.name), oids: r.fields.map((f) => f.dataTypeID), rows: r.rows as (string | null)[][] };
   } catch (e) {
     const d = e as pg.DatabaseError;
@@ -228,7 +233,7 @@ after(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
   if (adminUrl) psql(adminUrl, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
   // the role cases' login role (its grants went with the database)
-  if (adminUrl) psql(adminUrl, `DROP ROLE IF EXISTS ${ROLE_LOGIN}`);
+  if (adminUrl) psql(adminUrl, `DROP ROLE IF EXISTS ${ROLE_LOGIN}; DROP ROLE IF EXISTS ${ROLE_ALL}; DROP ROLE IF EXISTS ${ROLE_NONE}`);
 });
 
 test("the DuckDB endpoint answers every statement exactly as Postgres does, before and after changes", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 1_800_000 }, async () => {
@@ -308,12 +313,12 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // orders, customers whole — mirrored by a Postgres role with the same GRANTs (`roleCases`, below); every other
   // session has no role, so every statement above is planned with its reads named (null grants) and nothing refused
   const ROLE_FILE = "mason/roles.yml";
-  const roles: RolesLive = { file: ROLE_FILE, problem: null, grants: new Map([["agent", { name: "agent", file: ROLE_FILE, tables: new Map([
+  let roles: RolesLive = { file: ROLE_FILE, problem: null, default: null, grants: new Map([["agent", { name: "agent", file: ROLE_FILE, all: false, tables: new Map([
     ["public.orders", { table: "public.orders", all: false, columns: ["id", "customer_id", "status", "amount"] }],
     ["public.customers", { table: "public.customers", all: true, columns: [] }]]) }]]) };
   server = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: tag, masonVersion: "oracle",
-    authenticate: (_password, user) => user === ROLE_LOGIN ? { user, role: "agent" } : {},
+    authenticate: (_password, user) => user === ROLE_LOGIN ? { user, role: "agent" } : user === ROLE_ALL ? { user, role: "everything" } : user === ROLE_NONE ? { user } : {},
     roles: () => roles,
     schema: () => theSync.schema(),
     record: () => undefined, log: (l) => log.push(l),
@@ -405,6 +410,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   await run("after the copy");
   alone.closeSync();
   await roleCases();
+  await settingCases();
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of play)
   if (ONLY === null) {
     const fixture = { ...tallies, measured: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy" };
@@ -471,8 +477,11 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       { name: "SET SESSION AUTHORIZATION to another", sql: "SET SESSION AUTHORIZATION postgres" },
       { name: "SET ROLE to itself", sql: `SET ROLE ${ROLE_LOGIN}` },
       // set_config('role', 'none') is Postgres's permitted RESET ROLE to the login role; in Mason's catalog it was a way to
-      // the superuser inside one statement (the review of #35), so a role's session is refused it: a decided difference
-      { name: "set_config of the role, decided", sql: "SELECT set_config('role', 'none', false) AS a, (SELECT count(*) FROM information_schema.tables WHERE table_name = 'products') AS b", decided: "42501" },
+      // the superuser inside one statement (the review of #35). Beside another column it never reaches the catalog now:
+      // refused by name (set-config-forms), a decided difference; alone it is the session's SET ROLE NONE, a no-op
+      { name: "set_config of the role, decided", sql: "SELECT set_config('role', 'none', false) AS a, (SELECT count(*) FROM information_schema.tables WHERE table_name = 'products') AS b", decided: "0A000" },
+      { name: "set_config of the role alone", sql: "SELECT set_config('role', 'none', false)" },
+      { name: "after set_config of the role", sql: "SELECT current_setting('role'), count(*) FROM information_schema.tables WHERE table_name = 'products'" },
     ].filter((q) => ONLY === null || ONLY.test(`role case: ${q.name}`));
     if (cases.length === 0) return;
     psql(dbUrl, `CREATE ROLE ${ROLE_LOGIN} LOGIN PASSWORD 'x'; GRANT CONNECT ON DATABASE ${tag} TO ${ROLE_LOGIN}; GRANT USAGE ON SCHEMA public TO ${ROLE_LOGIN}; ` +
@@ -498,6 +507,184 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       }
     }
     console.log(`duck oracle: ${cases.length} role case(s) asked as a role of Postgres and a user of a Mason role, ${refusedAlike} refused alike by SQLSTATE and message`);
+    await allRoleCases();
+    await noRoleCases();
+  }
+
+  /**
+   * A USER THE FILE HOLDS TO NOTHING (no role, `default:` not written — this run's file names none), HELD TO A POSTGRES
+   * LOGIN WITH NO GRANT (CONNECT and USAGE only): a table read refused alike by SQLSTATE and message, and the catalog
+   * answering alike — information_schema lists nothing, the privilege functions are false, the user names itself.
+   */
+  async function noRoleCases(): Promise<void> {
+    const cases: Array<{ name: string; sql: string; decided?: string }> = [
+      { name: "no role, a table read", sql: "SELECT count(*) FROM public.orders" },
+      { name: "no role, a column read", sql: "SELECT id FROM public.customers ORDER BY id" },
+      { name: "no role, no table read", sql: "SELECT 1 + 1 AS two" },
+      { name: "no role, information_schema.tables", sql: "SELECT table_name::text FROM information_schema.tables WHERE table_schema = 'public' ORDER BY 1" },
+      { name: "no role, information_schema.columns", sql: "SELECT column_name::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'orders' ORDER BY 1" },
+      { name: "no role, the privilege functions", sql: "SELECT has_table_privilege('public.orders', 'SELECT'), has_any_column_privilege('public.orders', 'SELECT'), has_column_privilege('public.orders', 'status', 'SELECT')" },
+      { name: "no role, the user's names", sql: "SELECT current_user::text, current_role::text, user::text, session_user::text" },
+      // Postgres lets a login set_config: alone it is the session's SET, never the catalog's (where it is revoked)
+      { name: "no role, set_config", sql: "SELECT set_config('application_name', 'x', false)" },
+    ].filter((q) => ONLY === null || ONLY.test(`role case: ${q.name}`));
+    if (cases.length === 0) return;
+    psql(dbUrl, `CREATE ROLE ${ROLE_NONE} LOGIN PASSWORD 'x'; GRANT CONNECT ON DATABASE ${tag} TO ${ROLE_NONE}; GRANT USAGE ON SCHEMA public TO ${ROLE_NONE};`);
+    const u = new URL(dbUrl); u.username = ROLE_NONE; u.password = "x";
+    const sourceNone = new pg.Client({ connectionString: u.toString(), application_name: "duck-oracle-role-none" });
+    const masonNone = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: ROLE_NONE, password: "x", application_name: "duck-oracle-role-none" });
+    for (const c of [sourceNone, masonNone]) { await c.connect(); clients.push(c); await c.query("SET TimeZone = 'UTC'"); }
+    let refusedAlike = 0;
+    for (const q of cases) {
+      const [want, got] = [await ask(sourceNone, q.sql), await ask(masonNone, q.sql)];
+      if (q.decided !== undefined) {
+        const ok = !("code" in want) && "code" in got && got.code === q.decided;
+        if (!ok) differences.push({ phase: "roles", group: "role case", kind: "code" in got ? "sqlstate" : "answered", name: `role case: ${q.name}`, detail: `decided ${q.decided}: ${JSON.stringify(got)} where Postgres ${JSON.stringify(want)}`, sql: q.sql });
+        continue;
+      }
+      const v = verdict(want, got, ordered(q.sql));
+      if (v !== null) { differences.push({ phase: "roles", group: "role case", kind: v.kind, name: `role case: ${q.name}`, detail: v.detail, sql: q.sql }); continue; }
+      if ("code" in want && "code" in got) {
+        refusedAlike++;
+        if (want.message !== got.message) differences.push({ phase: "roles", group: "role case", kind: "text", name: `role case: ${q.name}`, detail: `${JSON.stringify(got.message)} where Postgres says ${JSON.stringify(want.message)}`, sql: q.sql });
+      }
+    }
+    console.log(`duck oracle: ${cases.length} role case(s) asked as a Postgres login with no grant and a Mason user the roles file holds to nothing, ${refusedAlike} refused alike by SQLSTATE and message`);
+  }
+
+  /**
+   * `tables: all` (stage 1b), HELD TO POSTGRES'S `GRANT SELECT ON ALL TABLES IN SCHEMA public`: the Mason role resolved
+   * from the roles file's own words against the copied tables (src/cli/roles.ts), a Postgres role granted every table
+   * of the schema, and the same statements asked of both — every column of every table read, the catalog's answer.
+   */
+  async function allRoleCases(): Promise<void> {
+    const cases = [
+      { name: "tables: all, every column", sql: "SELECT * FROM public.orders ORDER BY id" },
+      { name: "tables: all, a column another role may not read", sql: "SELECT id, notes FROM public.orders ORDER BY id" },
+      { name: "tables: all, every table", sql: "SELECT count(*) FROM public.products" },
+      { name: "tables: all, information_schema.columns", sql: "SELECT table_name::text, column_name::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN ('orders', 'customers', 'products') ORDER BY 1, 2" },
+      { name: "tables: all, the privilege functions", sql: "SELECT has_table_privilege('public.orders', 'SELECT'), has_column_privilege('public.orders', 'notes', 'SELECT'), has_table_privilege('public.products', 'SELECT')" },
+    ].filter((q) => ONLY === null || ONLY.test(`role case: ${q.name}`));
+    if (cases.length === 0) return;
+    const r = await import("../../src/cli/roles.ts");
+    const file = r.parseRolesText("roles:\n  everything:\n    tables: all\n", ROLE_FILE);
+    assert.ok(!("problems" in file), JSON.stringify(file));
+    const copiedNow = theSync.schema().tables.map((t) => ({ source: `${t.schema ?? "public"}.${t.name}`, columns: t.columns.map((c) => ({ name: c.name })) }));
+    const resolved = r.resolveRoles(file, copiedNow, dir);
+    assert.ok(!("message" in resolved), JSON.stringify(resolved));
+    // the catalog is rebuilt with the new role at the next statement (a new RolesLive object)
+    roles = { ...roles, grants: new Map([...roles.grants, ...resolved]) };
+    psql(dbUrl, `CREATE ROLE ${ROLE_ALL} LOGIN PASSWORD 'x'; GRANT CONNECT ON DATABASE ${tag} TO ${ROLE_ALL}; GRANT USAGE ON SCHEMA public TO ${ROLE_ALL}; ` +
+      `GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${ROLE_ALL};`);
+    const u = new URL(dbUrl); u.username = ROLE_ALL; u.password = "x";
+    const sourceAll = new pg.Client({ connectionString: u.toString(), application_name: "duck-oracle-role-all" });
+    const masonAll = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: ROLE_ALL, password: "x", application_name: "duck-oracle-role-all" });
+    for (const c of [sourceAll, masonAll]) { await c.connect(); clients.push(c); await c.query("SET TimeZone = 'UTC'"); }
+    for (const q of cases) {
+      const v = verdict(await ask(sourceAll, q.sql), await ask(masonAll, q.sql), ordered(q.sql));
+      if (v !== null) differences.push({ phase: "roles", group: "role case", kind: v.kind, name: `role case: ${q.name}`, detail: v.detail, sql: q.sql });
+    }
+    console.log(`duck oracle: ${cases.length} role case(s) asked as a role granted ALL TABLES IN SCHEMA public and a user of a Mason role of tables: all`);
+  }
+
+  /**
+   * THE SESSION'S SETTINGS (GitHub issues 40, 41): one session of each, asked the same statements IN ORDER — a SET
+   * moves what every later one reads — each held equal, a refusal by SQLSTATE and message. `current_setting` answers the
+   * session's value in the catalog and beside a copied table (a WHERE, a CTE, a parameter), and RESET, RESET ALL and
+   * DISCARD ALL restore the startup's values (its application_name and `options`; TimeZone is the startup's UTC on both,
+   * so a RESET never meets the server's own zone; work_mem and search_path are other than Postgres's defaults, so a
+   * restore of them is told from a reset to the default). A `named` case is a prepared statement of that name, Parsed
+   * at its first case and Bound and Executed again at each later one: read after later SETs. `set_config` alone is the
+   * session's SET; a view reads the settings of the session reading it.
+   */
+  async function settingCases(): Promise<void> {
+    const read = "SELECT current_setting('TimeZone') AS tz, current_setting('search_path') AS path, current_setting('work_mem') AS mem, current_setting('application_name') AS app";
+    const besideNamed = "SELECT current_setting('TimeZone') AS tz, current_setting($1) AS v FROM public.one";
+    const catalogNamed = "SELECT current_setting('TimeZone') AS tz, current_setting($1, true) AS v";
+    const cases: Array<{ name: string; sql: string; values?: string[]; named?: string }> = [
+      { name: "before any SET", sql: read },
+      { name: "a named statement beside a table, before any SET", sql: besideNamed, values: ["work_mem"], named: "settings_beside" },
+      { name: "a named statement of the catalog, before any SET", sql: catalogNamed, values: ["search_path"], named: "settings_catalog" },
+      { name: "strict on NULL, in the catalog", sql: "SELECT current_setting(NULL), current_setting(NULL, true), current_setting('TimeZone', NULL)" },
+      { name: "strict on NULL, beside a table", sql: "SELECT current_setting(NULL), current_setting(NULL, true), current_setting('TimeZone', NULL) FROM public.one" },
+      { name: "SET TimeZone", sql: "SET TimeZone = 'Europe/Berlin'" },
+      { name: "SET search_path", sql: "SET search_path = sales, public" },
+      { name: "SET work_mem", sql: "SET work_mem = '64MB'" },
+      { name: "after the SETs, in the catalog", sql: read },
+      { name: "the named statement beside a table, after the SETs", sql: besideNamed, values: ["work_mem"], named: "settings_beside" },
+      { name: "the named statement of the catalog, after the SETs", sql: catalogNamed, values: ["search_path"], named: "settings_catalog" },
+      { name: "a view of the settings, after the SETs", sql: "SELECT id, tz, app FROM public.settings_seen ORDER BY id" },
+      { name: "after the SETs, beside a table", sql: `${read}, count(*) AS n FROM public.orders` },
+      { name: "after the SETs, any case and missing_ok", sql: "SELECT current_setting('TIMEZONE'), current_setting('Search_Path', true), current_setting('work_mem', false), current_setting('DateStyle'), current_setting('IntervalStyle') FROM public.one" },
+      { name: "qualified, in the catalog", sql: "SELECT pg_catalog.current_setting('TimeZone'), pg_catalog.current_setting('work_mem', true)" },
+      { name: "qualified, beside a table", sql: "SELECT pg_catalog.current_setting('search_path'), pg_catalog.current_setting('work_mem', true) FROM public.one" },
+      { name: "SET search_path without public", sql: "SET search_path = sales" },
+      { name: "a search_path without public, beside a table", sql: "SELECT current_setting('search_path'), current_setting('TimeZone', true) FROM public.one" },
+      { name: "a search_path without public, in the catalog", sql: "SELECT current_setting('search_path'), current_setting('work_mem', false)" },
+      { name: "SET search_path back", sql: "SET search_path = sales, public" },
+      { name: "in a WHERE over a table", sql: "SELECT count(*) FROM public.orders WHERE current_setting('search_path') = 'sales, public' AND current_setting('TimeZone') = 'Europe/Berlin'" },
+      { name: "in a WHERE of the catalog", sql: "SELECT relname::text FROM pg_catalog.pg_class WHERE relname = 'pg_class' AND current_setting('work_mem') = '64MB'" },
+      { name: "in a CTE over a table", sql: "WITH s AS (SELECT id, current_setting('work_mem') AS mem FROM public.orders) SELECT mem, count(*) FROM s GROUP BY mem" },
+      { name: "in a CTE of no table", sql: "WITH s AS (SELECT current_setting('search_path') AS p) SELECT p FROM s" },
+      { name: "a parameter, beside a table", sql: "SELECT current_setting($1) FROM public.one", values: ["TimeZone"] },
+      { name: "a parameter, in the catalog", sql: "SELECT current_setting($1), current_setting($2, true)", values: ["search_path", "work_mem"] },
+      { name: "a placeholder not set, missing_ok", sql: "SELECT current_setting('myapp.flag', true) IS NULL AS unset, current_setting('no_such_setting', true) IS NULL AS unknown FROM public.one" },
+      { name: "a placeholder not set", sql: "SELECT current_setting('myapp.flag')" },
+      { name: "SET a placeholder", sql: "SET myapp.flag = 'on'" },
+      { name: "a placeholder set", sql: "SELECT current_setting('myapp.flag'), current_setting('myapp.flag', true) FROM public.one" },
+      { name: "a name nobody knows, beside a table", sql: "SELECT current_setting('no_such_setting') FROM public.one" },
+      { name: "a name nobody knows, in the catalog", sql: "SELECT current_setting('no_such_setting')" },
+      { name: "RESET TimeZone", sql: "RESET TimeZone" },
+      { name: "after RESET TimeZone", sql: read },
+      { name: "SET work_mem TO DEFAULT", sql: "SET work_mem TO DEFAULT" },
+      { name: "after SET work_mem TO DEFAULT", sql: read },
+      { name: "SET search_path TO DEFAULT", sql: "SET search_path TO DEFAULT" },
+      { name: "after SET search_path TO DEFAULT", sql: `${read} FROM public.one` },
+      { name: "SET search_path again", sql: "SET search_path = sales, public" },
+      { name: "SET application_name", sql: "SET application_name = 'after-set'" },
+      { name: "SHOW application_name, set", sql: "SHOW application_name" },
+      { name: "RESET ALL", sql: "RESET ALL" },
+      { name: "SHOW application_name after RESET ALL", sql: "SHOW application_name" },
+      { name: "SHOW a placeholder after RESET ALL", sql: "SHOW myapp.flag" },
+      { name: "SET a placeholder again", sql: "SET myapp.flag = 'again'" },
+      { name: "RESET a placeholder", sql: "RESET myapp.flag" },
+      { name: "a placeholder after its RESET", sql: "SELECT current_setting('myapp.flag'), current_setting('myapp.flag', true)" },
+      { name: "RESET a placeholder never set", sql: "RESET myapp.never" },
+      { name: "a placeholder RESET but never set", sql: "SELECT current_setting('myapp.never', true) FROM public.one" },
+      { name: "after RESET ALL, in the catalog", sql: read },
+      { name: "after RESET ALL, beside a table", sql: `${read}, current_setting('myapp.flag', true) AS flag FROM public.one` },
+      { name: "SET application_name again", sql: "SET application_name = 'pooled'" },
+      { name: "DISCARD ALL", sql: "DISCARD ALL" },
+      { name: "after DISCARD ALL", sql: "SELECT current_setting('application_name'), current_setting('TimeZone') FROM public.one" },
+      { name: "set_config alone", sql: "SELECT set_config('work_mem', '128MB', false)" },
+      { name: "after set_config", sql: `${read}, current_setting('work_mem') AS beside FROM public.one` },
+      { name: "set_config of TimeZone, in its own spelling", sql: "SELECT set_config('TimeZone', 'europe/berlin', false) AS tz" },
+      { name: "set_config of application_name", sql: "SELECT pg_catalog.set_config('application_name', 'by-set-config', false)" },
+      { name: "set_config of a placeholder", sql: "SELECT set_config('myapp.cfg', 'v', false)" },
+      { name: "after the set_configs", sql: `${read}, current_setting('myapp.cfg') AS cfg FROM public.one` },
+      { name: "a view of the settings, after the set_configs", sql: "SELECT id, tz, app FROM public.settings_seen ORDER BY id" },
+      { name: "set_config of a name nobody knows", sql: "SELECT set_config('no_such_setting', 'x', false)" },
+      { name: "the named statements, after set_config", sql: besideNamed, values: ["application_name"], named: "settings_beside" },
+      { name: "RESET ALL after set_config", sql: "RESET ALL" },
+      { name: "after RESET ALL, the startup's options", sql: `${read}, current_setting('myapp.cfg') AS cfg FROM public.one` },
+      { name: "the named statement of the catalog, after RESET ALL", sql: catalogNamed, values: ["work_mem"], named: "settings_catalog" },
+    ].filter((q) => ONLY === null || ONLY.test(`setting case: ${q.name}`));
+    if (cases.length === 0) return;
+    const startup = { application_name: "duck-oracle-settings", options: "-c TimeZone=UTC -c work_mem=32MB -c search_path=startup_path,public" };
+    const sourceS = new pg.Client({ connectionString: dbUrl, ...startup });
+    const masonS = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: "oracle", password: "x", ...startup });
+    for (const c of [sourceS, masonS]) { await c.connect(); clients.push(c); }
+    let refusedAlike = 0;
+    for (const q of cases) {
+      const [want, got] = [await ask(sourceS, q.sql, q.values, q.named), await ask(masonS, q.sql, q.values, q.named)];
+      const v = verdict(want, got, ordered(q.sql));
+      if (v !== null) { differences.push({ phase: "settings", group: "setting case", kind: v.kind, name: `setting case: ${q.name}`, detail: v.detail, sql: q.sql }); continue; }
+      if ("code" in want && "code" in got) {
+        refusedAlike++;
+        if (want.message !== got.message) differences.push({ phase: "settings", group: "setting case", kind: "text", name: `setting case: ${q.name}`, detail: `${JSON.stringify(got.message)} where Postgres says ${JSON.stringify(want.message)}`, sql: q.sql });
+      }
+    }
+    console.log(`duck oracle: ${cases.length} setting case(s) asked in order of one session each, ${refusedAlike} refused alike by SQLSTATE and message`);
   }
 
   // ---- the verdict ----------------------------------------------------------------------------------------------

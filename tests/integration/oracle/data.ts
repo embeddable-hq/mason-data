@@ -2,7 +2,7 @@
  * ADVERSARIAL SOURCE DATA over a small synthetic shop (tenants, customers, orders, their items, products and
  * categories): everything the CLAUDE.md rule "Correct for any data, not the data we tested" names — shared
  * values, NULL beside '' beside a value, case variants, a key that points at nothing, a time exactly on a
- * bucket boundary, 1970, the far future, ties, negatives, float-unfriendly decimals — and, after the first copy,
+ * bucket boundary, 1970, the far future, ties, negatives, float-unfriendly decimals — and, after the first sync,
  * every kind of change the stream carries: an UPDATE to NULL, a row moved across a day and a month, a row moved
  * between TENANTS, a DELETE, a deleted id re-inserted. Deterministic (a seeded PRNG), so a difference reproduces.
  */

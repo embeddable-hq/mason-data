@@ -36,7 +36,9 @@ export const RESTART_WINDOW_MS = 10 * 60_000;
 /** the wait before each restart, by how many came before it in the window */
 const BACKOFF_MS = [1_000, 2_000, 5_000, 15_000, 30_000];
 
-export interface Restart { at: string; reason: string; upSeconds: number }
+/** a restart as `.mason/restarts.json` records it: the shape is the events' (src/duck/events.ts), which merge them */
+export type { Restart } from "../duck/events.ts";
+import type { Restart } from "../duck/events.ts";
 
 /** The restarts recorded for a project's run, oldest first ([] when none; a file that cannot be read is said, not hidden). */
 export function readRestarts(home: string): Restart[] {
@@ -46,9 +48,24 @@ export function readRestarts(home: string): Restart[] {
   return Array.isArray(v.restarts) ? v.restarts : [];
 }
 
+/**
+ * THE RUN'S RESTARTS AS ONE FACT (`/api/state` `engine.restarts`, mason status's `Restarts` line, with Mason up or
+ * stopped): how many its supervisor recorded (it keeps the last 20) and the last one — when, why, after how long up —
+ * or why the record could not be read (said, never taken as none).
+ */
+export type RestartsFact = { count: number; last: { at: string; why: string; upSeconds: number } | null } | { error: string };
+
+export function restartsFact(home: string, read: () => Restart[] = () => readRestarts(home)): RestartsFact {
+  let r: Restart[];
+  try { r = read(); }
+  catch (e) { return { error: `${path.join(home, RESTARTS_FILE)} could not be read: ${(e as Error).message}` }; }
+  const last = r[r.length - 1];
+  return { count: r.length, last: last === undefined ? null : { at: last.at, why: last.reason, upSeconds: last.upSeconds } };
+}
+
 /** Why a run died, in the words a person reads: V8's own fatal line when it printed one */
 export function crashReason(code: number | null, signal: NodeJS.Signals | null, fatal: string | null): string {
-  // Mason's own fatal line (src/cli/dev.ts: the copy's thread stopped) is said as Mason said it
+  // Mason's own fatal line (src/cli/dev.ts: the engine's thread stopped) is said as Mason said it
   if (fatal !== null) return /heap out of memory/i.test(fatal) && !fatal.startsWith("Mason: ") ? "it ran out of JavaScript heap (V8: heap out of memory)"
     : fatal.startsWith("Mason: ") ? fatal.slice("Mason: ".length) : `V8: ${fatal}`;
   if (signal === "SIGKILL") return "it was killed (SIGKILL: often the system out of memory)";

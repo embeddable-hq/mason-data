@@ -36,8 +36,11 @@ pgService:                  # the Postgres API, 5433, for tools outside the clus
   annotations: {}           # e.g. service.beta.kubernetes.io/aws-load-balancer-type: nlb
   loadBalancerSourceRanges: []
 
+metrics:                    # GET /metrics on the health port (4140): Prometheus's format, numbers only, no secret
+  annotations: true         # prometheus.io/scrape, /port, /path on the health Service, for a Prometheus that scrapes by them
+
 tls:
   selfSigned: true          # MASON_PG_SELF_SIGNED_TLS=1: a certificate made on the volume; clients use sslmode=require
   certSecret: ""            # or a kubernetes.io/tls Secret (tls.crt, tls.key) a CA signed; selfSigned is then ignored
 
-settings: {}                # more of `mason serve --help`, e.g. MASON_CHANGES: replication, PG_PUBLICATION: app_pub, MASON_STATEMENT_TIMEOUT: "10min"
+settings: {}                # more of `mason serve --help`, e.g. PG_PUBLICATION: app_pub (for the sources file's publication: ${PG_PUBLICATION}), MASON_STATEMENT_TIMEOUT: "10min"
