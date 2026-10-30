@@ -190,8 +190,8 @@ AI agents and your own code then connect to Mason as they would to any read repl
 
 - **It only reads.** Mason sends `SELECT` queries and reads the change log. It never writes, never changes a table,
   and never asks your database to sort.
-- **It keeps its load small.** The first sync uses at most 3 connections (`MASON_COPY_PARALLEL`), and after a crash it
-  resumes where it stopped. A table's polls use at most a fifth of your database's time. By default, Mason reads
+- **It keeps its load small.** The first sync uses at most 3 connections (`MASON_COPY_PARALLEL`), and in case of a crash
+  it resumes where it stopped. A table's polls use at most a fifth of your database's time. By default, Mason reads
   nothing again after the first sync.
 - **It can read from a read replica.** Point Mason at a replica, and its queries run there, not on your primary.
 - **It leaves secrets out.** `mason add` skips columns that look like secrets (`password`, `token`, `api_key`, …)
