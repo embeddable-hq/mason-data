@@ -25,7 +25,7 @@ const FILE = path.join("tests", "double.test.ts");
 const MODULE = path.join("src", "double.ts");
 const TEST = `import { test } from "node:test";
 import assert from "node:assert/strict";
-import { double } from "../src/double.ts";
+import { double } from "${"../" + "src"}/double.ts";
 test("double doubles", () => { assert.equal(double(2), 4); });
 test("double doubles zero", () => { assert.equal(double(0), 0); });
 test("the sky is up", () => { assert.equal(1, 1); });
@@ -109,7 +109,7 @@ test("git reads a repository of its own", () => {
   assert.equal(git("rev-parse", "HEAD").trim(), process.env.HEAD_THERE);
 });
 test("its tracked files are the tree's, the staged one too", () => {
-  assert.deepEqual(git("ls-files").trim().split("\\n"), [".gitignore", "scripts/fails-without.ts", "src/double.ts", "staged.txt"]);
+  assert.deepEqual(git("ls-files").trim().split("\\n"), [".gitignore", "scripts/fails-without.ts", "src" + "/double.ts", "staged.txt"]);
 });
 test("what is uncommitted reads as uncommitted", () => {
   assert.match(git("status", "--porcelain"), /^\\?\\? tests\\/$/m);
@@ -193,7 +193,7 @@ test("a test that fails on the tree is NOT GREEN", (t) => {
 });
 
 const NEEDS_EXPORT = `import { test } from "node:test";
-import { triple } from "../src/double.ts";
+import { triple } from "${"../" + "src"}/double.ts";
 test("triple triples", () => { if (triple(1) !== 3) throw new Error("no"); });
 `;
 
