@@ -24,7 +24,7 @@ CLI lacks).
   every option named in it, and a wrong option answered with the usage. A new command is added to the registry, or it
   does not run. **The list is the runbook** (the commands in the order a user will likely need them): `STEPS`
   (src/cli/registry.ts) names each command's step — Learn (`help` first), Set up (`doctor`, `init`, `start`), Add your
-  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`, `mcp`), Run (`status`, `ui`, `sync`, `logs`, `stop`, `destroy`), Go to
+  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`, `mcp`), Run (`status`, `ui`, `sync`, `logs`, `cancel`, `usage`, `stop`, `destroy`), Go to
   production (`serve`) — and `mason --help` prints the steps as headings, and under Learn the guides too, a line each
   beside `mason help`; `COMMANDS` is derived from it. A command's old name (`dev`, `purge`, `rm`, `connect`, `list`, …)
   answers with the new one and exit 2 (src/cli/main.ts), never runs. Nothing a command prints refers to a repository
@@ -106,11 +106,22 @@ CLI lacks).
 - **Up means it answers** (what a reboot does to a run): a run is up only when its command server answers
   `/api/ping` with the run's token and its own pid (`answers`, src/cli/runs.ts); a pid in the config that is alive is
   not proof — after a reboot the number belongs to someone else.
-- **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state`, `/api/slow`,
-  `/api/refused`, `/api/requests`, `/api/users`, `POST /api/pick|remove|sync`), with the run's token as `Authorization:
+- **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state?columns=1` (the page polls it lean), `/api/slow`,
+  `/api/refused`, `/api/unsupported`, `/api/requests`, `/api/queries`, `/api/running`, `/api/events`, `/api/usage`, `/api/logs`, `/api/users`, `POST /api/pick|remove|sync|cancel`), with the run's token as `Authorization:
   Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
   Under `mason start` it serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), whose users are
-  `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`), so the page and the CLI cannot disagree.
+  `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`, `disableUser`, `enableUser`), so the page and the CLI cannot disagree.
+  **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
+  — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
+  worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint
+  (`/api/queries`, one scan of the ledger, shared for 30 s: `SUMMARY_TTL_MS`), never part of `/api/state`, which the page asks every 2 s. `mason cancel`
+  cancels through the listener's one path, the CancelRequest's (`interrupt`, src/api/postgres/server.ts); what it
+  names is the statement `mason logs --running` listed (`--statement`, `RunningStatement.statement`), refused 409 when
+  the session runs another by then — a session's number alone is whatever it runs at the moment. **A time is read by ONE
+  grammar** (`timeOf`, src/cli/request-filter.ts: an age 30m / 2h / 7d, or an ISO 8601 time WITH its zone; none without one)
+  for `--since` / `--until` of `mason logs` and `mason usage` and the `since` / `until` of `/api/requests`, `/api/events`,
+  `/api/usage` and `/api/logs`; `/api/users` reads the request log only with `?lastUsed=1` (`mason user list`), because the
+  web page polls it every 2 s.
 - **`mason wait` shows every added table and is exact** (after `mason add a b c` where `a` and `c` were quick, it showed
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still copying at the bottom — redrawn in place on a terminal, printed when it changes
@@ -184,12 +195,13 @@ CLI lacks).
   (`sourceServer`); the same name on another server resets the poll's watermarks (the old server's transaction ids mean
   nothing there), so every row is read and compared and only the changed ones written; another name is refused
   (`sourceMove`: `mason destroy`, then `mason start`). An identifier this user may not read (42501) is said, never guessed.
-- **`mason user add|list|remove` is the login a tool keeps** (src/cli/user.ts, src/duck/users.ts, the rules
+- **`mason user add|list|disable|enable|remove` is the login a tool keeps** (src/cli/user.ts, src/duck/users.ts, the rules
   in .claude/rules/duckdb.md "Users"): a BI tool stores ONE password that does not expire. `add` prints the password
   ONCE with the URL (one builder, `connectionUrl`), when the run is up; the command needs the project, never the run (it
   edits `.mason/users.json` beside it, `mason serve`'s data folder included). "User" is the word in everything it
   prints, never "token" or "credentials". `mason connect` (a token for a day) is gone: `mason user`
-  is enough.
+  is enough. `disable` keeps the user and its password and refuses its logins until `enable`; a no-op (disabled
+  already, not disabled) is said, `already: true`, exit 0.
 - **A roles file is read by ONE module, in the sources file's words** (`src/cli/roles.ts`: `mason/roles.yml`,
   `roles: { <role>: { tables: { <table>: {} | { columns: [...] } | { exclude: [...] } } } }`), validated at `mason
   start` against the tables the sources file copies and by `mason user add --role` (the listener's roles while the

@@ -19,13 +19,16 @@ differently on a guess.
 ```bash
 mason user add metabase                             # the URL, the user and its password: paste them into the tool now
 mason user list                                     # metabase   id 81fcb84caead79b7 · added 2026-10-26 12:00 UTC
+mason user disable metabase                         # kept: its logins refused (28000) until mason user enable metabase
+mason user enable metabase                          # it connects again, with the same password
 mason user remove metabase                          # its next connection is refused; its sessions end at their next statement
 docker compose exec mason mason user add grafana    # beside mason serve, in its data folder
 ```
 
 **A user is how a tool connects** (`mason start` and `mason serve`): a BI tool's datasource stores ONE
 password. `mason user add <name>` makes a named user whose password does not expire and prints it ONCE, with the URL
-to connect with; `mason user list` says the users (name, id, when added); `mason user remove <name>` removes one.
+to connect with; `mason user list` says the users (name, id, when added); `mason user disable <name>` stops one connecting and
+`mason user enable <name>` lets it again; `mason user remove <name>` removes one.
 
 - **The user name must be the user's**: the password is `mason_<id>_<mac>`, the MAC over the user's name and id keyed
   by the project's API key, so a connection sending another name is refused as a wrong password is (28P01), the reason
@@ -39,6 +42,13 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
   connection is refused (28P01, "was removed"), and a session the user holds ends, FATAL (28000), at its next
   statement, whatever it is. A file that cannot be read refuses every user's connection and statement (57P03, the
   reason said), never lets one in. `mason destroy` keeps it, as it keeps the API key.
+- **A disabled user is kept, with its password** (`disabledAt` in the file): its login, the password right, is refused
+  as Postgres refuses a role without LOGIN — `28000`, `role "metabase" is not permitted to log in`, DETAIL `the user
+  "metabase" is disabled (mason user disable). Mason: user_disabled`, HINT `mason user enable metabase lets it connect
+  again, with the same password` — and a session it holds ends, FATAL (28000, "was disabled"), at its next statement, as a removed
+  user's does. A wrong password for it is a wrong password (28P01): the state is told only to the login's holder.
+  `mason user enable` clears it: the same password connects again. Disabling one disabled already (or enabling one
+  that is not) says so and changes nothing, exit 0.
 - **Rotating the API key removes every user at once** (`apiKey` in `.mason/config.json`, `MASON_API_KEY` under
   `mason serve`): no password verifies under the new key, the refusal says the key was rotated, and `mason user list`
   marks each as not connecting. Remove and add each again for new passwords.
@@ -284,10 +294,22 @@ over the catalog alone (`pg_class`, `information_schema`, `SELECT version()`) is
 stopped reading at a row count (an Execute's: JDBC's `setMaxRows`, `mason mcp`'s `max_rows`) is a row when its portal
 closes (a Sync, a Close, the session's end), with the rows it sent. A row has
 the session, `application_name`, the `mason user`, the method (`QUERY`, `PARSE`, `BIND`, `DESCRIBE`, `EXECUTE`,
-`CONNECT`), the SQLSTATE, message, detail and hint sent, the rows sent, the duration and the statement (cut at 64 KiB,
-flagged when cut). It is kept `MASON_REQUEST_LOG_DAYS` days (default 7). `mason logs --requests` reads it, a request
-a line (`--failed` for the refused and failed only, `--json` for every column), and `mason status` shows the last
-day's slow and refused statements (docs/DESIGN.md "The request log").
+`CONNECT`), the SQLSTATE, message, detail and hint sent, the rows sent, the bytes sent (every frame of the answer, its
+CommandComplete or ErrorResponse included, the ReadyForQuery after it not), the duration and the statement (cut at 64
+KiB, flagged when cut). Its outcome is the SQLSTATE's: `ok`, `refused` (the statement's own fault), `failed` (Mason's
+or the machine's: classes XX, 53, 57, 58) or `cancelled` (57014: a cancel or a statement timeout). It is kept
+`MASON_HISTORY_DAYS` days (default 7). `mason logs --requests` reads it, a request a line, filtered by
+`--outcome`, `--since` / `--until`, `--user` and `--client` (`--failed` for every one not answered), a page at a time
+(`--before`, the position the last page answered with), `--json` for every column; `mason status` shows the last
+day's and week's statements (each outcome, the completed ones' average / p50 / p95 time, the rows and bytes sent) and
+the last day's slow and refused statements (docs/DESIGN.md "The request log").
+
+`mason logs --running` lists the statements running now, one per session (its number, its user, `application_name`,
+when it started, the rows sent so far), and `mason cancel <session> --statement <n>` stops one exactly as the client's
+own cancel would: the client is told 57014 "canceling statement due to user request", its session goes on, and the
+request log keeps it as cancelled. With `--statement`, a statement that ended before the cancel arrived is never
+mistaken for the session's next one: nothing is cancelled, and the answer names the one it runs now (409). Without it,
+whatever the session runs at that moment is stopped, as a `CancelRequest` stops it (Postgres's own semantics).
 
 ## Settings
 
@@ -299,7 +321,7 @@ day's slow and refused statements (docs/DESIGN.md "The request log").
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |
 | `MASON_PG_CATALOG_TIMEOUT_MS` | 10000 | how long a catalog statement may take before the embedded Postgres is discarded and the statement refused |
 | `MASON_STATEMENT_TIMEOUT` | 5min | the longest one statement may run (Postgres's units; 0 for none); a session's `statement_timeout` may only shorten it |
-| `MASON_REQUEST_LOG_DAYS` | 7 | how many days of the request log are kept |
+| `MASON_HISTORY_DAYS` | 7 | how many days of the request log (and the sync's events, the usage samples and the copies' sizes) are kept |
 | `MASON_STORE_JSON_PATHS` | on | `off`: never store the JSON paths statements keep reading as columns of the copy (`payload ->> 'customer_id'` read by 3 statements, or by one taking 1 s, is stored, and read from there; `mason status` lists them), and drop those stored, at that start |
 | `MASON_PG_TRACE` | unset | `1`: log every statement text a session receives |
 

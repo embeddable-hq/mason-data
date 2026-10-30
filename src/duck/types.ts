@@ -17,6 +17,7 @@ import {
   DuckDBListType, DuckDBArrayType, DuckDBTimestampSecondsValue, DuckDBTimestampMillisecondsValue, DuckDBTimestampNanosecondsValue,
 } from "@duckdb/node-api";
 import { jsonbText } from "./jsonb.ts";
+import { gapMark } from "./gaps.ts";
 import { EncodeError, encodeValue, OID, TIMESTAMP, type ApiValue, type PgSession, type WireType } from "../api/postgres/encode.ts";
 
 /** One result column as the wire describes it, and how its cells are written. */
@@ -131,7 +132,7 @@ function timestampColumn(name: string, tz: boolean): WireColumn {
       if (m < FIRST_AD_MICROS) {
         if (format === 1) { const b = Buffer.alloc(8); b.writeBigInt64BE(m - PG_EPOCH_MICROS); return b; }
         // a zone's offset before year 1 is its local mean time, which Mason does not compute
-        if (tz && s.timeZone.toUpperCase() !== "UTC") throw new EncodeError(`Mason writes a timestamptz before year 1 only in UTC, not in ${s.timeZone} (Mason gap bc-timestamptz-zone)`, "0A000");
+        if (tz && s.timeZone.toUpperCase() !== "UTC") throw new EncodeError(`Mason writes a timestamptz before year 1 only in UTC, not in ${s.timeZone} (${gapMark("bc-timestamptz-zone")})`, "0A000", "bc-timestamptz-zone");
         return Buffer.from(bcTimestampText(m, tz), "ascii");
       }
       return base.encode(v, format, s);
@@ -255,7 +256,7 @@ export function wireColumn(name: string, t: DuckDBType): WireColumn {
     case DuckDBTypeId.INTEGER: case DuckDBTypeId.USMALLINT: return viaApi(name, "int4", (v) => v as number);
     case DuckDBTypeId.BIGINT: case DuckDBTypeId.UINTEGER: return viaApi(name, "int8", bigintText);
     case DuckDBTypeId.HUGEINT: case DuckDBTypeId.UHUGEINT: case DuckDBTypeId.UBIGINT: case DuckDBTypeId.BIGNUM:
-      return viaApi(name, "numeric", bigintText, `DuckDB's ${t.toString()} (a sum of integers is one), sent as numeric: Postgres says bigint for a sum of int4 and numeric for a sum of int8`);
+      return viaApi(name, "numeric", bigintText, `the copy's ${t.toString()} (a sum of integers is one), sent as numeric: Postgres says bigint for a sum of int4 and numeric for a sum of int8`);
     case DuckDBTypeId.FLOAT: return viaApi(name, "float4", (v) => v as number);
     case DuckDBTypeId.DOUBLE: return viaApi(name, "float8", (v) => v as number);
     case DuckDBTypeId.DECIMAL: return viaApi(name, "numeric", (v) => (v as DuckDBDecimalValue).toString());
@@ -288,7 +289,7 @@ export function wireColumn(name: string, t: DuckDBType): WireColumn {
     }
     default: break;
   }
-  return custom(name, 25, -1, (v) => String(v), null, `DuckDB's ${t.toString()} has no Postgres type here: sent as its text`);
+  return custom(name, 25, -1, (v) => String(v), null, `the copy's ${t.toString()} has no Postgres type here: sent as its text`);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -376,9 +377,9 @@ export function pgTypedColumn(name: string, oid: number, t: DuckDBType, typmod =
   if (oid === 1700 && DUCK_EXACT.has(t.typeId)) return retyped(viaApi(name, "numeric", exactText));
   if (oid === 1700 && DUCK_FLOAT.has(t.typeId)) {
     // a double that overflowed is Postgres's numeric overflow (its exact arithmetic raises it)
-    return { ...retyped(viaApi(name, "numeric", (v) => { if (v === Infinity || v === -Infinity) throw new EncodeError("value overflows numeric format", "22003"); return floatAsNumeric(v as number); })), divergence: `Postgres computes this numeric exactly; DuckDB computed it as a double (${t.toString()}), sent with 15 significant digits` };
+    return { ...retyped(viaApi(name, "numeric", (v) => { if (v === Infinity || v === -Infinity) throw new EncodeError("value overflows numeric format", "22003"); return floatAsNumeric(v as number); })), divergence: `Postgres computes this numeric exactly; the copy computed it as a double (${t.toString()}), sent with 15 significant digits` };
   }
-  return { ...own, divergence: `Postgres says type OID ${oid}; DuckDB computed ${t.toString()}, sent as its own type` };
+  return { ...own, divergence: `Postgres says type OID ${oid}; the copy computed ${t.toString()}, sent as its own type` };
 }
 
 /** How a cell of an exact numeric (src/duck/rewrite.ts ExactColumn) reads as a decimal text, by DuckDB's type: an exact
