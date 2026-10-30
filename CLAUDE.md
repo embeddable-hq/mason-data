@@ -68,7 +68,7 @@ what done looks like. An issue is headed as a comment is ("Git workflow"), says 
 shapes ("The source database is production"), and is filed once, after a look for one that already names the thing.
 Neither waits for the owner to ask, and neither stops at a line in a message, which is forgotten: the task in hand goes
 on, the reply names what was filed or started, and the fix's PR is reviewed like any other and merged on the owner's
-word. A review's findings are the PR's and go to its author in one message ("How work is done here"), not here.
+word. A PR that changes nothing under `src/` merges without the owner's word once its Fable review has no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release, merge on the owner's word. GitHub's auto-merge is not used, as `main` has no branch protection. A review's findings are the PR's and go to its author in one message ("How work is done here"), not here.
 
 ## Licensing
 
@@ -249,6 +249,9 @@ code, read its rules file:**
   the recorded corpus.
 - `web-ui.md` — the web page (`mason ui`): rendered from the command server's JSON in the CLI's words, no framework or
   build, served from an allowlist under the run's guard, `mason start`'s only, and what the full UI adds.
+
+**How a common change is done**, step by step with what its tests must hold: `docs/RECIPES.md`. How a statement and `Sync`
+run, and what waits on which thread: `docs/FLOWS.md`.
 
 **Where a new rule goes**: a rule about one subsystem goes in its rules file, never here; this file holds only what
 every session needs. Write the rule and one sentence of why; the incident, the measurement and the dated decision go in

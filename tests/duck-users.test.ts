@@ -116,7 +116,21 @@ test("a removed user is KEPT with removedAt: the listener refuses it at login an
   assert.ok("problem" in bad && /users\[0\]\.removedAt is not a timestamp/.test(bad.problem), JSON.stringify(bad));
   fs.writeFileSync(file, JSON.stringify({ users: [{ name: "x", id: "0123456789abcdef", addedAt: "t" }] }));
   const bad2 = u.readUsers(file);
-  assert.ok("problem" in bad2 && /users\[0\] is not \{ name, id, addedAt, key, role\?\[, removedAt\]\[, disabledAt\] \}/.test(bad2.problem), JSON.stringify(bad2));
+  assert.ok("problem" in bad2 && /users\[0\] is not \{ name, id, addedAt, key, role\?, attributes\?\[, removedAt\]\[, disabledAt\] \}/.test(bad2.problem), JSON.stringify(bad2));
+});
+
+test("an attribute's value holding a NUL, written by hand, is the file's problem: it would end every statement it is bound into", async () => {
+  const u = await users();
+  const file = fileIn();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const entry = { name: "x", id: "0123456789abcdef", addedAt: "t", key: "k" };
+  for (const attributes of [{ tenant: "4\u00002" }, { regions: ["eu", "u\u0000k"] }]) {
+    fs.writeFileSync(file, JSON.stringify({ users: [{ ...entry, attributes }] }));
+    const bad = u.readUsers(file);
+    assert.ok("problem" in bad && /users\[0\] is not \{ name, id, addedAt, key, role\?, attributes\?/.test(bad.problem), JSON.stringify(bad));
+  }
+  fs.writeFileSync(file, JSON.stringify({ users: [{ ...entry, attributes: { tenant: "42", regions: ["eu"] } }] }));
+  assert.ok(!("problem" in u.readUsers(file)));
 });
 
 test("a DISABLED user is kept with disabledAt and its password: its login (right password) refused user_disabled in Postgres's words, mid-session too; a wrong password still a wrong one; enabled, the same password connects", async () => {
@@ -168,7 +182,7 @@ test("a file that cannot be read is a problem, never an empty list; a change ref
   const file = fileIn();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   for (const [text, why] of [["{\"users\": [", /is not valid JSON/], ["[]", /is not \{ "users": \[ … \] \}/],
-    ["{\"users\": [{\"name\": \"Metabase\", \"id\": \"0123456789abcdef\", \"addedAt\": \"x\", \"key\": \"y\"}]}", /users\[0\] is not \{ name, id, addedAt, key, role\?\[, removedAt\]\[, disabledAt\] \}/]] as const) {
+    ["{\"users\": [{\"name\": \"Metabase\", \"id\": \"0123456789abcdef\", \"addedAt\": \"x\", \"key\": \"y\"}]}", /users\[0\] is not \{ name, id, addedAt, key, role\?, attributes\?\[, removedAt\]\[, disabledAt\] \}/]] as const) {
     fs.writeFileSync(file, text);
     const r = u.readUsers(file);
     assert.ok("problem" in r && why.test(r.problem), `${text}: ${JSON.stringify(r)}`);

@@ -35,6 +35,9 @@ export const disabledText = (disabledAt) => `Disabled ${stamp(disabledAt)} UTC`;
 /** The question being asked, from a model's `confirming`: a name alone is Remove's (as before), else `{ name, verb }`. */
 const askOf = (confirming) => confirming === null || confirming === undefined ? null : typeof confirming === "string" ? { name: confirming, verb: "remove" } : confirming;
 
+/** a user's attributes as `mason user list` says them (src/cli/user.ts attributesText, held equal by tests/web-page.test.ts) */
+export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${typeof v === "string" ? v : `[${v.join(", ")}]`}`).join(", ");
+
 /**
  * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape), in a table in a card: a row each — its name
  * in mono with its id muted, its status as a dot and the word (Active, Disabled and when, or Removed and when), when it
@@ -45,7 +48,8 @@ const askOf = (confirming) => confirming === null || confirming === undefined ? 
  * asks nothing. A refused action (`refused`: { name, failure }) is said there too, until dismissed. `now` is the
  * page's clock, in ms. `roles`: `/api/state`'s (`mason status --json`'s): while the roles file cannot be read every
  * user held to it is refused (57P03), said above the table as `mason user list`'s tip says it (src/cli/roles.ts
- * rolesProblemText, held equal by tests/web-page.test.ts) and in each user's role.
+ * rolesProblemText, held equal by tests/web-page.test.ts) and in each user's role; beside the role, the user's
+ * attributes (its row filters' values) and, where it lacks one its role's filters read, that its statements are refused.
  */
 export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
@@ -74,7 +78,9 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       // said — or the file's default; none under a file with no default reads nothing, said; no roles file, every table
       `<td>${broken ? `<span class="warn">refused: the roles file cannot be read</span>` : u.readsNothing === true ? `<span class="warn">no role, and the roles file names no default: its statements are refused</span>`
         : u.role === undefined ? `<span class="dim">every table</span>`
-        : `${code(u.role)}${u.roleFrom === "default" ? ` <span class="dim">(default)</span>` : ""}${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}`}</td>` +
+        : `${code(u.role)}${u.roleFrom === "default" ? ` <span class="dim">(default)</span>` : ""}${u.attributes ? ` <span class="dim">${esc(attributesText(u.attributes))}</span>` : ""}` +
+          `${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}` +
+          `${u.missingAttributes ? ` <span class="warn">${esc(`no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}</span>` : ""}`}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
       `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +

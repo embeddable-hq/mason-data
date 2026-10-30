@@ -27,7 +27,15 @@ const replication = { slot: "mason_x", publication: "mason_x", owned: true };
 function batch(rows: Record<string, string | null>, truncated = false): Map<string, TableChanges> {
   const keys: TableChanges["keys"] = new Map();
   for (const [id, v] of Object.entries(rows)) keys.set(JSON.stringify([id]), { key: [id], change: v === null ? { kind: "delete" } : { kind: "row", values: [id, v] } });
-  return new Map([["public.t", { columns: ["id", "v"], truncated, keys, counts: { ...noCounts(), inserts: Object.keys(rows).length } }]]);
+  return new Map([["public.t", { stay: null, truncated, keys, counts: { ...noCounts(), inserts: Object.keys(rows).length } }]]);
+}
+
+/** the batch as the stream decodes it: of the table's stay in the stream now (`StreamedTable.stay`) */
+function decoded(sync: Sync, b: Map<string, TableChanges>): Map<string, TableChanges> {
+  const s = sync as unknown as { refreshStreamed: () => void; streamed: ReadonlyMap<string, { stay: number }> };
+  s.refreshStreamed();
+  for (const [name, c] of b) c.stay = s.streamed.get(name)?.stay ?? null;
+  return b;
 }
 
 interface Run {
@@ -61,7 +69,7 @@ async function aRun(body: (r: Run) => Promise<void>): Promise<void> {
     await sync.setTables([T]);
     const st = (): Record<string, unknown> => sync.state()[0] as unknown as Record<string, unknown>;
     const apply = (b: Map<string, TableChanges>, lsn: bigint): Promise<void> =>
-      (sync as unknown as { applyStreamed: (b: Map<string, TableChanges>, lsn: bigint, at: Date) => Promise<void> }).applyStreamed(b, lsn, new Date());
+      (sync as unknown as { applyStreamed: (b: Map<string, TableChanges>, lsn: bigint, at: Date) => Promise<void> }).applyStreamed(decoded(sync, b), lsn, new Date());
     const one = async (sql: string): Promise<number> => Number((await store.writer.runAndReadAll(sql)).getRowsJS()[0]![0]);
     const rows = async (): Promise<number[]> => [Number(st().rows), await one(`SELECT "rows" FROM ${MASON_SCHEMA}.copy_state WHERE source = 'public.t'`), await one("SELECT count(*) FROM public.t")];
     await body({ store, sync, events, st, apply, rows });
@@ -364,7 +372,7 @@ test("a stream's failure is over when the stream next applies a batch WITH A POS
     assert.equal(st().error, "replication: the slot is in use", "the publication check does not clear the stream's failure");
     assert.deepEqual(said(), [], "and says no recovery");
     // a piece of a large transaction: written, but no position yet
-    await s.applyStreamed(batch({ 11: "piece" }), null, new Date());
+    await s.applyStreamed(decoded(sync, batch({ 11: "piece" })), null, new Date());
     assert.equal(st().error, "replication: the slot is in use", "a piece without a position does not");
     assert.deepEqual(said(), []);
     // a batch with a position, of another table only (the database committed): every streamed table is current as of it
