@@ -141,12 +141,16 @@ In production, you deploy only the project folder: `mason/`, which holds the sou
 You configure it with environment variables, and it keeps its synced data on one volume. Your platform can check its health
 at `/healthz`. Run `mason help production` to read this section offline.
 
+Start from the project you made in [Try with your data](#try-with-your-data). Its `mason/` folder already names
+your tables and how each one syncs, so there is nothing to add again on the server:
+
 ```bash
-cd deploy/mason-data && mkdir -p mason   # or copy compose.yml and .env.example into your own folder
-cp .env.example .env                 # set DATABASE_URL and MASON_API_KEY (openssl rand -hex 24)
-docker compose up -d                 # starts ghcr.io/embeddable-hq/mason-data
-docker compose exec mason mason add public.orders
-docker compose exec mason mason user add metabase
+cd your-app                          # the folder that holds mason/
+curl -fsSLO https://raw.githubusercontent.com/embeddable-hq/mason-data/main/deploy/mason-data/compose.yml
+# On the server, .env sets the database URL (under the name your sources file uses: MASON_DATABASE_URL or
+# DATABASE_URL), MASON_API_KEY (openssl rand -hex 24) and MASON_PG_SELF_SIGNED_TLS=1 (see TLS below).
+docker compose up -d                 # starts ghcr.io/embeddable-hq/mason-data with your mason/ folder
+docker compose exec mason mason user add metabase   # users are kept on the server, so add them there
 ```
 
 | | |
