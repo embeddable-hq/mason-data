@@ -2315,7 +2315,7 @@ test("set_config alone is the session's SET, answered as Postgres answers it; an
     assert.equal(await code(a, "SELECT set_config('no_such_setting', 'x', false)"), '42704 unrecognized configuration parameter "no_such_setting"');
     assert.match(await code(a, "SELECT set_config('work_mem', 'lots', false)"), /^22023 /);
     // every other form is refused by name, and changes nothing
-    for (const sql of ["SELECT set_config('search_path', 'yyy', false), 1", "SELECT set_config('search_path', 'yyy', true)", "SELECT set_config('search_path', NULL, false)",
+    for (const sql of ["SELECT set_config('search_path', 'yyy', false), 1", "SELECT set_config('search_path', 'yyy', true), 1", "SELECT set_config('search_path', NULL, false)",
       "SELECT set_config('search_path', 'y' || 'yy', false)", "SELECT x FROM (SELECT set_config('search_path', 'yyy', false) AS x) AS s",
       "SELECT set_config('search_path', 'yyy', false) FROM public.orders LIMIT 1", "SELECT set_config('search_path', 'yyy', false) FROM pg_catalog.pg_class LIMIT 1",
       "EXPLAIN ANALYZE SELECT set_config('search_path', 'yyy', false)", "SELECT 1 WHERE set_config('search_path', 'yyy', false) IS NOT NULL"]) {
@@ -2366,12 +2366,11 @@ test("RESET ALL, RESET <name> and DISCARD ALL restore the startup's values and r
     // CommandComplete, in Postgres's spelling
     assert.deepEqual(reset.map((m) => m.type), ["CommandComplete", "ParameterStatus", "ParameterStatus", "ParameterStatus", "ReadyForQuery"]);
     // ONCE per parameter per request, its last value; a value moved and moved back within one request is not told;
-    // a request that fails half-way tells what its earlier statements moved
+    // a request that fails half-way undid what its earlier statements moved (its implicit transaction): nothing to tell
     assert.deepEqual(statuses(await run("SET application_name = 'a'; SET application_name = 'b'; SET TimeZone = 'Asia/Tokyo'; SET TimeZone = 'UTC'")), [["application_name", "b"]]);
     s.socket.write(wire.query("SET application_name = 'before-error'; SELECT 1 / 0"));
     const failed = await s.untilReady();
-    assert.deepEqual(failed.map((m) => m.type), ["CommandComplete", "ErrorResponse", "ParameterStatus", "ReadyForQuery"]);
-    assert.deepEqual(statuses(failed), [["application_name", "before-error"]]);
+    assert.deepEqual(failed.map((m) => m.type), ["CommandComplete", "ErrorResponse", "ReadyForQuery"]);
     assert.deepEqual(statuses(await run("RESET ALL")), [["application_name", "tool-at-startup"]]);
     assert.deepEqual(await shown("SHOW application_name; SHOW search_path; SHOW TimeZone; SHOW work_mem; SELECT current_setting('work_mem'), current_setting('application_name')"),
       ["tool-at-startup", "startup_path", "UTC", "32MB", "32MB", "tool-at-startup"]);
@@ -2400,6 +2399,350 @@ test("RESET ALL, RESET <name> and DISCARD ALL restore the startup's values and r
     const plans = await run("DISCARD PLANS");
     assert.deepEqual([statuses(plans), plans.find((m) => m.type === "CommandComplete")], [[], { type: "CommandComplete", tag: "DISCARD PLANS" }]);
     assert.deepEqual(await shown("SHOW application_name"), ["kept"]);
+  } finally { s.end(); }
+});
+
+// A SESSION'S SETTINGS ARE TRANSACTIONAL, as Postgres's GUCs are (GitHub issue 47: `SET LOCAL` was a SET, and a ROLLBACK
+// undid none). `vars` stays the one store every reader reads (`sessionSetting`); a transaction keeps what to restore, and
+// its end, explicit or implicit, replaces `vars`. Every reply below is the one Postgres 18 sent, message by message, and
+// the oracle holds the same shapes to a live Postgres (oracle/setting-scripts.ts).
+/** one request's reply, a line a message: what a driver reads of a session's settings */
+const replyLines = (ms: BackendMessage[]): string[] => ms.flatMap((m): string[] => {
+  switch (m.type) {
+    case "NoticeResponse": return [`${m.fields.V} ${m.fields.C} ${m.fields.M}`];
+    case "ErrorResponse": return [`${m.fields.V} ${m.fields.C} ${m.fields.M}`];
+    case "ParameterStatus": return [`status ${m.name}=${m.value}`];
+    case "CommandComplete": return [`tag ${m.tag}`];
+    case "DataRow": return [`row ${m.values.map((v) => v?.toString("utf8") ?? "NULL").join(",")}`];
+    case "ReadyForQuery": return [`ready ${m.status}`];
+    default: return [];
+  }
+});
+type Raw = Awaited<ReturnType<typeof rawSession>>;
+const onRaw = (s: Raw) => async (sql: string): Promise<string[]> => { s.socket.write(wire.query(sql)); return replyLines(await s.untilReady()); };
+/** statements in one extended-protocol batch, up to one Sync */
+const inBatch = (s: Raw) => async (...sqls: string[]): Promise<string[]> => {
+  s.socket.write(Buffer.concat([...sqls.flatMap((q) => [wire.parse("", q), wire.bind("", "", [], []), wire.execute("")]), wire.sync()]));
+  return replyLines(await s.untilReady());
+};
+const warned = "WARNING 25P01 SET LOCAL can only be used in transaction blocks";
+
+test("SET LOCAL outside a block is Postgres's WARNING, its value gone with its own transaction and nothing reported", async () => {
+  const s = await rawSession(api.port, { application_name: "start" });
+  const q = onRaw(s);
+  try {
+    assert.deepEqual(await q("SET LOCAL application_name = 'loc'"), [warned, "tag SET", "ready I"]);
+    assert.deepEqual(await q("SHOW application_name"), ["row start", "tag SHOW", "ready I"]);
+    assert.deepEqual(await q("SELECT current_setting('application_name'), current_setting('application_name') FROM public.orders LIMIT 1"), ["row start,start", "tag SELECT 1", "ready I"]);
+    // the warning comes first: a refused value is refused after it
+    assert.deepEqual(await q("SET LOCAL no_such_setting = 'x'"), [warned, 'ERROR 42704 unrecognized configuration parameter "no_such_setting"', "ready I"]);
+    assert.deepEqual(await q("SET LOCAL work_mem = 'lots'"), [warned, 'ERROR 22023 invalid value for parameter "work_mem": "lots"', "ready I"]);
+    assert.deepEqual(await q("SET application_name = 'a'"), ["tag SET", "status application_name=a", "ready I"]);
+    assert.deepEqual(await q("SET LOCAL application_name TO DEFAULT"), [warned, "tag SET", "ready I"]);
+    assert.deepEqual(await q("SHOW application_name"), ["row a", "tag SHOW", "ready I"]);
+    // SET LOCAL ROLE warns as any other; SET TRANSACTION in its own words, however it is spelt; the session's own form never
+    assert.deepEqual(await q("SET LOCAL ROLE NONE"), [warned, "tag SET", "ready I"]);
+    const transaction = ["WARNING 25P01 SET TRANSACTION can only be used in transaction blocks", "tag SET", "ready I"];
+    assert.deepEqual(await q("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"), transaction);
+    assert.deepEqual(await q("SET LOCAL TRANSACTION ISOLATION LEVEL READ COMMITTED"), transaction);
+    assert.deepEqual(await q("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED"), ["tag SET", "ready I"]);
+    assert.deepEqual(await q("SET SESSION TimeZone = 'Asia/Tokyo'"), ["tag SET", "status TimeZone=Asia/Tokyo", "ready I"]);
+  } finally { s.end(); }
+});
+
+test("in a block SET LOCAL lasts until it ends, a SET is kept by COMMIT and undone by ROLLBACK, and the revert is reported once, at the block's end", async () => {
+  const s = await rawSession(api.port, { application_name: "start" });
+  const q = onRaw(s);
+  const app = "SHOW application_name";
+  try {
+    for (const end of ["COMMIT", "ROLLBACK"]) {
+      assert.deepEqual(await q("BEGIN"), ["tag BEGIN", "ready T"]);
+      assert.deepEqual(await q("SET LOCAL application_name = 'loc'"), ["tag SET", "status application_name=loc", "ready T"], "no warning in a block");
+      assert.deepEqual(await q(app), ["row loc", "tag SHOW", "ready T"]);
+      assert.deepEqual(await q("SELECT current_setting('application_name') FROM public.orders LIMIT 1"), ["row loc", "tag SELECT 1", "ready T"]);
+      assert.deepEqual(await q(end), [`tag ${end}`, "status application_name=start", "ready I"], end);
+      assert.deepEqual(await q(app), ["row start", "tag SHOW", "ready I"]);
+    }
+    await q("BEGIN");
+    assert.deepEqual(await q("SET application_name = 'a'"), ["tag SET", "status application_name=a", "ready T"]);
+    assert.deepEqual(await q("ROLLBACK"), ["tag ROLLBACK", "status application_name=start", "ready I"]);
+    assert.deepEqual(await q(app), ["row start", "tag SHOW", "ready I"]);
+    await q("BEGIN");
+    await q("SET application_name = 'a'");
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "ready I"], "what a COMMIT keeps was told at the SET: nothing moved");
+    assert.deepEqual(await q(app), ["row a", "tag SHOW", "ready I"]);
+    // an unreported parameter, read by every reader, and a value from before the block; a parameter of its own is untouched
+    await q("BEGIN");
+    await q("SET LOCAL work_mem = '77MB'");
+    await q("SET LOCAL statement_timeout = '5s'");
+    assert.deepEqual(await q("SELECT current_setting('work_mem'), current_setting('statement_timeout')"), ["row 77MB,5s", "tag SELECT 1", "ready T"]);
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "ready I"]);
+    assert.deepEqual(await q("SELECT current_setting('work_mem'), current_setting('statement_timeout')"), ["row 4MB,0", "tag SELECT 1", "ready I"]);
+    assert.deepEqual(await q("BEGIN; SET TimeZone = 'Asia/Tokyo'; SET LOCAL application_name = 'b'; COMMIT; SHOW TimeZone; SHOW application_name"),
+      ["tag BEGIN", "tag SET", "tag SET", "tag COMMIT", "row Asia/Tokyo", "tag SHOW", "row a", "tag SHOW", "status TimeZone=Asia/Tokyo", "ready I"], "one Query, one report of what moved");
+  } finally { s.end(); }
+});
+
+test("a SET and a SET LOCAL of one name in one block: COMMIT keeps the SET and ROLLBACK neither, whichever came last", async () => {
+  const s = await rawSession(api.port, { application_name: "start" });
+  const q = onRaw(s);
+  const block = async (end: string, ...sets: string[]): Promise<string[]> => {
+    await q("BEGIN");
+    for (const v of sets) await q(`SET ${v === v.toUpperCase() ? "LOCAL " : ""}application_name = '${v}'`);
+    const ending = await q(end);
+    const left = (await q("SHOW application_name"))[0]!;
+    await q("RESET ALL");
+    return [...ending, left];
+  };
+  try {
+    // a lower-case value is a SET, an upper-case one a SET LOCAL
+    assert.deepEqual(await block("COMMIT", "a", "B"), ["tag COMMIT", "status application_name=a", "ready I", "row a"]);
+    assert.deepEqual(await block("ROLLBACK", "a", "B"), ["tag ROLLBACK", "status application_name=start", "ready I", "row start"]);
+    assert.deepEqual(await block("COMMIT", "B", "a"), ["tag COMMIT", "ready I", "row a"]);
+    assert.deepEqual(await block("COMMIT", "a", "B", "C"), ["tag COMMIT", "status application_name=a", "ready I", "row a"]);
+    assert.deepEqual(await block("COMMIT", "a", "B", "c"), ["tag COMMIT", "ready I", "row c"]);
+    // of two names, each its own
+    await q("BEGIN");
+    await q("SET LOCAL application_name = 'b'");
+    await q("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "status application_name=start", "ready I"]);
+    assert.deepEqual(await q("SHOW TimeZone"), ["row Asia/Tokyo", "tag SHOW", "ready I"]);
+  } finally { s.end(); }
+});
+
+test("a failed block has undone what it set at the error, whose ReadyForQuery reports it: not its ROLLBACK", async () => {
+  const s = await rawSession(api.port, { application_name: "start" });
+  const q = onRaw(s);
+  const aborted = "ERROR 25P02 current transaction is aborted, commands ignored until end of transaction block";
+  try {
+    await q("BEGIN");
+    await q("SET application_name = 'a'");
+    assert.deepEqual(await q("SELECT 1/0"), ["ERROR 22012 division by zero", "status application_name=start", "ready E"]);
+    for (const sql of ["SHOW application_name", "SET application_name = 'b'", "RESET ALL", "SELECT set_config('application_name', 'b', true)", "DISCARD ALL"]) {
+      assert.deepEqual(await q(sql), [aborted, "ready E"], sql);
+    }
+    assert.deepEqual(await q("ROLLBACK"), ["tag ROLLBACK", "ready I"]);
+    assert.deepEqual(await q("SHOW application_name"), ["row start", "tag SHOW", "ready I"]);
+    // a COMMIT of a failed block is its ROLLBACK, a SET LOCAL's value from before the block is what comes back
+    await q("SET application_name = 'before'");
+    await q("BEGIN");
+    await q("SET LOCAL application_name = 'a'");
+    assert.deepEqual(await q("SELECT no_such_column FROM public.orders"), ['ERROR 42703 column "no_such_column" does not exist', "status application_name=before", "ready E"]);
+    assert.deepEqual(await q("COMMIT"), ["tag ROLLBACK", "ready I"]);
+    // the error of a batch, its Sync's ReadyForQuery reporting it
+    await q("BEGIN");
+    await q("SET application_name = 'a'");
+    assert.deepEqual(await inBatch(s)("SELECT 1", "SELECT 1/0", "SELECT 2"), ["row 1", "tag SELECT 1", "ERROR 22012 division by zero", "status application_name=before", "ready E"]);
+    await q("ROLLBACK");
+  } finally { s.end(); }
+});
+
+test("a Query's statements and a Sync's batch are one implicit transaction: an error, a ROLLBACK or a BEGIN among them decides their SETs", async () => {
+  const s = await rawSession(api.port, { application_name: "start" });
+  const q = onRaw(s);
+  const batch = inBatch(s);
+  const app = "SHOW application_name";
+  const none = "WARNING 25P01 there is no transaction in progress";
+  try {
+    assert.deepEqual(await q("SET LOCAL application_name = 'loc'; SHOW application_name"), ["tag SET", "row loc", "tag SHOW", "ready I"], "in a block already: no warning, and nothing moved by its end");
+    assert.deepEqual(await q(app), ["row start", "tag SHOW", "ready I"]);
+    assert.deepEqual(await q("SET application_name = 'a'; SELECT 1/0"), ["tag SET", "ERROR 22012 division by zero", "ready I"], "undone: nothing to report");
+    assert.deepEqual(await q(app), ["row start", "tag SHOW", "ready I"]);
+    assert.deepEqual(await q("SET application_name = 'a'; ROLLBACK"), ["tag SET", none, "tag ROLLBACK", "ready I"]);
+    assert.deepEqual(await q("SET application_name = 'a'; COMMIT; SELECT 1/0"), ["tag SET", none, "tag COMMIT", "ERROR 22012 division by zero", "status application_name=a", "ready I"], "committed before the error");
+    await q("RESET ALL");
+    // a BEGIN takes in what ran before it
+    assert.deepEqual(await q("SET application_name = 'a'; BEGIN"), ["tag SET", "tag BEGIN", "status application_name=a", "ready T"]);
+    assert.deepEqual(await q("ROLLBACK"), ["tag ROLLBACK", "status application_name=start", "ready I"]);
+    assert.deepEqual(await q("SET LOCAL application_name = 'a'; BEGIN"), ["tag SET", "tag BEGIN", "status application_name=a", "ready T"]);
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "status application_name=start", "ready I"]);
+    assert.deepEqual(await q("SET LOCAL application_name = 'a'; COMMIT; SHOW application_name"), ["tag SET", none, "tag COMMIT", "row start", "tag SHOW", "ready I"]);
+    // a statement after a COMMIT is in the Query's block again
+    assert.deepEqual(await q("BEGIN; COMMIT; SET LOCAL application_name = 'x'; SHOW application_name"), ["tag BEGIN", "tag COMMIT", "tag SET", "row x", "tag SHOW", "ready I"]);
+
+    // a batch: the first SET LOCAL warns, one after an Execute does not, and its value lasts to the Sync
+    assert.deepEqual(await batch("SET LOCAL application_name = 'p'", "SET LOCAL TimeZone = 'Asia/Tokyo'", app), [warned, "tag SET", "tag SET", "row p", "tag SHOW", "ready I"]);
+    assert.deepEqual(await batch("SELECT 1", "SET LOCAL application_name = 'p'", app), ["row 1", "tag SELECT 1", "tag SET", "row p", "tag SHOW", "ready I"]);
+    assert.deepEqual(await q(app), ["row start", "tag SHOW", "ready I"]);
+    assert.deepEqual(await batch("SET application_name = 'p'", "SELECT 1/0", "SELECT 2"), ["tag SET", "ERROR 22012 division by zero", "ready I"]);
+    assert.deepEqual(await batch("SET application_name = 'p'", "ROLLBACK", app), ["tag SET", none, "tag ROLLBACK", "row start", "tag SHOW", "ready I"]);
+    assert.deepEqual(await batch("SET application_name = 'p'", "COMMIT", "SELECT 1/0"), ["tag SET", none, "tag COMMIT", "ERROR 22012 division by zero", "status application_name=p", "ready I"]);
+    await q("RESET ALL");
+    assert.deepEqual(await batch("SET application_name = 'p'", "BEGIN", "SET TimeZone = 'Asia/Tokyo'"), ["tag SET", "tag BEGIN", "tag SET", "status application_name=p", "status TimeZone=Asia/Tokyo", "ready T"]);
+    assert.deepEqual(await q("ROLLBACK"), ["tag ROLLBACK", "status application_name=start", "status TimeZone=UTC", "ready I"]);
+    assert.deepEqual(await batch("BEGIN", "SET LOCAL application_name = 'x'", "COMMIT", "SET LOCAL TimeZone = 'Asia/Tokyo'", "SELECT 1", "SET LOCAL TimeZone = 'Asia/Tokyo'"),
+      ["tag BEGIN", "tag SET", "tag COMMIT", warned, "tag SET", "row 1", "tag SELECT 1", "tag SET", "ready I"], "a COMMIT ends the block: the next SET LOCAL warns, then the batch is a block again");
+    // a suspended portal is not done: Postgres's flag waits for its last row
+    s.socket.write(Buffer.concat([wire.parse("", "SELECT id FROM public.orders ORDER BY id"), wire.bind("", "", [], []), wire.execute("", 1), wire.parse("q", "SET LOCAL application_name = 'p'"), wire.bind("q", "q", [], []), wire.execute("q"), wire.sync()]));
+    assert.deepEqual(replyLines(await s.untilReady()), ["row 1", warned, "tag SET", "ready I"]);
+  } finally { s.end(); }
+});
+
+test("RESET and RESET ALL in a block are undone by ROLLBACK and kept by COMMIT; DISCARD ALL is refused in one, implicit or not", async () => {
+  const s = await rawSession(api.port, { application_name: "start" });
+  const q = onRaw(s);
+  const batch = inBatch(s);
+  const app = "SHOW application_name";
+  const refused = "ERROR 25001 DISCARD ALL cannot run inside a transaction block";
+  try {
+    await q("SET application_name = 'a'");
+    await q("BEGIN");
+    assert.deepEqual(await q("RESET application_name"), ["tag RESET", "status application_name=start", "ready T"]);
+    assert.deepEqual(await q("ROLLBACK"), ["tag ROLLBACK", "status application_name=a", "ready I"]);
+    await q("BEGIN");
+    await q("RESET application_name");
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "ready I"]);
+    assert.deepEqual(await q(app), ["row start", "tag SHOW", "ready I"]);
+    // SET … TO DEFAULT is a SET, by its tag, and LOCAL may be it too
+    await q("SET application_name = 'a'");
+    assert.deepEqual(await q("SET application_name TO DEFAULT"), ["tag SET", "status application_name=start", "ready I"]);
+    await q("SET application_name = 'a'");
+    await q("BEGIN");
+    assert.deepEqual(await q("SET LOCAL application_name TO DEFAULT"), ["tag SET", "status application_name=start", "ready T"]);
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "status application_name=a", "ready I"]);
+    // RESET ALL: every parameter, undone or kept as one
+    await q("SET work_mem = '64MB'");
+    await q("BEGIN");
+    assert.deepEqual(await q("RESET ALL"), ["tag RESET", "status application_name=start", "ready T"]);
+    assert.deepEqual(await q("ROLLBACK"), ["tag ROLLBACK", "status application_name=a", "ready I"]);
+    assert.deepEqual(await q("SHOW work_mem"), ["row 64MB", "tag SHOW", "ready I"]);
+    await q("BEGIN");
+    await q("RESET ALL");
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "ready I"]);
+    assert.deepEqual(await q("SHOW work_mem"), ["row 4MB", "tag SHOW", "ready I"]);
+    // a RESET ALL overrides a SET LOCAL before it, as any SET, and a SET LOCAL after it ends with the block
+    await q("BEGIN");
+    await q("SET application_name = 'a'");
+    await q("SET LOCAL TimeZone = 'Asia/Tokyo'");
+    await q("RESET ALL");
+    await q("SET LOCAL application_name = 'z'");
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "status application_name=start", "ready I"]);
+    assert.deepEqual(await q("SHOW TimeZone"), ["row UTC", "tag SHOW", "ready I"]);
+    await q("SET application_name = 'a'");
+    assert.deepEqual(await q("RESET ALL; SELECT 1/0"), ["tag RESET", "ERROR 22012 division by zero", "ready I"], "an implicit transaction's");
+    assert.deepEqual(await q(app), ["row a", "tag SHOW", "ready I"]);
+
+    await q("BEGIN");
+    assert.deepEqual(await q("DISCARD ALL"), [refused, "ready E"]);
+    assert.deepEqual(await q("SELECT 1"), ["ERROR 25P02 current transaction is aborted, commands ignored until end of transaction block", "ready E"]);
+    await q("ROLLBACK");
+    assert.deepEqual(await q("SET application_name = 'b'; DISCARD ALL"), ["tag SET", refused, "ready I"]);
+    assert.deepEqual(await q("DISCARD ALL; SELECT 1"), [refused, "ready I"]);
+    assert.deepEqual(await batch("SELECT 1", "DISCARD ALL"), ["row 1", "tag SELECT 1", refused, "ready I"]);
+    assert.deepEqual(await q(app), ["row a", "tag SHOW", "ready I"], "nothing reset");
+    // first in a batch it is a transaction of its own, committed before what follows
+    assert.deepEqual(await batch("DISCARD ALL", "SET LOCAL TimeZone = 'Asia/Tokyo'", "SELECT 1/0"), ["tag DISCARD ALL", warned, "tag SET", "ERROR 22012 division by zero", "status application_name=start", "ready I"]);
+    assert.deepEqual(await batch("SELECT 1", "COMMIT", "DISCARD ALL"), ["row 1", "tag SELECT 1", "WARNING 25P01 there is no transaction in progress", "tag COMMIT", "tag DISCARD ALL", "ready I"], "a COMMIT ended the batch's block");
+    await q("BEGIN");
+    assert.deepEqual(await q("DISCARD PLANS"), ["tag DISCARD PLANS", "ready T"], "the rest of DISCARD runs in a block");
+    await q("COMMIT");
+  } finally { s.end(); }
+});
+
+test("a placeholder a transaction named stays defined, '', however it ended", async () => {
+  const s = await rawSession();
+  const q = onRaw(s);
+  const unset = 'ERROR 42704 unrecognized configuration parameter "myapp.never"';
+  const blank = ["row ", "tag SHOW", "ready I"];
+  try {
+    assert.deepEqual(await q("SHOW myapp.never"), [unset, "ready I"]);
+    assert.deepEqual(await q("BEGIN; SET LOCAL myapp.a = 'v'; SHOW myapp.a; ROLLBACK"), ["tag BEGIN", "tag SET", "row v", "tag SHOW", "tag ROLLBACK", "ready I"]);
+    assert.deepEqual(await q("SHOW myapp.a"), blank);
+    assert.deepEqual(await q("SELECT current_setting('myapp.a', true) FROM public.orders LIMIT 1"), ["row ", "tag SELECT 1", "ready I"]);
+    await q("BEGIN; SET myapp.b = 'v'; ROLLBACK");
+    assert.deepEqual(await q("SHOW myapp.b"), blank);
+    await q("BEGIN; SET myapp.c = 'v'; COMMIT");
+    await q("BEGIN; SET LOCAL myapp.c = 'w'; COMMIT");
+    assert.deepEqual(await q("SHOW myapp.c"), ["row v", "tag SHOW", "ready I"]);
+    await q("BEGIN; RESET myapp.d; ROLLBACK");
+    assert.deepEqual(await q("SHOW myapp.d"), blank);
+    await q("BEGIN");
+    await q("SET myapp.e = 'v'");
+    await q("SELECT 1/0");
+    await q("ROLLBACK");
+    assert.deepEqual(await q("SHOW myapp.e"), blank);
+    await q("SET LOCAL myapp.f = 'v'");
+    assert.deepEqual(await q("SHOW myapp.f"), blank);
+    await q("SET myapp.g = 'v'; SELECT 1/0");
+    assert.deepEqual(await q("SHOW myapp.g"), blank);
+    await q("BEGIN; SET LOCAL myapp.h = 'v'; RESET ALL; COMMIT");
+    assert.deepEqual(await q("SHOW myapp.h"), blank);
+  } finally { s.end(); }
+});
+
+test("set_config(name, value, true) alone is SET LOCAL, less the warning; ROLLBACK undoes a set_config as it undoes a SET", async () => {
+  const s = await rawSession(api.port, { application_name: "start" });
+  const q = onRaw(s);
+  try {
+    assert.deepEqual(await q("SELECT set_config('application_name', 'c', true)"), ["row c", "tag SELECT 1", "ready I"], "no warning, nothing reported");
+    assert.deepEqual(await q("SHOW application_name"), ["row start", "tag SHOW", "ready I"]);
+    assert.deepEqual(await q("SELECT set_config('application_name', 'c', true); SHOW application_name"), ["row c", "tag SELECT 1", "row c", "tag SHOW", "ready I"]);
+    await q("BEGIN");
+    assert.deepEqual(await q("SELECT set_config('application_name', 'c', true) AS v"), ["row c", "tag SELECT 1", "status application_name=c", "ready T"]);
+    assert.deepEqual(await q("SELECT current_setting('application_name') FROM public.orders LIMIT 1"), ["row c", "tag SELECT 1", "ready T"]);
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "status application_name=start", "ready I"]);
+    await q("BEGIN");
+    await q("SELECT set_config('application_name', 'c', false)");
+    assert.deepEqual(await q("ROLLBACK"), ["tag ROLLBACK", "status application_name=start", "ready I"]);
+    await q("BEGIN");
+    await q("SELECT set_config('application_name', 'k', false)");
+    await q("SELECT set_config('application_name', 'c', true)");
+    assert.deepEqual(await q("COMMIT"), ["tag COMMIT", "status application_name=k", "ready I"]);
+    assert.deepEqual(await inBatch(s)("SELECT set_config('application_name', 'p', true)", "SHOW application_name"), ["row p", "tag SELECT 1", "row p", "tag SHOW", "ready I"]);
+    await q("SELECT set_config('myapp.cl', 'c', true)");
+    assert.deepEqual(await q("SHOW myapp.cl"), ["row ", "tag SHOW", "ready I"]);
+    assert.deepEqual(await q("SELECT set_config('no_such_setting', 'c', true)"), ['ERROR 42704 unrecognized configuration parameter "no_such_setting"', "ready I"]);
+    assert.deepEqual(await q("SELECT set_config('work_mem', 'lots', true)"), ['ERROR 22023 invalid value for parameter "work_mem": "lots"', "ready I"]);
+    // its other forms stay the gap's, is_local or not
+    assert.match((await q("SELECT set_config('application_name', 'c', true) FROM public.orders"))[0]!, /^ERROR 0A000 set_config\(\) is answered by Mason only alone .*Mason gap set-config-forms/);
+  } finally { s.end(); }
+});
+
+test("a prepared statement reads the setting in force when it runs: a reverted one stays neither in its plan nor in its answer", async () => {
+  const s = await rawSession(api.port, { application_name: "start" });
+  const q = onRaw(s);
+  const statement = "SELECT created_at, date_trunc('day', created_at), current_setting('TimeZone'), current_setting('application_name') FROM public.orders WHERE id = 1";
+  const parse = (name: string): void => { s.socket.write(Buffer.concat([wire.parse(name, statement), wire.sync()])); };
+  const run = async (name: string): Promise<string[]> => {
+    s.socket.write(Buffer.concat([wire.bind("", name, [], []), wire.execute(""), wire.sync()]));
+    return replyLines(await s.untilReady());
+  };
+  const utc = ["row 2026-01-02 03:04:05+00,2026-01-02 00:00:00+00,UTC,start", "tag SELECT 1"];
+  const tokyo = (app: string): string[] => [`row 2026-01-02 12:04:05+09,2026-01-02 00:00:00+09,Asia/Tokyo,${app}`, "tag SELECT 1"];
+  try {
+    parse("before");
+    await s.untilReady();
+    assert.deepEqual(await run("before"), [...utc, "ready I"]);
+    await q("BEGIN");
+    await q("SET LOCAL TimeZone = 'Asia/Tokyo'");
+    await q("SET LOCAL application_name = 'loc'");
+    assert.deepEqual(await run("before"), [...tokyo("loc"), "ready T"]);
+    await q("COMMIT");
+    assert.deepEqual(await run("before"), [...utc, "ready I"], "after a COMMIT");
+    await q("BEGIN");
+    await q("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual(await run("before"), [...tokyo("start"), "ready T"]);
+    await q("ROLLBACK");
+    assert.deepEqual(await run("before"), [...utc, "ready I"], "after a ROLLBACK");
+    await q("BEGIN");
+    await q("SET TimeZone = 'Asia/Tokyo'");
+    await q("SELECT 1/0");
+    await q("ROLLBACK");
+    assert.deepEqual(await run("before"), [...utc, "ready I"], "after a failed block");
+    // made under the setting, run after it
+    await q("BEGIN");
+    await q("SET LOCAL TimeZone = 'Asia/Tokyo'");
+    parse("under");
+    await s.untilReady();
+    assert.deepEqual(await run("under"), [...tokyo("start"), "ready T"]);
+    await q("COMMIT");
+    assert.deepEqual(await run("under"), [...utc, "ready I"], "parsed under a SET LOCAL");
+    await q("BEGIN");
+    await q("SET TimeZone = 'Asia/Tokyo'");
+    parse("rolled");
+    await s.untilReady();
+    await q("ROLLBACK");
+    assert.deepEqual(await run("rolled"), [...utc, "ready I"], "parsed under a SET rolled back");
   } finally { s.end(); }
 });
 

@@ -859,6 +859,26 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
 });
 
 /**
+ * A TRANSACTION ENDS IN ONE PLACE, AND THE SETTINGS IT MOVED WITH IT (GitHub issue 47; a fact decided in several places:
+ * the four sites that each failed a transaction would each have had to undo its settings, and an implicit transaction
+ * has no statement of its own to do it in). `abortTransaction` alone fails a block, `endTransaction` and `resetAll` alone
+ * replace `vars`, the one store every reader reads, and what moves a value is `applySetting` (a RESET ALL's `resetAll`),
+ * so no SET escapes what a transaction must undo. The startup, before any transaction, is the one exception.
+ */
+test("a transaction's end is one method, and every SET reaches the settings through the one that lets it undo them", () => {
+  const server = "src/api/postgres/server.ts";
+  const src = fs.readFileSync(path.join(ROOT, server), "utf8");
+  const enclosing = (at: number): string => [...src.slice(0, at).matchAll(/\n {2}(?:private |readonly |static )*(?:async )?(\w+)\(/g)].at(-1)?.[1] ?? "?";
+  const callers = (pattern: RegExp): string[] => [...new Set([...src.matchAll(pattern)].map((m) => enclosing(m.index)))].sort();
+  assert.deepEqual(callers(/\bthis\.tx = "failed"/g), ["abortTransaction"], "a block failed beside abortTransaction: its settings stay");
+  assert.deepEqual(callers(/\bthis\.vars = /g), ["endTransaction", "resetAll"], "the settings replaced beside a transaction's end");
+  assert.deepEqual(callers(/\bthis\.setParameter\(/g), ["applySetting", "commandLineOptions", "resetParameter", "startup"], "a setting moved beside applySetting: a transaction cannot undo it");
+  assert.deepEqual(callers(/\bthis\.resetParameter\(/g), ["applySetting"]);
+  assert.deepEqual(callers(/\bthis\.resetAll\(/g), ["applySetting", "discard"]);
+  assert.deepEqual(callers(/\bthis\.settingsTx\b/g), ["endTransaction", "settingsAtStart"], "what a transaction restores is read for no answer");
+});
+
+/**
  * GET /metrics TAKES NO CREDENTIAL, SO IT CARRIES NO NAME (.claude/rules/cli.md "mason serve"): every label
  * src/cli/metrics.ts writes is one of a closed set whose values are Mason's own words (a phase, an outcome, a quantile,
  * the version) — never a table's, a user's, a client's or a host's. The first check is the type (src/cli/metrics.ts
