@@ -8,8 +8,8 @@
  * Before 1.0 a minor version may change the project's format with no compatibility (CLAUDE.md "No backwards
  * compatibility before v1.0"), so a project written for 0.5 and run by 0.6 would fail on whatever key moved, in words
  * that never say the versions differ. The pin turns that into one refusal that does: the image refuses to start on a
- * project of another release line, or of a newer patch than itself (`imagePinProblem` below, `mason serve`'s check,
- * src/cli/serve.ts), and `mason init` / `mason start` refuse a CLI that is (src/cli/pin.ts). ONE rule (`pinProblem`), in
+ * project of another release line, or of a newer patch than itself (`imagePinProblem` below), and the mason command
+ * refuses one too (src/cli/pin.ts: `mason init`, `mason start`, and `mason serve` run from the package). ONE rule (`pinProblem`), in
  * each reader's words. The way out is always the same pair: run the version the project names, or read the release notes
  * and move the pin.
  *
@@ -47,12 +47,13 @@ export function sameLine(a: Version, b: Version): boolean {
 const older = (a: Version, b: Version): boolean =>
   a.major !== b.major ? a.major < b.major : a.minor !== b.minor ? a.minor < b.minor : a.patch < b.patch;
 
-/** Why a project may not run: what is wrong, and the way out; null way out when the file itself is the problem, which
- *  says what to write. A person's `mason start` says them as one line, `mason serve` as a Failure's message and fix. */
-export interface PinRefusal { problem: string; wayOut: string | null }
+/** Why a project may not run: what is wrong, and each way out, a clause in lower case with no stop (none when the file
+ *  itself is the problem, which says what to write). `mason start` says them as sentences of one line, `mason serve` as a
+ *  Failure's message and fix. */
+export interface PinRefusal { problem: string; ways: string[] }
 
 /** What reads the project: `what` names it in the message ("this mason image", "this mason command"), `run` says how to
- *  run the pinned version instead. */
+ *  run the pinned version instead, as a way out. */
 export interface PinReader { what: string; run: (pinned: string) => string }
 
 /**
@@ -63,14 +64,14 @@ function pinProblem(pin: Version, running: Version, file: string, reader: PinRea
   if (sameLine(pin, running) && !older(running, pin)) return null;
   const p = versionText(pin), r = versionText(running), { what } = reader, run = reader.run(p);
   if (sameLine(pin, running)) {
-    return { problem: `${file} pins Mason ${p}, and ${what} is ${r}, older than it: the project may use a fix or a key ${r} does not have`, wayOut: run };
+    return { problem: `${file} pins Mason ${p}, and ${what} is ${r}, older than it: the project may use a fix or a key ${r} does not have`, ways: [run] };
   }
   const line = pin.major > 0 ? `${pin.major}.x` : `${pin.major}.${pin.minor}.x`;
   return older(running, pin)
-    ? { problem: `${file} pins Mason ${p}, and ${what} is ${r}: the project is written for a newer Mason`, wayOut: run }
+    ? { problem: `${file} pins Mason ${p}, and ${what} is ${r}: the project is written for a newer Mason`, ways: [run] }
     : { problem: `${file} pins Mason ${p}, and ${what} is ${r}, a newer release line than ${line}, which may read the project differently`,
-        wayOut: `${run} Or upgrade the project: read the release notes of every version after ${p} up to ${r} (their "Before you upgrade"), ` +
-          `change what they say, then set version: ${r} in ${path.basename(file)}.` };
+        ways: [run, `upgrade the project: read the release notes of every version after ${p} up to ${r} (their "Before you upgrade"), ` +
+          `change what they say, then set version: ${r} in ${path.basename(file)}`] };
 }
 
 /**
@@ -81,11 +82,11 @@ export function projectPinProblem(project: string, version: string, reader: PinR
   const running = parseVersion(version);
   if (running === null) return null;
   const read = readPin(project);
-  if ("problem" in read) return { problem: read.problem, wayOut: null };
+  if ("problem" in read) return { problem: read.problem, ways: [] };
   return read.pin === null ? null : pinProblem(read.pin, running, read.file, reader);
 }
 
-/** The image's check, its version what `mason serve` runs as (src/cli/version.ts): the words of someone running a container. */
+/** The image's check: the words of someone running a container. */
 export function imagePinProblem(project: string, imageVersion: string): PinRefusal | null {
-  return projectPinProblem(project, imageVersion, { what: "this mason image", run: (p) => `Run the image the project names (ghcr.io/embeddable-hq/mason-data:${p}).` });
+  return projectPinProblem(project, imageVersion, { what: "this mason image", run: (p) => `run the image the project names (ghcr.io/embeddable-hq/mason-data:${p})` });
 }

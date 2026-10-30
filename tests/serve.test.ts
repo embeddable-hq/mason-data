@@ -419,12 +419,12 @@ async function serveEnv(dir: string, m: { project: string; data: string }, versi
     ...(version === undefined ? {} : { MASON_VERSION: version }) });
 }
 
-const IMAGE_WAY_OUT = (p: string): string => `Run the image the project names (ghcr.io/embeddable-hq/mason-data:${p}).`;
+const IMAGE_WAY_OUT = (p: string): string => `run the image the project names (ghcr.io/embeddable-hq/mason-data:${p})`;
 /** each direction a project can be pinned from image 0.6.1, as the image's whole message and way out */
 const PIN_DIRECTIONS: ReadonlyArray<{ name: string; pin: string; message: (file: string) => string; fix: string }> = [
   { name: "a newer release line", pin: "0.7.0", message: (f) => `${f} pins Mason 0.7.0, and this mason image is 0.6.1: the project is written for a newer Mason`, fix: IMAGE_WAY_OUT("0.7.0") },
   { name: "an older release line", pin: "0.5.2", message: (f) => `${f} pins Mason 0.5.2, and this mason image is 0.6.1, a newer release line than 0.5.x, which may read the project differently`,
-    fix: `${IMAGE_WAY_OUT("0.5.2")} Or upgrade the project: read the release notes of every version after 0.5.2 up to 0.6.1 (their "Before you upgrade"), change what they say, then set version: 0.6.1 in mason.yml.` },
+    fix: `${IMAGE_WAY_OUT("0.5.2")}, or upgrade the project: read the release notes of every version after 0.5.2 up to 0.6.1 (their "Before you upgrade"), change what they say, then set version: 0.6.1 in mason.yml` },
   { name: "the same line at a later patch", pin: "0.6.3", message: (f) => `${f} pins Mason 0.6.3, and this mason image is 0.6.1, older than it: the project may use a fix or a key 0.6.1 does not have`, fix: IMAGE_WAY_OUT("0.6.3") },
 ];
 
@@ -462,6 +462,36 @@ test("mason serve refuses a mason.yml it cannot read in its own failure shape, n
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("mason serve run from the npm package is the mason command, never the image: its words and the npm way out, text and --json, exit 1, nothing written", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-pin-"));
+  try {
+    // the package's layout: this src/ beside the package.json version() reads, as npm installs it
+    const pkg = path.join(dir, "pkg"), main = path.join(pkg, "src", "cli", "main.ts");
+    fs.mkdirSync(pkg);
+    fs.cpSync(path.resolve(path.dirname(MAIN), "..", "..", "src"), path.join(pkg, "src"), { recursive: true });
+    fs.symlinkSync(path.resolve(path.dirname(MAIN), "..", "..", "node_modules"), path.join(pkg, "node_modules"));
+    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@mason-data/cli", version: "0.6.1", type: "module" }));
+    const m = mounted(dir, "version: 0.7.0\n");
+    fs.rmSync(path.join(m.project, "sources"), { recursive: true });
+    const env = await serveEnv(dir, m, undefined);
+    assert.equal((await runMason(dir, ["--version"], env, undefined, main)).stdout, "0.6.1\n");
+    const message = `${m.file} pins Mason 0.7.0, and this mason command is 0.6.1: the project is written for a newer Mason`;
+    const fix = "run the mason command it names: npm i -g @mason-data/cli@0.7.0 (or npx @mason-data/cli@0.7.0 …)";
+    const said = await runMason(dir, ["serve"], env, undefined, main);
+    assert.equal(said.code, 1, said.stdout + said.stderr);
+    assert.equal(said.stderr, `✗ mason serve: ${message}\n  fix   ${fix}\n`);
+    assert.equal(said.stdout, "");
+    const json = await runMason(dir, ["serve", "--json"], env, undefined, main);
+    assert.equal(json.code, 1, json.stdout + json.stderr);
+    assert.deepEqual(JSON.parse(json.stdout), { error: { code: "refused", message, fix }, next: [] });
+    // the package's version is what runs, whatever the environment says: one fact, read in one order
+    const stamped = await runMason(dir, ["serve", "--json"], { ...env, MASON_VERSION: "v0.7.0" }, undefined, main);
+    assert.deepEqual((JSON.parse(stamped.stdout) as { error: unknown }).error, { code: "refused", message, fix });
+    assert.deepEqual(fs.readdirSync(m.data), ["mason"], "the volume as it was: no .mason/");
+    assert.deepEqual(fs.readdirSync(m.project), ["mason.yml"], "the project folder as it was");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("mason serve starts on a project it may run: the same line at the pin's patch or later, and no mason.yml; a build that is no release checks nothing, whatever the file says", async () => {
   const cases: Array<[string | undefined, string | null]> = [["v0.6.1", "version: 0.6.1\n"], ["v0.6.1", "version: 0.6.0\n"], ["v0.6.1", null],
     [undefined, "version: 9.9.9\n"], ["main-abc1234", "version: 9.9.9\n"], ["main-abc1234", "version: soon\n"]];
@@ -482,7 +512,7 @@ test("the image's check: one rule from 1.0 too, its major the line; a project wi
     const { project: at, file } = mounted(dir, "version: 1.2.0\n");
     assert.equal(imagePinProblem(at, "1.9.0"), null, "a later minor is the same line from 1.0");
     assert.deepEqual(imagePinProblem(at, "2.0.0"), { problem: `${file} pins Mason 1.2.0, and this mason image is 2.0.0, a newer release line than 1.x, which may read the project differently`,
-      wayOut: `${IMAGE_WAY_OUT("1.2.0")} Or upgrade the project: read the release notes of every version after 1.2.0 up to 2.0.0 (their "Before you upgrade"), change what they say, then set version: 2.0.0 in mason.yml.` });
+      ways: [IMAGE_WAY_OUT("1.2.0"), 'upgrade the project: read the release notes of every version after 1.2.0 up to 2.0.0 (their "Before you upgrade"), change what they say, then set version: 2.0.0 in mason.yml'] });
     assert.equal(imagePinProblem(at, "dev"), null);
     assert.equal(imagePinProblem(at, "main-abc1234"), null);
     assert.equal(imagePinProblem(path.join(dir, "volume"), "9.0.0"), null, "no mason.yml is unpinned");
