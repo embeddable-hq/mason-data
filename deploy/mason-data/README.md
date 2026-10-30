@@ -113,5 +113,5 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
 | `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a copy is slow |
 | `MASON_CHANGES` | unset | never needed: how each table is kept current is its `sync:` in the sources file (`sync: replication` for a big table that must be current within seconds, with `max_slot_wal_keep_size` set on the database, "Your database"). Set, it is taken only when it agrees with the file, and goes in the next release |
 | `MASON_STATEMENT_TIMEOUT` | `5min` (0 for none) | a dashboard's statement may rightly take longer, or a runaway one should stop sooner |
-| `MASON_REQUEST_LOG_DAYS` | 7 | you want the request log (`mason logs --requests`, kept in the copy) longer or shorter |
+| `MASON_HISTORY_DAYS` | 7 | you want Mason's history — the request log (`mason logs --requests`), the sync's events, the usage samples (`mason usage`), all kept in the copy — longer or shorter (it was `MASON_REQUEST_LOG_DAYS`, which now refuses the start) |
 | `MASON_STORE_JSON_PATHS` | `on` | you want the copy to hold only the columns you named: `off` stores no JSON path as a column, and drops what was stored at the next start |

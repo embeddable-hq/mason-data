@@ -513,6 +513,7 @@ describe("a refused or failed statement is a line of the log, trace or not (a BI
   test("no statement's ErrorResponse is sent but through Session.refuse, which logs it (a FATAL is said by the close)", () => {
     const source = fs.readFileSync(new URL("../../src/api/postgres/server.ts", import.meta.url), "utf8");
     const sends = source.split("\n").filter((l) => /errorResponse\(/.test(l) && !/severity: "FATAL"/.test(l));
-    assert.deepEqual(sends.map((l) => l.trim()), ["this.send(errorResponse(e.fields));"], "the one non-FATAL sender is refuse()");
+    // refuse() builds the frame first: its bytes are counted in the statement's row of the request log, then it is sent
+    assert.deepEqual(sends.map((l) => l.trim()), ["const response = errorResponse(e.fields);"], "the one non-FATAL sender is refuse()");
   });
 });

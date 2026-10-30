@@ -9,7 +9,7 @@
  *   mason add <table>… [--columns …]      copy tables into Mason: every column, or the ones --columns names
  *   mason remove <table>…                 take tables out of the sources file; their copies are dropped
  *   mason wait [--timeout <s>] [--json]   until every added table is copied: 0 ready, 1 a copy failed (said), 124 timed out
- *   mason logs [-n <lines>] [-f] [--start] [--requests]   the run's log; --start, the start's terminal; --requests, its request log
+ *   mason logs [-n <lines>] [-f] [--start] [--requests] [--events]   the run's log; --start, the start's terminal; --requests, its request log; --events, the sync's events
  *   mason stop                            stop Mason for this folder's project (the copy stays)
  */
 import * as fs from "node:fs";
@@ -18,21 +18,25 @@ import { asFailure, endText, errorJson, failed, jsonText, nextBlock, parseComman
 import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from "./style.ts";
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
-import { readRestarts, signalSupervisor, stopSupervisor, supervisorGone, type Restart } from "./supervise.ts";
+import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
 import { DEMO_DIR, DUCK_FILE, STATE_DIR, isProject, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
-import { withPlaceholders, postgresLink } from "./pg-url.ts";
+import { withPlaceholders, postgresFacts, postgresLink, type PostgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
-import { SLOW_MS, type RefusedQuery, type SlowQuery } from "./run-server.ts";
+import type { RefusedQuery, SlowQuery } from "./run-server.ts";
+import { logEntries, logLineText } from "../lib/log-buffer.ts";
 import { catalogTable, entryName, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import { reach } from "./state.ts";
-import { copyingText, copyProgress, duration, readiness, type Readiness } from "./readiness.ts";
+import { copyingText, copyProgress, duration, msText, readiness, readinessWord, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import type { SyncEvent } from "../duck/events.ts";
 import type { CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
-import type { LedgerRequest } from "../duck/requests.ts";
+import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery, UnsupportedSql } from "../duck/requests.ts";
+import type { RunningStatement, SessionsOpen } from "../api/postgres/server.ts";
+import { DEFAULT_REQUEST_LIMIT, eventLimit, MAX_SEARCH, SLOW_MS, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 import { agoText, BIG_TABLE_ROWS, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 
@@ -44,7 +48,10 @@ const err = (m: string): void => { process.stderr.write(`${m}\n`); };
 export type ColumnState = CatalogColumn;
 /** A table as the run's state says it: the catalog's and the sources file's facts (sources.ts catalogTable, what mason
  *  tables reads without the run), and its copy (src/cli/run-server.ts runState) */
-export interface TableState extends CatalogTable {
+export interface TableState extends Omit<CatalogTable, "columns"> {
+  /** its columns: only in the state asked with `?columns=1` (readState; mason status --json carries them), never in
+   *  the lean one the page polls (src/cli/run-server.ts runState) */
+  columns?: ColumnState[];
   copy: { phase: "copying" | "done" | "failed"; rowsCopied: number; updatedAt: string;
     /** while its chunks are read: the chunks done and reading, the measured rate, the time left, as of the moment the
      *  state was asked (src/duck/sync.ts copyProgressNow) */
@@ -54,6 +61,8 @@ export interface TableState extends CatalogTable {
     retired?: string } | null;
   /** why its copy failed (the sync tries again by itself, src/duck/sync.ts copyRetryDelayMs); null otherwise */
   error: string | null;
+  /** an added table's sync: its state, its last sync and its age (src/cli/readiness.ts tableSync); a run from before it has none */
+  sync?: SyncFacts;
   /** how the run keeps the copy current now — its sync, when it was last synced — the sync's one derivation (src/duck/sync.ts KeptCurrent): absent for a
    *  table the sync does not hold, and from a run before it was said */
   kept?: KeptCurrent;
@@ -67,6 +76,9 @@ export interface RunState {
     name: string | null;
     /** the sources file the run copies from, absolute */
     file: string | null;
+    /** the same, relative to the project's root (src/cli/sources.ts shownPath): what mason status and the web page show,
+     *  which never shows an absolute path; absent from a run before it was said */
+    shownFile?: string | null;
     /** every table's sync unless its entry says its own: the file's top `sync:` (`written`), else the default, off */
     sync?: { default: string; written: boolean };
     /** replication mode: its slot and publication (`owned`: Mason's own; else named, only read) */
@@ -76,10 +88,27 @@ export interface RunState {
   /** the project folder's fingerprint (src/lib/project-files.ts projectFingerprint) */
   project: string | null;
   tables: TableState[];
+  /** where a tool connects (src/cli/pg-url.ts postgresFacts): the URL's parts, the URL with `<user>:<password>` in the
+   *  credentials' place, and its psql line; a run from before it has none */
+  postgres?: PostgresLink & { shown: string; psql: string };
+  /** the copies in all (src/cli/readiness.ts syncTotals); a run from before it has none */
+  totals?: SyncTotals;
   /** the run's copy: its file */
-  engine: { name: "duckdb"; file: string; bytes: number | null };
+  engine: { file: string; bytes: number | null;
+    /** the days the request log, the events and the usage samples are kept (MASON_HISTORY_DAYS); a run from before it has none */
+    keptDays?: number;
+    /** the run's version, when it started (ISO), and how long it has been up; a run from before them has none */
+    version?: string; startedAt?: string; uptimeSeconds?: number;
+    /** its supervisor's restarts (src/cli/supervise.ts restartsFact): how many, and the last one */
+    restarts?: RestartsFact };
   /** replication mode: where the stream is, its lag, what it applied (src/duck/sync.ts streamStatus) */
   stream?: StreamStatus;
+  /** the disk under the copy (src/duck/sync.ts diskStatus): free where its file is, the file, what the copies running
+   *  are projected to add; a run from before it has none */
+  disk?: { path: string; freeBytes: number | null; copyBytes: number | null; projectedBytes: number | null; error?: string };
+  /** the Postgres API's sessions logged in now, by user and client (src/api/postgres/server.ts openSessions); a run from
+   *  before it has none */
+  sessions?: SessionsOpen;
   /** the JSON paths stored as columns of the copies (src/duck/kept.ts): a run from before them has none */
   jsonPaths?: KeptPathStatus[];
   /** what mason wait waits on (src/cli/readiness.ts), said by the run: a run from before it has none */
@@ -99,8 +128,9 @@ async function runOr(spec: CommandSpec & { needs: "run" }, json: boolean): Promi
   return w !== null && "run" in w ? w.run : null;
 }
 
+/** The run's state with each table's columns (`?columns=1`: `mason status --json` carries them; the page polls it lean). */
 export async function readState(run: DevRun): Promise<RunState> {
-  const r = await callRun(run, "GET", "/api/state");
+  const r = await callRun(run, "GET", "/api/state?columns=1");
   if (r.status !== 200) throw new RunUnreachable(String(r.body.error ?? `HTTP ${r.status}`));
   return r.body as unknown as RunState;
 }
@@ -120,7 +150,7 @@ const bullets = (xs: readonly string[]): string => xs.map((x) => `  - ${x.split(
 const firstLine = (s: string): string => s.split("\n")[0]!.trim();
 
 /** A table as the commands name it: `orders` (in public), or `schema.table` — never a third part (tableNameProblem). */
-export function findTable<T extends CatalogTable>(tables: readonly T[], name: string): T | Failure {
+export function findTable<T extends Omit<CatalogTable, "columns">>(tables: readonly T[], name: string): T | Failure {
   const malformed = tableNameProblem(name, tables.map((t) => t.table));
   if (malformed !== null) return { message: malformed, code: "usage" };
   const exact = tables.find((t) => t.table === name) ?? tables.find((t) => t.table === `public.${name}`);
@@ -142,7 +172,7 @@ export const READY_STEPS: readonly NextStep[] = [
 
 /** What to run next over a database's tables: a table's columns, then adding it — named after a real table not yet added.
  *  `from: "tables"` is mason tables itself asking: it never points at itself. */
-export function addSteps(tables: readonly CatalogTable[], from: "tables" | null = null): NextStep[] {
+export function addSteps(tables: ReadonlyArray<Omit<CatalogTable, "columns">>, from: "tables" | null = null): NextStep[] {
   const one = tables.find((t) => !t.added && t.reason === null);
   if (!one) return [...READY_STEPS];
   const name = tableArg(one.table);
@@ -156,7 +186,7 @@ export function addSteps(tables: readonly CatalogTable[], from: "tables" | null 
 
 // ------------------------------------------------------------------ readiness (mason wait, mason status): src/cli/readiness.ts
 
-export { copyingText, copyProgress, duration, readiness, type Readiness };
+export { copyingText, copyProgress, duration, msText, readiness, readinessWord, type Readiness };
 
 /** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work
  *  (a table whose sync is off is copied as it asked: green). */
@@ -227,7 +257,7 @@ export function keptAge(t: Pick<TableState, "table" | "kept">, now: number = Dat
 }
 
 /** A span of seconds as the stream's lines say it: `0.3 s` under ten seconds, then as a wait reads (`duration`). */
-const spanText = (seconds: number): string => seconds < 10 ? `${Math.max(0, seconds).toFixed(1)} s` : duration(seconds);
+export const spanText = (seconds: number): string => seconds < 10 ? `${Math.max(0, seconds).toFixed(1)} s` : duration(seconds);
 
 /**
  * WHERE THE STREAM IS, a thing a line (the first replication run on a server showed nothing of it in 35
@@ -247,6 +277,7 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
     ? `the database is at ${st.database.lsn}: ${n(st.lag.bytes ?? 0)} bytes behind (read ${spanText(since(st.database.at))} ago)`
     : `the database's position could not be read: ${st.database.error.split("\n")[0]}`;
   rows.push(["position", `${st.position} · ${db}`]);
+  rows.push(["slot", slotText(st.slotWal, since)]);
   rows.push(["last change", st.lastBatch === null ? "none applied this run"
     : `committed ${spanText(since(st.lastBatch.committedAt))} ago, applied ${spanText((Date.parse(st.lastBatch.appliedAt) - Date.parse(st.lastBatch.committedAt)) / 1000)} after its commit`]);
   const total = (t: StreamStatus["tables"][number]): number => t.applied.inserts + t.applied.updates + t.applied.deletes + t.applied.truncates;
@@ -265,14 +296,32 @@ export function streamLines(st: StreamStatus, now = Date.now()): string[] {
   return rows.map(([k, v]) => `${k.padEnd(w)}  ${v}`);
 }
 
+/**
+ * THE WAL THE SLOT HOLDS ON THE DATABASE, in a line (`StreamStatus.slotWal`): how much, Postgres's status of it, and the cap —
+ * or, with `max_slot_wal_keep_size` unset, that nothing caps it: while nothing reads the slot it holds WAL for ever, until
+ * the database's disk fills (CLAUDE.md "Hard-won gotchas"). A read that failed is said, never a 0.
+ */
+export function slotText(w: StreamStatus["slotWal"], since: (iso: string) => number): string {
+  if ("error" in w) return `the WAL it holds could not be read: ${w.error.split("\n")[0]}`;
+  const read = `(read ${spanText(since(w.at))} ago)`;
+  if (w.walStatus === "lost") return `lost: Postgres invalidated it (it held more WAL than max_slot_wal_keep_size), so Mason makes it again and catches the copies up by one poll ${read}`;
+  const cap = w.safeWalSizeBytes === null
+    ? "max_slot_wal_keep_size is unset, so nothing caps it: while nothing reads the slot it holds WAL for ever, until the database's disk fills (set max_slot_wal_keep_size on the database)"
+    : w.safeWalSizeBytes <= 0 ? "past max_slot_wal_keep_size: Postgres invalidates it at its next checkpoint, and Mason makes it again"
+    : `${fileSize(w.safeWalSizeBytes)} more before Postgres invalidates it (max_slot_wal_keep_size)`;
+  return `holds ${fileSize(w.walHeldBytes)} of the database's WAL${w.walStatus === null ? "" : ` (${w.walStatus})`} · ${cap} ${read}`;
+}
+
 // ------------------------------------------------------------------ mason status
 
 const STATUS_USAGE = `usage: mason status [--json]
 
   Status: running, not running, or hung — then this project's facts, one a line: its folder, its database and how
-  its changes are read, the run and its copy's file, the Postgres API and how it listens. Then each added table as
-  mason wait shows it, with how it is kept current and how old its copy is (sync: off, last synced 3 days ago;
-  polled every 30s, last 4 s ago); the statements the Postgres API answered slowly in the last day; and the ones it refused or
+  its changes are read, the run and its copy's file and the copies in all (copied, rows, the last sync), the Postgres API
+  and how it listens. Then each added table as mason wait shows it, with how it is kept current and how old its copy is
+  (sync: off, last synced 3 days ago; polled every 30s, last 4 s ago); the sync's latest failures (mason logs --events
+  lists every event) and the latest statements refused, failed or cancelled (mason logs --requests --failed); the Postgres API's statements of the last day and the last week (each outcome, the completed
+  ones' average, p50 and p95 time, the rows and bytes sent); the ones it answered slowly in the last day; and the ones it refused or
   failed, each with the reason (mason logs --requests lists every one). With Mason stopped, the same rows say "not
   running", how the last run ended, and the tables are the ones the sources file names. Hung is a run that is alive and does
   not answer its commands (a statement may be holding its main thread): the same rows, and mason stop ends it (exit 1).
@@ -280,14 +329,32 @@ const STATUS_USAGE = `usage: mason status [--json]
     mason status
     mason status --json
 
-  --json   as data: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), listener:
+  --json   as data: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), shown (the URL with
+           <user>:<password> in the credentials' place), psql (its psql line), listener:
            { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
-           source's: its sources file's), file (the sources file), url, database, remote, version, standby, changes,
+           source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
            replication, demo (the demo database this run hosts), sync: { default (every table's sync unless its entry
            says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
-           bytes, key, added, addedColumns, copy, error, kept, … }], engine: { file, bytes, restarts (each time its supervisor
-           started the run again: { at, reason, upSeconds }) }, slowQueries, refusedQueries, refusedTotal (how many in
-           all), readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }.
+           bytes, key, added, addedColumns, copy, error, kept, sync: { state (synced, syncing, failed, waiting), syncedAt (when
+           the copy was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
+           ageSeconds (how old the copy is now) }, … }], totals: { added, copied, failed, rows (the copies' rows),
+           syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_HISTORY_DAYS), version (the run's), startedAt,
+           uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
+           or null }, or { error }) }, disk: { path (where the copy's file is), freeBytes, copyBytes (the file),
+           projectedBytes (what the copies running are projected to add; null: none, or too early to say), error },
+           sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
+           application_name), open, running }] }, queries: { keptDays, day, week } (the last day's and the last 7
+           days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
+           failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
+           when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all), unsupported: [{ gap
+           (its entry of docs/SQL-SUPPORT.md), title (what it is; null for an entry this Mason no longer has), runs
+           (the statements it refused in the last day), users, clients (application_name), last, example (the latest,
+           cut at 1,000 characters) }] (the most refused first: GET /api/unsupported) or { error },
+           recentErrors: { sync: [{ at, kind, failed, table, message }] (the latest failures of the sync and restarts,
+           newest last: mason logs --events), error (why they could not be read, or null), queries: [{ requestId,
+           startedAt, outcome, sqlstate, message, query, … }] (the latest statements refused, failed or cancelled, newest
+           last, as mason logs --requests --json shows each: mason logs --requests --failed), queriesError (or null) },
+           readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }.
            Each table's kept is how its copy is kept current now (absent for a table the sync does not hold):
            { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
            else off), syncedAt (its last copy or poll), nextAt (when its next poll is due; null: off, or not polled
@@ -298,7 +365,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            notRunning (why the stream is not running, null when it is) }; with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
            { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
-           exit 1. In replication mode stream: { slot, publication, running, failure, position,
+           exit 1. In replication mode stream: { slot, slotWal: { walHeldBytes (the WAL the slot holds on the
+           database), walStatus (reserved, extended, unreserved, lost), safeWalSizeBytes (the WAL left before Postgres
+           invalidates it; null: max_slot_wal_keep_size unset, nothing caps it), at } or { error }, publication, running, failure, position,
            applied, database: { lsn, at } or { error }, lag: { bytes, seconds }, lastBatch: { appliedAt, committedAt },
            tables: [{ table, state (streamed, catching-up, waiting, left-out), why, catchUp: { phase (queued, polling,
            applying), from, startedAt, held, retryAt }, applied: { inserts, updates, deletes, truncates } }] }.
@@ -328,10 +397,11 @@ const STATUS_USAGE = `usage: mason status [--json]
 export const STATUS: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "status",
-  summary: "what Mason is doing: the database, each table's copy, the Postgres API, the slow and refused statements",
+  summary: "what Mason is doing: the database, each table's copy, the Postgres API, its statements and errors",
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
-  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "engine", "stream", "jsonPaths", "slowQueries", "refusedQueries", "refusedTotal", "readiness", "ui",
+  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui",
     "roles", "lastRun", "lastStop", "hung", "next"],
 };
 
@@ -357,26 +427,47 @@ export async function status(argv: string[]): Promise<number> {
     const refusedReply = await callRun(run, "GET", "/api/refused");
     const refused = refusedReply.status === 200 ? refusedReply.body.refused as RefusedQuery[] : [];
     const refusedTotal = typeof refusedReply.body.total === "number" ? refusedReply.body.total : null;
+    // the same refusals grouped by the unsupported SQL they used (src/duck/gaps.ts): what to rewrite
+    const unsupportedReply = await callRun(run, "GET", `/api/unsupported?limit=${STATUS_UNSUPPORTED}`);
+    const unsupported: UnsupportedSql[] | { error: string } = unsupportedReply.status === 200 ? unsupportedReply.body.unsupported as UnsupportedSql[]
+      : { error: String(unsupportedReply.body.error ?? `the run answered ${unsupportedReply.status}`) };
+    // the sync's latest failures (src/duck/events.ts), and the run's restarts among them
+    const eventsReply = await callRun(run, "GET", `/api/events?failed=1&limit=${RECENT_ERRORS}`);
+    // and the latest statements refused, failed or cancelled: the request log's own page, the shape mason logs --requests --json prints
+    const failedReply = await callRun(run, "GET", `/api/requests?failed=1&limit=${RECENT_ERRORS}`);
+    const recentErrors: RecentErrors = {
+      sync: eventsReply.status === 200 ? eventsReply.body.events as SyncEvent[] : [],
+      error: eventsReply.status === 200 ? null : String(eventsReply.body.error ?? `the run answered ${eventsReply.status}`),
+      queries: failedReply.status === 200 ? failedReply.body.requests as LedgerRequest[] : [],
+      queriesError: failedReply.status === 200 ? null : String(failedReply.body.error ?? `the run answered ${failedReply.status}`),
+    };
+    // the last day's and week's statements (src/duck/requests.ts summary): asked here, never with the state
+    const queriesReply = await callRun(run, "GET", "/api/queries");
+    const queries: QuerySummary | { error: string } = queriesReply.status === 200 ? queriesReply.body.queries as QuerySummary
+      : { error: String(queriesReply.body.error ?? `the run answered ${queriesReply.status}`) };
     const picked = s.tables.filter((t) => t.added);
     // what to run next, the same for a person and under --json
     const next: NextStep[] = !picked.length ? addSteps(s.tables)
       : r.ready ? [...READY_STEPS]
       : r.failed.length ? [["mason logs", "the detail of each failure"], ["mason wait", "each failure, with the way out"]]
       : [["mason wait", "until it is done"]];
-    // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
-    const restarts = restartsOf(run.home);
     if (json) {
-      out(jsonText(STATUS, { running: true, pid: run.pid, postgres: { ...postgresLink(run.postgresUrl), listener: run.postgresListener },
-        ...s, engine: { ...s.engine, restarts }, slowQueries: slow, refusedQueries: refused, refusedTotal, readiness: r }, next));
+      out(jsonText(STATUS, { running: true, pid: run.pid,
+        ...s, postgres: { ...postgresFacts(run.postgresUrl), listener: run.postgresListener }, queries, slowQueries: slow, refusedQueries: refused, refusedTotal, unsupported, recentErrors, readiness: r }, next));
       return 0;
     }
     const rows: Array<[string, string]> = [
       ["Project", `${run.name}, files in ${s.folder ?? "(none chosen)"}`],
       ...sourceRows(s),
-      ["Mason", `${version()}, pid ${run.pid} · one process`],
+      masonRow(s.engine, run.pid),
       ["Copy", `${s.engine.file}${s.engine.bytes === null ? "" : ` · ${fileSize(s.engine.bytes)}`}`],
-      ...restartsRows(restarts),
+      ...diskRows(s.disk),
+      // the copies in all (src/cli/readiness.ts syncTotals): a run from before them has none
+      ...(s.totals ? [["Copies", totalsText(s.totals)] as [string, string]] : []),
+      // the times its supervisor started it again (src/cli/supervise.ts): a run that crashed says so, never only in a log
+      ...restartsRows(s.engine.restarts),
       ["Postgres API", `${withPlaceholders(run.postgresUrl)}  (mason user add <name> makes a user)`],
+      ...sessionsRows(s.sessions),
       // what it serves: its address, TLS or plain (src/cli/pg-tls.ts)
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
@@ -399,13 +490,19 @@ export async function status(argv: string[]): Promise<number> {
     }
     out(st.bold(`Tables (${picked.length} of ${s.tables.length} added):`));
     for (const l of tableLines(s)) out(`  ${paintBar(l, st)}`);
+    for (const l of syncErrorLines(recentErrors, st)) out(l);
+    for (const l of queryErrorLines(recentErrors, st)) out(l);
     for (const l of jsonPathLines(s.jsonPaths ?? [], st)) out(l);
+    for (const l of queryLines(queries, st)) out(l);
     for (const l of slowLines(slowReply.status === 200 ? slow : { error: String(slowReply.body.error ?? slowReply.status) }, st)) out(l);
     for (const l of refusedLines(refusedReply.status === 200 ? { refused, total: refusedTotal } : { error: String(refusedReply.body.error ?? refusedReply.status) }, st)) out(l);
+    for (const l of unsupportedLines(unsupported, st)) out(l);
     out("");
-    if (r.ready) out(withEnd(st.green("Ready: every added table is copied and served."), { next }));
-    else if (r.failed.length) out(withEnd(`${st.red("Failed:")}\n${bullets(r.failed)}`, { next }));
-    else out(withEnd(`Under way:\n${r.waiting.map((x) => `  - ${x}`).join("\n")}`, { next }));
+    // the word the web page's Status says too (readinessWord)
+    const word = readinessWord(r);
+    if (r.ready) out(withEnd(st.green(`${word}: every added table is copied and served.`), { next }));
+    else if (r.failed.length) out(withEnd(`${st.red(`${word}:`)}\n${bullets(r.failed)}`, { next }));
+    else out(withEnd(`${word}:\n${r.waiting.map((x) => `  - ${x}`).join("\n")}`, { next }));
     return 0;
   });
 }
@@ -416,14 +513,15 @@ export async function status(argv: string[]): Promise<number> {
  */
 export function sourceRows(s: Pick<RunState, "source">): Array<[string, string]> {
   return [
-    ...(s.source.file ? [["Source", `${s.source.file} (the tables it names are added)`] as [string, string]] : []),
+    ...(s.source.file ? [["Source", `${s.source.shownFile ?? s.source.file} (the tables it names are added)`] as [string, string]] : []),
     ["Database", s.source.demo ? `the demo database Mason hosts (${s.source.url} · Postgres ${s.source.version})`
       : `${s.source.url} · Postgres ${s.source.version}${s.source.standby ? " · a read replica" : ""}`],
-    ["Changes", `each table as its sync: says${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
-      (s.source.replication ? `sync: replication tables by logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication} ` +
-        `(${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others polled with SELECTs (xmin)`
-        : s.source.demo ? "polled with SELECTs (xmin): the demo database is read by polling only"
-        : "polled with SELECTs (xmin); sync: replication on an entry streams that table from the change log instead")],
+    // in a web developer's words first (each table as its sync: says, streamed as they happen); the mechanism an operator needs in parentheses
+    ["Changes", `each table as its sync: says${s.source.replication ? "" : " (a SELECT of its changed rows)"}${s.source.sync ? ` · sync: ${s.source.sync.default} ${s.source.sync.written ? "for every table without its own" : "(the default: the file writes none)"}` : ""} · ` +
+      (s.source.replication ? `sync: replication tables streamed as they happen (logical replication: slot ${s.source.replication.slot}, publication ${s.source.replication.publication}, ` +
+          `${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others by a SELECT of their changed rows`
+        : s.source.demo ? "the demo database is checked this way only"
+        : "sync: replication on an entry streams that table as it happens instead")],
   ];
 }
 
@@ -453,13 +551,68 @@ export function jsonPathLines(paths: readonly KeptPathStatus[], st: Style): stri
   return lines;
 }
 
+/** The copies in all, as mason status's `Copies` row says them: `3 of 3 added copied, 1,234 rows, the last synced 5 s ago`. */
+export function totalsText(t: SyncTotals, now = Date.now()): string {
+  const last = t.syncedAt === null ? "" : `, the last synced ${duration((now - Date.parse(t.syncedAt)) / 1000)} ago`;
+  return `${n(t.copied)} of ${n(t.added)} added copied, ${n(t.rows)} row${t.rows === 1 ? "" : "s"}${t.failed ? `, ${n(t.failed)} failed` : ""}${last}`;
+}
+
+/** How many of the latest sync failures and failed statements mason status shows (`recentErrors`); mason logs --events and --requests --failed list each. */
+export const RECENT_ERRORS = 5;
+
+/**
+ * mason status's RECENT ERRORS: the latest failures of the sync (`sync`, src/duck/events.ts, through `/api/events?failed=1`)
+ * and the latest statements the Postgres API refused, failed or cancelled (`queries`, the request log's page through
+ * `/api/requests?failed=1`, as `mason logs --requests --failed --json` prints them), each with why it could not be read
+ * (`error`, `queriesError`) when it could not.
+ */
+export interface RecentErrors { sync: SyncEvent[]; error: string | null; queries: LedgerRequest[]; queriesError: string | null }
+
+/** One event of the sync on one line (src/duck/events.ts): when, what (a failure in red), its table, its reason's first line. */
+export function eventLine(e: SyncEvent, st: Style): string {
+  return `${e.at.slice(0, 19).replace("T", " ")}  ${(e.failed ? st.red : st.green)(e.kind.padEnd(18))}  ${e.table ?? "(the sync)"}  ${firstLine(e.message)}`;
+}
+
+/** mason status's sync errors: the latest few, a line each, newest last; none, no section. */
+export function syncErrorLines(r: RecentErrors, st: Style): string[] {
+  if (r.error !== null) return [`\n${st.bold("Sync errors")}: could not read them (${firstLine(r.error)}; mason logs has the detail)`];
+  if (!r.sync.length) return [];
+  return [`\n${st.bold("Sync errors")} ${st.dim("(the latest, newest last; mason logs --events lists every event)")}:`, ...r.sync.map((e) => `  ${eventLine(e, st)}`)];
+}
+
+/** mason status's statement errors: the latest few refused, failed or cancelled, a line each (`requestLine`), newest last; none, no section. */
+export function queryErrorLines(r: Pick<RecentErrors, "queries" | "queriesError">, st: Style): string[] {
+  if (r.queriesError !== null) return [`\n${st.bold("Query errors")}: could not read them (${firstLine(r.queriesError)}; mason logs has the detail)`];
+  if (!r.queries.length) return [];
+  return [`\n${st.bold("Query errors")} ${st.dim("(the latest refused, failed or cancelled, newest last; mason logs --requests --failed lists each)")}:`, ...r.queries.map((q) => `  ${requestLine(q, st)}`)];
+}
+
+/** Bytes as a person reads them: B, KiB, MiB, GiB (the web page's statements say the same, src/web/shared.js). */
+export function bytesText(b: number): string { return b < 1024 ? `${n(b)} B` : fileSize(b); }
+
+/**
+ * mason status's queries (src/duck/requests.ts summary): the last day's and the last week's statements, a line each —
+ * how many, each outcome, the completed ones' times, the rows and bytes sent — and, when the request log keeps fewer
+ * days than the week, that the week is only what it keeps.
+ */
+export function queryLines(q: QuerySummary | { error: string }, st: Style): string[] {
+  if ("error" in q) return [`\n${st.bold("Queries")}: could not read them (${firstLine(q.error)}; mason logs has the detail)`];
+  const line = (label: string, w: QueryWindow): string => {
+    const counts = `${n(w.statements)} statement${w.statements === 1 ? "" : "s"}: ${n(w.completed)} completed, ${n(w.refused)} refused, ${n(w.failed)} failed, ${n(w.cancelled)} cancelled`;
+    const times = w.durationMs === null ? "" : ` · ${msText(w.durationMs.avg)} / ${msText(w.durationMs.p50)} / ${msText(w.durationMs.p95)}`;
+    const short = w.covered < w.days ? st.dim(` (the request log keeps ${w.covered} day${w.covered === 1 ? "" : "s"}: MASON_HISTORY_DAYS)`) : "";
+    return `  ${label.padEnd(10)}  ${counts}${times} · ${n(w.rows)} rows, ${bytesText(w.bytesSent)} sent${short}`;
+  };
+  return [`\n${st.bold("Queries")} ${st.dim("(the completed ones' time: average / p50 / p95; mason logs --requests lists each)")}:`, line("last day", q.day), line("last week", q.week)];
+}
+
 /** mason status's slow statements (src/duck/requests.ts slow), each on one line with its times. */
 export function slowLines(slow: readonly SlowQuery[] | { error: string }, st: Style): string[] {
   if (!Array.isArray(slow)) return [`\n${st.bold("Slow queries")}: could not read them (${firstLine((slow as { error: string }).error)}; mason logs has the detail)`];
   if (!slow.length) return [];
   const lines = [`\n${st.bold("Slow queries")} ${st.dim(`(the last day, still ${(SLOW_MS / 1000).toLocaleString("en-US")} s or more; slowest first)`)}:`];
   for (const q of slow as readonly SlowQuery[]) {
-    const times = `${n(q.latestMs)} ms last time (${q.runs} run${q.runs === 1 ? "" : "s"}, median ${n(q.medianMs)} ms)`;
+    const times = `${msText(q.latestMs)} last time (${q.runs} run${q.runs === 1 ? "" : "s"}, median ${msText(q.medianMs)})`;
     lines.push(`  ${times}, last ${q.last.slice(0, 16).replace("T", " ")} UTC`, `    ${oneLine(q.payload)}`);
   }
   return lines;
@@ -480,23 +633,66 @@ export function refusedLines(r: { refused: readonly RefusedQuery[]; total: numbe
   return lines;
 }
 
-/** A file's size, as a person reads one */
-function fileSize(b: number): string {
+/** how many entries of the unsupported SQL mason status shows (and its --json carries) */
+const STATUS_UNSUPPORTED = 5;
+
+/**
+ * `Unsupported SQL` in mason status: the last day's refused statements grouped by the registry entry that refused them
+ * (src/duck/requests.ts unsupported), the most refused first — how many, what they used, who sent them, and the latest
+ * — so a person knows what to rewrite; docs/SQL-SUPPORT.md has each entry's way out. None: no section.
+ */
+export function unsupportedLines(u: readonly UnsupportedSql[] | { error: string }, st: Style): string[] {
+  if ("error" in u) return [`\n${st.bold("Unsupported SQL")}: could not read it (${firstLine(u.error)}; mason logs has the detail)`];
+  if (!u.length) return [];
+  const lines = [`\n${st.bold("Unsupported SQL")} ${st.dim("(the last day's refused statements by what they used, the most first)")}:`];
+  for (const g of u) {
+    const title = g.title ?? "SQL this Mason no longer lists";
+    const who = [...(g.users.length ? [`as ${g.users.join(", ")}`] : []), ...(g.clients.length ? [`from ${g.clients.join(", ")}`] : [])];
+    lines.push(`  ${title}: ${n(g.runs)} statement${g.runs === 1 ? "" : "s"}${who.length ? ` ${who.join(" ")}` : ""}`);
+    lines.push(`    last ${g.last.slice(0, 16).replace("T", " ")} — ${oneLine(g.example)}`);
+    lines.push(`    How to rewrite it: see docs/SQL-SUPPORT.md › ${title}`);
+  }
+  return lines;
+}
+
+/** A file's size, as a person reads one (mason status's copy, mason usage's) */
+export function fileSize(b: number): string {
   return b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GiB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MiB` : `${(b / 1024).toFixed(1)} KiB`;
 }
 
-/** The restarts recorded for a run, or why they could not be read (a file nobody can read is said, never taken as none). */
-function restartsOf(home: string): Restart[] | { error: string } {
-  try { return readRestarts(home); }
-  catch (e) { return { error: `${path.join(home, "restarts.json")} could not be read: ${(e as Error).message}` }; }
+/** `Mason` in mason status: the run's own version (a CLI of another version says the run's), its pid, and how long it
+ *  has been up (a run from before it: the CLI's version, no uptime) */
+export function masonRow(e: Pick<RunState["engine"], "version" | "startedAt" | "uptimeSeconds">, pid: number): [string, string] {
+  return ["Mason", `${e.version ?? version()}, pid ${pid} · one process${e.startedAt ? ` · up ${spanText(e.uptimeSeconds ?? 0)}, since ${e.startedAt.slice(0, 19).replace("T", " ")} UTC` : ""}`];
 }
 
-/** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) */
-function restartsRows(r: Restart[] | { error: string }): Array<[string, string]> {
-  if (!Array.isArray(r)) return [["Restarts", r.error]];
-  const last = r[r.length - 1];
-  if (last === undefined) return [];
-  return [["Restarts", `${r.length}, the last ${ago(last.at)}: ${last.reason}, after ${last.upSeconds} s up (mason logs --start has its last lines)`]];
+/** `Sessions` in mason status: how many are logged in to the Postgres API, how many run a statement, and by whom (the
+ *  three with the most, then how many others) */
+export function sessionsRows(s: SessionsOpen | undefined): Array<[string, string]> {
+  if (s === undefined) return [];
+  if (s.open === 0) return [["Sessions", "none open"]];
+  const running = s.byClient.reduce((n, c) => n + c.running, 0);
+  const who = s.byClient.slice(0, 3).map((c) => `${c.open} ${c.user === "" ? "by a token" : `as ${c.user}`}${c.client === "" ? "" : ` (${c.client})`}`);
+  const others = s.byClient.length - who.length;
+  return [["Sessions", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
+}
+
+/** `Disk` in mason status: the bytes free where the copy is, and what the copies running are projected to add (none: no
+ *  row, for a run from before it) */
+export function diskRows(d: RunState["disk"]): Array<[string, string]> {
+  if (d === undefined) return [];
+  const adds = d.projectedBytes === null ? "" : ` · the copies running are projected to add about ${fileSize(d.projectedBytes)} more`;
+  if (d.freeBytes === null) return [["Disk", `${d.error ?? "the free space could not be read"}${adds}`]];
+  return [["Disk", `${fileSize(d.freeBytes)} free in ${d.path}${adds}${d.projectedBytes !== null && d.projectedBytes > d.freeBytes ? " — more than is free: the copy stops before the disk fills" : ""}`]];
+}
+
+/** `Restarts` in mason status: how many times the run was started again, and the last one's reason (none: no row) —
+ *  the run's own `engine.restarts` while it is up, the same fact read from the file while it is not (`restartsFact`) */
+export function restartsRows(r: RestartsFact | undefined): Array<[string, string]> {
+  if (r === undefined) return [];
+  if ("error" in r) return [["Restarts", r.error]];
+  if (r.last === null) return [];
+  return [["Restarts", `${r.count}, the last ${ago(r.last.at)}: ${r.last.why}, after ${r.last.upSeconds} s up (mason logs --start has its last lines)`]];
 }
 
 /**
@@ -514,7 +710,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   const duckFile = path.join(project.dir, DUCK_FILE);
   // the copy's file, when a run has made one: its size says what the next mason start resumes with
   const bytes = fs.existsSync(duckFile) ? fs.statSync(duckFile).size : null;
-  const restarts = restartsOf(project.dir);
+  const restarts = restartsFact(project.dir);
   const lastStop = project.config.lastStop ?? null;
   const next: readonly NextStep[] = hung === null ? ("message" in src && src.next?.length ? src.next : [["mason start", "start Mason for this project: what it copied is kept, and polled again"]])
     : hung.problem.next ?? [["mason stop", "end it"], ["mason logs", "what it was doing"]];
@@ -523,7 +719,7 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
     out(jsonText(STATUS, { running: false, ...(hung === null ? {} : { hung: { pid: hung.run.pid, problem: hung.problem.problem, why: hung.problem.why } }),
       project: { name: project.config.name, folder: project.folder },
       source: { name: "message" in src ? null : src.name, file: "message" in src ? null : src.file, url: database, error: "message" in src ? errorJson(src) : null },
-      engine: { name: "duckdb", file: duckFile, bytes, restarts }, tables: tables.map((table) => ({ table })),
+      engine: { file: duckFile, bytes, restarts }, tables: tables.map((table) => ({ table })),
       lastRun: project.config.lastRun ?? null, lastStop }, next));
     return hung === null ? 0 : 1;
   }
@@ -549,8 +745,9 @@ function stoppedStatus(project: Project, json: boolean, hung: { run: DevRun; pro
   return hung === null ? 0 : 1;
 }
 
-function ago(iso: string): string {
-  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+/** How long ago a time was, as mason status says it (`12s ago`, `5 min ago`, `3 h ago`; the web page's `agoText`, held equal) */
+export function ago(iso: string, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
   return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
 }
 
@@ -865,7 +1062,7 @@ export async function add(argv: string[]): Promise<number> {
 /** Where `mason add` adds a table: the database's tables as it names them, the sources file, the one edit, and what to
  *  run once `n` tables are added — the run (Mason up) or the file itself (Mason down). */
 interface AddWay {
-  tables: readonly CatalogTable[];
+  tables: ReadonlyArray<Omit<CatalogTable, "columns">>;
   file: string | null;
   pick: (table: string, columns: string[], key: string[] | null) => Promise<Edited<PickResult>>;
   /** what to run once `n` tables are added, `wereAdded` of them named by the file before */
@@ -928,7 +1125,7 @@ async function addTables(way: AddWay, specs: ReadonlyArray<{ table: string; colu
 }
 
 /** What `mason add` prints for a table added: its line (✔ …), then its notes under it (the web page says the same,
- *  src/web/app.js; tests/web-page.test.ts holds the two equal). `file` is the sources file as the reader is shown it. */
+ *  src/web/pages/tables.js; tests/web-page.test.ts holds the two equal). `file` is the sources file as the reader is shown it. */
 export function addedLines(b: PickResult, file: string): { line: string; notes: string[] } {
   const copies = b.columns === null ? (b.exclude.length ? `every column but ${b.exclude.join(", ")}` : "every column") : b.columns.join(", ");
   const s = b.skippedSecrets;
@@ -1132,39 +1329,78 @@ export async function wait(argv: string[]): Promise<number> {
 
 // ------------------------------------------------------------------ mason logs
 
-const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [--failed]] [--json]
+/** What the sync's events leave out, said where they are listed (mason logs --help, the page's Sync events, held equal
+ *  by tests/web-page.test.ts): a scheduled poll that succeeds is no event, so a person who synced reads where it is. */
+export const EVENTS_LEAVE_OUT = "A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).";
+
+const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>]] [--events [--failed]] [--running] [--json]
 
   The last lines of Mason's log: every copy, poll and statement it ran, warnings and errors with their reasons —
   running or not. With --requests, the run's request log instead: every statement a tool sent the
-  Postgres API that Mason answered, and every one it refused or failed, a line each, newest last — when, the outcome
-  and SQLSTATE, how long, the rows sent, the client's application_name (and the mason user's name), the statement and
-  the error's first line. It is kept MASON_REQUEST_LOG_DAYS days (default 7) in the run's copy, and read through the
-  running Mason.
+  Postgres API that Mason answered, and every one it refused, failed or cancelled, a line each, newest last — when, the
+  outcome and SQLSTATE, how long, the rows sent, the client's application_name (and the mason user's name), the
+  statement and the error's first line; the filters narrow it, and a page that has older rows ends with the line that
+  reads them (--before). With --events, the sync's events: each copy that failed or finished, each poll, catch-up or
+  stream that failed, the database out of reach, a table current again, each sync asked by hand (mason sync, the
+  page's Sync now) and what it did, and each restart of the run — a line each, newest last (a failure repeated word for
+  word is said once an hour). A scheduled poll that succeeds is not listed: the last one's result is each table's last
+  sync (mason status, the Tables page's Last sync). Both are kept MASON_HISTORY_DAYS days
+  (default 7) in the run's copy, and read through the running Mason. With --running, the statements running now
+  instead, one per session, each with its number (mason cancel <session> --statement <n> stops one).
 
     mason logs
     mason logs -f                 keep printing new lines as Mason works, until Ctrl-C
     mason logs -n 200 --start     what mason start printed: its steps, and the warnings and errors since
-    mason logs --requests --failed -n 20    the last 20 statements refused or failed
+    mason logs --requests --failed -n 20    the last 20 statements refused, failed or cancelled
+    mason logs --requests --since 2h --user metabase --outcome failed,cancelled
+    mason logs --requests --slow --search orders   the statements over orders that took a second or more
+    mason logs --events --failed  the sync's latest failures
+    mason logs --running          the statements running now, and their sessions
 
-  -n, --lines <n>  how many lines, or with --requests how many requests (default 40)
+  -n, --lines <n>  how many lines, or with --requests or --events how many of them (default 40; 1 to 10000 for each)
   -f, --follow     keep printing new lines until Ctrl-C
   --start          mason start's own terminal instead (its steps, then only the warnings and errors)
   --requests       the Postgres API's requests, from the run's request log (Mason must be running)
-  --failed         with --requests: only the refused and failed ones
-  --json           as data: { lines } (the log's), or with --requests { requests: [{ requestId, startedAt, session,
-                   applicationName, tokenName, user (the mason user), method, outcome (ok, refused, failed), sqlstate, message, detail, hint,
-                   rows, durationMs, query, queryTruncated }], keptDays }; next
+  --events         the sync's events and the run's restarts (Mason must be running)
+  --failed         with --requests: only the ones not answered (refused, failed or cancelled); with --events: only
+                   the failures
+  --outcome <o,…>  with --requests: only these outcomes — ok, refused (the statement's own fault), failed (Mason's or
+                   the machine's), cancelled (a cancel or a statement timeout, SQLSTATE 57014)
+  --since <time>   with --requests: started at or after it — an age (30m, 2h, 7d) or an ISO 8601 date or time with
+                   its zone (2026-10-28, 2026-10-28T09:00:00Z)
+  --until <time>   with --requests: started before it (as --since)
+  --user <name>    with --requests: the mason user's statements
+  --client <name>  with --requests: the statements of the client whose application_name it is
+  --slow           with --requests: only the ones that took ${(SLOW_MS / 1000).toLocaleString("en-US")} s or more (the slow ones mason status lists)
+  --search <text>  with --requests: only the statements whose text has it, in any case (at most ${MAX_SEARCH} characters)
+  --before <pos>   with --requests: the page before: the position a page answered with (its last Next line)
+  --running        the statements running now (Mason must be running)
+  --json           as data: { lines: [{ at, text }] } (the log's entries, oldest first; at is null for a line with no
+                   time); with --requests { requests: [{ requestId, startedAt, endedAt, session, applicationName,
+                   tokenName, user (the mason user), method, outcome (ok, refused, failed, cancelled), status
+                   (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
+                   bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
+                   or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
+                   catch_up_failed, stream_failed, source_unreachable, restart, copied, recovered, synced (a sync asked by hand)), failed, table
+                   (null: the whole sync), message }], keptDays }; with --running { running: [{ session, user,
+                   applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;
 
 export const LOGS: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "logs",
-  summary: "Mason's log: every copy, poll and statement (-f to follow it; --requests, every statement the Postgres API met)",
+  summary: "Mason's log (-f follows it); --requests: the Postgres API's statements; --events: the sync's; --running: running now",
   usage: LOGS_USAGE,
   options: { lines: { type: "string", short: "n" }, follow: { type: "boolean", short: "f" }, start: { type: "boolean" },
-    requests: { type: "boolean" }, failed: { type: "boolean" }, json: { type: "boolean" } },
-  json: ["lines", "requests", "keptDays", "next"],
+    requests: { type: "boolean" }, events: { type: "boolean" }, failed: { type: "boolean" }, outcome: { type: "string" }, since: { type: "string" },
+    until: { type: "string" }, user: { type: "string" }, client: { type: "string" }, slow: { type: "boolean" }, search: { type: "string" }, before: { type: "string" }, running: { type: "boolean" }, json: { type: "boolean" } },
+  json: ["lines", "requests", "events", "keptDays", "before", "running", "next"],
 };
+
+/** the request log's filters as mason logs spells them: -n, --since, … (src/cli/request-filter.ts names each so) */
+const flagOf = (k: FilterKey): string => k === "limit" ? "-n" : `--${k}`;
+/** the filters of --requests (every one but -n) */
+const FILTER_FLAGS = ["failed", "outcome", "since", "until", "user", "client", "slow", "search", "before"] as const;
 
 /**
  * One request of the run's ledger on one line (src/duck/requests.ts): when, the outcome and SQLSTATE, how long,
@@ -1175,45 +1411,152 @@ export function requestLine(r: LedgerRequest, st: Style): string {
   const paint = r.outcome === "ok" ? st.green : r.outcome === "failed" ? st.red : st.yellow;
   const rows = r.rows === null ? "" : `${n(r.rows)} row${r.rows === 1 ? "" : "s"}`;
   const who = `${r.applicationName || "(no application_name)"}${r.tokenName ? ` (token ${r.tokenName})` : ""}${r.user ? ` (user ${r.user})` : ""}`;
-  return `${r.startedAt.slice(0, 19).replace("T", " ")}  ${paint(word.padEnd(13))}  ${`${n(r.durationMs)} ms`.padStart(9)}  ${rows.padStart(11)}  ${who}  ` +
+  return `${r.startedAt.slice(0, 19).replace("T", " ")}  ${paint(word.padEnd(15))}  ${msText(r.durationMs).padStart(9)}  ${rows.padStart(11)}  ${who}  ` +
     `${oneLine(r.query, 120) || "(no statement)"}${r.message ? ` — ${firstLine(r.message)}` : ""}`;
 }
 
+/** One statement running now on one line (src/api/postgres/server.ts RunningStatement): its session, how long, who, what. */
+export function runningLine(r: RunningStatement): string {
+  const who = `${r.applicationName || "(no application_name)"}${r.user ? ` (user ${r.user})` : ""}`;
+  return `session ${String(r.session).padEnd(5)}  statement ${String(r.statement).padEnd(6)}  ${spanText(r.runningMs / 1000).padStart(8)}  ${`${n(r.rows)} row${r.rows === 1 ? "" : "s"} sent`.padStart(14)}  ${who}  ` +
+    `${oneLine(r.query, 120) || "(no statement)"}`;
+}
+
+/** The mason logs line that reads the same filters again, a page further back (`before`, the page's cursor). */
+function olderPage(q: RequestQuery, before: string): string {
+  const quote = (v: string): string => /^[\w.:,~+-]+$/.test(v) ? v : `'${v.replaceAll("'", "'\\''")}'`;
+  const parts = ["mason logs --requests", ...(q.limit !== DEFAULT_REQUEST_LIMIT ? [`-n ${q.limit}`] : [])];
+  if (q.failed === true) parts.push("--failed");
+  if (q.outcomes !== undefined) parts.push(`--outcome ${q.outcomes.join(",")}`);
+  for (const k of ["since", "until", "user", "client"] as const) { const v = q[k]; if (v !== undefined) parts.push(`--${k} ${quote(v)}`); }
+  if (q.minMs !== undefined) parts.push("--slow");
+  if (q.search !== undefined) parts.push(`--search ${quote(q.search)}`);
+  parts.push(`--before ${quote(before)}`);
+  return parts.join(" ");
+}
+
+/**
+ * WHAT THE REQUEST LOG DOES NOT LIST, said where a first statement is looked for (`mason logs --requests` with none, the
+ * Queries page; src/web/shared.js, held equal by the tests): a catalog read, a SET or a SHOW is the protocol's chatter —
+ * a BI tool sends hundreds as it connects — and is not recorded (src/api/postgres/server.ts `recordRequest`), so a
+ * `select 1` typed to test the connection is answered and never appears.
+ */
+export const UNLISTED_STATEMENTS = "A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed";
+
 /** mason logs --requests: the run's ledger through its command server (one process holds the copy's file) */
-async function requestLogs(limit: number, failedOnly: boolean, json: boolean): Promise<number> {
+async function requestLogs(q: RequestQuery, json: boolean): Promise<number> {
   const r0 = await theRun(process.cwd());
   if ("problem" in r0) return failed("logs", r0, { json });
   return guarded("logs", json, async () => {
-    const reply = await callRun(r0.run, "GET", `/api/requests?limit=${limit}${failedOnly ? "&failed=1" : ""}`);
-    if (reply.status !== 200) {
-      return failed("logs", { message: String(reply.body.error ?? `the run answered ${reply.status}`), code: reply.status === 409 ? "refused" : "failed",
-        next: [["mason status", "the slow and refused queries of the last day"], ["mason logs", "Mason's log"]] }, { json });
-    }
+    const reply = await callRun(r0.run, "GET", `/api/requests?${requestFilterParams(q).toString()}`);
+    if (reply.status !== 200) return failed("logs", runFailure(reply, [["mason status", "the slow and refused queries of the last day"], ["mason logs", "Mason's log"]]), { json });
     const requests = reply.body.requests as LedgerRequest[];
     const keptDays = Number(reply.body.keptDays);
-    const next: NextStep[] = failedOnly ? [["mason logs --requests", "every request, answered or not"], ["mason logs", "Mason's log, where each refusal is a line too"]]
-      : [["mason logs --requests --failed", "only the refused and failed ones"], ["mason status", "the slow and refused ones of the last day, grouped"]];
-    if (json) { out(jsonText(LOGS, { requests, keptDays }, next)); return 0; }
+    const before = typeof reply.body.before === "string" ? reply.body.before : null;
+    const filtered = q.failed === true || q.outcomes !== undefined || q.since !== undefined || q.until !== undefined || q.user !== undefined || q.client !== undefined ||
+      q.minMs !== undefined || q.search !== undefined;
+    const next: NextStep[] = [
+      ...(before !== null ? [[olderPage(q, before), "the page before this one"] as NextStep] : []),
+      ...(filtered ? [["mason logs --requests", "every request, answered or not"] as NextStep] : [["mason logs --requests --failed", "only the ones not answered"] as NextStep]),
+      ["mason status", "the last day's and week's statements, and the slow and refused ones grouped"],
+    ];
+    if (json) { out(jsonText(LOGS, { requests, keptDays, before }, next)); return 0; }
     const st = styleOut();
-    if (!requests.length) out(`No ${failedOnly ? "refused or failed request" : "request"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS).`);
+    if (!requests.length) out(`No ${filtered ? "request that passes the filters" : "request"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS).`);
     for (const r of requests) out(requestLine(r, st));
+    out(endText({ next, ...(!requests.length && !filtered ? { tips: [`${UNLISTED_STATEMENTS}.`] } : {}) }, st));
+    return 0;
+  });
+}
+
+/** mason logs --events: the sync's events and the run's restarts through its command server (src/duck/events.ts) */
+async function eventLogs(limit: number, failedOnly: boolean, json: boolean): Promise<number> {
+  const r0 = await theRun(process.cwd());
+  if ("problem" in r0) return failed("logs", r0, { json });
+  return guarded("logs", json, async () => {
+    const reply = await callRun(r0.run, "GET", `/api/events?limit=${limit}${failedOnly ? "&failed=1" : ""}`);
+    if (reply.status !== 200) {
+      return failed("logs", runFailure(reply, [["mason status", "each table's copy and its error now"], ["mason logs", "Mason's log, where each event is a line too"]]), { json });
+    }
+    const events = reply.body.events as SyncEvent[];
+    const keptDays = Number(reply.body.keptDays);
+    const next: NextStep[] = failedOnly ? [["mason logs --events", "every event, the copies finished and the tables current again too"], ["mason status", "each table's copy and its error now"]]
+      : [["mason logs --events --failed", "only the failures"], ["mason status", "each table's copy and its error now"]];
+    if (json) { out(jsonText(LOGS, { events, keptDays }, next)); return 0; }
+    const st = styleOut();
+    if (!events.length) out(`No ${failedOnly ? "sync failure" : "sync event"} in the last ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS).`);
+    for (const e of events) out(eventLine(e, st));
     out(endText({ next }, st));
     return 0;
   });
+}
+
+/** mason logs --running: the statements the listener runs now, through the run's command server */
+async function runningLogs(json: boolean): Promise<number> {
+  const r0 = await theRun(process.cwd());
+  if ("problem" in r0) return failed("logs", r0, { json });
+  return guarded("logs", json, async () => {
+    const reply = await callRun(r0.run, "GET", "/api/running");
+    if (reply.status !== 200) return failed("logs", runFailure(reply, [["mason logs", "Mason's log"]]), { json });
+    const running = reply.body.running as RunningStatement[];
+    const next: NextStep[] = running.length
+      ? [[`mason cancel ${running[0]!.session} --statement ${running[0]!.statement}`, "stop a session's statement, as a client's cancel does"], ["mason logs --requests", "the statements answered, refused and cancelled"]]
+      : [["mason logs --requests", "the statements answered, refused and cancelled"]];
+    if (json) { out(jsonText(LOGS, { running }, next)); return 0; }
+    const st = styleOut();
+    out(running.length ? st.bold(`Running now (${running.length}):`) : "No statement is running now.");
+    for (const r of running) out(`  ${runningLine(r)}`);
+    out(endText({ next }, st));
+    return 0;
+  });
+}
+
+/** A refusal the run answered, in the Failure shape it carries (`failure`, src/cli/run-server.ts sendFailure). */
+export function runFailure(reply: { status: number; body: Record<string, unknown> }, next: readonly NextStep[]): Failure {
+  const f = reply.body.failure as { code?: unknown; message?: unknown; why?: unknown; fix?: unknown } | undefined;
+  const code = typeof f?.code === "string" ? f.code : reply.status === 400 ? "usage" : reply.status === 404 ? "not_found" : reply.status === 409 ? "refused" : "failed";
+  return { message: typeof f?.message === "string" ? f.message : String(reply.body.error ?? `the run answered ${reply.status}`), code,
+    ...(typeof f?.why === "string" ? { why: f.why } : {}), ...(typeof f?.fix === "string" ? { fix: f.fix } : {}), next };
 }
 
 export async function logs(argv: string[]): Promise<number> {
   const f = parseCommand(LOGS, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
+  if (f.values.requests && f.values.events) return failed("logs", { message: "--requests and --events are two lists: ask for one", code: "usage", fix: "mason logs --requests, or mason logs --events" }, { json });
+  if (f.values.failed && !f.values.requests && !f.values.events) return failed("logs", { message: "--failed is a filter of --requests or --events", code: "usage", fix: "mason logs --requests --failed, or mason logs --events --failed" }, { json });
+  // the request log's own filters (--failed is --events' too)
+  const filter = FILTER_FLAGS.find((k) => k !== "failed" && f.values[k] !== undefined);
+  if (filter !== undefined && !f.values.requests) {
+    return failed("logs", { message: `--${filter} is a filter of --requests`, code: "usage", fix: `mason logs --requests --${filter} …` }, { json });
+  }
+  if (f.values.running && (f.values.requests || f.values.events || f.values.start || f.values.follow)) {
+    const other = f.values.requests ? "--requests" : f.values.events ? "--events" : f.values.start ? "--start" : "-f";
+    const whose = other === "--requests" ? "the request log's" : other === "--events" ? "the sync's events'" : "the log file's";
+    return failed("logs", { message: `--running lists the statements running now; ${other} is ${whose}`, code: "usage", fix: `mason logs --running, or mason logs ${other}` }, { json });
+  }
+  if (f.values.running && f.values.lines !== undefined) {
+    return failed("logs", { message: "--running lists every statement running now: -n (--lines) does not apply to it", code: "usage", fix: "mason logs --running" }, { json });
+  }
+  if (f.values.requests && (f.values.start || f.values.follow)) return failed("logs", { message: `--requests lists the request log; ${f.values.start ? "--start" : "-f"} is the log file's`, code: "usage", fix: "mason logs --requests, or mason logs " + (f.values.start ? "--start" : "-f") }, { json });
+  if (f.values.events && (f.values.start || f.values.follow)) return failed("logs", { message: `--events lists the sync's events; ${f.values.start ? "--start" : "-f"} is the log file's`, code: "usage", fix: "mason logs --events, or mason logs " + (f.values.start ? "--start" : "-f") }, { json });
+  if (json && f.values.follow) return failed("logs", { message: "-f prints lines as they come, and --json is one answer", code: "usage", fix: "mason logs --json, or mason logs -f" }, { json });
+  if (f.values.running) return runningLogs(json);
+  if (f.values.requests) {
+    // the filters, read as the run reads its query string (src/cli/request-filter.ts): a mistake is said here, exit 2
+    const text = (v: unknown): string | undefined => typeof v === "string" ? v : undefined;
+    const q = requestFilter({ limit: text(f.values.lines), failed: f.values.failed === true, outcome: text(f.values.outcome), since: text(f.values.since),
+      until: text(f.values.until), user: text(f.values.user), client: text(f.values.client),
+      slow: f.values.slow === true, search: text(f.values.search), before: text(f.values.before) }, Date.now(), flagOf);
+    if ("message" in q) return failed("logs", { ...q, usage: LOGS_USAGE }, { json });
+    return requestLogs(q, json);
+  }
   const lines = f.values.lines === undefined ? 40 : Number(f.values.lines);
   if (!Number.isInteger(lines) || lines < 0) return failed("logs", { message: `-n (--lines) is a number of lines, not ${JSON.stringify(f.values.lines)}`, code: "usage" }, { json });
-  if (f.values.failed && !f.values.requests) return failed("logs", { message: "--failed is a filter of --requests", code: "usage", fix: "mason logs --requests --failed" }, { json });
-  if (f.values.requests && (f.values.start || f.values.follow)) return failed("logs", { message: `--requests lists the request log; ${f.values.start ? "--start" : "-f"} is the log file's`, code: "usage", fix: "mason logs --requests, or mason logs " + (f.values.start ? "--start" : "-f") }, { json });
-  if (json && f.values.follow) return failed("logs", { message: "-f prints lines as they come, and --json is one answer", code: "usage", fix: "mason logs --json, or mason logs -f" }, { json });
-  if (f.values.requests) {
-    if (lines < 1) return failed("logs", { message: "-n with --requests is a number of requests, 1 or more", code: "usage" }, { json });
-    return requestLogs(lines, f.values.failed === true, json);
+  if (f.values.events) {
+    const limit = eventLimit(typeof f.values.lines === "string" ? f.values.lines : undefined, "-n");
+    if (typeof limit !== "number") return failed("logs", { ...limit, usage: LOGS_USAGE }, { json });
+    return eventLogs(limit, f.values.failed === true, json);
   }
   // a stopped run's log is still worth reading: the project's, running or not
   const t = theProject(process.cwd());
@@ -1225,10 +1568,14 @@ export async function logs(argv: string[]): Promise<number> {
     return failed("logs", { message: `${file} does not exist yet`, code: "nothing_yet", why: `Mason has not run for ${t.project.config.name}`, next: [["mason start", "start it, in the background"]] }, { json });
   }
   const text = fs.readFileSync(file, "utf8");
-  const all = text.split("\n");
-  if (all[all.length - 1] === "") all.pop();
-  if (json) { out(jsonText(LOGS, { lines: all.slice(Math.max(0, all.length - lines)) }, [["mason logs --requests", "every statement the Postgres API met"]])); return 0; }
-  for (const l of all.slice(Math.max(0, all.length - lines))) out(l);
+  // WHY THE FILE, even with the run up: it is the whole record (the run's memory keeps only its last LOG_KEPT entries,
+  // src/lib/log-buffer.ts) and the only one when the run is down. The entries are parsed by the buffer's own parser, so
+  // `{ at, text }` is the shape of GET /api/logs too (the run's answer, which a `mason serve` run has no file for).
+  // -n counts entries, a multi-line one being ONE; dev.log's lines (the start's steps, indented under each other) are a line each.
+  const all = logEntries(text, { perLine: f.values.start === true });
+  const last = all.slice(Math.max(0, all.length - lines));
+  if (json) { out(jsonText(LOGS, { lines: last }, [["mason logs --requests", "every statement the Postgres API met"]])); return 0; }
+  for (const l of last) out(logLineText(l));
   if (!f.values.follow) return 0;
   let offset = Buffer.byteLength(text);
   for (;;) {
@@ -1289,7 +1636,7 @@ export async function stop(argv: string[]): Promise<number> {
     if (isProject(recorded)) { recorded.config.running = null; recorded.config.lastStop = { at: new Date().toISOString(), how: `${killed ? "killed by mason stop (SIGKILL)" : "stopped by mason stop (SIGTERM)"}: ${how.replace(/, so it was killed$/, "")}` }; writeConfig(recorded.dir, recorded.config); }
     if (json) { out(jsonText(STOP, { stopped: [hung.name], killed, supervisor: sup }, next)); return 0; }
     out(reportText({ headline: `Stopped ${hung.name}`, details: [["how", `${how}${sup === null ? "" : `; its supervisor (pid ${sup}) will not start it again`}`],
-      ["kept", "its copy of the data and its state (DuckDB recovers from its write-ahead log at the next start)"], ["log", "mason logs shows what it was doing"]] }));
+      ["kept", "its copy of the data and its state (the copy recovers from its write-ahead log at the next start)"], ["log", "mason logs shows what it was doing"]] }));
     out(endText({ next }));
     return 0;
   }

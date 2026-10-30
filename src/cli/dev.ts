@@ -29,7 +29,7 @@ import * as path from "node:path";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
-import { createRunServer } from "./run-server.ts";
+import { createRunServer, usageFacts, type RunContext } from "./run-server.ts";
 import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
@@ -38,8 +38,12 @@ import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChanges
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
 import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, SELF_SIGNED_FILES } from "./pg-tls.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
-import { RequestLedger, REQUESTS_TABLE, requestLogDays } from "../duck/requests.ts";
+import { RequestLedger, REQUESTS_TABLE } from "../duck/requests.ts";
+import { historyDaysSetting } from "../duck/history.ts";
+import { EVENTS_TABLE, SyncEvents } from "../duck/events.ts";
+import { USAGE_TABLE, UsageSampler } from "../duck/usage.ts";
 import { withPlaceholders } from "./pg-url.ts";
+import { UI } from "./ui.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION } from "../duck/store.ts";
@@ -49,9 +53,10 @@ import { readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
 import { isLibcCollation } from "../duck/rewrite.ts";
 import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
 import { LiveRoles, readRoles, resolveRoles, usersWithoutRole } from "./roles.ts";
-import { READY_LINE } from "./supervise.ts";
+import { READY_LINE, readRestarts } from "./supervise.ts";
 import { changesAgreement, dropOwnReplication, dropStatements, liveReadinessFailure, madeReplication, namedPublication, projectReplication, publicationConflict, replicationReadiness, staleReplication } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
+import { LogBuffer } from "../lib/log-buffer.ts";
 import { pollMsRetired, syncText, type TableSync } from "../lib/table-sync.ts";
 
 export interface DevOptions {
@@ -189,6 +194,8 @@ function recordReplication(cfg: ProjectConfig, repl: ReturnType<typeof projectRe
 }
 
 async function run(o: DevOptions, hosted: Hosted): Promise<number> {
+  // when this run began: the uptime /api/state says (engine.startedAt, a supervisor's restart is a new run)
+  const startedAt = Date.now();
   const t = theProject(process.cwd());
   if ("problem" in t) { say(`mason start: ${t.problem}`); return 1; }
   const project = t.project;
@@ -211,6 +218,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
   const pollMs = pollMsRetired(process.env);
   if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: false });
+  // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused, named), read
+  // before anything opens (src/duck/history.ts); every history below keeps them
+  const keptDays = historyDaysSetting(process.env);
+  if (typeof keptDays !== "number") return failed("start", { code: "refused", ...keptDays }, { json: false });
   // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
   // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
   // always was (after the listener's checks): a demo project's port is needed first
@@ -243,9 +254,13 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const log = fs.createWriteStream(logFile, { flags: "a" });
   // one entry a line: a multi-line message's further lines indented under it (src/lib/log.ts `textEntry`);
   // mason serve gets the same entry, for the container's stdout (src/cli/serve.ts)
+  // the last entries are kept in memory too (src/lib/log-buffer.ts), for the command server's /api/logs: the one writer
+  // feeds the file, stdout and the buffer, so a mode with no file (mason serve) has the log as well
+  const logs = new LogBuffer();
   const logLine = (l: string): void => {
     const entry = textEntry(`${new Date().toISOString()} `, l);
     log.write(entry);
+    logs.push(entry);
     o.serve?.log(entry.trimEnd());
   };
   // THE DEMO DATABASE (src/cli/demo.ts), hosted here: opened before it is connected to, as any database is
@@ -390,23 +405,28 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let store: DuckStore;
   // its memory bounded (src/duck/store.ts DEFAULT_MEMORY_LIMIT): past it a statement spills, or fails alone
   const memoryLimit = process.env.MASON_DUCKDB_MEMORY || undefined;
-  try { store = await DuckStore.open(duckFile, (l) => logLine(`[duckdb] ${l}`), memoryLimit === undefined ? {} : { memoryLimit }); }
+  try { store = await DuckStore.open(duckFile, (l) => logLine(`[copy] ${l}`), memoryLimit === undefined ? {} : { memoryLimit }); }
   catch (e) { fail("Opening the copy"); say(`  ${(e as Error).message}`); return 1; }
   // THE COPY'S THREAD DYING (src/duck/executor.ts: V8 out of heap there, an uncaught error) ends the run, said, for its
   // supervisor to start it again: every session's statement in flight was told 57P02, and nothing can be answered after
   let crash: ((reason: string) => void) | null = null;
   store.onCrash((reason) => {
-    logLine(`[duckdb] the copy's thread stopped: ${reason}`);
+    logLine(`[copy] the copy's thread stopped: ${reason}`);
     if (crash !== null) crash(reason);
     else say(`  ! the copy's thread stopped: ${reason}`);
   });
   done(`the copy in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling to ${path.relative(project.root, duckFile)}.tmp`);
   const syncMode = syncModeOf(process.env);
+  // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
+  // that records them starts
+  let events: SyncEvents;
+  try { events = await SyncEvents.open(store, logLine, { days: keptDays }); }
+  catch (e) { fail("Opening the copy"); say(`  the sync's events (${EVENTS_TABLE}) could not be opened: ${(e as Error).message}`); await store.close(); return 1; }
   // each table is kept current as its own sync: says (the sources file's); the sync's interval is how soon a failed pass
   // is tried again (and MASON_DUCK_SYNC=recopy's whole copies). The slot and publication are the run's whenever a table
   // is replicated, now or after a mason add --sync replication (the demo database has no change log: none)
   const sync = new Sync(store, source, cfg.name, (l) => { logLine(`[sync] ${l}`); if (!o.serve && /^copied |failed/.test(l)) say(textEntry("  ", l).trimEnd()); }, PASS_RETRY_MS, syncMode,
-    cfg.demo === true ? null : repl, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths },
+    cfg.demo === true ? null : repl, { copyParallel, copyChunkSeconds, json: { enabled: storeJsonPaths }, onEvent: (e) => events.record(e),
       // what the run made on the database, recorded as it is made and dropped: mason destroy drops it by that name
       onReplication: (made) => {
         if (made) recordReplication(cfg, repl, home);
@@ -447,7 +467,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       });
       libc = r.order;
       if (r.read) done(`Read how ${source.database} orders text (${coll.collate}): kept in the copy, read again only when its collation version moves`);
-    } catch (e) { fail(reading); say(`  ${(e as Error).message}`); await sync.stop(); await store.close(); return 1; }
+    } catch (e) { fail(reading); say(`  ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }
   }
   begin("Starting the Postgres listener");
   // ONE STATEMENT'S LIMIT (server.ts armTimeout): a runaway query must not hold DuckDB for ever; a session's
@@ -457,18 +477,22 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (statementTimeoutMs === null) {
     fail("Starting the Postgres listener");
     say(`  MASON_STATEMENT_TIMEOUT=${JSON.stringify(timeoutSetting)} is not a duration: write it as Postgres's statement_timeout is written (5min, 90s, 300000 for ms; 0 for none)`);
-    await sync.stop(); await store.close(); return 1;
+    await sync.stop(); await events.close(); await store.close(); return 1;
   }
   // THE REQUEST LOG (src/duck/requests.ts): every statement the listener answers or refuses, kept in the copy's own file
-  const keptDays = requestLogDays(process.env.MASON_REQUEST_LOG_DAYS);
-  if (typeof keptDays !== "number") { fail("Starting the Postgres listener"); say(`  ${keptDays.problem}`); await sync.stop(); await store.close(); return 1; }
+  // for MASON_HISTORY_DAYS (read above, before anything opened)
   let requests: RequestLedger;
   try { requests = await RequestLedger.open(store, logLine, { days: keptDays }); }
-  catch (e) { fail("Starting the Postgres listener"); say(`  the request log (${REQUESTS_TABLE}) could not be opened: ${(e as Error).message}`); await sync.stop(); await store.close(); return 1; }
+  catch (e) { fail("Starting the Postgres listener"); say(`  the request log (${REQUESTS_TABLE}) could not be opened: ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }
+  // USAGE OVER TIME (src/duck/usage.ts): a sample a minute, kept as the request log is; it counts the listener's requests
+  // as they are recorded, and samples the run's state once the command server's context exists (below)
+  let usage: UsageSampler;
+  try { usage = await UsageSampler.open(store, logLine, { days: keptDays }); }
+  catch (e) { fail("Starting the Postgres listener"); say(`  the usage samples (${USAGE_TABLE}) could not be opened: ${(e as Error).message}`); await requests.close(); await sync.stop(); await events.close(); await store.close(); return 1; }
   let duckListener;
   try { duckListener = await store.listener(facts.collation, undefined, libc, () => sync.state(), sync.kept.enabled ? sync.kept : undefined); }
-  catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await store.close(); return 1; }
-  logLine(`[duckdb] text sorts as the source's collation does: ${JSON.stringify(duckListener.collation)}`);
+  catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
+  logLine(`[copy] text sorts as the source's collation does: ${JSON.stringify(duckListener.collation)}`);
   // THE USERS (src/duck/users.ts): `mason user` edits the file beside this process; the listener re-reads it at every
   // connection and before every statement of a user's session, so a removal takes effect without a restart
   const users = new LiveUsers(path.join(home, USERS_FILE), cfg.apiKey);
@@ -482,14 +506,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       ...listenerLogins(users, cfg.apiKey),
       roles: () => liveRoles.now(),
       schema: () => sync.schema(),
-      record: (row) => requests.record(row),
+      // the one place a request is recorded: the request log's row, and the usage sample's count of it
+      record: (row) => { requests.record(row); usage.count(row); },
       log: logLine,
       trace: process.env.MASON_PG_TRACE === "1",
       duck: duckListener,
     });
-  } catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await store.close(); return 1; }
+  } catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
   done(`Postgres listener on ${listenerText(pgTls.listener, api.port)}; ${statementTimeoutMs === 0 ? "statements without a time limit" : `each statement at most ${timeoutSetting.trim()}`} (MASON_STATEMENT_TIMEOUT); ` +
-    `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_REQUEST_LOG_DAYS; mason logs --requests)`);
+    `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS; mason logs --requests)`);
   {
     // a user whose role the file no longer names reads nothing until it is added again (fail closed): said here, by name
     const roles = liveRoles.now();
@@ -504,10 +529,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
 
   const setupPort = await freePort(o.port, chosen);
   const token = newToken();
-  const server = createRunServer({
+  const runCtx: RunContext = {
     source, facts: () => facts, warnings,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
-    replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root,
+    replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
+    version: o.version, startedAt,
     // the web page (mason ui) is mason start's alone: mason serve's run serves none (src/cli/run-server.ts RunContext.page)
     page: o.serve === undefined,
     demo: cfg.demo === true,
@@ -531,9 +557,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       return null;
     },
     log: (m) => say(`  ${m}`),
-    duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), measured: (table) => sync.measured(table), requests,
-      jsonPaths: () => sync.kept.status() },
-  });
+    logs,
+    // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
+    listener: api,
+    duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), measured: (table) => sync.measured(table), disk: () => sync.diskStatus(), requests, events, usage,
+      restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status() },
+  };
+  const server = createRunServer(runCtx);
+  // a sample is /api/state's facts at its moment (src/cli/run-server.ts usageFacts): one computation of each
+  usage.start(() => usageFacts(runCtx));
   await new Promise<void>((resolve) => server.listen(setupPort, "127.0.0.1", resolve));
   const refreshFacts = setInterval(() => {
     void (async () => {
@@ -546,9 +578,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   cfg.running = { pid: process.pid, controlUrl: `http://127.0.0.1:${setupPort}`, token, postgresUrl, postgresListener: pgTls.listener };
   cfg.lastRun = new Date().toISOString();
   writeConfig(home, cfg);
-  done(`Mason is up: ${sync.state().length} table(s) added, kept current ${syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)}` +
-      `${sync.streams() ? `; replicated by slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : " (read as it is)"}` : ""}`
-    : `every ${PASS_RETRY_MS / 1000} s by copying each table again whole (MASON_DUCK_SYNC=recopy)`}`);
+  done(`Mason is up: ${sync.state().length} table(s) added, kept current: ${syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)}` +
+      `${sync.streams() ? `; replicated tables streamed as they change (logical replication: slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})` : ""}`
+    : `each table copied again whole every ${PASS_RETRY_MS / 1000} s (MASON_DUCK_SYNC=recopy)`}`);
   // THE FILE'S DEFAULT, SAID ONCE (issue 33: nothing Mason does to your database is a hidden default)
   const defaultLine = syncDefaultLine(sources.file, shownPath(project.root, sources.file.file), syncMode === "poll" ? copiedBefore : 0);
   say(`  ${defaultLine}`);
@@ -593,6 +625,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
         try { await requests.close(); } catch (e) { say(`  closing the request log: ${(e as Error).message}`); }
         let syncStop: Error | null = null;
         try { await sync.stop(); } catch (e) { syncStop = e as Error; }
+        // after the sync: a sample in flight ends before the file closes (it reads the sync's state)
+        try { await usage.close(); } catch (e) { say(`  closing the usage samples: ${(e as Error).message}`); }
+        // after the sync: its last events are written before the file closes
+        try { await events.close(); } catch (e) { say(`  closing the sync's events: ${(e as Error).message}`); }
         // the demo database after the sync (nothing reads it any more) and before the copy closes
         await closeDemo(hosted, `closed the demo database (it stays in ${path.join(home, DEMO_DIR)}; mason destroy removes it)`);
         if (syncStop !== null) say(`  closing the copy: ${syncStop.message}`);
@@ -615,7 +651,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   say("");
   say(`  Postgres  ${withPlaceholders(postgresUrl)}  (mason user add <name> makes a user)`);
   // the web page by its command, never its URL: the URL carries the run's token, and this goes to dev.log
-  if (o.serve === undefined) say("  Web UI  mason ui  (the status page and the users, in your browser)");
+  // its words are mason ui's summary (mason --help's), so the two never drift
+  if (o.serve === undefined) say(`  Web UI  mason ui  (${UI.summary})`);
   if (demoChangeMs !== null) say(`  Demo  a new order lands every ${demoChangeMs / 1000} s: mason status shows the copy keeping up`);
   const elsewhere = elsewhereTip(pgTls.listener);
   if (elsewhere) say(`  ${elsewhere}`);

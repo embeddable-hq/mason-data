@@ -303,6 +303,7 @@ test("mason status says the restarts: how many, and the last one's reason", asyn
   assert.match(human.stdout, /Restarts\s+2, the last 5 min(utes)? ago: it ran out of JavaScript heap \(V8: heap out of memory\), after 120 s up/);
   const json = await runMason(root, ["status", "--json"], matrixEnv());
   assert.equal(json.code, 0, json.stderr);
-  const body = JSON.parse(json.stdout) as { engine: { restarts: Array<{ reason: string }> } };
-  assert.deepEqual(body.engine.restarts.map((r) => r.reason), ["it was killed (SIGKILL: often the system out of memory)", "it ran out of JavaScript heap (V8: heap out of memory)"]);
+  const body = JSON.parse(json.stdout) as { engine: { restarts: unknown } };
+  assert.deepEqual(body.engine.restarts, { count: 2, last: { at, why: "it ran out of JavaScript heap (V8: heap out of memory)", upSeconds: 120 } },
+    "the one fact the run's /api/state says too (src/cli/supervise.ts restartsFact)");
 });

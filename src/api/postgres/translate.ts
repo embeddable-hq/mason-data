@@ -11,6 +11,7 @@
  *   - anything else: REFUSED BY NAME (`Unsupported`), with its position in the statement, a SQLSTATE and the way
  *     out, never passed through on a guess. The switch has no default branch that accepts.
  */
+import type { GapId } from "../../duck/gaps.ts";
 import type { A_Const, ColumnRef, CommonTableExpr, Node, RangeVar, SelectStmt, TypeCast, VariableSetStmt } from "libpg-query";
 
 /** A statement, or a part of one, this listener does not answer: named, placed, with a SQLSTATE and the way out. */
@@ -20,8 +21,10 @@ export class Unsupported extends Error {
   /** `0A000` feature not supported; `42601` syntax; `25006` read only; `22023` an invalid value */
   readonly sqlstate: string;
   readonly hint: string | undefined;
-  constructor(message: string, offset: number | null, sqlstate = "0A000", hint?: string) {
-    super(message); this.offset = offset; this.sqlstate = sqlstate; this.hint = hint;
+  /** the registry entry that refused it (src/duck/gaps.ts): the request log's `gap`; null for any other refusal */
+  readonly gap: GapId | null;
+  constructor(message: string, offset: number | null, sqlstate = "0A000", hint?: string, gap: GapId | null = null) {
+    super(message); this.offset = offset; this.sqlstate = sqlstate; this.hint = hint; this.gap = gap;
   }
 }
 

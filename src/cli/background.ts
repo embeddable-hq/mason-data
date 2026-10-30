@@ -27,7 +27,9 @@ import { shownPath } from "./sources.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
 import { pollMsRetired } from "../lib/table-sync.ts";
+import { historyDaysSetting } from "../duck/history.ts";
 import { DEV } from "./registry.ts";
+import { UI } from "./ui.ts";
 import { out as styleOut, stepRenderer } from "./style.ts";
 import { postgresLink, withoutPlaceholders, type PostgresLink } from "./pg-url.ts";
 
@@ -38,6 +40,8 @@ const SUPERVISE = path.join(path.dirname(fileURLToPath(import.meta.url)), "super
 /** The commands to run next, as `mason start` prints them once the run is up: one a line, what each does beside it
  *  (not `mason status | mason logs | mason stop` on one line). */
 export const NEXT_STEPS: NextStep[] = [
+  // the web page first: a first-time user's most useful next step (the run serves it; mason ui opens it, signed in)
+  ["mason ui", UI.summary],
   ["mason tables", "the database's tables, and what you can add"],
   ["mason add <table>", "copy a table into Mason"],
   ["mason user add <name>", "a user for a BI tool or your app: its password and URL, printed once"],
@@ -87,6 +91,10 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   // the person (or --json) reads it, by the run's own check (src/lib/table-sync.ts)
   const pollMs = pollMsRetired(process.env);
   if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: o.json });
+  // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused), by the run's own
+  // check (src/duck/history.ts), refused here as in the run
+  const days = historyDaysSetting(process.env);
+  if (typeof days !== "number") return failed("start", { code: "refused", ...days }, { json: o.json });
   // a MASON_PG_PORT that is no port, or is held, is refused HERE, where the person (or --json) reads it, before a run is
   // spawned; the run checks again for itself (choosePgPort, src/cli/ports.ts), since a port may be taken in between.
   // A demo project's database port (its URL's, src/cli/demo.ts demoPort) is avoided as the run avoids it
@@ -153,7 +161,7 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
           // the run's line (src/cli/dev.ts: "Postgres  <url>", the URL in its shown form, `withPlaceholders`: postgres://<user>:<password>@…)
           const pgLine = /^\s+Postgres\s+(postgres:\/\/<user>:<password>@\S+)/.exec(l);
           if (pgLine) { postgres = postgresLink(withoutPlaceholders(pgLine[1]!)); steps.print(`  ${st.dim("Postgres API")}  ${pgLine[1]!}  ${st.dim("(mason user add <name> makes a user)")}`); continue; }
-          if (/^\s+Web UI\s+mason ui\b/.test(l)) { steps.print(`  ${st.dim("Web UI".padEnd("Postgres API".length))}  ${st.cyan("mason ui")}  ${st.dim("(the status page and the users, in your browser)")}`); continue; }
+          if (/^\s+Web UI\s+mason ui\b/.test(l)) { steps.print(`  ${st.dim("Web UI".padEnd("Postgres API".length))}  ${st.cyan("mason ui")}  ${st.dim(`(${UI.summary})`)}`); continue; }
           // a demo project's line (src/cli/dev.ts: "Demo  a new order lands every <n> s: …"), in the same column
           const demoLine = /^\s+Demo\s{2}(.+)$/.exec(l);
           if (demoLine) { steps.print(`  ${st.dim("Demo".padEnd("Postgres API".length))}  ${demoLine[1]!}`); continue; }

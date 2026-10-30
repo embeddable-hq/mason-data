@@ -13,7 +13,7 @@ import { reach } from "./state.ts";
 import { findTable, guarded, readState, tableArg } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import type { KeptCurrent, PolledTable, StreamedAnswer } from "../duck/sync.ts";
-import { syncWords } from "../lib/table-sync.ts";
+import { syncedText, syncWords } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const n = (x: number): string => x.toLocaleString("en-US");
@@ -43,6 +43,30 @@ export const SYNC: CommandSpec & { needs: "run" } = {
   options: { json: { type: "boolean" } },
   json: ["syncedAt", "tables", "streamed", "next"],
 };
+
+/**
+ * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (the web page's Sync button says the same,
+ * src/web/pages/tables.js; tests/web-page.test.ts holds the two equal): the rows written and deleted, a line per table,
+ * and what happens next to each table synced (`syncedTips`: an `off` one stays as of this sync). A table whose sync is
+ * replication was not polled: its line says where the stream is (`streamed`), and a sync of those alone has nothing to sync.
+ */
+export function syncedReport(b: { tables: readonly PolledTable[]; streamed?: readonly StreamedAnswer[] }, picked: readonly string[], tables: ReadonlyArray<{ table: string; kept?: KeptCurrent }>):
+  { headline: string; details: Array<readonly [string, string]>; tips: string[] } {
+  const streamed = b.streamed ?? [];
+  const streamedRows = streamed.map((t) => [t.table, `${t.state}${t.why ? `: ${t.why}` : ""} · the stream has applied the database's changes through ${t.position}`] as const);
+  if (b.tables.length === 0 && streamed.length > 0) {
+    return { headline: `Nothing to sync: logical replication keeps ${picked.join(", ")} current.`, details: streamedRows, tips: [] };
+  }
+  const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
+  const streamedNames = new Set(streamed.map((t) => t.table));
+  const polled = picked.filter((t) => !streamedNames.has(t));
+  return {
+    headline: `Synced ${polled.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
+    details: [...b.tables.map((t) => [t.table, syncedText(t)] as const), ...streamedRows],
+    // what happens next to each: an `off` table stays as of now, a polled one is polled again after its interval
+    tips: syncedTips(tables),
+  };
+}
 
 export async function sync(argv: string[]): Promise<number> {
   const f = parseCommand(SYNC, argv);
@@ -80,22 +104,7 @@ export async function sync(argv: string[]): Promise<number> {
     const b = r.body as unknown as { at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] };
     const next: NextStep[] = [[`mason sync ${names.join(" ")}`, "sync again, whenever you need it current"], ["mason status", "how each table is kept current, and when it was last synced"]];
     if (json) { out(jsonText(SYNC, { syncedAt: b.at, tables: b.tables, ...(b.streamed ? { streamed: b.streamed } : {}) }, next)); return 0; }
-    // a replicated table: nothing to poll, its line says where the stream is
-    const streamedRows = (b.streamed ?? []).map((t) => [t.table, `${t.state}${t.why ? `: ${t.why}` : ""} · the stream has applied the database's changes through ${t.position}`] as const);
-    if (b.tables.length === 0 && b.streamed) {
-      out(reportText({ headline: `Nothing to sync: logical replication keeps ${picked.join(", ")} current.`, details: streamedRows, next }, styleOut()));
-      return 0;
-    }
-    const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
-    const streamedNames = new Set((b.streamed ?? []).map((t) => t.table));
-    const polled = picked.filter((t) => !streamedNames.has(t));
-    out(reportText({
-      headline: `Synced ${polled.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
-      details: [...b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${n(t.ms)} ms`] as const), ...streamedRows],
-      // what happens next to each: an `off` table stays as of now, a polled one is polled again after its interval
-      tips: syncedTips(added.filter((t) => picked.includes(t.table))),
-      next,
-    }, styleOut()));
+    out(reportText({ ...syncedReport(b, picked, added.filter((t) => picked.includes(t.table))), next }, styleOut()));
     return 0;
   });
 }

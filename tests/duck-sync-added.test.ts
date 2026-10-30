@@ -249,10 +249,11 @@ const waitTable = (commands as unknown as { waitTable?: (t: RunState["tables"][n
 /** the run's context as runState reads it: the catalog the sync's tables are in, each one added in the sources file */
 const runContext = (tables: readonly AddedTable[], changes: "poll" | "replication"): RunContext => ({
   source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables, systemIdentifier: null }), warnings: [],
-  replication: () => changes === "replication" ? { slot: "mason_x", publication: "mason_x", owned: true } : null, page: false, folder: () => null,
+  replication: () => changes === "replication" ? { slot: "mason_x", publication: "mason_x", owned: true } : null, page: false, folder: () => null, root: os.tmpdir(), home: path.join(os.tmpdir(), "mason-no-such-home"), startedAt: Date.now(), version: "dev",
+  users: { file: "", apiKey: "", database: "x", postgresUrl: "postgresql://127.0.0.1:5433/x" }, listener: { openSessions: () => ({ open: 0, byClient: [] }) },
   sources: () => ({ file: { name: "x", file: "/x/mason/sources/x.yml", kind: "postgres", url: { env: "DATABASE_URL" },
     tables: tables.map((t) => ({ name: t.table, table: t.source, columns: null, exclude: [], key: null })) }, problem: null }),
-  duck: { file: path.join(os.tmpdir(), "mason-no-such-copy.db") },
+  duck: { file: path.join(os.tmpdir(), "mason-no-such-copy.db"), disk: () => ({ path: os.tmpdir(), freeBytes: null, projectedBytes: null }), restarts: () => [], requests: { days: 7 } },
 }) as unknown as RunContext;
 /** what mason status --json says of a sync (the run's /api/state, as the command reads it), and the sync's own states */
 const statusOf = (t: Started, changes: "poll" | "replication") => withSync(t, async (sync) => {
