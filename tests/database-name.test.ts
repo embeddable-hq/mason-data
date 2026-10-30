@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { connectionUrl, postgresLink, withPlaceholders } from "../src/cli/pg-url.ts";
 import { parseSource } from "../src/cli/preflight.ts";
 import { PgError } from "../src/cdc/pg-wire.ts";
-import { databaseMoved, type Project } from "../src/cli/project.ts";
+import * as P from "../src/cli/project.ts";
 import { postgresApiUrl } from "../src/api/postgres/listener.ts";
 import * as S from "../src/cli/sources.ts";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
@@ -183,18 +183,18 @@ test("mason mcp's 3D000: the way out is the URL's last part and the hint's name,
 
 test("mason status while up compares what the file says: a server named by its setting, asked from a shell without it, is no move", () => {
   const root = project(`${HEAD}tables: {}\n`);
-  const at = (served: boolean): Project => ({ root, dir: path.join(root, ".mason"), folder: path.join(root, "mason"),
+  const at = (served: boolean): P.Project => ({ root, dir: path.join(root, ".mason"), folder: path.join(root, "mason"),
     config: { name: "my-shop", folder: "mason", remote: false, apiKey: "k", ...(served ? { served } : {}) } });
   const file = path.join(root, "mason", "sources", "app.yml");
   try {
-    assert.equal(databaseMoved(at(true), "reporting"), null, "named by MASON_PG_DATABASE, which this shell need not have");
-    assert.equal(databaseMoved(at(false), "shop"), "mason", "a project's file took its line out: the next start answers as the default");
-    assert.equal(databaseMoved(at(false), "mason"), null);
+    assert.equal(P.databaseMoved(at(true), "reporting"), null, "named by MASON_PG_DATABASE, which this shell need not have");
+    assert.equal(P.databaseMoved(at(false), "shop"), "mason", "a project's file took its line out: the next start answers as the default");
+    assert.equal(P.databaseMoved(at(false), "mason"), null);
     fs.writeFileSync(file, `${HEAD}database: production\ntables: {}\n`);
-    assert.equal(databaseMoved(at(true), "reporting"), "production", "a file that writes a name is said on a server too");
-    assert.equal(databaseMoved(at(false), "production"), null);
+    assert.equal(P.databaseMoved(at(true), "reporting"), "production", "a file that writes a name is said on a server too");
+    assert.equal(P.databaseMoved(at(false), "production"), null);
     fs.writeFileSync(file, "database: [\n");
-    assert.equal(databaseMoved(at(false), "mason"), null, "a file that cannot be read is said by what reads it");
+    assert.equal(P.databaseMoved(at(false), "mason"), null, "a file that cannot be read is said by what reads it");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
