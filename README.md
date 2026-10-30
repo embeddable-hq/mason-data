@@ -341,9 +341,6 @@ Most of Mason's speed comes from memory. These are the things that help most, in
   the disk's speed: reading a JSON column of a 22 M-row table from a cloud disk took 93.5 s. Give Mason enough memory
   to hold the columns your dashboards read. `mason status` shows how big your synced data is, and Sizing in
   [Going to production](#going-to-production) shows how to set the memory.
-- **Sync only the columns you query.** Use `--columns` or `exclude:` (see
-  [Choosing what to sync](#choosing-what-to-sync)). There is less to sync and less to keep in memory. This helps most
-  with wide text and JSON columns.
 - **Filter by time.** Mason keeps rows in the order they were inserted, so a filter on `created_at` or an increasing
   `id` skips the blocks outside it. On 5 M rows inserted in time order, one day's filter read 1 of 41 blocks. Give
   your dashboards a date range where you can.
