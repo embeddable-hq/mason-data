@@ -739,9 +739,10 @@ test("a copy's chunks are sized by the rate measured on its connection, and its 
   type Rate = { pagesPerSecond: number; rowsPerSecond: number; bytesPerSecond: number; chunks: number };
   type Event = Chunk & { pages?: number; ceiling?: number; sizedBy?: Rate | null; seconds?: number };
   type View = { chunksDone: number; chunksTotal: number; reading: number; readingSeconds: number | null; rowsReading: number; rowsPerSecond: number | null; secondsLeft: number | null; share: number };
-  const { nextChunkPages, nextRate } = syncModule as unknown as {
+  const { nextChunkPages, nextRate, READING_SHARE_CAP } = syncModule as unknown as {
     nextChunkPages?: (ceiling: number, rate: Rate | null, seconds: number) => number;
     nextRate?: (prev: Rate | null, m: { pages: number; rows: number; seconds: number; blockSize: number }) => Rate;
+    READING_SHARE_CAP: number;
   };
   const { url, db, source } = await parallelDatabase("ts");
   const pages = Number(psql(url, "SELECT pg_relation_size('big') / current_setting('block_size')::int"));
@@ -805,7 +806,10 @@ test("a copy's chunks are sized by the rate measured on its connection, and its 
     assert.equal(commits.length, done.length);
     for (const c of commits) assert.equal(c.rowsSoFar, c.committed, "rowsSoFar is every committed chunk's rows, at each commit");
     // WHILE A CHUNK READS, THE STATE SAYS SO: one chunk reading, for at least as long as it has slept, and once a rate
-    // is measured, the rows it has read by now — under what it will commit
+    // is measured, the rows it has read by now — an ESTIMATE, held under what its pages are EXPECTED to hold at the rows
+    // a page so far (`READING_SHARE_CAP`), which is under what a chunk of full pages commits. The heap's last page is
+    // not full: where the sizes land the last chunk on it alone, its 1 page expected 14 rows and held 10, and "12 read
+    // by now" is the product keeping its bound, not an overrun (CI, 1 run in many: the chunks' sizes follow the rates)
     const reads = seen.filter((x) => x.phase === "read");
     let share = -1, firstShare: number | null = null;
     for (const [i, r] of reads.entries()) {
@@ -823,7 +827,11 @@ test("a copy's chunks are sized by the rate measured on its connection, and its 
       if (i === 0) assert.deepEqual([p.rowsPerSecond, p.rowsReading], [null, 0], "nothing measured during the first chunk");
       else {
         assert.ok(p.rowsPerSecond !== null && p.rowsPerSecond > 0 && p.secondsLeft !== null, `chunk ${i}: a measured rate and time left`);
-        assert.ok(p.rowsReading > 0 && p.rowsReading < done[i]!.rows, `chunk ${i}: ${p.rowsReading} rows read by now, under its ${done[i]!.rows}`);
+        const before = done.slice(0, i);
+        const rowsPerPage = before.reduce((n, e) => n + e.rows, 0) / before.reduce((n, e) => n + e.pages!, 0);
+        const expected = READING_SHARE_CAP * done[i]!.pages! * rowsPerPage;
+        assert.ok(p.rowsReading > 0 && p.rowsReading <= Math.floor(expected), `chunk ${i}: ${p.rowsReading} rows read by now, held under the ${expected} expected of its ${done[i]!.pages} page(s)`);
+        if (i < done.length - 1) assert.ok(p.rowsReading < done[i]!.rows, `chunk ${i}: ${p.rowsReading} rows read by now, under its ${done[i]!.rows}`);
       }
     }
     assert.ok(firstShare !== null && share > firstShare, `the share moved while the chunks read: ${firstShare} to ${share}`);

@@ -343,7 +343,9 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
 - **A copy's progress is rendered between commits** (`CopyLive`, `copyProgressNow`, `CopyState.progress`): the chunks
   done and about how many in all, the ones reading and how long the oldest has, the readers' measured rate and the time
   the pages left take at it, and the rows the chunks in flight have read by now at that rate, each held under 90 % of
-  its expected rows (`READING_SHARE_CAP`) so a commit moves the count forward. Its SHARE is of the heap's pages read
+  its expected rows (its pages at the rows a page so far, `READING_SHARE_CAP`) so a commit that holds them moves the
+  count forward: an estimate, which a chunk's pages may undercut (the heap's last page, a sparse range), when the count
+  steps back to what committed. Its SHARE is of the heap's pages read
   (`share`), never of the rows: the ranges are exact and the row estimate is Postgres's, which a copy can outrun (23.7 M
   rows under 20.1 M sent the bar back to 0 %), and a share derived from an estimate must never move backwards.
   `mason wait` and `mason status` render it (`copyingText`, src/cli/commands.ts); the rate is the sync's, never a

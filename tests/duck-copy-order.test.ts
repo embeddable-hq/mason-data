@@ -174,12 +174,12 @@ test("MASON_COPY_CHUNK_SECONDS is a number of seconds from 1 to 300, 12 when uns
 });
 
 // A COPY'S PROGRESS BETWEEN COMMITS (src/duck/sync.ts copyProgressNow): the chunks in flight count at the measured rate,
-// each under 90 % of its expected rows, so `mason wait` moves at every poll and a commit moves it forward, never back.
+// each under 90 % of its expected rows, so `mason wait` moves at every poll and a commit that holds them moves it forward.
 type Live = { pages: number; chunksDone: number; pagesDone: number; rowsDone: number; untaken: number; chunkPages: number; readers: number;
   reading: Array<{ since: number; pages: number }>; rate: Rate | null; rowsPerPage: number | null };
 type View = { chunksDone: number; chunksTotal: number; reading: number; readingSeconds: number | null; rowsReading: number; rowsPerSecond: number | null;
   bytesPerSecond: number | null; secondsLeft: number | null; share: number };
-test("a copy's progress counts the chunks in flight at the measured rate, held under what each will commit", () => {
+test("a copy's progress counts the chunks in flight at the measured rate, held under what each is expected to commit", () => {
   const { copyProgressNow } = syncModule as unknown as { copyProgressNow?: (l: Live, now: number) => View };
   assert.ok(copyProgressNow, "copyProgressNow");
   const rate: Rate = { pagesPerSecond: 240, rowsPerSecond: 11_040, bytesPerSecond: 240 * 8192, chunks: 4 };
@@ -207,6 +207,16 @@ test("a copy's progress counts the chunks in flight at the measured rate, held u
     last = p.rowsReading; lastShare = p.share;
   }
   assert.equal(last, Math.floor(3 * 0.9 * 2_880 * 46), "held under each chunk's rows");
+  // WHAT EACH WILL COMMIT IS AN EXPECTATION: its pages at the rows a page so far, never its rows, which only the commit
+  // knows. The heap's last page holds what is left: 14 rows a page, the last of 14,286 pages holding 10, read alone as
+  // the last chunk, is held under its expected 14 (12), above the 10 it commits (the integration test's "chunk 22: 12
+  // rows read by now, under its 10"). The count may step back by that much; the share, of exact pages, never does
+  const tail: Live = { pages: 14_286, chunksDone: 22, pagesDone: 14_285, rowsDone: 199_990, untaken: 0, chunkPages: 240, readers: 1,
+    reading: [{ since: T, pages: 1 }], rate: { pagesPerSecond: 500, rowsPerSecond: 7_000, bytesPerSecond: 500 * 8192, chunks: 22 }, rowsPerPage: 14 };
+  const reading = copyProgressNow(tail, T + 1_000);
+  assert.equal(reading.rowsReading, Math.floor(0.9 * 14), "held under the rows its pages are expected to hold");
+  const landed = copyProgressNow({ ...tail, chunksDone: 23, pagesDone: 14_286, rowsDone: 200_000, reading: [] }, T + 1_000);
+  assert.ok(landed.share >= reading.share, `the share never goes back: ${reading.share} to ${landed.share}`);
   // a commit (the oldest, its 2,880 pages' rows) moves the count forward whenever it lands
   for (const s of [3, 12, 30, 600]) {
     const before = live(T), at = T + s * 1000;

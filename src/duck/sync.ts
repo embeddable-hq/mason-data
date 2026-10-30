@@ -485,7 +485,9 @@ export interface CopyProgressView {
   /** the chunks being read now, and how long the oldest of them has been */
   reading: number; readingSeconds: number | null;
   /** the rows the chunks being read have read by now at the measured rate, each held under `READING_SHARE_CAP` of its
-   *  expected rows, so the next commit moves the count forward, never back; 0 until something is measured */
+   *  EXPECTED rows (its pages at the rows a page so far), so a commit that holds them moves the count forward. An
+   *  estimate: a chunk's pages may hold fewer (the heap's last page, a sparse range), and the count then steps back to
+   *  what committed; `share`, of exact pages, never does. 0 until something is measured */
   rowsReading: number;
   /** what the copy reads a second, its readers together (null: nothing measured yet), and the time its pages left take at it */
   rowsPerSecond: number | null; bytesPerSecond: number | null; secondsLeft: number | null;
