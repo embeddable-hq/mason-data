@@ -5,7 +5,7 @@ A drop-in replacement for a Postgres read replica, built for exceptionally fast 
 - **Lightweight:** Mason is a single Node.js process you can run anywhere.
 - **Works like a read replica:** Choose which tables and columns to sync from your Postgres database, and how each stays in sync: on demand, polling or logical replication. Mason makes them available to query from any Postgres client.
 - **Lightning fast:** Mason rewrites your Postgres queries to run on [DuckDB](https://github.com/duckdb/duckdb)'s columnar engine, in the form DuckDB runs fastest. Analytical queries (`COUNT`, `SUM`, `GROUP BY`, etc.) over large tables run [significantly faster](#performance-vs-postgres) than on Postgres.
-- **Same SQL, same answers:** Mason is built from the ground up to match Postgres syntax and behaviour, so you can confidently point your existing SQL queries at Mason, without needing to port them to another SQL dialect (where subtle differences change your results). Where Mason can't match Postgres exactly, it refuses the query and says what to write instead (apart from a few listed edge cases, such as a float's last digit). On the [oracle's](#how-compatibility-is-tested) test queries, DuckDB alone answers 30% exactly as Postgres does. Mason answers 95%.
+- **Same SQL, same answers:** Mason is built from the ground up [to match Postgres syntax and behaviour](#postgres-compatibility), so you can confidently point your existing SQL queries at Mason, without needing to port them to another SQL dialect (where subtle differences change your results).
 - **Built for AI agents:** Give AI agents fast, secure access to your data: a user per agent, role-based access control (RBAC) that limits the tables, columns and rows each one can read, every query logged, and native MCP support.
 
 **Contents**
@@ -382,16 +382,6 @@ Mason's goal is to answer every query exactly as Postgres would. That means the 
 OIDs, the same text, the same row order and the same SQLSTATE error codes. So you can keep the SQL you already have.
 
 If Mason can't answer a query exactly, it refuses it. The error says what isn't supported and what to write instead.
-For example, Mason does not yet answer `json_agg(DISTINCT …)` exactly, so it refuses it with Postgres's "feature not
-supported" code (`0A000`):
-
-```text
-SELECT json_agg(DISTINCT status) FROM orders;
-ERROR:  json_agg(DISTINCT …) is not supported by Mason
-DETAIL:  Mason gap json-agg-distinct (docs/SQL-SUPPORT.md)
-HINT:  select the DISTINCT values in a subquery and json_agg them
-```
-
 In a few cases, Mason answers differently from Postgres on purpose. Each of these cases is listed, with the reason.
 Mason never gives a different answer silently.
 
