@@ -85,6 +85,26 @@ test("a named publication is the sources file's, else PG_PUBLICATION — never t
   assert.equal(projectReplication("shop", "app", "mason_dev_shop_app").owned, true, "Mason's own name, named, is still Mason's own (replicationNames' rule)");
 });
 
+test("a lost slot is said as what Mason does: a new slot and one poll per table, never a sync from scratch", async () => {
+  const { replicationChecks } = await import("../src/cli/replication-checks.ts");
+  const facts = (o: Partial<ServerFacts> = {}): ServerFacts => ({
+    version: 160004, versionText: "16.4", standby: false, user: "mason", walLevel: "logical", slotWalKeepMb: 8192,
+    maxSlots: 10, slotsUsed: 1, maxSenders: 10, sendersUsed: 1, superuser: false, replication: true, rds: null, cloudSql: false,
+    hotStandbyFeedback: true, idleInTransactionMs: 0, statementTimeoutMs: 0, walBytesPerSecond: 1024 ** 3 / 86_400 * 64, ...o,
+  });
+  const said = "Mason makes a new slot and catches each table up with one poll (a scan of each table on your database), never a full sync";
+  const detail = (f: ServerFacts, name: string, slot: Parameters<typeof replicationChecks>[2] = null): string =>
+    replicationChecks(f, "mason_dev_shop", slot).find((c) => c.name === name)!.detail;
+  const lost = detail(facts(), "slot", { active: false, activePid: null, walStatus: "lost", plugin: "pgoutput" });
+  const standby = detail(facts({ standby: true, hotStandbyFeedback: false }), "standby");
+  const cap = detail(facts(), "WAL cap");
+  assert.equal(lost, `mason_dev_shop exists and Postgres invalidated it (wal_status lost): ${said}`);
+  assert.match(standby, /hot_standby_feedback is off: the primary may remove catalog rows the slot still needs, which invalidates it \(Mason makes a new slot and catches each table up with one poll \(a scan of each table on your database\), never a full sync\) — turn it on$/);
+  assert.ok(cap.includes(`past it Postgres invalidates the slot rather than fill its disk, and ${said}. A day of this server's WAL is about`), cap);
+  assert.ok(cap.endsWith("an outage longer than the cap's worth means that catch-up"), cap);
+  for (const text of [lost, standby, cap]) assert.doesNotMatch(text, /from scratch|rebuild/);
+});
+
 test("the readiness check: REPLICATION, a superuser or RDS's rds_replication may replicate; a read replica needs a named publication", async () => {
   const { readinessVerdict } = await import("../src/cli/replication-mode.ts");
   const facts = (o: Partial<ServerFacts> = {}): ServerFacts => ({

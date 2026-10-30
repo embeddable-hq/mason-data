@@ -96,6 +96,9 @@ export function suggestedWalCapGb(bytesPerSecond: number | null): number | null 
   return Math.max(4, Math.ceil((bytesPerSecond * 86_400) / 1024 ** 3));
 }
 
+/** What Mason does about a lost slot (src/duck/sync.ts `prepareReplication`), one wording for every check that says it. */
+const SLOT_REMADE = "Mason makes a new slot and catches each table up with one poll (a scan of each table on your database), never a full sync";
+
 /** What wal_level = logical takes on this server: its provider's way, or postgresql.conf's. */
 function walLevelFix(f: ServerFacts): string {
   if (f.rds) return "set rds.logical_replication = 1 in the DB parameter group (Aurora: the DB cluster parameter group), then reboot the instance";
@@ -112,7 +115,7 @@ export function replicationChecks(f: ServerFacts, slot: string, slotState: Await
   if (f.standby) {
     out.push(f.version >= 160000
       ? { name: "standby", ok: true, warn: !f.hotStandbyFeedback,
-        detail: `a read replica (Postgres 16+ decodes on a standby)${f.hotStandbyFeedback ? "" : ". hot_standby_feedback is off: the primary may remove catalog rows the slot still needs, which invalidates it (Mason then rebuilds from scratch) — turn it on"}` }
+        detail: `a read replica (Postgres 16+ decodes on a standby)${f.hotStandbyFeedback ? "" : `. hot_standby_feedback is off: the primary may remove catalog rows the slot still needs, which invalidates it (${SLOT_REMADE}) — turn it on`}` }
       : { name: "standby", ok: false, detail: `a read replica on Postgres ${f.versionText}: logical decoding on a standby needs Postgres 16. Point Mason at the primary, upgrade the replica, or poll the table: give its entry sync: poll <interval> in the sources file` });
   }
   const canReplicate = f.superuser || f.replication || f.rds?.member === true;
@@ -123,7 +126,7 @@ export function replicationChecks(f: ServerFacts, slot: string, slotState: Await
   const free = f.maxSlots - f.slotsUsed;
   if (slotState) {
     out.push(slotState.walStatus === "lost"
-      ? { name: "slot", ok: true, warn: true, detail: `${slot} exists and Postgres invalidated it (wal_status lost): Mason drops it and rebuilds from scratch at its start` }
+      ? { name: "slot", ok: true, warn: true, detail: `${slot} exists and Postgres invalidated it (wal_status lost): ${SLOT_REMADE}` }
       : slotState.active
         ? { name: "slot", ok: false, detail: `${slot} is in use by another reader${slotState.activePid !== null ? ` (pid ${slotState.activePid} on the database)` : ""}: one slot has one reader. ` +
           `Stop the other Mason for this project (mason stop). A run that crashed holds it until its connection ends${slotState.activePid !== null ? `: SELECT pg_terminate_backend(${slotState.activePid}) ends it now` : ""}` }
@@ -140,7 +143,7 @@ export function replicationChecks(f: ServerFacts, slot: string, slotState: Await
   const size = gb === null ? "a day of this database's WAL" : `${gb}GB`;
   const basis = gb === null ? "" : ` (a day of the WAL this server writes: ${bytesText(f.walBytesPerSecond!)}/s since its statistics were reset)`;
   out.push(f.slotWalKeepMb >= 0
-    ? { name: "WAL cap", ok: true, detail: `max_slot_wal_keep_size = ${f.slotWalKeepMb >= 1024 ? `${(f.slotWalKeepMb / 1024).toFixed(f.slotWalKeepMb % 1024 ? 1 : 0)}GB` : `${f.slotWalKeepMb}MB`}: past it Postgres drops the slot rather than fill its disk, and Mason rebuilds from scratch${gb !== null && f.slotWalKeepMb < gb * 1024 ? `. A day of this server's WAL is about ${gb}GB${basis}: an outage longer than the cap's worth means a rebuild` : ""}` }
+    ? { name: "WAL cap", ok: true, detail: `max_slot_wal_keep_size = ${f.slotWalKeepMb >= 1024 ? `${(f.slotWalKeepMb / 1024).toFixed(f.slotWalKeepMb % 1024 ? 1 : 0)}GB` : `${f.slotWalKeepMb}MB`}: past it Postgres invalidates the slot rather than fill its disk, and ${SLOT_REMADE}${gb !== null && f.slotWalKeepMb < gb * 1024 ? `. A day of this server's WAL is about ${gb}GB${basis}: an outage longer than the cap's worth means that catch-up` : ""}` }
     : { name: "WAL cap", ok: false,
       detail: `max_slot_wal_keep_size is unlimited: while Mason is stopped its slot holds every byte of WAL, until the disk fills and Postgres stops taking writes. Cap it at the outage you want Mason to survive, e.g. ${size}${basis}` +
         (f.rds || f.cloudSql ? ` — in the ${f.rds ? "DB parameter group" : "database flags"} (max_slot_wal_keep_size, in MB)` : ""),
