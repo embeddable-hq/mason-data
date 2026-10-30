@@ -7,6 +7,7 @@
 import type { Node } from "libpg-query";
 import { parseSql, PostgresSyntaxError } from "./parser.ts";
 import { Unsupported } from "./translate.ts";
+import { gapMark } from "../../duck/gaps.ts";
 
 export interface ExplainOptions {
   analyze: boolean;
@@ -72,12 +73,12 @@ export function explainOptions(options: readonly unknown[]): ExplainOptions {
         break;
       }
       case "generic_plan":
-        if (booleanOf(name, b.arg, at)) throw new Unsupported(`EXPLAIN (GENERIC_PLAN) is not supported by Mason (Mason gap explain-option)`, at, "0A000", "bind the parameters' values and EXPLAIN that: DuckDB plans the statement with them");
+        if (booleanOf(name, b.arg, at)) throw new Unsupported(`EXPLAIN (GENERIC_PLAN) is not supported by Mason (${gapMark("explain-option")})`, at, "0A000", "bind the parameters' values and EXPLAIN that: Mason plans the statement with them", "explain-option");
         break;
       case "format": {
         const v = stringOf(name, b.arg, at);
         if (v === "text" || v === "json") { o.format = v; break; }
-        if (v === "xml" || v === "yaml") throw new Unsupported(`EXPLAIN (FORMAT ${v.toUpperCase()}) is not supported by Mason (Mason gap explain-option)`, at, "0A000", "write FORMAT TEXT or FORMAT JSON");
+        if (v === "xml" || v === "yaml") throw new Unsupported(`EXPLAIN (FORMAT ${v.toUpperCase()}) is not supported by Mason (${gapMark("explain-option")})`, at, "0A000", "write FORMAT TEXT or FORMAT JSON", "explain-option");
         throw new Unsupported(`unrecognized value for EXPLAIN option "format": "${v}"`, at, "22023");
       }
       default: throw new Unsupported(`unrecognized EXPLAIN option "${name}"`, at, "42601");

@@ -70,10 +70,13 @@ before(async () => {
   assert.ok("source" in parsed);
   const ctx: RunContext = {
     source: parsed.source, facts: () => ({ version: 180000, versionText: "18", standby: false, tables: [], systemIdentifier: null }), warnings: [],
-    replication: () => null, port: 0, token: TOKEN, page: false, users: { file: path.join(dir, "users.json"), apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" }, folder: () => null, root: dir, sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined,
-    readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined,
-    duck: { copies: () => [], file: path.join(dir, "duck.db"), poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null,
-      requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
+    replication: () => null, port: 0, token: TOKEN, page: false, users: { file: path.join(dir, "users.json"), apiKey: API_KEY, database: "app", postgresUrl: "postgresql://127.0.0.1:5433/app" }, folder: () => null, root: dir, home: dir, version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined,
+    readSource: () => ({ message: "no sources file here", code: "bad_source" }), runUrl: "", log: () => undefined, listener: api,
+    logs: { capacity: 2000, recent: () => [] },
+    duck: { copies: () => [], file: path.join(dir, "duck.db"), poll: async () => ({ at: new Date().toISOString(), tables: [] }), stream: async () => null, disk: () => ({ path: dir, freeBytes: null, projectedBytes: null }),
+      requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map(), 
+        lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
+      usage: { days: 7, sampleSeconds: 60, samples: async () => [], copySizes: async () => [] }, restarts: () => [] },
   };
   control = createRunServer(ctx);
   await new Promise<void>((r) => control.listen(0, "127.0.0.1", () => r()));

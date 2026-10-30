@@ -24,6 +24,7 @@ export type PolledSync = Exclude<TableSync, { mode: "replication" }>;
  *  then only what you tell it to) */
 export const DEFAULT_SYNC: TableSync = { mode: "off" };
 
+
 /** the shortest interval a poll takes: below a second a full scan of the table on the source is the source's whole time */
 export const MIN_POLL_SECONDS = 1;
 /** the longest: a day. Longer is `off` with `mason sync <table>` from a scheduler (and an instant past a Date's range,
@@ -203,4 +204,30 @@ export function changesRetired(env: Readonly<Record<string, string | undefined>>
 export function changesRetiredText(env: Readonly<Record<string, string | undefined>>, shown: string): string | null {
   const r = changesRetired(env, shown);
   return r === null ? null : `${r.message}: ${r.why} — ${r.fix}`;
+}
+
+/**
+ * A DURATION IN MILLISECONDS as a person reads it, the one formatter of a statement's, a sync's or a percentile's time
+ * (the web page's `msText`, src/web/shared.js, held equal by the tests): `512 ms` under a second, then `13.7 s`, then
+ * `2 min 5 s`, then `1 h 4 min` (a 13,703 ms statement read as thirteen thousand of something).
+ */
+export function msText(ms: number): string {
+  const v = Math.max(0, ms);
+  if (Math.round(v) < 1000) return `${Math.round(v)} ms`;
+  const tenths = Math.round(v / 100);
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)} s`;
+  const s = Math.round(v / 1000);
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
+  const m = Math.round(s / 60);
+  return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+
+/**
+ * WHAT A SYNC DID TO ONE TABLE, in the words `mason sync` prints on its line and the web page's Sync now says
+ * (src/cli/sync.ts `syncedReport`, src/web/pages/tables.js, held equal) — and a sync by hand records as its `synced`
+ * event (src/duck/sync.ts pollNow), so the event and the answer the person read are one sentence.
+ */
+export function syncedText(t: { changed: number; deleted: number; rows: number; ms: number }): string {
+  const n = (x: number): string => x.toLocaleString("en-US");
+  return `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`;
 }

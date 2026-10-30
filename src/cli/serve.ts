@@ -27,6 +27,7 @@ import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenPro
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
 import { changesRetiredText, pollMsRetiredText } from "../lib/table-sync.ts";
+import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { version } from "./version.ts";
 import type { CopyState } from "../duck/sync.ts";
 
@@ -58,7 +59,8 @@ export const SERVE: CommandSpec = {
     MASON_DUCKDB_MEMORY     the copy's memory, 4GB or 512MiB (default half the container's memory limit, else half the
                             machine's RAM; mason doctor says it); a statement past it fails alone with 53200
     MASON_STATEMENT_TIMEOUT   each statement's limit, as Postgres's statement_timeout (default 5min; 0 for none)
-    MASON_REQUEST_LOG_DAYS  how long the request log keeps a statement, in days (default 7)
+    MASON_HISTORY_DAYS      how many days Mason keeps its history: the request log, the sync's events, the usage
+                            samples and the copies' sizes (default 7)
     MASON_STORE_JSON_PATHS  on (the default) stores the JSON paths statements keep reading as columns; off stores none
     MASON_COPY_PARALLEL     a copy's chunks read at once, each a backend on the database (1 to 8, default 3)
     MASON_COPY_CHUNK_SECONDS   how long each chunk takes to read, at the rate measured (1 to 300, default 12)
@@ -103,6 +105,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   if (changes !== null) wrong.push(changes);
   const pollMs = pollMsRetiredText(env);
   if (pollMs !== null) wrong.push(pollMs);
+  // the history's days: MASON_HISTORY_DAYS, a number of days; the old name refused (src/duck/history.ts)
+  const days = historyDaysSetting(env);
+  if (typeof days !== "number") wrong.push(historyDaysWrongText(days));
   const selfSigned = env.MASON_PG_SELF_SIGNED_TLS || "0";
   if (selfSigned !== "0" && selfSigned !== "1") wrong.push(`MASON_PG_SELF_SIGNED_TLS=${JSON.stringify(selfSigned)}: 1, or 0 (the default)`);
   const portText = env.MASON_HEALTH_PORT || "4140";

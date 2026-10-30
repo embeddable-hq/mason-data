@@ -24,6 +24,7 @@ import { TABLES_SQL } from "../src/cli/preflight.ts";
 import { jsonbText } from "../src/duck/jsonb.ts";
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { CopyState } from "../src/duck/sync.ts";
+import type { ApiLogRow } from "../src/api/request-log.ts";
 import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
@@ -212,6 +213,8 @@ const schema: PgSchema = {
 /** the sync's copy state the listener reads for a table the catalog does not hold (`Sync.state` in a run) */
 let copies: CopyState[] = [];
 const logged: string[] = [];
+/** the request log's rows as the listener built them (src/api/request-log.ts ApiLogRow) */
+const recorded: ApiLogRow[] = [];
 /** every line, never cleared (a test that reads a line said once, at the catalog's start, cannot know when that was) */
 const everLogged: string[] = [];
 
@@ -234,7 +237,7 @@ before(async () => {
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "0.6.1", product: "mason-data",
     authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
     schema: () => schema,
-    record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
+    record: (r) => { recorded.push(r); }, log: (l) => (logged.push(l), everLogged.push(l)),
     duck: await store.listener(undefined, undefined, undefined, () => copies),
   });
 });
@@ -662,17 +665,21 @@ test("the BI-tools test: a sum over a CASE has the scale of the arms its rows to
 
 /** One session over a raw socket, its reading in the test's hands (`pg` reads every reply as it comes); `startup` adds
  *  to its startup packet, and `reported` is the ParameterStatus the startup answered. */
-async function rawSession(port = api.port, startup: Record<string, string> = {}): Promise<{ socket: net.Socket; pid: number; secret: number; reported: Map<string, string>; untilReady(): Promise<BackendMessage[]>; end(): void }> {
+async function rawSession(port = api.port, startup: Record<string, string> = {}): Promise<{ socket: net.Socket; pid: number; secret: number; reported: Map<string, string>; untilReady(): Promise<BackendMessage[]>; end(): void; readonly bytes: number }> {
   const socket = net.connect(port, "127.0.0.1");
   await new Promise<void>((r) => socket.once("connect", () => r()));
   let chunks: Buffer[] = [];
   let tail = Buffer.alloc(0);
   let wake: (() => void) | null = null;
+  /** the bytes the last untilReady read, ReadyForQuery included */
+  let bytes = 0;
   socket.on("data", (d: Buffer) => { chunks.push(d); tail = Buffer.concat([tail, d]).subarray(-6); wake?.(); });
   const ready = (): boolean => tail.length === 6 && tail[0] === 0x5a && tail.readInt32BE(1) === 5;
   const untilReady = async (): Promise<BackendMessage[]> => {
     while (!ready()) await new Promise<void>((r) => { wake = r; });
-    const ms = wire.replies(Buffer.concat(chunks));
+    const all = Buffer.concat(chunks);
+    bytes = all.length;
+    const ms = wire.replies(all);
     chunks = []; tail = Buffer.alloc(0);
     return ms;
   };
@@ -683,7 +690,7 @@ async function rawSession(port = api.port, startup: Record<string, string> = {})
   const started = await untilReady();
   const key = started.find((m) => m.type === "BackendKeyData") as Extract<BackendMessage, { type: "BackendKeyData" }>;
   const reported = new Map(started.flatMap((m) => m.type === "ParameterStatus" ? [[m.name, m.value] as const] : []));
-  return { socket, pid: key.pid, secret: key.secret, reported, untilReady, end: () => { socket.destroy(); } };
+  return { socket, pid: key.pid, secret: key.secret, reported, untilReady, end: () => { socket.destroy(); }, get bytes() { return bytes; } };
 }
 const dataRows = (ms: BackendMessage[]): Array<Extract<BackendMessage, { type: "DataRow" }>> => ms.filter((m) => m.type === "DataRow") as Array<Extract<BackendMessage, { type: "DataRow" }>>;
 const finished = (word: string): boolean => logged.some((l) => l.startsWith("statement:") && l.includes(word));
@@ -1361,7 +1368,7 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
     const plain = await explained(0);
     assert.deepEqual(await explained(1), plain);
     // the SQL sent is the join's, and DuckDB plans its delimiter join
-    assert.match(plain.join("\n"), /Sent to DuckDB: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
+    assert.match(plain.join("\n"), /Sent to the copy: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
     assert.doesNotMatch(plain.join("\n"), /CROSS JOIN LATERAL/, plain.join("\n"));
 
     // planned again under the search_path and TimeZone of its Parse, never a later SET's
@@ -1698,9 +1705,9 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     assert.deepEqual(p.fields, [["QUERY PLAN", 25]]);
     assert.equal(p.command, "EXPLAIN");
     // no sync here (`copies` is empty): how it is kept current is said unknown, never guessed
-    assert.equal(p.lines[0], "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
-    assert.equal(p.lines[1], "  Sent to DuckDB: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
-    assert.equal(p.lines[2], "  Computed by Mason after DuckDB: nothing");
+    assert.equal(p.lines[0], "Mason: answered from its copy of public.orders (about 3 rows; how it is kept current is unknown: the sync has no record of it)");
+    assert.equal(p.lines[1], "  Sent to the copy: SELECT id AS id, status AS status FROM orders ORDER BY id LIMIT 2");
+    assert.equal(p.lines[2], "  Computed by Mason after the copy: nothing");
     // a preview's late materialization (14a1a831), as DuckDB plans it: the top two by the key, then the other columns
     // read for those rows only
     assert.ok(p.lines.some((l) => /^ +->  Hash Join {2}\(rows=3\)$/.test(l)) && p.lines.some((l) => /^ +Join Type: SEMI$/.test(l)), p.lines.join("\n"));
@@ -1713,16 +1720,16 @@ test("EXPLAIN says where the answer comes from, what Mason sent DuckDB and compu
     const v = await plan("EXPLAIN (VERBOSE, COSTS false, BUFFERS) SELECT id FROM orders WHERE status = $1", ["paid"]);
     assert.ok(v.lines.some((l) => /^\s+Projections: /.test(l)) && v.lines.some((l) => /^\s+Filters: /.test(l)), v.lines.join("\n"));
     assert.ok(!v.lines.some((l) => /rows=/.test(l)), v.lines.join("\n"));
-    assert.ok(v.lines.includes("  Note: BUFFERS has no DuckDB meaning: ignored"), v.lines.join("\n"));
+    assert.ok(v.lines.includes("  Note: BUFFERS has no meaning to the copy: ignored"), v.lines.join("\n"));
     // what Mason computes after DuckDB, and its functions DuckDB calls
     const x = await plan("EXPLAIN SELECT sum(amount) / 7 FROM orders");
-    assert.match(x.lines[2]!, /^ {2}Computed by Mason after DuckDB: column 1 "\?column\?": Postgres's exact numeric, from \d of DuckDB's value\(s\)$/);
+    assert.match(x.lines[2]!, /^ {2}Computed by Mason after the copy: column 1 "\?column\?": Postgres's exact numeric, from \d of the copy's value\(s\)$/);
     // a function is what DuckDB calls, never the cells Mason computes from (`__mason_cell_0` is a column's name)
-    const called = (await plan("EXPLAIN SELECT sum(amount::text::numeric) FROM orders")).lines.find((l) => /^ {2}Mason's functions DuckDB calls: /.test(l));
+    const called = (await plan("EXPLAIN SELECT sum(amount::text::numeric) FROM orders")).lines.find((l) => /^ {2}Mason's functions the copy calls: /.test(l));
     assert.ok(called !== undefined && /__mason_numeric_exact/.test(called) && !/__mason_cell_/.test(called), called);
     // a catalog statement is the catalog Postgres's, said so first
     const k = await plan("EXPLAIN SELECT relname FROM pg_class WHERE relname = 'orders'");
-    assert.match(k.lines[0]!, /^Mason: answered by the catalog Postgres \(Mason's own, PGlite\), not DuckDB/);
+    assert.match(k.lines[0]!, /^Mason: answered by the catalog Postgres \(Mason's own, PGlite\), not the copy/);
     assert.ok(k.lines.length > 1);
     assert.match((await plan("EXPLAIN SELECT relname FROM pg_class", [])).lines[0]!, /^Mason: answered by the catalog Postgres/);
   } finally { await c.end(); }
@@ -1739,7 +1746,7 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
   const json = async (): Promise<Record<string, unknown>> =>
     (JSON.parse(String((await c.query({ text: "EXPLAIN (FORMAT JSON) SELECT id FROM orders", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>)[0]!.Mason.Copies[0]!;
   const copied = (kept: CopyState["kept"]): CopyState => ({ source: "public.orders", phase: "copied", rows: 3, bytes: 8192, seconds: 0.1, copiedAt: "2026-10-27 19:00:00+00", error: null, ...(kept ? { kept } : {}) });
-  const head = "Mason: answered by DuckDB from its copy of public.orders (about 3 rows; ";
+  const head = "Mason: answered from its copy of public.orders (about 3 rows; ";
   // the copy's age is said for a streamed table too: the last moment the stream had everything the database wrote
   const syncedAt = new Date(Date.now() - 3 * 60_000).toISOString();
   const synced = `last synced 3 min ago (${syncedAt.slice(0, 19).replace("T", " ")} UTC)`;
@@ -1794,7 +1801,7 @@ test("EXPLAIN says how a copy is kept current as the sync says it to mason statu
     // a statement over two copies says each on a line of its own
     copies = [copied(streamed), { ...copied({ by: "poll", sync: every30, syncedAt: null, nextAt: null }), source: "sales.invoices" }];
     const two = (await c.query({ text: "EXPLAIN SELECT o.id FROM orders o JOIN sales.invoices i ON i.id = o.id", rowMode: "array" })).rows.map((x) => String((x as unknown[])[0]));
-    assert.equal(two[0], "Mason: answered by DuckDB from its copies of");
+    assert.equal(two[0], "Mason: answered from its copies of");
     assert.ok(two.includes(`  public.orders (about 3 rows; kept current by logical replication (slot mason_shop), replicated, at 0/1A2B3C4D, ${synced}, last change committed 2026-10-29 08:15:02 UTC)`), two.join("\n"));
     assert.ok(two.some((l) => /^ {2}sales\.invoices \(about \d+ rows; polled every 30s, not polled yet\)$/.test(l)), two.join("\n"));
   } finally {
@@ -1815,10 +1822,10 @@ test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's
     assert.ok(lines.some((l) => /^ {2}->  Order By {2}\(rows=\d+\) \(actual rows=2, thread time=\d+\.\d{3} ms\)$/.test(l)), lines.join("\n"));
     assert.ok(lines.some((l) => /->  Table Scan on public\.orders {2}\(rows=\d+\) \(actual rows=2, thread time=\d+\.\d{3} ms\)$/.test(l)), lines.join("\n"));
     // the time is DuckDB's thread time, said so once: never Postgres's elapsed `actual time` (the Fable review of #517)
-    assert.ok(lines.includes("  Note: an operator's thread time is DuckDB's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time"), lines.join("\n"));
+    assert.ok(lines.includes("  Note: an operator's thread time is the copy's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time"), lines.join("\n"));
     assert.ok(!lines.some((l) => /actual time=/.test(l)), lines.join("\n"));
-    assert.match(lines.at(-2)!, /^Planning Time: \d+\.\d{3} ms \(Postgres's analysis \d+\.\d{3}, Mason's rewrite \d+\.\d{3}, DuckDB's planning \d+\.\d{3}\)$/);
-    assert.match(lines.at(-1)!, /^Execution Time: \d+\.\d{3} ms \(DuckDB \d+\.\d{3}, Mason's conversion and exact numerics \d+\.\d{3}\)$/);
+    assert.match(lines.at(-2)!, /^Planning Time: \d+\.\d{3} ms \(Postgres's analysis \d+\.\d{3}, Mason's rewrite \d+\.\d{3}, the copy's planning \d+\.\d{3}\)$/);
+    assert.match(lines.at(-1)!, /^Execution Time: \d+\.\d{3} ms \(the copy \d+\.\d{3}, Mason's conversion and exact numerics \d+\.\d{3}\)$/);
     // it ran, through the same runner (its log line), and the plan's rows are all the client got
     assert.ok(finished("2 row(s)"), logged.join("\n"));
 
@@ -1847,14 +1854,14 @@ test("EXPLAIN ANALYZE reports the statement's own profile, never another stateme
       assert.ok(!l.some((x) => /schemas/i.test(x)), l.join("\n"));
       // DuckDB's plan of the count (its EXPLAIN: a scan of the one row it computed), the rows it answered, no times
       assert.deepEqual(plan, ["Column Data Scan  (rows=1) (actual rows=1)"], l.join("\n"));
-      assert.ok(l.includes("  Note: DuckDB's profiler recorded no operator of this statement: DuckDB answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered"), l.join("\n"));
+      assert.ok(l.includes("  Note: the copy's profiler recorded no operator of this statement: the copy answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered"), l.join("\n"));
       assert.ok(!l.some((x) => /thread time/.test(x)), l.join("\n"));
       assert.match(l.at(-1)!, /^Execution Time: \d+\.\d{3} ms /);
     }
     // FORMAT JSON says the same
     const [doc] = JSON.parse(String((await c.query({ text: "EXPLAIN (ANALYZE, FORMAT JSON) SELECT count(*) FROM big", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown> }>;
     assert.deepEqual([doc!.Plan["Node Type"], doc!.Plan["Actual Rows"], doc!.Plan["DuckDB Thread Time"]], ["Column Data Scan", 1, undefined]);
-    assert.match(String(doc!.Mason.Note), /^DuckDB's profiler recorded no operator of this statement/);
+    assert.match(String(doc!.Mason.Note), /^the copy's profiler recorded no operator of this statement/);
     // a statement the profiler does time is its own, after one it did not and after one of another table's; one that
     // scans a copy says its scan's rows and time
     for (const [sql, scans] of [["SELECT count(*) FROM big WHERE id > 7", "big"], ["SELECT count(*) FROM orders WHERE qty > 1", "orders"], ["SELECT 1", null], ["SELECT id FROM orders WHERE false", null]] as const) {
@@ -1878,11 +1885,11 @@ test("EXPLAIN (FORMAT JSON) is Postgres's plan document, DuckDB's operators in i
     const [doc] = JSON.parse(String((r.rows as unknown[][])[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown>; "Planning Time": number; "Execution Time": number }>;
     assert.equal(doc!.Plan["Node Type"], "Top N");
     assert.equal(doc!.Plan["Actual Rows"], 2);
-    assert.equal(typeof doc!.Plan["DuckDB Thread Time"], "number");
+    assert.equal(typeof doc!.Plan["Copy Thread Time"], "number");
     assert.equal(doc!.Plan["Actual Total Time"], undefined, "a plan viewer draws Actual Total Time as elapsed: DuckDB's is thread time");
     const scan = (doc!.Plan.Plans as Array<Record<string, unknown>>)[0]!;
     assert.deepEqual([scan["Node Type"], scan["Relation Name"], scan["Schema"], scan["Plan Rows"]], ["Table Scan", "orders", "public", 3]);
-    assert.equal(doc!.Mason["Answered By"], "DuckDB");
+    assert.equal(doc!.Mason["Answered By"], "the copy");
     assert.deepEqual(doc!.Mason.Copies, [{ Table: "public.orders", "Estimated Rows": 3, "Kept Current By": null, "Kept Current": "how it is kept current is unknown: the sync has no record of it" }]);
     assert.ok(typeof doc!["Planning Time"] === "number" && typeof doc!["Execution Time"] === "number");
     // FORMAT XML and YAML are refused by name; Postgres's own errors for an option it does not have, or one that needs ANALYZE
@@ -2189,4 +2196,167 @@ test("no rewrite of the statements above placed one of their nodes twice", async
   const rewrite = await import("../src/duck/rewrite.ts") as { nodesPlacedTwice?: () => readonly string[] };
   assert.ok(rewrite.nodesPlacedTwice !== undefined, "the rewrite has no detector of a node placed twice");
   assert.deepEqual(rewrite.nodesPlacedTwice(), [], "a rule placed a node in two places: clone it per use (Rewriter.cp)");
+});
+
+// THE BYTES SENT, per statement (src/api/request-log.ts bytesSent): what the client read for it, every frame from its
+// first to its CommandComplete or ErrorResponse — the ReadyForQuery after it is the protocol's, not the statement's
+test("the request log's bytes are the bytes the client read for the statement: an answer's rows and its tag, a refusal's ErrorResponse, a 150,000-row stream", async () => {
+  const s = await rawSession();
+  try {
+    const READY = 6;
+    const asked = async (sql: string): Promise<{ read: number; row: ApiLogRow }> => {
+      const from = recorded.length;
+      s.socket.write(wire.query(sql));
+      await s.untilReady();
+      const row = recorded.slice(from).find((r) => r.session === s.pid);
+      assert.ok(row !== undefined, `a row for ${sql}`);
+      return { read: s.bytes - READY, row };
+    };
+    for (const sql of ["SELECT count(*) FROM big", "SELECT * FROM nope"]) {
+      const { read, row } = await asked(sql);
+      assert.equal(row.bytesSent, read, sql);
+    }
+    const wide = await asked("SELECT v || repeat('z', 200) AS bytes_wide FROM big");
+    assert.equal(wide.row.bytesSent, wide.read);
+    assert.ok(wide.read > 30_000_000, "the stream's 30 MB, counted whole");
+  } finally { s.end(); }
+});
+
+// THE REQUEST LOG RECORDS WHICH ENTRY REFUSED A STATEMENT (ApiLogRow.gap, src/duck/gaps.ts): taken from the refusal as
+// it was built (StatementError.gap), on each path a refusal takes — the rewrite's and the allowlist's at plan time, a
+// view's from the plan of its expansion, a refusal raised inside DuckDB from the worker — and none for any other refusal
+test("the request log records the registry entry that refused a statement, on every path a refusal takes; another refusal has none", async () => {
+  const c = await client();
+  try {
+    const refusedBy = async (sql: string): Promise<{ code: string; gap: string | undefined }> => {
+      const e = await c.query(sql).then(() => assert.fail(`${sql} was answered`), (x: pg.DatabaseError) => x);
+      const rows = recorded.filter((r) => r.payload === sql);
+      assert.equal(rows.length, 1, `one row for ${sql}`);
+      assert.equal(rows[0]!.sqlstate, e.code);
+      return { code: e.code!, gap: rows[0]!.gap };
+    };
+    assert.deepEqual(await refusedBy("SELECT degrees(qty) FROM orders WHERE id > -1"), { code: "0A000", gap: "unverified" }, "the allowlist's");
+    assert.deepEqual(await refusedBy("SELECT paid_orders FROM paid_orders WHERE true"), { code: "0A000", gap: "view-forms" }, "a view's, from the plan of what it expands to");
+    assert.deepEqual(await refusedBy("SELECT json_agg(DISTINCT id) FROM orders"), { code: "0A000", gap: "json-agg-distinct" }, "the rewrite's");
+    assert.deepEqual(await refusedBy("EXPLAIN (FORMAT XML) SELECT id FROM orders WHERE id > -2"), { code: "0A000", gap: "explain-option" }, "the translation's");
+    assert.deepEqual(await refusedBy("SELECT width_bucket(qty, 10, 0, 5) FROM orders"), { code: "0A000", gap: "width-bucket-forms" }, "raised by DuckDB, as its text alone");
+    await c.query("SET TimeZone = 'Europe/Rome'");
+    assert.deepEqual(await refusedBy("SELECT timestamptz '0044-03-15 12:00:00+00 BC' FROM orders WHERE id = 2"), { code: "0A000", gap: "bc-timestamptz-zone" },
+      "raised inside DuckDB, across the executor's worker");
+    assert.deepEqual(await refusedBy("SELECT * FROM nope_gapless"), { code: "42P01", gap: undefined }, "a missing table is no entry's");
+    assert.deepEqual(await refusedBy("SELEC 1 gapless"), { code: "42601", gap: undefined }, "nor a syntax error");
+  } finally { await c.end(); }
+});
+
+// A PAGED PORTAL'S BYTES ARE ITS OWN (src/api/postgres/server.ts `bytesFor`, `Portal.bytes`): its pages and its tag,
+// however many statements ran between two of its Executes — it was counted as the session's bytes since its first
+// Execute, so a portal paged around another statement counted that statement's bytes twice (a review finding)
+test("a paged portal's bytes are its own Executes' frames, never those of a statement run between two of them", async () => {
+  const s = await rawSession();
+  try {
+    const READY = 6;
+    const PARSE_BIND = 5 + 5;
+    s.socket.write(wire.query("BEGIN"));
+    await s.untilReady();
+    const from = recorded.length;
+    // portal a: two rows of five, suspended
+    s.socket.write(Buffer.concat([wire.parse("a", "SELECT v FROM big WHERE id < 5"), wire.bind("pa", "a", [], []), wire.execute("pa", 2), wire.sync()]));
+    const first = await s.untilReady();
+    assert.ok(first.some((m) => m.type === "PortalSuspended"), JSON.stringify(first.map((m) => m.type)));
+    let a = s.bytes - READY - PARSE_BIND;
+    // portal b, run whole between two Executes of a
+    s.socket.write(Buffer.concat([wire.parse("b", "SELECT v || repeat('z', 100) AS w FROM big WHERE id < 50"), wire.bind("pb", "b", [], []), wire.execute("pb", 0), wire.sync()]));
+    await s.untilReady();
+    const b = s.bytes - READY - PARSE_BIND;
+    // the rest of a
+    s.socket.write(Buffer.concat([wire.execute("pa", 0), wire.sync()]));
+    const rest = await s.untilReady();
+    assert.equal(dataRows(rest).length, 3);
+    a += s.bytes - READY;
+    const rows = recorded.slice(from).filter((r) => r.session === s.pid);
+    assert.deepEqual(rows.map((r) => [r.rows, r.bytesSent]), [[50, b], [5, a]], "b's bytes are b's alone, a's its two Executes'");
+    s.socket.write(wire.query("COMMIT"));
+    await s.untilReady();
+  } finally { s.end(); }
+});
+
+// THE SESSIONS LOGGED IN NOW (`openSessions`, `/api/state` `sessions`): from the listener's sessions in memory, by user
+// and client, with how many run a statement
+test("the sessions logged in now, by user and client, and how many of each run a statement; a closed one is gone", async () => {
+  const has = (api as unknown as { openSessions?: unknown }).openSessions;
+  assert.equal(typeof has, "function", "src/api/postgres/server.ts PgApiServer.openSessions");
+  // other tests' sessions may still be closing: these are told apart by their application_name
+  const a = await rawSession(), b = await rawSession(), c = await rawSession();
+  try {
+    for (const [x, name] of [[a, "obs-two"], [b, "obs-two"], [c, "obs-one"]] as const) { x.socket.write(wire.query(`SET application_name = '${name}'`)); await x.untilReady(); }
+    const group = (client: string): unknown => api.openSessions().byClient.find((g) => g.client === client);
+    const open = api.openSessions();
+    assert.ok(open.open >= 3 && open.open === open.byClient.reduce((n, g) => n + g.open, 0), JSON.stringify(open));
+    assert.deepEqual(group("obs-two"), { user: "", client: "obs-two", open: 2, running: 0 }, "a token's sessions: no user");
+    assert.deepEqual(group("obs-one"), { user: "", client: "obs-one", open: 1, running: 0 });
+    a.socket.write(wire.query(SLOW));
+    for (const deadline = Date.now() + 10_000; (group("obs-two") as { running: number } | undefined)?.running !== 1;) {
+      if (Date.now() > deadline) throw new Error("the statement never showed as running");
+      await sleep(20);
+    }
+    api.cancel(a.pid);
+    await a.untilReady();
+    c.end();
+    for (const deadline = Date.now() + 5_000; group("obs-one") !== undefined;) {
+      if (Date.now() > deadline) throw new Error(`a closed session is still counted: ${JSON.stringify(api.openSessions())}`);
+      await sleep(20);
+    }
+  } finally { a.end(); b.end(); c.end(); }
+});
+
+// THE STATEMENTS RUNNING NOW, AND A CANCEL BY SESSION (`/api/running`, `POST /api/cancel`): the listener's own, and the
+// cancel is the CancelRequest's path — the client told 57014 "due to user request", recorded cancelled, the session on
+test("the statements running now, by session; a cancel by session stops one as a CancelRequest does, and says when there is nothing to stop", async () => {
+  const s = await rawSession();
+  try {
+    assert.deepEqual(api.running().filter((r) => r.session === s.pid), [], "an idle session runs nothing");
+    const from = recorded.length;
+    const t0 = Date.now();
+    s.socket.write(wire.query(SLOW));
+    let running = api.running().find((r) => r.session === s.pid);
+    for (const deadline = Date.now() + 10_000; running === undefined; running = api.running().find((r) => r.session === s.pid)) {
+      if (Date.now() > deadline) throw new Error("the statement never showed as running");
+      await sleep(20);
+    }
+    assert.deepEqual({ ...running, statement: 0, startedAt: "", runningMs: 0 }, { session: s.pid, statement: 0, user: "", applicationName: "", method: "QUERY", startedAt: "", runningMs: 0, rows: 0,
+      query: SLOW, queryTruncated: false });
+    assert.ok(Date.parse(running.startedAt) >= t0 - 5 && running.runningMs >= 0);
+    assert.ok(Number.isInteger(running.statement) && running.statement >= 1, JSON.stringify(running));
+    assert.equal(api.running().find((r) => r.session === s.pid)?.statement, running.statement, "one statement, one number however often it is listed");
+    // a cancel naming ANOTHER statement (the one listed ended, and the session began this one): nothing is cancelled
+    const other = api.cancel(s.pid, running.statement + 1000);
+    assert.ok("other" in other && other.other.statement === running.statement && other.asked === running.statement + 1000, JSON.stringify(other));
+    assert.ok(api.running().some((r) => r.session === s.pid), "still running");
+    const answer = api.cancel(s.pid, running.statement);
+    assert.ok("cancelled" in answer && answer.cancelled.session === s.pid && answer.cancelled.query === SLOW, JSON.stringify(answer));
+    const ms = await s.untilReady();
+    const error = ms.find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+    assert.deepEqual([error?.fields.C, error?.fields.M], ["57014", "canceling statement due to user request"]);
+    assert.ok(Date.now() - t0 < 10_000, `stopped after ${Date.now() - t0} ms`);
+    const row = recorded.slice(from).find((r) => r.session === s.pid);
+    assert.equal(row?.sqlstate, "57014", "recorded, as cancelled");
+    assert.ok(logged.some((l) => l === `[postgres] session ${s.pid}: its statement cancelled by mason cancel`), "the log says who cancelled it");
+    assert.ok(logged.some((l) => l.startsWith(`[postgres] session ${s.pid} cancelled: 57014 canceling statement due to user request — ${SLOW}`)), "its refusal line says cancelled");
+    assert.deepEqual(api.cancel(s.pid), { idle: s.pid }, "nothing running: nothing cancelled");
+    assert.deepEqual(api.cancel(s.pid, running.statement), { idle: s.pid }, "its statement ended: nothing to cancel");
+    assert.deepEqual(api.cancel(999_999), { unknown: 999_999 });
+    s.socket.write(wire.query("SELECT count(*) FROM big"));
+    assert.equal(String(dataRows(await s.untilReady())[0]!.values[0]), "150000", "the session goes on");
+    // the next statement of the session is another number: a cancel of the first one never stops it
+    s.socket.write(wire.query(SLOW));
+    let next = api.running().find((r) => r.session === s.pid);
+    for (const deadline = Date.now() + 10_000; next === undefined; next = api.running().find((r) => r.session === s.pid)) {
+      if (Date.now() > deadline) throw new Error("the second statement never showed as running");
+      await sleep(20);
+    }
+    assert.notEqual(next.statement, running.statement);
+    assert.ok("other" in api.cancel(s.pid, running.statement), "the first statement's cancel does not stop the second");
+    assert.ok("cancelled" in api.cancel(s.pid));
+    await s.untilReady();
+  } finally { s.end(); }
 });

@@ -6,39 +6,103 @@
 <title>Mason</title>
 <!-- no favicon request: an empty one, inline (img-src allows data:) -->
 <link rel="icon" href="data:,">
+<!-- every file Mason's own, from its allowlist (src/cli/run-server.ts PAGE_ROUTES): the fonts are app.css's, vendored -->
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/vendor/uplot-1.6.32/uPlot.min.css">
 <script type="module" src="/app.js"></script>
 </head>
 <body>
-<header>
-  <h1>Mason</h1>
-  <p id="where" class="where"></p>
-  <p id="updated" class="updated" aria-live="polite"></p>
-</header>
+<!-- the shell (src/web/app.js): the sidebar — the project, the nav, when it was updated and the version — and the page
+     beside it. Below 1000 px the sidebar is an icon rail; below 640 px a top bar whose menu button opens the nav as a sheet -->
+<aside id="sidebar" class="sidebar">
+  <div class="side-head">
+    <button type="button" id="menu-button" class="menu-button" data-menu aria-controls="side-body" aria-expanded="false"><span id="menu-icon"></span><span class="sr">Menu</span></button>
+    <h1 class="brand"><span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" focusable="false"><path d="M3 3h8.25v5H3zM12.75 3H21v5h-8.25zM3 9.5h3.5L8 14.5H3zM8 9.5h8l-1.5 5h-5zM17.5 9.5H21v5h-5zM3 16h6v5H3zM15 16h6v5h-6z"/></svg></span><span class="brand-name">Mason</span></h1>
+    <div class="project"><p id="where" class="where"></p><span id="badge"></span></div>
+  </div>
+  <div id="side-body" class="side-body">
+    <!-- the pages: one section each, the one shown chosen by the URL's hash; the links work before the script runs, which adds their icons -->
+    <nav id="nav" class="nav" aria-label="Pages"><ul><li><a href="#overview"><span class="label">Overview</span></a></li><li><a href="#tables"><span class="label">Tables</span></a></li><li><a href="#users"><span class="label">Users</span></a></li><li class="group"><p class="group-title" id="nav-observability">Observability</p><ul aria-labelledby="nav-observability"><li><a href="#observability/queries"><span class="label">Queries</span></a></li><li><a href="#observability/usage"><span class="label">Usage</span></a></li><li><a href="#observability/syncs"><span class="label">Sync events</span></a></li></ul></li></ul></nav>
+    <div class="side-foot"><p id="updated" class="updated" aria-live="polite"></p><p id="version" class="version"></p></div>
+  </div>
+</aside>
+<div class="scrim" aria-hidden="true"></div>
+<div class="content">
 <div id="poll"></div>
 <main>
-  <section aria-labelledby="status-h">
-    <h2 id="status-h">Status</h2>
-    <div id="status"><p class="dim">Asking Mason…</p></div>
+  <section id="page-status" aria-labelledby="status-h">
+    <div class="page-head"><h2 id="status-h">Overview</h2><p class="desc">Mason copies the tables you add from your Postgres, keeps them current, and answers analytics SQL at a Postgres URL of its own. Here: whether the copy is ready, how to connect, and what it answered — what <code>mason status</code> says.</p></div>
+    <div id="status"><div class="loading" aria-busy="true"><p class="dim">Asking Mason…</p><span class="skeleton block"></span></div></div>
   </section>
-  <section aria-labelledby="tables-h">
-    <h2 id="tables-h">Tables</h2>
-    <p class="lead">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p>
+  <section id="page-tables" aria-labelledby="tables-h" hidden>
+    <div class="page-head"><h2 id="tables-h">Tables</h2><p class="desc">The database's tables, as <code>mason tables</code> lists them. Add one and Mason copies it: it is added to the sources file, as <code>mason add</code> does; Remove takes it out and drops its copy, as <code>mason remove</code> does.</p></div>
+    <div id="tables-cards"></div>
+    <!-- each label in a field with its control, as the request filters are: on a phone a field is a row, never a label left at a line's end -->
+    <div class="toolbar">
+      <div class="field grow"><label for="tables-filter">Search the tables</label>
+        <input type="search" id="tables-filter" autocomplete="off" spellcheck="false" placeholder="orders"></div>
+      <div class="field"><label for="tables-show">Show</label>
+        <select id="tables-show"><option value="all">All</option><option value="added">Added</option><option value="failed">Failed</option><option value="not-added">Not added</option></select></div>
+    </div>
     <div id="tables"></div>
   </section>
-  <section aria-labelledby="users-h">
-    <h2 id="users-h">Users</h2>
-    <p class="lead">A user of the Postgres API: a name and a password that does not expire, for a BI tool or an app. The same users as <code>mason user</code>.</p>
-    <div id="added"></div>
-    <form id="add-user" autocomplete="off">
+  <section id="page-queries" aria-labelledby="queries-h" hidden>
+    <!-- an Observability view's head is ONE row: its title left, the time range the three share right (src/web/app.js renderSubnav) -->
+    <div class="page-head"><div class="head-row"><h2 id="queries-h">Queries</h2><div id="range-queries" class="head-range"></div></div><p class="desc">Every statement the Postgres API answered, refused or cancelled, as <code>mason logs --requests</code> lists them, newest first, over the time range. Who is connected, what runs now and the range's numbers are on <a href="#observability/usage">Usage</a>.</p></div>
+    <p class="lead">Since, when given, is used instead: an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone. A statement that reads no copied table (select 1, SET, SHOW, a BI tool's catalog queries) is answered but not listed.</p>
+    <form id="request-filters" class="toolbar" autocomplete="off">
+      <div class="field"><label for="rq-status">Status</label>
+        <select id="rq-status" name="status"><option value="">All</option><option value="completed">Completed</option><option value="refused">Refused</option><option value="failed">Failed</option><option value="refused-or-failed">Refused or failed</option><option value="cancelled">Cancelled</option></select></div>
+      <div class="field"><label for="rq-since">Since</label>
+        <input id="rq-since" name="since" placeholder="2h" spellcheck="false"></div>
+      <div class="field"><label for="rq-user">User</label>
+        <input id="rq-user" name="user" spellcheck="false"></div>
+      <div class="field"><label for="rq-client">Client</label>
+        <input id="rq-client" name="client" spellcheck="false"></div>
+      <div class="field grow"><label for="rq-search">Statement has</label>
+        <input id="rq-search" name="search" type="search" maxlength="200" spellcheck="false" placeholder="orders"></div>
+      <label class="check" for="rq-slow"><input type="checkbox" id="rq-slow" name="slow"> Slow (1 s or more)</label>
+      <div class="actions"><button type="submit" class="primary">Filter</button>
+        <button type="button" data-clear-filters>Clear</button></div>
+    </form>
+    <div id="request-log"></div>
+  </section>
+  <section id="page-users" aria-labelledby="users-h" hidden>
+    <div class="page-head"><h2 id="users-h">Users</h2><p class="desc">A user is the name and password psql, a BI tool or your app connects to Mason with; it does not expire. The same users as <code>mason user</code>.</p></div>
+    <form id="add-user" class="formcard" autocomplete="off">
       <label for="user-name">Name</label>
       <input id="user-name" name="name" required placeholder="metabase" spellcheck="false" autocapitalize="off">
-      <button type="submit">Add a user</button>
+      <button type="submit" class="primary">Add a user</button>
     </form>
     <div id="action"></div>
+    <div id="added"></div>
+    <div id="users-connect"></div>
     <div id="users"></div>
   </section>
+  <section id="page-usage" aria-labelledby="usage-h" hidden>
+    <div class="page-head"><div class="head-row"><h2 id="usage-h">Usage</h2><div id="range-usage" class="head-range"></div></div><p class="desc">What the Postgres API answered over the time range — who connected, what ran, the SQL it refused as unsupported — and each copy's size, as <code>mason status</code>, <code>mason logs</code> and <code>mason usage</code> say them. A client or a card leads to its statements on <a href="#observability/queries">Queries</a>.</p></div>
+    <div id="usage-kpis"></div>
+    <div id="usage-charts"></div>
+    <h3 id="usage-connected-h">Connected now</h3>
+    <div id="usage-connected"></div>
+    <h3 id="usage-running-h">Running now</h3>
+    <p class="lead" id="usage-running-lead"></p>
+    <div id="usage-running"></div>
+    <h3>Unsupported SQL</h3>
+    <div id="unsupported"></div>
+    <h3>Over time</h3>
+    <div id="usage-hourly"></div>
+    <h3>Each copy's own size</h3>
+    <div id="usage-sizes"></div>
+  </section>
+  <section id="page-syncs" aria-labelledby="syncs-h" hidden>
+    <div class="page-head"><div class="head-row"><h2 id="syncs-h">Sync events</h2><div id="range-syncs" class="head-range"></div></div><p class="desc">The sync's events — each copy made, each failure and recovery, each sync asked by hand — as <code>mason logs --events</code> lists them, and the run's own log behind a details. A scheduled poll that succeeds is not listed: the last one's result is each table's last sync (mason status, the Tables page's Last sync).</p></div>
+    <div class="toolbar"><div id="syncs-filters" class="fields"></div><label class="check" for="syncs-failures-only"><input type="checkbox" id="syncs-failures-only"> Failures only</label></div>
+    <div id="syncs-events"></div>
+    <div id="syncs-run"></div>
+  </section>
 </main>
-<noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code> and <code>mason user list</code> say the same in a terminal.</p></noscript>
+</div>
+<noscript><p>This page needs JavaScript. <code>mason status</code>, <code>mason tables</code>, <code>mason user list</code>, <code>mason logs</code> and <code>mason usage</code> say the same in a terminal.</p></noscript>
 </body>
 </html>

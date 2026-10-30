@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { COMMANDS } from "../src/cli/registry.ts";
 import { PROJECT_STATES, meets, type ProjectState } from "../src/cli/state.ts";
-import { MATRIX_ARGS, MATRIX_EXTRA_ARGS, TRANSITIONS, answerProblems, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
+import { MATRIX_ARGS, MATRIX_EXTRA_ARGS, MATRIX_MORE, TRANSITIONS, answerProblems, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
 import type { CopyState, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
@@ -189,9 +189,9 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
     source: parsed.source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: catalog, systemIdentifier: null }), warnings: [],
     replication: () => changes === "replication" ? { slot: "mason_matrix", publication: "mason_matrix", owned: true } : null,
     port: 0, token, page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
-    folder: () => folder, root, sourcesChanged: () => undefined, log: () => undefined, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
+    listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [] }, folder: () => folder, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(), sourcesChanged: () => undefined, log: () => undefined, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
     sources: () => ({ file: { name: "shop", file, kind: "postgres", url: { env: "DATABASE_URL" }, tables: ["orders", "events", "fresh"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null }),
-    duck: { copies: () => copies, file: path.join(root, ".mason", "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => stream,
+    duck: { copies: () => copies, file: path.join(root, ".mason", "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => stream, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);
@@ -215,7 +215,7 @@ test("mason status and mason wait --json, Mason up: each added table says how it
   const leftOut: KeptCurrent = { by: "replication", slot: "mason_matrix", state: "left-out", why: "publication mason_matrix does not carry public.events",
     position: "0/16B3F28", lastCommit: "2026-10-29T09:29:59.000Z", notRunning: null, syncedAt: "2026-10-29T09:00:00.000Z" };
   const zero = { inserts: 0, updates: 0, deletes: 0, truncates: 0 };
-  const stream: StreamStatus = { slot: "mason_matrix", publication: "mason_matrix", running: true, failure: null, position: "0/16B3F28", applied: "0/16B3F28",
+  const stream: StreamStatus = { slot: "mason_matrix", slotWal: { walHeldBytes: 2 ** 20, walStatus: "reserved", safeWalSizeBytes: 2 ** 30, at: "2026-10-29T09:30:00.000Z" }, publication: "mason_matrix", running: true, failure: null, position: "0/16B3F28", applied: "0/16B3F28",
     database: { lsn: "0/16B3F28", at: "2026-10-29T09:30:00.000Z" }, lag: { bytes: 0, seconds: 1 }, lastBatch: { appliedAt: "2026-10-29T09:30:00.000Z", committedAt: "2026-10-29T09:29:59.000Z" },
     tables: [{ table: "public.orders", state: "streamed", why: null, applied: zero }, { table: "public.events", state: "left-out", why: leftOut.why, applied: zero }] };
   // kept is the sync's, never the sources file's: `fresh`, just added, has no copy until the run reads the file again
@@ -317,6 +317,10 @@ test("every command, in every state without a run, as a person and with --json: 
             return { state, cmd: c.name, json, a: await runMason(root, argv, env, TRANSITIONS.has(c.name) ? 90_000 : 30_000) };
           });
         }
+      }
+      // its other modes, --json each (MATRIX_MORE)
+      for (const line of MATRIX_MORE[c.name] ?? []) {
+        jobs.push(async () => ({ state, cmd: c.name, json: true, a: await runMason(folderIn(state), [c.name, ...line, "--json"], env, 30_000) }));
       }
     }
   }

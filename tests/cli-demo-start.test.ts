@@ -151,6 +151,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     // the run's lines in one column (src/cli/background.ts relays them)
     assert.match(s.stdout, new RegExp(`^ {2}Postgres API {2}postgres://<user>:<password>@127\\.0\\.0\\.1:${pgPort}/${config().name} {2}\\(mason user add <name> makes a user\\)$`, "m"));
     assert.match(s.stdout, /^ {2}Demo {10}a new order lands every 0\.3 s: mason status shows the copy keeping up$/m);
+    // what to run next, the web page first: a first-time user's most useful next step
+    assert.match(s.stdout.slice(s.stdout.lastIndexOf("Next:")), /^Next:\n {2}mason ui +the status, tables, users and statements, in your browser\n {2}mason tables +the database's tables, and what you can add\n {2}mason add <table> +copy a table into Mason\n {2}mason user add <name> +a user for a BI tool or your app: its password and URL, printed once\n {2}mason status +what Mason is doing\n {2}mason logs +its log: every copy, poll and statement\n {2}mason stop +stop Mason; the next mason start resumes where it stopped\n?$/, said(s));
     assert.ok(fs.existsSync(demoDir), ".mason/demo/ is made");
     const again = await mason(["start", "--json"]);
     assert.equal(again.code, 0, said(again));
@@ -174,7 +176,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const text = await mason(["status"]);
     assert.equal(text.code, 0, said(text));
     assert.match(text.stdout, new RegExp(`the demo database Mason hosts \\(postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo · Postgres 18[.\\d]*\\)`));
-    assert.match(text.stdout, /the demo database is read by polling only/);
+    assert.match(text.stdout, /^ {2}Changes +each table as its sync: says \(a SELECT of its changed rows\) · sync: poll 1s for every table without its own · the demo database is checked this way only$/m);
     assert.match(text.stdout, /^Tables \(3 of 4 added\):$/m);
     for (const t of ["customers", "products", "orders"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · copied · polled every 1s, (last \\d+ s ago|not polled yet)$`, "m"));
   });
@@ -247,8 +249,9 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
       // the answer an agent reads (its help: { running, pid, postgres: { url, host, port, database, sslmode }, next })
       const j = await mason(["start", "--json"]);
       assert.equal(j.code, 0, said(j));
-      const v = JSON.parse(j.stdout) as { running: boolean; postgres: { host: string; port: number; database: string } | null };
+      const v = JSON.parse(j.stdout) as { running: boolean; postgres: { host: string; port: number; database: string } | null; next: { command: string }[] };
       assert.equal(v.running, true);
+      assert.equal(v.next[0]?.command, "mason ui", "the web page is the first thing to run next, for an agent too");
       assert.deepEqual(v.postgres && { host: v.postgres.host, port: v.postgres.port, database: v.postgres.database }, { host: "127.0.0.1", port: pgPort, database: config().name });
     });
   });

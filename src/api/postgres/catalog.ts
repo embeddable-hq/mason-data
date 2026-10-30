@@ -382,7 +382,8 @@ class CatalogWorker {
     return new Promise((resolve, reject) => {
       const id = this.#next++;
       const timer = setTimeout(() => {
-        this.#die(new Error(`the catalog did not answer ${what} within ${ms / 1000} s: PGlite was discarded (the next statement starts a fresh one; MASON_PG_CATALOG_TIMEOUT_MS raises the deadline)`));
+        // the message reaches the client on the wire and the request log: Mason's words, never the catalog's engine's name
+        this.#die(new Error(`the catalog did not answer ${what} within ${ms / 1000} s, so Mason started it again (the next statement is answered as usual; MASON_PG_CATALOG_TIMEOUT_MS raises the deadline)`));
         void this.#worker.terminate();
       }, ms);
       timer.unref();

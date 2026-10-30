@@ -56,6 +56,13 @@ back identical ([SQL support](#sql-support)).
 Install the CLI from npm (or, until the first release, from a checkout), then try it on a demo database Mason hosts
 itself.
 
+**A machine with no internet.** Nothing is downloaded after `npm install`: the copy's `postgres`
+and `inet` extensions ship with the CLI, one optional package per platform
+(`@mason-data/extensions-<platform>`), and the `mason-data` image has them. `mason doctor` says
+whether this machine has them; on a platform no package is built for (Linux on musl, Windows on
+arm64), or an install with `--omit=optional`, the first copy downloads them once.
+
+
 ### Try the demo
 
 ```bash
@@ -131,7 +138,7 @@ URL to paste into the tool's datasource form:
 
 ```bash
 mason user add metabase              # postgres://metabase:<password>@127.0.0.1:5433/your-app
-mason ui                             # the status page and the users, in your browser
+mason ui                             # the status, tables, users and statements, in your browser
 ```
 
 The tool sends the SQL it sends Postgres and reads the same names, types and text back; each copied table is a table
@@ -141,12 +148,15 @@ holds it) and every later start listens on the same port, so a saved connection 
 connects.
 
 **3. Keep an eye on it.** `mason status` says what Mason is doing: the database and how its changes are read, each
-table's copy, the Postgres API and how it listens, the statements it answered slowly in the last day and the ones it
-refused, each with its reason.
+table's copy, the Postgres API and how it listens, the statements it answered in the last day and week, the ones it
+answered slowly and the ones it refused, each with its reason. `mason ui` shows the same in a browser, with the
+statements, usage over time and the sync's events.
 
 ```bash
 mason status
-mason logs --requests --failed       # every statement the Postgres API refused or failed, with why
+mason logs --requests --failed       # every statement the Postgres API refused, failed or cancelled, with why
+mason logs --running                 # the statements running now; mason cancel <session> --statement <n> stops one
+mason usage --since 7d --step 1h     # the week, an hour a line: statements, the copy, memory
 mason stop                           # the copy stays; the next `mason start` resumes in seconds
 mason destroy                        # removes this project's copy and state, never its files or users
 ```
@@ -226,7 +236,7 @@ your Postgres  ──SELECTs (or its change log)──▶  the copy, kept curren
   continues with the ranges it did not commit. Small tables are copied first, and a copy runs
   beside the stream and the polls, never instead of them.
 - **Every statement is a row of the request log** (`mason logs --requests`): when, the outcome
-  and SQLSTATE, how long, the rows sent, the tool's `application_name` and the user's name.
+  and SQLSTATE, how long, the rows and bytes sent, the tool's `application_name` and the user's name.
 
 [`docs/DESIGN.md`](docs/DESIGN.md) is the design: how a statement is
 answered, what was decided and why, what was measured.
