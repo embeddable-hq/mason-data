@@ -36,6 +36,7 @@ import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery, UnsupportedSql } from "../duck/requests.ts";
 import type { RunningStatement, SessionsOpen } from "../api/postgres/server.ts";
+import type { ShareState } from "./share-run.ts";
 import { DEFAULT_REQUEST_LIMIT, eventLimit, MAX_SEARCH, SLOW_MS, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 import { agoText, BIG_TABLE_ROWS, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -118,6 +119,8 @@ export interface RunState {
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
   roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[] };
+  /** the share open now (mason share, src/cli/share-run.ts), or null; a run from before it has none */
+  share?: ShareState | null;
 }
 
 // ------------------------------------------------------------------ shared
@@ -343,7 +346,8 @@ const STATUS_USAGE = `usage: mason status [--json]
            or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file),
            projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), error },
            sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
-           application_name), open, running }] }, queries: { keptDays, day, week } (the last day's and the last 7
+           application_name), open, running }] }, share: (null, or what mason share has open) { port, fingerprint, sessions,
+           refusedLogins, droppedConnections, shares: [{ user, role, reads, openedAt, via, host, port, endsAt, state }] }, queries: { keptDays, day, week } (the last day's and the last 7
            days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
            failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
            when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all), unsupported: [{ gap
@@ -403,7 +407,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
     "refusedTotal", "unsupported", "recentErrors", "readiness", "ui",
-    "roles", "lastRun", "lastStop", "hung", "next"],
+    "roles", "share", "lastRun", "lastStop", "hung", "next"],
 };
 
 export async function status(argv: string[]): Promise<number> {
@@ -471,6 +475,7 @@ export async function status(argv: string[]): Promise<number> {
       ...sessionsRows(s.sessions),
       // what it serves: its address, TLS or plain (src/cli/pg-tls.ts)
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
+      ...shareRows(s.share),
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
       ...(s.ui === true ? [["Web UI", `${run.control.url}/  (mason ui opens it)`] as [string, string]] : []),
       // the roles file as the listener reads it now (mason user add --role): its roles, or what is wrong with it
@@ -677,6 +682,17 @@ export function sessionsRows(s: SessionsOpen | undefined): Array<[string, string
   const who = s.byClient.slice(0, 3).map((c) => `${c.open} ${c.user === "" ? "by a token" : `as ${c.user}`}${c.client === "" ? "" : ` (${c.client})`}`);
   const others = s.byClient.length - who.length;
   return [["Sessions", `${s.open} open, ${running} running a statement · ${who.join(", ")}${others > 0 ? `, and ${others} other client${others === 1 ? "" : "s"}` : ""} (mason logs --running lists the statements)`]];
+}
+
+/** `Share` in mason status: each share open now (mason share) and what its socket met; no row when none is. */
+export function shareRows(s: ShareState | null | undefined, now = Date.now()): Array<[string, string]> {
+  if (s === undefined || s === null) return [];
+  const each = s.shares.map((h): [string, string] => {
+    const where = h.host === null ? "its tunnel is opening" : `${h.host}:${h.port} via ${h.via ?? "a tunnel"}${h.state === "reconnecting" ? " (reconnecting)" : ""}`;
+    const ends = h.endsAt === null ? "" : `, ends in about ${Math.max(0, Math.round((Date.parse(h.endsAt) - now) / 60_000))} min`;
+    return ["Share", `${where}, as ${h.user}, reads ${h.role === null ? h.reads : `as the role ${h.role}`}${ends}`];
+  });
+  return [...each, ["Share socket", `127.0.0.1:${s.port}, TLS required, SHA-256 ${s.fingerprint} · ${s.sessions} session${s.sessions === 1 ? "" : "s"}, ${s.refusedLogins} login${s.refusedLogins === 1 ? "" : "s"} refused, ${s.droppedConnections} dropped before a login`]];
 }
 
 /** `Disk` in mason status: the bytes free where the synced data is, and what the first syncs running are projected to add (none: no

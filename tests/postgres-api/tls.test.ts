@@ -8,10 +8,11 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import * as net from "node:net";
 import * as tls from "node:tls";
 import pg from "pg";
 import { ApiError } from "../../src/api/error.ts";
-import { startPostgresApi, type PgApiOptions, type PgApiServer } from "../../src/api/postgres/server.ts";
+import { startPostgresApi, type PgApiOptions, type PgApiServer, type ShareDoor, type ShareSocket } from "../../src/api/postgres/server.ts";
 import { selfSignedCertificate } from "../../src/cli/self-signed-cert.ts";
 import { password, query, replies, startup, terminate } from "./wire.ts";
 
@@ -165,4 +166,173 @@ test("psql 17+ with sslnegotiation=direct connects and is a TLS session (skipped
     });
     assert.equal(out.trim(), "on", `sslnegotiation=${negotiation}`);
   }
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ONE SERVER, TWO SOCKETS (mason share): TLS required of the share's socket alone, a property of the socket carried into
+// the session, on a plain server. Real listeners, real clients.
+
+const SHARE_PASSWORD = "the-share-password";
+/** a share's login: its own password alone, nothing the run's listener takes */
+const shareDoor = (o: Partial<ShareDoor> = {}): ShareDoor => ({
+  tls: { cert: Buffer.from(pair.cert), key: Buffer.from(pair.key) },
+  authenticate: (p, user) => {
+    if (p !== SHARE_PASSWORD) { const e = new ApiError(401, "not this share's password", "invalid_share"); e.userName = user; throw e; }
+    return { user: "share_a", jti: "share_a" };
+  },
+  recheck: async () => undefined,
+  loginHint: "the password mason share printed",
+  ...o,
+});
+
+const shareClient = (port: number, ssl: pg.ClientConfig["ssl"], o: { password?: string; user?: string; database?: string } = {}): pg.Client =>
+  new pg.Client({ host: "127.0.0.1", port, user: o.user ?? "share_a", password: o.password ?? SHARE_PASSWORD, database: o.database ?? "shop", ssl, connectionTimeoutMillis: 10_000 });
+
+/** the first message of a raw plain connection's answer, once `bytes` are sent */
+const firstAnswer = (port: number, bytes: Buffer): Promise<Buffer> => new Promise((resolve, reject) => {
+  const c = net.connect(port, "127.0.0.1");
+  const got: Buffer[] = [];
+  c.on("connect", () => c.write(bytes));
+  c.on("data", (b: Buffer) => got.push(b));
+  c.on("error", reject);
+  c.on("close", () => resolve(Buffer.concat(got)));
+});
+
+/** one server with the two sockets, closed whatever the test did */
+async function withShare(t: { after: (f: () => Promise<void>) => void }, o: Partial<ShareDoor> = {}, server: Partial<PgApiOptions> = {}): Promise<{ api: PgApiServer; share: ShareSocket }> {
+  const api = await startPostgresApi({ ...options({ tls: null }), ...server });
+  t.after(() => api.close());
+  return { api, share: await api.openShare(shareDoor(o)) };
+}
+
+test("a share's socket requires TLS on a plain server: a plain startup refused there alone, SSLRequest and a direct start TLS, SHOW ssl each session's own, and the socket closed takes no plain session with it", async (t) => {
+  const { api, share } = await withShare(t);
+  assert.notEqual(share.port, api.port);
+
+  // the same plain startup: answered on the plain socket, refused 28000 on the share's
+  const plainOnPlain = shareClient(api.port, false, { user: "anyone", password: "good-token" });
+  await plainOnPlain.connect();
+  assert.equal(await one(plainOnPlain, "SHOW ssl"), "off");
+  const refused = replies(await firstAnswer(share.port, startup({ user: "share_a", database: "shop" })));
+  const error = refused.find((m) => m.type === "ErrorResponse");
+  assert.ok(error?.type === "ErrorResponse");
+  assert.equal(error.fields.C, "28000");
+  assert.match(error.fields.M ?? "", /this server requires TLS/);
+  // a driver that does not ask for TLS is refused too, and the password never left it
+  const plainDriver = shareClient(share.port, false);
+  await assert.rejects(plainDriver.connect(), (e: pg.DatabaseError) => e.code === "28000");
+
+  // SSLRequest: a driver's default negotiation, in the same process as the plain session
+  const negotiated = shareClient(share.port, { rejectUnauthorized: false });
+  await negotiated.connect();
+  assert.equal(await one(negotiated, "SHOW ssl"), "on");
+  assert.equal(await one(plainOnPlain, "SHOW ssl"), "off", "the plain session beside it is still plain");
+  assert.equal(share.sessions, 1);
+
+  // a direct TLS start is TLS at once
+  const direct = tls.connect({ host: "127.0.0.1", port: share.port, rejectUnauthorized: false, ALPNProtocols: ["postgresql"] });
+  await new Promise<void>((resolve, reject) => { direct.once("secureConnect", resolve); direct.once("error", reject); });
+  const answer = replies(await new Promise<Buffer>((resolve, reject) => {
+    const got: Buffer[] = [];
+    direct.on("data", (b: Buffer) => got.push(b));
+    direct.on("error", reject);
+    direct.on("close", () => resolve(Buffer.concat(got)));
+    direct.write(Buffer.concat([startup({ user: "share_a", database: "shop" }), password(SHARE_PASSWORD), query("SHOW ssl"), terminate()]));
+  }));
+  const row = answer.find((m) => m.type === "DataRow");
+  assert.ok(row?.type === "DataRow");
+  assert.equal(row.values[0]?.toString(), "on");
+
+  // closed: its session ended and its port gone; the plain session goes on, on the same server
+  const gone = new Promise<void>((resolve) => { negotiated.once("error", () => resolve()); negotiated.once("end", () => resolve()); });
+  await share.close();
+  await gone;
+  await assert.rejects(new Promise((resolve, reject) => { const c = net.connect(share.port, "127.0.0.1"); c.once("connect", () => { c.destroy(); resolve(null); }); c.once("error", reject); }), /ECONNREFUSED/);
+  assert.equal(await one(plainOnPlain, "SELECT 1"), "1");
+  await plainOnPlain.end();
+});
+
+test("only the share's own login opens its socket, and that login opens nothing else: a token is refused there, the share's password on the run's listener, each 28P01 with its door's hint, recorded and counted", async (t) => {
+  const records: Array<{ user?: string; role?: string; sqlstate?: string; method: string }> = [];
+  const refusedUsers: string[] = [];
+  const { api, share } = await withShare(t, { refused: (u) => refusedUsers.push(u) }, { record: (r) => { records.push(r as (typeof records)[number]); } });
+
+  const token = shareClient(share.port, { rejectUnauthorized: false }, { user: "anyone", password: "good-token" });
+  await assert.rejects(token.connect(), (e: pg.DatabaseError) => e.code === "28P01" && e.hint === "the password mason share printed");
+  assert.deepEqual(refusedUsers, ["anyone"], "a refused login is told to the door, with the user the packet named");
+  assert.ok(records.some((r) => r.method === "CONNECT" && r.sqlstate === "28P01" && r.user === "anyone"), "and is a row of the request log, as a plain socket's");
+
+  const onPlain = shareClient(api.port, false, { user: "share_a" });
+  await assert.rejects(onPlain.connect(), (e: pg.DatabaseError) => e.code === "28P01" && /mason user add/.test(e.hint ?? ""));
+
+  const good = shareClient(share.port, { rejectUnauthorized: false });
+  await good.connect();
+  // one server, not two: its refused statement is a row like a plain session's, attributed to the share's login
+  await assert.rejects(good.query("SELECT 1 FROM"), (e: pg.DatabaseError) => e.code === "42601");
+  await good.end();
+  assert.ok(records.some((r) => r.method !== "CONNECT" && r.sqlstate === "42601" && r.user === "share_a"), JSON.stringify(records));
+});
+
+test("a connection held open without logging in cannot starve a login: the oldest makes way for a newer one, and one alone is dropped at the deadline", async (t) => {
+  const dropped: string[] = [];
+  const limit = 4;
+  const { share } = await withShare(t, { pendingLimit: limit, pendingMs: 400, dropped: (why) => dropped.push(why) });
+  // more than the limit, each past the TLS start or at it, none sending a password
+  const held = await Promise.all(Array.from({ length: limit + 3 }, async (_, i) => {
+    const c = net.connect(share.port, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => { c.once("connect", resolve); c.once("error", reject); });
+    c.on("error", () => undefined);   // dropped by the server: the point of the test
+    c.resume();
+    if (i % 2 === 0) c.write(Buffer.from([0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f]));   // an SSLRequest, and then silence
+    return c;
+  }));
+  // the tool logs in at once, past them all
+  const tool = shareClient(share.port, { rejectUnauthorized: false });
+  await tool.connect();
+  assert.equal(await one(tool, "SELECT 1"), "1");
+  await tool.end();
+  assert.ok(dropped.includes("made way for a newer connection"), dropped.join(", "));
+  // and whatever was left is gone at the deadline, so an idle holder costs nothing past it
+  const closed = held.map((c) => c.destroyed ? Promise.resolve() : new Promise<void>((resolve) => c.once("close", () => resolve())));
+  await Promise.all(closed);
+  assert.ok(dropped.includes("did not log in in time"), dropped.join(", "));
+});
+
+test("a public socket says nothing of the project before a login", async (t) => {
+  const { api, share } = await withShare(t);
+  const wrong = shareClient(share.port, { rejectUnauthorized: false }, { database: "guess" });
+  await assert.rejects(wrong.connect(), (e: pg.DatabaseError) => e.code === "3D000" && e.hint === undefined && !/shop/.test(e.message));
+  // the plain socket still says it, to a developer on this machine
+  const local = shareClient(api.port, false, { user: "anyone", password: "good-token", database: "guess" });
+  await assert.rejects(local.connect(), (e: pg.DatabaseError) => e.code === "3D000" && /shop/.test(e.hint ?? ""));
+
+});
+
+test("a connection reset in the middle of its TLS handshake ends that session alone", async (t) => {
+  const { share } = await withShare(t);
+  const c = net.connect(share.port, "127.0.0.1");
+  await new Promise<void>((resolve, reject) => { c.once("connect", resolve); c.once("error", reject); });
+  c.write(Buffer.from([0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f]));
+  await new Promise<void>((resolve) => c.once("data", () => resolve()));
+  c.resetAndDestroy();
+  await new Promise((r) => setTimeout(r, 100));
+  const tool = shareClient(share.port, { rejectUnauthorized: false });
+  await tool.connect();
+  assert.equal(await one(tool, "SELECT 1"), "1");
+  await tool.end();
+});
+
+test("endSessions ends one login's sessions at once and leaves another's", async (t) => {
+  const { share } = await withShare(t, {
+    authenticate: (p, user) => { if (p !== SHARE_PASSWORD) throw new ApiError(401, "no", "invalid_share"); return { user, jti: user }; },
+  });
+  const a = shareClient(share.port, { rejectUnauthorized: false }, { user: "share_a" });
+  const b = shareClient(share.port, { rejectUnauthorized: false }, { user: "share_b" });
+  await a.connect(); await b.connect();
+  const ended = new Promise<void>((resolve) => { a.once("error", () => resolve()); a.once("end", () => resolve()); });
+  assert.equal(share.endSessions("share_a", "the share ended"), 1);
+  await ended;
+  assert.equal(await one(b, "SELECT 1"), "1");
+  assert.equal(share.sessions, 1);
+  await b.end();
 });

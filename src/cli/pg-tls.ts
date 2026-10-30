@@ -62,6 +62,12 @@ export function ensureSelfSigned(home: string, project: string, now = new Date()
   return { fingerprint: new crypto.X509Certificate(made.cert).fingerprint256, said: kept.why };
 }
 
+/** The project's self-signed certificate as a listener reads it: the two files of `ensureSelfSigned`, and what it said. */
+export function selfSignedPair(home: string, project: string): { cert: Buffer; key: Buffer; fingerprint: string; said: string | null } {
+  const { fingerprint, said } = ensureSelfSigned(home, project);
+  return { cert: fs.readFileSync(path.join(home, SELF_SIGNED_FILES.cert)), key: fs.readFileSync(path.join(home, SELF_SIGNED_FILES.key)), fingerprint, said };
+}
+
 function keptCertificate(certFile: string, keyFile: string, now: Date): { fingerprint: string } | { why: string } {
   if (!fs.existsSync(certFile) || !fs.existsSync(keyFile)) return { why: `made a self-signed certificate: .mason/${SELF_SIGNED_FILES.cert}` };
   try {

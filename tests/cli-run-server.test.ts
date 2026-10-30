@@ -339,6 +339,10 @@ test("mason serve's run serves no page: / is the 404 it was, and the users are s
     const at = (p: string) => fetch(`http://127.0.0.1:${port}${p}`, { headers: { Authorization: "Bearer t0ken-of-this-run" } });
     for (const p of ["/", "/app.js", "/app.css"]) assert.equal((await at(p)).status, 404, p);
     assert.equal((await at("/api/users")).status, 200, "the commands' users");
+    // a server has an address of its own: mason share is refused by name, no socket opened
+    const share = await fetch(`http://127.0.0.1:${port}/api/share`, { method: "POST", headers: { Authorization: "Bearer t0ken-of-this-run", "Content-Type": "application/json" }, body: JSON.stringify({ secret: "0".repeat(64) }) });
+    assert.equal(share.status, 409);
+    assert.match(((await share.json()) as { error: string }).error, /this run is on a server, and has an address of its own/);
   } finally { served.close(); }
 });
 

@@ -40,6 +40,7 @@ import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, UnsupportedSql } from "../duck/requests.ts";
 import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
+import type { RunShares, ShareTunnel } from "./share-run.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
@@ -70,6 +71,8 @@ export interface RunContext {
   /** the project's roles as the listener holds them now (src/cli/roles.ts LiveRoles): what `mason user add --role`
    *  is checked against while the run is up, and what `/api/state` says of them; absent: a run with no roles file */
   roles?: () => RolesLive;
+  /** what `mason share` opens (src/cli/share-run.ts): mason start's run alone; a server has an address of its own */
+  shares?: RunShares;
   /** the project's folder (sources/, mason.yml) */
   folder: () => string | null;
   /** the project's root (where .mason/ is): what messages name files from */
@@ -200,6 +203,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // the roles file as the listener reads it now: its roles by name, and what is wrong with it (every statement of a
     // session with a role is refused while there is)
     ...(ctx.roles ? { roles: rolesState(ctx.roles()) } : {}),
+    // the share open now (mason share): where, who, and what was refused there; nothing in it logs anyone in
+    share: ctx.shares?.state() ?? null,
     // replication mode: where the stream is, its lag and what it applied (mason status and wait render it, streamLines)
     ...(stream !== null ? { stream } : {}),
   };
@@ -491,6 +496,33 @@ export function timedCache<T>(read: () => Promise<T>, ms: number, clock: () => n
   };
 }
 
+/**
+ * `POST /api/share` { secret, role? }: a share opened, its first line of JSON, and THE ANSWER LEFT OPEN: the connection is
+ * the share (src/cli/share-run.ts), so a command gone by any means ends it. Only the password's hash arrives here. Past
+ * its first line the answer says one thing, why the run ended it.
+ */
+async function openShare(ctx: RunContext, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (ctx.shares === undefined) {
+    sendFailure(res, 409, { message: "this run is on a server, and has an address of its own: mason share is for a run on a laptop", code: "refused", next: [["mason help production", "reaching a server's Postgres API"]] });
+    return;
+  }
+  const shares = ctx.shares;
+  const body = JSON.parse(await readBody(req, 64 * 1024)) as { secret?: unknown; role?: unknown };
+  if (typeof body.secret !== "string" || !/^[0-9a-f]{64}$/.test(body.secret)) throw new Refusal(400, "send { secret, role? }: the password's SHA-256 in hex");
+  if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "role is a role's name, or left out");
+  let gone = false;
+  res.once("close", () => { gone = true; });
+  const opened = await shares.open({ secret: body.secret, role: body.role as string | undefined });
+  if ("failure" in opened) { sendFailure(res, statusOf(opened.failure), opened.failure, opened.choices ? { choices: opened.choices } : {}); return; }
+  const end = (why: string): void => { void shares.close(opened.user, why).catch((e: unknown) => ctx.log(`closing the share ${opened.user} failed: ${(e as Error).message}`)); };
+  // the command went while the socket opened
+  if (gone) { end("mason share went away"); return; }
+  res.once("close", () => end("mason share went away"));
+  shares.onEnd(opened.user, (why) => { res.end(`${JSON.stringify({ ended: why })}\n`); });
+  res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+  res.write(`${JSON.stringify(opened)}\n`);
+}
+
 export function createRunServer(ctx: RunContext): http.Server {
   const saidErrors = new Set<string>();
   // the last day's and week's statements, read at most once every SUMMARY_TTL_MS for every page and command that asks
@@ -603,6 +635,14 @@ export function createRunServer(ctx: RunContext): http.Server {
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });
           }
+        } else if (req.method === "POST" && url.pathname === "/api/share") {
+          await openShare(ctx, req, res);
+        } else if (req.method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {
+          // what the command knows of its tunnel, as it knows it: mason status says it, and the run stops the client
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as ShareTunnel;
+          const user = decodeURIComponent(url.pathname.slice("/api/share/".length));
+          if (ctx.shares?.update(user, body) !== true) { sendFailure(res, 404, { message: `no share ${user} is open`, code: "not_found" }); return; }
+          sendJson(res, 200, { ok: true });
         } else if (req.method === "GET" && url.pathname === "/api/users") {
           // mason user list --json's shape: the users, and whether each connects (and with ?lastUsed=1 when each was last used)
           const r = listUsers(ctx.users.file, ctx.users.apiKey, postgresLink(ctx.users.postgresUrl), ctx.roles?.() ?? NO_ROLES);

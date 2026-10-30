@@ -37,7 +37,8 @@ import { liveRun } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
 import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
-import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, SELF_SIGNED_FILES } from "./pg-tls.ts";
+import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, selfSignedPair, SELF_SIGNED_FILES } from "./pg-tls.ts";
+import { RunShares } from "./share-run.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
 import { RequestLedger, REQUESTS_TABLE } from "../duck/requests.ts";
 import { historyDaysSetting } from "../duck/history.ts";
@@ -521,6 +522,22 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     }
   }
 
+  // WHAT mason share OPENS (src/cli/share-run.ts): a second socket of this listener, on a run on a laptop alone
+  const shares = o.serve !== undefined ? undefined : new RunShares({
+    listener: api, roles: () => liveRoles.now(), database: cfg.name, log: logLine,
+    // the project's own certificate, as --self-signed-tls serves it: made once, and recorded as that flag records it
+    certificate: () => {
+      try {
+        const pair = selfSignedPair(home, cfg.name);
+        if (pair.said) logLine(`[postgres] ${pair.said} (SHA-256 ${pair.fingerprint})`);
+        const recorded = { cert: SELF_SIGNED_FILES.cert, key: SELF_SIGNED_FILES.key, fingerprint: pair.fingerprint };
+        if (JSON.stringify(cfg.selfSignedTls ?? null) !== JSON.stringify(recorded)) { cfg.selfSignedTls = recorded; writeConfig(home, cfg); }
+        return pair;
+      } catch (e) {
+        return { message: `the self-signed certificate could not be written to ${home}: ${(e as Error).message}`, code: "failed", fix: "this folder must be writable: mason doctor checks the machine" };
+      }
+    },
+  });
   const setupPort = await freePort(o.port, chosen);
   const token = newToken();
   const runCtx: RunContext = {
@@ -533,6 +550,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database: cfg.name, postgresUrl },
     roles: () => liveRoles.now(),
+    ...(shares !== undefined ? { shares } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
     // a table set to sync: replication while the run is up, in a run that never checked the database for it: the
@@ -614,6 +632,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       hosted.stopChanges?.();
       server.close();
       void (async () => {
+        // before the listener: a share's command is told why, and its tunnel client stopped
+        try { await shares?.closeAll("Mason is stopping"); } catch (e) { say(`  closing the share: ${(e as Error).message}`); }
         try { await api.close(); } catch (e) { say(`  closing the listener: ${(e as Error).message}`); }
         // after the listener: its last statements' rows are written before the file closes
         try { await requests.close(); } catch (e) { say(`  closing the request log: ${(e as Error).message}`); }
