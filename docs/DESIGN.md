@@ -120,7 +120,7 @@ against 1.7 (20 %), and re-read N times more at a stop. **Where.** `src/duck/syn
 **Decision.** A copy's first chunks (one per reader) are a tenth of the ceiling, at least 128 pages; every later one is
 what a reader reads in `MASON_COPY_CHUNK_SECONDS` (12 s, 1 to 300) at a moving average of the committed chunks' rate,
 the newest weighing 0.7 when slower and 0.3 when faster (`nextChunkPages`, `nextRate`). `mason wait` / `mason status`
-render the chunks in flight between commits at that rate, held under 90 % of their rows (`READING_SHARE_CAP`), and the
+render the chunks in flight between commits at that rate, held under 90 % of their expected rows (`READING_SHARE_CAP`), and the
 share is of the heap's PAGES, never the rows.
 
 **Why.** A laptop copying a 20,126,276-row, 5.4 GB table over the internet: chunks of 43,104 pages took ~180 s each, and

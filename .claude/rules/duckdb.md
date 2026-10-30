@@ -152,6 +152,11 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   lists the closes). `tests/duck-executor.test.ts` "a vector slower than any quiet window", "a call-free statement closed
   inside a slow vector", "a connection closed under its own", "cancelling a function-calling statement again and again"
   hold it. Any statement on a session's connection waits for `releasing` first: DuckDB would refuse it. ("The watch")
+  **Its log line does not wait for that close** (`say`, src/duck/store.ts): a statement's line is posted before its client
+  is told it ended, in the worker port's order, so a statement's own line is before its answer and no earlier statement
+  it was told of lands after it (a late line entered the next test's window). A statement its client closed
+  early (a portal, a session gone) has no end its client hears: its line still comes at its release.
+  `tests/duck-wire.test.ts` "logged before its client is told" holds it.
 - **Nothing is closed under a pending call of DuckDB's** (a stop during a drain aborted the process, exit
   134): a session's connection closes once nothing runs on it (`SessionRunner.close`: an open answer drained, every
   fetch settled), and the worker's shutdown waits for every session close in flight and every connection's call before
@@ -359,7 +364,9 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
 - **A copy's progress is rendered between commits** (`CopyLive`, `copyProgressNow`, `CopyState.progress`): the chunks
   done and about how many in all, the ones reading and how long the oldest has, the readers' measured rate and the time
   the pages left take at it, and the rows the chunks in flight have read by now at that rate, each held under 90 % of
-  its expected rows (`READING_SHARE_CAP`) so a commit moves the count forward. Its SHARE is of the heap's pages read
+  its expected rows (its pages at the rows a page so far, `READING_SHARE_CAP`) so a commit that holds them moves the
+  count forward: an estimate, which a chunk's pages may undercut (the heap's last page, a sparse range), when the count
+  steps back to what committed. Its SHARE is of the heap's pages read
   (`share`), never of the rows: the ranges are exact and the row estimate is Postgres's, which a copy can outrun (23.7 M
   rows under 20.1 M sent the bar back to 0 %), and a share derived from an estimate must never move backwards.
   `mason wait` and `mason status` render it (`copyingText`, src/cli/commands.ts); the rate is the sync's, never a
@@ -611,8 +618,17 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   swap, the poll's reconciled count at its commit, and after every stream batch the rows its writes inserted less the
   rows they deleted (`rowsChanged`, `writeByKey`) — never a `count(*)` per batch (a write by key's deletes make it a
   scan) — written to `copy_state` IN the batch's transaction. When it was last brought current, and how,
-  is `CopyState.synced` (`Synced`: the swap, a poll's commit, the stream's last batch); `/api/state` derives each
-  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked.
+  is `CopyState.synced` (`Synced`: the swap, a poll's start, the stream's last batch); `/api/state` derives each
+  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked. **A poll's or a
+  batch's time is ONE value, the ledger's**: taken once before the sync's transaction, written in it (`polled_at`,
+  `applied_at`) and remembered as written (`polledAt`, `synced`), never `now()` in the ledger beside a `new Date()`
+  here — the two stood until `readPolledAt` replaced one with the other, and a table's `syncedAt` went 8 ms backwards
+  under `mason status`. **A copy has TWO, each one value**: its watermark's `polled_at`, taken before the swap, which
+  `kept.syncedAt`, `dueAt` and `nextAt` read, and `copied_at`, taken after it, which `CopyState.synced.at` and
+  `copiedAt` read; they differ by the swap's length, and `copied_at >= polled_at` is how `readSynced` tells a copy from
+  a later poll. **`readPolledAt` only ever moves a time forward** (its SELECT's snapshot may be older than a commit on
+  the rebuilds' connection), and drops a table the ledger no longer holds only when no commit gave it a time meanwhile.
+  `tests/duck-sync-facts.test.ts` and `tests/integration/duck-poll.itest.ts` hold what the run says to the ledger.
 
 ## Users (`mason user`, src/duck/users.ts)
 

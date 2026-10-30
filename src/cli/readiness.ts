@@ -34,7 +34,7 @@ export interface Readiness {
  * WHAT A COPYING TABLE'S LINE SAYS, AND HOW FULL ITS BAR IS (a 20 M-row copy over the internet showed no progress: its
  * first line waited on 0 for minutes, then jumped to 100%). A copy's rows
  * land a chunk at a time, so the count is the committed chunks' rows PLUS what the chunks being read have read by now
- * at the rate the copy measured (`progress.rowsReading`, held under each chunk's expected rows, so a commit moves it
+ * at the rate the copy measured (`progress.rowsReading`, held under each chunk's expected rows, so a commit that holds them moves it
  * forward), and the text says what is happening: the chunks reading and for how long, the rate, and the time left at
  * it — never from the row estimate alone. Before anything is measured it says the first chunk is being read, never
  * `0 of`. The share is of the heap's PAGES read (`progress.share`: the ranges are exact), and only without the chunks'

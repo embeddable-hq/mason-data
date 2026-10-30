@@ -488,10 +488,19 @@ export class SessionRunner implements DuckRunner {
     const started = Date.now();
     let total = 0;
     let result: DuckDBResult | null = null;
-    let closed = false, fetching = false, released = false;
+    let closed = false, fetching = false, released = false, said = false;
     /** DuckDB ended the query: a fetch failed, or read its end (`cleanUp` says why that is what `release` waits for) */
     let ended = false;
     let ending = false;
+    // ITS LINE IS SAID WHEN IT ENDS, before its client hears the end, never when its result is released: that waits for
+    // DuckDB to end it (`cleanUp`), by when its client is gone and the next session's statements are running, and a
+    // reader of the log took the late line for theirs (`tests/duck-wire.test.ts`, 1 run in 100 under load). The
+    // worker's port keeps the order: a line posted before the answer is read before it
+    const say = (): void => {
+      if (said) return;
+      said = true;
+      this.log(`statement: ${total} row(s) in ${Date.now() - started} ms — ${oneLine(sql)}`);
+    };
     const release = (): void => {
       if (released) return;
       released = true;
@@ -499,19 +508,21 @@ export class SessionRunner implements DuckRunner {
       signal.removeEventListener("abort", cancel);
       result?.closeSync();
       p.destroySync();
-      this.log(`statement: ${total} row(s) in ${Date.now() - started} ms — ${oneLine(sql)}`);
+      say();
     };
     // A STATEMENT THAT DID NOT RUN TO ITS END (it failed, its cancel raised, it was closed early) IS CLOSED ONLY ONCE
     // DuckDB ENDED IT OFF THIS THREAD (`cleanUp`), the session's next statement waiting for that (`releasing`). One read
     // to its end has no task left, and is released at once
-    const releaseAfterCleanup = (): void => {
+    const endOffThisThread = (): void => {
       if (released || ending) return;
       ending = true;
       const done = (async () => { await this.cleanUp(seq, sql, callsFunctions, ended ? null : result); release(); })();
       this.releasing.add(done);
       void done.finally(() => this.releasing.delete(done));
     };
-    // a result closed before its end while no fetch is in flight
+    // it ended with an answer its client is about to hear: said now
+    const releaseAfterCleanup = (): void => { if (!released) say(); endOffThisThread(); };
+    // a result closed before its end while no fetch is in flight: no end its client hears, so its line is its release's
     const drain = (): void => {
       // CLOSED WHILE DuckDB STILL STARTS IT (its `stream()` pending: an aggregate computes there whole): nothing is
       // released under the pending start — that destroyed the prepared statement under it and, its release done, let the
@@ -519,7 +530,7 @@ export class SessionRunner implements DuckRunner {
       // calls queued for this thread, and the thread's end met them (Linux CI: `FATAL ERROR: Error::Error
       // napi_define_properties`, 7 runs in 30 of a stop under a calling count). The start's own path releases it: its
       // failure through `releaseAfterCleanup`, its answer drained once handed back (below `stream()`)
-      if (result !== null) releaseAfterCleanup();
+      if (result !== null) endOffThisThread();
     };
     // an early end by the listener (a portal closed half read, the session gone): cancelled, and released — by the
     // fetch in flight once DuckDB hands the chunk back, else by `drain`
