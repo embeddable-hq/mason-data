@@ -6,7 +6,7 @@
  * — each with its id, and says its log lines as messages.
  *
  * THIS thread never waits for the executor (src/duck/store.ts "HOW A STATEMENT IS CANCELLED"): a result or a
- * connection is closed only once DuckDB has handed it back. A request is answered asynchronously, so the turns between
+ * connection is closed only once DuckDB ended what ran on it. A request is answered asynchronously, so the turns between
  * a statement's function calls serve the others; a statement's cancel does not need one (the cancel table,
  * src/duck/cancel.ts).
  */
@@ -111,8 +111,14 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
     }
     case "conn.interrupt": conns.get(Number(m.conn))?.interrupt(); return undefined;
     case "conn.close": {
-      const c = conns.get(Number(m.conn));
-      conns.delete(Number(m.conn));
+      const n = Number(m.conn);
+      // NEVER CLOSED UNDER A CALL OF ITS OWN: the close is synchronous here and waits for that call's tasks, and a task
+      // inside a Mason function waits for this thread. The close says nobody wants the call's answer, so it is
+      // interrupted, and its failure (a call's own promise, handled by whoever asked) waited for off this thread
+      const calls = [...(connCalls.get(n) ?? [])];
+      if (calls.length > 0) { conns.get(n)?.interrupt(); await Promise.allSettled(calls); }
+      const c = conns.get(n);
+      conns.delete(n);
       try { c?.closeSync(); }
       catch (e) { log(`closing a connection of the engine failed: ${(e as Error).message}`); }
       return undefined;
