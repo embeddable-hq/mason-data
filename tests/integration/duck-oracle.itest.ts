@@ -56,6 +56,7 @@ import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
+import { HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS } from "./oracle/row-filters.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
 import { GAP_MARK, GAPS, type GapId } from "../../src/duck/gaps.ts";
@@ -85,6 +86,8 @@ const ROLE_ALL = `${tag}_all`;
 /** the Postgres LOGIN of the no-role cases (stage 1b): CONNECT and USAGE only, against a Mason user with no role under a
  *  roles file with no default: */
 const ROLE_NONE = `${tag}_none`;
+/** the Postgres LOGIN of each row-filter user (`rowFilterCases`, oracle/row-filters.ts ROWS_USERS) */
+const rowLogin = (key: string): string => `${tag}_rf_${key}`;
 const dbUrl = adminUrl ? (() => { const u = new URL(adminUrl); u.pathname = `/${tag}`; return u.toString(); })() : "";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-duck-oracle-"));
 const report = path.join(process.env.IT_LOG_DIR ?? os.tmpdir(), "duck-oracle-differences.txt");
@@ -233,7 +236,8 @@ after(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
   if (adminUrl) psql(adminUrl, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
   // the role cases' login role (its grants went with the database)
-  if (adminUrl) psql(adminUrl, `DROP ROLE IF EXISTS ${ROLE_LOGIN}; DROP ROLE IF EXISTS ${ROLE_ALL}; DROP ROLE IF EXISTS ${ROLE_NONE}`);
+  if (adminUrl) psql(adminUrl, `DROP ROLE IF EXISTS ${ROLE_LOGIN}; DROP ROLE IF EXISTS ${ROLE_ALL}; DROP ROLE IF EXISTS ${ROLE_NONE}; ` +
+    ROWS_USERS.map((u) => `DROP ROLE IF EXISTS ${rowLogin(u.key)};`).join(" "));
 });
 
 test("the DuckDB endpoint answers every statement exactly as Postgres does, before and after changes", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 1_800_000 }, async () => {
@@ -245,6 +249,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   psql(dbUrl, ONE);
   psql(dbUrl, META);
   psql(dbUrl, TYPED);
+  psql(dbUrl, ROWS_SCHEMA);
   const collation = psql(dbUrl, "SELECT datcollate || ' (' || datlocprovider::text || ')' FROM pg_database WHERE datname = current_database()");
   console.log(`duck oracle: database ${tag}, collation ${collation}`);
 
@@ -257,11 +262,14 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   conn.pg.close();
   const added = facts.tables.filter((t) => COPIED.includes(t.table) && t.schema === "public");
   assert.equal(added.length, COPIED.length, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
+  // the row filters' own shop (oracle/row-filters.ts), copied beside the rest and read by `rowFilterCases` alone
+  const shop = facts.tables.filter((t) => t.schema === "shop");
+  assert.deepEqual(shop.map((t) => t.source).sort(), ["shop.customers", "shop.order_items", "shop.orders"]);
   const log: string[] = [];
   store = await DuckStore.open(path.join(dir, "duck.db"), (l) => log.push(l));
   sync = new Sync(store, parsed.source, tag, (l) => log.push(l), 3_600_000, "poll", null, EAGER_JSON ? { json: { eager: true } } : {});
   await sync.open();
-  sync.setTables(added);
+  sync.setTables([...added, ...shop]);
   sync.setViews(facts.views ?? []);
   await sync.once();
   assert.deepEqual(sync.state().filter((x) => x.phase !== "copied").map((x) => `${x.source} ${x.phase} ${x.error}`), [], "every table copied");
@@ -318,7 +326,11 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     ["public.customers", { table: "public.customers", all: true, columns: [] }]]) }]]) };
   server = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: tag, masonVersion: "oracle",
-    authenticate: (_password, user) => user === ROLE_LOGIN ? { user, role: "agent" } : user === ROLE_ALL ? { user, role: "everything" } : user === ROLE_NONE ? { user } : {},
+    authenticate: (_password, user) => {
+      const rows = ROWS_USERS.find((u) => rowLogin(u.key) === user);
+      if (rows !== undefined) return { user, role: rows.role, attributes: rows.attributes };
+      return user === ROLE_LOGIN ? { user, role: "agent" } : user === ROLE_ALL ? { user, role: "everything" } : user === ROLE_NONE ? { user } : {};
+    },
     roles: () => roles,
     schema: () => theSync.schema(),
     record: () => undefined, log: (l) => log.push(l),
@@ -410,6 +422,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   await run("after the copy");
   alone.closeSync();
   await roleCases();
+  await rowFilterCases();
   await settingCases();
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of play)
   if (ONLY === null) {
@@ -585,6 +598,97 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       if (v !== null) differences.push({ phase: "roles", group: "role case", kind: v.kind, name: `role case: ${q.name}`, detail: v.detail, sql: q.sql });
     }
     console.log(`duck oracle: ${cases.length} role case(s) asked as a role granted ALL TABLES IN SCHEMA public and a user of a Mason role of tables: all`);
+  }
+
+  /**
+   * ROWS PER USER, HELD TO POSTGRES ROW SECURITY (oracle/row-filters.ts): the roles file's `where:` and `through:`
+   * resolved from its own words against the copied shop (its foreign keys as the source's catalog reports them), each
+   * Mason user beside a Postgres login of the same `mason.attr.*` settings under the same policies, every shape asked of
+   * both — as each filtered user, and as `open`, a user of the same tables with no filter — and held equal by the
+   * oracle's verdict (a refusal by SQLSTATE and message). A one-value list answers as the scalar; EXPLAIN says each
+   * table's filter where the user has one, and none for `open`.
+   */
+  async function rowFilterCases(): Promise<void> {
+    const name = (user: string, shape: string): string => `row filter: ${user}: ${shape}`;
+    const users = ROWS_USERS.filter((u) => ONLY === null || [...ROW_SHAPES, ...HIDDEN_SHAPES, { name: "EXPLAIN" }].some((q) => ONLY.test(name(u.key, q.name))));
+    if (users.length === 0) return;
+    const r = await import("../../src/cli/roles.ts");
+    const file = r.parseRolesText(ROWS_ROLES, ROLE_FILE);
+    assert.ok(!("problems" in file), JSON.stringify(file));
+    const resolved = r.resolveRoles(file, shop.map((t) => ({ source: t.source, columns: t.columns.map((c) => ({ name: c.name })), foreignKeys: t.foreignKeys, key: t.key })), dir);
+    assert.ok(!("message" in resolved), JSON.stringify(resolved));
+    roles = { ...roles, grants: new Map([...roles.grants, ...resolved]) };
+    psql(dbUrl, referenceSql(tag, rowLogin));
+    const pair = new Map<string, { source: pg.Client; mason: pg.Client }>();
+    for (const u of users) {
+      const url = new URL(dbUrl); url.username = rowLogin(u.key); url.password = "x";
+      const source = new pg.Client({ connectionString: url.toString(), application_name: "duck-oracle-rows" });
+      const mason = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: rowLogin(u.key), password: "x", application_name: "duck-oracle-rows" });
+      for (const c of [source, mason]) { await c.connect(); clients.push(c); await c.query("SET TimeZone = 'UTC'"); }
+      pair.set(u.key, { source, mason });
+    }
+    let asked = 0, refusedAlike = 0;
+    const answers = new Map<string, Answer>();
+    const hold = (n: string, sql: string, want: Answer, got: Answer): void => {
+      asked++;
+      const v = verdict(want, got, ordered(sql));
+      if (v !== null) { differences.push({ phase: "row filters", group: "row filter", kind: v.kind, name: n, detail: v.detail, sql }); return; }
+      if ("code" in want && "code" in got) {
+        refusedAlike++;
+        if (want.message !== got.message) differences.push({ phase: "row filters", group: "row filter", kind: "text", name: n, detail: `${JSON.stringify(got.message)} where Postgres says ${JSON.stringify(want.message)}`, sql });
+      }
+    };
+    for (const u of users) {
+      const { source, mason } = pair.get(u.key)!;
+      const shapes: ReadonlyArray<{ name: string; sql: string; values?: string[]; prepared?: string[] }> = u.key === "hidden" ? HIDDEN_SHAPES : ROW_SHAPES;
+      for (const q of shapes) {
+        const n = name(u.key, q.name);
+        if (ONLY !== null && !ONLY.test(n)) continue;
+        const prepared = q.prepared;
+        if (prepared !== undefined) {
+          // Parsed once under the statement's name, Bound and Executed with each value in turn
+          for (const [i, value] of prepared.entries()) {
+            const [want, got] = [await ask(source, q.sql, [value], "rows_prepared"), await ask(mason, q.sql, [value], "rows_prepared")];
+            hold(`${n} (execution ${i + 1})`, q.sql, want, got);
+          }
+          continue;
+        }
+        const [want, got] = [await ask(source, q.sql, q.values), await ask(mason, q.sql, q.values)];
+        hold(n, q.sql, want, got);
+        answers.set(n, got);
+      }
+      // EXPLAIN: Postgres's shape (one QUERY PLAN column of text), the filter said on each table read where there is one
+      const n = name(u.key, "EXPLAIN");
+      if (ONLY !== null && !ONLY.test(n)) continue;
+      const sql = u.key === "hidden" ? "EXPLAIN SELECT count(*) FROM shop.customers" : "EXPLAIN SELECT count(*) FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id";
+      const [want, got] = [await ask(source, sql), await ask(mason, sql)];
+      asked++;
+      if ("code" in want || "code" in got || JSON.stringify([want.names, want.oids]) !== JSON.stringify([got.names, got.oids])) {
+        differences.push({ phase: "row filters", group: "row filter", kind: "type", name: n, detail: `${JSON.stringify(got).slice(0, 300)} where Postgres ${JSON.stringify(want).slice(0, 300)}`, sql });
+        continue;
+      }
+      const plan = got.rows.map((row) => row[0]).join("\n");
+      const said = (plan.match(new RegExp(`filtered by the role ${u.role}: `, "g")) ?? []).length;
+      const expected = u.role === "open" ? 0 : u.role === "hidden" ? 1 : u.role === "regions" ? 3 : 2;
+      if (said !== expected || /filtered by the role/.test(plan) !== (expected > 0)) {
+        differences.push({ phase: "row filters", group: "row filter", kind: "value", name: n, detail: `${said} table(s) said filtered where ${expected} are: ${plan}`, sql });
+      }
+    }
+    // A ONE-VALUE LIST ANSWERS AS THE SCALAR: list1 (tenants: [3]) and tenant (tenant: 3), shape by shape
+    let alike = 0;
+    for (const q of ROW_SHAPES) {
+      const a = answers.get(name("list1", q.name)), b = answers.get(name("tenant", q.name));
+      if (a === undefined || b === undefined || q.name.startsWith("information_schema")) continue;
+      const v = verdict(b, a, ordered(q.sql));
+      if (v === null) alike++;
+      else differences.push({ phase: "row filters", group: "row filter", kind: v.kind, name: name("list1 as tenant", q.name), detail: v.detail, sql: q.sql });
+    }
+    // and a filter that filters: open reads more customers than tenant, which reads more than nobody
+    const count = (k: string): number | null => { const x = answers.get(name(k, "SELECT * of a filtered table")); return x === undefined || "code" in x ? null : x.rows.length; };
+    const [open, one] = [count("open"), count("tenant")];
+    if (open !== null && one !== null) assert.ok(open > one && one > 0, `open reads ${open} customers, tenant ${one}: the filter must leave some rows and drop some`);
+    console.log(`duck oracle: ${asked} row-filter statement(s) asked as ${users.length} user(s) of Mason roles with where: and through: and Postgres logins under the same row security, ` +
+      `${refusedAlike} refused alike; a one-value list answered as the scalar in ${alike}`);
   }
 
   /**

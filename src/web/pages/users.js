@@ -35,6 +35,9 @@ export const disabledText = (disabledAt) => `Disabled ${stamp(disabledAt)} UTC`;
 /** The question being asked, from a model's `confirming`: a name alone is Remove's (as before), else `{ name, verb }`. */
 const askOf = (confirming) => confirming === null || confirming === undefined ? null : typeof confirming === "string" ? { name: confirming, verb: "remove" } : confirming;
 
+/** a user's attributes as `mason user list` says them (src/cli/user.ts attributesText, held equal by tests/web-page.test.ts) */
+export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${typeof v === "string" ? v : `[${v.join(", ")}]`}`).join(", ");
+
 /**
  * THE USERS from `/api/users?lastUsed=1` (`mason user list --json`'s shape), in a table in a card: a row each — its name
  * in mono with its id muted, its status as a dot and the word (Active, Disabled and when, or Removed and when), when it
@@ -45,11 +48,9 @@ const askOf = (confirming) => confirming === null || confirming === undefined ? 
  * asks nothing. A refused action (`refused`: { name, failure }) is said there too, until dismissed. `now` is the
  * page's clock, in ms. `roles`: `/api/state`'s (`mason status --json`'s): while the roles file cannot be read every
  * user held to it is refused (57P03), said above the table as `mason user list`'s tip says it (src/cli/roles.ts
- * rolesProblemText, held equal by tests/web-page.test.ts) and in each user's role.
+ * rolesProblemText, held equal by tests/web-page.test.ts) and in each user's role; beside the role, the user's
+ * attributes (its row filters' values) and, where it lacks one its role's filters read, that its statements are refused.
  */
-/** a user's attributes as `mason user list` says them (src/cli/user.ts attributesText, held equal by tests/web-page.test.ts) */
-export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${typeof v === "string" ? v : `[${v.join(", ")}]`}`).join(", ");
-
 export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
   if (!users.length) return empty("No users yet", `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);

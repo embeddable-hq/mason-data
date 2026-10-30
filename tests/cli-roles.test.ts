@@ -8,6 +8,14 @@
  *     naming a role the file lacks, `default:` beside no `roles:`;
  *   - the start's roles line in the file's three states (none, a default, no default) and when it cannot be read;
  *   - `newRolesText()` is a valid file whose default is `everything`, `tables: all`.
+ * ROWS PER USER (stage 2: `attributes:`, `where:`, `through:`):
+ *   - `attributes:` as a list (every one a scalar) or a map of scalar | list; a bad shape word with a did-you-mean;
+ *   - a `where:` reading an attribute the role does not declare, at its key, with the did-you-mean and the line that
+ *     declares it; `where:` beside `through:`; an empty `where:`; an unclosed string; a malformed `through:`; a
+ *     `through:` parent the role lacks, one with no filter of its own, and a cycle — all on ONE report;
+ *   - `through:` resolved by the one foreign key; none or several refused with the explicit form as the way out; the
+ *     explicit form without a foreign key compares with the parent's one-column key; `resolveRoles` builds the filters;
+ *   - the users missing an attribute their role reads, said in ONE wording with the commands that make them again.
  * The module is imported inside each test, so a tree without these exports fails each test by name (scripts/fails-without.ts).
  */
 import { test } from "node:test";
@@ -136,4 +144,126 @@ test("newRolesText: the file mason init writes is a valid roles file — default
   const two = r.parseRolesText(uncommented, FILE);
   assert.ok(!("problems" in two), uncommented);
   assert.deepEqual(two.roles.map((x) => x.name), ["everything", "agent"]);
+});
+
+const shop = [
+  { source: "public.customers", columns: [{ name: "id" }, { name: "tenant_id" }, { name: "email" }], foreignKeys: [], key: ["id"] },
+  { source: "public.orders", columns: [{ name: "id" }, { name: "customer_id" }, { name: "billed_to" }, { name: "tenant_id" }],
+    foreignKeys: [{ column: "customer_id", target: "public.customers", targetColumn: "id" }, { column: "billed_to", target: "public.customers", targetColumn: "id" }], key: ["id"] },
+  { source: "public.order_items", columns: [{ name: "id" }, { name: "order_id" }, { name: "sku" }],
+    foreignKeys: [{ column: "order_id", target: "public.orders", targetColumn: "id" }], key: ["id"] },
+];
+
+test("attributes: a list (each a scalar) or a map of scalar | list; where: and through: read into the role's tables", async () => {
+  const r = await roles();
+  const file = r.parseRolesText([
+    "roles:",
+    "  tenant:",
+    "    attributes: [tenant]",
+    "    tables:",
+    "      customers: { where: \"tenant_id = :tenant\" }",
+    "      order_items: { through: orders }",
+    "      orders: { through: { customers: customer_id } }",
+    "  regional:",
+    "    attributes: { tenant: scalar, tenants: list }",
+    "    tables:",
+    "      customers: { where: \"tenant_id = ANY(:tenants) AND id <> :tenant\" }",
+  ].join("\n"), FILE);
+  assert.ok(!("problems" in file), JSON.stringify(file));
+  const [tenant, regional] = file.roles;
+  assert.deepEqual([...tenant!.attributes!], [["tenant", "scalar"]]);
+  assert.deepEqual([...regional!.attributes!], [["tenant", "scalar"], ["tenants", "list"]]);
+  const t = tenant!.tables as Array<{ name: string; where?: { text: string }; through?: unknown }>;
+  assert.equal(t[0]!.where!.text, "tenant_id = :tenant");
+  assert.deepEqual(t[1]!.through, { name: "orders", table: "public.orders", column: null });
+  assert.deepEqual(t[2]!.through, { name: "customers", table: "public.customers", column: "customer_id" });
+  // resolved: the explicit form follows its foreign key; the implicit one the only foreign key there is
+  const g = r.resolveRoles(file, shop, "/p");
+  assert.ok(!("message" in g), JSON.stringify(g));
+  const filters = g.get("tenant")!.filters!;
+  assert.deepEqual(filters.get("public.order_items")!.through, { parent: "public.orders", column: "order_id", parentColumn: "id" });
+  assert.deepEqual(filters.get("public.orders")!.through, { parent: "public.customers", column: "customer_id", parentColumn: "id" });
+  assert.equal(filters.get("public.customers")!.where!.text, "tenant_id = :tenant");
+  assert.equal(filters.get("public.customers")!.at, "roles.tenant.tables.customers");
+  assert.deepEqual([...g.get("tenant")!.attributes!.keys()], ["tenant"]);
+});
+
+test("every mistake of attributes:, where: and through: is at its key, on ONE report, with the way out", async () => {
+  const { why } = await report([
+    "roles:",
+    "  a:",
+    "    attributes: { tenant: scalr }",
+    "    tables: { customers: {} }",
+    "  b:",
+    "    attributes: [tenant]",
+    "    tables:",
+    "      customers: { where: \"tenant_id = :tenat\" }",
+    "      orders: { where: \"x = 1\", through: customers }",
+    "      order_items: { where: \"\" }",
+    "  c:",
+    "    tables:",
+    "      customers: { where: \"note = 'open\" }",
+    "      orders: { through: [customers] }",
+    "  d:",
+    "    tables:",
+    "      customers: {}",
+    "      orders: { through: customers }",
+    "      order_items: { through: refunds }",
+    "  e:",
+    "    tables:",
+    "      customers: { through: orders }",
+    "      orders: { through: customers }",
+  ].join("\n"));
+  const lines = why!.split("\n");
+  const has = (re: RegExp): void => assert.ok(lines.some((l) => re.test(l)), `${re} in:\n${why}`);
+  has(/^- roles\.a\.attributes\.tenant: is scalar \(one value: --set tenant=42\) or list \(several: --set tenant=12 --set tenant=41\) — did you mean `scalar`\?/);
+  has(/^- roles\.b\.tables\.customers\.where: :tenat is not an attribute of the role — did you mean `tenant`\? — declare it beside tables: attributes: \[tenant, tenat\]/);
+  has(/^- roles\.b\.tables\.orders: where and through together .* keep one/);
+  has(/^- roles\.b\.tables\.order_items\.where: is a Postgres condition on the table's columns, quoted: where: "tenant_id = :tenant"/);
+  has(/^- roles\.c\.tables\.customers\.where: .*is not closed/);
+  has(/^- roles\.c\.tables\.orders\.through: is the table whose visible rows make this one's visible: through: orders, or through: \{ orders: order_id \}/);
+  has(/^- roles\.d\.tables\.orders\.through: customers has no where: or through: of its own, so every row of it is visible — filter it/);
+  has(/^- roles\.d\.tables\.order_items\.through: refunds is not a table of the role d .*— add it with a where:/);
+  has(/^- roles\.e\.tables\.customers\.through: comes back round \(customers → orders → customers\) — one of them needs a where: instead/);
+});
+
+test("through: by no foreign key or by several is refused with the explicit form; the explicit form without one compares the parent's key", async () => {
+  const r = await roles();
+  const read = (yaml: string) => { const f = r.parseRolesText(yaml, FILE); assert.ok(!("problems" in f), JSON.stringify(f)); return f; };
+  // two foreign keys from orders to customers: name the one
+  const two = r.resolveRoles(read("roles:\n  t:\n    attributes: [tenant]\n    tables:\n      customers: { where: \"tenant_id = :tenant\" }\n      orders: { through: customers }\n"), shop, "/p");
+  assert.ok("message" in two);
+  assert.equal(two.message, "mason/roles.yml: roles.t.tables.orders.through: public.orders references public.customers by 2 foreign keys (customer_id, billed_to) — name the one: through: { customers: customer_id } or through: { customers: billed_to }");
+  // none: from customers to orders there is no foreign key
+  const none = r.resolveRoles(read("roles:\n  t:\n    attributes: [tenant]\n    tables:\n      orders: { where: \"tenant_id = :tenant\" }\n      customers: { through: orders }\n"), shop, "/p");
+  assert.ok("message" in none);
+  assert.match(none.message, /roles\.t\.tables\.customers\.through: public\.customers has no foreign key to public\.orders \(as the database's catalog reports them\) — name the column that references it: through: \{ orders: <a column of customers> \}$/);
+  // the explicit form on a column with no foreign key: compared with the parent's one-column primary key
+  const explicit = r.resolveRoles(read("roles:\n  t:\n    attributes: [tenant]\n    tables:\n      orders: { where: \"tenant_id = :tenant\" }\n      customers: { through: { orders: id } }\n"), shop, "/p");
+  assert.ok(!("message" in explicit), JSON.stringify(explicit));
+  assert.deepEqual(explicit.get("t")!.filters!.get("public.customers")!.through, { parent: "public.orders", column: "id", parentColumn: "id" });
+  // a column the copy lacks, with a did-you-mean
+  const typo = r.resolveRoles(read("roles:\n  t:\n    attributes: [tenant]\n    tables:\n      customers: { where: \"tenant_id = :tenant\" }\n      orders: { through: { customers: custmer_id } }\n"), shop, "/p");
+  assert.ok("message" in typo);
+  assert.match(typo.message, /roles\.t\.tables\.orders\.through\.customers: the copy of public\.orders has no column custmer_id — did you mean `customer_id`\?/);
+});
+
+test("the users missing an attribute their role reads: named with the commands that make them again; none when the file has a problem", async () => {
+  const r = await roles();
+  const file = r.parseRolesText("roles:\n  t:\n    attributes: { tenant: scalar, regions: list }\n    tables:\n      customers: { where: \"tenant_id = :tenant AND email = ANY(:regions)\" }\n  everything:\n    tables: all\n", FILE);
+  assert.ok(!("problems" in file));
+  const grants = r.resolveRoles(file, shop, "/p");
+  assert.ok(!("message" in grants));
+  const live = { file: "mason/roles.yml", default: null, problem: null, grants };
+  const users = [
+    { name: "acme", role: "t", attributes: { tenant: "1", regions: ["eu"] } },
+    { name: "stale", role: "t", attributes: { tenant: "1" } },
+    { name: "bare", role: "t" },
+    { name: "admin", role: "everything" },
+  ];
+  const missing = r.usersMissingAttributes(users, live);
+  assert.deepEqual(missing, [{ name: "stale", role: "t", missing: ["regions"] }, { name: "bare", role: "t", missing: ["tenant", "regions"] }]);
+  assert.equal(r.missingAttributesText(missing[1]!),
+    "the user bare has no value for tenant, regions, which the role t filters rows by: its statements are refused — mason user remove bare && mason user add bare --role t --set tenant=<value> --set regions=<value>");
+  assert.deepEqual(r.usersMissingAttributes(users, { ...live, problem: "it is not YAML" }), [], "a file that cannot be read refuses everyone already (57P03): no second claim");
 });

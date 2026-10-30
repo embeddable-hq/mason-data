@@ -301,7 +301,7 @@ function rowsOfState(r: NonNullable<RunState["roles"]>, role: string): Pick<Role
   return { ...(attrs !== undefined && Object.keys(attrs).length > 0 ? { attributes: new Map(Object.entries(attrs)) } : {}), ...(filters.size > 0 ? { filters } : {}) };
 }
 
-/** a user's attributes as `mason user add` and `mason user list` say them: `tenant=42, regions=eu+uk` */
+/** a user's attributes as `mason user add` and `mason user list` say them: `tenant=42, regions=[eu, uk]` */
 export const attributesText = (a: Readonly<Record<string, string | readonly string[]>>): string =>
   Object.entries(a).map(([k, v]) => `${k}=${typeof v === "string" ? v : `[${v.join(", ")}]`}`).join(", ");
 

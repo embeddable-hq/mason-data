@@ -421,6 +421,20 @@ test("the users: a user's role (mason user add --role) in its own column; one th
   assert.match(textOf(html), /dflt id 0000000000000003 everything \(default\) Active .* bare id 0000000000000004 no role, and the roles file names no default: its statements are refused Active /);
 });
 
+test("the users: a user's attributes beside its role in mason user list's words; one its role's filters read and it lacks, said refused", async () => {
+  const renderUsers = fn<[unknown, string | null, number?], string>("renderUsers");
+  const attributesText = fn<[Record<string, string | string[]>], string>("attributesText");
+  const cli = await import("../src/cli/user.ts");
+  const values = { tenant: "42", regions: ["eu", "uk"] };
+  assert.equal(attributesText(values), cli.attributesText(values), "the page's words are the CLI's");
+  assert.equal(attributesText(values), "tenant=42, regions=[eu, uk]");
+  const at = { addedAt: "2026-10-29T08:00:00.000Z", removedAt: null, live: true, lastUsedAt: null, url: null };
+  const html = renderUsers({ users: [{ name: "acme", id: "0000000000000001", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: values },
+    { name: "stale", id: "0000000000000002", ...at, role: "tenant", roleFrom: "file", roleKnown: true, attributes: { tenant: "7" }, missingAttributes: ["regions"] }],
+    lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
+  assert.match(textOf(html), /acme id 0000000000000001 tenant tenant=42, regions=\[eu, uk\] Active .* stale id 0000000000000002 tenant tenant=7 no value for regions: its statements are refused Active /);
+});
+
 test("the users: a row each, active first then removed without Remove; Remove asks first; none is said", () => {
   const renderUsers = fn<[unknown, string | null, number?], string>("renderUsers");
   const list = { users: [{ name: "old", id: "aaaaaaaaaaaaaaaa", addedAt: "2026-10-01T10:00:00.000Z", removedAt: "2026-10-02T10:00:00.000Z", live: false, lastUsedAt: null, url: null },
