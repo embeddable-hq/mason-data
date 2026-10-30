@@ -456,8 +456,8 @@ mason user remove claude             # blocks its next connection, and ends its 
 - If a query reads a table or column outside the user's role, Mason refuses it with `42501`, the same error Postgres
   sends. The error names the table or column. A `SELECT *` on a table where the role can see only some columns is
   refused too. Mason never quietly returns fewer columns.
-- When a user reads the catalog or uses the MCP tools, it sees only what its role can read. So an agent never finds a
-  table it is not allowed to query.
+- When a user reads `information_schema` or uses the MCP tools, it sees only what its role can read. `pg_catalog` still
+  lists every synced table and column, as Postgres does for a role with no access: names, never rows.
 - A user added without `--role` gets the file's `default:` role. `mason init` writes `default: everything`, so at
   first every user can read every synced table. Remove the `default:` line, and a user with no role of its own reads
   nothing: each query is refused with `42501`, and the error says how to give it a role.
@@ -492,7 +492,7 @@ tool, and shows the setup for Claude Desktop.
 
 | | |
 |---|---|
-| `mason logs --requests` | Every query, answered, refused, failed or cancelled. For each one: when it ran, the result and SQLSTATE, how long it took, the rows and bytes sent, the tool's `application_name`, and the user and its role. For a refused query, it also shows the grant or filter that refused it. An MCP client shows up as `mason-mcp/<client>`. Narrow it with `--failed`, `--since 2h`, `--user` or `--client`, or add `--json` for every column. Queries are kept for 7 days (`MASON_REQUEST_LOG_DAYS`). |
+| `mason logs --requests` | Every query, answered, refused, failed or cancelled. For each one: when it ran, the result and SQLSTATE, how long it took, the rows and bytes sent, the tool's `application_name`, and the user and its role. For a refused query, it also shows the grant or filter that refused it. An MCP client shows up as `mason-mcp/<client>`. Narrow it with `--failed`, `--since 2h`, `--user` or `--client`, or add `--json` for every column. Queries are kept for 7 days (`MASON_HISTORY_DAYS`). |
 | `mason logs --running` | The queries running now, by session. `mason cancel <session>` stops one, as the client's own cancel would: the client gets `57014`, and its session continues. |
 | `mason logs --events` | The sync's events: each first sync, poll or replication stream that failed, the database out of reach, a table up to date again, and each restart of Mason. |
 | `mason usage` | What Mason did over time, from a sample every minute: the queries and their p95, the rows and bytes sent, the synced data's size, the stalest table, the replication lag and the memory. |
