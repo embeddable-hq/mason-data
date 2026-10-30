@@ -25,8 +25,8 @@
  *     sessions' unnamed statements never meet.
  *   - A TRANSACTION IS POSTGRES'S: `BEGIN` opens one (ReadyForQuery says `T`), an error inside it aborts it (`E`,
  *     and every statement until `ROLLBACK` is `25P02`, as a driver with autocommit off expects), `COMMIT` of an
- *     aborted one is a `ROLLBACK`. Nothing is ever written, so a transaction holds nothing — the states exist because
- *     a driver reads them.
+ *     aborted one is a `ROLLBACK`. Nothing is ever written, so all a transaction holds is the session's settings
+ *     (`settingsTx`): its end, explicit or implicit, keeps or undoes them; the states exist because a driver reads them.
  *   - "NOW" IS THE TRANSACTION'S: the session holds the instant its transaction began (`txNow`), which a plan reads as
  *     a parameter (`DuckPlan.clock`). A transaction begins as Postgres's does: at a simple Query's arrival (every
  *     statement of one Query message is one implicit transaction, and a transaction begun by a later statement of it
@@ -73,7 +73,8 @@ import {
   cstr, int16, int32, frame, decodeBackend, decodeNoticeFrame, splitFrames, MAX_MESSAGE_LENGTH,
 } from "./protocol.ts";
 import { typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
-import { Unsupported, duckTranslate, type Translation } from "./translate.ts";
+import { Unsupported, duckTranslate, endsFailedBlock, type Translation } from "./translate.ts";
+import type { Node } from "libpg-query";
 
 /** what a statement is: one the session or the catalog Postgres answers (translate.ts), one DuckDB answers, or an
  *  EXPLAIN of one */
@@ -508,6 +509,17 @@ interface Vars {
 const defaultVars = (): Vars => ({ timeZone: "UTC", applicationName: "", searchPath: '"$user", public', other: new Map() });
 const copyVars = (v: Vars): Vars => ({ ...v, other: new Map(v.other) });
 
+/** One parameter's value carried from one set of values to another, from where `setParameter` keeps it. */
+function copySetting(name: string, from: Vars, to: Vars): void {
+  switch (name) {
+    case "timezone": case "time zone": to.timeZone = from.timeZone; return;
+    case "application_name": to.applicationName = from.applicationName; return;
+    case "search_path": to.searchPath = from.searchPath; return;
+  }
+  const value = from.other.get(name);
+  if (value === undefined) to.other.delete(name); else to.other.set(name, value);
+}
+
 /** A placeholder's name as Postgres's `valid_custom_variable_name` reads it: two or more simple identifiers, dotted. */
 function placeholderName(name: string): void {
   if (/^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*(\.[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*)+$/.test(name)) return;
@@ -604,6 +616,9 @@ interface Portal {
 
 type TxState = "none" | "open" | "failed";
 
+/** Postgres's answer to anything but a failed block's end */
+const aborted = (): PgError => new PgError({ code: "25P02", message: "current transaction is aborted, commands ignored until end of transaction block" });
+
 /**
  * A DuckDB result being sent: read from DuckDB a chunk at a time, so a result of any size holds one chunk (`pending`,
  * the rows read and not yet sent: an Execute's row limit, or a portal read aside while another statement ran). `sent`
@@ -647,6 +662,15 @@ class Session {
   /** each reported parameter's value as the client was last told it (`reportChanges`) */
   readonly reported = new Map<string, string>();
   tx: TxState = "none";
+  /**
+   * WHAT THE TRANSACTION WOULD LEAVE OF THE SESSION'S SETTINGS, from its first SET: `rollback`, the values it found, and
+   * `commit`, those with its SETs and none of its LOCALs. Neither is ever read for an answer: `vars` is what is in force,
+   * and `endTransaction` replaces it with one of these. Null: nothing was set since the transaction began.
+   */
+  settingsTx: { rollback: Vars; commit: Vars } | null = null;
+  /** the statement runs in an IMPLICIT transaction block, as Postgres's IsTransactionBlock reads one: a Query of several
+   *  statements, or a Sync's batch once an Execute completed (`extended`). A plain transaction of one statement is none */
+  implicitBlock = false;
   /** the instant the transaction began (Postgres's `now()`), null between transactions */
   txNow: number | null = null;
   /** the instant of the statement being run (`statement_timestamp()`): its Query's arrival or its Bind */
@@ -799,7 +823,7 @@ class Session {
       if ((this.phase as string) === "closed") return;
       if (refused !== null) {
         this.refuse(refused, m.type === "Execute" ? this.sqlOf(m) : m.sql);
-        if (this.tx === "open") this.tx = "failed";
+        this.abortTransaction();
         if (m.type === "Query") this.send(...this.ready());
         else this.skipToSync = true;
         return;
@@ -1051,8 +1075,11 @@ class Session {
   private async resetAll(): Promise<void> {
     const placeholders: string[] = [];
     for (const name of this.vars.other.keys()) if (await this.isPlaceholder(name)) placeholders.push(name);
+    const tx = this.settingsAtStart();
     this.vars = copyVars(this.startupVars);
     for (const name of placeholders) if (!this.vars.other.has(name)) this.vars.other.set(name, "");
+    // a SET of every parameter: it overrides each LOCAL before it, and a ROLLBACK undoes it
+    tx.commit = copyVars(this.vars);
   }
 
   /** a custom placeholder (`SET myapp.x`): a dotted name the catalog Postgres does not list (an extension's, `plpgsql.*`, it lists) */
@@ -1081,10 +1108,54 @@ class Session {
    * A REQUEST'S END: the reported parameters it changed, then its ReadyForQuery — where Postgres 14+ reports them
    * (`ReportChangedGUCOptions` in PostgresMain, just before ReadyForQuery): after the statement's CommandComplete, and
    * ONCE per parameter per Query string or Sync, its last value (`SET application_name = 'a'; SET application_name =
-   * 'b'` reports 'b' alone). A request that failed half-way reports what its earlier statements moved, as Postgres does.
+   * 'b'` reports 'b' alone). With no block open the request's implicit transaction ends here, so what it reverted is
+   * what is reported: a SET LOCAL told nothing, a block's revert is told by the ReadyForQuery that ends the block.
    */
   private ready(): Buffer[] {
+    if (this.tx === "none") this.endTransaction(true);
     return [...this.reportChanges(), readyForQuery(this.txStatus())];
+  }
+
+  /**
+   * A TRANSACTION'S END, explicit or implicit: the session's settings become what it leaves (`settingsTx`), as Postgres's
+   * AtEOXact_GUC restores them, one level, since a SAVEPOINT is refused here. A placeholder a transaction defined stays
+   * defined (`applySetting`); a transaction that set nothing changes nothing.
+   */
+  private endTransaction(committed: boolean): void {
+    this.implicitBlock = false;
+    if (this.settingsTx === null) return;
+    this.vars = committed ? this.settingsTx.commit : this.settingsTx.rollback;
+    this.settingsTx = null;
+  }
+
+  /**
+   * A FAILED BLOCK ACCEPTS NOTHING BUT ITS END, on every message: Postgres checks a Query's statement, a Parse, a Bind and
+   * an Execute (`IsTransactionExitStmt`), each before the statement is classified or sent anywhere, so 25P02 is said
+   * where Mason's own refusal of it (an INSERT's 25006) or the catalog's answer would be. Undefined: an empty statement,
+   * which a Bind refuses as it refuses any other. A Parse of an empty string passes (`parseMessage`), a Describe has its
+   * own rule (`describedInFailedBlock`), and a Close always runs.
+   */
+  private heldToFailedBlock(stmt: Node | undefined): void {
+    if (this.tx === "failed" && (stmt === undefined || !endsFailedBlock(stmt))) throw aborted();
+  }
+
+  /** A Describe in a failed block: refused where it would describe a result (Postgres reads the catalog for a
+   *  RowDescription, which an aborted transaction cannot), answered otherwise, so a driver that describes all it sends
+   *  can still send its ROLLBACK. */
+  private describedInFailedBlock(statement: Statement): void {
+    const kind = statement.shape?.kind;
+    if (this.tx === "failed" && kind !== undefined && ["catalog", "duckdb", "explain", "show", "set_config"].includes(kind)) throw aborted();
+  }
+
+  /**
+   * A STATEMENT FAILED, the one way a transaction fails: an open block is failed (25P02 until its end), and in every
+   * case what the transaction set is undone NOW, as Postgres's AbortTransaction does at the error, never at the ROLLBACK
+   * that follows — so the failed block's own ReadyForQuery reports the revert, and an implicit transaction's SET (`SET a;
+   * SELECT 1/0`, or a pipeline's before its Sync) never took.
+   */
+  private abortTransaction(): void {
+    if (this.tx === "open") this.tx = "failed";
+    this.endTransaction(false);
   }
 
   /** The catalog Postgres validates a parameter this server has no opinion on; its own error is the answer. Inside a
@@ -1109,6 +1180,7 @@ class Session {
       await this.simpleStatements(sql);
     } finally {
       if (this.tx === "none") this.txNow = null;
+      this.implicitBlock = false;
     }
   }
 
@@ -1125,7 +1197,7 @@ class Session {
     } catch (err) {
       const e = asPgError(err, sql);
       this.refuse(e, sql);
-      if (this.tx === "open") this.tx = "failed";
+      this.abortTransaction();
       this.send(...this.ready());
       return;
     }
@@ -1133,13 +1205,15 @@ class Session {
     for (const raw of stmts) {
       const text = statementText(sql, raw);
       this.asked = { sql: text, method: "QUERY", startedAt: Date.now(), sentAt: this.sentBytes };
+      // at every statement, as Postgres's BeginImplicitTransactionBlock: a COMMIT among them ended the block before it
+      if (stmts.length > 1) this.implicitBlock = true;
       try {
         const out = await this.runSimple(raw, text, sql);
         this.sendAll(out);
       } catch (err) {
         const e = asPgError(err, sql);
         this.refuse(e, text);
-        if (this.tx === "open") this.tx = "failed";
+        this.abortTransaction();
         break;
       }
     }
@@ -1215,10 +1289,8 @@ class Session {
   private async runSimple(raw: RawStmt, text: string, whole: string): Promise<Buffer[]> {
     if (raw.stmt === undefined) return [emptyQueryResponse()];
     const now = this.txStart(this.statementNow);
+    this.heldToFailedBlock(raw.stmt);
     const t = this.classify(raw.stmt, text);
-    if (this.tx === "failed" && !(t.kind === "transaction" && t.tag !== "BEGIN" && t.tag !== "START TRANSACTION")) {
-      throw new PgError({ code: "25P02", message: "current transaction is aborted, commands ignored until end of transaction block" });
-    }
     switch (t.kind) {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
@@ -1235,7 +1307,8 @@ class Session {
       }
       case "catalog": return this.forwardSimple(this.spliced(text, raw));
       case "set": return this.setStatement(t);
-      case "set_config": return this.setConfigStatement(t);
+      // its RowDescription first, as Postgres's: a value it refuses is refused after it
+      case "set_config": this.send(this.setConfigDescription(t, 0)); return this.setConfigStatement(t);
       case "show": return this.showStatement(t.name);
       case "transaction": return [...this.transaction(t.tag)];
       case "discard": return this.discard(t.target);
@@ -1704,9 +1777,20 @@ class Session {
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
   }
 
+  /** SET and RESET as statements. SET LOCAL and SET TRANSACTION (`local`) outside a block are Postgres's WARNING, said
+   *  before the value is read, so an invalid value is refused after it. The value still holds to the end of its own
+   *  transaction: to the Sync, in a batch. */
   private async setStatement(t: Extract<Translation, { kind: "set" }>): Promise<Buffer[]> {
+    if (t.local && this.tx === "none" && !this.implicitBlock) {
+      this.send(noticeResponse({ severity: "WARNING", code: "25P01", message: `${t.name === "transaction" ? "SET TRANSACTION" : "SET LOCAL"} can only be used in transaction blocks` }));
+    }
+    return this.applySetting(t);
+  }
+
+  /** A SET's effect, whoever asked (a statement, `set_config`): `vars` is moved, and a plain SET stays for the
+   *  transaction's COMMIT (`settingsTx`, the transaction's first one snapshots it). */
+  private async applySetting(t: Extract<Translation, { kind: "set" }>): Promise<Buffer[]> {
     if (t.name === "all") { await this.resetAll(); return [commandComplete("RESET")]; }
-    const tag = t.value === null ? "RESET" : "SET";
     // SET ROLE and SET SESSION AUTHORIZATION: a session is its user and becomes no one else — RESET, NONE and its own
     // name are Postgres's no-ops, any other name Postgres's refusal. Never the catalog's to validate: that is one
     // superuser connection, which accepted `SET ROLE postgres` silently (a review finding of #35)
@@ -1715,27 +1799,38 @@ class Session {
       // current_user says), which Postgres always allows; SET SESSION AUTHORIZATION is the login's name alone
       const own = t.value === null || t.value === this.user || (t.name === "role" && (t.value.toLowerCase() === "none" || t.value === this.roleName()));
       if (!own) throw new PgError({ code: "42501", message: `permission denied to set ${t.name === "role" ? "role" : "session authorization"} "${t.value}"` }, 403);
-      return [commandComplete(tag)];
+      return [commandComplete(t.tag)];
     }
     // a user's attributes are the users file's (mason user add --set), never the session's to change: Postgres's refusal
     // of a parameter a role may not set
     if (t.name.toLowerCase().startsWith("mason.attr.")) throw new PgError({ code: "42501", message: `permission denied to set parameter "${t.name}"`, hint: "a user's attributes are set by mason user add --set, never by the session" }, 403);
     // a placeholder (`myapp.x`) is validated here: a SET the catalog validated left it DEFINED there, with '', for every
     // session (a `current_setting` of it answered '' where Postgres's is 42704) — its rollback undoes the value, not that
-    if (await this.isPlaceholder(t.name)) placeholderName(t.name);
+    const placeholder = await this.isPlaceholder(t.name);
+    if (placeholder) placeholderName(t.name);
     else if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
+    const tx = this.settingsAtStart();
     if (t.value === null) await this.resetParameter(t.name); else this.setParameter(t.name, t.value);
-    return [commandComplete(tag)];
+    if (!t.local) copySetting(t.name, this.vars, tx.commit);
+    // once named a placeholder stays defined, '', whichever way the transaction ends: its definition is no value it undoes
+    if (placeholder) for (const v of [tx.rollback, tx.commit]) if (!v.other.has(t.name)) v.other.set(t.name, "");
+    return [commandComplete(t.tag)];
   }
 
-  /** `SELECT set_config(name, value, false)` alone (translate.ts setConfig): the session's SET, answered as Postgres
-   *  answers the function — one text row, the value as `SHOW` then answers it (its own DataRow: one reader), the column
-   *  named `set_config` or as aliased (an Execute drops the RowDescription: a portal's is its Describe's). */
+  /** what the transaction found, kept at its first SET (`settingsTx`) */
+  private settingsAtStart(): { rollback: Vars; commit: Vars } {
+    return this.settingsTx ??= { rollback: copyVars(this.vars), commit: copyVars(this.vars) };
+  }
+
+  /** `SELECT set_config(name, value, is_local)` alone (translate.ts setConfig): the session's SET or SET LOCAL, answered
+   *  as Postgres answers the function — one text row, the value as `SHOW` then answers it (its own DataRow: one reader),
+   *  the column named `set_config` or as aliased. Its RowDescription is the caller's: a Query's, an Execute's Describe's.
+   *  Unlike SET LOCAL it warns of nothing outside a block: Postgres's function does not. */
   private async setConfigStatement(t: Extract<Translation, { kind: "set_config" }>): Promise<Buffer[]> {
-    await this.setStatement({ kind: "set", name: t.name, value: t.value, local: false });
+    await this.applySetting({ kind: "set", name: t.name, value: t.value, local: t.local, tag: "SET" });
     const row = (await this.showStatement(t.name)).find((f) => f[0] === DATA_ROW);
     if (row === undefined) throw new PgError({ code: "XX000", message: `SHOW ${t.name} answered no row after set_config (Mason bug: report it)` }, 500);
-    return [this.setConfigDescription(t, 0), row, commandComplete("SELECT 1")];
+    return [row, commandComplete("SELECT 1")];
   }
 
   private setConfigDescription(t: Extract<Translation, { kind: "set_config" }>, format: 0 | 1): Buffer {
@@ -1746,9 +1841,12 @@ class Session {
    *  SEQUENCES and TEMP find nothing of theirs here */
   private async discard(target: string): Promise<Buffer[]> {
     if (target !== "ALL") return [commandComplete(`DISCARD ${target}`)];
+    if (this.tx !== "none" || this.implicitBlock) throw new PgError({ code: "25001", message: "DISCARD ALL cannot run inside a transaction block" });
     this.statements.clear();
     this.dropPortals();
     await this.resetAll();
+    // it commits at once, what follows it in a batch being a transaction of its own (XACT_FLAGS_NEEDIMMEDIATECOMMIT)
+    this.endTransaction(true);
     return [commandComplete("DISCARD ALL")];
   }
 
@@ -1834,8 +1932,10 @@ class Session {
       this.tx = "open";
       return [commandComplete(tag)];
     }
-    if (this.tx === "none") { return [noticeResponse({ severity: "WARNING", code: "25P01", message: "there is no transaction in progress" }), commandComplete(tag)]; }
+    // the implicit transaction's end too: `SET a; ROLLBACK` in one Query undoes the SET, with the same warning
     const wasFailed = this.tx === "failed";
+    this.endTransaction(tag === "COMMIT" && !wasFailed);
+    if (this.tx === "none") { return [noticeResponse({ severity: "WARNING", code: "25P01", message: "there is no transaction in progress" }), commandComplete(tag)]; }
     this.tx = "none";
     // the transaction's "now" ends with it; a statement after it in the same Query begins the next at the Query's arrival
     this.txNow = null;
@@ -1864,14 +1964,24 @@ class Session {
         case "Parse": return this.sendAll(await this.parseMessage(m));
         case "Bind": return this.sendAll(await this.bindMessage(m));
         case "Describe": return this.sendAll(await this.describeMessage(m));
-        case "Execute": return this.sendAll(await this.executeMessage(m));
+        case "Execute": {
+          const out = await this.executeMessage(m);
+          this.sendAll(out);
+          // AN EXECUTE LEAVES ITS TRANSACTION OPEN UNTIL THE SYNC, and what follows it runs in an implicit block, as
+          // Postgres 18's does, a portal suspended at a row count included: a later SET LOCAL warns of nothing, a later
+          // DISCARD ALL is refused. Not after a transaction statement, which ended it, nor a DISCARD ALL, whose portal
+          // it dropped
+          const kind = this.portals.get(m.portal)?.statement.shape?.kind;
+          if (kind !== undefined && kind !== "transaction") this.implicitBlock = true;
+          return;
+        }
         case "Close": return this.sendAll(await this.closeMessage(m));
       }
     } catch (err) {
       const e = asPgError(err, sql);
       this.refuse(e, sql, m.type);
       this.skipToSync = true;
-      if (this.tx === "open") this.tx = "failed";
+      this.abortTransaction();
     }
   }
 
@@ -1906,10 +2016,11 @@ class Session {
   }
 
   private async parseMessage(m: Extract<FrontendMessage, { type: "Parse" }>): Promise<Buffer[]> {
-    if (m.name !== "" && this.statements.has(m.name)) throw new PgError({ code: "42P05", message: `prepared statement "${m.name}" already exists` });
     const stmts = (await parseSql(m.sql)).stmts ?? [];
     if (stmts.length > 1) throw new PgError({ code: "42601", message: "cannot insert multiple commands into a prepared statement" });
     const raw = stmts[0] ?? null;
+    if (raw?.stmt !== undefined) this.heldToFailedBlock(raw.stmt);
+    if (m.name !== "" && this.statements.has(m.name)) throw new PgError({ code: "42P05", message: `prepared statement "${m.name}" already exists` });
     const statement: Statement = { sql: m.sql, raw, paramOids: [...m.paramTypes], shape: null, catalogName: null };
     if (raw?.stmt !== undefined) {
       statement.shape = this.classify(raw.stmt, statementText(m.sql, raw));
@@ -1944,6 +2055,8 @@ class Session {
   private async bindMessage(m: Extract<FrontendMessage, { type: "Bind" }>): Promise<Buffer[]> {
     const statement = this.statements.get(m.statement);
     if (statement === undefined) throw new PgError({ code: "26000", message: `prepared statement "${m.statement}" does not exist` });
+    // before anything runs: a catalog statement is run whole at its Bind
+    this.heldToFailedBlock(statement.raw?.stmt);
     if (m.portal !== "" && this.portals.has(m.portal)) throw new PgError({ code: "42P03", message: `cursor "${m.portal}" already exists` });
     if (statement.catalogName !== null) {
       // bound, described, run whole and closed in one call, Sync included (the Portal's `catalog`): nothing of this
@@ -1987,6 +2100,7 @@ class Session {
     if (m.kind === "S") {
       const statement = this.statements.get(m.name);
       if (statement === undefined) throw new PgError({ code: "26000", message: `prepared statement "${m.name}" does not exist` });
+      this.describedInFailedBlock(statement);
       if (statement.catalogName !== null) return this.catalogRun(frame("D", Buffer.from("S"), cstr(statement.catalogName)));
       const shape = statement.shape;
       if (shape?.kind === "show") return [parameterDescription([]), ...await this.showDescription(shape.name)];
@@ -2004,6 +2118,7 @@ class Session {
     }
     const portal = this.portals.get(m.name);
     if (portal === undefined) throw new PgError({ code: "34000", message: `portal "${m.name}" does not exist` });
+    this.describedInFailedBlock(portal.statement);
     if (portal.catalog !== undefined) return [portal.catalog.description];
     const shape = portal.statement.shape;
     if (shape?.kind === "show") return this.showDescription(shape.name);
@@ -2017,6 +2132,10 @@ class Session {
   private async executeMessage(m: Extract<FrontendMessage, { type: "Execute" }>): Promise<Buffer[]> {
     const portal = this.portals.get(m.portal);
     if (portal === undefined) throw new PgError({ code: "34000", message: `portal "${m.portal}" does not exist` });
+    const statement = portal.statement;
+    if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
+    // a catalog portal's rows are held here since its Bind: a block that failed after it answers none of them
+    this.heldToFailedBlock(statement.raw.stmt);
     if (portal.catalog !== undefined) {
       const c = portal.catalog;
       const take = m.maxRows > 0 ? Math.min(m.maxRows, c.rows.length - c.sent) : c.rows.length - c.sent;
@@ -2026,17 +2145,12 @@ class Session {
     }
     // what its earlier Executes sent is this one's row's too (`bytesFor`)
     if (this.asked !== null) this.asked.carried = portal.bytes;
-    const statement = portal.statement;
-    if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
     const t = statement.shape ?? this.classify(statement.raw.stmt, statementText(statement.sql, statement.raw));
-    if (this.tx === "failed" && !(t.kind === "transaction" && t.tag !== "BEGIN" && t.tag !== "START TRANSACTION")) {
-      throw new PgError({ code: "25P02", message: "current transaction is aborted, commands ignored until end of transaction block" });
-    }
     switch (t.kind) {
       case "empty": return [emptyQueryResponse()];
       case "catalog": throw new PgError({ code: "XX000", message: "a catalog statement bound as a query (Mason bug: report it)" }, 500);
       case "set": return this.setStatement(t);
-      case "set_config": return (await this.setConfigStatement(t)).filter((f) => f[0] !== ROW_DESCRIPTION);
+      case "set_config": return this.setConfigStatement(t);
       // as Postgres: the extended protocol's Execute sends the rows and the tag, the RowDescription is the Describe's
       case "show": return (await this.showStatement(t.name)).filter((f) => f[0] !== ROW_DESCRIPTION);
       case "transaction": return this.transaction(t.tag);

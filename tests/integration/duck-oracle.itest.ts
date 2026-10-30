@@ -54,6 +54,7 @@ import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postg
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
+import { SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
 import { staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
@@ -441,6 +442,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   await roleCases();
   await rowFilterCases();
   await settingCases();
+  await settingScripts();
   for (const round of [1, 2]) {
     psql(dbUrl, mutations(round) + typedMutations(round));
     await sync.once();
@@ -827,6 +829,30 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       }
     }
     console.log(`duck oracle: ${cases.length} setting case(s) asked in order of one session each, ${refusedAlike} refused alike by SQLSTATE and message`);
+  }
+
+  /** THE SETTINGS ACROSS TRANSACTIONS (GitHub issue 47; oracle/setting-scripts.ts): a session of each per script, under
+   *  the settings cases' startup, every step's whole reply held equal, its warnings and ParameterStatus among it. */
+  async function settingScripts(): Promise<void> {
+    const startup = { application_name: "duck-oracle-settings", options: "-c TimeZone=UTC -c work_mem=32MB -c search_path=startup_path,public" };
+    const scripts = SETTING_SCRIPTS.filter((q) => ONLY === null || ONLY.test(`setting case: ${q.name}`));
+    let steps = 0;
+    for (const script of scripts) {
+      const sourceT = new pg.Client({ connectionString: dbUrl, ...startup });
+      const masonT = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: "oracle", password: "x", ...startup });
+      await sourceT.connect();
+      await masonT.connect();
+      try {
+        for (const step of script.steps) {
+          steps++;
+          const [want, got] = [await traceStep(sourceT, step), await traceStep(masonT, step)];
+          if (JSON.stringify(want) === JSON.stringify(got)) continue;
+          differences.push({ phase: "settings", group: "setting case", kind: "text", name: `setting case: ${script.name}`, detail: `${JSON.stringify(got)} where Postgres answers ${JSON.stringify(want)}`, sql: stepText(step) });
+          break;   // what follows in a session parted from Postgres's says nothing more
+        }
+      } finally { await sourceT.end(); await masonT.end(); }
+    }
+    if (scripts.length > 0) console.log(`duck oracle: ${scripts.length} setting script(s), ${steps} steps, each reply held whole`);
   }
 
   // ---- the verdict ----------------------------------------------------------------------------------------------

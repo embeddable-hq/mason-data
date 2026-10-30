@@ -274,6 +274,42 @@ test("the session cannot SET its attributes; SHOW answers them; SET ROLE is unch
   assert.match(policies.find((p) => p[0] === "orders")![2]!, /current_setting\('mason\.attr\.tenant'::text\)\)::integer/);
 });
 
+// EVERY WAY A SESSION HAS TO SET A PARAMETER REACHES `applySetting`, set_config directly, so the refusal lives there: in
+// `setStatement` alone, `set_config('mason.attr.tenant', '2', true)` would have widened the session's rows for a block.
+// A session's transaction holds settings it may undo: an attribute is none of them, and the row filter reads it after each.
+test("no SET, SET LOCAL, RESET or set_config moves an attribute, and no transaction's end does", async () => {
+  await wire();
+  const acme = await connect("acme5", addUser("acme5", "tenant", { tenant: "1" }));
+  const unmoved = async (asked: string): Promise<void> => {
+    assert.deepEqual((await rows(acme, "SHOW mason.attr.tenant"))[0], ["1"], asked);
+    assert.deepEqual((await rows(acme, "SELECT current_setting('mason.attr.tenant'), count(*) FROM orders"))[0], ["1", "4"], `${asked}: still its own rows`);
+    assert.deepEqual((await rows(acme, "SELECT current_setting('mason.attr.tenant')"))[0], ["1"], `${asked}: in the catalog too`);
+  };
+  for (const sql of ["SET mason.attr.tenant = '2'", "SET LOCAL mason.attr.tenant = '2'", "SET SESSION mason.attr.tenant = '2'", "RESET mason.attr.tenant", "SET mason.attr.tenant TO DEFAULT",
+    "SET LOCAL mason.attr.tenant TO DEFAULT", "SET MASON.ATTR.tenant = '2'", "SELECT set_config('mason.attr.tenant', '2', false)", "SELECT set_config('mason.attr.tenant', '2', true)",
+    "SELECT set_config('MASON.ATTR.tenant', '2', true)", "SET mason.attr.never_given = '2'"]) {
+    const r = await refusal(acme, sql);
+    assert.deepEqual([r.code, r.message.toLowerCase()], ["42501", `permission denied to set parameter "${/never_given/.test(sql) ? "mason.attr.never_given" : "mason.attr.tenant"}"`], sql);
+    await unmoved(sql);
+    // in a block it fails the block, and the block's end moves nothing: nothing of it was kept to restore
+    await acme.query("BEGIN");
+    assert.equal((await refusal(acme, sql)).code, "42501", `${sql} in a block`);
+    await acme.query("ROLLBACK");
+    await unmoved(`${sql}, then ROLLBACK`);
+  }
+  // the transaction's other settings come and go around it; RESET ALL touches no attribute, kept or undone
+  for (const end of ["COMMIT", "ROLLBACK"]) {
+    await acme.query("BEGIN");
+    await acme.query("SET LOCAL application_name = 'in-block'");
+    await acme.query("RESET ALL");
+    await unmoved(`RESET ALL in a block, before its ${end}`);
+    await acme.query(end);
+    await unmoved(`RESET ALL, ${end}`);
+  }
+  assert.equal((await acme.query("DISCARD ALL")).command, "DISCARD");
+  await unmoved("DISCARD ALL");
+});
+
 test("every statement's request-log row carries the user's attributes beside its role", async () => {
   await wire();
   const acme = await connect("acme4", addUser("acme4", "tenant", { tenant: "1" }));

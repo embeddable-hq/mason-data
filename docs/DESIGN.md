@@ -1475,6 +1475,40 @@ clients that take a static header. The tool code would not change; the transport
 **Where.** `src/cli/mcp.ts`, `src/cdc/pg-wire.ts` (`extended`, `cancel`), `src/api/postgres/catalog.ts`
 (`sourceTypeNames`); `tests/cli-mcp.test.ts`, `tests/pg-wire.test.ts`.
 
+### A session's settings are transactional (2026-10-30, issue 47)
+
+`SET LOCAL` was a SET and a ROLLBACK undid none: the classifier read `is_local` and nothing used it. The issue asked for
+a block's two ends; probing Postgres 18 message by message, before any code, found three things it had not:
+
+- **A failed block reverts at the error, not at its ROLLBACK.** AbortTransaction runs AtEOXact_GUC when the error is
+  raised; the block only stays open as a state. So the ParameterStatus comes with the error's ReadyForQuery (`E`), and
+  the ROLLBACK reports nothing. A revert at ROLLBACK passes a test that reads `SHOW` after it and tells a driver late.
+- **An implicit transaction is a transaction.** `SET a; SELECT 1/0` in one Query undoes the SET, and `SET a; ROLLBACK`
+  does too, with its warning; a `BEGIN` after a SET takes the SET into the block. #46's comment and test said a request
+  that failed half-way reports what its earlier statements moved: Postgres reports nothing, the value was undone.
+- **A batch of Executes is a block once one completed**, on Postgres 18: the second `SET LOCAL` of a pipeline warns of
+  nothing, `DISCARD ALL` after a SELECT is "cannot run inside a transaction block", not the pipeline's own message
+  xact.c also holds, and a portal suspended at a row count counts as completed (the first version of this change said
+  otherwise, and asserted it: the independent review measured it). Read from the wire, not the source.
+- **A failed block's rule is per message, and Mason's was per statement kind.** The 25P02 check sat after a statement's
+  classification, and a catalog statement never reached it in the extended protocol: it runs whole at its Bind, its rows
+  kept for an Execute that returned them first, so `SELECT 1` answered inside a failed block where Postgres refuses the
+  Parse. Issue 47's class, found by the same review: a state a driver reads, held at one of its entrances.
+
+**Decision.** `vars` stays the one store every reader reads, so no reader can miss a transaction: the transaction keeps
+two whole copies, what ROLLBACK restores and what COMMIT leaves, and a plain SET writes its one name through to the
+second. That is Postgres's per-GUC stack (GUC_SET, GUC_LOCAL, GUC_SET_LOCAL) at one level, a value's whole history being
+two strings; with savepoints it would be a list of these. An overlay of LOCAL values was the other shape, and every
+reader would have had to read it. A placeholder's definition is no value (Postgres keeps it defined, `''`), so it is
+written into both copies when a statement names it. `set_config(…, true)` needed one word in the classifier.
+
+Each of the four sites that failed a transaction would have had to undo the settings, so they became one
+(`abortTransaction`), held by `tests/conventions.test.ts`. The oracle's setting scripts hold each step's whole reply:
+`ask` sees rows, and nothing here but SHOW is a row. On main 80 of the 95 scripts differed.
+
+**Where.** `src/api/postgres/server.ts` (`settingsTx`, `applySetting`, `endTransaction`, `abortTransaction`,
+`implicitBlock`), `translate.ts`; `tests/duck-wire.test.ts`, `tests/integration/oracle/setting-scripts.ts`.
+
 ## Observability (2026-10-27 – 2026-10-30)
 
 **Decision.** Every run keeps its history in its own file — the request log (below), the sync's events, a usage

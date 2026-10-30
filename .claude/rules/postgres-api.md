@@ -63,15 +63,30 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   (`asSession`, catalog.ts; the catalog is one connection every session shares), and beside a copied table, where
   the rewrite reads the map the session's statement runs under (`settingRead`, `SETTINGS_VARIABLE`), never DuckDB's
   own. RESET restores the startup's values (`startupVars`: its packet's `application_name` and `options`).
-  `set_config` is a SET, so the listener's (translate.ts `setConfig`: alone in a SELECT, else `set-config-forms`):
-  forwarded, it ran on the one shared catalog connection and stayed for every session. The changed parameters are
+  `set_config` is a SET, or under `is_local` a SET LOCAL, so the listener's (translate.ts `setConfig`: alone in a
+  SELECT, else `set-config-forms`): forwarded, it ran on the one shared catalog connection and stayed for every session.
+  The changed parameters are
   told once per request, before its ReadyForQuery (`ready`). The
   catalog's `current_setting` was a fourth reader answering its own values after a SET (issues 40, 41). DETECTOR:
   `tests/conventions.test.ts` (one reader; every catalog request carries the settings or is named), `tests/duck-wire.test.ts`
   and the oracle's setting cases.
+- **A session's settings are transactional, and `vars` stays the one store** (issue 47; docs/DESIGN.md "A session's
+  settings are transactional"): a transaction keeps only what to restore (`settingsTx`: `rollback`, the values it found;
+  `commit`, those with its SETs and none of its LOCALs), read for no answer, and its end replaces `vars` with one of
+  them (`endTransaction`). Every SET passes `applySetting`, every failure `abortTransaction`, which undoes them AT THE
+  ERROR, as Postgres's AbortTransaction does (the failed block's ReadyForQuery reports the revert, its ROLLBACK nothing),
+  and a request that ends with no block open commits its implicit transaction in `ready`. **An implicit transaction is
+  one too**: `SET a; SELECT 1/0` in one Query, or in one batch before its Sync, undoes the SET, and `implicitBlock` says
+  where Postgres's IsTransactionBlock is true (a Query of several statements; a batch once an Execute completed), which
+  is what `SET LOCAL`'s warning and `DISCARD ALL`'s 25001 read. No savepoints, so one level. DETECTOR:
+  `tests/conventions.test.ts` (one end, one way in), `tests/duck-wire.test.ts`, the oracle's `oracle/setting-scripts.ts`
+  (each step's whole reply equal to Postgres's: warnings, ParameterStatus, tags, status).
 - **A transaction is Postgres's**: `BEGIN` opens one (ReadyForQuery `T`), an error inside it aborts it (`E`, every
   statement until `ROLLBACK` is `25P02`, as a driver with autocommit off expects), `COMMIT` of an aborted one is a
-  `ROLLBACK`. Nothing is ever written, so a transaction holds nothing — the states exist because a driver reads them.
+  `ROLLBACK`. Nothing is ever written, so all a transaction holds is the session's settings — the states exist because
+  a driver reads them. **A failed block accepts nothing but its end on every message** (`heldToFailedBlock`, read before
+  a statement is classified or sent to the catalog: a catalog statement runs whole at its Bind, and its rows were once
+  answered past the check; `describedInFailedBlock` for a Describe, refused only where it has a result).
   **"Now" is the transaction's** (`txNow`: a simple Query's arrival or the first Bind since Sync, kept by `BEGIN`),
   read by the plan as a parameter, so two statements in one transaction see one instant.
 - **Where the listener is comes from ONE reader** (`listener.ts` `pgListenerAddress`: `MASON_PG_PORT`, `MASON_PG_HOST`),

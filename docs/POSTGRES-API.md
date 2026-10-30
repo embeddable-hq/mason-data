@@ -397,7 +397,7 @@ or column 42703, a type mismatch 42883) is refused with Postgres's own error: Du
 | a construct Mason knows it cannot answer as Postgres does | 0A000, `Mason gap <id>` in the detail and what to write instead in the hint ([docs/SQL-SUPPORT.md](SQL-SUPPORT.md) "Refused") |
 | `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `COPY`, `TRUNCATE`, DDL, `GRANT`, `VACUUM`, `SET … READ WRITE` | 25006: a read-only copy |
 | `PREPARE` / `EXECUTE` (the SQL forms) | 0A000: use the protocol's prepared statements (every driver does) |
-| `SAVEPOINT`, `PREPARE TRANSACTION` | 0A000: BEGIN, COMMIT and ROLLBACK are accepted and do nothing |
+| `SAVEPOINT`, `PREPARE TRANSACTION` | 0A000: BEGIN, COMMIT and ROLLBACK are accepted, and a ROLLBACK undoes the block's `SET`s |
 | `LISTEN`, and any other statement that is not a SELECT, an EXPLAIN, a catalog query, SET, SHOW or a transaction no-op | 0A000, naming what is answered |
 | an unknown `SET` | 42704, as Postgres |
 | `SET TimeZone = 'CET'` (an abbreviation or a fixed offset) | 22023: an IANA zone name (`Europe/London`) or UTC |
@@ -434,14 +434,32 @@ the session started with — its startup packet's `application_name` and `option
 session is told a ParameterStatus for each reported parameter whose value changed, as Postgres tells a driver that
 caches them (pgjdbc, npgsql): once per request and parameter, its last value, after the statements' CommandComplete
 and before the ReadyForQuery (a SET, a RESET or RESET ALL that moves nothing reports nothing).
-`SELECT set_config('name', 'value', false)` on its own is the session's `SET`, answered with the value as `SHOW` then
-answers it. Forwarded to the embedded Postgres, which every session shares, it stayed there for every session. Any
-other form — beside another column or a table, with an expression, a parameter or NULL, with `is_local` true, under
-EXPLAIN — is refused (`set-config-forms`). Not yet Postgres's: a `SET LOCAL`, and a SET inside a transaction that is
-rolled back, change the session's value for good (GitHub issue 47).
+`SELECT set_config('name', 'value', false)` on its own is the session's `SET`, and with `true` its `SET LOCAL` (less
+the warning, as Postgres's function), answered with the value as `SHOW` then answers it. Forwarded to the embedded
+Postgres, which every session shares, it stayed there for every session. Any other form — beside another column or a
+table, with an expression, a parameter or NULL, under EXPLAIN — is refused (`set-config-forms`).
 
-`BEGIN`, `COMMIT` and `ROLLBACK` are accepted and write nothing — there is nothing to write. A failed statement inside
-a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it.
+**A session's settings are transactional, as Postgres's are.** Inside `BEGIN … COMMIT`, a `SET` (a `RESET`, `RESET ALL`,
+`set_config`) is kept by `COMMIT` and undone by `ROLLBACK`; a `SET LOCAL` lasts until the block ends, either way, and a
+`SET` and a `SET LOCAL` of one name leave the `SET`'s value at `COMMIT`. A failed statement undoes what the block set AT
+THE ERROR, so the ParameterStatus of the revert comes with that statement's ReadyForQuery, and the block's `ROLLBACK`
+tells nothing. Outside a block, `SET LOCAL` and `SET TRANSACTION` answer Postgres's `WARNING 25P01 … can only be used in
+transaction blocks`, and the value is gone with its statement: nothing is reported. Every statement has a transaction
+of its own, and the statements of one Query, or of one batch of Executes up to its Sync, share one: in such a Query
+`SET LOCAL` warns of nothing and holds to its end, in such a batch the first does warn (an Execute that completed makes
+the rest of the batch a block, as on Postgres 18), a `SET` before an error or a `ROLLBACK` in them is undone, and a
+`BEGIN` among them takes in what ran before it. `DISCARD ALL` is refused in a block, explicit or implicit (25001). A
+placeholder (`myapp.x`) a transaction named stays defined, `''`, however it ended, as on Postgres. A prepared statement
+reads the settings in force when it runs, never the ones it was parsed under, and an unqualified table in it is found
+under the `search_path` in force then, as on Postgres (a path that no longer finds it is 42P01, and the path restored
+finds it again). What it does not do is analyse the statement again: its columns and types stay those of its Parse.
+There are no savepoints (`SAVEPOINT` is refused, above), so a block has one level to undo.
+
+`BEGIN`, `COMMIT` and `ROLLBACK` are accepted and write nothing — there is nothing to write, and what they keep or undo
+is the session's settings. A failed statement inside
+a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it. A
+failed block accepts nothing but its end, in either protocol: a Query, a Parse, a Bind, an Execute of a portal bound
+before the failure, and a Describe of anything with a result are each 25P02, and a Close still closes.
 `CancelRequest` cancels the statement running on that session's backend.
 
 **What "now" is**: Postgres's, the start of the TRANSACTION. `now()`, `current_timestamp`, `current_date` and a
