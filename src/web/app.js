@@ -288,15 +288,19 @@ export function renderWhere(s) {
 
 /**
  * THE USERS from `/api/users` (`mason user list --json`'s shape): a line each — its name, when it was added, whether it
- * connects — with a Remove button; the one being removed asks first (`confirming`, its name).
+ * connects — with a Remove button; the one being removed asks first (`confirming`, its name). `roles`: `/api/state`'s
+ * (`mason status --json`'s): while the roles file cannot be read every user held to it is refused (57P03), said as
+ * `mason user list`'s tip says it (src/cli/roles.ts rolesProblemText) and on each user's role.
  */
-export function renderUsers(list, confirming = null) {
+export function renderUsers(list, confirming = null, roles = null) {
   if (!list.users.length) return `<p class="dim">No users yet.</p>`;
-  return `<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Added</th><th scope="col"></th></tr></thead><tbody>${list.users.map((u) =>
+  const broken = roles && roles.problem != null ? roles : null;
+  return (broken ? `<p class="warn">${esc(`${broken.file ?? "mason/roles.yml"} cannot be read as it is now, so every statement of a user held to it is refused: ${broken.problem}`)}</p>` : "") +
+    `<table class="users"><thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Added</th><th scope="col"></th></tr></thead><tbody>${list.users.map((u) =>
     `<tr><th scope="row">${code(u.name)}${u.live ? "" : ` <span class="warn">does not connect: the API key was rotated since it was added</span>`}</th>` +
     // the role it reads as (src/cli/roles.ts userRole): its own (mason user add --role) — one the roles file does not name,
     // said — or the file's default; none under a file with no default reads nothing, said; no roles file, every table
-    `<td>${u.readsNothing === true ? `<span class="warn">no role, and the roles file names no default: its statements are refused</span>`
+    `<td>${broken ? `<span class="warn">refused: the roles file cannot be read</span>` : u.readsNothing === true ? `<span class="warn">no role, and the roles file names no default: its statements are refused</span>`
       : u.role === undefined ? `<span class="dim">every table</span>`
       : `${code(u.role)}${u.roleFrom === "default" ? ` <span class="dim">(default)</span>` : ""}${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}`}</td>` +
     `<td class="dim">${esc(u.addedAt.slice(0, 16).replace("T", " "))} UTC · id ${esc(u.id)}</td>` +
@@ -445,7 +449,7 @@ export function createApp(fetchFn, now = () => new Date()) {
         poll: m.pollFailure ? renderFailure(m.pollFailure) : "",
         status: m.state ? renderStatus(m.state, m.requests) : m.pollFailure ? "" : `<p class="dim">Asking Mason…</p>`,
         tables: m.state ? renderTables(m.held ?? m.state, { removing: m.removing, choosing: m.choosing, outcome: m.outcome, ticked: m.ticked }) : "",
-        users: m.usersFailure ? renderFailure(m.usersFailure) : m.users ? renderUsers(m.users, m.confirming) : "",
+        users: m.usersFailure ? renderFailure(m.usersFailure) : m.users ? renderUsers(m.users, m.confirming, m.state?.roles ?? null) : "",
         added: m.added ? renderAdded(m.added) : "",
         action: m.actionFailure ? renderFailure(m.actionFailure) : "",
       };

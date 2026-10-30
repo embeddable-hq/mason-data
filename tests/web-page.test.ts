@@ -318,6 +318,20 @@ test("the users: a line each with when it was added, one rotated away said so; R
   assert.equal(textOf(renderUsers({ users: [] }, null)), "No users yet.");
 });
 
+test("the users while the roles file cannot be read: mason user list's tip, word for word, and every user's role said refused", async () => {
+  // /api/state's roles (mason status --json's) beside /api/users' list: the problem the listener refuses every user for (57P03)
+  const renderUsers = fn<[unknown, string | null, unknown], string>("renderUsers");
+  const { rolesProblemText } = await import("../src/cli/roles.ts") as unknown as { rolesProblemText: (file: string, problem: string) => string };
+  const list = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true, roleFrom: "none" },
+    { name: "agent", id: "0000000000000001", addedAt: "2026-10-29T08:00:00.000Z", live: true, role: "agent", roleFrom: "file" }] };
+  const problem = "mason/roles.yml: it is not YAML: Flow sequence in block collection must be sufficiently indented and end with a ] at line 1, column 18";
+  const html = renderUsers(list, null, { file: "mason/roles.yml", roles: [], problem, default: null });
+  assert.ok(textOf(html).startsWith(`${rolesProblemText("mason/roles.yml", problem)} User Role Added `), textOf(html));
+  assert.match(textOf(html), /metabase refused: the roles file cannot be read 2026-10-27 .* agent refused: the roles file cannot be read 2026-10-29/);
+  // a readable file: nothing said
+  assert.doesNotMatch(textOf(renderUsers(list, null, { file: "mason/roles.yml", roles: ["agent"], problem: null, default: null })), /cannot be read/);
+});
+
 test("a user just added: the password and the URL to paste, each with a copy button, and that it will not be shown again", () => {
   const html = fn<[unknown], string>("renderAdded")({ user: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", password: "mason_0123456789abcdef_" + "a".repeat(32),
     database: "shop", url: `postgres://metabase:mason_0123456789abcdef_${"a".repeat(32)}@127.0.0.1:5433/shop`, host: "127.0.0.1", port: 5433, sslmode: "disable" });

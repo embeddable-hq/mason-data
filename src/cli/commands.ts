@@ -89,7 +89,7 @@ export interface RunState {
   ui?: boolean;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
-  roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null };
+  roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[] };
 }
 
 // ------------------------------------------------------------------ shared
@@ -304,7 +304,7 @@ const STATUS_USAGE = `usage: mason status [--json]
            under way), keptAt, readyAt, why }]. roles (a run with a roles file, mason/roles.yml: what a user added
            with --role may read): { file, roles: [name], problem (what is wrong with the file now, every statement of a
            user with a role refused while there is; null), default (the role of a user added without --role; null: the
-           file names none, and such a user reads nothing) }
+           file names none, and such a user reads nothing), all (the roles of tables: all) }
 
   In replication mode a Stream section says where the stream is: its position against the database's (bytes behind),
   when the newest change applied was committed and how long after it was applied, and each added table — streamed,

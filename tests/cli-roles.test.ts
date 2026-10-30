@@ -95,6 +95,9 @@ test("the new keys' refusals, each at its key with the way out, on ONE report", 
     why: "- default: there is no role nope in roles: — add it under roles:, or name one of: r, s\n" +
       "- roles.r.tables: is all (every copied table and column) or one entry per table the role may read, like tables: { orders: {}, customers: { exclude: [email] } } — alll is neither — did you mean `all`?\n" +
       "- roles.s.tables.all: all names every table — write tables: all for every copied table, or public.all for a table named all" });
+  // not YAML: the library's own words, its first line, never ending in the colon before the snippet it drops (the review of #44)
+  const notYaml = await report("roles: [not a map");
+  assert.match(notYaml.message, /^mason\/roles\.yml: it is not YAML: .* at line 1, column \d+$/, notYaml.message);
   // a table named all is reachable as public.all
   const r = await roles();
   const named = r.parseRolesText("roles:\n  r:\n    tables:\n      public.all: {}\n", FILE);

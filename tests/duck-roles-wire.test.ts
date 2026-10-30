@@ -397,6 +397,18 @@ test("the review of #35: no way around the role's catalog view (set_config revok
       assert.deepEqual([r.code, r.message], ["42501", message], sql);
     }
     assert.equal((await refused(n, "SET ROLE agent")).code, "42501", "a session with no role is its user too");
+    // SET ROLE to the role the session already IS — its own, or the file's default: what current_user says — is a
+    // no-op, as Postgres always allows (the review of #44); a user named otherwise than its role shows it
+    const bot = await connect("bot", addUser("bot", "agent"));
+    try {
+      for (const sql of ["SET ROLE agent", "SET LOCAL ROLE agent", "SET role = 'agent'"]) await bot.query(sql);
+      assert.deepEqual((await bot.query("SELECT current_user AS who")).rows, [{ who: "agent" }]);
+      for (const sql of ["SET ROLE wide", "SET ROLE everything", "SET SESSION AUTHORIZATION agent"]) assert.equal((await refused(bot, sql)).code, "42501", sql);
+      assert.equal((await refused(bot, "SELECT set_config('role', 'agent', false)")).code, "42501", "set_config('role') still refused");
+    } finally { await bot.end(); }
+    await n.query("SET ROLE everything");
+    assert.deepEqual((await n.query("SELECT current_user AS who")).rows, [{ who: "everything" }], "the default's session sets the default, a no-op");
+    for (const sql of ["SET ROLE agent", "SET SESSION AUTHORIZATION everything"]) assert.equal((await refused(n, sql)).code, "42501", sql);
     assert.equal((await a.query("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = 'events'")).rows[0].n, 0, "still the role's view");
     // session_user is the session's user; current_user the role (SET ROLE's), as on Postgres
     assert.deepEqual((await a.query("SELECT session_user, current_user, session_user::text || '!' AS t, (SELECT session_user) AS sub")).rows, [{ session_user: "agent", current_user: "agent", t: "agent!", sub: "agent" }]);
@@ -496,7 +508,8 @@ test("no default: a user with no role reads nothing — refused 42501 with the t
     assert.deepEqual((await c.query(prepared)).rows, [{ amount: "10" }], "prepared under default: everything");
     assert.equal((await token.query("SELECT notes FROM orders")).rows.length, 3, "a token under default: everything");
     fs.writeFileSync(rolesFile, withDefault(null));
-    const hint = `write default: agent at the top of ${ROLES_PATH}, or mason user remove dflt and mason user add dflt --role agent`;
+    // the way out names the file's role of tables: all (everything), never merely its first (agent)
+    const hint = `write default: everything at the top of ${ROLES_PATH}, or mason user remove dflt and mason user add dflt --role everything`;
     for (const sql of ["SELECT count(*) FROM orders", "SELECT id FROM customers", "SELECT o.id FROM orders o JOIN customers c ON c.id = o.id", "SELECT id FROM order_status"]) {
       const e = await refused(c, sql);
       assert.deepEqual([e.code, e.detail, e.hint], ["42501", `the user "dflt" has no role and ${ROLES_PATH} names no default`, hint], sql);

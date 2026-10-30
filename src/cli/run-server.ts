@@ -163,8 +163,8 @@ function fileBytes(file: string): number | null {
 }
 
 /** `RunState.roles` (src/cli/commands.ts): the file, the roles it names and what is wrong with it now */
-export const rolesState = (r: RolesLive): { file: string | null; roles: string[]; problem: string | null; default: string | null } =>
-  ({ file: r.file, roles: [...r.grants.keys()], problem: r.problem, default: r.default });
+export const rolesState = (r: RolesLive): { file: string | null; roles: string[]; problem: string | null; default: string | null; all: string[] } =>
+  ({ file: r.file, roles: [...r.grants.keys()], problem: r.problem, default: r.default, all: [...r.grants.values()].filter((g) => g.all).map((g) => g.name) });
 
 async function state(ctx: RunContext): Promise<unknown> {
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream());

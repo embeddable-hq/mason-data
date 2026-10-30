@@ -18,7 +18,7 @@ import { changeUsers, keyFingerprint, newUserId, readUsers, underKey, userPasswo
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { out as styleOut } from "./style.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive } from "../duck/grants.ts";
-import { exampleRole, noRoleWayOut, problemText, readRoles, ROLE_NAME_RE, ROLE_NAME_RULE, ROLES_FILE, roleProblems, rolesFailure, rolesFile, userRole, type RoleFrom } from "./roles.ts";
+import { exampleRole, noRoleWayOut, problemText, rolesProblemText, readRoles, ROLE_NAME_RE, ROLE_NAME_RULE, ROLES_FILE, roleProblems, rolesFailure, rolesFile, userRole, type RoleFrom } from "./roles.ts";
 import { readSource, shownPath } from "./sources.ts";
 import { readState, type RunState } from "./commands.ts";
 import { RunUnreachable } from "./control.ts";
@@ -157,7 +157,7 @@ export async function rolesBeside(project: Project, run: DevRun | null): Promise
     // a run that does not answer its state (hung, or an older run without /api/state's roles): the file is read here
     // instead, as with Mason stopped — the user is still refused a role the file lacks, which is what this guards
     try { r = (await readState(run)).roles; } catch (e) { if (!(e instanceof RunUnreachable)) throw e; r = undefined; }
-    if (r !== undefined) return { file: r.file, grants: new Map(r.roles.map((n) => [n, { name: n, file: r.file ?? "", tables: new Map(), all: false } as RoleGrants])), problem: r.problem, default: r.default ?? null };
+    if (r !== undefined) return { file: r.file, grants: new Map(r.roles.map((n) => [n, { name: n, file: r.file ?? "", tables: new Map(), all: r.all?.includes(n) === true } as RoleGrants])), problem: r.problem, default: r.default ?? null };
   }
   const read = readRoles(project.folder, project.root);
   if (read === null) return NO_ROLES;
@@ -307,7 +307,7 @@ export async function user(argv: string[]): Promise<number> {
         ...(rotated.length ? [`A user added under another API key does not connect: mason user remove ${rotated[0]!.name}, then mason user add ${rotated[0]!.name}.`] : []),
         ...(orphan ? [`A role the roles file (mason/${ROLES_FILE}) does not name reads nothing: add ${orphan.role} to it, or mason user remove ${orphan.name}, then mason user add ${orphan.name} --role <role>.`] : []),
         ...(roleless ? [`A user with no role reads nothing while ${rolesFileShown} names no default: ${noRoleWayOut(roleless.name, rolesFileShown, exampleRole(roles))}.`] : []),
-        ...(roles.problem !== null && r.users.length ? [`${rolesFileShown} cannot be read as it is now, so every statement of a user held to it is refused: ${roles.problem}`] : []),
+        ...(roles.problem !== null && r.users.length ? [rolesProblemText(rolesFileShown, roles.problem)] : []),
       ], next }));
     return 0;
   }

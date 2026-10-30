@@ -505,7 +505,8 @@ test("stage 1b, the roles file decides a user added without --role: its default 
   fs.writeFileSync(path.join(folder, "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ntables:\n  orders: {}\n  customers: {}\n");
   const rolesFile = path.join(folder, "roles.yml");
   const WITH_DEFAULT = "default: everything\nroles:\n  everything:\n    tables: all\n  agent:\n    tables:\n      orders: {}\n";
-  const NO_DEFAULT = "roles:\n  everything:\n    tables: all\n  agent:\n    tables:\n      orders: {}\n";
+  // agent first: the way out names the role of tables: all (everything), never merely the file's first (src/duck/grants.ts exampleRole)
+  const NO_DEFAULT = "roles:\n  agent:\n    tables:\n      orders: {}\n  everything:\n    tables: all\n";
   const run = (argv: string[]) => runMason(root, argv, matrixEnv());
   type User = { name?: string; user?: string; role?: string; roleFrom?: string; readsNothing?: boolean; roleKnown?: boolean };
   const roleOf = (u: User | undefined) => u && { role: u.role, roleFrom: u.roleFrom, readsNothing: u.readsNothing };
@@ -586,14 +587,16 @@ test("stage 1b, the roles file decides a user added without --role: its default 
   try {
     const status = await run(["status", "--json"]);
     assert.equal(status.code, 0, status.stdout + status.stderr);
-    assert.deepEqual((JSON.parse(status.stdout) as { roles: unknown }).roles, { file: "mason/roles.yml", roles: ["everything", "agent"], problem: null, default: "everything" });
+    assert.deepEqual((JSON.parse(status.stdout) as { roles: unknown }).roles, { file: "mason/roles.yml", roles: ["everything", "agent"], problem: null, default: "everything", all: ["everything"] });
     assert.match((await run(["status"])).stdout, /^ {2}Roles +everything, agent {2}\(mason\/roles\.yml; default everything for a user added without --role\)$/m);
     const up = await run(["user", "add", "looker", "--json"]);
     assert.deepEqual(roleOf(JSON.parse(up.stdout) as User), { role: "everything", roleFrom: "default", readsNothing: undefined });
     fs.writeFileSync(rolesFile, NO_DEFAULT);
     assert.equal((JSON.parse((await run(["status", "--json"])).stdout) as { roles: { default: unknown } }).roles.default, null);
-    assert.match((await run(["status"])).stdout, /^ {2}Roles +everything, agent {2}\(mason\/roles\.yml; no default: a user with no role reads nothing\)$/m);
+    assert.match((await run(["status"])).stdout, /^ {2}Roles +agent, everything {2}\(mason\/roles\.yml; no default: a user with no role reads nothing\)$/m);
     assert.deepEqual(roleOf(JSON.parse((await run(["user", "add", "tableau", "--json"])).stdout) as User), { role: undefined, roleFrom: "none", readsNothing: true });
+    // the listener's roles say which is of tables: all (/api/state's roles.all): the way out names it, as with Mason stopped
+    assert.match((await run(["user", "add", "mode"])).stdout, /Tip: Its statements are refused until it has a role: write default: everything at the top of mason\/roles\.yml, or mason user remove mode and mason user add mode --role everything\./);
   } finally { config(null); server.close(); }
 });
 

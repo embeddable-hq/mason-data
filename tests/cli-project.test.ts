@@ -15,7 +15,9 @@ import { findProject, ignoresStateDir, nameFromFolder, newConfig, readProject, t
 import { init, nameProblem, withIgnored } from "../src/cli/init.ts";
 import * as initModule from "../src/cli/init.ts";
 // imported when the tests run: at a commit without the module the file still loads, and a test that needs it fails by name
-const sourcesModule = await import("../src/cli/sources.ts" as string).catch(() => ({})) as Record<string, unknown>;
+// only a module the commit lacks is tolerated (ERR_MODULE_NOT_FOUND); any other import error is the test's to see
+const absent = (e: unknown): Record<string, unknown> => { if ((e as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw e; return {}; };
+const sourcesModule = await import("../src/cli/sources.ts" as string).catch(absent) as Record<string, unknown>;
 // read from the modules, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 const { urlVariable } = initModule as unknown as { urlVariable: (root: string, url: string, found?: { variable: string; file: string | null }) => { variable: string; line: string | null } | { problem: string } };
 // at a commit without it, the bare file it writes, so the file loads and its tests fail by name
@@ -23,7 +25,7 @@ const newSourceText = (url?: string, sync?: unknown): string =>
   (sourcesModule.newSourceText as ((u?: string, t?: unknown, s?: unknown) => string) | undefined)?.(url, [], sync) ?? `kind: postgres\nurl: ${url ?? "$" + "{DATABASE_URL}"}\ntables: {}\n`;
 // the roles file mason init writes (src/cli/roles.ts newRolesText, stage 1b): read from the module when the test runs,
 // so the file loads at a commit without it and the tests that need it fail by name
-const rolesModule = await import("../src/cli/roles.ts" as string).catch(() => ({})) as Record<string, unknown>;
+const rolesModule = await import("../src/cli/roles.ts" as string).catch(absent) as Record<string, unknown>;
 const newRolesText = (): string => (rolesModule.newRolesText as (() => string) | undefined)?.() ?? "(no newRolesText at this commit)";
 const ROLES_WROTE = "✓ Wrote mason/roles.yml: every user reads every copied table (default: everything, tables: all) — narrow it with a second role — commit it";
 /** the demo's sync, as mason init demo writes it at the file's top (src/demo/seed.ts DEMO_SYNC) */

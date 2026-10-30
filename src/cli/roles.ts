@@ -86,7 +86,9 @@ function nameList(v: unknown, at: string, what: string): string[] | string {
 /** The file's text read as a roles file: its shape, never the copied tables (that is `resolveRoles`'s). */
 export function parseRolesText(text: string, file: string): RolesFile | { problems: string[] } {
   const doc = parseDocument(text, { uniqueKeys: true });
-  if (doc.errors.length) return { problems: [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]}`] };
+  // the YAML library's first line ends "… at line 1, column 18:" before a snippet of the file: the snippet is dropped,
+  // and its colon with it, so the problem reads whole on one line (a tip, a log line)
+  if (doc.errors.length) return { problems: [`it is not YAML: ${doc.errors[0]!.message.split("\n")[0]!.replace(/:\s*$/, "")}`] };
   const v: unknown = doc.toJS();
   if (!isPlain(v)) return { problems: [`it is ${v === null || v === undefined ? "empty" : "not a mapping"}: a roles file is roles: { <role>: { tables: { orders: {} } } }`] };
   const problems: string[] = [];
@@ -291,6 +293,9 @@ export class LiveRoles {
     return this.live;
   }
 }
+
+/** what `mason user list` says (and the web page, held equal) while the roles file cannot be read as it is now */
+export const rolesProblemText = (file: string, problem: string): string => `${file} cannot be read as it is now, so every statement of a user held to it is refused: ${problem}`;
 
 /** a failure's text on one line, for a log line or a refusal */
 export const problemText = (f: Failure): string => `${f.message}${f.why ? `: ${f.why.replace(/\n/g, "; ")}` : ""}`;

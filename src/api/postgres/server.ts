@@ -1428,7 +1428,9 @@ class Session {
     // name are Postgres's no-ops, any other name Postgres's refusal. Never the catalog's to validate: that is one
     // superuser connection, which accepted `SET ROLE postgres` silently (a review finding of #35)
     if (t.name === "role" || t.name === "session_authorization") {
-      const own = t.value === null || t.value === this.user || (t.name === "role" && t.value.toLowerCase() === "none");
+      // its own name, NONE, RESET — and SET ROLE to the role it already is (its own, or the roles file's default: what
+      // current_user says), which Postgres always allows; SET SESSION AUTHORIZATION is the login's name alone
+      const own = t.value === null || t.value === this.user || (t.name === "role" && (t.value.toLowerCase() === "none" || t.value === this.roleName()));
       if (!own) throw new PgError({ code: "42501", message: `permission denied to set ${t.name === "role" ? "role" : "session authorization"} "${t.value}"` }, 403);
       return [commandComplete(tag)];
     }

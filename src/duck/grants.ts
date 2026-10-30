@@ -214,8 +214,10 @@ export function noRoleRefusal(table: string, file: string, who: { user: string; 
 export const noRoleWayOut = (user: string, file: string, example: string): string =>
   `write default: ${example} at the top of ${file}, or mason user remove ${user} and mason user add ${user} --role ${example}`;
 
-/** A role of the file to name in a way out (the first), or a placeholder where it names none. */
-export const exampleRole = (live: Pick<RolesLive, "grants">): string => [...live.grants.keys()][0] ?? "<a role>";
+/** A role of the file to name in a way out: one of `tables: all` where there is one (the role today's access is), else
+ *  the first, or a placeholder where it names none. */
+export const exampleRole = (live: Pick<RolesLive, "grants">): string =>
+  [...live.grants.values()].find((g) => g.all)?.name ?? [...live.grants.keys()][0] ?? "<a role>";
 
 /**
  * The statement's table reads held to the role: the tree's reads named through the catalog, then refused where the role
