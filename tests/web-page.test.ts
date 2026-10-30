@@ -3570,3 +3570,25 @@ test("a past range's 'as of' is its own read's, never another page's; a Refresh 
   await clicked; await settle();
   assert.ok((run2.asked as string[]).includes("GET /api/activity?since=1h"), `the Refresh ran once the poll ended: ${run2.asked.join(", ")}`);
 });
+
+test("a request's + opens on its click: the toggle event a repaint strands (the live log's ages move every second) is never needed", async () => {
+  // found in the browser: of six clicks on a request's id, three opened nothing — the pointerup's repaint replaced the
+  // details (its ages had moved), and the toggle event, fired on the replaced element, never reached the document
+  const run = fakeRun();
+  run.answers.set("GET /api/requests?since=15m", answer({ requests: REQUESTS, keptDays: 7, before: null }));
+  const { el, on, settle } = fakeBrowser(run, "#observability/queries");
+  await settle();
+  assert.match(el("request-log").html, /data-open="request:r-new"/);
+  assert.ok(!/<tr class="detail">/.test(el("request-log").html), "closed at first");
+  // the click on the summary: the toggle handler is NOT called (as when the event is stranded)
+  let prevented = false;
+  const det = { tagName: "DETAILS", id: "", open: false, dataset: { open: "request:r-new" } };
+  const summary = { parentElement: det };
+  await on.get("click")!({ target: { closest: (sel: string) => sel === "summary" ? summary : null }, preventDefault: () => { prevented = true; } });
+  assert.match(el("request-log").html, /<details data-open="request:r-new" open>/, "open, from the click alone");
+  assert.match(el("request-log").html, /<tr class="detail">/);
+  assert.ok(prevented, "the browser's own toggle is not run as well");
+  // clicked again: closed
+  await on.get("click")!({ target: { closest: (sel: string) => sel === "summary" ? { parentElement: { ...det, open: true } } : null }, preventDefault: () => undefined });
+  assert.ok(!/<tr class="detail">/.test(el("request-log").html), "closed again");
+});
