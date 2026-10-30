@@ -5,7 +5,8 @@
  *  - every `Mason gap <id>` the code writes names an entry, every `refused` entry is one the code refuses with, and a
  *    `heldBy` test names the entry it holds.
  * The oracle (tests/integration/duck-oracle.itest.ts) holds the rest against a real Postgres: a refusal where Postgres
- * answers must name a `refused` entry, and an entry none of its statements meets is dead.
+ * answers must name a `refused` entry, and an entry none of its statements meets is dead. What each entry accounts for
+ * is its fixture's `gaps` (tests/integration/oracle/gap-tally.ts), held here to the tallies it refines.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,6 +14,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { GAPS, type Gap } from "../src/duck/gaps.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
+import { GAP_CASES } from "./integration/oracle/gap-cases.ts";
+import { countGap, emptyTally, fixtureText, gapSummary, rankedGaps, totalOf, type GapCount, type GapCounts, type GapTally } from "./integration/oracle/gap-tally.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const DOC = path.join(ROOT, "docs/SQL-SUPPORT.md");
@@ -237,4 +240,67 @@ test("what a refused statement is said to have used is in a developer's words: n
   // (unsupportedLines); the engine and the oracle are named in the docs' other columns only
   const internal = Object.entries(GAPS).filter(([, g]) => /\b(oracle|duckdb|pglite)\b/i.test(g.what)).map(([id, g]) => `${id}: ${g.what}`);
   assert.deepEqual(internal, []);
+});
+
+type GapFixture = Pick<AloneTallies, "statements" | "mason"> & {
+  gaps: { copyPhase: GapTally; everyAsk: GapTally & { asked: number } };
+  measured: { machine: string; postgres: string; collation: string; shapes: boolean };
+};
+const readGaps = (): GapFixture => {
+  const fixture = JSON.parse(fs.readFileSync(ALONE_FIXTURE, "utf8")) as Partial<GapFixture>;
+  assert.ok(fixture.gaps !== undefined, `${ALONE_FIXTURE} has no gaps: regenerate it with the oracle's UPDATE_FIXTURE=1`);
+  return fixture as GapFixture;
+};
+const sum = (c: GapCount): number => c.planted + c.natural;
+
+test("the oracle's fixture counts by gap sum to the tallies they refine", () => {
+  const { mason, statements, gaps: { copyPhase, everyAsk } } = readGaps();
+  assert.equal(sum(totalOf(copyPhase.refused)), mason.refused, "the copy phase's refusals by gap: regenerate with the oracle's UPDATE_FIXTURE=1");
+  assert.equal(sum(totalOf(copyPhase.decided)), mason.decided, "the copy phase's decided differences by gap: regenerate with the oracle's UPDATE_FIXTURE=1");
+  // no gap is counted for more statements than were planted for it, so no planted statement twice (one answered
+  // exactly is counted for none): each gap has its gap case, and mixed-scale-numeric MIXED_SCALE besides
+  const plantedFor = new Map<string, number>([["mixed-scale-numeric", 1]]);
+  for (const c of GAP_CASES) plantedFor.set(c.gap, (plantedFor.get(c.gap) ?? 0) + 1);
+  const counted = new Map<string, number>();
+  for (const [id, c] of [...Object.entries(copyPhase.refused), ...Object.entries(copyPhase.decided)]) counted.set(id, (counted.get(id) ?? 0) + c.planted);
+  assert.deepEqual([...counted].filter(([id, n]) => n > (plantedFor.get(id) ?? 0)).map(([id, n]) => `${id}: ${n}`), [], "a gap counted for more statements than were planted for it");
+  assert.ok(everyAsk.asked >= 3 * statements, "every statement is asked in three phases, and the shapes beside them");
+  // every ask holds the copy phase, by gap and by split: the two measures are not each other's by mistake
+  const short = (["refused", "decided"] as const).flatMap((met) => (Object.entries(copyPhase[met]) as Array<[keyof GapCounts, GapCount]>)
+    .filter(([id, c]) => (everyAsk[met][id]?.planted ?? 0) < c.planted || (everyAsk[met][id]?.natural ?? 0) < c.natural).map(([id]) => `${met} ${id}`));
+  assert.deepEqual(short, []);
+});
+
+test("every id of the oracle's fixture counts is a gap of the kind counted: a refusal's refused, a decided one's differs", () => {
+  const { gaps: { copyPhase, everyAsk } } = readGaps();
+  const wrong = [copyPhase, everyAsk].flatMap((t) => ([["refused", "refused"], ["decided", "differs"]] as const).flatMap(([met, kind]) =>
+    Object.keys(t[met]).filter((id) => !Object.hasOwn(GAPS, id) || (GAPS as Record<string, Gap>)[id]!.kind !== kind).map((id) => `${met}: ${id}`)));
+  assert.deepEqual(wrong, [], "the fixture names a gap src/duck/gaps.ts does not have, or of another kind: regenerate with the oracle's UPDATE_FIXTURE=1");
+});
+
+test("the oracle's fixture says what it was measured on, and it is what CI measures on: the shapes, a libc collation, a Linux Postgres", () => {
+  // a regeneration under IT_ORACLE_SHAPES=0, or against a C or ICU database, writes a `gaps` block that looks the same
+  const { measured } = readGaps();
+  assert.equal(typeof measured?.machine, "string", "the fixture does not say its machine: regenerate with the oracle's UPDATE_FIXTURE=1");
+  assert.equal(measured.shapes, true, "the fixture was measured with the shapes off: regenerate it without IT_ORACLE_SHAPES=0");
+  assert.match(measured.collation, /\(c\)$/, "the fixture was measured over another provider than libc: regenerate it against a Postgres as CI's (postgres:18)");
+  assert.match(measured.postgres, /linux/, "the fixture was measured against a Postgres not on Linux, whose libc collation is not glibc's: regenerate it against a Postgres as CI's (postgres:18)");
+});
+
+test("a gap is counted apart for its planted statements, ranked by the rest, and the summary says both", () => {
+  const t = emptyTally();
+  for (const [gap, group] of [["jsonb-compare", "gap case"], ["sum-real", "gap case"], ["sum-real", "gap case"], ["inet-order", "type matrix"], ["inet-order", "BI shape"], ["sum-real", "dialect"]] as const) countGap(t, "refused", gap, group);
+  countGap(t, "decided", "show-all", "gap case");
+  assert.deepEqual(t.refused, { "jsonb-compare": { planted: 1, natural: 0 }, "sum-real": { planted: 2, natural: 1 }, "inet-order": { planted: 0, natural: 2 } });
+  assert.deepEqual(rankedGaps(t.refused).map(([id]) => id), ["inet-order", "sum-real", "jsonb-compare"], "a gap the oracle only planted ranks last, whatever its planted count");
+  assert.deepEqual(totalOf(t.refused), { planted: 3, natural: 3 });
+  // MIXED_SCALE's group carries its decision as a gap case carries a refusal
+  const d = emptyTally();
+  countGap(d, "decided", "mixed-scale-numeric", "decided");
+  countGap(d, "decided", "mixed-scale-numeric", "query case");
+  assert.deepEqual(d.decided, { "mixed-scale-numeric": { planted: 1, natural: 1 } });
+  const lines = gapSummary(t, 10, t, 40);
+  assert.equal(lines[0], "duck oracle: 6 of 10 statements refused, by gap, natural+planted (3+3): inet-order 2+0, sum-real 1+2, jsonb-compare 0+1");
+  assert.equal(lines[3], "duck oracle: 1 of 40 asks decided, by gap, natural+planted (0+1): show-all 0+1");
+  assert.equal(fixtureText({ refused: { "sum-real": { planted: 2, natural: 1 } } }), '{\n  "refused": {\n    "sum-real": { "planted": 2, "natural": 1 }\n  }\n}\n');
 });
