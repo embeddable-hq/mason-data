@@ -130,6 +130,9 @@ function needsAttributes(message: string, roles: readonly RoleGrants[], choices:
  */
 export function shareRole(asked: string | undefined, live: RolesLive): { role: string | null; reads: string } | { failure: Failure; choices?: ShareChoice[] } {
   const file = live.file ?? `mason/${ROLES_FILE}`;
+  if (live.checkFailed === true) {
+    return { failure: { message: `nothing is shared: ${live.problem}`, code: "failed", why: `the file may be right: a share opens only on filters Postgres has read`, fix: "mason logs says why, then mason share again", next: [["mason logs", "the run's log"]] } };
+  }
   if (live.problem !== null) {
     return { failure: { message: `${file} cannot be read as it is now, so nothing is shared: ${live.problem}`, code: "bad_roles", why: "what a share reads is that file's", fix: `repair ${file}, then mason share` } };
   }
@@ -147,17 +150,18 @@ export function shareRole(asked: string | undefined, live: RolesLive): { role: s
       return { failure: { message: `there is no role ${asked}: this project has no roles file`, code: "not_found", why: `a role is a key of ${file}, beside the sources file, naming the tables (and the columns of each) it may read`,
         fix: `write ${file}:\n  roles:\n    ${asked}:\n      tables:\n        <a synced table>: {}\nthen mason share --role ${asked}`, next: [["mason share", "or share every synced table: this project has no roles file"]] } };
     }
-    return { failure: { message: `there is no role ${asked} in ${file}${didYouMean(asked, choices.map((c) => c.role))}`, code: "not_found", why: `the roles: ${choices.map((c) => c.role).join(", ")}`, next: lines }, choices };
+    const roles = [...choices.map((c) => c.role), ...left.map((r) => `${r} (its rows depend on an attribute, so a share cannot read as it)`)];
+    return { failure: { message: `there is no role ${asked} in ${file}${didYouMean(asked, [...live.grants.keys()])}`, code: "not_found", why: `the roles: ${roles.join(", ")}`, next: lines }, choices };
   }
   if (live.file === null) return { role: null, reads: "every synced table" };
-  if (choices.length === 1) return { role: choices[0]!.role, reads: choices[0]!.reads };
+  if (live.grants.size === 1 && choices.length === 1) return { role: choices[0]!.role, reads: choices[0]!.reads };
   if (choices.length === 0 && live.grants.size > 0) {
     return { failure: needsAttributes(`no role of ${file} can be shared: the rows of each depend on an attribute, and a share's login has no attributes`, [...live.grants.values()], choices, file) };
   }
   if (choices.length === 0) {
     return { failure: { message: `${file} names no role, so a share would read nothing`, code: "not_found", why: "what a share reads is one role of that file", fix: `add a role to ${file}, then mason share --role <role>` } };
   }
-  return { failure: { message: `${file} names ${choices.length} roles: mason share needs to know which one this address reads as`, code: "usage",
+  return { failure: { message: `${file} names ${live.grants.size} roles: mason share needs to know which one this address reads as`, code: "usage",
     why: "anyone with the address and password reads what that role reads", fix: [...choices.map((c) => `--role ${c.role}: reads ${c.reads}${c.default ? " (the file's default)" : ""}`), ...(left.length > 0 ? [`left out, because a share's login has no attributes: ${left.join(", ")}`] : [])].join("\n"), next: lines }, choices };
 }
 

@@ -2734,7 +2734,7 @@ class Server {
         const problem = `the roles' row filters could not be checked by the catalog: ${e instanceof Error ? e.message : String(e)}`;
         // tried again at every statement of every session, so said once a streak: the line a streak's end answers
         if (!this.rolesCheckFailing) { this.rolesCheckFailing = true; this.log(`roles: ${problem} — tried again at each statement, every statement of a user held to a role refused until then`); }
-        return { ...raw, problem: raw.problem ?? problem };
+        return raw.problem !== null ? raw : { ...raw, problem, checkFailed: true };
       }
       if (this.rolesCheckFailing) { this.rolesCheckFailing = false; this.log("roles: the catalog checks the row filters again"); }
       const problem = raw.problem ?? (problems.length === 0 ? null : `${raw.file ?? "the roles file"}: ${problems.join("; ")}`);

@@ -660,6 +660,14 @@ test("a catalog that cannot check the filters: every statement refused, the line
     fs.writeFileSync(rolesFile, `${ROLES}\n# a new file, so a new check\n`);
     for (let i = 0; i < 4; i++) assert.equal((await refusal(acme, "SELECT count(*) FROM orders")).code, "57P03", "fails closed");
     assert.equal(failing().length - before, 1, `one line for the streak:\n${failing().join("\n")}`);
+    // mason share meets the same catalog: the failure is said as Mason's, and the file is not blamed
+    const { RunShares, shareSecret } = await import("../src/cli/share-run.ts");
+    const shares = new RunShares({ listener: api, database: "shop", log: () => undefined, certificate: () => ({ message: "no socket should open", code: "failed" }) });
+    const opened = await shares.open({ secret: shareSecret("x"), role: "everything" });
+    assert.ok("failure" in opened, JSON.stringify(opened));
+    assert.equal(opened.failure.code, "failed");
+    assert.match(opened.failure.message, /^nothing is shared: the roles' row filters could not be checked by the catalog: the catalog is gone$/);
+    assert.deepEqual(opened.failure.next, [["mason logs", "the run's log"]]);
   } finally { PgCatalog.prototype.policies = policies; fs.writeFileSync(rolesFile, ROLES); }
   assert.deepEqual((await rows(acme, "SELECT count(*) FROM orders"))[0], ["4"], "answered again, no restart");
   assert.ok(logged.some((l) => l.includes("the catalog checks the row filters again")), "the streak's end said");

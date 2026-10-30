@@ -104,6 +104,11 @@ test("what a share reads: the one answer used and said, several refused naming e
   const bad = shareRole("sales", live([grant("sales", "all")], { problem: "line 3 is wrong" }));
   assert.ok("failure" in bad);
   assert.equal(bad.failure.code, "bad_roles");
+  // the catalog could not check the filters: the file may be right, so it is not said to be wrong
+  const unchecked = shareRole("sales", live([grant("sales", "all")], { problem: "the roles' row filters could not be checked by the catalog: gone", checkFailed: true }));
+  assert.ok("failure" in unchecked);
+  assert.deepEqual(unchecked.failure, { message: "nothing is shared: the roles' row filters could not be checked by the catalog: gone", code: "failed",
+    why: "the file may be right: a share opens only on filters Postgres has read", fix: "mason logs says why, then mason share again", next: [["mason logs", "the run's log"]] });
   assert.deepEqual(shareRole("Not A Role", NO_ROLES).constructor, Object);
   assert.equal((shareRole("Not A Role", NO_ROLES) as { failure: { code: string } }).failure.code, "usage");
 });
@@ -128,8 +133,25 @@ test("a role whose rows need an attribute is no share's: named, refused saying w
   });
   // a filter that reads no attribute is a share's: only what a password cannot carry is refused
   assert.deepEqual(shareRole("paid", live([tenant, paid])), { role: "paid", reads: "1 synced table: public.orders" });
-  // left out, the one role left is the one sensible answer
-  assert.deepEqual(shareRole(undefined, live([tenant, sales])), { role: "sales", reads: "1 synced table: public.customers" });
+  // the role left is no file's one answer: a default says what a local user gets, and a public address never widens it
+  const left = shareRole(undefined, live([tenant, sales]));
+  assert.ok("failure" in left);
+  assert.equal(left.failure.code, "usage");
+  assert.equal(left.failure.message, "mason/roles.yml names 2 roles: mason share needs to know which one this address reads as");
+  assert.deepEqual(left.choices?.map((c) => c.role), ["sales"]);
+  const widened = shareRole(undefined, live([{ ...tenant, name: "tenant" }, grant("everything", "all")], { default: "tenant" }));
+  assert.ok("failure" in widened, "default: tenant and an all-tables role: never every table without asking");
+  assert.equal(widened.failure.message, "mason/roles.yml names 2 roles: mason share needs to know which one this address reads as");
+  assert.equal(widened.failure.fix, "--role everything: reads every synced table\nleft out, because a share's login has no attributes: tenant");
+  assert.deepEqual(widened.choices?.map((c) => c.role), ["everything"]);
+  // a file of one role that can be shared stays the one answer
+  assert.deepEqual(shareRole(undefined, live([paid])), { role: "paid", reads: "1 synced table: public.orders" });
+  // a typo of a role left out still finds it, and says what it is
+  const typo = shareRole("tenat", live([tenant, sales]));
+  assert.ok("failure" in typo);
+  assert.equal(typo.failure.code, "not_found");
+  assert.match(typo.failure.message, /^there is no role tenat in mason\/roles\.yml.*did you mean.*tenant/);
+  assert.equal(typo.failure.why, "the roles: sales, tenant (its rows depend on an attribute, so a share cannot read as it)");
   const several = shareRole(undefined, live([tenant, sales, paid]));
   assert.ok("failure" in several);
   assert.deepEqual(several.choices?.map((c) => c.role), ["sales", "paid"]);
