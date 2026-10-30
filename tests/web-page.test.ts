@@ -85,8 +85,7 @@ function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: bo
   const ctx = {
     source: o.demo ? demoSource : source, ...(o.demo ? { demo: true } : {}),
     facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: o.tables ?? TABLES, systemIdentifier: null }),
-    warnings: o.warnings ?? [], slot: o.replication ? "mason_dev_shop" : "", changes: o.replication ? "replication" : "poll",
-    ...(o.replication ? { publication: { name: "app_pub", owned: false } } : {}),
+    warnings: o.warnings ?? [], replication: () => o.replication ? { slot: "mason_dev_shop", publication: "app_pub", owned: false } : null,
     page: true, users: { file: "/app/.mason/users.json", apiKey: "k".repeat(32), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
     folder: () => "/app/mason", root: "/app", home: "/app/.mason", version: "0.9.0", startedAt: Date.parse("2026-10-27T09:00:00.000Z"),
     sources: () => ({ file: o.sources ?? sourceFile, problem: null }),
@@ -127,15 +126,21 @@ const columnsOf = (name: string) => ({ table: name, columns: catalogTable(CATALO
 /** `/api/pick`'s answers (src/cli/run-server.ts PickResult): every column with a secret left out, a --columns list
  *  the key was added to, a table with no primary key added by --key, one the file named so already. */
 /** each table's sync as /api/pick answers it (src/cli/source-edit.ts PickResult): the file's default, its own, a big one written off */
-const OFF = { sync: { value: "off", from: "default" }, bigOff: false, pollCost: null };
+const OFF = { sync: { value: "off", from: "default" }, bigOff: false, pollCost: null, notReplicated: null };
 const PICKED = {
   secret: { table: "public.accounts", file: FILE, entry: "accounts", columns: null, exclude: ["password_hash"], key: null, addedKey: [], skippedSecrets: ["password_hash"], already: false, ...OFF },
   columns: { table: "public.audit", file: FILE, entry: "audit", columns: ["id", "name"], exclude: [], key: null, addedKey: ["id"], skippedSecrets: [], already: false,
-    sync: { value: "poll 30s", from: "entry" }, bigOff: false, pollCost: null },
+    sync: { value: "poll 30s", from: "entry" }, bigOff: false, pollCost: null, notReplicated: null },
   keyed: { table: "public.event_log", file: FILE, entry: "event_log", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,
-    sync: { value: "off", from: "entry" }, bigOff: true, pollCost: null },
+    sync: { value: "off", from: "entry" }, bigOff: true, pollCost: null, notReplicated: null },
   already: { table: "public.customers", file: FILE, entry: "customers", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: true,
-    sync: { value: "poll 5s", from: "file" }, bigOff: false, pollCost: "customers has about 40,000,000 rows, and each poll scans it whole on your database: …" },
+    sync: { value: "poll 5s", from: "file" }, bigOff: false, pollCost: "customers has about 40,000,000 rows, and each poll scans it whole on your database: …", notReplicated: null },
+  // a key: table under a file whose default is replication: written sync: poll 5m, and why
+  notReplicated: { table: "public.event_log", file: FILE, entry: "event_log", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,
+    sync: { value: "poll 5m", from: "entry" }, bigOff: false, pollCost: null, notReplicated: "it has no primary key, so logical replication cannot apply its changes by its key:" },
+  // one the file's replication keeps current
+  replicated: { table: "public.orders", file: FILE, entry: "orders", columns: null, exclude: [], key: null, addedKey: [], skippedSecrets: [], already: false,
+    sync: { value: "replication", from: "file" }, bigOff: false, pollCost: null, notReplicated: null },
 };
 const answer = (v: unknown, status = 200) => () => new Response(JSON.stringify(v), { status });
 
@@ -249,6 +254,10 @@ test("a table added and tables removed are said as mason add and mason remove pr
   assert.equal(added(PICKED.columns), "Added public.audit to /app/mason/sources/shop.yml: id, name sync: poll 30s (its entry's): polled every 30s after its first copy — " +
     "mason add audit --sync off stops that key added: id (a copy always has its key) Dismiss");
   assert.match(added(PICKED.keyed), /^Added public\.event_log to \/app\/mason\/sources\/shop\.yml: every column, copied by tenant_id, id sync: off written on its entry: it has more than 1,000,000 rows/);
+  assert.equal(added(PICKED.notReplicated), "Added public.event_log to /app/mason/sources/shop.yml: every column, copied by tenant_id, id " +
+    "sync: poll 5m written on its entry, not the file's replication: it has no primary key, so logical replication cannot apply its changes by its key: — " +
+    "mason add event_log --sync \"poll 1h\" polls it hourly; mason add event_log --sync off reads it only by mason sync event_log Dismiss");
+  assert.match(added(PICKED.replicated), /^Added public\.orders to \/app\/mason\/sources\/shop\.yml: every column sync: replication \(the file's\): kept current from the database's change log after its first copy/);
   assert.match(added(PICKED.already), /^Added public\.customers to \/app\/mason\/sources\/shop\.yml: every column \(already so\) sync: poll 5s \(the file's\).* customers has about 40,000,000 rows/);
   assert.equal(textOf(fn<[unknown], string>("renderTablesRemoved")({ removed: ["public.orders"], file: FILE })),
     "Removed public.orders from /app/mason/sources/shop.yml Tip: Mason stops copying it and drops its copy Dismiss");
@@ -274,7 +283,7 @@ test("running: the database masked, each table copied with its rows, the counts,
   const text = textOf(html);
   assert.match(text, /Database postgres:\/\/shop:\*\*\*\*@db\.example\.com:5432\/shop · Postgres 16\.4/);
   assert.ok(!text.includes("secret"), "the password is the run's to mask, and it did");
-  assert.match(text, /Changes each table as its sync: says \(a SELECT of its changed rows\) · sync: off \(the default: the file writes none\) · mason start --replication streams them as they happen instead/);
+  assert.match(text, /Changes each table as its sync: says \(a SELECT of its changed rows\) · sync: off \(the default: the file writes none\) · sync: replication on an entry streams that table as it happens instead/);
   assert.match(text, /Tables synced 3 of 3 added/);
   assert.ok(!/Copies not finished|100%/.test(text), "every copy is done: no bar (the Tables page lists them)");
   assert.ok(!text.includes("public.audit"), "a table not added is not a line");
@@ -320,7 +329,7 @@ test("failed: its error on its line and in full, the warning, a table whose sync
   const events = (FAILED as { tables: Array<{ table: string }> }).tables.find((t) => t.table === "public.events");
   assert.match(fn<[unknown], { what: string }>("tableLine")(events).what, /^30,000,000 rows · copied · sync: off, last synced \d+ days? ago — mason sync events syncs it now; sync: poll 5m on its entry polls it$/);
   assert.match(text, /Warning mason\/sources\/shop\.yml: tables\.ordrs: no such table/);
-  assert.match(text, /Changes streamed as they happen \(logical replication: slot mason_dev_shop, publication app_pub, named: read as it is, never altered\) · mason start --poll checks each table as its sync: says instead/);
+  assert.match(text, /Changes each table as its sync: says · sync: off \(the default: the file writes none\) · sync: replication tables streamed as they happen \(logical replication: slot mason_dev_shop, publication app_pub, named: read as it is, never altered\); the others by a SELECT of their changed rows/);
   assert.ok(!/xmin|polling with SELECTs|goes back to polling/.test(text), "how the changes arrive is said in a web developer's words");
   assert.match(text, /Queries: could not read them \(the request log cannot be read; mason logs has the detail\)/);
   assert.match(text, /^Failed /);
@@ -1958,7 +1967,7 @@ test("the Overview: replication mode says the changes — running or not and why
   assert.match(textOf(renderStatus(REPL(STREAMS[3]![1]), { now: NOW })), /the database's position could not be read: connection refused Lag bytes behind unknown/);
   assert.ok(!/Changes \(the stream/.test(textOf(renderStatus(RUNNING, { now: NOW }))), "polling: no stream block");
   // the facts' own Changes row (how changes arrive) is still the one table's
-  assert.match(text, /Changes streamed as they happen \(logical replication: slot mason_dev_shop, publication app_pub/);
+  assert.match(text, /Changes each table as its sync: says .* sync: replication tables streamed as they happen \(logical replication: slot mason_dev_shop, publication app_pub/);
 });
 
 test("the Overview: the slot's WAL is the CLI's slotText; lost, past its cap, uncapped and unreadable are warnings, a healthy slot is not", () => {
@@ -2563,7 +2572,7 @@ test("Sync events: 'Failures only' narrows the events read, in the page alone; t
   assert.match(textOf(app.view()["syncs-events"]!), /^When ↓ Kind Table Message 5 min ago ✗ restart .* ✗ copy_failed .* 10 min ago copied public\.orders/);
   // the kind and table filters: EVERY kind, and the sync and EVERY added table, whatever the range read (the state
   // read here names customers, orders and events; public.events has events, public.customers none)
-  assert.equal(textOf(app.view()["syncs-filters"]!), "Kind Every kind copy_failed poll_failed catch_up_failed stream_failed source_unreachable restart copied recovered synced Table Every table (the sync) public.customers public.events public.orders");
+  assert.equal(textOf(app.view()["syncs-filters"]!), "Kind Every kind copy_failed poll_failed catch_up_failed stream_failed source_unreachable restart copied recovered synced sync_changed Table Every table (the sync) public.customers public.events public.orders");
   assert.equal(app.pages.get("syncs")!.input({ id: "syncs-kind", value: "copy_failed" }), true);
   assert.match(app.view()["syncs-filters"]!, /<option value="copy_failed" selected>/);
   assert.match(textOf(app.view()["syncs-events"]!), /^1 of the 3 events read\. When ↓ Kind Table Message 9 min ago ✗ copy_failed/);

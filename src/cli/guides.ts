@@ -81,7 +81,9 @@ ${codes}
     kind: postgres
     url: \${DATABASE_URL}          a variable from .env.local, .env or the shell; a literal URL is allowed for local dev
     sync: off                     how each table is kept current after its first copy: off (the default; mason sync
-                                  <table> reads it again) or poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h)
+                                  <table> reads it again), poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h) or
+                                  replication (the change log: a primary key, wal_level = logical)
+    publication: \${PG_PUBLICATION}  optional: the publication replication reads, its owner's, never altered
     tables:
       orders:                     a bare name is in public; billing.invoices names its schema
         columns: [id, status]     these columns (the primary key is always copied)
@@ -130,15 +132,16 @@ export function productionGuide(): string {
 names the tables the server copies, and its url: names the variable that holds the database's URL. Nothing in .mason/ goes with it; the server makes its own copy and state on its volume.
 
 1. PREPARE THE DATABASE. Mason only reads it. How each table is kept current after its first copy is the sources
-   file's sync: — off (the default: read again only by mason sync <table>, from cron or a deploy) or poll <interval>,
-   per table — and needs a user that can SELECT the tables; each poll costs the database a scan of its table (a poll
-   waits four times its own time, so the polls never take more than a fifth of it), and it works on a read replica.
-   Logical replication (MASON_CHANGES=replication)
-   needs wal_level = logical, a user with REPLICATION, and either a publication you name (PG_PUBLICATION, read as it is,
-   never altered) or the right to create one; the slot holds the database's WAL while Mason is down, so cap it with
-   max_slot_wal_keep_size. Try it locally first:
-     mason start --replication                      the change log, as the server reads it
-     mason start --replication --publication app_pub   through a publication the database's owner made
+   file's sync: — off (the default: read again only by mason sync <table>, from cron or a deploy), poll <interval>
+   or replication, per table — and needs a user that can SELECT the tables; each poll costs the database a scan of its
+   table (a poll waits four times its own time, so the polls never take more than a fifth of it), and it works on a
+   read replica. A table under sync: replication is read from the change log, through one slot and one publication
+   for the project: it needs wal_level = logical, a user with REPLICATION, a primary key (a key: table is polled), and
+   either a publication you name (publication: \${PG_PUBLICATION} at the top of the sources file, read as it is, never
+   altered: it must carry every replicated table) or the right to create Mason's own, which carries the replicated
+   tables alone. The slot holds the database's WAL while Mason is down, so cap it with max_slot_wal_keep_size; it is
+   dropped when no table's sync is replication. Try it locally first:
+     mason add orders --sync replication             that table from the change log, as the server reads it
 
 2. RUN IT: one container, ghcr.io/embeddable-hq/mason-data:<version> (the version mason.yml names), running mason serve:
      DATABASE_URL           the database to copy from (the variable the sources file's url: names)

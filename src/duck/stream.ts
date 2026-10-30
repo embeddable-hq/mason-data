@@ -270,6 +270,9 @@ export interface StreamTarget {
   apply(batch: ReadonlyMap<string, TableChanges>, lsn: bigint | null, committedAt: Date): Promise<void>;
   /** the position of the last commit applied (0 when none) */
   applied(): bigint;
+  /** told whenever the stream has everything the database wrote up to its position: a keepalive with nothing pending,
+   *  or a batch applied and acknowledged — the moment a streamed table's copy is current as of (`kept`'s syncedAt) */
+  current?(): void;
 }
 
 /**
@@ -368,6 +371,7 @@ export class ReplicationStream {
       this.acked = lastEnd;
       repl.sendStatus(this.acked);
       batch = new Map(); rows = 0; firstAt = 0; pieces = 0; big = false;
+      this.target.current?.();
     };
     // a piece of the open transaction: applied and committed, the position left where it is
     const piece = async (): Promise<void> => {
@@ -392,6 +396,7 @@ export class ReplicationStream {
           if (!inTxn && rows === 0 && lastEnd <= this.acked) {
             if (m.walEnd > this.seen) this.seen = m.walEnd;
             if (m.walEnd > this.acked) { this.acked = m.walEnd; repl.sendStatus(this.acked); }
+            this.target.current?.();
           } else if (m.replyRequested) repl.sendStatus(this.acked);
           if (!inTxn && rows > 0 && Date.now() - firstAt >= size().ms) await flush();
           continue;

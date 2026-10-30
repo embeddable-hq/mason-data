@@ -225,6 +225,23 @@ test("mason start refuses MASON_POLL_MS too, before it spawns and in the run its
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("MASON_CHANGES against the sources file is refused with the other settings, before anything is written or connected; one that agrees is taken", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-changes-"));
+  try {
+    fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
+    const file = (text: string): void => fs.writeFileSync(path.join(dir, "mason", "sources", "app.yml"), text);
+    const env = { DATABASE_URL: URL_, MASON_API_KEY: KEY };
+    file("kind: postgres\nurl: ${DATABASE_URL}\nsync: poll 5m\ntables:\n  orders: { sync: replication }\n");
+    const refused = serveSettings({ ...env, MASON_CHANGES: "poll" }, dir);
+    assert.ok("message" in refused);
+    assert.equal(refused.message, "a setting is missing or wrong: MASON_CHANGES=poll polls every table, and mason/sources/app.yml streams orders (sync: replication) — " +
+      "write sync: poll 5m (or off) on the entry of orders — or keep the file as it is — then unset MASON_CHANGES, then start again");
+    assert.equal(fs.readdirSync(dir).join(","), "mason", "nothing written beside the project: no .mason/");
+    file("kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\ntables:\n  orders: {}\n");
+    assert.ok(!("message" in serveSettings({ ...env, MASON_CHANGES: "replication" }, dir)), "every table replicated: it agrees");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a MASON_HISTORY_DAYS that is not a number of days refuses mason serve (on its one report) and mason start (before it spawns, in the run, and --json) in the Failure shape, before anything opens", async () => {
   const why = "it is how many days Mason keeps its history (the request log, the sync's events, the usage samples and the copies' sizes): a whole number, 1 or more";
   const fix = "write MASON_HISTORY_DAYS=7 (the default, as when it is unset) or another whole number of days";

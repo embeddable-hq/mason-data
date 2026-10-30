@@ -17,8 +17,8 @@ DuckDB runs INSIDE the `mason start` process, on a worker thread of its own (`sr
 one instance. **Postgres decides, DuckDB
 computes**: the catalog Postgres (PGlite, the copied tables' definitions, no rows) analyses each statement, the rewrite
 makes it DuckDB's, and DuckDB runs it (`src/duck/plan.ts`). Each added table is copied whole from the source, then kept
-current as its `sync:` says — `off` (the default: read again only at `mason sync`) or Mason's xmin poll at its interval
-— or, for every table, by logical replication (`mason start --replication`, `src/duck/stream.ts`).
+current as its `sync:` says — `off` (the default: read again only at `mason sync`), Mason's xmin poll at its interval,
+or logical replication (`replication`, `src/duck/stream.ts`), mixed in one project.
 
 ## A statement
 
@@ -511,13 +511,31 @@ current as its `sync:` says — `off` (the default: read again only at `mason sy
   `pg_replication_slots` on that same connection, at most every 30 s, `SLOT_READ_MS` — its status, and the cap left, or
   that `max_slot_wal_keep_size` is unset and nothing caps it), and each table's state and changes applied
   (`streamStatus`). A new state of a table is a state there too. ("Logical replication")
-- **The slot outlives `mason stop` and holds the source's WAL** (said at the stop); `--poll` and `mason destroy` drop
-  the slot, and Mason's own publication, verified gone. A `REPLICA IDENTITY NOTHING` table is refused by name: publishing
-  its updates would fail the app's own UPDATEs.
+- **A table is streamed only when its `sync:` is `replication`; the others are polled beside the stream, or `off`**
+  (`Sync.replicated`, `Sync.streams`): one slot and ONE publication per project, the publication carrying the
+  replicated tables ALONE — Mason's own `SET TABLE` to exactly that list, verified against `pg_publication_tables`
+  afterwards (a polled table's writes in the slot's WAL are WAL held for nothing), a named one never altered. A `key:`
+  table and a `REPLICA IDENTITY NOTHING` one under `replication` are refused at the file's read with the line to write
+  (`entryProblems`; the stream cannot apply a keyless change, and publishing NOTHING fails the app's own UPDATEs).
+  A sync change keeps the copy in every direction: into replication it is marked behind in `_mason.catch_up` and caught
+  up by one poll while the stream holds its changes; out of it, it leaves the stream and is caught up by one poll.
+  `mason start --replication` / `--poll` / `MASON_CHANGES` are read only where the file agrees, else refused naming the
+  `sync:` line (`changesAgreement`); the next release removes them. **A table set to `replication` while the run is
+  up, in a run that never checked the database for it, is held to the start's own checks first** (`checkReplication`,
+  src/cli/dev.ts; `liveReadinessFailure`): refused with what the database lacks and the line that polls it, the file put
+  back byte for byte — a review finding: on `wal_level = replica` the add said success and the table, polled until then,
+  was frozen for ever; the engine's own failure to set replication up says the same way out on the table's line.
+  DETECTOR: `tests/integration/duck-stream.itest.ts` (a mixed project, the publication's list, a switch each way held to
+  the ledger), `tests/cli-run-server.test.ts` (the live refusal). ("Each table's sync")
+- **The slot outlives `mason stop` and holds the source's WAL** (said at the stop); it is dropped, with Mason's own
+  publication, VERIFIED gone, when no table's sync is `replication` any more (`retireReplication`: at the start, and live
+  when the last one leaves) and at `mason destroy`, from what the config records (`config.replication`).
 - **A NAMED publication is read and verified, never created, altered or dropped; Mason makes its own only when none is
   named** (a read replica takes no CREATE PUBLICATION, and on a production primary the slot is the one
-  object Mason creates). Named by `--publication`, else `PG_PUBLICATION` (`replicationNames`), else the one recorded in
-  `.mason/config.json`; verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
+  object Mason creates). Named by `publication:` at the top of the sources file (`${PG_PUBLICATION}` allowed, read by
+  `readSource`), else `--publication` (both is refused), else `PG_PUBLICATION` (`namedPublication`) — never the one a
+  start recorded, so a file that takes `publication:` out gets Mason's own; Mason's own one left behind by a switch to a
+  named one is dropped, verified gone, before the record moves (`staleReplication`); verified by the ClickHouse reader's own `checkPublication` (src/duck/publication.ts), never a
   second verifier. A gap in one table refuses that table alone, the others stream on; the way out is the found
   publication plus the gap as `ALTER PUBLICATION … ADD TABLE …`. On a standby a named one is required, refused before
   any slot is made. ("Logical replication")

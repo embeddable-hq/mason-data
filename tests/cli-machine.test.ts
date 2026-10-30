@@ -182,8 +182,19 @@ test("a project in replication mode takes its slot and publication with it; when
     assert.equal(project(shop.root).config.replication, null, "dropped: nothing names it");
     // a polling project made nothing on the database: nothing is asked of it
     cfg.changes = "poll";
+    cfg.replication = null;
     writeConfig(shop.dir, cfg);
     await removeProject(project(shop.root), { state: async () => ({ kind: "none", run: null }), stopSupervisor: async () => null,
       dropReplication: async () => { throw new Error("must not be called"); } });
+    // a project whose start made them recorded them, whatever its mode said (a sources file's sync: replication): they go
+    delete cfg.changes;
+    cfg.replication = { slot: "mason_dev_shop", publication: "mason_dev_shop", owned: true };
+    writeConfig(shop.dir, cfg);
+    asked.length = 0;
+    await removeProject(project(shop.root), {
+      state: async () => ({ kind: "none", run: null }), stopSupervisor: async () => null,
+      dropReplication: async (s, o) => { asked.push({ database: s.database, ...o }); return [`replication slot ${o.slot}`, `publication ${o.publication}`]; },
+    });
+    assert.deepEqual(asked, [{ database: "shop_dev", slot: "mason_dev_shop", publication: "mason_dev_shop", owned: true }]);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });

@@ -179,8 +179,8 @@ per poll. **Where.** `src/duck/sync.ts`, `src/cdc/poll.ts`; `tests/integration/d
 **Decision** (2026-10-29). How a copy stays current after its first copy is the sources file's `sync:`, at the top of
 the file for every table and on an entry for that one: `off` (the default) reads it again only at `mason sync <table>`,
 `poll <interval>` (`<n>s|m|h`, 1 s to 24 h) polls it at that interval. One grammar (`parseSync`, src/lib/table-sync.ts)
-read by the file's reader and by `mason add --sync`; `replication` is a word of it, refused until a table can be
-streamed alone (`mason start --replication` keeps every table current meanwhile). The run is ONE pass loop that polls
+read by the file's reader and by `mason add --sync`; `replication` streams the table from the change log (below, PR 2
+of 3). The run is ONE pass loop that polls
 the tables due (`Sync.dueAt`), never a timer a table: a pass also queues copies, drops removed tables and attaches the
 source once. Two bounds on what the polls cost the source: a table's own (`nextPollAt`, four times its last poll) and
 the passes' (`passDelayMs`, four times the last pass). The sync each table was last polled or copied under is a column
@@ -200,9 +200,41 @@ copy is read (`mason status`, `wait`, `sync`, EXPLAIN, the MCP tools), since an 
 **Where.** `src/lib/table-sync.ts`, `src/duck/sync.ts`, `src/cli/source-edit.ts`; `tests/cli-sources.test.ts`,
 `tests/duck-sync-schedule.test.ts`, `tests/integration/duck-poll.itest.ts`.
 
+**`sync: replication`, per table** (2026-10-29, PR 2 of 3). A table whose sync is `replication` is streamed; the others
+are polled beside the stream or left `off`, in one run. The project still has ONE slot and ONE publication, and the
+publication carries the replicated tables alone: Mason's own is `ALTER PUBLICATION … SET TABLE` to exactly that list
+(created with it when missing) and verified against `pg_publication_tables` afterwards, so a polled table's writes
+are never decoded into the slot's WAL; a publication the operator names (`publication:` at the top of the sources
+file, `${PG_PUBLICATION}` allowed, read by `readSource` as `url:` is) is never altered, and a replicated table it lacks
+is refused alone with the `ALTER PUBLICATION … ADD TABLE` its owner runs. What cannot be replicated is refused at the
+file's read, on one report with the line to write: a `key:` table (no primary key, so the stream cannot apply its
+changes by key) and a `REPLICA IDENTITY NOTHING` one (publishing it would fail the app's own UPDATEs), the latter read
+from the catalog; `mason add` of either under a file whose default is `replication` writes `sync: poll 5m` on its
+entry and says why. A change of sync keeps the copy in every direction: into replication the table is marked behind
+(`_mason.catch_up`, so a restart owes the same) and its changes are held from before its one catch-up poll — the
+publication carries it before that poll starts, which is what makes the replay safe (src/duck/stream.ts) — then it
+joins the stream; out of it the table leaves the stream (`refreshStreamed`) and is caught up by one poll from its
+watermark, then polled as its sync says. When no table is replicated any more the slot is dropped, and Mason's own
+publication with it, VERIFIED gone (`retireReplication`: the stream stopped first, the slot waited inactive), at the
+start that finds none and live when the last one leaves; the project's config records what was made
+(`config.replication`) through the run's hook, so `mason destroy` drops what exists, never a name computed again.
+`mason start --replication` / `--poll` / `MASON_CHANGES` are taken only where they agree with the file and refused
+otherwise, naming the `sync:` line to write; PR 3 removes them.
+
+**Why.** One decision per project made the developer choose between a slot that decodes every table's writes (a busy
+log table the dashboards never read included) and polls that scan every table; the file already weighs each table's
+cost, so the change log is one more choice there. A publication of the replicated tables alone keeps the slot's WAL to
+what Mason reads. The slot is dropped when unused because it holds the source's WAL for ever otherwise (CLAUDE.md
+"A replication slot outlives its reader"). The copy's age of a replicated table is the stream's position and the last
+instant the stream was known current (`kept.syncedAt`: the later of its last poll and the stream's last keepalive or
+flush with nothing pending), said as `replicated, at <lsn>, <age>` on its line, so a stopped stream's copy is never
+read as current. **Where.** `src/duck/sync.ts` (`replicated`, `streams`, `ensurePublication`, `retireReplication`),
+`src/cli/replication-mode.ts` (`changesAgreement`, `publicationConflict`), `src/cli/sources.ts`; `tests/cli-sources.test.ts`,
+`tests/integration/duck-stream.itest.ts` (a mixed project, a switch each way, a named publication, REPLICA IDENTITY NOTHING).
+
 ### Logical replication
 
-**Decision.** `mason start --replication` keeps the copies current from the change log (`src/duck/stream.ts`); the rules
+**Decision.** A table whose `sync:` is `replication` is kept current from the change log (`src/duck/stream.ts`); the rules
 are `.claude/rules/duckdb.md` "Keeping a copy current". Why each is so:
 
 | decision | why, with the number |

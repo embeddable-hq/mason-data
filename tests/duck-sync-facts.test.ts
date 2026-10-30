@@ -151,9 +151,12 @@ test("a whole-sync failure over is said, once, as a recovered of no table: the p
     attach = null;
     await s.pass();
     await s.pass();
+    // the failure with its way out, as the replicated table's own line says it (src/duck/sync.ts pass)
+    const failed = "replication: the slot could not be read: connection refused — public.t is NOT kept current until it is fixed: " +
+      "give its entry sync: poll <interval> (poll 5m) in the sources file to poll it instead";
     assert.deepEqual(kinds(), [
-      "stream_failed: replication: the slot could not be read: connection refused",
-      "recovered: the publication and the slot are ready again (it had failed: replication: the slot could not be read: connection refused)",
+      `stream_failed: ${failed}`,
+      `recovered: the publication and the slot are ready again (it had failed: ${failed})`,
       "source_unreachable: could not attach the database: connection refused",
       "recovered: the database is attached again (it had failed: connection refused)",
     ], "each over once, at the pass that did what had failed");
