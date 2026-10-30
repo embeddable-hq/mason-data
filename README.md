@@ -330,9 +330,6 @@ things make the difference:
   This works best on columns that grow as rows are inserted, such as `created_at` or an increasing `id`, because Mason
   keeps rows in the order they were inserted.
 
-The trade-off is the index. Mason keeps none, so fetching one row by its primary key means a scan, and Postgres is
-faster for that. And because analytical queries run on Mason's machine, they no longer slow down your database.
-
 [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every measurement and how it was taken.
 [docs/BENCHMARK.md](docs/BENCHMARK.md) shows how to run the benchmark on your own machine.
 
