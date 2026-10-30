@@ -1103,6 +1103,37 @@ so a TLS proxy had been written beside it. Postgres 17's `sslnegotiation=direct`
 had answered `off` over TLS. **Where.** `src/api/postgres/listener.ts`, `src/cli/pg-tls.ts`; `tests/pg-tls.test.ts`,
 `tests/postgres-api/tls.test.ts`.
 
+### mason share (2026-10-30, GitHub issue 62)
+
+**Decision.** A second socket of the one listener, TLS required, opened by the run for a tunnel's client: the plain
+listener is untouched, so no session drops and a local tool notices nothing. Restarting under `--self-signed-tls` was
+rejected (fifteen seconds, every session dropped, TLS asked of every local tool), and offering TLS on the plain socket
+too (a tunnel's connection and a local psql are the same to it, so a tool configured without SSL would send its
+password through the relay in clear, and Mason would never know).
+
+The owner's decisions on the issue: a free tunnel's end ends the share, because a new tunnel is a new address to copy
+anyway; a paid token keeps the address, so it reconnects. The login lasts for one run of the command. No throttle: every
+tunnelled connection is from 127.0.0.1, so a throttle cannot tell a scanner from the BI tool, and a port scanner would
+lock the tool out. The promise is "a relay that forwards bytes cannot read them", never more.
+
+Decided in the building:
+
+- **The command makes the password; the run gets its SHA-256.** A run that holds a hash cannot log, answer or dump a
+  password, whatever a later change prints, where a test for its absence holds only the paths it thought of. A fast hash
+  is right because the password is 192 random bits.
+- **The connection is the share**: an answer left open, so the end of the process is the end of the share with no
+  signal, heartbeat or state file. A tunnel client would outlive a `kill -9` of its parent, so the run stops it, by its
+  pid and only while that process names the share's port.
+- **Oldest out, not newest refused**: with a cap that refuses, `limit` idle connections hold the socket for as long as
+  their deadline; with eviction, a flood must outrun a real login. A flood through a relay still can, and nothing here
+  stops it: no source is known.
+- **`ssh` config over `-o`** keeps the token off the command line, and `-F` keeps the developer's `~/.ssh/config`
+  (a `ProxyCommand`, a `ControlMaster`) out of it. A machine that needs a proxy to reach the internet is the price.
+- **A second `mason share` meets the same socket with its own login**, so the issue's "a second call answers the same
+  port" holds under a credential per run.
+- **A probe of the printed address**, because the address is read from output Mason does not own: the contract answers a
+  probe (CLAUDE.md "Fix the class").
+
 ### Users
 
 **Decision.** `mason user add <name>` prints a password once: `mason_<id>_<mac>`, 16 random hex digits then 32 of an

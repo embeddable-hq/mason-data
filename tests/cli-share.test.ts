@@ -23,11 +23,14 @@ import { alive, masonProcess } from "../src/cli/runs.ts";
 import { supervisorOf } from "../src/cli/supervise.ts";
 import { unassignedPort } from "./test-ports.ts";
 import { mintToken } from "../src/duck/token.ts";
-import { lastLines, pinggyConfig, probeShare, tunnelAddress, tunnelEnds, tunnelPlan } from "../src/cli/tunnel.ts";
-import { newSharePassword, RunShares, shareRole, shareSecret } from "../src/cli/share-run.ts";
-import { chosenRole } from "../src/cli/share.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive } from "../src/duck/grants.ts";
 import type { ShareDoor, ShareSocket } from "../src/api/postgres/server.ts";
+// read from the modules when the tests run: the file loads at a commit without them, and each test fails by name
+// (scripts/fails-without.ts)
+const absent = (): Record<string, unknown> => ({});
+const { lastLines, pinggyConfig, probeShare, tunnelAddress, tunnelEnds, tunnelPlan } = await import("../src/cli/tunnel.ts" as string).catch(absent) as typeof import("../src/cli/tunnel.ts");
+const { newSharePassword, RunShares, shareRole, shareSecret } = await import("../src/cli/share-run.ts" as string).catch(absent) as typeof import("../src/cli/share-run.ts");
+const { chosenRole } = await import("../src/cli/share.ts" as string).catch(absent) as typeof import("../src/cli/share.ts");
 
 const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 
@@ -113,7 +116,7 @@ test("a person's answer: a number or a name; anything else is no choice", () => 
 });
 
 /** A RunShares over a socket that records what it is told. */
-function fakeShares(): { shares: RunShares; door: () => ShareDoor; closed: () => number; lines: string[]; ended: string[]; stopped: Array<[number, number]> } {
+function fakeShares(): { shares: InstanceType<typeof RunShares>; door: () => ShareDoor; closed: () => number; lines: string[]; ended: string[]; stopped: Array<[number, number]> } {
   let door: ShareDoor | null = null, closed = 0;
   const lines: string[] = [], ended: string[] = [], stopped: Array<[number, number]> = [];
   const socket: ShareSocket = { port: 40001, sessions: 0, endSessions: (jti) => { ended.push(jti); return 1; }, close: async () => { closed++; } };

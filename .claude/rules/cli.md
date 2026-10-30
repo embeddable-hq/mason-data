@@ -24,7 +24,7 @@ CLI lacks).
   every option named in it, and a wrong option answered with the usage. A new command is added to the registry, or it
   does not run. **The list is the runbook** (the commands in the order a user will likely need them): `STEPS`
   (src/cli/registry.ts) names each command's step — Learn (`help` first), Set up (`doctor`, `init`, `start`), Add your
-  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`, `mcp`), Run (`status`, `ui`, `sync`, `logs`, `cancel`, `usage`, `stop`, `destroy`), Go to
+  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`, `mcp`, `share`), Run (`status`, `ui`, `sync`, `logs`, `cancel`, `usage`, `stop`, `destroy`), Go to
   production (`serve`) — and `mason --help` prints the steps as headings, and under Learn the guides too, a line each
   beside `mason help`; `COMMANDS` is derived from it. A command's old name (`dev`, `purge`, `rm`, `connect`, `list`, …)
   answers with the new one and exit 2 (src/cli/main.ts), never runs. Nothing a command prints refers to a repository
@@ -215,6 +215,19 @@ CLI lacks).
   demo`) writes the file** when the folder has none (`newRolesText`, its one writer: `default: everything`, `tables:
   all`), and keeps one that is there. What a user with no role reads is the FILE's (`userRole`, one function for `mason
   user add` / `list`, `mason start`'s line `rolesDefaultLine` and the web page; `roleFrom`, `readsNothing` in `--json`).
+- **`mason share` holds its share in the foreground, and its connection to the run IS the share** (src/cli/share.ts,
+  src/cli/share-run.ts, src/cli/tunnel.ts; docs/POSTGRES-API.md "From a cloud BI tool"): `POST /api/share`'s answer stays
+  open (`holdRun`, src/cli/control.ts, never fetch, which gives up on a silent body), so a `kill -9` closes the share as
+  Ctrl-C does, and the run stops the tunnel client by its checked pid (`stopTunnelClient`). **The password is the command's,
+  printed once; the run receives its SHA-256 alone**, in memory, so nothing the run logs or answers can carry it, and it is
+  no row of `.mason/users.json`. A free tunnel's end ends the share (exit 1, `Next:` mason share: a new address and a new
+  password); a paid token's reconnects, the password unchanged, said. **A secret never reaches a command line**
+  (`ps`): the token is in a 0600 config file named by `-F`, removed once the tunnel is up, and masked in whatever a failure
+  repeats of the client's output. **ssh never prompts** (`detached`: no terminal; `accept-new` into `.mason/share-known-hosts`;
+  `SSH_ASKPASS=true`, forced). **The client's output is not ours**: a time limit, a shape, and a probe of the address
+  for the share's own certificate (`probeShare`: `other` is a Failure, `unknown` a tip, "couldn't tell" kept apart
+  from "no"). What `--json` prints is one object, once; everything after it is on stderr, so stdout stays one
+  document. `mason serve`'s run refuses it. The vendor's name is in `--via` and the `via` row alone, never a headline.
 - **`mason mcp` is an MCP server on stdio, a client of the Postgres API as a `mason user`** (src/cli/mcp.ts, docs/DESIGN.md
   "An MCP server"): stdout is the protocol's (JSON-RPC frames alone), every log line goes to stderr, and so does a
   failure to start — it takes no `--json` (`CommandSpec.stdout: "protocol"`; tests/cli-help.test.ts); a tool's failure is

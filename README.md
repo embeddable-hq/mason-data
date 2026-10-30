@@ -116,6 +116,9 @@ Paste this URL into your tool's Postgres connection form. Each synced table appe
 after your project. The port stays the same every time Mason starts, so saved connections keep working.
 [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) explains how tools connect and which SQL Mason answers.
 
+Is your BI tool in the cloud? `mason share` opens a temporary public address for an hour's evaluation, with TLS all the
+way to your laptop ([From a cloud BI tool](docs/POSTGRES-API.md#from-a-cloud-bi-tool)).
+
 **3. Keep an eye on it.**
 
 ```bash
