@@ -114,6 +114,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const sourcesFile = path.join(root, "mason", "sources", "demo.yml");
     fs.writeFileSync(sourcesFile, sources.replace(/^sync: poll 5s /m, "sync: poll 1s "));
     assert.equal(config().demo, true);
+    // the roles file every project starts with (stage 1b): every user reads every copied table, said in a committed file
+    assert.match(fs.readFileSync(path.join(root, "mason", "roles.yml"), "utf8"), /^default: everything {3}# [^\n]*\n\nroles:\n {2}everything:\n {4}tables: all /m);
     assert.ok(!fs.existsSync(demoDir), "nothing is hosted before mason start");
     // THE DEMO ON A PORT THE OS NEVER HANDS OUT (out of its ephemeral range, claimed: tests/test-ports.ts), never the 5434 init prefers (src/cli/demo.ts DEMO_PORT): init takes 5434
     // whenever it is free at that moment, and another run of this file (a second worktree's check), another test's demo
@@ -148,6 +150,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const connected = s.stdout.search(new RegExp(`✓ Connected to postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo: Postgres 18[.\\d]*, 4 table\\(s\\)`));
     assert.ok(step >= 0, `the demo step: ${said(s)}`);
     assert.ok(connected > step, `connected after the demo step: ${said(s)}`);
+    // the roles line, once, after the listener's: what a user added without --role reads (src/cli/roles.ts rolesDefaultLine)
+    assert.match(s.stdout, /^ {2}1 role from mason\/roles\.yml \(everything\); default: everything \(a user added without --role\)$/m, said(s));
     // the run's lines in one column (src/cli/background.ts relays them)
     assert.match(s.stdout, new RegExp(`^ {2}Postgres API {2}postgres://<user>:<password>@127\\.0\\.0\\.1:${pgPort}/${config().name} {2}\\(mason user add <name> makes a user\\)$`, "m"));
     assert.match(s.stdout, /^ {2}Demo {10}a new order lands every 0\.3 s: mason status shows the copy keeping up$/m);

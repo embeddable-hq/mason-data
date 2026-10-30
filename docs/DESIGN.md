@@ -1127,6 +1127,38 @@ view must exist first) and checked on their base tables: stricter than Postgres,
 `src/api/postgres/server.ts` (`Session.grants`, `heldToRole`, `catalogAs`); `tests/duck-roles-wire.test.ts`,
 `tests/postgres-api/catalog.test.ts`, the oracle's `roleCases`.
 
+### Roles: the file decides the default (2026-10-29, GitHub issue 30, stage 1b)
+
+**What stage 1a left in the code.** A user with no role read every copied table, and so did a token: a grant nobody had
+written down, decided by `Session.grants()` returning "no role, nothing to hold". Beside a roles file that narrowed
+every other user, the one line of access no reviewer could read in a commit was the widest.
+
+**Decision (the owner, 2026-10-29): the FILE says it.** Three states, each said where a person and an agent look (`mason
+start`'s roles line, `mason user add` / `list`, `mason status`, the web page, `--json`'s `roleFrom` / `readsNothing`):
+no `mason/roles.yml` — every user reads every copied table, as before roles existed; `default: <role>` at the top of
+the file — a user added without `--role` reads as that role (its refusals, its catalog under `SET ROLE`, its request
+log rows); a file with no `default:` — such a user reads nothing, each statement that reads a copied table refused
+42501 with the two ways out as exact lines, `SELECT 1` still answered. Its catalog requests run as a grant-less role,
+`__mason_no_role` — named outside the file's namespace (a role name never starts with `_`) — so `information_schema`
+and the privilege functions answer as Postgres's do for a login with no grant (the review of #44: run as the catalog's
+superuser they listed every table and said `has_table_privilege` true while every read was refused). The session asks the roles at
+every statement (`LiveRoles` re-reads the file when its stat moves), so an edit of `default:` applies at the next one;
+`Session.roleName` is the effective role, the one name `catalogAs`, the plan cache and the request log read. A file
+that cannot be read refuses a roleless user too (57P03): its default cannot be known, and fail closed is the rule. A
+token is no user and keeps reading everything: it is minted from the API key, which is the operator's.
+
+**`tables: all`, Postgres's own word.** "Every table" is `GRANT SELECT ON ALL TABLES IN SCHEMA` in Postgres, so the
+file says `tables: all` rather than a word of Mason's; it is resolved against the tables copied at every read
+(`resolveRoles` writes a whole-table grant per copied table), so a table the sources file adds is the role's once its
+copy is served, and the catalog grants it per table at its rebuild — never `ON ALL TABLES`, which would be true only
+of the tables there at the GRANT. A table key `all` is refused with both meanings (`public.all` for a table so named).
+The oracle holds a Mason role of `tables: all` to a Postgres role granted `ALL TABLES IN SCHEMA public`.
+
+**`mason init` writes the file** (`newRolesText`, beside the sources file's `newSourceText`): one role, `everything`,
+`tables: all`, and `default: everything`, with a narrower role as a comment to copy. A new project starts with today's
+access, but visible in a committed file: narrowing it is an edit a reviewer sees, and deleting the `default:` line is
+the one-line way to make every roleless user read nothing. A file already there (a clone) is kept byte for byte.
+
 ### An MCP server (2026-10-29)
 
 **Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is

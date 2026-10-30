@@ -9,7 +9,8 @@ import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, 
 const USERS = "/api/users?lastUsed=1";
 const USERS_POST = "/api/users";
 const USERS_EVERY_MS = 30_000;
-/** The run's state: where a tool connects (`postgres`, src/cli/pg-url.ts postgresFacts), the Connect panel's. */
+/** The run's state: where a tool connects (`postgres`, src/cli/pg-url.ts postgresFacts), the Connect panel's; and the
+ *  roles file's state (`roles`, src/cli/run-server.ts rolesState), what each user's role is held to. */
 const STATE = "/api/state";
 
 /** A time as `mason user list` stamps it: `2026-10-27 09:10`, UTC. */
@@ -42,16 +43,20 @@ const askOf = (confirming) => confirming === null || confirming === undefined ? 
  * not removed first; a removed user is listed after them, muted, without actions. A Remove or a Disable asks first
  * (`confirming`: the name, Remove's; or { name, verb: "disable" }), in a popover beside the row's actions; an Enable
  * asks nothing. A refused action (`refused`: { name, failure }) is said there too, until dismissed. `now` is the
- * page's clock, in ms.
+ * page's clock, in ms. `roles`: `/api/state`'s (`mason status --json`'s): while the roles file cannot be read every
+ * user held to it is refused (57P03), said above the table as `mason user list`'s tip says it (src/cli/roles.ts
+ * rolesProblemText, held equal by tests/web-page.test.ts) and in each user's role.
  */
-export function renderUsers(list, confirming = null, now = Date.now(), refused = null) {
+export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
   if (!users.length) return empty("No users yet", `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);
   const note = (what, text) => text ? `<p class="dim">${esc(what)}: ${esc(text)}.</p>` : "";
+  const broken = roles && roles.problem != null ? roles : null;
+  const brokenNote = broken ? `<p class="warn">${esc(`${broken.file ?? "mason/roles.yml"} cannot be read as it is now, so every statement of a user held to it is refused: ${broken.problem}`)}</p>` : "";
   // a Remove's or a Disable's question is a popover beside the user's actions (`pop`), never a row: no row below it moves
   const pops = [];
   const ask = askOf(confirming);
-  return panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
+  return brokenNote + panel(`<table class="users"><thead><tr><th scope="col">User</th><th scope="col" class="role">Role</th><th scope="col" class="status">Status</th><th scope="col" class="added">Added</th><th scope="col" class="num last">Last used</th><th scope="col" class="act"></th></tr></thead><tbody>${users.map((u) => {
     const active = u.removedAt == null;
     const last = lastUsedText(u, list.lastUsedNote, list.requestLogDays, now);
     const lastCell = !active ? "" : u.lastUsedAt != null
@@ -65,8 +70,11 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       `<p class="pop-actions">${button(`Disable ${u.name}`, { confirmDisable: u.name }, "danger small")} ${button("Cancel", { cancelRemove: "", popClose: "" }, "small")}</p>`, { kind: "dialog", label: `Disable ${u.name}?` }));
     else if (refused?.name === u.name) pops.push(pop(anchor, `${renderFailure(refused.failure)}<p class="pop-actions">${button("Dismiss", { dismissRefused: "", popClose: "" }, "small")}</p>`));
     return `<tr${active ? "" : ` class="removed"`}><th scope="row"><code class="name" title="${esc(u.name)}">${esc(u.name)}</code> <span class="dim">id ${esc(u.id)}</span></th>` +
-      // the user's role (mason user add --role): what it may read; none, every copied table; one the roles file does not name, said
-      `<td>${u.role === undefined ? `<span class="dim">every table</span>` : `${code(u.role)}${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}`}</td>` +
+      // the role it reads as (src/cli/roles.ts userRole): its own (mason user add --role) — one the roles file does not name,
+      // said — or the file's default; none under a file with no default reads nothing, said; no roles file, every table
+      `<td>${broken ? `<span class="warn">refused: the roles file cannot be read</span>` : u.readsNothing === true ? `<span class="warn">no role, and the roles file names no default: its statements are refused</span>`
+        : u.role === undefined ? `<span class="dim">every table</span>`
+        : `${code(u.role)}${u.roleFrom === "default" ? ` <span class="dim">(default)</span>` : ""}${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}`}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
       `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +
@@ -176,7 +184,8 @@ export const page = {
       view() {
         const u = users();
         return {
-          users: u ? renderUsers(u, m.confirming, ctx.now().getTime(), m.refused) : "",
+          // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
+          users: u ? renderUsers(u, m.confirming, ctx.now().getTime(), m.refused, ctx.read(STATE)?.body?.roles ?? null) : "",
           "users-connect": renderUsersConnect(ctx.read(STATE)?.body?.postgres),
           added: m.added ? renderAdded(m.added) : "",
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",

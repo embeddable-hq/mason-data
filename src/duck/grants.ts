@@ -1,8 +1,10 @@
 /**
  * ROLES: WHAT A USER MAY READ, HELD ON THE ANALYSED TREE (GitHub issue 30, stage 1: table and column grants per role).
  * A role is an entry of the project's roles file (`mason/roles.yml`, src/cli/roles.ts): for each copied table, every
- * column (`{}`), `columns:` or `exclude:`, the sources file's own words. A `mason user` carries a role
- * (src/duck/users.ts `MasonUser.role`); a user with none reads every copied table, as before.
+ * column (`{}`), `columns:` or `exclude:`, the sources file's own words — or `tables: all`, every copied table and column.
+ * A `mason user` carries a role (src/duck/users.ts `MasonUser.role`); a user with none is held to the file's
+ * `default:` role, and reads nothing when the file names none (stage 1b: the FILE decides, never the code); with no
+ * roles file at all, every user reads every copied table. A token (no user) reads every copied table.
  *
  * ENFORCED ON THE TREE POSTGRES ANALYSED, NEVER ON SQL TEXT: Postgres puts one `RTEPERMISSIONINFO` per relation in the
  * query tree it analyses (src/duck/analyze.ts), with `selectedCols` as its own bitmap of the columns the statement
@@ -40,6 +42,14 @@ export interface RoleGrants {
   file: string;
   /** by `schema.table` */
   tables: ReadonlyMap<string, TableGrant>;
+  /** `tables: all`: every copied table and column, those the sources file adds later included (resolved again then) */
+  all: boolean;
+  /**
+   * NOT A ROLE: a user with no role of its own under a roles file that names no `default:` — it reads nothing, and
+   * every statement that reads a copied table is refused saying why and the two ways out (`noRoleRefusal`). `example`:
+   * a role of the file to name in those lines (`<a role>` when it has none).
+   */
+  noRole?: { user: string; example: string };
 }
 
 /**
@@ -53,10 +63,29 @@ export interface RolesLive {
   file: string | null;
   grants: ReadonlyMap<string, RoleGrants>;
   problem: string | null;
+  /** the file's `default:`: the role of every user with no role of its own; null where it names none (such a user
+   *  reads nothing) or there is no file (every user reads every copied table) */
+  default: string | null;
 }
 
 /** no roles file: every session reads every copied table, as before; one object, so the listener sees no change */
-export const NO_ROLES: RolesLive = { file: null, grants: new Map(), problem: null };
+export const NO_ROLES: RolesLive = { file: null, grants: new Map(), problem: null, default: null };
+
+/**
+ * THE CATALOG'S ROLE OF A USER THE FILE HOLDS TO NOTHING (no role of its own, no `default:`): a Postgres role with no
+ * grant, so its catalog requests answer as Postgres answers a login with none — information_schema lists none of the
+ * copied tables or views, every `has_*_privilege` is false, `set_config` is refused (revoked while any role exists).
+ * Named outside the file's namespace: `ROLE_NAME_RE` (src/cli/roles.ts) forbids a leading underscore, so no role of the
+ * file can ever be it.
+ */
+export const NO_ROLE_CATALOG = "__mason_no_role";
+
+/** The roles the catalog Postgres holds (src/api/postgres/catalog.ts catalogRoles): the file's, and — whenever a roles
+ *  file exists — `NO_ROLE_CATALOG`, a role with no table, for a user the file holds to nothing. */
+export function catalogRolesOf(live: RolesLive): ReadonlyMap<string, RoleGrants> {
+  if (live.file === null) return live.grants;
+  return new Map([...live.grants, [NO_ROLE_CATALOG, { name: NO_ROLE_CATALOG, file: live.file, tables: new Map(), all: false }]]);
+}
 
 /** `FirstLowInvalidHeapAttributeNumber` is -7: a column's bit in `selectedCols` is its attnum + 7 */
 const ATTNUM_OFFSET = 7;
@@ -148,7 +177,11 @@ const shown = (table: string): string => table.startsWith("public.") ? table.sli
 
 /** The 42501 of a read the role does not cover, Postgres's words first; null when the role covers every read. */
 export function grantRefusal(reads: readonly ResolvedRead[], role: RoleGrants): StatementError | null {
-  const tablesOf = (): string => { const names = [...role.tables.keys()].map(shown); return names.length ? names.join(", ") : "none"; };
+  if (role.noRole !== undefined) return reads.length === 0 ? null : noRoleRefusal(reads[0]!.table, role.file, role.noRole);
+  const tablesOf = (): string => {
+    if (role.all) return "every copied table (tables: all)";
+    const names = [...role.tables.keys()].map(shown); return names.length ? names.join(", ") : "none";
+  };
   for (const r of reads) {
     const g = role.tables.get(r.table);
     const denied = (detail: string, hint: string): StatementError =>
@@ -165,6 +198,26 @@ export function grantRefusal(reads: readonly ResolvedRead[], role: RoleGrants): 
   }
   return null;
 }
+
+/**
+ * THE 42501 OF A USER WITH NO ROLE UNDER A FILE THAT NAMES NO DEFAULT (stage 1b): Postgres's message for the first
+ * table read, the reason in the DETAIL, and both ways out as the exact lines in the HINT — the file's `default:`, or
+ * the user made again with a role. `file`: the roles file as messages name it.
+ */
+export function noRoleRefusal(table: string, file: string, who: { user: string; example: string }): StatementError {
+  return new StatementError({ code: "42501", message: `permission denied for table ${table.replace(/^[^.]+\./, "")}`,
+    detail: `the user "${who.user}" has no role and ${file} names no default`, hint: noRoleWayOut(who.user, file, who.example) });
+}
+
+/** The two ways out for a user with no role under a file with no default, as exact lines: ONE wording, for the
+ *  refusal's HINT, `mason start`, `mason user list` and `mason user add`. */
+export const noRoleWayOut = (user: string, file: string, example: string): string =>
+  `write default: ${example} at the top of ${file}, or mason user remove ${user} and mason user add ${user} --role ${example}`;
+
+/** A role of the file to name in a way out: one of `tables: all` where there is one (the role today's access is), else
+ *  the first, or a placeholder where it names none. */
+export const exampleRole = (live: Pick<RolesLive, "grants">): string =>
+  [...live.grants.values()].find((g) => g.all)?.name ?? [...live.grants.keys()][0] ?? "<a role>";
 
 /**
  * The statement's table reads held to the role: the tree's reads named through the catalog, then refused where the role
