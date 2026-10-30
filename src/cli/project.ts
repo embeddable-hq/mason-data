@@ -194,7 +194,7 @@ export function theProject(cwd: string): { project: Project } | Problem {
   if (p && "broken" in p) return brokenProblem(p);
   if (p) return { project: p };
   return { problem: "no Mason project here or above", code: "no_project", fix: "cd into a project's folder, or make this folder one (mason init demo: a demo database, nothing to install)",
-    next: [["mason init", "make this folder a project (DATABASE_URL from .env, or mason init postgres://…)"]] };
+    next: [["mason init", "make this folder a project (MASON_DATABASE_URL or DATABASE_URL from .env, or mason init postgres://…)"]] };
 }
 
 /** Whether `root`'s .gitignore already ignores `.mason/`. */

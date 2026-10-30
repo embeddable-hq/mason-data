@@ -172,7 +172,7 @@ export function nextSteps(checks: readonly Check[], run: DevRun | null, project:
   if (bad("database") && project?.config.demo === true) return [["mason start", "hosts the demo database, then copies its tables"]];
   if (bad("database")) return [["mason start", `once the connection works (the detail above says how; the URL is in ${project ? `${project.dir}/config.json` : ".mason/config.json"})`]];
   if (project === null) return [
-    ["mason init", "in your app's folder: the database from DATABASE_URL in .env.local, .env or the shell"],
+    ["mason init", "in your app's folder: the database from MASON_DATABASE_URL or DATABASE_URL in .env.local, .env or the shell"],
     ["mason init postgres://user:password@localhost:5432/your_app", "or name it"],
   ];
   if (run === null) return [["mason start", "Mason in the background, for this folder"]];
