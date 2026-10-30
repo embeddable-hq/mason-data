@@ -20,8 +20,9 @@ Read `.claude/rules/cli.md` ("What a project syncs is ONE sources file"). Walked
 5. **`addedTables`: into the run.** A field the engine reads goes on `AddedTable` (`src/duck/sync.ts`).
 6. **What writes the file:** `entryText` and `withTable` for an entry key, `newSourceText` for a top key and for the comment
    at the top of a new file. Every other byte stays as it was (`withEntrySync` shows how to edit one key).
-7. **The other entrances.** `mason add` takes a flag if a person sets it per table (`addSpecs`, `addEntry` in
-   `src/cli/source-edit.ts`). Both of `POST /api/pick` and the command with Mason down go through `addEntry`.
+7. **The other entrances.** `mason add` takes a flag if a person sets it per table (`addSpecs` in
+   `src/cli/commands.ts`, `addEntry` in `src/cli/source-edit.ts`). Both of `POST /api/pick` and the command with Mason
+   down go through `addEntry`.
 8. **A top key the run reads at its start** has more entrances (PR 72's walk): `mason init` (`src/cli/init.ts`), `mason serve`
    (`serveSettings`, one report), and `mason start`, which refuses in the parent (`src/cli/background.ts`) before it spawns.
 9. **A change while running.** Decide what an edit does: `rereadSources` hands it to `Sync.setTables`. A change that keeps the
@@ -57,8 +58,9 @@ Read `.claude/rules/cli.md` and `docs/OBSERVABILITY.md`. Walked against `disk` (
 2. **Put it on the run's state:** `RunContext` and `runState` in `src/cli/run-server.ts`, and on `CopyState` for a per-table
    fact. The page polls `/api/state` every 2 s, so nothing here reads the source or scans the ledger. A slow read is an
    endpoint of its own, as `/api/queries` is.
-3. **Wire it in the run:** `src/cli/dev.ts` builds the `RunContext`. Fakes of it exist in `tests/cli-ui.test.ts`,
-   `tests/duck-executor.test.ts` and `tests/cli-state-matrix.test.ts`, and each needs the new member.
+3. **Wire it in the run:** `src/cli/dev.ts` builds the `RunContext`. Fakes of it are in seven test files, and each needs the
+   new member: grep `RunContext` in `tests/`. Four are casts that `tsc` will not catch: `tests/duck-sync-added.test.ts`,
+   `tests/web-page.test.ts`, `tests/cli-ui.test.ts` and `tests/cli-state-matrix.test.ts`.
 4. **Type it:** `RunState` in `src/cli/commands.ts`.
 5. **Render it** in an exported renderer beside `diskRows` or `masonRow`, called from `status`. The web page uses the same
    words (`src/web/pages/status.js`, `.claude/rules/web-ui.md`).
@@ -108,12 +110,7 @@ whose forms are refused by name.
 `IT_ORACLE_ONLY`; run the full oracle once. `tests/integration/oracle/shapes.ts` asks each statement again as a subquery, a
 CTE, a UNION, with parameters, by name and ordered, so those need no statement of their own.
 
-**The shapes the brief must name**, from `.claude/rules/duckdb.md`, each of which broke a rule that passed its author's oracle:
-- the value grouped, then `ORDER BY` its ordinal, its output name and the qualified column;
-- the nulls idiom (`x IS NULL, x`) with a bare name an output alias shadows, and with an integer constant;
-- a prepared statement run after a later `SET`, and a time form in more than one session zone;
-- `SELECT *` beside the named columns, and a NULL or a row-held argument where Postgres is strict;
-- each collation kind (C, ICU, a libc order) where a string is compared, and equality apart from order.
+**The shapes the brief must name** are `.claude/rules/duckdb.md`'s, under "A statement": "in the shapes a BI tool sends".
 
 **Reviews caught:**
 - A strict function not strict: `date_trunc` with a NULL zone answered the instant (d95fda6).

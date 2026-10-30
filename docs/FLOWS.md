@@ -14,6 +14,7 @@ something, start from `docs/RECIPES.md`.
 | DuckDB's task threads | The query's work; they queue function calls back to the worker | |
 | Catalog worker (`src/api/postgres/catalog-worker.ts`) | PGlite, one request at a time (`PgCatalog.run`), with a deadline per request | |
 | Parser worker (`src/api/postgres/parser-worker.ts`) | `parseSql` | |
+| Pg-eval worker (`src/duck/pg-eval-worker.ts`) | A PGlite with no tables, started at the first `__mason_pg_*` call: Postgres's own functions over a chunk's values | Waits on the executor worker, which is blocked on it |
 
 Main reaches the worker through `DuckConnection` (`RemoteConnection`) and `DuckRunner` (`RemoteRunner`) in
 `src/duck/executor.ts`. Those are messages: a `closeSync` or an `interrupt` on main is posted and returns at once, so the
@@ -113,13 +114,14 @@ statement is planned again from the top, as a view is, and the role key gains th
   buffer per chunk is transferred to main.
 - With a row count, `executeDuck` reads ahead by one chunk to know whether to send `portalSuspended`. The portal keeps the
   open result, and a suspended one's request-log row is written by `dropPortal`.
-- At the end, `recordRequest` writes the row and the answer's `close` runs.
+- At the end the answer's `close` runs, in a `finally` when streaming (`runSimple`, `executeDuck`), then `recordRequest`
+  writes the row.
 
 ### 7. A refusal, wherever it was raised
 
 Everything above throws. `simpleStatements` or `extended` catches it, `asPgError` shapes it, and `Session.refuse` is the
-one place an ErrorResponse goes out: it logs, calls `recordRequest` and sends. Then `tx` moves to `failed` if a block is
-open. The extended path also sets `skipToSync`.
+one place a statement's ErrorResponse goes out: it logs, calls `recordRequest` and sends. Then `tx` moves to `failed` if
+a block is open. The extended path also sets `skipToSync`.
 
 A cancel or timeout aborts the statement's `AbortController` (`armTimeout`, `Server.interrupt`). The cancel table and the
 close path are `.claude/rules/duckdb.md` "A statement".
@@ -217,6 +219,7 @@ probe measured the event loop's longest stall during each call.
 | `interrupt` | Sync | Nowhere: it returned in 0 ms. The statement stops later, at DuckDB's next check |
 | `bindVarchar`, `bindNull`, `getRows`, `columnType` | Sync | On the calling thread, for the work itself |
 | `closeSync` (result, connection, instance), `disconnectSync`, `destroySync` | Sync | **On the calling thread**, which in Mason is the worker. See below |
+| A `__mason_pg_*` function (`src/duck/functions.ts`, `pgEvalSync` in `src/duck/pg-eval.ts`) | Sync, `Atomics.wait` | **On the calling thread, the executor worker**, until the PGlite on the pg-eval worker answers: about 8 ms per 2,048 values. At `TIMEOUT_MS` (30 s) that worker is terminated and the statement fails. Not probed here |
 
 - **The pool is small and shared.** libuv's pool is per process, four threads by default, and nothing here sets
   `UV_THREADPOOL_SIZE`. Six statements on six connections finished four together, then the rest; a `connect` beside them
