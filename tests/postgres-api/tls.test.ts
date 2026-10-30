@@ -294,7 +294,8 @@ test("a connection held open without logging in cannot starve a login: the oldes
   assert.ok(dropped.includes("made way for a newer connection"), dropped.join(", "));
   // and whatever was left is gone at the deadline, so an idle holder costs nothing past it
   const closed = held.map((c) => c.destroyed ? Promise.resolve() : new Promise<void>((resolve) => c.once("close", () => resolve())));
-  await Promise.all(closed);
+  let deadline: NodeJS.Timeout | undefined;
+  await Promise.race([Promise.all(closed), new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("a connection outlived the login deadline")), 10_000); })]).finally(() => clearTimeout(deadline));
   assert.ok(dropped.includes("did not log in in time"), dropped.join(", "));
 });
 
