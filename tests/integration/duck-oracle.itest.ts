@@ -105,9 +105,9 @@ const throughOne = (sql: string): string => sql.replaceAll(T, viaOne(T)).replace
 
 type Answer = { names: string[]; oids: number[]; rows: (string | null)[][] } | { code: string; message: string; detail?: string | undefined };
 const raw = { getTypeParser: () => (v: string) => v };
-async function ask(c: pg.Client, sql: string, values?: string[]): Promise<Answer> {
+async function ask(c: pg.Client, sql: string, values?: string[], name?: string): Promise<Answer> {
   try {
-    const r = await c.query({ text: sql, ...(values === undefined ? {} : { values }), rowMode: "array", types: raw } as pg.QueryConfig);
+    const r = await c.query({ text: sql, ...(values === undefined ? {} : { values }), ...(name === undefined ? {} : { name }), rowMode: "array", types: raw } as pg.QueryConfig);
     return { names: r.fields.map((f) => f.name), oids: r.fields.map((f) => f.dataTypeID), rows: r.rows as (string | null)[][] };
   } catch (e) {
     const d = e as pg.DatabaseError;
@@ -472,8 +472,11 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       { name: "SET SESSION AUTHORIZATION to another", sql: "SET SESSION AUTHORIZATION postgres" },
       { name: "SET ROLE to itself", sql: `SET ROLE ${ROLE_LOGIN}` },
       // set_config('role', 'none') is Postgres's permitted RESET ROLE to the login role; in Mason's catalog it was a way to
-      // the superuser inside one statement (the review of #35), so a role's session is refused it: a decided difference
-      { name: "set_config of the role, decided", sql: "SELECT set_config('role', 'none', false) AS a, (SELECT count(*) FROM information_schema.tables WHERE table_name = 'products') AS b", decided: "42501" },
+      // the superuser inside one statement (the review of #35). Beside another column it never reaches the catalog now:
+      // refused by name (set-config-forms), a decided difference; alone it is the session's SET ROLE NONE, a no-op
+      { name: "set_config of the role, decided", sql: "SELECT set_config('role', 'none', false) AS a, (SELECT count(*) FROM information_schema.tables WHERE table_name = 'products') AS b", decided: "0A000" },
+      { name: "set_config of the role alone", sql: "SELECT set_config('role', 'none', false)" },
+      { name: "after set_config of the role", sql: "SELECT current_setting('role'), count(*) FROM information_schema.tables WHERE table_name = 'products'" },
     ].filter((q) => ONLY === null || ONLY.test(`role case: ${q.name}`));
     if (cases.length === 0) return;
     psql(dbUrl, `CREATE ROLE ${ROLE_LOGIN} LOGIN PASSWORD 'x'; GRANT CONNECT ON DATABASE ${tag} TO ${ROLE_LOGIN}; GRANT USAGE ON SCHEMA public TO ${ROLE_LOGIN}; ` +
@@ -506,16 +509,28 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
    * moves what every later one reads — each held equal, a refusal by SQLSTATE and message. `current_setting` answers the
    * session's value in the catalog and beside a copied table (a WHERE, a CTE, a parameter), and RESET, RESET ALL and
    * DISCARD ALL restore the startup's values (its application_name and `options`; TimeZone is the startup's UTC on both,
-   * so a RESET never meets the server's own zone).
+   * so a RESET never meets the server's own zone; work_mem and search_path are other than Postgres's defaults, so a
+   * restore of them is told from a reset to the default). A `named` case is a prepared statement of that name, Parsed
+   * at its first case and Bound and Executed again at each later one: read after later SETs. `set_config` alone is the
+   * session's SET; a view reads the settings of the session reading it.
    */
   async function settingCases(): Promise<void> {
     const read = "SELECT current_setting('TimeZone') AS tz, current_setting('search_path') AS path, current_setting('work_mem') AS mem, current_setting('application_name') AS app";
-    const cases: Array<{ name: string; sql: string; values?: string[] }> = [
+    const besideNamed = "SELECT current_setting('TimeZone') AS tz, current_setting($1) AS v FROM public.one";
+    const catalogNamed = "SELECT current_setting('TimeZone') AS tz, current_setting($1, true) AS v";
+    const cases: Array<{ name: string; sql: string; values?: string[]; named?: string }> = [
       { name: "before any SET", sql: read },
+      { name: "a named statement beside a table, before any SET", sql: besideNamed, values: ["work_mem"], named: "settings_beside" },
+      { name: "a named statement of the catalog, before any SET", sql: catalogNamed, values: ["search_path"], named: "settings_catalog" },
+      { name: "strict on NULL, in the catalog", sql: "SELECT current_setting(NULL), current_setting(NULL, true), current_setting('TimeZone', NULL)" },
+      { name: "strict on NULL, beside a table", sql: "SELECT current_setting(NULL), current_setting(NULL, true), current_setting('TimeZone', NULL) FROM public.one" },
       { name: "SET TimeZone", sql: "SET TimeZone = 'Europe/Berlin'" },
       { name: "SET search_path", sql: "SET search_path = sales, public" },
       { name: "SET work_mem", sql: "SET work_mem = '64MB'" },
       { name: "after the SETs, in the catalog", sql: read },
+      { name: "the named statement beside a table, after the SETs", sql: besideNamed, values: ["work_mem"], named: "settings_beside" },
+      { name: "the named statement of the catalog, after the SETs", sql: catalogNamed, values: ["search_path"], named: "settings_catalog" },
+      { name: "a view of the settings, after the SETs", sql: "SELECT id, tz, app FROM public.settings_seen ORDER BY id" },
       { name: "after the SETs, beside a table", sql: `${read}, count(*) AS n FROM public.orders` },
       { name: "after the SETs, any case and missing_ok", sql: "SELECT current_setting('TIMEZONE'), current_setting('Search_Path', true), current_setting('work_mem', false), current_setting('DateStyle'), current_setting('IntervalStyle') FROM public.one" },
       { name: "qualified, in the catalog", sql: "SELECT pg_catalog.current_setting('TimeZone'), pg_catalog.current_setting('work_mem', true)" },
@@ -538,6 +553,11 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       { name: "a name nobody knows, in the catalog", sql: "SELECT current_setting('no_such_setting')" },
       { name: "RESET TimeZone", sql: "RESET TimeZone" },
       { name: "after RESET TimeZone", sql: read },
+      { name: "SET work_mem TO DEFAULT", sql: "SET work_mem TO DEFAULT" },
+      { name: "after SET work_mem TO DEFAULT", sql: read },
+      { name: "SET search_path TO DEFAULT", sql: "SET search_path TO DEFAULT" },
+      { name: "after SET search_path TO DEFAULT", sql: `${read} FROM public.one` },
+      { name: "SET search_path again", sql: "SET search_path = sales, public" },
       { name: "SET application_name", sql: "SET application_name = 'after-set'" },
       { name: "SHOW application_name, set", sql: "SHOW application_name" },
       { name: "RESET ALL", sql: "RESET ALL" },
@@ -553,15 +573,27 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       { name: "SET application_name again", sql: "SET application_name = 'pooled'" },
       { name: "DISCARD ALL", sql: "DISCARD ALL" },
       { name: "after DISCARD ALL", sql: "SELECT current_setting('application_name'), current_setting('TimeZone') FROM public.one" },
+      { name: "set_config alone", sql: "SELECT set_config('work_mem', '128MB', false)" },
+      { name: "after set_config", sql: `${read}, current_setting('work_mem') AS beside FROM public.one` },
+      { name: "set_config of TimeZone, in its own spelling", sql: "SELECT set_config('TimeZone', 'europe/berlin', false) AS tz" },
+      { name: "set_config of application_name", sql: "SELECT pg_catalog.set_config('application_name', 'by-set-config', false)" },
+      { name: "set_config of a placeholder", sql: "SELECT set_config('myapp.cfg', 'v', false)" },
+      { name: "after the set_configs", sql: `${read}, current_setting('myapp.cfg') AS cfg FROM public.one` },
+      { name: "a view of the settings, after the set_configs", sql: "SELECT id, tz, app FROM public.settings_seen ORDER BY id" },
+      { name: "set_config of a name nobody knows", sql: "SELECT set_config('no_such_setting', 'x', false)" },
+      { name: "the named statements, after set_config", sql: besideNamed, values: ["application_name"], named: "settings_beside" },
+      { name: "RESET ALL after set_config", sql: "RESET ALL" },
+      { name: "after RESET ALL, the startup's options", sql: `${read}, current_setting('myapp.cfg') AS cfg FROM public.one` },
+      { name: "the named statement of the catalog, after RESET ALL", sql: catalogNamed, values: ["work_mem"], named: "settings_catalog" },
     ].filter((q) => ONLY === null || ONLY.test(`setting case: ${q.name}`));
     if (cases.length === 0) return;
-    const startup = { application_name: "duck-oracle-settings", options: "-c TimeZone=UTC" };
+    const startup = { application_name: "duck-oracle-settings", options: "-c TimeZone=UTC -c work_mem=32MB -c search_path=startup_path,public" };
     const sourceS = new pg.Client({ connectionString: dbUrl, ...startup });
     const masonS = new pg.Client({ host: "127.0.0.1", port: server!.port, database: tag, user: "oracle", password: "x", ...startup });
     for (const c of [sourceS, masonS]) { await c.connect(); clients.push(c); }
     let refusedAlike = 0;
     for (const q of cases) {
-      const [want, got] = [await ask(sourceS, q.sql, q.values), await ask(masonS, q.sql, q.values)];
+      const [want, got] = [await ask(sourceS, q.sql, q.values, q.named), await ask(masonS, q.sql, q.values, q.named)];
       const v = verdict(want, got, ordered(q.sql));
       if (v !== null) { differences.push({ phase: "settings", group: "setting case", kind: v.kind, name: `setting case: ${q.name}`, detail: v.detail, sql: q.sql }); continue; }
       if ("code" in want && "code" in got) {

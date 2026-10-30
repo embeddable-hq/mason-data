@@ -157,6 +157,8 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   "CREATE VIEW public.happy AS SELECT id, m, t FROM moods WHERE m >= 'ok'; " +
   "CREATE VIEW other.typed_summary (flag, n, total) AS SELECT b, count(*), sum(i4) FROM typed GROUP BY b; " +
   "CREATE VIEW public.happy_count AS SELECT count(*) AS n, max(m) AS top FROM happy;" +
+  // a view reading the session's settings (the setting cases of duck-oracle.itest.ts read it after a SET)
+  "CREATE VIEW public.settings_seen AS SELECT id, current_setting('TimeZone'::text) AS tz, pg_catalog.current_setting('application_name'::text, true) AS app FROM moods;" +
   // A SELECT LIST COMPUTED AFTER ITS LIMIT (the Metabase test of #517: a table's preview, its JSON's fields, a join):
   // row 2000's 'x' is no integer, and late.k orders the rows backwards with no index
   "CREATE TABLE public.late (id int PRIMARY KEY, j jsonb, k int, c int); " +

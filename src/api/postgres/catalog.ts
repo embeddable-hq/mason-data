@@ -31,6 +31,7 @@
  * The instance's TimeZone is UTC (the API treats every time as UTC, §4.8); its search_path is Postgres's default, so
  * `public."orders"` and `orders` both resolve, as a tool expects.
  */
+import { randomBytes } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { runnable } from "../../lib/runnable.ts";
@@ -308,8 +309,11 @@ export function unwrapRole(frames: ReadonlyArray<{ type: string; frame: Buffer }
   return { frames: inner.slice(0, end), setRoleRefused: null };
 }
 
-/** the placeholder parameter a session's settings ride in, for one request of its (`asSession`) */
-export const SESSION_SETTINGS = "mason.session";
+/** the placeholder parameter a session's settings ride in, for one request of its (`asSession`): named anew by each
+ *  process, so no name a tool writes is it — `current_setting('mason.session')` answered the carrier's JSON where
+ *  Postgres (and `SHOW`, and the same beside a copied table) answers 42704 (a review finding of #46). A placeholder
+ *  stays defined once SET, so the name, not a RESET, is what keeps it out of reach. */
+export const SESSION_SETTINGS = `mason_${randomBytes(8).toString("hex")}.session`;
 
 /**
  * THE CATALOG'S `current_setting(name[, missing_ok])` IS THE SESSION'S (GitHub issue 40: after `SET TimeZone` it answered
@@ -330,29 +334,31 @@ export function currentSettingSql(): string[] {
 }
 
 /**
- * A SESSION'S CATALOG REQUEST WITH ITS SETTINGS: `SET mason.session = '<its settings as JSON>'` before the request's
+ * A SESSION'S CATALOG REQUEST WITH ITS SETTINGS: `SET <SESSION_SETTINGS> = '<its settings as JSON>'` before the request's
  * frames and `RESET` after, in ONE message, as `asRole` wraps a role (around it, when the session has one) — the catalog
  * runs one request at a time and a message whole, so no other session's request reads these settings, and none of this
  * session's runs without them. A Sync is added before the RESET where the request has none (ignore_till_sync: a
- * setting left set would be every session's). `settings` are the listener's `sessionSetting`, never read here.
+ * setting left set would be every session's). `settings` are the listener's `sessionSetting`, never read here. The
+ * catalog's search_path is pinned in the same SET (`public, pg_catalog`): the overrides of `current_setting` and
+ * `version()` win only while public comes first, and the request must never depend on what the catalog was left with.
  */
 export function asSession(message: Uint8Array, settings: ReadonlyMap<string, string>): Uint8Array {
   const own = Buffer.from(message.buffer, message.byteOffset, message.byteLength);
   const frames = splitFrames(own);
   const synced = frames.some((f) => f.type === "S") || frames.at(-1)?.type === "Q";
   const json = JSON.stringify(Object.fromEntries(settings));
-  return Buffer.concat([frame("Q", cstr(`SET ${SESSION_SETTINGS} = ${quoteLiteral(json)}`)), own, ...(synced ? [] : [frame("S")]), frame("Q", cstr(`RESET ${SESSION_SETTINGS}`))]);
+  return Buffer.concat([frame("Q", cstr(`SET search_path = public, pg_catalog; SET ${SESSION_SETTINGS} = ${quoteLiteral(json)}`)), own, ...(synced ? [] : [frame("S")]), frame("Q", cstr(`RESET ${SESSION_SETTINGS}`))]);
 }
 
-/** The reply to an `asSession` message, less the SET's and the RESET's own replies (a CommandComplete and a
- *  ReadyForQuery each). A SET the catalog refused is a Mason bug, said. */
+/** The reply to an `asSession` message, less the SETs' and the RESET's own replies (two CommandCompletes and a
+ *  ReadyForQuery first, a CommandComplete and a ReadyForQuery last). A SET the catalog refused is a Mason bug, said. */
 export function unwrapSession(frames: ReadonlyArray<{ type: string; frame: Buffer }>): Array<{ type: string; frame: Buffer }> {
-  const ok = frames[0]?.type === "C" && frames[1]?.type === "Z";
+  const ok = frames[0]?.type === "C" && frames[1]?.type === "C" && frames[2]?.type === "Z";
   const n = frames.length;
-  if (!ok || n < 4 || frames[n - 1]!.type !== "Z" || frames[n - 2]!.type !== "C") {
+  if (!ok || n < 5 || frames[n - 1]!.type !== "Z" || frames[n - 2]!.type !== "C") {
     throw new Error(`the catalog Postgres did not take the session's settings around a request (${frames.map((f) => f.type).join(", ")}): report it`);
   }
-  return frames.slice(2, n - 2);
+  return frames.slice(3, n - 2);
 }
 
 export interface PgCatalogOptions {

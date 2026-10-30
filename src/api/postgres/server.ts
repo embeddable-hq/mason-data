@@ -384,6 +384,7 @@ function statementIdOf(c: AbortController): number {
 
 /** the type byte of a RowDescription frame */
 const ROW_DESCRIPTION = 0x54;
+const DATA_ROW = 0x44;
 /** the first byte of a TLS handshake record (a ClientHello): never a startup packet's, whose length's high byte is 0
  *  under MAX_STARTUP_LENGTH, and never SSLRequest's (length 8) */
 const TLS_HANDSHAKE = 0x16;
@@ -766,7 +767,7 @@ class Session {
       if (refused !== null) {
         this.refuse(refused, m.type === "Execute" ? this.sqlOf(m) : m.sql);
         if (this.tx === "open") this.tx = "failed";
-        if (m.type === "Query") this.send(readyForQuery(this.txStatus()));
+        if (m.type === "Query") this.send(...this.ready());
         else this.skipToSync = true;
         return;
       }
@@ -1030,7 +1031,8 @@ class Session {
    * WHAT THE CLIENT IS TOLD OF ITS REPORTED PARAMETERS (GUC_REPORT): a ParameterStatus for each whose value is not the one
    * last reported — all of them at the startup, those a SET, a RESET, RESET ALL or DISCARD ALL moved after it — as
    * Postgres reports a changed one (`ReportChangedGUCOptions`), each value `sessionSetting`'s through `reportedParameters`.
-   * A driver that caches them (pgjdbc, npgsql) was left with a SET's value after RESET ALL (GitHub issue 41).
+   * A driver that caches them (pgjdbc, npgsql) was left with a SET's value after RESET ALL (GitHub issue 41). After the
+   * startup, `ready` alone calls it: what a request moved is told once, before its ReadyForQuery.
    */
   private reportChanges(): Buffer[] {
     const out: Buffer[] = [];
@@ -1040,6 +1042,16 @@ class Session {
       out.push(parameterStatus(name, value));
     }
     return out;
+  }
+
+  /**
+   * A REQUEST'S END: the reported parameters it changed, then its ReadyForQuery — where Postgres 14+ reports them
+   * (`ReportChangedGUCOptions` in PostgresMain, just before ReadyForQuery): after the statement's CommandComplete, and
+   * ONCE per parameter per Query string or Sync, its last value (`SET application_name = 'a'; SET application_name =
+   * 'b'` reports 'b' alone). A request that failed half-way reports what its earlier statements moved, as Postgres does.
+   */
+  private ready(): Buffer[] {
+    return [...this.reportChanges(), readyForQuery(this.txStatus())];
   }
 
   /** The catalog Postgres validates a parameter this server has no opinion on; its own error is the answer. Inside a
@@ -1081,10 +1093,10 @@ class Session {
       const e = asPgError(err, sql);
       this.refuse(e, sql);
       if (this.tx === "open") this.tx = "failed";
-      this.send(readyForQuery(this.txStatus()));
+      this.send(...this.ready());
       return;
     }
-    if (stmts.length === 0) { this.send(emptyQueryResponse(), readyForQuery(this.txStatus())); return; }
+    if (stmts.length === 0) { this.send(emptyQueryResponse(), ...this.ready()); return; }
     for (const raw of stmts) {
       const text = statementText(sql, raw);
       this.asked = { sql: text, method: "QUERY", startedAt: Date.now(), sentAt: this.sentBytes };
@@ -1098,7 +1110,7 @@ class Session {
         break;
       }
     }
-    this.send(readyForQuery(this.txStatus()));
+    this.send(...this.ready());
   }
 
   /**
@@ -1188,6 +1200,7 @@ class Session {
       }
       case "catalog": return this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user));
       case "set": return this.setStatement(t);
+      case "set_config": return this.setConfigStatement(t);
       case "show": return this.showStatement(t.name);
       case "transaction": return [...this.transaction(t.tag)];
       case "discard": return this.discard(t.target);
@@ -1529,7 +1542,7 @@ class Session {
   }
 
   private async setStatement(t: Extract<Translation, { kind: "set" }>): Promise<Buffer[]> {
-    if (t.name === "all") { await this.resetAll(); return [...this.reportChanges(), commandComplete("RESET")]; }
+    if (t.name === "all") { await this.resetAll(); return [commandComplete("RESET")]; }
     const tag = t.value === null ? "RESET" : "SET";
     // SET ROLE and SET SESSION AUTHORIZATION: a session is its user and becomes no one else — RESET, NONE and its own
     // name are Postgres's no-ops, any other name Postgres's refusal. Never the catalog's to validate: that is one
@@ -1544,7 +1557,21 @@ class Session {
     if (await this.isPlaceholder(t.name)) placeholderName(t.name);
     else if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
     if (t.value === null) await this.resetParameter(t.name); else this.setParameter(t.name, t.value);
-    return [...this.reportChanges(), commandComplete(tag)];
+    return [commandComplete(tag)];
+  }
+
+  /** `SELECT set_config(name, value, false)` alone (translate.ts setConfig): the session's SET, answered as Postgres
+   *  answers the function — one text row, the value as `SHOW` then answers it (its own DataRow: one reader), the column
+   *  named `set_config` or as aliased (an Execute drops the RowDescription: a portal's is its Describe's). */
+  private async setConfigStatement(t: Extract<Translation, { kind: "set_config" }>): Promise<Buffer[]> {
+    await this.setStatement({ kind: "set", name: t.name, value: t.value, local: false });
+    const row = (await this.showStatement(t.name)).find((f) => f[0] === DATA_ROW);
+    if (row === undefined) throw new PgError({ code: "XX000", message: `SHOW ${t.name} answered no row after set_config (Mason bug: report it)` }, 500);
+    return [this.setConfigDescription(t, 0), row, commandComplete("SELECT 1")];
+  }
+
+  private setConfigDescription(t: Extract<Translation, { kind: "set_config" }>, format: 0 | 1): Buffer {
+    return rowDescription([fieldOf(t.column, "text", format)]);
   }
 
   /** DISCARD ALL is Postgres's CLOSE ALL, DEALLOCATE ALL and RESET ALL (its ParameterStatus with it) in one; PLANS,
@@ -1554,7 +1581,7 @@ class Session {
     this.statements.clear();
     this.dropPortals();
     await this.resetAll();
-    return [...this.reportChanges(), commandComplete("DISCARD ALL")];
+    return [commandComplete("DISCARD ALL")];
   }
 
   private decidesHere(name: string): boolean {
@@ -1654,7 +1681,7 @@ class Session {
       this.skipToSync = false;
       // an implicit transaction ends at Sync; an open one keeps its "now"
       if (this.tx === "none") this.txNow = null;
-      this.send(readyForQuery(this.txStatus()));
+      this.send(...this.ready());
       return;
     }
     if (this.skipToSync || m.type === "Flush") return;
@@ -1792,6 +1819,7 @@ class Session {
       if (statement.catalogName !== null) return this.catalogRun(frame("D", Buffer.from("S"), cstr(statement.catalogName)));
       const shape = statement.shape;
       if (shape?.kind === "show") return [parameterDescription([]), ...await this.showDescription(shape.name)];
+      if (shape?.kind === "set_config") return [parameterDescription([]), this.setConfigDescription(shape, 0)];
       if (statement.explain !== undefined) {
         const e = statement.explain;
         return [parameterDescription(e.plan.params.map((o, i) => { const given = statement.paramOids[i] ?? 0; return given !== 0 ? given : o; })), rowDescription([explainField(e.options, 0)])];
@@ -1808,6 +1836,7 @@ class Session {
     if (portal.catalog !== undefined) return [portal.catalog.description];
     const shape = portal.statement.shape;
     if (shape?.kind === "show") return this.showDescription(shape.name);
+    if (shape?.kind === "set_config") return [this.setConfigDescription(shape, formatAt(portal.resultFormats, 0))];
     if (portal.statement.explain !== undefined) return [rowDescription([explainField(portal.statement.explain.options, formatAt(portal.resultFormats, 0))])];
     const d = portal.statement.duck;
     if (d !== undefined) return [d.fields !== null && d.fields.length ? rowDescription(d.fields.map((c, i) => ({ name: c.name, typeOid: c.oid, typeSize: c.size, typeModifier: c.typmod, format: formatAt(portal.resultFormats, i) }))) : noData()];
@@ -1836,6 +1865,7 @@ class Session {
       case "empty": return [emptyQueryResponse()];
       case "catalog": throw new PgError({ code: "XX000", message: "a catalog statement bound as a query (Mason bug: report it)" }, 500);
       case "set": return this.setStatement(t);
+      case "set_config": return (await this.setConfigStatement(t)).filter((f) => f[0] !== ROW_DESCRIPTION);
       // as Postgres: the extended protocol's Execute sends the rows and the tag, the RowDescription is the Describe's
       case "show": return (await this.showStatement(t.name)).filter((f) => f[0] !== ROW_DESCRIPTION);
       case "transaction": return this.transaction(t.tag);

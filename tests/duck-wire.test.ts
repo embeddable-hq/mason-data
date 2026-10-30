@@ -2278,6 +2278,64 @@ test("two sessions' current_setting read their own settings however their reques
   } finally { await a.end(); await b.end(); }
 });
 
+// SET_CONFIG IS A SET, AND A SET IS THE SESSION'S (a review finding of #46): forwarded, it ran on the catalog's one
+// connection as its superuser and stayed there for every session — A's `set_config('search_path', 'zzz', false)` moved
+// the catalog off the overrides (B's `version()` answered the engine's own string, B's current_setting('TimeZone') the
+// catalog's UTC after a SET) and A's placeholder was B's. Now alone in a SELECT it is the session's SET, answered as
+// the function's row, and any other form is refused by its registry entry; the carrier of a session's settings in the
+// catalog is no name a tool writes (`current_setting('mason.session')` answered the carrier's JSON)
+test("set_config alone is the session's SET, answered as Postgres answers it; another session never sees it; its other forms are refused by name", async () => {
+  const [a, b] = [await client(), await client()];
+  const one = async (c: pg.Client, sql: string): Promise<unknown> => (await answer(c, sql)).rows[0]?.[0];
+  const code = async (c: pg.Client, sql: string, values?: unknown[]): Promise<string> => {
+    try { await c.query(sql, values); return "answered"; } catch (e) { return `${(e as pg.DatabaseError).code} ${(e as pg.DatabaseError).message}`; }
+  };
+  try {
+    assert.deepEqual(await answer(a, "SELECT set_config('search_path', 'zzz', false)"), { fields: [["set_config", 25]], rows: [["zzz"]] });
+    assert.deepEqual([await one(a, "SHOW search_path"), await one(a, "SELECT current_setting('search_path')"), await one(a, "SELECT current_setting('search_path') FROM public.orders LIMIT 1")],
+      ["zzz", "zzz", "zzz"], "A's own value, however A asks");
+    // B is untouched: the catalog's overrides still win, B's own SET is B's
+    assert.match(String(await one(b, "SELECT version()")), /^PostgreSQL 18\.6 \(mason-data /);
+    await b.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual((await answer(b, "SELECT current_setting('TimeZone'), current_setting('search_path')")).rows, [["Asia/Tokyo", '"$user", public']]);
+    // a placeholder: A's alone; the value answered as SHOW answers it (the time zone's own spelling), aliased
+    assert.deepEqual(await answer(a, "SELECT set_config('myapp.leak', 'from-a', false) AS v"), { fields: [["v", 25]], rows: [["from-a"]] });
+    assert.equal(await one(a, "SELECT current_setting('myapp.leak')"), "from-a");
+    assert.equal(await one(b, "SELECT current_setting('myapp.leak', true)"), null);
+    assert.equal(await one(a, "SELECT pg_catalog.set_config('TimeZone', 'europe/berlin', false)"), "Europe/Berlin");
+    assert.equal(await one(a, "SHOW TimeZone"), "Europe/Berlin");
+    // the extended protocol, a named statement: Describe and Execute answer alike
+    const r = await a.query({ name: "configure", text: "SELECT set_config('work_mem', '64MB', false)", rowMode: "array", types: raw } as pg.QueryConfig);
+    assert.deepEqual([r.fields.map((f) => [f.name, f.dataTypeID]), r.rows], [[["set_config", 25]], [["64MB"]]]);
+    assert.equal(await one(a, "SHOW work_mem"), "64MB");
+    // a name Postgres does not know is its 42704, as SET's; a value it refuses is its refusal
+    assert.equal(await code(a, "SELECT set_config('no_such_setting', 'x', false)"), '42704 unrecognized configuration parameter "no_such_setting"');
+    assert.match(await code(a, "SELECT set_config('work_mem', 'lots', false)"), /^22023 /);
+    // every other form is refused by name, and changes nothing
+    for (const sql of ["SELECT set_config('search_path', 'yyy', false), 1", "SELECT set_config('search_path', 'yyy', true)", "SELECT set_config('search_path', NULL, false)",
+      "SELECT set_config('search_path', 'y' || 'yy', false)", "SELECT x FROM (SELECT set_config('search_path', 'yyy', false) AS x) AS s",
+      "SELECT set_config('search_path', 'yyy', false) FROM public.orders LIMIT 1", "SELECT set_config('search_path', 'yyy', false) FROM pg_catalog.pg_class LIMIT 1",
+      "EXPLAIN ANALYZE SELECT set_config('search_path', 'yyy', false)", "SELECT 1 WHERE set_config('search_path', 'yyy', false) IS NOT NULL"]) {
+      assert.match(await code(b, sql), /^0A000 set_config\(\) is answered by Mason only alone .*Mason gap set-config-forms/, sql);
+    }
+    assert.match(await code(b, "SELECT set_config($1, 'yyy', false)", ["search_path"]), /^0A000 .*Mason gap set-config-forms/);
+    assert.equal(await one(b, "SHOW search_path"), '"$user", public');
+    // the carrier of the session's settings in the catalog is none of a tool's names: Postgres's 42704 however asked
+    for (const sql of ["SELECT current_setting('mason.session')", "SELECT current_setting('mason.session') FROM public.orders LIMIT 1", "SHOW mason.session"]) {
+      assert.equal(await code(a, sql), '42704 unrecognized configuration parameter "mason.session"', sql);
+    }
+    assert.equal(await one(a, "SELECT current_setting('mason.session', true)"), null);
+  } finally { await a.end(); await b.end(); }
+  // the ParameterStatus of a reported parameter set_config moved: after its row and its tag, before the ReadyForQuery
+  const s = await rawSession();
+  try {
+    s.socket.write(wire.query("SELECT set_config('application_name', 'via-config', false)"));
+    const ms = await s.untilReady();
+    assert.deepEqual(ms.map((m) => m.type), ["RowDescription", "DataRow", "CommandComplete", "ParameterStatus", "ReadyForQuery"]);
+    assert.deepEqual(ms.find((m) => m.type === "ParameterStatus"), { type: "ParameterStatus", name: "application_name", value: "via-config" });
+  } finally { s.end(); }
+});
+
 // RESET ALL IS POSTGRES'S (GitHub issue 41): every parameter back to the session's start — the startup packet's
 // `application_name` and `options` included, which RESET ALL once kept (application_name) or dropped (`-c`) — and a
 // ParameterStatus for each REPORTED parameter that changed, as Postgres reports one (`ReportChangedGUCOptions`: a driver
@@ -2301,8 +2359,17 @@ test("RESET ALL, RESET <name> and DISCARD ALL restore the startup's values and r
     assert.deepEqual(statuses(set), [["TimeZone", "Europe/Berlin"], ["application_name", "after-set"], ["search_path", "sales, public"]], "a SET reports what it changed (IntervalStyle did not)");
     const reset = await run("RESET ALL");
     assert.deepEqual(statuses(reset), [["TimeZone", "UTC"], ["application_name", "tool-at-startup"], ["search_path", "startup_path"]]);
-    // each ParameterStatus comes before the RESET's CommandComplete, in Postgres's spelling
-    assert.deepEqual(reset.map((m) => m.type), ["ParameterStatus", "ParameterStatus", "ParameterStatus", "CommandComplete", "ReadyForQuery"]);
+    // where Postgres 14+ sends them (ReportChangedGUCOptions, just before ReadyForQuery): after the RESET's
+    // CommandComplete, in Postgres's spelling
+    assert.deepEqual(reset.map((m) => m.type), ["CommandComplete", "ParameterStatus", "ParameterStatus", "ParameterStatus", "ReadyForQuery"]);
+    // ONCE per parameter per request, its last value; a value moved and moved back within one request is not told;
+    // a request that fails half-way tells what its earlier statements moved
+    assert.deepEqual(statuses(await run("SET application_name = 'a'; SET application_name = 'b'; SET TimeZone = 'Asia/Tokyo'; SET TimeZone = 'UTC'")), [["application_name", "b"]]);
+    s.socket.write(wire.query("SET application_name = 'before-error'; SELECT 1 / 0"));
+    const failed = await s.untilReady();
+    assert.deepEqual(failed.map((m) => m.type), ["CommandComplete", "ErrorResponse", "ParameterStatus", "ReadyForQuery"]);
+    assert.deepEqual(statuses(failed), [["application_name", "before-error"]]);
+    assert.deepEqual(statuses(await run("RESET ALL")), [["application_name", "tool-at-startup"]]);
     assert.deepEqual(await shown("SHOW application_name; SHOW search_path; SHOW TimeZone; SHOW work_mem; SELECT current_setting('work_mem'), current_setting('application_name')"),
       ["tool-at-startup", "startup_path", "UTC", "32MB", "32MB", "tool-at-startup"]);
     // a placeholder the session SET stays defined, '' (Postgres's default of one), however it is asked

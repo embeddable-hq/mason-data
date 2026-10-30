@@ -104,11 +104,12 @@ roles:
   than Postgres, where a view's owner's grants apply. No row filter yet (the gap `roles` in docs/SQL-SUPPORT.md).
 - **A session is its user and becomes no one else**: `SET ROLE` and `SET SESSION AUTHORIZATION` to its own name,
   `NONE` or `RESET` are no-ops, any other name is Postgres's refusal (`42501 permission denied to set role "…"`);
-  `session_user` is the session's user and `current_user` its role. **`set_config` is refused to a role's session**
-  (42501, `permission denied for function set_config`), where Postgres lets a role `set_config('role', 'none')` back
-  to its login: the catalog is one superuser connection with `SET ROLE` on top, and inside one statement that call
-  was a reset to the superuser (the hidden columns' NAMES, never rows, were listed by the rest of the statement). A
-  session with no role, and a token, keep `set_config`.
+  `session_user` is the session's user and `current_user` its role. **`set_config` never reaches the embedded
+  Postgres**: `SELECT set_config('name', 'value', false)` on its own is the session's `SET` (so `set_config('role',
+  'none', false)` is `SET ROLE NONE`'s no-op), and any other form is refused (below). Inside the embedded Postgres it
+  is also revoked while roles exist: that is one superuser connection with `SET ROLE` on top, and inside one statement
+  the call was a reset to the superuser (the hidden columns' NAMES, never rows, were listed by the rest of the
+  statement).
 - **Every refusal is a row of the request log with the user's role** (`role` in `_mason.requests`).
 
 `mason start` listens on 5433 when it is free on every address (127.0.0.1, 0.0.0.0, `::` and `::1`: a port another
@@ -283,8 +284,14 @@ carries the session's settings in and takes them out again, and a statement over
 engine's own). A name the session does not hold is the embedded Postgres's own value (`block_size`), and a name nobody
 holds is Postgres's 42704, or NULL with `missing_ok`. `RESET <name>`, `RESET ALL` and `DISCARD ALL` restore the value
 the session started with — its startup packet's `application_name` and `options` (`-c name=value`) included — and the
-session is told a ParameterStatus for each reported parameter whose value changed (a SET, a RESET or RESET ALL that
-moves nothing reports nothing), as Postgres tells a driver that caches them (pgjdbc, npgsql).
+session is told a ParameterStatus for each reported parameter whose value changed, as Postgres tells a driver that
+caches them (pgjdbc, npgsql): once per request and parameter, its last value, after the statements' CommandComplete
+and before the ReadyForQuery (a SET, a RESET or RESET ALL that moves nothing reports nothing).
+`SELECT set_config('name', 'value', false)` on its own is the session's `SET`, answered with the value as `SHOW` then
+answers it. Forwarded to the embedded Postgres, which every session shares, it stayed there for every session. Any
+other form — beside another column or a table, with an expression, a parameter or NULL, with `is_local` true, under
+EXPLAIN — is refused (`set-config-forms`). Not yet Postgres's: a `SET LOCAL`, and a SET inside a transaction that is
+rolled back, change the session's value for good (GitHub issue 47).
 
 `BEGIN`, `COMMIT` and `ROLLBACK` are accepted and write nothing — there is nothing to write. A failed statement inside
 a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it.

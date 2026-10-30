@@ -55,7 +55,10 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   `current_setting` — in the catalog, where every request carries the session's settings and RESETs them after
   (`asSession`, catalog.ts; the catalog is one connection every session shares), and beside a copied table, where
   the rewrite reads the map the session's statement runs under (`settingRead`, `SETTINGS_VARIABLE`), never DuckDB's
-  own. RESET restores the startup's values (`startupVars`: its packet's `application_name` and `options`). The
+  own. RESET restores the startup's values (`startupVars`: its packet's `application_name` and `options`).
+  `set_config` is a SET, so the listener's (translate.ts `setConfig`: alone in a SELECT, else `set-config-forms`):
+  forwarded, it ran on the one shared catalog connection and stayed for every session. The changed parameters are
+  told once per request, before its ReadyForQuery (`ready`). The
   catalog's `current_setting` was a fourth reader answering its own values after a SET (issues 40, 41). DETECTOR:
   `tests/conventions.test.ts` (one reader; every catalog request carries the settings or is named), `tests/duck-wire.test.ts`
   and the oracle's setting cases.
