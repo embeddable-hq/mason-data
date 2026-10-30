@@ -335,13 +335,16 @@ of its own, and the statements of one Query, or of one batch of Executes up to i
 the rest of the batch a block, as on Postgres 18), a `SET` before an error or a `ROLLBACK` in them is undone, and a
 `BEGIN` among them takes in what ran before it. `DISCARD ALL` is refused in a block, explicit or implicit (25001). A
 placeholder (`myapp.x`) a transaction named stays defined, `''`, however it ended, as on Postgres. A prepared statement
-reads the settings in force when it runs, never the ones it was parsed under, but keeps the tables its Parse resolved:
-it does not resolve them again after a later `search_path`, reverted or not, where Postgres plans it again. There are no
-savepoints (`SAVEPOINT` is refused, above), so a block has one level to undo.
+reads the settings in force when it runs, never the ones it was parsed under, and an unqualified table in it is found
+under the `search_path` in force then, as on Postgres (a path that no longer finds it is 42P01, and the path restored
+finds it again). What it does not do is analyse the statement again: its columns and types stay those of its Parse.
+There are no savepoints (`SAVEPOINT` is refused, above), so a block has one level to undo.
 
 `BEGIN`, `COMMIT` and `ROLLBACK` are accepted and write nothing — there is nothing to write, and what they keep or undo
 is the session's settings. A failed statement inside
-a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it.
+a transaction puts it in the failed state (25P02 until `ROLLBACK`), as Postgres does, because drivers rely on it. A
+failed block accepts nothing but its end, in either protocol: a Query, a Parse, a Bind, an Execute of a portal bound
+before the failure, and a Describe of anything with a result are each 25P02, and a Close still closes.
 `CancelRequest` cancels the statement running on that session's backend.
 
 **What "now" is**: Postgres's, the start of the TRANSACTION. `now()`, `current_timestamp`, `current_date` and a

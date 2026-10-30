@@ -876,6 +876,10 @@ test("a transaction's end is one method, and every SET reaches the settings thro
   assert.deepEqual(callers(/\bthis\.resetParameter\(/g), ["applySetting"]);
   assert.deepEqual(callers(/\bthis\.resetAll\(/g), ["applySetting", "discard"]);
   assert.deepEqual(callers(/\bthis\.settingsTx\b/g), ["endTransaction", "settingsAtStart"], "what a transaction restores is read for no answer");
+  // a failed block is held at every entrance a statement has, by one check (a catalog statement's Bind and its rows went past the old one)
+  assert.deepEqual(callers(/\bthis\.heldToFailedBlock\(/g), ["bindMessage", "executeMessage", "parseMessage", "runSimple"], "an entrance a failed block does not hold");
+  assert.deepEqual(callers(/\bthis\.describedInFailedBlock\(/g), ["describeMessage"]);
+  assert.equal([...src.matchAll(/"25P02"/g)].length, 1, "25P02 said beside `aborted`");
 });
 
 /**

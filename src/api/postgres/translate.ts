@@ -67,6 +67,14 @@ function collect(n: unknown, kind: string, out: Node[] = []): Node[] {
 const INFORMATION_SCHEMA = "information_schema";
 const PG_CATALOG = "pg_catalog";
 
+/** Postgres's IsTransactionExitStmt: what a failed block still accepts. `ROLLBACK TO` and `PREPARE TRANSACTION` are among
+ *  them, each then refused here for being what it is, a savepoint or a prepared transaction, never for the block. */
+export function endsFailedBlock(stmt: Node): boolean {
+  if (kindOf(stmt) !== "TransactionStmt") return false;
+  const k = bodyOf<{ kind?: string }>(stmt).kind;
+  return k === "TRANS_STMT_COMMIT" || k === "TRANS_STMT_ROLLBACK" || k === "TRANS_STMT_ROLLBACK_TO" || k === "TRANS_STMT_PREPARE";
+}
+
 // ------------------------------------------------------------------ entry
 
 /** A statement other than a SELECT or an EXPLAIN (`duckTranslate` takes those): the session's, or refused by name. */

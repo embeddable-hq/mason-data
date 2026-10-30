@@ -77,7 +77,9 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
 - **A transaction is Postgres's**: `BEGIN` opens one (ReadyForQuery `T`), an error inside it aborts it (`E`, every
   statement until `ROLLBACK` is `25P02`, as a driver with autocommit off expects), `COMMIT` of an aborted one is a
   `ROLLBACK`. Nothing is ever written, so all a transaction holds is the session's settings — the states exist because
-  a driver reads them.
+  a driver reads them. **A failed block accepts nothing but its end on every message** (`heldToFailedBlock`, read before
+  a statement is classified or sent to the catalog: a catalog statement runs whole at its Bind, and its rows were once
+  answered past the check; `describedInFailedBlock` for a Describe, refused only where it has a result).
   **"Now" is the transaction's** (`txNow`: a simple Query's arrival or the first Bind since Sync, kept by `BEGIN`),
   read by the plan as a parameter, so two statements in one transaction see one instant.
 - **Where the listener is comes from ONE reader** (`listener.ts` `pgListenerAddress`: `MASON_PG_PORT`, `MASON_PG_HOST`),

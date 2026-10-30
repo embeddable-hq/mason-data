@@ -3,11 +3,18 @@
  * its steps sent IN ORDER to Postgres and to Mason, and every step's whole reply must be equal — the warnings, the
  * ParameterStatus and where it falls, the tags, the rows, the refusals and the ReadyForQuery's status, none of which
  * `ask` sees. A step is a simple Query (its string), a batch of statements up to one Sync (`pipeline`: Postgres ends a
- * transaction differently there), or a named statement Parsed and later run, the reverted setting in between.
+ * transaction differently there), a named statement Parsed and later run, the reverted setting in between, or one
+ * message of the extended protocol, which is what a failed block holds to its end.
  */
 import type pg from "pg";
 
-export type Step = string | { pipeline: string[] } | { prepare: string; sql: string } | { run: string };
+export type Step = string | { pipeline: string[] } | { prepare: string; sql: string } | { run: string }
+  /** a Parse, Bind and Execute of a row count of one, then `then`'s statements, in one batch */
+  | { suspend: string; then: string[] }
+  /** a named statement bound to a named portal, and that portal's own messages, each to its own Sync */
+  | { bind: string; portal: string } | { execute: string } | { describePortal: string }
+  /** a Describe or a Close of a named statement */
+  | { describe: string } | { close: string };
 export interface SettingScript { name: string; steps: Step[] }
 
 const APP = "SHOW application_name";
@@ -17,6 +24,9 @@ const MEM = "SHOW work_mem";
 const ALL = "SELECT current_setting('application_name') AS app, current_setting('TimeZone') AS tz, current_setting('work_mem') AS mem, current_setting('search_path') AS path";
 const BESIDE = `${ALL} FROM public.one`;
 /** read after a revert: the zone a timestamptz is written in, truncated in and read by name, beside a table */
+const ORDERS = "SELECT id FROM public.orders ORDER BY id";
+/** a block with a value to revert, failed */
+const FAILED: Step[] = ["BEGIN", "SET application_name = 'a'", "SELECT 1/0"];
 const ZONED = "SELECT created_at, date_trunc('day', created_at) AS day, current_setting('TimeZone') AS tz, current_setting('application_name') AS app FROM public.orders ORDER BY id LIMIT 2";
 
 const s = (name: string, ...steps: Step[]): SettingScript => ({ name, steps });
@@ -125,6 +135,35 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   s("set_config local of an invalid value", "SELECT set_config('work_mem', 'lots', true)"),
   s("set_config local, then a failed block", "BEGIN", "SELECT set_config('application_name', 'c', true)", "SELECT 1/0", "ROLLBACK", APP),
 
+  // a portal suspended at a row count begins the batch's implicit block, as an Execute that finished does
+  s("a suspended portal, then SET LOCAL", { suspend: ORDERS, then: ["SET LOCAL application_name = 'p'", APP] }, APP),
+  s("a suspended portal, then DISCARD ALL", "SET application_name = 'a'", { suspend: ORDERS, then: ["DISCARD ALL"] }, APP, "SELECT 2"),
+  s("a suspended portal, then SET, then its error", { suspend: ORDERS, then: ["SET application_name = 'p'", "SELECT 1/0"] }, APP),
+  s("a suspended portal, then SET, kept at the Sync", { suspend: ORDERS, then: ["SET application_name = 'p'"] }, APP),
+  s("a suspended portal, then BEGIN and SET LOCAL", { suspend: ORDERS, then: ["BEGIN", "SET LOCAL application_name = 'p'"] }, APP, "COMMIT", APP),
+  s("a suspended portal, then COMMIT", { suspend: ORDERS, then: ["SET application_name = 'p'", "COMMIT", "SELECT 1/0"] }, APP),
+
+  // a failed block accepts nothing but its end, on every message of either protocol
+  s("a failed block, a Query of each kind", ...FAILED, "SELECT 1", ALL, BESIDE, APP, "BEGIN", "INSERT INTO public.one (id) VALUES (9)", "SAVEPOINT s", "EXPLAIN SELECT 1", "PREPARE p AS SELECT 1", "SELECT set_config('application_name', 'b', true), 1", "ROLLBACK", APP),
+  s("a failed block, a Query stops at its first", ...FAILED, "SELECT 1; ROLLBACK", "ROLLBACK; SELECT 1", APP),
+  s("a failed block, a syntax error stays one", ...FAILED, "SELEC 1", { prepare: "bad", sql: "SELEC 1" }, { prepare: "two", sql: "SELECT 1; SELECT 2" }, "ROLLBACK"),
+  s("a failed block, a Parse", ...FAILED, { prepare: "f", sql: "SELECT 1" }, { prepare: "g", sql: BESIDE }, { prepare: "h", sql: "BEGIN" }, "ROLLBACK", { run: "f" }),
+  s("a failed block, a Parse of a name taken", { prepare: "f", sql: "SELECT 1" }, ...FAILED, { prepare: "f", sql: "SELECT 2" }, "ROLLBACK", { run: "f" }),
+  s("a failed block, a Parse of nothing", ...FAILED, { prepare: "f", sql: "" }, { run: "f" }, "ROLLBACK"),
+  s("a failed block, a pipeline of the catalog", ...FAILED, { pipeline: ["SELECT current_setting('application_name')"] }, { pipeline: ["SELECT 1"] }, "ROLLBACK", APP),
+  s("a failed block, a pipeline of a table and of SHOW", ...FAILED, { pipeline: [BESIDE] }, { pipeline: [APP] }, { pipeline: ["SET application_name = 'b'"] }, "ROLLBACK", APP),
+  s("a failed block, a pipeline stops at its first", ...FAILED, { pipeline: ["SELECT 1", "ROLLBACK"] }, { pipeline: ["ROLLBACK", APP, "SELECT 1/0"] }, APP),
+  s("a failed block, a pipeline's COMMIT", ...FAILED, { pipeline: ["COMMIT", APP] }, APP),
+  s("a failed block, a Bind of what was parsed before", { prepare: "c", sql: "SELECT 1" }, { prepare: "t", sql: BESIDE }, { prepare: "w", sql: APP }, { prepare: "v", sql: "SET application_name = 'b'" }, ...FAILED, { run: "c" }, { run: "t" }, { run: "w" }, { run: "v" }, { run: "no_such" }, "ROLLBACK", APP),
+  s("a failed block, its end parsed before", { prepare: "end", sql: "ROLLBACK" }, ...FAILED, { describe: "end" }, { run: "end" }, APP),
+  s("a failed block, its COMMIT parsed before", { prepare: "end", sql: "COMMIT" }, ...FAILED, { run: "end" }, APP),
+  s("a failed block, a Describe of a result", { prepare: "c", sql: "SELECT 1" }, { prepare: "t", sql: BESIDE }, { prepare: "w", sql: APP }, { prepare: "cfg", sql: "SELECT set_config('application_name', 'b', false)" }, { prepare: "x", sql: "EXPLAIN SELECT 1" }, ...FAILED, { describe: "c" }, { describe: "t" }, { describe: "w" }, { describe: "cfg" }, { describe: "x" }, "ROLLBACK"),
+  s("a failed block, a Describe of no result", { prepare: "v", sql: "SET application_name = 'b'" }, ...FAILED, { describe: "v" }, { describe: "no_such" }, "ROLLBACK"),
+  s("a failed block, a Close", { prepare: "c", sql: "SELECT 1" }, { prepare: "v", sql: "SET application_name = 'b'" }, ...FAILED, { close: "c" }, { close: "v" }, { close: "no_such" }, "ROLLBACK", { run: "c" }),
+  s("a failed block, a catalog portal bound before", { prepare: "c", sql: ALL }, "BEGIN", { bind: "c", portal: "pc" }, "SELECT 1/0", { execute: "pc" }, { describePortal: "pc" }, { execute: "no_such" }, "ROLLBACK", APP),
+  s("a failed block, a table's portal bound before", { prepare: "t", sql: BESIDE }, "BEGIN", { bind: "t", portal: "pt" }, "SELECT 1/0", { execute: "pt" }, { describePortal: "pt" }, "ROLLBACK", APP),
+  s("a failed block, a SHOW's portal bound before", { prepare: "w", sql: APP }, "BEGIN", { bind: "w", portal: "ps" }, "SELECT 1/0", { execute: "ps" }, { describePortal: "ps" }, "ROLLBACK", APP),
+
   // a prepared statement reads what is in force when it RUNS: a reverted setting never stays in its plan
   s("a statement parsed before, run through SET LOCAL and after", { prepare: "z", sql: ZONED }, { run: "z" }, "BEGIN", "SET LOCAL TimeZone = 'Asia/Tokyo'", "SET LOCAL application_name = 'loc'", { run: "z" }, "COMMIT", { run: "z" }),
   s("a statement parsed before, run through a rolled-back SET and after", { prepare: "z", sql: ZONED }, "BEGIN", "SET TimeZone = 'Asia/Tokyo'", { run: "z" }, "ROLLBACK", { run: "z" }),
@@ -147,6 +186,13 @@ const line = (m: Message): string | null => {
     case "parameterStatus": return REPORTED.has(m.parameterName ?? "") ? `status ${m.parameterName}=${m.parameterValue}` : null;
     case "commandComplete": return `tag ${m.text}`;
     case "dataRow": return `row ${JSON.stringify(m.fields)}`;
+    case "portalSuspended": return "suspended";
+    case "parseComplete": return "parsed";
+    case "bindComplete": return "bound";
+    case "closeComplete": return "closed";
+    case "noData": return "no data";
+    case "rowDescription": return `columns ${JSON.stringify(m.fields?.map((f) => (f as { name: string }).name))}`;
+    case "parameterDescription": return "parameters";
     case "readyForQuery": return `ready ${m.status}`;
     default: return null;
   }
@@ -158,9 +204,10 @@ interface Wire {
   removeListener(event: "message", listener: (m: Message) => void): void;
   query(text: string): void;
   parse(q: { text: string; name?: string }): void;
-  bind(c: { statement?: string }): void;
-  describe(m: { type: "P" }): void;
-  execute(c: object): void;
+  bind(c: { statement?: string; portal?: string }): void;
+  describe(m: { type: "P" | "S"; name?: string }): void;
+  execute(c: { portal?: string; rows?: number }): void;
+  close(m: { type: "P" | "S"; name: string }): void;
   sync(): void;
 }
 
@@ -179,8 +226,19 @@ export async function traceStep(client: pg.Client, step: Step): Promise<string[]
       submit: () => {
         if (typeof step === "string") { wire.query(step); return; }
         if ("pipeline" in step) for (const text of step.pipeline) { wire.parse({ text }); portal(""); }
-        else if ("prepare" in step) wire.parse({ name: step.prepare, text: step.sql });
-        else portal(step.run);
+        else if ("suspend" in step) {
+          wire.parse({ text: step.suspend });
+          wire.bind({});
+          wire.describe({ type: "P" });
+          wire.execute({ rows: 1 });
+          for (const text of step.then) { wire.parse({ text }); portal(""); }
+        } else if ("prepare" in step) wire.parse({ name: step.prepare, text: step.sql });
+        else if ("run" in step) portal(step.run);
+        else if ("bind" in step) wire.bind({ statement: step.bind, portal: step.portal });
+        else if ("execute" in step) wire.execute({ portal: step.execute });
+        else if ("describePortal" in step) wire.describe({ type: "P", name: step.describePortal });
+        else if ("describe" in step) wire.describe({ type: "S", name: step.describe });
+        else wire.close({ type: "S", name: step.close });
         wire.sync();
       },
       handleReadyForQuery: noop, handleError: noop, handleRowDescription: noop, handleDataRow: noop, handleCommandComplete: noop, handleEmptyQuery: noop, handlePortalSuspended: noop,
@@ -194,4 +252,5 @@ export async function traceStep(client: pg.Client, step: Step): Promise<string[]
   return at < 0 ? lines : [...others.slice(0, at), ...lines.filter(isStatus).sort(), ...others.slice(at)];
 }
 
-export const stepText = (step: Step): string => typeof step === "string" ? step : "pipeline" in step ? step.pipeline.join(" |> ") : "prepare" in step ? `PARSE ${step.prepare}: ${step.sql}` : `RUN ${step.run}`;
+export const stepText = (step: Step): string => typeof step === "string" ? step : "pipeline" in step ? step.pipeline.join(" |> ") : "prepare" in step ? `PARSE ${step.prepare}: ${step.sql}`
+  : "suspend" in step ? `SUSPEND ${step.suspend} |> ${step.then.join(" |> ")}` : `${Object.keys(step).join(" ")} ${Object.values(step).join(" ")}`.toUpperCase();

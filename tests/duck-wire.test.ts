@@ -2414,6 +2414,7 @@ const replyLines = (ms: BackendMessage[]): string[] => ms.flatMap((m): string[] 
     case "ParameterStatus": return [`status ${m.name}=${m.value}`];
     case "CommandComplete": return [`tag ${m.tag}`];
     case "DataRow": return [`row ${m.values.map((v) => v?.toString("utf8") ?? "NULL").join(",")}`];
+    case "PortalSuspended": return ["suspended"];
     case "ReadyForQuery": return [`ready ${m.status}`];
     default: return [];
   }
@@ -2572,9 +2573,15 @@ test("a Query's statements and a Sync's batch are one implicit transaction: an e
     assert.deepEqual(await q("ROLLBACK"), ["tag ROLLBACK", "status application_name=start", "status TimeZone=UTC", "ready I"]);
     assert.deepEqual(await batch("BEGIN", "SET LOCAL application_name = 'x'", "COMMIT", "SET LOCAL TimeZone = 'Asia/Tokyo'", "SELECT 1", "SET LOCAL TimeZone = 'Asia/Tokyo'"),
       ["tag BEGIN", "tag SET", "tag COMMIT", warned, "tag SET", "row 1", "tag SELECT 1", "tag SET", "ready I"], "a COMMIT ends the block: the next SET LOCAL warns, then the batch is a block again");
-    // a suspended portal is not done: Postgres's flag waits for its last row
-    s.socket.write(Buffer.concat([wire.parse("", "SELECT id FROM public.orders ORDER BY id"), wire.bind("", "", [], []), wire.execute("", 1), wire.parse("q", "SET LOCAL application_name = 'p'"), wire.bind("q", "q", [], []), wire.execute("q"), wire.sync()]));
-    assert.deepEqual(replyLines(await s.untilReady()), ["row 1", warned, "tag SET", "ready I"]);
+    // a portal suspended at a row count begins the block as a finished Execute does (a review finding, against Postgres
+    // 18.6): no warning, and DISCARD ALL refused, its portal and the session's settings left alone
+    const suspended = (then: string): Buffer => Buffer.concat([wire.parse("", "SELECT id FROM public.orders ORDER BY id"), wire.bind("", "", [], []), wire.execute("", 1), wire.parse("q", then), wire.bind("q", "q", [], []), wire.execute("q"), wire.sync()]);
+    s.socket.write(suspended("SET LOCAL application_name = 'p'"));
+    assert.deepEqual(replyLines(await s.untilReady()), ["row 1", "suspended", "tag SET", "ready I"]);
+    await q("SET application_name = 'kept'");
+    s.socket.write(Buffer.concat([wire.close("P", "q"), wire.close("S", "q"), suspended("DISCARD ALL")]));
+    assert.deepEqual(replyLines(await s.untilReady()), ["row 1", "suspended", "ERROR 25001 DISCARD ALL cannot run inside a transaction block", "ready I"]);
+    assert.deepEqual(await q(app), ["row kept", "tag SHOW", "ready I"], "nothing reset");
   } finally { s.end(); }
 });
 
@@ -2695,6 +2702,67 @@ test("set_config(name, value, true) alone is SET LOCAL, less the warning; ROLLBA
     assert.deepEqual(await q("SELECT set_config('work_mem', 'lots', true)"), ['ERROR 22023 invalid value for parameter "work_mem": "lots"', "ready I"]);
     // its other forms stay the gap's, is_local or not
     assert.match((await q("SELECT set_config('application_name', 'c', true) FROM public.orders"))[0]!, /^ERROR 0A000 set_config\(\) is answered by Mason only alone .*Mason gap set-config-forms/);
+  } finally { s.end(); }
+});
+
+// A FAILED BLOCK ACCEPTS NOTHING BUT ITS END, ON EVERY MESSAGE (a review finding of #60): the check sat after the
+// classifier in a Query and an Execute, none in a Parse or a Bind, and a catalog statement runs whole at its Bind, its
+// rows returned by the Execute before the check. So inside a failed block `SELECT 1` and `current_setting` answered.
+test("a failed block refuses a Parse, a Bind, an Execute and a Describe of a result, in both protocols, and accepts its end", async () => {
+  const s = await rawSession(api.port, { application_name: "start" });
+  const q = onRaw(s);
+  // each message's own answer counts here: one refused and one answered with nothing are the point
+  const own = (m: BackendMessage): string[] => ({ ParseComplete: ["parsed"], BindComplete: ["bound"], CloseComplete: ["closed"], NoData: ["no data"] } as Record<string, string[]>)[m.type] ?? replyLines([m]);
+  const send = async (...frames: Buffer[]): Promise<string[]> => { s.socket.write(Buffer.concat([...frames, wire.sync()])); return (await s.untilReady()).flatMap(own); };
+  const aborted = "ERROR 25P02 current transaction is aborted, commands ignored until end of transaction block";
+  const refused = [aborted, "ready E"];
+  const fail = async (): Promise<void> => { await q("BEGIN"); await q("SET application_name = 'a'"); await q("SELECT 1/0"); };
+  const catalog = "SELECT current_setting('application_name')";
+  const table = "SELECT id FROM public.orders LIMIT 1";
+  try {
+    for (const [name, sql] of [["cat", catalog], ["tab", table], ["sho", "SHOW application_name"], ["set", "SET application_name = 'b'"], ["end", "ROLLBACK"], ["com", "COMMIT"]] as const) await send(wire.parse(name, sql));
+    await send(wire.parse("nothing", ""));
+    await fail();
+    // a Parse: what it holds is read, so a syntax error and two commands stay theirs, and a name taken is no matter
+    assert.deepEqual(await send(wire.parse("new", "SELECT 1")), refused);
+    assert.deepEqual(await send(wire.parse("cat", "SELECT 1")), refused, "25P02, not 42P05");
+    assert.deepEqual(await send(wire.parse("new", "BEGIN")), refused);
+    assert.deepEqual(await send(wire.parse("new", "SELEC 1")), ['ERROR 42601 syntax error at or near "SELEC"', "ready E"]);
+    assert.deepEqual(await send(wire.parse("new", "SELECT 1; SELECT 2")), ["ERROR 42601 cannot insert multiple commands into a prepared statement", "ready E"]);
+    assert.deepEqual(await send(wire.parse("new", "")), ["parsed", "ready E"], "an empty one holds no command");
+    // a Bind: never run, the catalog's included
+    for (const name of ["cat", "tab", "sho", "set", "new"]) assert.deepEqual(await send(wire.bind("", name, [], [])), refused, name);
+    assert.deepEqual(await send(wire.bind("", "no_such", [], [])), ['ERROR 26000 prepared statement "no_such" does not exist', "ready E"]);
+    // a Describe: of a result refused, of anything else answered, so a driver can still describe its ROLLBACK
+    for (const name of ["cat", "tab", "sho"]) assert.deepEqual(await send(wire.describe("S", name)), refused, name);
+    assert.deepEqual(await send(wire.describe("S", "set")), ["no data", "ready E"]);
+    assert.deepEqual(await send(wire.describe("S", "end")), ["no data", "ready E"]);
+    // a batch stops at the first refusal, the ROLLBACK in it included; a Close always runs
+    const batch = inBatch(s);
+    assert.deepEqual(await batch(catalog), refused);
+    assert.deepEqual(await batch("SELECT 1", "ROLLBACK"), refused, "skipped to the Sync");
+    assert.deepEqual(await batch(table), refused);
+    assert.deepEqual(await send(wire.close("S", "new")), ["closed", "ready E"]);
+    // a Query: 25P02 before the statement is classified, so before Mason's own refusal of it
+    for (const sql of ["SELECT 1", catalog, table, "BEGIN", "INSERT INTO public.orders (id) VALUES (9)", "SAVEPOINT s", "EXPLAIN SELECT 1", "SELECT set_config('application_name', 'b', true), 1"]) assert.deepEqual(await q(sql), refused, sql);
+    assert.deepEqual(await q("SELECT 1; ROLLBACK"), refused, "the Query stops at the first");
+    // its end, by a statement prepared before the failure
+    assert.deepEqual(await send(wire.bind("", "end", [], []), wire.execute("")), ["bound", "tag ROLLBACK", "ready I"]);
+    assert.deepEqual(await q("SHOW application_name"), ["row start", "tag SHOW", "ready I"]);
+    await fail();
+    assert.deepEqual(await batch("COMMIT", "SHOW application_name"), ["tag ROLLBACK", "row start", "tag SHOW", "ready I"], "a ROLLBACK's tag, and the block over within the batch");
+
+    // a portal bound before the failure: neither its rows nor its description, the catalog's held since its Bind
+    await q("BEGIN");
+    await send(wire.bind("c", "cat", [], []));
+    await send(wire.bind("t", "tab", [], []));
+    await q("SELECT 1/0");
+    for (const portal of ["c", "t"]) {
+      assert.deepEqual(await send(wire.execute(portal)), refused, portal);
+      assert.deepEqual(await send(wire.describe("P", portal)), refused, portal);
+    }
+    assert.deepEqual(await send(wire.execute("no_such")), ['ERROR 34000 portal "no_such" does not exist', "ready E"]);
+    await q("ROLLBACK");
   } finally { s.end(); }
 });
 

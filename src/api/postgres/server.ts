@@ -71,7 +71,8 @@ import {
   cstr, int16, int32, frame, decodeBackend, decodeNoticeFrame, splitFrames, MAX_MESSAGE_LENGTH,
 } from "./protocol.ts";
 import { typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
-import { Unsupported, duckTranslate, type Translation } from "./translate.ts";
+import { Unsupported, duckTranslate, endsFailedBlock, type Translation } from "./translate.ts";
+import type { Node } from "libpg-query";
 
 /** what a statement is: one the session or the catalog Postgres answers (translate.ts), one DuckDB answers, or an
  *  EXPLAIN of one */
@@ -385,7 +386,6 @@ function statementIdOf(c: AbortController): number {
 /** the type byte of a RowDescription frame */
 const ROW_DESCRIPTION = 0x54;
 const DATA_ROW = 0x44;
-const PORTAL_SUSPENDED = 0x73;
 /** the first byte of a TLS handshake record (a ClientHello): never a startup packet's, whose length's high byte is 0
  *  under MAX_STARTUP_LENGTH, and never SSLRequest's (length 8) */
 const TLS_HANDSHAKE = 0x16;
@@ -586,6 +586,9 @@ interface Portal {
 }
 
 type TxState = "none" | "open" | "failed";
+
+/** Postgres's answer to anything but a failed block's end */
+const aborted = (): PgError => new PgError({ code: "25P02", message: "current transaction is aborted, commands ignored until end of transaction block" });
 
 /**
  * A DuckDB result being sent: read from DuckDB a chunk at a time, so a result of any size holds one chunk (`pending`,
@@ -1093,6 +1096,25 @@ class Session {
   }
 
   /**
+   * A FAILED BLOCK ACCEPTS NOTHING BUT ITS END, on every message: Postgres checks a Query's statement, a Parse, a Bind and
+   * an Execute (`IsTransactionExitStmt`), each before the statement is classified or sent anywhere, so 25P02 is said
+   * where Mason's own refusal of it (an INSERT's 25006) or the catalog's answer would be. Undefined: an empty statement,
+   * which a Bind refuses as it refuses any other. A Parse of an empty string passes (`parseMessage`), a Describe has its
+   * own rule (`describedInFailedBlock`), and a Close always runs.
+   */
+  private heldToFailedBlock(stmt: Node | undefined): void {
+    if (this.tx === "failed" && (stmt === undefined || !endsFailedBlock(stmt))) throw aborted();
+  }
+
+  /** A Describe in a failed block: refused where it would describe a result (Postgres reads the catalog for a
+   *  RowDescription, which an aborted transaction cannot), answered otherwise, so a driver that describes all it sends
+   *  can still send its ROLLBACK. */
+  private describedInFailedBlock(statement: Statement): void {
+    const kind = statement.shape?.kind;
+    if (this.tx === "failed" && kind !== undefined && ["catalog", "duckdb", "explain", "show", "set_config"].includes(kind)) throw aborted();
+  }
+
+  /**
    * A STATEMENT FAILED, the one way a transaction fails: an open block is failed (25P02 until its end), and in every
    * case what the transaction set is undone NOW, as Postgres's AbortTransaction does at the error, never at the ROLLBACK
    * that follows — so the failed block's own ReadyForQuery reports the revert, and an implicit transaction's SET (`SET a;
@@ -1233,10 +1255,8 @@ class Session {
   private async runSimple(raw: RawStmt, text: string, whole: string): Promise<Buffer[]> {
     if (raw.stmt === undefined) return [emptyQueryResponse()];
     const now = this.txStart(this.statementNow);
+    this.heldToFailedBlock(raw.stmt);
     const t = this.classify(raw.stmt, text);
-    if (this.tx === "failed" && !(t.kind === "transaction" && t.tag !== "BEGIN" && t.tag !== "START TRANSACTION")) {
-      throw new PgError({ code: "25P02", message: "current transaction is aborted, commands ignored until end of transaction block" });
-    }
     switch (t.kind) {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
@@ -1253,7 +1273,8 @@ class Session {
       }
       case "catalog": return this.forwardSimple(this.spliced(text, raw));
       case "set": return this.setStatement(t);
-      case "set_config": return this.setConfigStatement(t);
+      // its RowDescription first, as Postgres's: a value it refuses is refused after it
+      case "set_config": this.send(this.setConfigDescription(t, 0)); return this.setConfigStatement(t);
       case "show": return this.showStatement(t.name);
       case "transaction": return [...this.transaction(t.tag)];
       case "discard": return this.discard(t.target);
@@ -1699,13 +1720,13 @@ class Session {
 
   /** `SELECT set_config(name, value, is_local)` alone (translate.ts setConfig): the session's SET or SET LOCAL, answered
    *  as Postgres answers the function — one text row, the value as `SHOW` then answers it (its own DataRow: one reader),
-   *  the column named `set_config` or as aliased (an Execute drops the RowDescription: a portal's is its Describe's).
+   *  the column named `set_config` or as aliased. Its RowDescription is the caller's: a Query's, an Execute's Describe's.
    *  Unlike SET LOCAL it warns of nothing outside a block: Postgres's function does not. */
   private async setConfigStatement(t: Extract<Translation, { kind: "set_config" }>): Promise<Buffer[]> {
     await this.applySetting({ kind: "set", name: t.name, value: t.value, local: t.local, tag: "SET" });
     const row = (await this.showStatement(t.name)).find((f) => f[0] === DATA_ROW);
     if (row === undefined) throw new PgError({ code: "XX000", message: `SHOW ${t.name} answered no row after set_config (Mason bug: report it)` }, 500);
-    return [this.setConfigDescription(t, 0), row, commandComplete("SELECT 1")];
+    return [row, commandComplete("SELECT 1")];
   }
 
   private setConfigDescription(t: Extract<Translation, { kind: "set_config" }>, format: 0 | 1): Buffer {
@@ -1839,11 +1860,12 @@ class Session {
         case "Execute": {
           const out = await this.executeMessage(m);
           this.sendAll(out);
-          // AN EXECUTE DONE LEAVES ITS TRANSACTION OPEN UNTIL THE SYNC, and what follows it runs in an implicit block,
-          // as Postgres 18's does: a later SET LOCAL warns of nothing, a later DISCARD ALL is refused. Not after a
-          // transaction statement, which ended it, a suspended portal, nor a DISCARD ALL, whose portal it dropped
+          // AN EXECUTE LEAVES ITS TRANSACTION OPEN UNTIL THE SYNC, and what follows it runs in an implicit block, as
+          // Postgres 18's does, a portal suspended at a row count included: a later SET LOCAL warns of nothing, a later
+          // DISCARD ALL is refused. Not after a transaction statement, which ended it, nor a DISCARD ALL, whose portal
+          // it dropped
           const kind = this.portals.get(m.portal)?.statement.shape?.kind;
-          if (kind !== undefined && kind !== "transaction" && out[out.length - 1]?.[0] !== PORTAL_SUSPENDED) this.implicitBlock = true;
+          if (kind !== undefined && kind !== "transaction") this.implicitBlock = true;
           return;
         }
         case "Close": return this.sendAll(await this.closeMessage(m));
@@ -1887,10 +1909,11 @@ class Session {
   }
 
   private async parseMessage(m: Extract<FrontendMessage, { type: "Parse" }>): Promise<Buffer[]> {
-    if (m.name !== "" && this.statements.has(m.name)) throw new PgError({ code: "42P05", message: `prepared statement "${m.name}" already exists` });
     const stmts = (await parseSql(m.sql)).stmts ?? [];
     if (stmts.length > 1) throw new PgError({ code: "42601", message: "cannot insert multiple commands into a prepared statement" });
     const raw = stmts[0] ?? null;
+    if (raw?.stmt !== undefined) this.heldToFailedBlock(raw.stmt);
+    if (m.name !== "" && this.statements.has(m.name)) throw new PgError({ code: "42P05", message: `prepared statement "${m.name}" already exists` });
     const statement: Statement = { sql: m.sql, raw, paramOids: [...m.paramTypes], shape: null, catalogName: null };
     if (raw?.stmt !== undefined) {
       statement.shape = this.classify(raw.stmt, statementText(m.sql, raw));
@@ -1925,6 +1948,8 @@ class Session {
   private async bindMessage(m: Extract<FrontendMessage, { type: "Bind" }>): Promise<Buffer[]> {
     const statement = this.statements.get(m.statement);
     if (statement === undefined) throw new PgError({ code: "26000", message: `prepared statement "${m.statement}" does not exist` });
+    // before anything runs: a catalog statement is run whole at its Bind
+    this.heldToFailedBlock(statement.raw?.stmt);
     if (m.portal !== "" && this.portals.has(m.portal)) throw new PgError({ code: "42P03", message: `cursor "${m.portal}" already exists` });
     if (statement.catalogName !== null) {
       // bound, described, run whole and closed in one call, Sync included (the Portal's `catalog`): nothing of this
@@ -1968,6 +1993,7 @@ class Session {
     if (m.kind === "S") {
       const statement = this.statements.get(m.name);
       if (statement === undefined) throw new PgError({ code: "26000", message: `prepared statement "${m.name}" does not exist` });
+      this.describedInFailedBlock(statement);
       if (statement.catalogName !== null) return this.catalogRun(frame("D", Buffer.from("S"), cstr(statement.catalogName)));
       const shape = statement.shape;
       if (shape?.kind === "show") return [parameterDescription([]), ...await this.showDescription(shape.name)];
@@ -1985,6 +2011,7 @@ class Session {
     }
     const portal = this.portals.get(m.name);
     if (portal === undefined) throw new PgError({ code: "34000", message: `portal "${m.name}" does not exist` });
+    this.describedInFailedBlock(portal.statement);
     if (portal.catalog !== undefined) return [portal.catalog.description];
     const shape = portal.statement.shape;
     if (shape?.kind === "show") return this.showDescription(shape.name);
@@ -1998,6 +2025,10 @@ class Session {
   private async executeMessage(m: Extract<FrontendMessage, { type: "Execute" }>): Promise<Buffer[]> {
     const portal = this.portals.get(m.portal);
     if (portal === undefined) throw new PgError({ code: "34000", message: `portal "${m.portal}" does not exist` });
+    const statement = portal.statement;
+    if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
+    // a catalog portal's rows are held here since its Bind: a block that failed after it answers none of them
+    this.heldToFailedBlock(statement.raw.stmt);
     if (portal.catalog !== undefined) {
       const c = portal.catalog;
       const take = m.maxRows > 0 ? Math.min(m.maxRows, c.rows.length - c.sent) : c.rows.length - c.sent;
@@ -2007,17 +2038,12 @@ class Session {
     }
     // what its earlier Executes sent is this one's row's too (`bytesFor`)
     if (this.asked !== null) this.asked.carried = portal.bytes;
-    const statement = portal.statement;
-    if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
     const t = statement.shape ?? this.classify(statement.raw.stmt, statementText(statement.sql, statement.raw));
-    if (this.tx === "failed" && !(t.kind === "transaction" && t.tag !== "BEGIN" && t.tag !== "START TRANSACTION")) {
-      throw new PgError({ code: "25P02", message: "current transaction is aborted, commands ignored until end of transaction block" });
-    }
     switch (t.kind) {
       case "empty": return [emptyQueryResponse()];
       case "catalog": throw new PgError({ code: "XX000", message: "a catalog statement bound as a query (Mason bug: report it)" }, 500);
       case "set": return this.setStatement(t);
-      case "set_config": return (await this.setConfigStatement(t)).filter((f) => f[0] !== ROW_DESCRIPTION);
+      case "set_config": return this.setConfigStatement(t);
       // as Postgres: the extended protocol's Execute sends the rows and the tag, the RowDescription is the Describe's
       case "show": return (await this.showStatement(t.name)).filter((f) => f[0] !== ROW_DESCRIPTION);
       case "transaction": return this.transaction(t.tag);

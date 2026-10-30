@@ -1232,7 +1232,12 @@ a block's two ends; probing Postgres 18 message by message, before any code, fou
   that failed half-way reports what its earlier statements moved: Postgres reports nothing, the value was undone.
 - **A batch of Executes is a block once one completed**, on Postgres 18: the second `SET LOCAL` of a pipeline warns of
   nothing, `DISCARD ALL` after a SELECT is "cannot run inside a transaction block", not the pipeline's own message
-  xact.c also holds. Read from the wire, against the source, which was not what a reading of the source predicted.
+  xact.c also holds, and a portal suspended at a row count counts as completed (the first version of this change said
+  otherwise, and asserted it: the independent review measured it). Read from the wire, not the source.
+- **A failed block's rule is per message, and Mason's was per statement kind.** The 25P02 check sat after a statement's
+  classification, and a catalog statement never reached it in the extended protocol: it runs whole at its Bind, its rows
+  kept for an Execute that returned them first, so `SELECT 1` answered inside a failed block where Postgres refuses the
+  Parse. Issue 47's class, found by the same review: a state a driver reads, held at one of its entrances.
 
 **Decision.** `vars` stays the one store every reader reads, so no reader can miss a transaction: the transaction keeps
 two whole copies, what ROLLBACK restores and what COMMIT leaves, and a plain SET writes its one name through to the
