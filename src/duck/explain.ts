@@ -132,7 +132,9 @@ export type CopyFacts = Pick<CopyState, "source" | "phase" | "error" | "rowsSoFa
 
 /** `rows`: DuckDB's estimate of the copy's rows (duckdb_tables().estimated_size), said as one; `facts`: the sync's
  *  (null: the sync has no record of the table) */
-export interface Copy { table: string; rows: number | null; facts: CopyFacts | null }
+export interface Copy { table: string; rows: number | null; facts: CopyFacts | null;
+  /** the rows of it the session's role reads, in words (`filtered by the role tenant: tenant_id = 42`, src/duck/row-filter.ts) */
+  filter?: string }
 
 /** the sync's states as EXPLAIN takes them across to the executor's thread (src/api/postgres/server.ts `duckExplain`):
  *  its facts alone, read at the EXPLAIN */
@@ -223,7 +225,7 @@ const VERBOSE_ONLY = new Set(["Projections", "Filters", "Table", "Type"]);
 
 function copyLine(c: Copy): string {
   const rows = c.rows === null ? "rows unknown" : `about ${count(c.rows)} rows`;
-  return `${c.table} (${rows}; ${keptText(c.facts)})`;
+  return `${c.table} (${rows}; ${keptText(c.facts)}${c.filter !== undefined ? `; ${c.filter}` : ""})`;
 }
 
 /** EXPLAIN as Postgres's text format: one line a row */
@@ -278,7 +280,7 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
     Plan: roots.length === 1 ? roots[0] : { "Node Type": "Copy Plans", Plans: roots },
     Mason: {
       "Answered By": "the copy",
-      Copies: e.copies.map((c) => ({ Table: c.table, "Estimated Rows": c.rows, ...keptJson(c.facts) })),
+      Copies: e.copies.map((c) => ({ Table: c.table, "Estimated Rows": c.rows, ...keptJson(c.facts), ...(c.filter !== undefined ? { "Row Filter": c.filter } : {}) })),
       "Sent To Copy": e.sql,
       "Computed After Copy": e.computed,
       "Mason Functions Copy Calls": e.functions,

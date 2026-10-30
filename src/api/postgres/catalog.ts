@@ -36,6 +36,7 @@ import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { runnable } from "../../lib/runnable.ts";
 import { NO_ROLE_CATALOG, type RoleGrants } from "../../duck/grants.ts";
+import { renderWhere, tableSql } from "../../duck/row-filter.ts";
 import { cstr, frame, splitFrames } from "./protocol.ts";
 import { PG_API_TYPE_SPELLING, typeNameParts, type PgJoin, type PgSchema, type PgTable } from "./schema.ts";
 
@@ -287,6 +288,46 @@ export function catalogRoles(schema: PgSchema, roles: ReadonlyMap<string, RoleGr
 }
 
 /**
+ * THE ROLES' ROW FILTERS AS THE CATALOG'S OWN ROW SECURITY (src/duck/row-filter.ts): every copied table some role filters
+ * gets `ENABLE ROW LEVEL SECURITY` and one permissive SELECT policy per role that reads it — its `where:` with each
+ * attribute read as `current_setting('mason.attr.<name>')::<type>` (a list `string_to_array(…, ',')::<type>`), the type
+ * Postgres inferred for it (`filterTypes`, carried on the roles as `filterTypes`), each request carrying the session's
+ * attributes as settings (`asSession`); a `through:` as `EXISTS (SELECT 1 FROM <parent> …)`, the parent's own policy
+ * applying inside; `true` for a role that reads it unfiltered (row security with no policy hides every row). So
+ * `pg_policies`, `relrowsecurity` and the catalog's own analysis see what Postgres would. The catalog holds no row: the
+ * rows Mason answers are filtered on the copy (src/duck/plan.ts), never here. A filter whose types are not known (its
+ * check failed: the roles' problem refuses every user held to them) gets no policy. Idempotent: each policy dropped first.
+ */
+export function catalogPolicies(schema: PgSchema, roles: ReadonlyMap<string, RoleGrants>): string[] {
+  const filtered = new Set([...roles.values()].flatMap((g) => [...(g.filters?.keys() ?? [])]));
+  const out: string[] = [];
+  for (const t of schema.tables) {
+    const name = `${t.schema ?? "public"}.${t.name}`;
+    if (!filtered.has(name)) continue;
+    out.push(`ALTER TABLE ${qualified(t)} ENABLE ROW LEVEL SECURITY`);
+    for (const g of roles.values()) {
+      if (!g.tables.has(name)) continue;
+      const f = g.filters?.get(name);
+      let using: string;
+      if (f === undefined) using = "true";
+      else if (f.through !== undefined) using = `EXISTS (SELECT 1 FROM ${tableSql(f.through.parent)} AS __mason_parent WHERE __mason_parent.${ident(f.through.parentColumn)} = ${qualified(t)}.${ident(f.through.column)})`;
+      else {
+        const types = g.filterTypes?.get(name);
+        if (types === undefined || f.where === undefined) continue;
+        const shapes = g.attributes ?? new Map();
+        using = renderWhere(f.where.parts, (a) => {
+          const read = `current_setting('mason.attr.${a}')`;
+          return shapes.get(a) === "list" ? `string_to_array(${read}, ',')::${types.get(a) ?? "text[]"}` : `${read}::${types.get(a) ?? "text"}`;
+        });
+      }
+      out.push(`DROP POLICY IF EXISTS ${ident(`mason_${g.name}`)} ON ${qualified(t)}`);
+      out.push(`CREATE POLICY ${ident(`mason_${g.name}`)} ON ${qualified(t)} AS PERMISSIVE FOR SELECT TO ${ident(g.name)} USING (${using})`);
+    }
+  }
+  return out;
+}
+
+/**
  * A SESSION'S CATALOG REQUEST AS ITS ROLE: `SET ROLE` before the request's frames and `RESET ROLE` after, in ONE
  * message — the catalog runs one request at a time (`PgCatalog`'s chain) and a message whole, so no other session's
  * request runs under this role, and none of this session's runs without it. A Sync is added before the RESET where
@@ -475,6 +516,9 @@ export class PgCatalog {
   #chain: Promise<void> = Promise.resolve();
   #idleTimer: NodeJS.Timeout | null = null;
   #lastUsed = 0;
+  /** the roles' row security policies (`catalogPolicies`), written once the listener checked the filters: run on the
+   *  instance up now and at every start after, until the schema or the roles are replaced */
+  #policies: string[] = [];
 
   constructor(schema: PgSchema, opts: PgCatalogOptions = {}) {
     this.#schema = schema;
@@ -523,8 +567,26 @@ export class PgCatalog {
   replace(schema: PgSchema, roles: ReadonlyMap<string, RoleGrants> = this.#roles): Promise<void> {
     this.#schema = schema;
     this.#roles = roles;
+    this.#policies = [];
     this.#said.clear();
     return this.#enqueue(() => this.#close("replaced"));
+  }
+
+  /**
+   * THE ROLES' ROW SECURITY POLICIES (`catalogPolicies`), written now (the instance started where needed) and at every
+   * start after, until the next `replace`. A statement the catalog refuses is said, never fatal: the rows are the copy's.
+   */
+  policies(ddl: string[]): Promise<void> {
+    return this.#enqueue(async () => {
+      this.#policies = ddl;
+      if (ddl.length === 0) return;
+      const db = await this.#ensureStarted();
+      for (const sql of ddl) {
+        try { await this.#ask(db, { op: "query", sql }, "a row security policy"); }
+        catch (e) { this.#log(`catalog: a row security policy left out (${errorMessage(e)}): ${sql}`); }
+      }
+      this.#touch();
+    });
   }
 
   #enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -558,7 +620,7 @@ export class PgCatalog {
     const db = new CatalogWorker();
     try {
       const started = await this.#ask(db, { op: "init", statements: ["SET TimeZone = 'UTC'", ...catalogDdl(schema), ...catalogRoles(schema, roles), ...this.#setup],
-        optional: [...catalogDefaults(schema), ...catalogViews(schema, roles)] }, "its start");
+        optional: [...catalogDefaults(schema), ...catalogViews(schema, roles), ...this.#policies] }, "its start");
       // each left-out default or view: one line, once per schema (the instance starts again after every idle stop)
       for (const r of started.refused ?? []) {
         const line = leftOutLine(r);

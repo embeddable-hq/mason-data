@@ -19,6 +19,7 @@ import { datumText, masonCalls, rewrite, treeDifference, Unrewritable, type Duck
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
 import { distinctCountTables, distinctKeyCounts, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
 import { enforceGrants, type RoleGrants } from "./grants.ts";
+import { expandRowFilters } from "./row-filter.ts";
 import type { PgAnalysis } from "./analyze.ts";
 
 const JSON_OID = 114, JSONB_OID = 3802;
@@ -190,6 +191,24 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   // before the rewrite (a role's refusal before a Mason gap's). The reads stay on the plan: an Execute under a role
   // given or taken since the Parse is held to them again (src/api/postgres/server.ts)
   const reads = grants === undefined ? undefined : await enforceGrants(catalog, analysis.tree, grants);
+  // THE ROLE'S ROWS (src/duck/row-filter.ts): every read of a table the role filters becomes its filtered read, and that
+  // statement is planned from the start — analysed by Postgres, rewritten and verified as any other (one grammar), held
+  // to nothing more (the grants were held above, on the statement as written: a filter may read a column the role
+  // may not, as a policy may on Postgres). Its errors are the expanded text's, so they carry no position into this one
+  if (grants?.rows !== undefined && grants.rows.size > 0) {
+    const filtered = await expandRowFilters(catalog, stmt, analysis, pathSql(searchPath), grants.rows);
+    if (filtered !== null) {
+      let inner: DuckPlan;
+      try { inner = await planDuck(catalog, filtered.text, filtered.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, undefined); }
+      catch (e) {
+        if (!(e instanceof StatementError)) throw e;
+        const { position: _p, ...fields } = e.fields;
+        throw new StatementError(fields, text, e.gap);
+      }
+      const rowFilters = filtered.tables.map((t) => ({ table: t, words: `filtered by the role ${grants.name}: ${grants.rows!.get(t)!.words}` }));
+      return { ...inner, ...(reads !== undefined ? { reads } : {}), rowFilters };
+    }
+  }
   // the catalog's own OIDs for the types an extension made (citext): the rewrite knows a few by name, and the wire sends
   // the SOURCE's OID for them (`userTypes`, from the copy), never the catalog's
   let resolved = resolvedKeys(analysis.tree);

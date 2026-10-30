@@ -34,6 +34,8 @@ export interface ApiLogRow {
   user?: string | undefined;
   /** the role the session read as (src/duck/grants.ts), when its user carries one */
   role?: string | undefined;
+  /** the user's attribute values its role's row filters read (`mason user add … --set`, src/duck/row-filter.ts), when it carries any */
+  attributes?: Readonly<Record<string, string | readonly string[]>> | undefined;
   /** the session's number, the SQLSTATE, DETAIL and HINT a refusal was sent with, and the rows an answer sent */
   session?: number | undefined;
   sqlstate?: string | undefined;

@@ -47,6 +47,9 @@ const askOf = (confirming) => confirming === null || confirming === undefined ? 
  * user held to it is refused (57P03), said above the table as `mason user list`'s tip says it (src/cli/roles.ts
  * rolesProblemText, held equal by tests/web-page.test.ts) and in each user's role.
  */
+/** a user's attributes as `mason user list` says them (src/cli/user.ts attributesText, held equal by tests/web-page.test.ts) */
+export const attributesText = (a) => Object.entries(a).map(([k, v]) => `${k}=${typeof v === "string" ? v : `[${v.join(", ")}]`}`).join(", ");
+
 export function renderUsers(list, confirming = null, now = Date.now(), refused = null, roles = null) {
   const users = [...list.users.filter((u) => u.removedAt == null), ...list.users.filter((u) => u.removedAt != null)];
   if (!users.length) return empty("No users yet", `A user is the name and password psql, a BI tool or your app connects with. Add one above, as ${code("mason user add <name>")} does: its URL, password included, is shown once.`);
@@ -74,7 +77,9 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
       // said — or the file's default; none under a file with no default reads nothing, said; no roles file, every table
       `<td>${broken ? `<span class="warn">refused: the roles file cannot be read</span>` : u.readsNothing === true ? `<span class="warn">no role, and the roles file names no default: its statements are refused</span>`
         : u.role === undefined ? `<span class="dim">every table</span>`
-        : `${code(u.role)}${u.roleFrom === "default" ? ` <span class="dim">(default)</span>` : ""}${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}`}</td>` +
+        : `${code(u.role)}${u.roleFrom === "default" ? ` <span class="dim">(default)</span>` : ""}${u.attributes ? ` <span class="dim">${esc(attributesText(u.attributes))}</span>` : ""}` +
+          `${u.roleKnown === false ? ` <span class="warn">not in the roles file: its statements are refused</span>` : ""}` +
+          `${u.missingAttributes ? ` <span class="warn">${esc(`no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}</span>` : ""}`}</td>` +
       `<td>${!active ? status("unknown", `Removed ${stamp(u.removedAt)} UTC`) : disabled ? status("warn", disabledText(u.disabledAt)) : status("ok", "Active")}` +
       `${active && !disabled && !u.live ? ` <span class="warn">does not connect: the API key was rotated since it was added</span>` : ""}</td>` +
       `<td class="mono">${esc(stamp(u.addedAt))} UTC</td><td class="num">${lastCell}</td>` +

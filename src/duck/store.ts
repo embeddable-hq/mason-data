@@ -673,7 +673,7 @@ export class SessionRunner implements DuckRunner {
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }
     // what it calls is the plan's (src/duck/plan.ts PlannedSql), the list that decides how it is cancelled
-    const explained: Explained = { copies: await this.copies(scannedTables(plan), how.copies), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
+    const explained: Explained = { copies: await this.copies(scannedTables(plan), how.copies, how.rowFilters ?? []), sql: oneLine(sql.text), computed: computedOf(how.exact, how.fields),
       functions: [...sql.functions], plan, ...(analyzed === undefined ? {} : { analyzed }) };
     return o.format === "json" ? [explainJson(explained, o)] : explainText(explained, o);
   }
@@ -697,12 +697,14 @@ export class SessionRunner implements DuckRunner {
 
   /** each copy's rows, and the sync's facts of it (how it is kept current: src/duck/sync.ts `KeptCurrent`, never the
    *  poll's ledger read here — a project switched to logical replication still holds its last poll there) */
-  private async copies(tables: readonly TableName[], facts: readonly CopyFacts[]): Promise<Copy[]> {
+  private async copies(tables: readonly TableName[], facts: readonly CopyFacts[], filters: ReadonlyArray<{ table: string; words: string }> = []): Promise<Copy[]> {
     const out: Copy[] = [];
     for (const { schema, name } of tables) {
       const rows = (await this.conn.runAndReadAll("SELECT estimated_size FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = $1 AND table_name = $2", [schema, name])).getRowsJS()[0]?.[0];
       // the sync's source is the two names as they are; EXPLAIN says the table as a statement writes it (qualifiedName)
-      out.push({ table: qualifiedName({ schema, name }), rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === `${schema}.${name}`) ?? null });
+      const filter = filters.find((f) => f.table === `${schema}.${name}`)?.words;
+      out.push({ table: qualifiedName({ schema, name }), rows: rows === undefined || rows === null ? null : Number(rows), facts: facts.find((f) => f.source === `${schema}.${name}`) ?? null,
+        ...(filter !== undefined ? { filter } : {}) });
     }
     return out;
   }

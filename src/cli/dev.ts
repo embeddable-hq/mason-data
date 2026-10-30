@@ -51,7 +51,7 @@ import { storeJsonPathsOf } from "../duck/kept.ts";
 import { readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
 import { isLibcCollation } from "../duck/rewrite.ts";
 import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
-import { exampleRole, LiveRoles, noRoleWayOut, readRoles, resolveRoles, rolesDefaultLine, rolesFile, usersWithNoRole, usersWithoutRole } from "./roles.ts";
+import { exampleRole, LiveRoles, missingAttributesText, noRoleWayOut, readRoles, resolveRoles, rolesDefaultLine, rolesFile, usersMissingAttributes, usersWithNoRole, usersWithoutRole } from "./roles.ts";
 import { READY_LINE, readRestarts } from "./supervise.ts";
 import { dropOwnReplication, dropStatements, liveReadinessFailure, madeReplication, namedPublication, projectReplication, replicationReadiness, staleReplication } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
@@ -501,7 +501,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS; mason logs --requests)`);
   {
     // a user whose role the file no longer names reads nothing until it is added again (fail closed): said here, by name
-    const roles = liveRoles.now();
+    // the row filters checked by the catalog Postgres here (on the tables copied already): a where: Postgres refuses is
+    // said now, at its key, before any user meets it
+    const roles = await api.checkRoles();
     const list = readUsers(path.join(home, USERS_FILE));
     const orphans = "users" in list ? usersWithoutRole(list.users, new Set(roles.grants.keys())) : [];
     // WHAT A USER ADDED WITHOUT --role READS, SAID ONCE (stage 1b: the file decides it, never the code), and each user
@@ -511,6 +513,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     logLine(`[postgres] ${rolesLine}`);
     for (const name of "users" in list ? usersWithNoRole(list.users, roles) : []) {
       say(`  ! the user ${name} has no role, and ${roles.file ?? ""} names no default: its statements are refused — ${noRoleWayOut(name, roles.file ?? "", exampleRole(roles))}`);
+    }
+    // a user without a value its role's row filters read: refused at every statement until it is made again with it
+    for (const u of "users" in list ? usersMissingAttributes(list.users.filter((x) => x.removedAt === undefined), roles) : []) {
+      say(`  ! ${missingAttributesText(u)}`);
     }
     for (const u of orphans) {
       say(`  ! the user ${u.name} has the role ${u.role}, which ${roles.file ?? "no roles file (mason/roles.yml)"} ${roles.file === null ? "exists to name" : "does not name"}: ` +
@@ -529,7 +535,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     page: o.serve === undefined,
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database: cfg.name, postgresUrl },
-    roles: () => liveRoles.now(),
+    // the roles as the listener holds them: their row filters checked by its catalog (a filter Postgres refuses is a problem)
+    roles: () => api.roles(),
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
     // a table set to sync: replication while the run is up, in a run that never checked the database for it: the

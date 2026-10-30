@@ -30,7 +30,9 @@ import { readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } fro
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
-import { addedNext, addUser, disabledNext, disableUser, enabledNext, enableUser, listUsers, removeUser, REMOVED_NEXT, roleToAdd, withLastUsed } from "./user.ts";
+import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, listUsers, removeUser, REMOVED_NEXT, roleToAdd, withLastUsed } from "./user.ts";
+import { userRole } from "./roles.ts";
+import type { RunState } from "./commands.ts";
 import { postgresFacts, postgresLink } from "./pg-url.ts";
 import { catalogTable, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
@@ -209,8 +211,13 @@ function fileBytes(file: string): number | null {
 }
 
 /** `RunState.roles` (src/cli/commands.ts): the file, the roles it names and what is wrong with it now */
-export const rolesState = (r: RolesLive): { file: string | null; roles: string[]; problem: string | null; default: string | null; all: string[] } =>
-  ({ file: r.file, roles: [...r.grants.keys()], problem: r.problem, default: r.default, all: [...r.grants.values()].filter((g) => g.all).map((g) => g.name) });
+export const rolesState = (r: RolesLive): NonNullable<RunState["roles"]> & { all: string[] } => {
+  const attributes = Object.fromEntries([...r.grants.values()].filter((g) => g.attributes !== undefined).map((g) => [g.name, Object.fromEntries(g.attributes!)]));
+  const wheres = Object.fromEntries([...r.grants.values()].filter((g) => g.filters !== undefined).map((g) => [g.name,
+    [...g.filters!.values()].flatMap((f) => f.where === undefined ? [] : [{ table: f.table, at: f.at, where: f.where.text }])]));
+  return { file: r.file, roles: [...r.grants.keys()], problem: r.problem, default: r.default, all: [...r.grants.values()].filter((g) => g.all).map((g) => g.name),
+    ...(Object.keys(attributes).length > 0 ? { attributes } : {}), ...(Object.keys(wheres).length > 0 ? { wheres } : {}) };
+};
 
 async function state(ctx: RunContext, columns = false): Promise<unknown> {
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream(), Date.now(), { columns });
@@ -593,15 +600,20 @@ export function createRunServer(ctx: RunContext): http.Server {
             : { users: r.users, lastUsedNote: LAST_USED_NOT_ASKED, requestLogDays: ctx.duck.requests.days };
           sendJson(res, 200, { ...used, urlNote: null, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
         } else if (req.method === "POST" && url.pathname === "/api/users") {
-          const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown; role?: unknown };
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown; role?: unknown; set?: unknown };
           if (typeof body.name !== "string") throw new Refusal(400, "send { name }: the user's name");
           if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "send { name, role }: the role's name, a string");
+          if (body.set !== undefined && !(Array.isArray(body.set) && body.set.every((x) => typeof x === "string"))) throw new Refusal(400, "send { name, role, set }: set is a list of \"attribute=value\" strings, as mason user add --set takes them");
           // the role must be one the roles file names NOW (src/cli/user.ts roleToAdd): refused before anything is written
           const roleProblem = body.role === undefined ? null : roleToAdd(body.role, ctx.roles?.() ?? NO_ROLES);
           if (roleProblem !== null) { sendFailure(res, statusOf(roleProblem), roleProblem); return; }
+          // its attributes, held to the role as mason user add holds them (src/cli/user.ts attributesToAdd): one grammar
+          const rolesNow = ctx.roles?.() ?? NO_ROLES;
+          const attributes = attributesToAdd(body.name, typeof body.role === "string" ? body.role : userRole({}, rolesNow).role, (body.set as string[] | undefined) ?? [], rolesNow);
+          if ("refused" in attributes) { sendFailure(res, statusOf(attributes.refused), attributes.refused); return; }
           // mason user add --json's shape: its password, once, and the URL to paste (this run is up, so it has one)
           const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database, roles: ctx.roles?.() ?? NO_ROLES,
-            ...(typeof body.role === "string" ? { role: body.role } : {}) });
+            ...(typeof body.role === "string" ? { role: body.role } : {}), attributes: attributes.values });
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           const { replaced, ...added } = r;
           ctx.log(`user ${added.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}`);

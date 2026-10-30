@@ -847,7 +847,8 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
   // catalog's own settings)
   const enclosing = (at: number): string => [...src.slice(0, at).matchAll(/\n {2}(?:private |readonly |static )*(?:async )?(\w+)\(/g)].at(-1)?.[1] ?? "?";
   const direct = [...new Set([...src.matchAll(/catalog\.run\(/g)].map((m) => enclosing(m.index)))].sort();
-  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "duckPlan", "duckValues", "end", "explaining", "showAll", "showStatement", "validateElsewhere"].sort(),
+  // (checkRoles: the roles' row filters analysed once per roles file, as the catalog's own, never a session's request)
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "showAll", "showStatement", "validateElsewhere"].sort(),
     "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
