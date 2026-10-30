@@ -258,7 +258,7 @@ are `.claude/rules/duckdb.md` "Keeping a copy current". Why each is so:
 | a NAMED publication is read and verified (`checkPublication`), never created, altered or dropped | a read replica takes no CREATE PUBLICATION; on a production primary the slot is the one object Mason creates |
 | a table the publication lacks (or narrows, or filters) is refused alone; insert, update and delete must be published | a filtered row's delete never arrives; one table's gap must not stop the rest |
 | on a standby: a named publication, and Postgres 16+ | a standby decodes only from 16 |
-| `REPLICA IDENTITY NOTHING` and a `key:` table are refused | publishing their updates fails the app's own UPDATEs |
+| `REPLICA IDENTITY NOTHING` and a `key:` table are refused | publishing a table of `REPLICA IDENTITY NOTHING` fails the app's own UPDATEs and DELETEs; a `key:` table's changes carry no key to apply them by |
 | a table joins once caught up by ONE poll; a new slot catches the copies up by one poll from their watermarks | a key's changes replayed in commit order end at its state, so nothing is copied again |
 | a batch (500 ms or 10 k changes) commits with its position before it is acknowledged; idle, the server's position is acknowledged | a run that dies skips what it applied; an idle slot holds no WAL |
 | a large transaction is applied in committed pieces of `PIECE_CHANGES` (10,000) | 607,000 changes in one transaction ran a sync out of a 96 MB heap folded whole; in pieces it ran in 48 MB |

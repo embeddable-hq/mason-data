@@ -58,12 +58,14 @@ export function renderReadmeSupport(gaps: Record<string, Gap>, verified: Readonl
   const m = alone.mason;
   const wrong = m.differs === 0 ? "none was answered with a wrong value" : `${m.differs.toLocaleString("en-US")} were answered with a wrong value`;
   return `${README_START}
-Of the ${alone.statements.toLocaleString("en-US")} statements the oracle also sends to a plain DuckDB connection, Mason answers ${pct(m.exact)} exactly as Postgres
-does, ${pct(m.decided)} differently by a decision it lists, and refuses ${pct(m.refused)} by name, saying what to write instead;
-${wrong}. DuckDB alone, over the same tables, answers ${pct(alone.duckdb.exact)} of them exactly. [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md),
-rendered from the code, names the ${verified.size.toLocaleString("en-US")} pieces verified (types, functions, operators, aggregates, window functions,
-casts, constructs and their forms), the ${of("refused")} shapes refused, the ${of("differs")} answered differently and the ${of("limit")} limits, each
-with what to write instead.
+To show what Mason adds over DuckDB by itself, the oracle also sends ${alone.statements.toLocaleString("en-US")} of its queries to a plain DuckDB connection,
+over the same tables. **DuckDB alone answers only ${pct(alone.duckdb.exact)} of them exactly as Postgres does. Mason answers ${pct(m.exact)}.**
+It answers ${pct(m.decided)} differently, each by a decision it lists, and it refuses ${pct(m.refused)} with an error that says what to write
+instead. ${wrong[0]!.toUpperCase() + wrong.slice(1)}.
+
+[docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the ${verified.size.toLocaleString("en-US")} verified pieces (types, functions,
+operators, aggregates, window functions, casts, constructs and their forms). It also lists the ${of("refused")} refused shapes, the
+${of("differs")} that are answered differently and the ${of("limit")} limits, each with what to write instead.
 `;
 }
 
@@ -153,9 +155,9 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 
 ${table(of("refused"))}
 
-## Answered differently (${of("differs").length})
+## Answered differently
 
-Answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
+${of("differs").length} cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 ${table(of("differs"))}
 
@@ -192,10 +194,11 @@ test("the README's block is in its body, before License, and says each count doc
   const doc = renderGaps(GAPS, VERIFIED);
   const kinds = ["refused", "differs", "limit"] as const;
   const n = Object.fromEntries(kinds.map((k) => [k, Object.values(GAPS).filter((g) => g.kind === k).length]));
-  assert.ok(text.includes(`the ${VERIFIED.size.toLocaleString("en-US")} pieces verified (types, functions, operators, aggregates, window functions, casts, constructs and their forms), the ${n.refused} shapes refused, the ${n.differs} answered differently and the ${n.limit} limits`), text);
-  for (const heading of [`## What is verified (${VERIFIED.size})`, `## Refused (${n.refused})`, `## Answered differently (${n.differs})`, `## Limits of the prototype (${n.limit})`, "## At a glance", "## Why not DuckDB by itself"]) {
+  assert.ok(text.includes(`the ${VERIFIED.size.toLocaleString("en-US")} verified pieces (types, functions, operators, aggregates, window functions, casts, constructs and their forms). It also lists the ${n.refused} refused shapes, the ${n.differs} that are answered differently and the ${n.limit} limits`), text);
+  for (const heading of [`## What is verified (${VERIFIED.size})`, `## Refused (${n.refused})`, "## Answered differently", `## Limits of the prototype (${n.limit})`, "## At a glance", "## Why not DuckDB by itself"]) {
     assert.ok(doc.includes(`\n${heading}\n`), `docs/SQL-SUPPORT.md has ${heading}`);
   }
+  assert.ok(doc.includes(`\n${n.differs} cases are answered, but not as Postgres answers.`), "docs/SQL-SUPPORT.md says how many are answered differently");
 });
 
 test("docs/SQL-SUPPORT.md is what src/duck/gaps.ts and src/duck/verified.ts render", () => {
