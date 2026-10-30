@@ -71,6 +71,8 @@ function demoReplicating(root: string): void {
   fs.writeFileSync(file, now);
 }
 
+const V0_7_STREAMED = { changes: "replication", publication: null, replication: { slot: "mason_dev_matrix_shop", publication: "mason_dev_matrix_shop", owned: true } };
+
 /** A folder in a state; `null` config writes none. */
 function folderIn(state: string): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `mason-matrix-${state}-`));
@@ -92,13 +94,15 @@ function folderIn(state: string): string {
     // after a reboot the config still names the run; its pid is dead, or now another process's (this test's own)
     config.running = { pid: state === "stale" ? deadPid() : process.pid, controlUrl: "http://127.0.0.1:1", token: "t".repeat(32), postgresUrl: "postgresql://127.0.0.1:1/matrix", postgresListener: { host: "127.0.0.1", tls: null } };
   }
+  // what a 0.7.0 start recorded for a project it streamed (v0.7.0 src/cli/dev.ts), under the file 0.7.0 wrote: no sync:
+  if (state === "streamed_0_7") Object.assign(config, V0_7_STREAMED);
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(config), { mode: 0o600 });
   return root;
 }
 
-const STATES = ["no_project", "stopped", "stale", "squatted", "broken", "demo"] as const;
+const STATES = ["no_project", "stopped", "stale", "squatted", "broken", "demo", "streamed_0_7"] as const;
 /** Which of src/cli/state.ts's states each folder is: a run recorded that does not answer is stopped. */
-const IS: Record<(typeof STATES)[number], ProjectState> = { no_project: "no_project", stopped: "stopped", stale: "stopped", squatted: "stopped", broken: "bad_config", demo: "stopped" };
+const IS: Record<(typeof STATES)[number], ProjectState> = { no_project: "no_project", stopped: "stopped", stale: "stopped", squatted: "stopped", broken: "bad_config", demo: "stopped", streamed_0_7: "stopped" };
 
 test("the states are src/cli/state.ts's, in order: each meets more than the one before", () => {
   assert.deepEqual(Object.keys(PROJECT_STATES), ["no_project", "bad_config", "stopped", "up"]);
@@ -280,6 +284,64 @@ test("a demo project, stopped: mason tables says its database runs inside mason 
   }
 });
 
+test("a project 0.7.0 streamed, its file silent on sync: mason start is refused in every state of its config, before it connects, the config as it was; a sync: written goes on to the database", async () => {
+  for (const running of [null, "stale", "squatted"] as const) {
+    for (const json of [false, true]) {
+      const root = folderIn(running ?? "stopped");
+      const config = path.join(root, ".mason", "config.json");
+      fs.writeFileSync(config, JSON.stringify({ ...JSON.parse(fs.readFileSync(config, "utf8")) as object, ...V0_7_STREAMED }));
+      const was = fs.readFileSync(config, "utf8");
+      const files = fs.readdirSync(path.join(root, "mason"));
+      const start = await runMason(root, ["start", ...(json ? ["--json"] : [])], matrixEnv());
+      assert.equal(start.code, 1, start.stdout + start.stderr);
+      if (json) {
+        const e = (JSON.parse(start.stdout) as { error: { code: string; message: string; fix: string } }).error;
+        assert.deepEqual([e.code, e.message], ["refused", "this project streams, and mason/sources/shop.yml does not say so: no sync: at its top or on an entry"]);
+        assert.match(e.fix, /write sync: replication at the top of mason\/sources\/shop\.yml; .* confirm it with sync: off or sync: poll <interval> there$/);
+      } else assert.match(start.stderr, /mason start: this project streams, and mason\/sources\/shop\.yml does not say so/m);
+      assert.equal(fs.readFileSync(config, "utf8"), was, "the config untouched");
+      assert.deepEqual(fs.readdirSync(path.join(root, "mason")), files, "the pin not written");
+      assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, "refused before a run was spawned");
+      // --attach is the run itself, which mason serve reaches too: the same refusal, nothing written
+      const attached = await runMason(root, ["start", "--attach"], matrixEnv());
+      assert.equal(attached.code, 1, attached.stdout + attached.stderr);
+      assert.match(attached.stdout + attached.stderr, /this project streams/);
+      assert.equal(fs.readFileSync(config, "utf8"), was, "the run wrote nothing either");
+    }
+  }
+  // any sync: is the way past it: the next thing met is the database, which is away here
+  const root = folderIn("streamed_0_7");
+  const file = path.join(root, "mason", "sources", "shop.yml");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("tables:", "sync: off\ntables:"));
+  const through = await runMason(root, ["start", "--json"], matrixEnv());
+  assert.doesNotMatch(through.stdout + through.stderr, /this project streams/);
+});
+
+test("MASON_CHANGES refuses mason start as it does mason serve, naming the line, in every state of a project; a state below a project answers its own", async () => {
+  for (const state of ["stopped", "stale", "squatted", "streamed_0_7"] as const) {
+    const root = folderIn(state);
+    const was = fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8");
+    const start = await runMason(root, ["start", "--json"], matrixEnv({ MASON_CHANGES: "replication" }));
+    assert.equal(start.code, 1, start.stdout + start.stderr);
+    const e = (JSON.parse(start.stdout) as { error: { code: string; message: string; fix: string } }).error;
+    assert.equal(e.code, "refused", state);
+    // settings first, at both entrances: the record's refusal is the next edit's
+    assert.equal(e.message, "MASON_CHANGES=replication is no longer read", state);
+    assert.equal(fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8"), was, state);
+    assert.equal(e.fix, "write sync: replication at the top of mason/sources/shop.yml (every table; a table's entry may say its own), then unset MASON_CHANGES");
+    assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, "refused before a run was spawned");
+    // the run, as --attach reaches it
+    const attached = await runMason(root, ["start", "--attach"], matrixEnv({ MASON_CHANGES: "replication" }));
+    assert.equal(attached.code, 1, attached.stdout + attached.stderr);
+    assert.ok((attached.stdout + attached.stderr).includes(e.message), `${state}: --attach says the same: ${attached.stdout}${attached.stderr}`);
+  }
+  const none = await runMason(folderIn("no_project"), ["start", "--json"], matrixEnv({ MASON_CHANGES: "poll" }));
+  assert.equal((JSON.parse(none.stdout) as { error: { code: string } }).error.code, "no_project");
+  const broken = await runMason(folderIn("broken"), ["start", "--json"], matrixEnv({ MASON_CHANGES: "poll" }));
+  assert.equal(broken.code, 1, broken.stdout + broken.stderr);
+  assert.doesNotMatch(broken.stdout, /MASON_CHANGES/);
+});
+
 test("mason add and mason remove need only the project: Mason stopped, they read the database themselves — the demo's runs inside mason start", async () => {
   // the sources file is the list, so a table is added before mason start: with Mason stopped the command checks the
   // edit against the database itself, and a database that does not answer is ITS refusal, as mason tables says it —
@@ -321,6 +383,9 @@ test("every command, in every state without a run, as a person and with --json: 
   const jobs: Array<() => Promise<{ state: (typeof STATES)[number]; cmd: string; json: boolean; a: Answer }>> = [];
   for (const state of STATES) {
     for (const c of COMMANDS) {
+      // destroy there tries the slot on a database that is away, and answers per project (`removed[].error`), exit 1:
+      // its own shape, not this state's (tests/integration/cli-upgrade.itest.ts drops the slot of such a project)
+      if (state === "streamed_0_7" && c.name === "destroy") continue;
       // start in a stopped project is the session's transition (it connects to the database): its refusal here is
       // the database not answering, which is checked; stop is harmless where nothing runs
       for (const args of [MATRIX_ARGS[c.name]!, ...(MATRIX_EXTRA_ARGS[c.name] ?? [])]) {

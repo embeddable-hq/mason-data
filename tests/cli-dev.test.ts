@@ -141,6 +141,82 @@ test("the readiness check: REPLICATION, a superuser or RDS's rds_replication may
   assert.deepEqual([uncapped.refused, uncapped.warnings.map((c) => c.name)], [[], ["WAL cap"]]);
 });
 
+test("what the config records and the file does not say is refused, by what the file says: any sync: is a choice, publication: names or declines the recorded one", async () => {
+  const { recordRefusal, namedPublication } = await import("../src/cli/replication-mode.ts");
+  const { parseSourceText } = await import("../src/cli/sources.ts");
+  const shown = "mason/sources/app.yml";
+  const file = (text: string, publicationName: string | null = null) => {
+    const f = parseSourceText(`kind: postgres\nurl: x\n${text}`, "app", "/p/mason/sources/app.yml");
+    assert.ok(!("problems" in f), JSON.stringify(f));
+    return { ...f, publicationName };
+  };
+  // the config a 0.7.0 start wrote (v0.7.0 src/cli/dev.ts: changes, publication, replication), Mason's own and a named one
+  const own = { changes: "replication" as const, publication: null, replication: { slot: "mason_dev_shop_app", publication: "mason_dev_shop_app", owned: true } };
+  const named = { changes: "replication" as const, publication: "app_pub", replication: { slot: "mason_dev_shop_app", publication: "app_pub", owned: false } };
+  const silent = file("tables:\n  orders: {}\n");
+  const refused = (cfg: Parameters<typeof recordRefusal>[0], f: Parameters<typeof recordRefusal>[1], env: NodeJS.ProcessEnv = {}) => recordRefusal(cfg, f, env, shown, "mason start");
+
+  assert.deepEqual(refused(own, silent), {
+    message: "this project streams, and mason/sources/app.yml does not say so: no sync: at its top or on an entry", code: "refused",
+    why: "an older Mason recorded that this project streams every table (changes: replication in .mason/config.json); left unsaid, sync is off, which drops replication slot mason_dev_shop_app and Mason's publication, and streaming again reads every table whole from your database",
+    fix: "to keep streaming, write sync: replication at the top of mason/sources/app.yml; to drop replication slot mason_dev_shop_app and Mason's publication, confirm it with sync: off or sync: poll <interval> there",
+    next: [["mason start", "once the file says it; nothing was dropped or changed"]] });
+  // both at once: the first edit never meets the second refusal, and an owner's publication is never said to be dropped
+  const both = refused(named, silent);
+  assert.match(both!.fix!, /^to keep streaming, write sync: replication and publication: app_pub at the top of mason\/sources\/app\.yml; to drop replication slot mason_dev_shop_app, confirm/);
+  assert.doesNotMatch(both!.why!, /Mason's publication/);
+  // 0.7.0's own record of a project that polls, and a project of this release that never streamed, pass
+  assert.equal(refused({ changes: "poll", publication: null, replication: null }, silent), null);
+  assert.equal(refused({}, silent), null);
+  // a sync: anywhere is the file saying so, whichever it says: a project that chose polling has a way through
+  for (const text of ["sync: off\ntables:\n  orders: {}\n", "sync: poll 5m\ntables:\n  orders: {}\n", "tables:\n  orders: { sync: off }\n  events: {}\n", "tables:\n  orders: { sync: poll 30s }\n", "sync: off\ntables: {}\n"]) {
+    assert.equal(refused(own, file(text)), null, text);
+    assert.equal(refused(named, file(text)), null, `${text}: nothing is replicated, so no publication is read`);
+  }
+  assert.equal(refused(own, file("sync: replication\ntables:\n  orders: {}\n")), null);
+  // no sources file (mason serve would write one saying sync: off, no one's choice)
+  const noFile = recordRefusal(own, null, {}, "project/sources/<name>.yml", "mason serve")!;
+  assert.equal(noFile.message, "this project streams, and it has no sources file to say so");
+  assert.equal(noFile.fix, "mount the project folder with its sources file (MASON_PROJECT), or make project/sources/<name>.yml there with kind: postgres, url: ${DATABASE_URL}, tables: and the tables it streams, " +
+    "and sync: replication to keep streaming; sync: off or sync: poll <interval> in it instead confirms dropping replication slot mason_dev_shop_app and Mason's publication");
+  // THE CLASS: a project of this release, its slot recorded and no `changes`, whose line was taken out
+  const current = { publication: null, replication: own.replication };
+  const lost = refused(current, silent)!;
+  assert.equal(lost.message, "this project streams, and mason/sources/app.yml does not say so: no sync: at its top or on an entry");
+  assert.equal(lost.why, ".mason/config.json records that this project streams; left unsaid, sync is off, which drops replication slot mason_dev_shop_app and Mason's publication, and streaming again reads every table whole from your database");
+  assert.equal(refused(current, file("sync: off\ntables:\n  orders: {}\n")), null, "the drop confirmed");
+  assert.equal(refused(current, file("tables: {}\n")), null, "no table left: nothing to read whole again");
+  assert.ok(recordRefusal(current, null, {}, "s", "mason serve"), "no file at all is no decision");
+  assert.equal(refused({ replication: null }, silent), null, "no slot: the default");
+  assert.deepEqual(recordRefusal(own, null, {}, "project/sources/<name>.yml", "mason serve")!.next, [["mason serve", "once the file says it; nothing was dropped or changed"]]);
+
+  // the recorded publication
+  const replicates = file("sync: replication\ntables:\n  orders: {}\n");
+  assert.deepEqual(refused(named, replicates), {
+    message: "this project reads publication app_pub, and mason/sources/app.yml does not name it", code: "refused",
+    why: ".mason/config.json records app_pub, its owner's, named at an earlier start; with no publication: line and no PG_PUBLICATION, Mason would make and read a publication of its own on your database instead",
+    fix: "to keep reading it, write publication: app_pub at the top of mason/sources/app.yml; for a publication of Mason's own, write publication: null there",
+    next: [["mason start", "once the file says it; nothing was dropped or changed"]] });
+  // one entry replicated is enough, and the record alone (`changes` deleted by a later start) too
+  assert.ok(refused({ publication: "app_pub" }, file("tables:\n  orders: { sync: replication }\n")));
+  // the three ways through: the file names it, the environment names it, the file declines it
+  assert.equal(refused(named, file("sync: replication\npublication: app_pub\ntables:\n  orders: {}\n", "app_pub")), null);
+  assert.equal(refused(named, replicates, { PG_PUBLICATION: "app_pub" }), null);
+  const declined = file("sync: replication\npublication: null\ntables:\n  orders: {}\n");
+  assert.equal(refused(named, declined), null);
+  assert.equal(namedPublication(declined, { PG_PUBLICATION: "env_pub" }), null, "publication: null is the file's, and the file is first");
+  // the two together are a CREATE on the source said by neither: refused, on any project, with a replicated table or not
+  assert.deepEqual(refused({}, declined, { PG_PUBLICATION: "env_pub" }), {
+    message: "mason/sources/app.yml says publication: null, and PG_PUBLICATION names env_pub", code: "refused",
+    why: "one asks Mason to make a publication of its own on your database, the other to read that one, and the file would win by saying nothing of the setting",
+    fix: "for Mason's own, unset PG_PUBLICATION; to read env_pub, take publication: null out of mason/sources/app.yml",
+    next: [["mason start", "once the file says it; nothing was dropped or changed"]] });
+  assert.ok(refused({}, file("sync: off\npublication: null\ntables: {}\n"), { PG_PUBLICATION: "env_pub" }));
+  assert.equal(refused({}, declined, { PG_PUBLICATION: "" }), null, "set empty is unset");
+  // a project with no record is untouched: Mason's own, as ever
+  assert.equal(refused({ publication: null }, replicates), null);
+});
+
 test("mason start says the file's sync once — and LOUDLY when an upgrade stops the polls: no sync: written anywhere over a copy that holds tables", async () => {
   const dev = await import("../src/cli/dev.ts") as unknown as { syncDefaultLine?: (file: unknown, shown: string, copiedBefore?: number) => string };
   const { parseSourceText } = await import("../src/cli/sources.ts");
@@ -149,9 +225,9 @@ test("mason start says the file's sync once — and LOUDLY when an upgrade stops
   const older = file("kind: postgres\nurl: x\ntables:\n  orders: {}\n  customers: {}\n  events: {}\n");
   // a file an older Mason wrote, over its copy of three tables: they were polled every 5 s, and are off from now
   assert.equal(line(older, "mason/sources/app.yml", 3),
-    "sync: off (the default): 3 tables are not polled (an older Mason polled every table every 5 s); write `sync: poll 5s` at the top of mason/sources/app.yml to keep them current as before, " +
-    "or `mason sync <table>` when you need it");
-  assert.match(line(older, "mason/sources/app.yml", 1), /^sync: off \(the default\): 1 table is not polled \(an older Mason polled every table every 5 s\); /);
+    "sync: off (the default): 3 tables are not polled (an older Mason polled every table under 1,000,000 rows every 5 s); `sync: poll 5s` at the top of mason/sources/app.yml keeps them current as before, " +
+    "but polls the bigger ones too, each poll a full scan on your database: give those `sync: off` on their entry (mason tables shows the rows), or use `mason sync <table>` when you need it");
+  assert.match(line(older, "mason/sources/app.yml", 1), /^sync: off \(the default\): 1 table is not polled \(an older Mason polled every table under 1,000,000 rows every 5 s\); /);
   // a new project (nothing copied yet): the default said, how to change it
   assert.equal(line(older, "mason/sources/app.yml", 0),
     "sync: off (the default): after its first sync, a table is read again only by mason sync <table> — sync: poll 5m at the top of mason/sources/app.yml polls every table, or on an entry that one");

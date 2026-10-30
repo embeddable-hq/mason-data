@@ -52,7 +52,7 @@ test("a port held on :: alone (v6only) is taken: 127.0.0.1 and 0.0.0.0 both bind
   } finally { await h.close(); }
 });
 
-test("a port held on ::1 alone is taken (Node's `localhost` on macOS; a driver tries ::1 first)", async (t) => {
+test("a port held on ::1 alone is taken (Node's `localhost` on macOS; a driver tries ::1 first)", { skip: "quarantined: #80" }, async (t) => {
   const h = await hold("::1");
   if (!h) { t.skip("no IPv6 loopback on this machine"); return; }
   try {

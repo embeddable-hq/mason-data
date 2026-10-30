@@ -188,11 +188,20 @@ test("publication: at the top names the publication replication reads, a ${VARIA
     fs.rmSync(path.join(root, ".env"));
     const unset = S.readSource(folder, root, {}) as Failure;
     assert.deepEqual([unset.code, unset.message, unset.fix], ["bad_source", "mason/sources/app.yml: publication: ${PG_PUBLICATION} is not set — not in .env.local, .env or the shell",
-      "put PG_PUBLICATION=<the publication's name> in .env (or export it), or take publication: out of the file and Mason makes its own"]);
+      "put PG_PUBLICATION=<the publication's name> in .env (or export it), or write publication: null and Mason makes its own"]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  // `publication: null` is Mason's own, said on purpose, past PG_PUBLICATION too; no line says nothing
+  const said = parse("kind: postgres\nurl: x\npublication: null\ntables: {}\n") as { publication: unknown };
+  assert.deepEqual(said.publication, { own: true });
+  assert.equal((parse("kind: postgres\nurl: x\ntables: {}\n") as { publication: unknown }).publication, null);
+  // only the word: a key left with no value is a line half-written, and `~` is nobody's way of saying it
+  for (const bare of ["publication:", "publication: ~", "publication: NULL"]) {
+    assert.deepEqual((parse(`kind: postgres\nurl: x\n${bare}\ntables: {}\n`) as { problems: string[] }).problems,
+      ["publication: write publication: ${PG_PUBLICATION}, or a publication's name (publication: null and Mason makes its own)"], bare);
+  }
   const problems = (text: string): string[] => (parse(text) as { problems: string[] }).problems;
   assert.deepEqual(problems("kind: postgres\nurl: x\npublication: $PG_PUBLICATION\ntables: {}\n"), ['publication: "$PG_PUBLICATION" — write ${NAME} alone, like ${PG_PUBLICATION}, or the publication\'s name']);
-  assert.deepEqual(problems("kind: postgres\nurl: x\npublication: ''\ntables: {}\n"), ["publication: write publication: ${PG_PUBLICATION}, or a publication's name (leave it out and Mason makes its own)"]);
+  assert.deepEqual(problems("kind: postgres\nurl: x\npublication: ''\ntables: {}\n"), ["publication: write publication: ${PG_PUBLICATION}, or a publication's name (publication: null and Mason makes its own)"]);
   assert.deepEqual(problems("kind: postgres\nurl: x\npublcation: app_pub\ntables: {}\n"), ["unexpected key publcation — did you mean `publication`? — a source file takes kind, url, database, sync, publication, tables"]);
 });
 
@@ -557,6 +566,24 @@ test("mason add's sync: --sync writes the entry's sync: alone, comments kept; a 
     assert.match(said(() => E.addEntry(edit(withAudit), { tables: [...CATALOG, table({ table: "audit", replicaIdentity: "n" })], database: "shop" }, "public.audit", ["*"], null, { ...REPL, keep: true })),
       / — mason add audit --sync "poll 5m" polls it instead$/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the run's re-read keeps the tables read before when the file goes silent on sync: over a recorded slot, said with the line; any sync: is taken, and a run with no slot is untouched", () => {
+  const entry = "kind: postgres\nurl: x\ntables:\n  orders: {}\n";
+  const reading = (text: string) => ({ ...(parse(text) as Sources.SourceFile), resolved: "x", from: "mason/sources/app.yml", publicationName: null });
+  const prev = { file: parse("kind: postgres\nurl: x\nsync: replication\ntables:\n  orders: {}\n") as Sources.SourceFile, tables: [], problem: null };
+  const kept = S.rereadSources(prev, reading(entry), "x", CATALOG, "shop", "/app", { slot: "mason_dev_shop_app" });
+  assert.equal(kept.file, prev.file, "the tables read before: the slot is not retired");
+  assert.equal(kept.tables, prev.tables);
+  assert.equal(kept.problem, "mason/sources/app.yml: no sync: at its top or on an entry, and this project streams through replication slot mason_dev_shop_app: " +
+    "write sync: replication at its top to keep streaming, or sync: off or sync: poll <interval> to drop the slot");
+  assert.match(kept.said!, /^the sources file cannot be read as it is now, so the tables read before are kept: /);
+  for (const said of ["sync: off\n", "sync: poll 5m\n", "sync: replication\n"]) {
+    assert.equal(S.rereadSources(prev, reading(`kind: postgres\nurl: x\n${said}tables:\n  orders: {}\n`), "x", CATALOG, "shop", "/app", { slot: "mason_dev_shop_app" }).problem, null, said);
+  }
+  assert.equal(S.rereadSources(prev, reading("kind: postgres\nurl: x\ntables: {}\n"), "x", CATALOG, "shop", "/app", { slot: "mason_dev_shop_app" }).problem, null, "no table left to stream");
+  assert.equal(S.rereadSources(prev, reading(entry), "x", CATALOG, "shop", "/app", { slot: null }).problem, null, "no slot: a silent file is the default");
+  assert.equal(S.rereadSources(prev, reading(entry), "x", CATALOG, "shop", "/app").problem, null);
 });
 
 test("the run's re-read keeps the tables read before when the file sets one to sync: replication the run never checked the database for, said with the way out", () => {

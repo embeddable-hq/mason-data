@@ -23,7 +23,8 @@ import { createHash } from "node:crypto";
 import { replicationNames } from "../cdc/source.ts";
 import type { Failure } from "./command.ts";
 import { connectSource, systemIdentifier, type Source } from "./preflight.ts";
-import type { ProjectConfig } from "./project.ts";
+import { STATE_DIR, type ProjectConfig } from "./project.ts";
+import { replicatedEntries, silentOverSlot, syncWritten, type SourceFile } from "./sources.ts";
 import { readServerFacts, readSlotFacts, replicationChecks, type ProductionCheck, type ServerFacts } from "./replication-checks.ts";
 
 /** Postgres's longest identifier (NAMEDATALEN - 1): a longer slot name is refused, a longer publication's cut with a notice. */
@@ -68,13 +69,58 @@ export function madeReplication(cfg: Pick<ProjectConfig, "name" | "publication" 
 
 /**
  * THE PUBLICATION A START READS, and where it is named: the sources file's `publication:` (its `${PG_PUBLICATION}`
- * resolved), else `PG_PUBLICATION` in the environment, else none — Mason's own. NEVER
- * the one an earlier start recorded: a file that takes `publication:` out means Mason makes its own, as every refusal's
- * way out says (a review finding: the record kept a named one read after its line was gone).
+ * resolved), else `PG_PUBLICATION` in the environment, else none — Mason's own, which `publication: null` asks for past
+ * the environment too. NEVER the one an earlier start recorded, read silently: a record the file does not take up is
+ * refused (`recordRefusal`), so what runs is what is committed.
  */
-export function namedPublication(file: { publicationName: string | null }, env: NodeJS.ProcessEnv): { name: string; from: "file" | "env" } | null {
+export function namedPublication(file: { publicationName: string | null; publication?: SourceFile["publication"] }, env: NodeJS.ProcessEnv): { name: string; from: "file" | "env" } | null {
   if (file.publicationName !== null) return { name: file.publicationName, from: "file" };
+  if (file.publication && "own" in file.publication) return null;
   if (env.PG_PUBLICATION) return { name: env.PG_PUBLICATION, from: "env" };
+  return null;
+}
+
+/**
+ * WHAT `.mason/config.json` RECORDS AND THE SOURCES FILE DOES NOT SAY, refused before anything is written or connected
+ * (one report, for the start that is typed, the run it spawns and `mason serve`). The file says how a project replicates,
+ * and a file that is silent is an omission, not a decision, whose price is on someone's production database:
+ *   - a project that streams (a slot recorded, of any release, or an older Mason's `changes: "replication"`) under a file
+ *     naming tables with no `sync:` at its top or on any entry would have its slot dropped, and streaming again copies
+ *     every table whole. Any `sync:` written is the file saying so: `off` or `poll <interval>` confirms the drop,
+ *     `replication` keeps the slot. The run's re-read holds the same line (`silentOverSlot`, `rereadSources`).
+ *   - a project that replicates through a publication it recorded, with no `publication:` and no `PG_PUBLICATION`,
+ *     would silently make and read a publication of Mason's own. The literal `publication: null` asks for that on purpose.
+ *   - `publication: null` beside a set `PG_PUBLICATION` says two things, and one of them is a CREATE on the source.
+ * `file` null: there is no sources file (a serve would write one saying `sync: off`, which must not read as a choice). A
+ * project is told the first two at once: the first edit must not meet the second refusal.
+ */
+export function recordRefusal(cfg: Pick<ProjectConfig, "changes" | "publication" | "replication">, file: (Pick<SourceFile, "sync" | "tables" | "publication"> & { publicationName: string | null }) | null,
+  env: NodeJS.ProcessEnv, shown: string, cmd: "mason start" | "mason serve"): Failure | null {
+  const recorded = cfg.publication ?? null;
+  const declined = file?.publication != null && "own" in file.publication;
+  const unnamed = recorded !== null && !declined && namedPublication(file ?? { publicationName: null }, env) === null;
+  const next: Failure["next"] = [[cmd, "once the file says it; nothing was dropped or changed"]];
+  if (declined && env.PG_PUBLICATION) {
+    return { message: `${shown} says publication: null, and PG_PUBLICATION names ${env.PG_PUBLICATION}`, code: "refused",
+      why: "one asks Mason to make a publication of its own on your database, the other to read that one, and the file would win by saying nothing of the setting",
+      fix: `for Mason's own, unset PG_PUBLICATION; to read ${env.PG_PUBLICATION}, take publication: null out of ${shown}`, next };
+  }
+  const slotRecorded = (cfg.replication ?? null) !== null;
+  const older = cfg.changes === "replication";
+  if (file === null ? slotRecorded || older : older ? !syncWritten(file) : silentOverSlot(slotRecorded, file)) {
+    const slot = cfg.replication?.slot;
+    const made = `${slot === undefined ? "its replication slot" : `replication slot ${slot}`}${(cfg.replication?.owned ?? recorded === null) ? " and Mason's publication" : ""}`;
+    return { message: `this project streams, and ${file === null ? "it has no sources file to say so" : `${shown} does not say so: no sync: at its top or on an entry`}`, code: "refused",
+      why: `${older ? `an older Mason recorded that this project streams every table (changes: replication in ${STATE_DIR}/config.json)` : `${STATE_DIR}/config.json records that this project streams`}; left unsaid, sync is off, which drops ${made}, and streaming again reads every table whole from your database`,
+      fix: file === null
+        ? `mount the project folder with its sources file (MASON_PROJECT), or make ${shown} there with kind: postgres, url: \${DATABASE_URL}, tables: and the tables it streams, and sync: replication${unnamed ? ` and publication: ${recorded}` : ""} to keep streaming; sync: off or sync: poll <interval> in it instead confirms dropping ${made}`
+        : `to keep streaming, write sync: replication${unnamed ? ` and publication: ${recorded}` : ""} at the top of ${shown}; to drop ${made}, confirm it with sync: off or sync: poll <interval> there`, next };
+  }
+  if (unnamed && file !== null && replicatedEntries(file).length > 0) {
+    return { message: `this project reads publication ${recorded}, and ${shown} does not name it`, code: "refused",
+      why: `${STATE_DIR}/config.json records ${recorded}, its owner's, named at an earlier start; with no publication: line and no PG_PUBLICATION, Mason would make and read a publication of its own on your database instead`,
+      fix: `to keep reading it, write publication: ${recorded} at the top of ${shown}; for a publication of Mason's own, write publication: null there`, next };
+  }
   return null;
 }
 

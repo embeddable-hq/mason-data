@@ -64,7 +64,7 @@ const requiredOf = (t: CopiedTable): string[] => t.columns.filter((c) => !c.gene
 /** what follows every refusal: Mason waits for the owner, and when it looks again */
 const NEVER_ALTERED = "Mason reads a publication it is given as it is, never altering it: once its owner has run that, the next mason start " +
   "(or mason add) checks it again. Or give the table's entry sync: poll <interval> in the sources file, which needs no publication; " +
-  "or take publication: out of it, where Mason makes its own, carrying the replicated tables alone (not on a read replica).";
+  "or write publication: null in it, where Mason makes its own, carrying the replicated tables alone (not on a read replica).";
 
 /**
  * The verdict over a described publication (pure: `described` is what `readNamedPublication` read). `identities` are

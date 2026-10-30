@@ -85,6 +85,7 @@ ${codes}
                                   <table> reads it again), poll <interval> (poll 5s, poll 5m, poll 1h; 1s to 24h) or
                                   replication (the change log: a primary key, wal_level = logical)
     publication: \${PG_PUBLICATION}  optional: the publication replication reads, its owner's, never altered
+                                     (publication: null: Mason's own, past one an earlier start recorded)
     tables:
       orders:                     a bare name is in public; billing.invoices names its schema
         columns: [id, status]     these columns (the primary key is always synced)
@@ -151,7 +152,10 @@ names the tables the server syncs, and its url: names the variable that holds th
    carries the replicated tables alone. The slot holds the database's WAL while Mason is down, so cap it on the
    database with max_slot_wal_keep_size (Postgres 13+); it is dropped, verified gone, when no table's sync is
    replication any more, and at mason destroy. The flags --replication, --poll and --publication of mason start, and
-   MASON_CHANGES on a server, are gone: each answers with the line to write in the sources file. Try it locally first:
+   MASON_CHANGES, are gone: each answers with the line to write in the sources file. A project that streams, under a
+   file with no sync: anywhere, is refused rather than dropped (sync: replication keeps the slot; sync: off or
+   sync: poll <interval> confirms the drop), and so is one with a recorded publication that nothing names now
+   (publication: <name>, or publication: null for Mason's own, with PG_PUBLICATION unset). Try it locally first:
      mason add orders --sync replication             that table from the change log, as the server reads it
      mason sync customers                           any table read again now, whatever its sync:
 
