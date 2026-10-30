@@ -33,7 +33,7 @@ export function readEnv(root: string, processEnv: NodeJS.ProcessEnv = process.en
 }
 
 /**
- * A VARIABLE OF AN APP'S FOLDER (`mason init`'s DATABASE_URL, and a source file's `url: ${NAME}`,
+ * A VARIABLE OF AN APP'S FOLDER (`mason init`'s MASON_DATABASE_URL or DATABASE_URL, and a source file's `url: ${NAME}`,
  * src/cli/sources.ts): `name` from the folder's `.env.local`, then `.env` (an `export ` before a line is
  * allowed, as shells write it), then the environment — the order web frameworks read them in, the app's own files
  * first because they name the database this folder's app uses. A different question from readEnv's "this process's
@@ -56,10 +56,24 @@ export function appEnvValue(root: string, name: string, processEnv: NodeJS.Proce
   return value ? { value, from: "the shell", file: null } : null;
 }
 
-/** The app's DATABASE_URL (`appEnvValue`): what `mason init` reads when no URL is given. */
-export function appDatabaseUrl(root: string, processEnv: NodeJS.ProcessEnv = process.env): { url: string; from: string; file: string | null } | null {
-  const v = appEnvValue(root, "DATABASE_URL", processEnv);
-  return v === null ? null : { url: v.value, from: v.file ?? "the shell's DATABASE_URL", file: v.file };
+/**
+ * The variables `mason init` reads a database's URL from when none is given, in the order it reads them: Mason's own
+ * first, so a developer whose app's DATABASE_URL names another database can aim Mason elsewhere; then the app's.
+ */
+export const DATABASE_URL_VARIABLES = ["MASON_DATABASE_URL", "DATABASE_URL"] as const;
+
+/**
+ * What `mason init` reads when no URL is given: the first of `DATABASE_URL_VARIABLES` that is set, each read as
+ * `appEnvValue` reads it (`.env.local`, `.env`, then the shell). `variable` is the one read — the variable the sources
+ * file then names; `from` says it with where it was found (`MASON_DATABASE_URL in .env`, `DATABASE_URL in the shell`).
+ */
+export function appDatabaseUrl(root: string, processEnv: NodeJS.ProcessEnv = process.env):
+  { url: string; variable: string; from: string; file: string | null } | null {
+  for (const variable of DATABASE_URL_VARIABLES) {
+    const v = appEnvValue(root, variable, processEnv);
+    if (v !== null) return { url: v.value, variable, from: `${variable} in ${v.from}`, file: v.file };
+  }
+  return null;
 }
 
 /**

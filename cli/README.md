@@ -22,7 +22,7 @@ anywhere in the folder, as git does. `mason destroy` removes the copy and the st
 npm i -g @mason-data/cli
 cd my-app
 mason doctor                         # Node, memory, ports: what is missing, and what to do
-mason init                           # this folder becomes a project, on the database in .env's DATABASE_URL (checked first)
+mason init                           # this folder becomes a project, on the database .env names (checked first)
 mason tables                         # the tables: rows, keys, added; a table's columns with `mason tables orders`
 mason add orders customers           # add them to the sources file (--columns id,status: those only)
 mason start                          # Mason in the background, copying them, then returns
@@ -32,10 +32,12 @@ mason ui                             # the status page and the users, in your br
 ```
 
 `mason init` takes the database's URL as an argument too (`mason init postgres://user:password@localhost:5432/your_app`);
-without one it reads `DATABASE_URL` from the folder's `.env.local`, `.env` or the shell. The sources file it writes says
-`url: ${DATABASE_URL}`, and the URL itself stays in `.env` (init writes the line there when you gave the URL as an
-argument or it was only in the shell, and gitignores that file): change it there when the password changes. The
-database is required.
+without one it reads `MASON_DATABASE_URL`, else `DATABASE_URL`, each from the folder's `.env.local`, `.env` or the
+shell — set `MASON_DATABASE_URL` to aim Mason at a database other than the one your app's `DATABASE_URL` names. The
+sources file it writes names the variable it read, `url: ${DATABASE_URL}` or `url: ${MASON_DATABASE_URL}` (given a URL
+as an argument, `MASON_DATABASE_URL` when your app's `DATABASE_URL` names another database), and the URL itself stays
+in `.env` (init writes the line there when you gave the URL as an argument or it was only in the shell, and gitignores
+that file): change it there when the password changes. The database is required.
 
 **No database at hand?** `mason init demo && mason start`, in a new folder, makes a project on a demo database Mason
 hosts itself — a small shop (`customers`, `products`, `orders`, `order_items`; the first three added, `order_items`
@@ -47,7 +49,7 @@ left for your first `mason add order_items` after `mason start`), kept in `.maso
 
 ```
 my-app/
-  .env                    the database's URL (DATABASE_URL), as your app has it (gitignored)
+  .env                    the database's URL (DATABASE_URL, as your app has it, or MASON_DATABASE_URL) (gitignored)
   .mason/                 this machine's: Mason's key, the copy of your data, its state and logs (gitignored)
   mason/sources/app.yml   the database and the tables Mason copies — commit it
   mason/mason.yml         the Mason version the project is written for — commit it: production runs that version
@@ -93,7 +95,7 @@ again and remove `mason/models/`.
 |---|---|
 | `mason help [<command> \| <guide>]` | The commands by step, one command's usage, or one of the guides, offline: `mason help agent` (driving Mason from a coding agent: the commands in order, `--json` and its shapes, exit codes, failures) and `mason help production` (the road from a laptop to production: the image, its settings, Docker Compose, logical replication, upgrades). |
 | `mason doctor` | Checks what Mason needs here — Node 22.13+, memory, Mason's ports — and in a project's folder its database; with Mason running for it, the run itself: whether every added table is copied, the statements refused or slow in the last day. Every failing line says what to do; it ends with the next command. |
-| `mason init [<postgres url>]` | Makes this folder a project: checks it can read the database (nothing is written when it cannot; `--skip-check` writes anyway), writes `.mason/config.json` (Mason's key, never the URL) and `mason/sources/<database>.yml` (keeping a sources file already there), adds the URL to `.env` when it was not there, and adds `.mason/` and that `.env` to `.gitignore`. The URL from the argument, else `DATABASE_URL` in `.env.local`, `.env` or the shell. `--name` sets the project's name (default: the folder's) — the database name a tool connects to — `--folder` where its files go, `--remote` allows a database on another machine. Refuses a folder already in a project, but for one with no sources file (an older Mason's), whose sources file alone it writes. |
+| `mason init [<postgres url>]` | Makes this folder a project: checks it can read the database (nothing is written when it cannot; `--skip-check` writes anyway), writes `.mason/config.json` (Mason's key, never the URL) and `mason/sources/<database>.yml` (keeping a sources file already there), adds the URL to `.env` when it was not there, and adds `.mason/` and that `.env` to `.gitignore`. The URL from the argument, else `MASON_DATABASE_URL`, else `DATABASE_URL`, each in `.env.local`, `.env` or the shell (the sources file names the one read). `--name` sets the project's name (default: the folder's) — the database name a tool connects to — `--folder` where its files go, `--remote` allows a database on another machine. Refuses a folder already in a project, but for one with no sources file (an older Mason's), whose sources file alone it writes. |
 | `mason start` | Starts Mason for this folder's project in the background and returns once it is up. Run it again any time: it says so when Mason is already running. `--replication` reads the database's change log as production does (below); `--poll` goes back. `--self-signed-tls` serves the Postgres API over TLS; `--attach` stays in the foreground. |
 | `mason tables [<table>…] [--all]` | The tables this user can read against the sources file, one line each: rows, primary key, whether added (and with which columns), and why a table cannot be added yet (no primary key: the `--key` to add it by). Name a table (or pass `--all` for every one) for its columns: each one's type, what it references, and whether `mason add` would leave it out as a secret. It reads the project's database itself, so Mason need not be running. |
 | `mason add <table>… [--columns …] [--include …] [--key …] [--sync …]` | Copies tables into Mason, each one an entry of the sources file: every column (`orders: {}`), or `--columns id,status,created_at` for those (one table at a time; the key is written with them). Columns that look like secrets (`password`, `token`, `api_key`, `private_key`, …) are left out, named, and written as `exclude:`; `--include password_hash` adds one. `--key tenant_id,id` adds a table with no primary key, copied by those columns. `--sync "poll 30s"` (or `off`) writes how it is kept current after its first copy on its entry; on a table already added, `--sync` alone changes that line and nothing else. Without it the entry follows the file's `sync:`, but a table over 1,000,000 rows under a file that polls is written `sync: off` and said, and a frequent poll of tens of millions of rows is warned of with an estimate of its cost. Adding a table again with other columns changes its entry. Mason need not be running: the entry is checked against the database as the run checks it, and the copy begins at `mason start` (with Mason running, at once). |
