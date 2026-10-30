@@ -7,8 +7,11 @@
  * (`copy` says what was measured).
  *
  * KEPT CURRENT AS THE SOURCES FILE SAYS, PER TABLE (`AddedTable.sync`, src/lib/table-sync.ts; GitHub issue 33): `off`
- * (the default) reads a table again only when asked (`pollNow`, `mason sync`), and `poll <interval>` by MASON'S XMIN
- * POLL (step 1, decision G; `MASON_DUCK_SYNC=poll`, the default) at that interval. Each polled table is polled by ONE
+ * (the default) reads a table again only when asked (`pollNow`, `mason sync`), `poll <interval>` by MASON'S XMIN
+ * POLL (step 1, decision G; `MASON_DUCK_SYNC=poll`, the default) at that interval, and `replication` by the database's
+ * change log (src/duck/stream.ts) through the project's ONE slot and publication, which carries the replicated tables
+ * only (`ensurePublication`) — the polled tables polled beside the stream, the slot made when the first table is
+ * replicated and dropped, verified gone, when the last one no longer is (`retireReplication`). Each polled table is polled by ONE
  * DuckDB transaction of its own (one over every table held them all behind the slowest), which reads the source through the attached extension — which runs every read of a
  * DuckDB transaction in ONE Postgres REPEATABLE READ READ ONLY transaction (verified: a count inside it did
  * not move for an INSERT committed outside it), so every read below sees one snapshot — and commits what it read:
@@ -68,10 +71,11 @@ import { didYouMean } from "../lib/did-you-mean.ts";
 import { namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import type { SyncEventInput } from "./events.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
-import { BIG_TABLE_ROWS, intervalOf, syncedText, syncText, syncWords, type TableSync } from "../lib/table-sync.ts";
+import { BIG_TABLE_ROWS, intervalOf, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
 
-/** how a copied table is kept current: Mason's xmin poll (step 1), a whole copy again (step 0), or the database's
- *  logical replication stream (`mason start --replication`, src/duck/stream.ts) */
+/** how a run keeps its copies current: each table as its `sync:` says (`poll`; a table with none — a test's — polled at
+ *  the run's interval), each as its `sync:` says with a table with none streamed (`replication`: a test's run of the
+ *  stream), or every table copied again whole (step 0, `recopy`) */
 export type SyncMode = "poll" | "recopy" | "replication";
 export function syncModeOf(env: NodeJS.ProcessEnv): SyncMode {
   const v = env.MASON_DUCK_SYNC || "poll";
@@ -85,7 +89,7 @@ export function syncModeOf(env: NodeJS.ProcessEnv): SyncMode {
  *  is how the sources file keeps it current after its first copy (its entry's, else the file's, else `off`); a table
  *  with none — a test's — is polled at the sync's own interval (`Sync.syncOf`). */
 export type AddedTable = Pick<SourceTable, "source" | "schema" | "table" | "key" | "columns" | "foreignKeys" | "bytes" | "rows"> & Partial<Pick<SourceTable, "rowTypeOid" | "uniqueKeys">> &
-  { primaryKey?: string[]; sync?: TableSync };
+  { primaryKey?: string[]; sync?: TableSync; replicaIdentity?: SourceTable["replicaIdentity"] };
 
 export type CopyPhase = "waiting" | "copying" | "copied" | "failed";
 
@@ -187,13 +191,15 @@ export interface Synced { at: string; seconds: number | null; by: "copy" | "poll
  * - `recopy`: copied again whole every interval (every table, whatever its state: `pass`); `pending` as the poll's, for
  *   a table not copied now (waiting, being copied, its copy failed);
  * - `replication`: its part in the stream (`StreamTableStatus`'s state and why), where the stream is (`position`, the
- *   status's), the commit time of the newest change applied this run, and why the stream is not running (null: it is).
+ *   status's), the commit time of the newest change applied this run, why the stream is not running (null: it is), and
+ *   `syncedAt`: the copy is current as of then — the last moment the stream had everything the database wrote (a
+ *   keepalive with nothing pending, a batch applied) while the table was streamed, else its last copy or poll.
  */
 export type KeptCurrent =
-  | { by: "poll"; sync: TableSync; syncedAt: string | null; nextAt: string | null; pending?: string }
+  | { by: "poll"; sync: PolledSync; syncedAt: string | null; nextAt: string | null; pending?: string }
   | { by: "recopy"; copiedAt: string | null; pending?: string }
   | { by: "replication"; slot: string; state: StreamTableStatus["state"]; why: string | null; position: string; lastCommit: string | null;
-    notRunning: string | null };
+    notRunning: string | null; syncedAt: string | null };
 
 /**
  * WHERE THE STREAM IS, for `mason status`, `mason wait` and their `--json` (`Sync.streamStatus`; the test server's
@@ -788,10 +794,17 @@ export class Sync {
   private attached = false;
   private loaded = false;
   private stopped = false;
-  /** REPLICATION MODE: the publication and slot it reads (`owned`: the publication is Mason's own, made and kept equal
-   *  to the added tables; else the operator named it, and it is only read — src/duck/publication.ts), the stream while it
-   *  runs, the last commit DuckDB applied */
+  /** REPLICATION: the publication and slot the `replication` tables are read through (`owned`: the publication is
+   *  Mason's own, made and kept equal to the replicated tables; else the operator named it, and it is only read —
+   *  src/duck/publication.ts), null in a run that cannot stream (the demo's); the stream while it runs, the last commit
+   *  DuckDB applied */
   private readonly replication: SyncReplication | null;
+  /** told when the slot is made (true) and when it is dropped, verified gone (false): the run records it, so `mason
+   *  destroy` drops what was made by its own name (src/cli/dev.ts) */
+  private readonly onReplication: ((made: boolean) => void) | undefined;
+  /** the last moment the stream had everything the database wrote (a keepalive with nothing pending, a batch applied):
+   *  a streamed table's copy is current as of then (`keptOf`'s syncedAt) */
+  private streamCurrentAt: number | null = null;
   private stream: ReplicationStream | null = null;
   private appliedLsn = 0n;
   /** the slot has a row in `_mason.stream_state`: what this copy applied of it is known */
@@ -893,7 +906,7 @@ export class Sync {
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
     options: { streamReportMs?: number; copyChunkRows?: number; copyParallel?: number; copyChunkSeconds?: number; onChunk?: (e: ChunkEvent) => void | Promise<void>; diskFree?: (dir: string) => number;
-      json?: Partial<KeptOptions>;
+      json?: Partial<KeptOptions>; onReplication?: (made: boolean) => void;
       /** each failure and notable event of the sync, as it happens (src/duck/events.ts): the run records them */
       onEvent?: (e: SyncEventInput) => void } = {}) {
     this.store = store; this.source = source; this.database = database; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
@@ -910,6 +923,7 @@ export class Sync {
     this.diskFree = options.diskFree ?? ((dir) => { const st = fs.statfsSync(dir); return st.bavail * st.bsize; });
     if (mode === "replication" && replication === null) throw new Error("replication mode needs its slot and publication (Mason bug: report it)");
     this.replication = replication;
+    this.onReplication = options.onReplication;
     this.currentSchema = { database, tables: [] };
     this.writerLane = { conn: store.writer, inFlight: false };
     this.kept = new KeptJsonPaths(store, {
@@ -1022,12 +1036,35 @@ export class Sync {
       const was = prev !== undefined ? syncText(this.syncOf(prev)) : this.recordedSync.get(t.source) ?? null;
       if (was === null || was === now) continue;
       this.due.delete(t.source);
-      // only the poll reads sync: (replication streams every table, recopy copies every one again), and a table whose
-      // columns changed too is copied again with them, its new sync recorded at that copy's swap
+      // recopy copies every table again whatever its sync, and a table whose columns changed too is copied again with
+      // them, its new sync recorded at that copy's swap
       const copied = this.states.get(t.source)?.phase === "copied" && this.snapshots.has(t.source) && this.copiedAs.get(t.source) === columnsKey(t.columns);
-      if (this.mode !== "poll" || !copied) continue;
-      this.switched.add(t.source);
-      this.log(`${t.source}: sync: ${was} → ${now}: its copy is kept, and caught up by one poll now`);
+      if (this.mode === "recopy" || !copied) continue;
+      if (this.replicated(t)) {
+        // INTO THE STREAM (poll or off → replication): caught up by ONE poll with the stream's changes of it held from
+        // just before that poll (`catchUp`), as a slot new to the copy is — once the pass has the publication carry it
+        // (`prepareReplication` runs before the pass queues the catch-up). Marked in `_mason.catch_up`, on the writer's
+        // turn and so before the catch-up starts: the stream acknowledges what it holds, so a run that dies between
+        // the catch-up's poll and the held changes' apply must catch it up again (its recorded sync is already the new)
+        this.switched.delete(t.source);
+        const why = `after its sync changed from ${was}`;
+        if (!this.behind.has(t.source)) {
+          const mark = { why };
+          this.behind.set(t.source, mark);
+          void this.onWriter(() => this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(t.source)}, ${literal(why)}, now())`)).catch((e: unknown) => {
+            // its next start catches it up again only by this row: said, and the mark kept for this run's own catch-up
+            this.log(`${t.source}: its catch-up could not be recorded (a stop before it ends catches it up again only if its sync changes): ${e instanceof Error ? e.message : String(e)}`);
+          });
+        }
+      } else {
+        // OUT OF THE STREAM, or between off and poll: it leaves the stream at its next batch (`refreshStreamed`) and the
+        // next pass polls it from its watermark, which every change since is at or past
+        this.switched.add(t.source);
+      }
+      // said, and recorded as the sync's event (src/duck/events.ts): what a table's sync was is history the log alone loses
+      const switched = `sync: ${was} → ${now}: its copy is kept, and caught up by one poll now${this.replicated(t) ? ", then streamed" : ""}`;
+      this.log(`${t.source}: ${switched}`);
+      this.event({ kind: "sync_changed", table: t.source, message: switched });
     }
     // loud: the copy goes with the table's entry, and comes back only by reading the source again (the test server: a 53 GB
     // copy, 21 minutes of a production replica, dropped by a project file moved aside)
@@ -1060,8 +1097,8 @@ export class Sync {
     if (copy !== null) return { source: t.source, copy };
     const b = this.behind.get(t.source);
     if (b !== undefined) return { source: t.source, behind: b.why };
-    if (this.replication !== null && !this.slotKnown) return { source: t.source, behind: `slot ${this.replication.slot} is new to this copy` };
-    const off = this.mode === "poll" && this.syncOf(t).mode === "off";
+    if (this.replicated(t) && this.replication !== null && !this.slotKnown) return { source: t.source, behind: `slot ${this.replication.slot} is new to this copy` };
+    const off = this.mode !== "recopy" && this.syncOf(t).mode === "off";
     return { source: t.source, kept: this.keptWords(t), off };
   }
 
@@ -1069,15 +1106,31 @@ export class Sync {
   private keptWords(t: AddedTable): string {
     const every = `${Number((this.intervalMs / 1000).toFixed(1))} s`;
     const s = this.syncOf(t);
-    return this.mode === "replication" ? `streamed from ${formatLsn(this.appliedLsn)}`
-      : this.mode === "recopy" ? `copied again whole every ${every}`
+    return this.mode === "recopy" ? `copied again whole every ${every}`
+      : s.mode === "replication" ? `streamed from ${formatLsn(this.appliedLsn)}`
       : s.mode === "off" ? `sync: off (read again only by mason sync ${t.source})` : syncWords(s);
   }
 
   /** how a table is kept current, as the sources file says (`AddedTable.sync`); a table with none — a test's — polled at
    *  the sync's own interval */
   private syncOf(t: AddedTable): TableSync {
-    return t.sync ?? { mode: "poll", every: intervalOf(this.intervalMs / 1000), seconds: this.intervalMs / 1000 };
+    if (t.sync !== undefined) return t.sync;
+    return this.mode === "replication" ? { mode: "replication" } : { mode: "poll", every: intervalOf(this.intervalMs / 1000), seconds: this.intervalMs / 1000 };
+  }
+
+  /** a table the stream keeps current: its sync is `replication` (never in a run that copies every table again whole) */
+  private replicated(t: AddedTable): boolean {
+    return this.mode !== "recopy" && this.syncOf(t).mode === "replication";
+  }
+
+  /** the added tables the stream keeps current, in the project's order */
+  private replicatedTables(): AddedTable[] {
+    return [...this.tables.values()].filter((t) => this.replicated(t));
+  }
+
+  /** THE RUN STREAMS NOW: a table's sync is `replication` (the slot is made, or kept, and the stream runs) */
+  streams(): boolean {
+    return this.replication !== null && this.replicatedTables().length > 0;
   }
 
   /**
@@ -1183,22 +1236,27 @@ export class Sync {
    */
   private keptOf(t: AddedTable, now: number): KeptCurrent {
     const st = this.states.get(t.source);
-    if (this.mode === "poll") {
+    const sync = this.syncOf(t);
+    if (this.mode !== "recopy" && sync.mode !== "replication") {
       const polledAt = this.polledAt.get(t.source) ?? null;
       // a copy the passes do not keep current now, and why: not copied (waiting, being copied, its copy failed:
       // `needsCopy` holds for every phase but copied), to be copied again (its columns changed, a numeric outgrew it, a
       // retired layout), or caught up first (`pass`'s `polled`, and a table not yet caught up on the writer's turn)
       const pending = this.needsCopy(t) || this.behind.has(t.source) ? this.notStreamedWhy(t.source) : null;
       const next = pending === null ? this.dueAt(t) : null;
-      return { by: "poll", sync: this.syncOf(t), syncedAt: polledAt, nextAt: next === null ? null : new Date(Math.max(next, now)).toISOString(), ...(pending !== null ? { pending } : {}) };
+      return { by: "poll", sync, syncedAt: polledAt, nextAt: next === null ? null : new Date(Math.max(next, now)).toISOString(), ...(pending !== null ? { pending } : {}) };
     }
     // copied again whole every pass, whatever its watermark: only a table not copied now (waiting, being copied, its copy
     // failed) is not kept current
     if (this.mode === "recopy") return { by: "recopy", copiedAt: st?.copiedAt ?? null, ...(st?.phase !== "copied" ? { pending: this.notStreamedWhy(t.source) } : {}) };
     const s = this.stream;
     const part = this.streamTable(t, now, s);
-    return { by: "replication", slot: this.replication!.slot, state: part.state, why: part.why, position: formatLsn(s?.position() ?? this.appliedLsn),
-      lastCommit: this.lastBatch === null ? null : new Date(this.lastBatch.committedAt).toISOString(), notRunning: this.streamDownWhy(s, st) };
+    // current as of its last copy or poll, or — streamed — the last moment the stream had all the database wrote
+    const polled = this.polledAt.get(t.source) ?? null;
+    const streamed = part.state === "streamed" && this.streamCurrentAt !== null ? new Date(this.streamCurrentAt).toISOString() : null;
+    const syncedAt = streamed !== null && (polled === null || streamed > polled) ? streamed : polled;
+    return { by: "replication", slot: this.replication?.slot ?? "", state: part.state, why: part.why, position: formatLsn(s?.position() ?? this.appliedLsn),
+      lastCommit: this.lastBatch === null ? null : new Date(this.lastBatch.committedAt).toISOString(), notRunning: this.streamDownWhy(s, st), syncedAt };
   }
 
   /** why the stream is not running, in the reader's words (null: it runs): its last failure and when it starts again; the
@@ -1209,7 +1267,8 @@ export class Sync {
     const firstLine = (e: string): string => e.replace(/^replication: /, "").split("\n")[0]!;
     if (this.streamFailure !== null) return `${firstLine(this.streamFailure.error)} · it starts again after ${clock(this.streamFailure.retryAt)} UTC`;
     if (st?.error?.startsWith("replication: ")) return firstLine(st.error);
-    if (!this.slotKnown) return `slot ${this.replication!.slot} is not made yet: it starts once it is`;
+    if (this.replication === null) return "this run reads no slot, so nothing streams it (the demo database has no change log): give its entry sync: poll <interval>";
+    if (!this.slotKnown) return `slot ${this.replication.slot} is not made yet: it starts once it is`;
     if (this.stopped) return "Mason is stopping";
     return "it has not started yet: it starts at the next pass";
   }
@@ -1280,11 +1339,11 @@ export class Sync {
     }).finally(() => {
       this.running = null;
       if (this.stopped) return;
-      // replication mode: the stream keeps the copies current between passes, and a pass runs when the tables change —
-      // or after the interval, when it failed or a table waits for a copy or catch-up nothing has queued (a copy that
-      // failed waits its turn, `copyRetryDelayMs`); poll mode: when the next polled table is due (`nextPassDelay`)
-      if (this.mode !== "replication") { const d = this.nextPassDelay(); if (d !== null) this.timer = setTimeout(() => this.kick(), d); }
-      else if (this.passFailed || this.waiting()) this.timer = setTimeout(() => this.kick(), this.intervalMs);
+      // when the next polled table is due (`nextPassDelay`) — the stream keeps a replicated table current between passes,
+      // and a pass runs for it when the tables change — or after the interval, when it failed or a table waits for a copy
+      // or catch-up nothing has queued (a copy that failed waits its turn, `copyRetryDelayMs`)
+      const d = this.nextPassDelay();
+      if (d !== null) this.timer = setTimeout(() => this.kick(), d);
     });
   }
 
@@ -1343,7 +1402,7 @@ export class Sync {
    * table's polls never began. A pass running sets its own when it ends, from the state then.
    */
   private rearm(): void {
-    if (this.stopped || this.mode === "replication" || this.running !== null) return;
+    if (this.stopped || this.running !== null) return;
     const d = this.nextPassDelay();
     if (d === null) return;
     if (this.timer !== null) clearTimeout(this.timer);
@@ -1363,8 +1422,8 @@ export class Sync {
   /**
    * A POLL OF EXACTLY THESE TABLES, NOW, whatever their sync says (`mason sync`: an `off` table is read again only so):
    * a pass of its own, queued behind the one running, in one source snapshot as every poll is; a polled table's next
-   * poll waits its interval from this one. In replication mode nothing is polled: the answer is where the stream is
-   * (`streamed`). Refused by name (`PollRefused`) for a table not added or not copied yet, and in a run that copies
+   * poll waits its interval from this one. A replicated table is not polled: its answer is where the stream is
+   * (`streamed`), beside the polled ones'. Refused by name (`PollRefused`) for a table not added or not copied yet, and in a run that copies
    * every table again whole. Its failure is its caller's to say: the copies serve as they were, and the passes go on.
    */
   async pollNow(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
@@ -1374,15 +1433,17 @@ export class Sync {
       if (t === undefined) throw new PollRefused("not_found", `${s} is not added (mason add adds it)${didYouMean(s, [...this.tables.keys()])}`);
       return t;
     });
-    if (this.mode === "replication") {
-      // the stream keeps every table current: nothing to poll, and the answer is where it is, and each table's part in it
+    // a replicated table: the stream keeps it current, so nothing to poll — its answer is where the stream is, and its part
+    const said = (): StreamedAnswer[] => {
       const now = Date.now(), position = formatLsn(this.stream?.position() ?? this.appliedLsn);
-      return { at: new Date(now).toISOString(), tables: [], streamed: tables.map((t) => { const p = this.streamTable(t, now, this.stream); return { table: t.source, position, state: p.state, why: p.why }; }) };
-    }
+      return tables.filter((t) => this.replicated(t)).map((t) => { const p = this.streamTable(t, now, this.stream); return { table: t.source, position, state: p.state, why: p.why }; });
+    };
+    const polled = tables.filter((t) => !this.replicated(t));
+    if (polled.length === 0) return { at: new Date().toISOString(), tables: [], streamed: said() };
     while (this.running !== null) await this.running;
     if (this.stopped) throw new Stopping();
     // asked after the pass ahead of it: that pass may have copied it, or failed its copy
-    for (const t of tables) {
+    for (const t of polled) {
       const st = this.states.get(t.source);
       if (st?.phase !== "copied" || !this.snapshots.has(t.source) || this.copiedAs.get(t.source) !== columnsKey(t.columns)) {
         throw new PollRefused("nothing_yet", `${t.source} is not copied yet (${st?.phase === "failed" ? `its copy failed: ${st.error ?? "mason logs says why"}` : "its copy has not finished"}): mason wait waits for it`);
@@ -1395,7 +1456,7 @@ export class Sync {
       try {
         // a transaction per table, as the passes poll; a table whose rebuild started since it was asked is refused
         const found: PolledTable[] = [];
-        for (const t of tables) {
+        for (const t of polled) {
           const f = await this.onWriter(async () => { this.refuseRebuilding(t); return this.poll(this.writerLane, [t]); });
           for (const x of f) this.polledNow(t, x.ms);
           found.push(...f);
@@ -1410,11 +1471,13 @@ export class Sync {
     const found = await poll;
     // A SYNC BY HAND IS AN EVENT (src/duck/events.ts `synced`), in the words mason sync and the page's Sync now say:
     // a scheduled poll that succeeds records nothing (one every few seconds would bury the failures), so without it a
-    // person who synced and then read the events found only an older copy, and read it as a sync lost
+    // person who synced and then read the events found only an older copy, and read it as a sync lost. A replicated
+    // table asked for is answered with the stream's position and records none: nothing was read for it
     for (const x of found) this.event({ kind: "synced", table: x.table, message: `synced by hand: ${syncedText(x)}` });
-    const missing = tables.filter((t) => !found.some((f) => f.table === t.source));
+    const missing = polled.filter((t) => !found.some((f) => f.table === t.source));
     if (missing.length) throw new Error(`${missing.map((t) => t.source).join(", ")} has a numeric value wider than its copy's DECIMAL: it is copied again at the next pass, and current once copied`);
-    return { at: new Date().toISOString(), tables: found };
+    const streamed = said();
+    return { at: new Date().toISOString(), tables: found, ...(streamed.length ? { streamed } : {}) };
   }
 
   /**
@@ -1480,7 +1543,7 @@ export class Sync {
   }
 
   /**
-   * REPLICATION, BEFORE A PASS COPIES: the publication carries every added table, and the slot exists — so a table
+   * REPLICATION, BEFORE A PASS COPIES: the publication carries every replicated table, and the slot exists — so a table
    * copied now has its changes in the stream from before it joins (src/duck/stream.ts "why replaying is safe"). A slot
    * made now, or one this copy has no record of, carries nothing from before it: the tables already copied are caught
    * up by one poll each before the stream applies their changes (`behind`, recorded with the slot in one transaction).
@@ -1489,7 +1552,7 @@ export class Sync {
    */
   private async prepareReplication(): Promise<void> {
     const r = this.replication!;
-    const tables = [...this.tables.values()];
+    const tables = this.replicatedTables();
     const pg = await PgConnection.connect(this.pgOptions());
     try {
       const identities = new Map((await pg.query(`SELECT n.nspname || '.' || c.relname, c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ` +
@@ -1499,7 +1562,8 @@ export class Sync {
       const nothing = tables.filter((t) => identities.get(t.source) === "n").map((t) => t.source);
       if (nothing.length) {
         throw new Error(`${nothing.join(", ")} ${nothing.length === 1 ? "has" : "have"} REPLICA IDENTITY NOTHING: a publication carrying ${nothing.length === 1 ? "it" : "them"} ` +
-          `would make the app's own UPDATEs and DELETEs fail, so Mason does not add ${nothing.length === 1 ? "it" : "them"}. ALTER TABLE … REPLICA IDENTITY DEFAULT, or mason start --poll`);
+          `would make the app's own UPDATEs and DELETEs fail, so Mason does not replicate ${nothing.length === 1 ? "it" : "them"}. Give ${nothing.length === 1 ? "its entry" : "their entries"} ` +
+          `sync: poll <interval> (poll 5m) in the sources file, or ALTER TABLE … REPLICA IDENTITY DEFAULT on the database`);
       }
       if (r.owned) await this.ensurePublication(pg, tables, identities);
       else await this.verifyPublication(pg, tables, identities);
@@ -1514,11 +1578,13 @@ export class Sync {
       }
       if (!slot.exists || slot.walStatus === "lost") {
         const repl = await PgConnection.connect({ ...this.pgOptions(), replication: true });
-        try { this.log(`made replication slot ${r.slot} at ${await createSlot(repl, r.slot)} (it holds the database's WAL until Mason reads it: mason destroy, or mason start --poll, drops it)`); }
+        try { this.log(`made replication slot ${r.slot} at ${await createSlot(repl, r.slot)} (it holds the database's WAL until Mason reads it: mason destroy drops it, and so does a sources file in which no table's sync is replication)`); }
         finally { repl.close(); }
         made = true;
+        this.onReplication?.(true);
       }
       if (made || !this.slotKnown) {
+        // the replicated tables already copied: the slot carries nothing from before it (a polled one is the poll's)
         const copied = tables.filter((t) => this.states.get(t.source)?.phase === "copied" && this.snapshots.has(t.source));
         await this.onWriter(async () => {
           const w = this.store.writer;
@@ -1585,7 +1651,7 @@ export class Sync {
     this.unpublished.clear();
     for (const [source, m] of v.tables) this.unpublished.set(source, m);
     if (v.noTruncate && !this.truncateSaid) {
-      this.log(`publication ${name} does not publish truncate: a TRUNCATE on the database does not reach the copy (the poll's count would see it; mason start --poll)`);
+      this.log(`publication ${name} does not publish truncate: a TRUNCATE on the database does not reach the copy (the poll's count would see it: sync: poll <interval> on its entry)`);
       this.truncateSaid = true;
     }
   }
@@ -1617,8 +1683,56 @@ export class Sync {
       if (flags[1] === "t") throw new Error(`publication ${name} is FOR ALL TABLES: it is not the one Mason made (drop it, or name another project)`);
       await pg.query(`ALTER PUBLICATION ${pgIdent(name)} SET TABLE ${list}`);
       await pg.query(`ALTER PUBLICATION ${pgIdent(name)} SET (publish = 'insert, update, delete, truncate')`);
-      this.log(`re-pointed publication ${name} at ${tables.map((t) => t.source).join(", ")}`);
+      this.log(`re-pointed publication ${name} at ${tables.map((t) => t.source).join(", ")}: the tables whose sync is replication`);
     }
+    // VERIFIED, never assumed: what the publication carries is what the database says it does
+    const carried = (await pg.query(`SELECT schemaname || '.' || tablename FROM pg_publication_tables WHERE pubname = ${pgLiteral(name)}`)).rows.map((x) => x[0]!).sort();
+    const wanted = tables.map((t) => t.source).sort();
+    if (carried.join("\n") !== wanted.join("\n")) {
+      throw new Error(`publication ${name} carries ${carried.join(", ") || "no table"} after it was set to ${wanted.join(", ")} (Mason bug: report it, with mason logs)`);
+    }
+  }
+
+  /**
+   * NO TABLE'S SYNC IS REPLICATION ANY MORE (at the start that finds none, or live when the last one leaves): the stream
+   * stopped, the slot dropped — it holds the database's WAL while it exists, read or not — and Mason's own publication
+   * with it (a named one is its owner's: left as it is), each VERIFIED gone; then this copy's record of the slot goes,
+   * so a table replicated again later is caught up by one poll under the slot made anew. Idempotent: what is already
+   * gone is not an error. A failure is the pass's, said, and tried again at the next.
+   */
+  private async retireReplication(): Promise<void> {
+    const r = this.replication!;
+    const s = this.stream;
+    if (s !== null) { await s.stop(); if (this.stream === s) this.stream = null; }
+    const pg = await PgConnection.connect(this.pgOptions());
+    const dropped: string[] = [];
+    try {
+      // the walsender a stop ended lets the slot go a moment later: waited for, at most 10 s
+      let slot = await readSlot(pg, r.slot);
+      for (let i = 0; slot.exists && slot.active && i < 100; i++) { await new Promise((res) => setTimeout(res, 100)); slot = await readSlot(pg, r.slot); }
+      if (slot.exists) {
+        if (slot.active) throw new Error(`replication slot ${r.slot} is in use by pid ${slot.activePid ?? "?"}, so it cannot be dropped (another Mason over the same project? stop it)`);
+        await dropSlot(pg, r.slot);
+        dropped.push(`replication slot ${r.slot}`);
+      }
+      const hasPub = async (): Promise<boolean> => (await pg.query(`SELECT 1 FROM pg_publication WHERE pubname = ${pgLiteral(r.publication)}`)).rows.length > 0;
+      if (r.owned && await hasPub()) {
+        await pg.query(`DROP PUBLICATION IF EXISTS ${pgIdent(r.publication)}`);
+        dropped.push(`publication ${r.publication}`);
+      }
+      if ((await readSlot(pg, r.slot)).exists) throw new Error(`replication slot ${r.slot} is still there after pg_drop_replication_slot`);
+      if (r.owned && await hasPub()) throw new Error(`publication ${r.publication} is still there after DROP PUBLICATION`);
+    } finally { pg.close(); }
+    await this.onWriter(async () => {
+      await this.store.writer.run(`DELETE FROM ${MASON_SCHEMA}.stream_state WHERE slot = $1`, [r.slot]);
+      this.slotKnown = false;
+      this.appliedLsn = 0n;
+      this.streamCurrentAt = null;
+      this.refreshStreamed();
+    });
+    this.log(`no table's sync is replication now: ${dropped.length ? `dropped ${dropped.join(" and ")} from ${this.source.database}, verified gone` : `replication slot ${r.slot} was already gone`}` +
+      ` (the slot held the database's WAL)${r.owned ? "" : `; publication ${r.publication} is its owner's, left as it is`} — a table set to sync: replication makes the slot again`);
+    this.onReplication?.(false);
   }
 
   /**
@@ -1627,13 +1741,13 @@ export class Sync {
    * joins once caught up and leaves when copied again without a restart.
    */
   private startStream(): void {
-    if (this.stream !== null || this.stopped || this.mode !== "replication" || !this.slotKnown || Date.now() < this.streamAt) return;
+    if (this.stream !== null || this.stopped || !this.streams() || !this.slotKnown || Date.now() < this.streamAt) return;
     const r = this.replication!;
     this.refreshStreamed();
     const s = new ReplicationStream({
       connect: () => PgConnection.connect({ ...this.pgOptions(), replication: true }), slot: r.slot, publication: r.publication, log: (l) => this.log(l),
       target: { tables: () => this.streamed, apply: (batch, lsn, committedAt) => this.applyStreamed(batch, lsn, committedAt), applied: () => this.appliedLsn,
-        refuse: (source, missing) => this.refuseStreamed(source, missing) },
+        refuse: (source, missing) => this.refuseStreamed(source, missing), current: () => { if (this.stream === s) this.streamCurrentAt = Date.now(); } },
     });
     this.stream = s;
     this.streamFailure = null;
@@ -1642,7 +1756,7 @@ export class Sync {
     if (this.reportTimer === null) { this.reportTimer = setInterval(() => this.reportStream(), this.streamReportMs); this.reportTimer.unref(); }
     const joined = [...this.streamed.keys()].filter((x) => !this.held.has(x));
     this.log(`streaming ${joined.length ? joined.join(", ") : "no table yet"} from slot ${r.slot} (publication ${r.publication}), applied through ${formatLsn(this.appliedLsn)}` +
-      `${joined.length < this.tables.size ? "; a table copied or caught up meanwhile joins it once current" : ""}`);
+      `${joined.length < this.replicatedTables().length ? "; a table copied or caught up meanwhile joins it once current" : ""}`);
     void s.done.then(async (e) => {
       if (this.stream === s) this.stream = null;
       if (e === null || this.stopped) return;
@@ -1718,8 +1832,9 @@ export class Sync {
     this.streamed.clear();
     const now = new Set<string>();
     for (const t of this.tables.values()) {
-      // a table a named publication does not carry is never streamed (`unpublished`): its changes are not in the slot
-      const joined = !this.behind.has(t.source) && !this.needsCopy(t) && !this.unpublished.has(t.source);
+      // a table a named publication does not carry is never streamed (`unpublished`): its changes are not in the slot;
+      // nor one whose sync is not replication (it is polled, or off)
+      const joined = this.replicated(t) && !this.behind.has(t.source) && !this.needsCopy(t) && !this.unpublished.has(t.source);
       // in the COPY's columns: a held table's columns may have changed since its copy began (`asCopied`)
       const c = this.asCopied(t).columns;
       if (joined || this.held.has(t.source)) {
@@ -1731,9 +1846,17 @@ export class Sync {
     // while a stream runs: its start names what it streams. What it returns is the tables whose join was said
     const said: string[] = [];
     const s = this.stream;
-    if (s !== null && this.mode === "replication") {
+    if (s !== null) {
       const at = formatLsn(s.position());
-      for (const source of this.joinedNow) if (!now.has(source)) this.log(`${source} leaves the stream at ${at}: ${this.notStreamedWhy(source)}`);
+      for (const source of this.joinedNow) {
+        if (now.has(source)) continue;
+        const t = this.tables.get(source);
+        // its sync changed: what keeps it current now, in the words of the switch
+        const why = t !== undefined && !this.replicated(t)
+          ? `its sync is ${syncText(this.syncOf(t))} now, so it is caught up by one poll from its watermark${this.syncOf(t).mode === "off" ? ", then read again only by mason sync" : ", then polled"}`
+          : this.notStreamedWhy(source);
+        this.log(`${source} leaves the stream at ${at}: ${why}`);
+      }
       for (const source of now) {
         if (this.joinedNow.has(source)) continue;
         const why = this.joinWhy.get(source);
@@ -1781,7 +1904,7 @@ export class Sync {
    * connection at most every 5 s (`databasePosition`); everything else is the run's own.
    */
   async streamStatus(): Promise<StreamStatus | null> {
-    if (this.mode !== "replication") return null;
+    if (!this.streams()) return null;
     const r = this.replication!;
     const s = this.stream;
     const position = s?.position() ?? this.appliedLsn;
@@ -1789,7 +1912,7 @@ export class Sync {
     const now = Date.now();
     const iso = (ms: number): string => new Date(ms).toISOString();
     // each table's part, as `keptOf` says it for EXPLAIN (`streamTable`), with what it applied this run
-    const tables = [...this.tables.values()].map((t): StreamTableStatus =>
+    const tables = this.replicatedTables().map((t): StreamTableStatus =>
       ({ table: t.source, ...this.streamTable(t, now, s), applied: { ...(this.appliedCounts.get(t.source) ?? noCounts()) } }));
     return {
       slot: r.slot, slotWal: this.slotWal?.wal ?? { error: "not read yet: the database did not answer within 3 s" }, publication: r.publication, running: s !== null,
@@ -2186,24 +2309,37 @@ export class Sync {
       this.synced.delete(source);
       this.log(`dropped ${source}'s copy: it is no longer added (mason add ${source} copies it again from the source, whole)`);
     }
-    if (this.tables.size === 0) { await this.rebuildSchema(); return; }
-    if (this.mode === "replication") {
-      try { await this.prepareReplication(); }
+    // REPLICATION, as the tables' syncs say: the publication and slot made ready for the replicated tables and the stream
+    // started — or, when none is replicated any more, the slot dropped (verified gone). Its failure is the replicated
+    // tables' alone (not copied, not caught up: `work`), and the pass's, said once the polled tables are polled
+    let replicationFailed: unknown = null;
+    let replicationReady = false;
+    for (const source of [...this.unpublished.keys()]) { const t = this.tables.get(source); if (t === undefined || !this.replicated(t)) this.unpublished.delete(source); }
+    if (this.streams()) {
+      try { await this.prepareReplication(); replicationReady = true; }
       catch (e) {
-        const m = `replication: ${e instanceof Error ? e.message : String(e)}`;
+        // the way out on the table's own line: a failure that names none (a slot the database will not make, a role that
+        // may not replicate) says the line that keeps the tables polled meanwhile — never a bare SQLSTATE's text
+        const said = e instanceof Error ? e.message : String(e);
+        const names = this.replicatedTables().map((t) => t.source);
+        const m = `replication: ${said}${/sync: poll/.test(said) ? "" : ` — ${names.join(", ")} ${names.length === 1 ? "is" : "are"} NOT kept current until it is fixed: ` +
+          `give ${names.length === 1 ? "its entry" : "their entries"} sync: poll <interval> (poll 5m) in the sources file to poll ${names.length === 1 ? "it" : "them"} instead`}`;
         this.event({ kind: "stream_failed", table: null, message: m });
         this.wholeFailure.prepare = m;
         // a table copied before keeps serving its copy; one never copied is failed, so mason status says why
         await this.onWriter(async () => {
-          for (const t of this.tables.values()) { const st = this.states.get(t.source)!; await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }); }
+          for (const t of this.replicatedTables()) { const st = this.states.get(t.source)!; await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }); }
         });
-        await this.rebuildSchema();
-        throw e;
+        replicationFailed = e;
       }
       this.recovered("prepare", "the publication and the slot are ready again");
       // the stream starts once the slot is known, and runs from then on whatever the passes and rebuilds do
-      this.startStream();
+      if (replicationReady) this.startStream();
+    } else if (this.replication !== null && (this.slotKnown || this.stream !== null)) {
+      try { await this.retireReplication(); }
+      catch (e) { replicationFailed = new Error(`no table's sync is replication now, but replication slot ${this.replication.slot} could not be dropped (it holds the database's WAL; tried again at the next pass): ${e instanceof Error ? e.message : String(e)}`); }
     }
+    if (this.tables.size === 0) { await this.rebuildSchema(); if (replicationFailed !== null) throw replicationFailed; return; }
     try { await this.onWriter(() => this.attach()); }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e);
@@ -2222,13 +2358,15 @@ export class Sync {
       throw new Error(`Mason could not attach ${this.source.database} on ${this.source.host}:${this.source.port}: ${m}`);
     }
     this.recovered("attach", "the database is attached again");
-    try { await this.work(); }
+    try { await this.work(replicationReady); }
     finally { await this.onWriter(() => this.detach()); }
     await this.rebuildSchema();
+    if (replicationFailed !== null) throw replicationFailed;
   }
 
-  /** a pass's queueing and polls, the source attached */
-  private async work(): Promise<void> {
+  /** a pass's queueing and polls, the source attached; a replicated table is copied or caught up only once the publication
+   *  carries it and the slot exists (`replicationReady`): its changes are in the stream from before it joins */
+  private async work(replicationReady: boolean): Promise<void> {
     const started = Date.now();
     // a table never copied (or whose copy failed, or whose copy is out of date) is copied whole, beside the rest: the
     // smallest first (`copyOrder`)
@@ -2238,6 +2376,7 @@ export class Sync {
       if ((this.retries.get(t.source)?.at ?? 0) > Date.now()) continue;
       // a table the named publication does not carry: copied, nothing would keep it current (prepareReplication)
       if (this.unpublished.has(t.source)) continue;
+      if (this.replicated(t) && !replicationReady) continue;
       if (this.mode !== "recopy" && !this.needsCopy(t)) continue;
       if (this.queued.has(t.source) || this.rebuildingNow?.source === t.source) continue;
       if (this.states.get(t.source)?.phase === "copied" && this.copiedAs.get(t.source) !== columnsKey(t.columns)) this.log(`${t.source}: its columns are not the ones it was copied with: it is copied again`);
@@ -2247,12 +2386,12 @@ export class Sync {
     for (const source of this.behind.keys()) {
       const t = this.tables.get(source);
       // a failed catch-up waits its turn as a failed copy does (`backOff`); the error it recorded says when
-      if (t !== undefined && !this.needsCopy(t) && (this.retries.get(source)?.at ?? 0) <= Date.now()) this.enqueue(source, { kind: "catch-up" });
+      if (t !== undefined && !this.needsCopy(t) && (this.retries.get(source)?.at ?? 0) <= Date.now() && (!this.replicated(t) || replicationReady)) this.enqueue(source, { kind: "catch-up" });
     }
     // POLL MODE: the tables due (`dueAt`: a polled one past its interval, one whose sync changed), and not a table whose
     // new columns could not be copied (its copy failed above): it is not polled with them
     const now = Date.now();
-    const kept = this.mode === "poll" ? [...this.tables.values()].filter((t) => this.pollable(t) && (this.dueAt(t) ?? Infinity) <= now) : [];
+    const kept = this.mode !== "recopy" ? [...this.tables.values()].filter((t) => !this.replicated(t) && this.pollable(t) && (this.dueAt(t) ?? Infinity) <= now) : [];
     for (const t of kept) {
       if (this.stopped) break;
       // A TRANSACTION PER TABLE, on the writer's turn: one table's slow scan holds no other, and a batch of the stream
@@ -2274,7 +2413,7 @@ export class Sync {
         await this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
       }
     }
-    if (this.mode === "poll") await this.onWriter(() => this.readPolledAt());
+    if (this.mode !== "recopy") await this.onWriter(() => this.readPolledAt());
     this.lastPassMs = Date.now() - started;
   }
 
@@ -2360,7 +2499,7 @@ export class Sync {
    */
   private async catchUp(t: AddedTable): Promise<"copy again" | null> {
     const mark = this.behind.get(t.source)!;
-    const replication = this.mode === "replication";
+    const replication = this.replicated(t);
     // J: from the writer's turn on, every batch's changes of this table are held (`applyStreamed`)
     if (replication) await this.onWriter(async () => { if (!this.held.has(t.source)) this.held.set(t.source, noChanges()); this.refreshStreamed(); });
     const release = (): Promise<void> => this.onWriter(async () => { this.held.delete(t.source); this.refreshStreamed(); });
@@ -2430,7 +2569,7 @@ export class Sync {
     if (saidJoin) return null;
     const s = this.syncOf(t);
     const tail = replication ? (this.behind.has(t.source) ? "it is caught up again first (the slot was made again meanwhile)" : "the stream carries what follows once it runs again")
-      : this.mode === "poll" && s.mode === "off" ? `its sync is off, so it is served as of now: mason sync ${t.source} syncs it again`
+      : s.mode === "off" ? `its sync is off, so it is served as of now: mason sync ${t.source} syncs it again`
         : `the poll keeps it current (${syncWords(s)})`;
     this.log(`caught up ${t.source} by one poll ${mark.why}: ${tail}`);
     return null;
@@ -2474,7 +2613,7 @@ export class Sync {
     this.copiedColumns.set(t.source, [...t.columns]);
     if (o.behind !== null) {
       this.behind.set(t.source, { why: o.behind });
-      if (this.mode === "replication") this.held.set(t.source, noChanges());
+      if (this.replicated(t)) this.held.set(t.source, noChanges());
     }
     this.retired.delete(t.source);
     this.duckTypes.delete(t.source);
@@ -2697,8 +2836,8 @@ export class Sync {
       if (resumed === null) {
         // the stream (or the other tables' polls) goes on: the slot holds no WAL for this copy, and the table joins once
         // caught up from the copy's snapshot
-        const beside = this.mode === "replication" ? "beside the stream, which goes on keeping the other tables current: it is streamed once caught up by one poll from the copy's snapshot"
-          : this.mode === "poll" ? "beside the other tables' polls: it is caught up by one poll from the copy's snapshot once copied" : "beside the other tables";
+        const beside = this.replicated(t) ? "beside the stream, which goes on keeping the other tables current: it is streamed once caught up by one poll from the copy's snapshot"
+          : this.mode !== "recopy" ? "beside the other tables' polls: it is caught up by one poll from the copy's snapshot once copied" : "beside the other tables";
         const again = this.retired.has(t.source) ? `, again (its copy is ${RETIRED_LAYOUT})` : "";
         this.log(`copying ${t.source}${again}: ${t.rows === null ? "rows unknown" : `about ${t.rows} row(s)`}, ${t.bytes} source bytes, ${beside}`);
       }

@@ -57,12 +57,16 @@ test("what --poll and mason destroy drop is what the start recorded, never the n
 });
 
 // a publication the operator names is the database owner's — read as it is, never altered or dropped
-test("a named publication is the flag's, else PG_PUBLICATION, else the recorded one; it is never Mason's to drop, and the slot stays the project's", async () => {
+test("a named publication is the sources file's, else the flag's, else PG_PUBLICATION — never the one a start recorded; it is never Mason's to drop, and the slot stays the project's", async () => {
   const { namedPublication, projectReplication, dropStatements } = await import("../src/cli/replication-mode.ts");
-  assert.deepEqual(namedPublication("app_pub", { PG_PUBLICATION: "env_pub" }, "old_pub"), { name: "app_pub", from: "flag" });
-  assert.deepEqual(namedPublication(null, { PG_PUBLICATION: "env_pub" }, "old_pub"), { name: "env_pub", from: "env" });
-  assert.deepEqual(namedPublication(null, {}, "old_pub"), { name: "old_pub", from: "recorded" }, "a later start of the same copy reads the one it read");
-  assert.equal(namedPublication(null, {}, null), null, "none named: Mason's own");
+  const none = { publicationName: null };
+  assert.deepEqual(namedPublication({ publicationName: "file_pub" }, null, { PG_PUBLICATION: "env_pub" }), { name: "file_pub", from: "file" }, "the file first");
+  assert.deepEqual(namedPublication(none, "app_pub", { PG_PUBLICATION: "env_pub" }), { name: "app_pub", from: "flag" });
+  assert.deepEqual(namedPublication(none, null, { PG_PUBLICATION: "env_pub" }), { name: "env_pub", from: "env" });
+  // a start recorded owners_pub (config.json publication), then publication: was taken out of the file: Mason's own,
+  // never the record — the function takes no record to fall back to
+  assert.equal(namedPublication(none, null, {}), null, "none named: Mason's own");
+  assert.deepEqual(projectReplication("shop", "app", namedPublication(none, null, {})?.name ?? null).owned, true, "a file naming none starts owned");
   const named = projectReplication("shop", "app", "app_pub");
   assert.deepEqual(named, { publication: "app_pub", slot: "mason_dev_shop_app", owned: false });
   assert.equal(dropStatements(named), "SELECT pg_drop_replication_slot('mason_dev_shop_app') FROM pg_replication_slots WHERE slot_name = 'mason_dev_shop_app' AND NOT active;",
@@ -89,9 +93,14 @@ test("the readiness check: REPLICATION, a superuser or RDS's rds_replication may
   const standby = facts({ standby: true, replication: true });
   const v = readinessVerdict(standby, "mason_dev_shop", null, own);
   assert.deepEqual(v.refused.map((c) => c.name), ["publication"]);
-  assert.match(v.refused[0]!.detail, /^this database is a read replica, where Mason cannot make its publication mason_dev_shop \(CREATE PUBLICATION is refused on a standby\)\. Create one on the primary for the tables you add, then name it: mason start --replication --publication <name>$/);
+  assert.match(v.refused[0]!.detail, /^this database is a read replica, where Mason cannot make its publication mason_dev_shop \(CREATE PUBLICATION is refused on a standby\)\. Create one on the primary for the tables whose sync: is replication, then name it: publication: <name> at the top of the sources file$/);
   assert.deepEqual(refused(standby, named), []);
   assert.deepEqual(refused(facts({ standby: true, replication: true, version: 150004, versionText: "15.4" }), named), ["standby"], "before 16 a standby decodes nothing");
+  // the way out to polling is the table's sync:, never --poll (refused whenever a table replicates; a review finding)
+  const detail = (f: ServerFacts, name: string): string => readinessVerdict(f, "mason_dev_shop", null, named).refused.find((c) => c.name === name)!.detail;
+  assert.match(detail(facts({ replication: true, walLevel: "replica" }), "wal_level"), /Or poll the table instead: give its entry sync: poll <interval> in the sources file \(SELECTs alone, no change log\)$/);
+  assert.match(detail(facts({ standby: true, replication: true, version: 150004, versionText: "15.4" }), "standby"), /or poll the table: give its entry sync: poll <interval> in the sources file$/);
+  for (const n of ["wal_level", "standby"]) assert.doesNotMatch(detail(facts({ replication: true, walLevel: "replica", standby: true, version: 150004, versionText: "15.4" }), n), /--poll/);
   // a slot another reader holds: the way out is this project's own stop, and the pid to end when a run crashed
   const held = readinessVerdict(facts({ replication: true }), "mason_dev_shop", { active: true, activePid: 4242, walStatus: "reserved", plugin: "pgoutput" }, own);
   assert.deepEqual(held.refused.map((c) => c.name), ["slot"]);
@@ -102,22 +111,40 @@ test("the readiness check: REPLICATION, a superuser or RDS's rds_replication may
 });
 
 test("mason start says the file's sync once — and LOUDLY when an upgrade stops the polls: no sync: written anywhere over a copy that holds tables", async () => {
-  const dev = await import("../src/cli/dev.ts") as unknown as { syncDefaultLine?: (file: unknown, shown: string, replication: boolean, copiedBefore?: number) => string };
+  const dev = await import("../src/cli/dev.ts") as unknown as { syncDefaultLine?: (file: unknown, shown: string, copiedBefore?: number) => string };
   const { parseSourceText } = await import("../src/cli/sources.ts");
   const file = (text: string) => { const f = parseSourceText(text, "app", "/p/mason/sources/app.yml"); assert.ok(!("problems" in f), JSON.stringify(f)); return f; };
   const line = dev.syncDefaultLine!;
   const older = file("kind: postgres\nurl: x\ntables:\n  orders: {}\n  customers: {}\n  events: {}\n");
   // a file an older Mason wrote, over its copy of three tables: they were polled every 5 s, and are off from now
-  assert.equal(line(older, "mason/sources/app.yml", false, 3),
+  assert.equal(line(older, "mason/sources/app.yml", 3),
     "sync: off (the default): 3 tables are not polled (an older Mason polled every table every 5 s); write `sync: poll 5s` at the top of mason/sources/app.yml to keep them current as before, " +
     "or `mason sync <table>` when you need it");
-  assert.match(line(older, "mason/sources/app.yml", false, 1), /^sync: off \(the default\): 1 table is not polled \(an older Mason polled every table every 5 s\); /);
+  assert.match(line(older, "mason/sources/app.yml", 1), /^sync: off \(the default\): 1 table is not polled \(an older Mason polled every table every 5 s\); /);
   // a new project (nothing copied yet): the default said, how to change it
-  assert.equal(line(older, "mason/sources/app.yml", false, 0),
+  assert.equal(line(older, "mason/sources/app.yml", 0),
     "sync: off (the default): after its first copy, a table is read again only by mason sync <table> — sync: poll 5m at the top of mason/sources/app.yml polls every table, or on an entry that one");
   // a sync: written anywhere is a choice made: never the upgrade's warning
-  assert.doesNotMatch(line(file("kind: postgres\nurl: x\nsync: off\ntables:\n  orders: {}\n"), "f", false, 3), /are not polled|is not polled/);
-  assert.doesNotMatch(line(file("kind: postgres\nurl: x\ntables:\n  orders: { sync: poll 30s }\n  events: {}\n"), "f", false, 3), /are not polled|is not polled/);
-  // under replication the stream keeps every table current: nothing stopped
-  assert.doesNotMatch(line(older, "f", true, 3), /are not polled|is not polled/);
+  assert.doesNotMatch(line(file("kind: postgres\nurl: x\nsync: off\ntables:\n  orders: {}\n"), "f", 3), /are not polled|is not polled/);
+  assert.doesNotMatch(line(file("kind: postgres\nurl: x\ntables:\n  orders: { sync: poll 30s }\n  events: {}\n"), "f", 3), /are not polled|is not polled/);
+  // a file whose default is replication: every table without its own sync streamed, said so
+  assert.equal(line(file("kind: postgres\nurl: x\nsync: replication\ntables:\n  orders: {}\n"), "f", 3),
+    "sync: replication (f): every table without a sync: of its own is kept current from the database's change log");
+});
+
+test("what the record names and this start no longer reads is dropped before the record names the new one: a renamed slot with Mason's own publication, Mason's own publication alone once another is named", async () => {
+  const R = await import("../src/cli/replication-mode.ts" as string) as Partial<typeof import("../src/cli/replication-mode.ts")>;
+  assert.equal(typeof R.staleReplication, "function", "src/cli/replication-mode.ts exports staleReplication");
+  const stale = R.staleReplication!;
+  const own = { slot: "mason_dev_shop_app", publication: "mason_dev_shop_app", owned: true };
+  const named = { slot: "mason_dev_shop_app", publication: "owners_pub", owned: false };
+  // a review finding: own → named on the same slot left mason_dev_shop_app on the database, after mason destroy too
+  assert.deepEqual(stale(own, named), { drop: own, what: "publication", why: "the replicated tables are read through publication owners_pub now, its owner's" });
+  // the slot renamed (the sources file renamed): both go
+  assert.deepEqual(stale({ ...own, slot: "mason_dev_shop_old" }, own), { drop: { ...own, slot: "mason_dev_shop_old" }, what: "both", why: "this source's slot is mason_dev_shop_app now" });
+  // named → own, the same named one, the same own one, nothing recorded: nothing of Mason's to drop
+  assert.equal(stale(named, own), null, "a named one is its owner's: never dropped");
+  assert.equal(stale(named, named), null);
+  assert.equal(stale(own, own), null);
+  assert.equal(stale(null, own), null);
 });

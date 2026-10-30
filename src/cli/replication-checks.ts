@@ -108,12 +108,12 @@ export function replicationChecks(f: ServerFacts, slot: string, slotState: Await
   const out: ProductionCheck[] = [];
   out.push(f.walLevel === "logical"
     ? { name: "wal_level", ok: true, detail: "logical" }
-    : { name: "wal_level", ok: false, detail: `${f.walLevel}: logical replication needs logical. To fix: ${walLevelFix(f)}. Or read changes by polling instead (--poll: SELECT alone, for a small database)` });
+    : { name: "wal_level", ok: false, detail: `${f.walLevel}: logical replication needs logical. To fix: ${walLevelFix(f)}. Or poll the table instead: give its entry sync: poll <interval> in the sources file (SELECTs alone, no change log)` });
   if (f.standby) {
     out.push(f.version >= 160000
       ? { name: "standby", ok: true, warn: !f.hotStandbyFeedback,
         detail: `a read replica (Postgres 16+ decodes on a standby)${f.hotStandbyFeedback ? "" : ". hot_standby_feedback is off: the primary may remove catalog rows the slot still needs, which invalidates it (Mason then rebuilds from scratch) — turn it on"}` }
-      : { name: "standby", ok: false, detail: `a read replica on Postgres ${f.versionText}: logical decoding on a standby needs Postgres 16. Point Mason at the primary, upgrade the replica, or poll it (--poll)` });
+      : { name: "standby", ok: false, detail: `a read replica on Postgres ${f.versionText}: logical decoding on a standby needs Postgres 16. Point Mason at the primary, upgrade the replica, or poll the table: give its entry sync: poll <interval> in the sources file` });
   }
   const canReplicate = f.superuser || f.replication || f.rds?.member === true;
   out.push(canReplicate

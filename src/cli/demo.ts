@@ -23,6 +23,7 @@ import type { Failure } from "./command.ts";
 import type { ChangeSource } from "../cdc/poll.ts";
 import { parseSource, isLocalHost } from "./preflight.ts";
 import { changesOf } from "./replication-mode.ts";
+import { entryName, replicatedEntries, type SourceFile } from "./sources.ts";
 import { heldText, portHolder } from "./ports.ts";
 import { DEMO_DIR, STATE_DIR, type ProjectConfig } from "./project.ts";
 import { DEMO_DATABASE, DEMO_USER, demoUrl } from "../demo/seed.ts";
@@ -77,10 +78,18 @@ export function demoPort(url: string, from: string): { port: number } | { proble
   return { port: s.port };
 }
 
-/** The refusal of logical replication for a demo project (the flag, or a mode the config was edited to): before
- *  anything starts, with the way out; null for any other project, or a demo one polled. */
-export function demoChangesRefusal(cfg: Pick<ProjectConfig, "demo" | "changes">, flag: ChangeSource | null): Failure | null {
-  if (cfg.demo !== true || changesOf(flag, cfg.changes) !== "replication") return null;
+/** The refusal of logical replication for a demo project (the flag, a mode the config was edited to, or a table whose
+ *  sync: is replication in its sources file, `shown`): before anything starts, with the way out; null for any other
+ *  project, or a demo one polled. */
+export function demoChangesRefusal(cfg: Pick<ProjectConfig, "demo" | "changes">, flag: ChangeSource | null, file: Pick<SourceFile, "sync" | "tables"> | null = null, shown = ""): Failure | null {
+  if (cfg.demo !== true) return null;
+  const streamed = file === null ? [] : replicatedEntries(file).map((e) => entryName(e.table));
+  if (streamed.length && flag !== "replication") {
+    return { message: `the demo database is read by polling only: sync: replication does not apply to it (${streamed.join(", ")})`, code: "refused",
+      why: "the demo database has no change log for logical replication to read; Mason polls it with SELECTs",
+      fix: `write sync: poll 5s for ${streamed.length === 1 ? "it" : "them"} in ${shown}, then mason start`, next: [["mason start", "the demo database and Mason, polled"]] };
+  }
+  if (changesOf(flag, cfg.changes) !== "replication") return null;
   return { message: "the demo database is read by polling only: --replication does not apply to it", code: "refused",
     why: "the demo database has no change log for logical replication to read; mason start polls it with SELECTs, every few seconds",
     fix: flag === "replication" ? "mason start, without --replication" : `remove "changes": "replication" from ${STATE_DIR}/config.json, then mason start`,

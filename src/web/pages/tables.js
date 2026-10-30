@@ -32,13 +32,21 @@ const nameMatches = (table, filter) => !filter || table.toLowerCase().includes(f
 /**
  * WHAT A SYNC DID, as `mason sync` prints it from `POST /api/sync`'s answer (src/cli/sync.ts `syncedReport`, held equal
  * by the tests): the rows written and deleted, a line per table, and what happens next to each table synced (`syncedTips`:
- * an `off` one stays as of this sync).
+ * an `off` one stays as of this sync). A table whose sync is replication was not polled: its line says where the stream
+ * is (`streamed`), and a sync of those alone has nothing to sync.
  */
 export function syncedReport(b, picked, tables) {
+  const streamed = b.streamed ?? [];
+  const streamedRows = streamed.map((t) => [t.table, `${t.state}${t.why ? `: ${t.why}` : ""} · the stream has applied the database's changes through ${t.position}`]);
+  if (b.tables.length === 0 && streamed.length > 0) {
+    return { headline: `Nothing to sync: logical replication keeps ${picked.join(", ")} current.`, details: streamedRows, tips: [] };
+  }
   const changed = b.tables.reduce((a, t) => a + t.changed, 0), deleted = b.tables.reduce((a, t) => a + t.deleted, 0);
+  const streamedNames = new Set(streamed.map((t) => t.table));
+  const polled = picked.filter((t) => !streamedNames.has(t));
   return {
-    headline: `Synced ${picked.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted.`,
-    details: b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`]),
+    headline: `Synced ${polled.join(", ")}: ${n(changed)} row(s) written, ${n(deleted)} deleted${streamedRows.length ? `; logical replication keeps ${streamedRows.map((r) => r[0]).join(", ")} current` : ""}.`,
+    details: [...b.tables.map((t) => [t.table, `${n(t.changed)} changed, ${n(t.deleted)} deleted, ${n(t.rows)} rows now · ${msText(t.ms)}`]), ...streamedRows],
     tips: syncedTips(tables),
   };
 }
@@ -92,9 +100,13 @@ export function addedLines(b, file) {
   const s = b.skippedSecrets;
   const name = entryName(b.table);
   const sync = b.bigOff ? `sync: off written on its entry: it has more than 1,000,000 rows, and each poll scans it whole on your database — ` +
-      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason start --replication keeps every table current from the change log`
+      `mason add ${name} --sync "poll 1h" polls it hourly; mason sync ${name} syncs it once, now; mason add ${name} --sync replication keeps it current from the change log`
+    : b.notReplicated ? `sync: poll 5m written on its entry, not the file's replication: ${b.notReplicated} — ` +
+      `mason add ${name} --sync "poll 1h" polls it hourly; mason add ${name} --sync off reads it only by mason sync ${name}`
     : b.sync.value === "off" ? `sync: off (${b.sync.from === "entry" ? "its entry's" : b.sync.from === "file" ? "the file's" : "the default"}): after its first copy it is read again only by mason sync ${name} — ` +
       `mason add ${name} --sync "poll 5m" polls it every 5 minutes`
+    : b.sync.value === "replication" ? `sync: replication (${b.sync.from === "entry" ? "its entry's" : "the file's"}): kept current from the database's change log after its first copy — ` +
+      `mason add ${name} --sync "poll 5m" polls it instead`
     : `sync: ${b.sync.value} (${b.sync.from === "entry" ? "its entry's" : "the file's"}): polled every ${b.sync.value.slice("poll ".length)} after its first copy — mason add ${name} --sync off stops that`;
   return { line: `Added ${b.table} to ${file}: ${copies}${b.key ? `, copied by ${b.key.join(", ")}` : ""}${b.already ? " (already so)" : ""}`, notes: [
     sync,
