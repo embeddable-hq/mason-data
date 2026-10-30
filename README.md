@@ -354,7 +354,7 @@ Most of Mason's speed comes from memory. These are the things that help most, in
   [Going to production](#going-to-production) shows how to set the memory.
 - **Use a fast disk if your data doesn't fit in memory.** Whatever is not in memory is read from disk. The benchmark
   ran on a standard AWS gp3 volume, which reads about 125 MB/s. A local NVMe disk, or a gp3 volume with more
-  throughput provisioned, reads many times faster. How much that speeds up Mason has not been measured yet.
+  throughput provisioned, reads many times faster.
 - **Filter by time.** Mason keeps rows in the order they were inserted, so a filter on `created_at` or an increasing
   `id` skips the blocks outside it. On 5 M rows inserted in time order, one day's filter read 1 of 41 blocks. Give
   your dashboards a date range where you can.
