@@ -343,6 +343,20 @@ export function start(doc, win) {
     const b = e.target.closest?.("button");
     if (b?.dataset.menu !== undefined) { setMenu(!menuOpen, true); return; }
     if (menuOpen && !inMenu(e.target)) { setMenu(false, true); return; }
+    // A DETAILS' SUMMARY: opened or closed by the click itself, never by the toggle event the browser fires after it —
+    // a repaint between the two (a pointerup's, the ages of a live log moving every second) replaced the element, and
+    // the event, fired on the old one, never reached this document: a request's + took several clicks to open
+    const summary = b ? null : e.target.closest?.("summary");
+    const det = summary?.parentElement;
+    if (det?.tagName === "DETAILS") {
+      const r = shownPage().toggle?.({ id: det.id, dataset: det.dataset, open: !det.open }) ?? null;
+      if (r === null) return;   // a details the page keeps no state of: the browser opens it, as ever
+      e.preventDefault?.();
+      paint();
+      await r;
+      paint();
+      return;
+    }
     if (!b) return;
     // Refresh beside a range that is not Now: everything shown read again
     if (b.dataset.refreshRange !== undefined) { app.markStale(); await poll(); return; }
