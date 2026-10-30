@@ -995,11 +995,63 @@ checkpointed.
 | a cancel is a cell of a `SharedArrayBuffer` table the listener writes at once (`src/duck/cancel.ts`) | the worker is busy for seconds with calls; a message would wait behind them |
 | whether a statement calls a function is its PLAN's (`PlannedSql.functions`), never its text's | `__mason_visible` matched a text test: a self-join ran 82 s past a 300 ms timeout and answered "ok"; after, 57014 at 319 ms |
 | a cancel asked is answered 57014, however the statement ends | a scalar subquery's early calls let a cancelled statement finish "ok" |
-| a calling statement's unfinished result is cancelled, interrupted, and closed after `CALLS_QUIET_MS` (50 ms) with no call (`SessionRunner.cleanUp`) | under load the suite sat at 0 % CPU for good: the result's close (`Executor::CancelTasks`) waiting for a task waiting for the worker. After: released 21–63 ms after the client left; a 300 ms timeout answered at ~305 ms |
+| a statement's unfinished result is interrupted, read on off the worker's thread until DuckDB ended it, proved ended, and closed (`SessionRunner.cleanUp`; "The watch" says why, 2026-10-30) | under load the suite sat at 0 % CPU for good: the result's close (`Executor::CancelTasks`) waiting for a task waiting for the worker. Until issue 58 the guard was 50 ms with no call, which was no proof |
 | nothing is closed under a pending call; a statement in flight at a stop gets 57P01 | a stop during a drain aborted the process (exit 134, `Napi::Error`) |
-| a worker silent `SILENT_MS` (60 s) is given up on (57P02, the run exits for its supervisor); `close` settles in `CLOSE_GRACE_MS` (5 s) | a thread blocked in native code survives `worker.terminate()` and `process.exit`; one join (`a.id > b.id AND a.id - b.id = -7`, 1 M rows) takes ~10 s to honour an interrupt in DuckDB itself |
+| a worker silent `SILENT_MS` (60 s) is given up on (57P02, the run exits for its supervisor); `close` settles in `CLOSE_GRACE_MS` (5 s) | a thread blocked in native code survives `worker.terminate()` and `process.exit`. This row once said one join (`a.id > b.id AND a.id - b.id = -7`, 1 M rows) takes ~10 s to honour an interrupt; measured again in 2026-10, its close took 91 ms |
 | a worker given up on is asked to shut down and terminated only once it answered, referenced until then; an answer's close is a request (2026-10-28) | a test file under four suites' load aborted at exit (`libc++abi: terminating due to uncaught exception of type Napi::Error`): the after-hook's close outlasted 5 s and the executor terminated the worker under a Mason function call. A close with a 1 ms grace under a calling statement: 6 aborts in 6 before, 0 in 4 after; a script ending while a closed answer drained: 4 in 4 before, 0 in 4 after. Twenty CPU burners beside the file alone did not reproduce it (3 runs). A terminate under a call-free statement still aborts (2 in 12): nothing terminates a worker with a statement in flight |
 | a statement closed while it starts is released once DuckDB hands the start back; a session's close closes an answer opened while it waits (2026-10-28) | Linux CI then failed the new grace test (`FATAL ERROR: Error::Error napi_define_properties`, the worker's loop still turning): the shutdown answered with a result still open. In a Linux container (node 24, arm64) the test's "grace" child aborted 6 in 30, 7 in 30, 3 in 20 (0 in 30 on the Mac, where a start takes 1–8 ms); traced with synchronous writes, the abort's run met the statement with no answer yet (`stream()` pending), released it at once, and the start was handed back 1 ms later to nobody. After: 0 in 40, twice, and the test file 3 of 3. A start is short (a calling count: 1–8 ms start, 1.7–4.7 s first fetch), so the test makes it late on purpose: a worker whose `stream()` hands DuckDB's start back only once the close's interrupt landed. It first held the start 300 ms after saying "starting" BEFORE DuckDB's own start, and under load the close's interrupt landed inside that start, which DuckDB failed (`INTERRUPT Error: Interrupted!`): told 57014 and released after its failure, correct, but not the case the test names (CI once, two local full checks; 3 – 4 runs in 24 of the child alone, 12 at once). The start is now whole before the close and the close an event, never a timer: 0 in 96 |
+
+### The watch
+
+**What happened** (issue 58, 2026-10-30). A test failed with 57P02 "stuck inside the engine" on a healthy machine, and
+looking found three separate things behind that one message:
+
+| | what | the worker | was the message true? |
+|---|---|---|---|
+| A | the main thread blocked or frozen past 60 s | idle, healthy | no |
+| B | one calling statement holds the worker's loop for a whole 999-call turn | running, on CPU | no |
+| C | a close on the worker's thread waits for a task that waits for that thread | deadlocked at 0 % CPU, for good | yes |
+
+A: the watch compared the clock with the last message, so a block counted as silence, and after one the tick ran before
+the answer waiting in the port was read: `SELECT 41 + 1` refused in 0 ms, no load, and a 66 s SIGSTOP refused a healthy
+statement at its resume. B: the pong needs a loop turn, and a turn lasts 999 × a call's CPU (6.8 ms at ~54 bytes, 103 ms at
+5 kB, 322 ms at 20 kB), so a read of 5 kB documents fires on any machine; with the watchdog disarmed a 20 kB statement
+answered after 1,232 s with a longest silence of 1,151 s. A read of such documents took the whole server down.
+
+C was the 50 ms: a task doing native work before its call makes no call for as long as that takes, and a cancel before
+the first call read the previous statement's time as quiet. Cancels hung 1 in 3,329 over small documents and 5 in 1,303
+over 20 kB ones, and by construction (a vector with `md5(repeat(j, K))` in the call's argument) every time at K = 20000.
+
+**Decision.** The watch counts unanswered pings on the main thread's own ticks, and every Mason function call and row
+adds to a shared beat. Nothing on the worker's thread waits for DuckDB's tasks.
+
+**What does the wait, read from DuckDB 2.0's source and held by experiment.** The prototype of this fix read on, then ran
+`SELECT 1` "to wait"; which of the two waited was not known. `ClientContext::EndQueryInternal` runs
+`Executor::CancelTasks` on the calling thread, and every end of a query passes through it. An interrupted result's next
+fetch fails in `BufferedData::Participate` before it computes anything, and `HandleFetchFailure` ends the query on the
+fetching thread, libuv's. A statement cannot do it: `InitialCleanup` refuses one while a result holds the connection
+(`connection has an open result`, measured: refused while open, interrupted or not, and run after the fetch failed). So the
+FETCH is the wait, and `SELECT 1` is the proof it happened. It is kept for that, as a probe: the contract answers one.
+
+**What it costs: less.** From the abort, median of 30 on a loaded laptop (macOS, Node 24, 3 M rows):
+
+| | client told, before → after | session free, before → after |
+|---|---:|---:|
+| calling, cancel between two chunks | 8.3 → 3.3 ms | 81.5 → 7.0 ms |
+| calling, cancel inside a fetch | 4.0 → 1.5 ms | 62.0 → 3.5 ms |
+| call-free, cancel between two chunks | 0.9 → 0.3 ms | 3.4 → 2.4 ms |
+| call-free, cancel inside a fetch | 0.9 → 0.6 ms | 4.6 → 2.3 ms |
+
+The call-free close was its own false alarm in waiting, which is why it takes the same path: DuckDB checks nothing inside
+a vector, so a close held the thread for the rest of one. With another session's `SELECT 41 + 1` as the measure, a
+vector of `md5(repeat(j, K))` over 1 M rows, before → after: 748 → 3 ms, and 17,872 → 5 ms. The session that closed still
+waits for its vector (15.8 s there), and nobody else does. The join this page once said took ~10 s closed in 91 ms.
+
+**What the message means now.** It fires on a thread that neither turned its loop nor ran a row of a Mason function for 60 s
+of the main thread's time: inside the engine, or spinning. Both are Mason bugs, so a statement that holds the worker
+for minutes no longer fires, and a real deadlock still does. **Where.** `src/duck/executor.ts` (the watch),
+`src/duck/cancel.ts` (the beat), `src/duck/store.ts` `cleanUp`, `src/duck/executor-worker.ts` `conn.close`;
+`tests/duck-executor.test.ts`.
 
 **Still true.** A calling statement starves the worker for its run, and every other request to the copy (another
 session's statement: 8.2 s beside an 8.7 s calling one); the listener, logins, catalog, commands and cancels do not

@@ -172,6 +172,15 @@ export function conflictMarkers(src: string): number[] {
     .filter((n) => n > 0);
 }
 
+test("every synchronous close on the engine's thread is one read against the rule (it never waits for DuckDB's tasks: .claude/rules/duckdb.md)", () => {
+  // a close of an open result waits for the query's tasks, and a task inside a Mason function waits for this thread
+  const closes = (file: string): string[] => fs.readFileSync(path.join(ROOT, file), "utf8").split("\n").filter((l) => /\.closeSync\(\)/.test(l)).map((l) => l.trim());
+  assert.deepEqual(closes("src/duck/store.ts"), ["result?.closeSync();", "this.conn.closeSync();"]);
+  assert.deepEqual(closes("src/duck/executor-worker.ts"), ["try { c?.closeSync(); }", "for (const [n, c] of [...conns].reverse()) { conns.delete(n); c.closeSync(); }", "instance?.closeSync();"]);
+  // and a test beside a running engine never blocks the main thread: its watch's ticks are that thread's
+  assert.doesNotMatch(fs.readFileSync(path.join(ROOT, "tests/duck-executor.test.ts"), "utf8"), /\bspawnSync\(/);
+});
+
 test("no source file carries a committed merge-conflict marker", () => {
   const hits: string[] = [];
   for (const { name, src } of scannedFiles()) {

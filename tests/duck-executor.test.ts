@@ -437,8 +437,9 @@ test("a timeout that lands after a statement's last function call is 57014, neve
     const own = await timed(() => assert.rejects(c.query(CALLS_THEN_COUNTS), (e: pg.DatabaseError) => e.code === "57014" && e.message === "canceling statement due to statement timeout" && e.hint === undefined));
     await c.query("SET statement_timeout = 0");
     // the capped listener's catalog warmed first (its first analysis is a cold PGlite's, ~1 s here): what is timed is
-    // the statement, not the catalog's start
-    await d.query("SELECT count(*) FROM gen a, small b WHERE a.id = b.id");
+    // the statement, not the catalog's start. A statement of the small table: over `gen` this join outlasted the 300 ms
+    // cap itself on a loaded Linux container, and the warm-up failed the test
+    await d.query("SELECT count(*) FROM small a, small b WHERE a.id = b.id");
     const server = await timed(() => assert.rejects(d.query(CALLS_THEN_COUNTS), (e: pg.DatabaseError) => e.code === "57014" && /MASON_STATEMENT_TIMEOUT/.test(e.hint ?? "")));
     t.diagnostic(`whole: ${Math.round(whole.ms)} ms; under a 300 ms timeout: ${Math.round(own.ms)} ms (the session's), ${Math.round(server.ms)} ms (Mason's)`);
     assert.ok(own.ms < 1300 && server.ms < 1300, `answered ${Math.round(own.ms)} / ${Math.round(server.ms)} ms after it was asked: the rest is interrupted, never run to its end (${Math.round(whole.ms)} ms)`);
@@ -694,6 +695,17 @@ parentPort.on("message", (m) => {
 `);
   return file;
 };
+
+test("the watch: a real Mason function beats on every row, so a statement's calls are heard with no turn of the worker's loop", { timeout: 60_000 }, async () => {
+  const { beats } = await import("../src/duck/cancel.ts");
+  const table = (store as unknown as { executor: { cancels: Int32Array } }).executor.cancels;
+  const c = await client();
+  try {
+    const before = beats(table);
+    assert.equal(String((await c.query("SELECT count(*) AS n FROM gen WHERE id < 5000 AND (j -> 'n') IS NOT NULL")).rows[0].n), "5000");
+    assert.ok(beats(table) - before >= 5000, `the beat moved ${beats(table) - before} over 5,000 rows`);
+  } finally { await c.end(); }
+});
 
 test("the watch: a main thread blocked past the bound counts nothing against an idle worker, its first statement after is answered", { timeout: 60_000 }, async () => {
   const crashed: string[] = [];
