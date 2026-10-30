@@ -330,7 +330,7 @@ things about how DuckDB works make the difference:
   This works best on columns that grow as rows are inserted, such as `created_at` or an increasing `id`, because Mason
   keeps rows in the order they were inserted.
 
-Mason adds two things of its own, automatically:
+Mason makes DuckDB faster:
 
 - **It stores what your queries keep computing.** When queries keep reading the same JSON field, such as
   `payload ->> 'status'`, Mason stores that field as a column of its own, in the background. After that, reading it
