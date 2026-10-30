@@ -5,7 +5,7 @@
  * re-exports it).
  */
 import type { RunState } from "./commands.ts";
-import type { CopyProgressView } from "../duck/sync.ts";
+import type { CopyProgressView, CopyState, Synced } from "../duck/sync.ts";
 
 const n = (x: number): string => x.toLocaleString("en-US");
 const firstLine = (s: string): string => s.split("\n")[0]!.trim();
@@ -17,6 +17,9 @@ export function duration(seconds: number): string {
   const m = Math.round(s / 60);
   return m < 90 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
+
+/** A duration in milliseconds as a person reads it (src/lib/table-sync.ts, where the sync reads it too). */
+export { msText } from "../lib/table-sync.ts";
 
 export interface Readiness {
   /** true: every added table is copied */
@@ -68,6 +71,57 @@ export function copyingText(copied: number, rowsEstimate: number | null, p?: Cop
 export function copyProgress(source: string, copied: number, rowsEstimate: number | null, p?: CopyProgressView): string {
   const c = copyingText(copied, rowsEstimate, p);
   return `${source}: ${c.fraction !== null ? `syncing ${Math.floor(c.fraction * 100)}% · ` : /^\d/.test(c.text) ? "syncing " : ""}${c.text}`;
+}
+
+/**
+ * A TABLE'S SYNC IN ONE WORD, from what the sync has of its copy — the one place it is decided (`/api/state`
+ * `tables[].sync.state`, so mason status, the web page and an agent say one thing):
+ *  - `waiting`: no copy yet, nor one under way (the sync has not reached it);
+ *  - `failed`: its copy failed, or the poll, catch-up or stream keeping it current did (its `error` says why; a table
+ *    copied before still serves that copy);
+ *  - `syncing`: being copied, copied again, or caught up by its one poll before it is kept current;
+ *  - `synced`: its copy is served and kept current — or, for a table over the poll's row limit, served as copied and
+ *    NOT kept current (its `unsynced` says so, and `syncedAt` how old the copy is).
+ */
+export type TableSyncState = "synced" | "syncing" | "failed" | "waiting";
+export function syncStateOf(c: CopyState | undefined): TableSyncState {
+  if (c === undefined || c.phase === "waiting") return "waiting";
+  if (c.phase === "failed" || c.error !== null) return "failed";
+  if (c.phase === "copying" || c.rebuilding !== undefined || c.behind !== undefined) return "syncing";
+  return "synced";
+}
+
+/** A table's sync as `/api/state` says it (`tables[].sync`): its state, when it was last brought current and how
+ *  (src/duck/sync.ts `Synced`), and how old that is NOW — the one value here relative to the moment it is asked. */
+export interface SyncFacts { state: TableSyncState; syncedAt: string | null; syncSeconds: number | null; syncedBy: Synced["by"] | null; ageSeconds: number | null }
+export function tableSync(c: CopyState | undefined, now: number): SyncFacts {
+  const s = c?.synced;
+  return { state: syncStateOf(c), syncedAt: s?.at ?? null, syncSeconds: s?.seconds ?? null, syncedBy: s?.by ?? null,
+    ageSeconds: s === undefined ? null : Math.max(0, Math.round((now - Date.parse(s.at)) / 100) / 10) };
+}
+
+/** The run's copies in all (`/api/state` `totals`): the tables added, those copied (served), those whose sync failed,
+ *  the copies' rows, and the most recent sync of any (the copy file's size is `engine.bytes`). */
+export interface SyncTotals { added: number; copied: number; failed: number; rows: number; syncedAt: string | null }
+export function syncTotals(added: number, copies: readonly CopyState[]): SyncTotals {
+  const copied = copies.filter((c) => c.phase === "copied");
+  const latest = copies.flatMap((c) => c.synced === undefined ? [] : [c.synced.at]).sort().pop() ?? null;
+  return { added, copied: copied.length, failed: copies.filter((c) => syncStateOf(c) === "failed").length, rows: copied.reduce((n, c) => n + (c.rows ?? 0), 0), syncedAt: latest };
+}
+
+/** THE SYNC'S COPIES BY PHASE: what `/healthz` says (src/cli/serve.ts `healthBody`) and `GET /metrics`' `mason_tables`
+ *  (src/cli/metrics.ts, through `usageFacts`) — counts only, one count for both endpoints. */
+export interface PhaseCounts { total: number; copied: number; copying: number; waiting: number; failed: number }
+export function phaseCounts(copies: readonly CopyState[]): PhaseCounts {
+  const counts: PhaseCounts = { total: 0, copied: 0, copying: 0, waiting: 0, failed: 0 };
+  for (const c of copies) { counts.total++; counts[c.phase]++; }
+  return counts;
+}
+
+/** WHERE A RUN IS IN ONE WORD, as `mason status` heads its last line and the web page's Status says it: every added
+ *  table copied and served, a failure, or still under way. */
+export function readinessWord(r: Readiness): "Ready" | "Failed" | "Under way" {
+  return r.ready ? "Ready" : r.failed.length ? "Failed" : "Under way";
 }
 
 /**

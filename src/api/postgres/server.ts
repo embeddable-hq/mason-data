@@ -10,7 +10,8 @@
  *
  * THE RULES THIS MODULE EMBODIES:
  *   - THE PASSWORD IS VERIFIED BY `authenticate` (a `mason user`'s password, or a token minted from the API key,
- *     src/duck/users.ts `listenerLogins`): a refused one is `28P01` as a wrong password is. The database a tool names
+ *     src/duck/users.ts `listenerLogins`): a refused one is `28P01` as a wrong password is; a DISABLED user's (its
+ *     password right) is `28000`, as Postgres refuses a role without LOGIN. The database a tool names
  *     must be the project's: a tool connecting to the wrong Mason learns so at once (`3D000`).
  *   - WHAT A TOOL SETS IS HONOURED OR REFUSED, never silently ignored: `TimeZone` moves every timestamptz the session
  *     sends; `extra_float_digits` below 1 would print a float with FEWER digits than this listener sends and is
@@ -53,11 +54,12 @@ import * as crypto from "node:crypto";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import type { RawStmt } from "libpg-query";
-import { ApiError } from "../error.ts";
+import { ApiError, USER_DISABLED } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
+import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
-import { grantRefusal, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
-import { asRole, databaseNameSql, PgCatalog, unwrapRole } from "./catalog.ts";
+import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
+import { asRole, asSession, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
 import { parseSql, PostgresSyntaxError, stopParser } from "./parser.ts";
@@ -81,7 +83,7 @@ interface ExplainTranslation { kind: "explain"; query: NonNullable<RawStmt["stmt
 interface Explaining { options: ExplainOptions; plan: DuckPlan | null }
 
 /** what an EXPLAIN of a catalog statement says first: whose plan it is */
-const CATALOG_EXPLAINED = "Mason: answered by the catalog Postgres (Mason's own, PGlite), not DuckDB: a statement of pg_catalog or information_schema, or of no table, is the catalog's, and this is its plan";
+const CATALOG_EXPLAINED = "Mason: answered by the catalog Postgres (Mason's own, PGlite), not the copy: a statement of pg_catalog or information_schema, or of no table, is the catalog's, and this is its plan";
 
 /** an EXPLAIN's one column, Postgres's: text, or json for FORMAT JSON (ExplainResultDesc) */
 const explainField = (o: ExplainOptions, format: 0 | 1): FieldDescription => ({ name: "QUERY PLAN", typeOid: o.format === "json" ? 114 : 25, typeSize: -1, typeModifier: -1, format });
@@ -106,7 +108,7 @@ function catalogExplained(frames: Buffer[], o: ExplainOptions): Buffer[] {
   const value = dataRowValues(frames[first]!)[0];
   if (value === null || value === undefined) return frames;
   const doc = JSON.parse(value.toString("utf8")) as Array<Record<string, unknown>>;
-  if (doc[0] !== undefined) doc[0].Mason = { "Answered By": "the catalog Postgres (Mason's own, PGlite), not DuckDB", Why: "a statement of pg_catalog or information_schema, or of no table, is the catalog's" };
+  if (doc[0] !== undefined) doc[0].Mason = { "Answered By": "the catalog Postgres (Mason's own, PGlite), not the copy", Why: "a statement of pg_catalog or information_schema, or of no table, is the catalog's" };
   return [...frames.slice(0, first), dataRow([Buffer.from(JSON.stringify(doc, null, 2))]), ...frames.slice(first + 1)];
 }
 /** a statement DuckDB answers as written: its text (the parser's slice of the message) */
@@ -142,14 +144,17 @@ export interface DuckAnswer {
    *  has let go of the main thread (src/duck/store.ts scalarCallsSettled); DuckDB's connection is free again then */
   close(): void;
 }
+/** what a DuckDB statement of a session runs under (`Session.duckSession`): its TimeZone and search_path, and every
+ *  setting `current_setting(name)` reads beside a copied table (src/duck/rewrite.ts, src/duck/store.ts settle) */
+export interface DuckSession { timeZone: string; searchPath: string; settings: Readonly<Record<string, string>> }
 export interface DuckRunner {
   /** `sql`: a plan's (src/duck/plan.ts PlannedSql), never a statement's text; `fields`: Postgres's columns for the
    *  result (the plan's), which DuckDB's values are written as */
-  run(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  run(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     fields?: ReadonlyArray<{ name: string; oid: number; typmod?: number }> | null, exact?: readonly ExactColumn[]): Promise<DuckAnswer>;
   /** EXPLAIN of a plan (src/duck/explain.ts): its QUERY PLAN rows, a line each (FORMAT JSON: one document). ANALYZE runs
    *  it as `run` does, under the same `signal`, converting every row and sending none */
-  explain(sql: PlannedSql, params: readonly (string | null)[], session: { timeZone: string; searchPath: string }, signal: AbortSignal,
+  explain(sql: PlannedSql, params: readonly (string | null)[], session: DuckSession, signal: AbortSignal,
     how: ExplainHow): Promise<string[]>;
   /** closes the connection once its answers are released: never under the executor (src/duck/store.ts) */
   close(): Promise<void>;
@@ -227,7 +232,19 @@ export function timeoutMs(value: string): number | null {
 export class StatementError extends Error {
   readonly fields: Omit<ErrorFields, "severity">;
   readonly sql: string;
-  constructor(fields: Omit<ErrorFields, "severity">, sql = "") { super(fields.message); this.fields = fields; this.sql = sql; }
+  /** the registry entry (src/duck/gaps.ts) that refused the statement, as the refusal was built with it (`gapRefusal`,
+   *  src/duck/store.ts pgErrorOf): what the request log records as `gap`; null for every other error */
+  readonly gap: GapId | null;
+  constructor(fields: Omit<ErrorFields, "severity">, sql = "", gap: GapId | null = null) { super(fields.message); this.fields = fields; this.sql = sql; this.gap = gap; }
+}
+
+/**
+ * A REFUSAL BY A REGISTRY ENTRY (src/duck/gaps.ts), the one way one is built: 0A000, `Mason gap <id>` in its DETAIL (what
+ * the oracle and a reader read), followed by `detail` (docs/SQL-SUPPORT.md, or what it names), and the id itself on the
+ * error, so the request log records which entry refused it without reading the text back.
+ */
+export function gapRefusal(gap: GapId, message: string, hint: string, sql = "", detail = " (docs/SQL-SUPPORT.md)"): StatementError {
+  return new StatementError({ code: "0A000", message, hint, detail: `${gapMark(gap)}${detail}` }, sql, gap);
 }
 export const SERVER_VERSION = "18.6";
 export const SERVER_VERSION_NUM = "180006";
@@ -302,8 +319,64 @@ export interface PgApiOptions {
 export interface PgApiServer {
   readonly port: number;
   close(): Promise<void>;
-  /** sessions open now */
+  /** sessions open now (every connection, its login under way included) */
   readonly sessions: number;
+  /** the sessions logged in now, by user and client, and how many of each run a statement (`/api/state` `sessions`) */
+  openSessions(): SessionsOpen;
+  /** the statements running now, one per session, oldest first (`/api/running`, `mason logs --running`) */
+  running(): RunningStatement[];
+  /** cancels a session's statement exactly as a CancelRequest does (`POST /api/cancel`, `mason cancel`); `statement`
+   *  (RunningStatement.statement): only while the session runs that one, else nothing is cancelled (`other`) */
+  cancel(session: number, statement?: number): CancelAnswer;
+}
+
+/**
+ * THE SESSIONS LOGGED IN NOW (`openSessions`; `/api/state` `sessions`, mason status, the usage samples): how many, and
+ * by user and client — the `mason user` ('' for a token's session) and the application_name ('' when it sent none) —
+ * with how many of them run a statement now. Read from the sessions in memory: no query, no ledger.
+ */
+export interface SessionsOpen { open: number; byClient: Array<{ user: string; client: string; open: number; running: number }> }
+
+/**
+ * A statement running now: one a session's DuckDB is running, or whose rows it is sending — what a CancelRequest (and
+ * `mason cancel`) stops. A statement being parsed or planned, a catalog read, and a portal suspended between two
+ * Executes (the client's turn) are not running.
+ */
+export interface RunningStatement {
+  /** the listener's session number (the log's `session <n>`, the request log's `session`): what `mason cancel` names */
+  session: number;
+  /** the statement's number in this run (`statementIdOf`; one across the Executes that page a portal's rows): what
+   *  `mason cancel <session> --statement <n>` names, so the cancel stops the statement listed, never the next one */
+  statement: number;
+  /** the `mason user` the session logged in as ('' for a token's session) */
+  user: string;
+  /** the client's application_name ('' when it sent none) */
+  applicationName: string;
+  /** QUERY (a simple Query's statement) or EXECUTE */
+  method: string;
+  /** when the statement arrived, ISO 8601 UTC, and how long ago */
+  startedAt: string;
+  runningMs: number;
+  /** the rows sent so far */
+  rows: number;
+  /** the statement as the tool sent it, capped as the request log caps it (`queryTruncated`) */
+  query: string;
+  queryTruncated: boolean;
+}
+
+/** What a cancel did: asked the statement to stop (it ends with 57014, as Postgres's does), found the session idle,
+ *  found no such session, or — asked for one statement — found the session running another (`other`), cancelling none.
+ *  Without a statement it stops whatever the session runs, as a CancelRequest does (Postgres's own semantics). */
+export type CancelAnswer = { cancelled: RunningStatement } | { idle: number } | { unknown: number } | { other: RunningStatement; asked: number };
+
+/** EACH STATEMENT'S NUMBER IN THIS RUN, by the controller that runs it — the thing a cancel aborts, so a cursor's is one
+ *  number across the Executes that page its rows — given when first asked (`runningNow`), never reused */
+const statementIds = new WeakMap<AbortController, number>();
+let nextStatementId = 1;
+function statementIdOf(c: AbortController): number {
+  let id = statementIds.get(c);
+  if (id === undefined) { id = nextStatementId++; statementIds.set(c, id); }
+  return id;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -311,6 +384,7 @@ export interface PgApiServer {
 
 /** the type byte of a RowDescription frame */
 const ROW_DESCRIPTION = 0x54;
+const DATA_ROW = 0x44;
 /** the first byte of a TLS handshake record (a ClientHello): never a startup packet's, whose length's high byte is 0
  *  under MAX_STARTUP_LENGTH, and never SSLRequest's (length 8) */
 const TLS_HANDSHAKE = 0x16;
@@ -327,10 +401,13 @@ class PgError extends Error {
   readonly fields: ErrorFields;
   /** the HTTP-like status the request log records (400 for a refusal, 401 a refused login, 500 Mason's failure) */
   readonly status: number;
-  constructor(fields: Omit<ErrorFields, "severity"> & { severity?: string }, status = 400) {
+  /** the registry entry that refused it (StatementError.gap): the request log's `gap` */
+  readonly gap: GapId | null;
+  constructor(fields: Omit<ErrorFields, "severity"> & { severity?: string }, status = 400, gap: GapId | null = null) {
     super(fields.message);
     this.fields = { severity: "ERROR", ...fields };
     this.status = status;
+    this.gap = gap;
   }
 }
 
@@ -350,12 +427,14 @@ function sqlstateOf(status: number, code: string | undefined): string {
 }
 
 /**
- * A refused or failed statement as its log line (`Session.refuse`): `failed` where the fault is Mason's or the
- * machine's (SQLSTATE classes XX internal, 53 resources, 57 a timeout or cancel, 58 system), `refused` for the
- * statement's own; the detail and the hint where there are, and the statement on one line, as the answered lines carry it.
+ * A refused or failed statement as its log line (`Session.refuse`): its outcome (src/api/request-log.ts outcomeOf) —
+ * `cancelled` for 57014 (a cancel or a timeout), `failed` where the fault is Mason's or the machine's (SQLSTATE classes
+ * XX internal, 53 resources, 57, 58 system), `refused` for the statement's own; the detail and the hint where there
+ * are, and the statement on one line, as the answered lines carry it.
  */
 export function refusalLine(session: number, f: Omit<ErrorFields, "severity">, sql: string): string {
-  const word = outcomeOf(f.code) === "failed" ? "failed" : "refused";
+  const o = outcomeOf(f.code);
+  const word = o === "ok" ? "refused" : o;
   const statement = sql.replace(/\s+/g, " ").trim();
   return `session ${session} ${word}: ${f.code} ${f.message}${f.detail ? `; detail: ${f.detail}` : ""}${f.hint ? `; hint: ${f.hint}` : ""}` +
     ` — ${statement === "" ? "(no statement)" : statement}`;
@@ -363,17 +442,17 @@ export function refusalLine(session: number, f: Omit<ErrorFields, "severity">, s
 
 function asPgError(err: unknown, sql: string): PgError {
   if (err instanceof PgError) return err;
-  if (err instanceof StatementError) return new PgError({ ...err.fields, position: err.fields.position ?? undefined }, err.fields.code.startsWith("XX") ? 500 : 400);
+  if (err instanceof StatementError) return new PgError({ ...err.fields, position: err.fields.position ?? undefined }, err.fields.code.startsWith("XX") ? 500 : 400, err.gap);
   if (err instanceof Unsupported) {
-    return new PgError({ code: err.sqlstate, message: err.message, position: positionOf(sql, err.offset), hint: err.hint, detail: "Mason answers the Postgres subset in docs/POSTGRES-API.md" });
+    return new PgError({ code: err.sqlstate, message: err.message, position: positionOf(sql, err.offset), hint: err.hint, detail: "Mason answers the Postgres subset in docs/POSTGRES-API.md" }, 400, err.gap);
   }
   if (err instanceof PostgresSyntaxError) return new PgError({ code: "42601", message: err.message, position: positionOf(sql, err.offset) });
   if (err instanceof ApiError) return new PgError({ code: sqlstateOf(err.status, err.code), message: err.message, detail: `Mason: ${err.code}` }, err.status);
   // Postgres's own error for a numeric (a division by zero, 22012; a field overflow, 22003), raised as Postgres raises it
-  if (err instanceof NumericError) return new PgError({ code: err.sqlstate, message: err.message }, err.sqlstate === "XX000" ? 500 : 400);
+  if (err instanceof NumericError) return new PgError({ code: err.sqlstate, message: err.message }, err.sqlstate === "XX000" ? 500 : 400, err.gap);
   if (err instanceof EncodeError) return err.code === "XX000"
     ? new PgError({ code: "XX000", message: err.message, detail: "Mason: a value the column's Postgres type cannot carry; report it" }, 500)
-    : new PgError({ code: err.code, message: err.message }, 400);
+    : new PgError({ code: err.code, message: err.message }, 400, err.gap);
   if (err instanceof ProtocolError) return new PgError({ code: "08P01", message: err.message }, 500);
   const message = err instanceof Error ? err.message : String(err);
   return new PgError({ code: "XX000", message }, 500);
@@ -398,26 +477,29 @@ interface Vars {
 }
 
 const defaultVars = (): Vars => ({ timeZone: "UTC", applicationName: "", searchPath: '"$user", public', other: new Map() });
+const copyVars = (v: Vars): Vars => ({ ...v, other: new Map(v.other) });
 
-/** What `SHOW` / `current_setting` answer for the parameters this server fixes. */
+/** A placeholder's name as Postgres's `valid_custom_variable_name` reads it: two or more simple identifiers, dotted. */
+function placeholderName(name: string): void {
+  if (/^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*(\.[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*)+$/.test(name)) return;
+  throw new PgError({ code: "42602", message: `invalid configuration parameter name "${name}"`, detail: "Custom parameter names must be two or more simple identifiers separated by dots." });
+}
+
+/** What `SHOW` / `current_setting` answer for the parameters this server fixes, by name: read by `fixedParameter` alone. */
+const FIXED = new Map<string, (vars: Vars, user: string) => string>([
+  ["server_version", () => SERVER_VERSION], ["server_version_num", () => SERVER_VERSION_NUM],
+  ["server_encoding", () => "UTF8"], ["client_encoding", () => "UTF8"],
+  ["datestyle", () => "ISO, MDY"], ["intervalstyle", () => "postgres"],
+  ["timezone", (v) => v.timeZone], ["application_name", (v) => v.applicationName], ["search_path", (v) => v.searchPath],
+  ...["integer_datetimes", "standard_conforming_strings", "default_transaction_read_only", "transaction_read_only", "in_hot_standby"].map((n): [string, () => string] => [n, () => "on"]),
+  ["is_superuser", () => "off"],
+  // the session's user, and no role SET over it (SET ROLE is its own name or NONE, setStatement): Postgres's `none`
+  ["session_authorization", (_v, user) => user], ["role", () => "none"],
+  ["transaction_isolation", () => "read committed"], ["default_transaction_isolation", () => "read committed"],
+  ["extra_float_digits", () => "1"], ["max_identifier_length", () => "63"],
+]);
 function fixedParameter(name: string, vars: Vars, user: string): string | null {
-  switch (name) {
-    case "server_version": return SERVER_VERSION;
-    case "server_version_num": return SERVER_VERSION_NUM;
-    case "server_encoding": case "client_encoding": return "UTF8";
-    case "datestyle": return "ISO, MDY";
-    case "intervalstyle": return "postgres";
-    case "timezone": return vars.timeZone;
-    case "application_name": return vars.applicationName;
-    case "search_path": return vars.searchPath;
-    case "integer_datetimes": case "standard_conforming_strings": case "default_transaction_read_only": case "transaction_read_only": case "in_hot_standby": return "on";
-    case "is_superuser": return "off";
-    case "session_authorization": case "role": return user;
-    case "transaction_isolation": case "default_transaction_isolation": return "read committed";
-    case "extra_float_digits": return "1";
-    case "max_identifier_length": return "63";
-    default: return null;
-  }
+  return FIXED.get(name)?.(vars, user) ?? null;
 }
 
 /**
@@ -434,17 +516,6 @@ export function tlsParameters(on: boolean): Readonly<Record<string, string>> {
     ssl: "on", ssl_library: "OpenSSL", ssl_min_protocol_version: tls.DEFAULT_MIN_VERSION, ssl_max_protocol_version: tls.DEFAULT_MAX_VERSION,
     ssl_ciphers: tls.DEFAULT_CIPHERS, ssl_groups: tls.DEFAULT_ECDH_CURVE, ssl_prefer_server_ciphers: "off",
   };
-}
-
-/** The catalog's `current_setting(name[, missing_ok])`, answering the TLS parameters first (`tlsParameters`) and the rest
- *  as Postgres's own: the `version()` override's way (search_path lists pg_catalog after public), so a statement reading
- *  no table and calling it is forwarded as ever, and one table answers SHOW and current_setting alike. */
-export function currentSettingSql(params: Readonly<Record<string, string>>): string[] {
-  const cases = Object.entries(params).map(([name, value]) => `WHEN ${quoteLiteral(name)} THEN ${quoteLiteral(value)}`).join(" ");
-  return [
-    `CREATE OR REPLACE FUNCTION public.current_setting(text) RETURNS text LANGUAGE sql STABLE AS $$ SELECT CASE lower($1) ${cases} ELSE pg_catalog.current_setting($1) END $$`,
-    `CREATE OR REPLACE FUNCTION public.current_setting(text, boolean) RETURNS text LANGUAGE sql STABLE AS $$ SELECT CASE lower($1) ${cases} ELSE pg_catalog.current_setting($1, $2) END $$`,
-  ];
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -496,6 +567,10 @@ interface Portal {
   cursor?: DuckCursor;
   sent: number;
   fields: FieldDescription[] | null;
+  /** THE BYTES ITS EARLIER EXECUTES SENT (a paged portal's pages, `pageSent`): its request log row, written at its
+   *  last, counts them with that one's — never the session's bytes since its first Execute, which held every other
+   *  statement's sent between two of its Executes */
+  bytes: number;
 }
 
 type TxState = "none" | "open" | "failed";
@@ -515,6 +590,12 @@ interface DuckCursor { answer: DuckAnswer; formats: readonly number[]; controlle
    *  dropped so is recorded by the drop, one dropped mid-Execute by that Execute (its rows or its error) */
   suspended?: boolean }
 
+/** THE STATEMENT BEING ASKED (`Session.asked`): its text, its message, when it arrived and the session's bytes sent by
+ *  then (what this message sends is counted from there: one message is handled at a time, so nothing else is sent
+ *  meanwhile), what its portal's earlier Executes sent (`carried`, `Portal.bytes`), the JSON paths it reads, and the
+ *  rows sent so far while it runs */
+interface Asked { sql: string; method: string; startedAt: number; sentAt: number; carried?: number; jsonReads?: readonly string[]; rows?: number }
+
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
 
@@ -532,6 +613,10 @@ class Session {
   /** when the user was last found live (a user's session is asked again, `recheckMs`) */
   verifiedAt = 0;
   vars: Vars = defaultVars();
+  /** the session's parameters as its startup left them (its packet's `application_name` and `options`): what RESET restores */
+  startupVars: Vars = defaultVars();
+  /** each reported parameter's value as the client was last told it (`reportChanges`) */
+  readonly reported = new Map<string, string>();
   tx: TxState = "none";
   /** the instant the transaction began (Postgres's `now()`), null between transactions */
   txNow: number | null = null;
@@ -543,6 +628,8 @@ class Session {
   skipToSync = false;
   /** the query running now, for a CancelRequest and the socket closing */
   running: AbortController | null = null;
+  /** the bytes written to the client so far: a message's are this less its mark (`Asked.sentAt`; `bytesFor`) */
+  sentBytes = 0;
   /** this session's DuckDB connection, opened at its first statement over a table */
   private duckRunner: DuckRunner | null = null;
 
@@ -551,7 +638,7 @@ class Session {
     if (this.duckRunner === null) return;
     const runner = this.duckRunner;
     this.duckRunner = null;
-    runner.close().catch((e: unknown) => { this.server.log(`session ${this.id}: closing its DuckDB connection failed: ${e instanceof Error ? e.message : String(e)}`); });
+    runner.close().catch((e: unknown) => { this.server.log(`session ${this.id}: closing its connection to the copy failed: ${e instanceof Error ? e.message : String(e)}`); });
   }
 
   /** A statement ended, however: the session's next one may run, and a session closed meanwhile closes its connection now. */
@@ -561,7 +648,7 @@ class Session {
   }
   /** THE STATEMENT BEING ASKED, for the request log (`recordRequest`): set as each message arrives, its
    *  text narrowed to one statement of a simple Query as each is run */
-  private asked: { sql: string; method: string; startedAt: number; jsonReads?: readonly string[] } | null = null;
+  private asked: Asked | null = null;
   /** messages are handled one at a time, in order: a parse is asynchronous */
   private draining = false;
   /** the connection's first bytes have been read, and told a TLS ClientHello from a startup packet */
@@ -592,7 +679,18 @@ class Session {
   /** the frames as one write; an answer's rows are many (150,000 spread into a call's arguments overflow the stack) */
   sendAll(parts: readonly Buffer[]): void {
     if (this.phase === "closed") return;
-    this.socket.write(Buffer.concat(parts));
+    const bytes = Buffer.concat(parts);
+    this.sentBytes += bytes.length;
+    this.socket.write(bytes);
+  }
+
+  /** The statement running now (RunningStatement), or null: one DuckDB runs or sends, so a cancel would stop it. */
+  runningNow(now: number): RunningStatement | null {
+    if (this.running === null || this.asked === null || this.phase !== "ready") return null;
+    const stored = storedPayload(this.asked.sql);
+    return { session: this.id, statement: statementIdOf(this.running), user: this.token?.user ?? "", applicationName: this.vars.applicationName, method: this.asked.method,
+      startedAt: new Date(this.asked.startedAt).toISOString(), runningMs: now - this.asked.startedAt, rows: this.asked.rows ?? 0,
+      query: stored.text, queryTruncated: stored.truncated };
   }
 
   end(why: string): void {
@@ -659,7 +757,7 @@ class Session {
       this.server.log(`trace ${this.id} ${JSON.stringify(this.vars.applicationName)} ${m.type}: ${JSON.stringify(m.sql)}`);
     }
     if (m.type === "Query" || m.type === "Parse" || m.type === "Bind" || m.type === "Describe" || m.type === "Execute") {
-      this.asked = { sql: m.type === "Query" || m.type === "Parse" ? m.sql : this.sqlOf(m), method: m.type.toUpperCase(), startedAt: Date.now() };
+      this.asked = { sql: m.type === "Query" || m.type === "Parse" ? m.sql : this.sqlOf(m), method: m.type.toUpperCase(), startedAt: Date.now(), sentAt: this.sentBytes };
     }
     // EVERY statement of a user's session is held to its removal (review of #507: a check inside the answer let a pool's
     // keep-alive, its catalog reads, SET and SHOW go on for ever after a revocation)
@@ -669,7 +767,7 @@ class Session {
       if (refused !== null) {
         this.refuse(refused, m.type === "Execute" ? this.sqlOf(m) : m.sql);
         if (this.tx === "open") this.tx = "failed";
-        if (m.type === "Query") this.send(readyForQuery(this.txStatus()));
+        if (m.type === "Query") this.send(...this.ready());
         else this.skipToSync = true;
         return;
       }
@@ -737,6 +835,8 @@ class Session {
           this.fatal(e.fields.code, e.message, e.fields.hint);
           return;
         }
+        // what RESET and RESET ALL restore: the startup packet's values beside the defaults
+        this.startupVars = copyVars(this.vars);
         this.phase = "password";
         this.send(authenticationCleartextPassword());
         return;
@@ -799,14 +899,21 @@ class Session {
       const message = err instanceof Error ? err.message : String(err);
       // a revocation record that could not be read is no wrong password: the server could not tell, said as such
       const unknown = err instanceof ApiError && err.status === 503;
-      const refused = new PgError({ code: unknown ? "57P03" : "28P01",
-        message: unknown ? `the password could not be checked for user "${this.user}": ${message}` : `password authentication failed for user "${this.user}": ${message}`,
-        hint: unknown ? "connect again once Mason can read its list of users"
-          : "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL" }, 401);
+      // a disabled user (`mason user disable`): its password was right, so it is no wrong password but a role that may
+      // not log in, which Postgres refuses 28000 "role … is not permitted to log in": that sentence alone, why in DETAIL,
+      // the way out in HINT, as Postgres splits them
+      const disabled = err instanceof ApiError && err.code === USER_DISABLED;
+      const refused = disabled
+        ? new PgError({ code: "28000", message, detail: `the user "${this.user}" is disabled (mason user disable). Mason: ${USER_DISABLED}`, hint: `mason user enable ${this.user} lets it connect again, with the same password` }, 401)
+        : new PgError({ code: unknown ? "57P03" : "28P01",
+          message: unknown ? `the password could not be checked for user "${this.user}": ${message}` : `password authentication failed for user "${this.user}": ${message}`,
+          hint: unknown ? "connect again once Mason can read its list of users"
+            : "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL" }, 401);
       // a tool that cannot connect is the first thing to look for in the request log
-      this.asked = { sql: "", method: "CONNECT", startedAt: Date.now() };
-      this.recordRequest(refused, undefined, err instanceof ApiError ? err.userName : undefined);
-      this.send(errorResponse({ ...refused.fields, severity: "FATAL" }));
+      this.asked = { sql: "", method: "CONNECT", startedAt: Date.now(), sentAt: this.sentBytes };
+      const response = errorResponse({ ...refused.fields, severity: "FATAL" });
+      this.recordRequest(refused, undefined, err instanceof ApiError ? err.userName : undefined, [response]);
+      this.send(response);
       this.end("authentication failed");
       return;
     }
@@ -819,10 +926,7 @@ class Session {
     // what is happening, as it happens (mason logs once showed little): who connected, and (end) who left
     this.server.log(`session ${this.id} connected: ${this.vars.applicationName === "" ? "a client with no application_name" : JSON.stringify(this.vars.applicationName)} as ${JSON.stringify(this.user)}` +
       (token.user !== undefined ? " (a mason user)" : ""));
-    const status: Buffer[] = [authenticationOk()];
-    for (const [name, value] of this.reportedParameters()) status.push(parameterStatus(name, value));
-    status.push(backendKeyData(this.id, this.secret), readyForQuery("I"));
-    this.sendAll(status);
+    this.sendAll([authenticationOk(), ...this.reportChanges(), backendKeyData(this.id, this.secret), readyForQuery("I")]);
   }
 
   private reportedParameters(): Array<[string, string]> {
@@ -837,44 +941,43 @@ class Session {
   // ---------------------------------------------------------------- session parameters
 
   /**
-   * SET of one parameter. Returns the ParameterStatus to send when it is one Postgres reports. The parameters this
-   * server has an opinion on are decided here; the rest go to the catalog Postgres for validation and are kept.
+   * SET of one parameter (`value` null: its default). The parameters this server has an opinion on are decided here;
+   * the rest go to the catalog Postgres for validation and are kept. What a client is told of it is `reportChanges`'s.
    */
-  private setParameter(name: string, value: string | null, atStartup = false): Buffer[] {
-    const report = (n: string, v: string): Buffer[] => REPORTED.has(n) ? [parameterStatus(spell(n), v)] : [];
+  private setParameter(name: string, value: string | null, atStartup = false): void {
     switch (name) {
       case "timezone": case "time zone": {
         const zone = value === null || /^(default|local|localtime)$/i.test(value) ? "UTC" : canonicalZone(value);
         if (zone === null) throw new PgError({ code: "22023", message: `invalid value for parameter "TimeZone": "${value}"`, hint: "an IANA zone name (Europe/London) or UTC: this API knows no abbreviation or fixed offset" });
         this.vars.timeZone = zone;
-        return report("timezone", zone);
+        return;
       }
-      case "application_name": this.vars.applicationName = value ?? ""; return report(name, this.vars.applicationName);
-      case "search_path": this.vars.searchPath = value ?? '"$user", public'; return report(name, this.vars.searchPath);
+      case "application_name": this.vars.applicationName = value ?? ""; return;
+      case "search_path": this.vars.searchPath = value ?? '"$user", public'; return;
       case "client_encoding": case "names":
         if (value !== null && !isUtf8(value)) throw new PgError({ code: "22023", message: `invalid value for parameter "client_encoding": "${value}"`, hint: "this API sends UTF8 only" });
-        return report("client_encoding", "UTF8");
+        return;
       case "datestyle":
         if (value !== null && !/^\s*iso\b/i.test(value) && !/,\s*iso\s*$/i.test(value) && value.trim() !== "") {
           throw new PgError({ code: "0A000", message: `DateStyle ${value} is not supported: this API writes every date and time in ISO 8601 (DateStyle ISO)` });
         }
-        return report("datestyle", "ISO, MDY");
+        return;
       case "extra_float_digits": {
         const n = value === null ? 1 : Number(value);
         if (!Number.isInteger(n) || n < -15 || n > 3) throw new PgError({ code: "22023", message: `${n} is outside the valid range for parameter "extra_float_digits" (-15 .. 3)` });
         if (n < 1) throw new PgError({ code: "0A000", message: `extra_float_digits ${n} is not supported: this API sends every float as the shortest text that reads back exactly (Postgres's extra_float_digits >= 1, the default since Postgres 12); fewer digits would be a different number` });
-        return [];
+        return;
       }
       case "standard_conforming_strings":
         if (value !== null && !/^(on|true|yes|1)$/i.test(value)) throw new PgError({ code: "0A000", message: "standard_conforming_strings off is not supported: a string literal is read as Postgres reads it by default" });
-        return report(name, "on");
-      case "intervalstyle": return report(name, "postgres");
+        return;
+      case "intervalstyle": return;
       case "transaction_isolation": case "default_transaction_isolation": case "transaction": case "session characteristics":
         // read committed on a store that is never written: every level answers the same rows
-        return [];
+        return;
       case "default_transaction_read_only": case "transaction_read_only":
         if (value !== null && /^(off|false|no|0)$/i.test(value)) throw new PgError({ code: "25006", message: "cannot set transaction read-write mode: this API is read-only" });
-        return report(name, "on");
+        return;
       case "statement_timeout": case "lock_timeout": case "idle_in_transaction_session_timeout": case "idle_session_timeout":
       case "transaction_timeout": case "client_min_messages": case "log_min_messages": case "bytea_output":
       case "default_transaction_deferrable": case "xmloption": case "backslash_quote": case "escape_string_warning":
@@ -883,14 +986,72 @@ class Session {
         // accepted and remembered; none changes an answer (statement_timeout is honoured, armTimeout: it may only shorten
         // the run's own limit, MASON_STATEMENT_TIMEOUT)
         if (value === null) this.vars.other.delete(name); else this.vars.other.set(name, value);
-        return [];
+        return;
       default: {
         // a parameter Mason knows nothing of: the catalog Postgres decides whether it exists
         if (atStartup) throw new PgError({ code: "42704", message: `unrecognized configuration parameter "${name}" in the startup packet` });
         if (value === null) this.vars.other.delete(name); else this.vars.other.set(name, value);
-        return [];
+        return;
       }
     }
+  }
+
+  /**
+   * RESET of one parameter: the value the session STARTED with — its startup packet's (`application_name`, `options`'s
+   * `-c`) where it set one, else the default — as Postgres's RESET restores a parameter's session default. A placeholder
+   * (`myapp.x`, a dotted name Postgres does not list) has '' for its default and stays defined, as on Postgres.
+   */
+  private async resetParameter(name: string): Promise<void> {
+    const start = this.startupVars;
+    switch (name) {
+      case "timezone": case "time zone": this.vars.timeZone = start.timeZone; return;
+      case "application_name": this.vars.applicationName = start.applicationName; return;
+      case "search_path": this.vars.searchPath = start.searchPath; return;
+    }
+    this.setParameter(name, null);
+    const was = start.other.get(name) ?? (await this.isPlaceholder(name) ? "" : undefined);
+    if (was !== undefined) this.vars.other.set(name, was);
+  }
+
+  /** RESET ALL (and DISCARD ALL's): every parameter back to the session's start, the startup packet's included; a
+   *  placeholder the session SET stays defined, '' (`resetParameter`) */
+  private async resetAll(): Promise<void> {
+    const placeholders: string[] = [];
+    for (const name of this.vars.other.keys()) if (await this.isPlaceholder(name)) placeholders.push(name);
+    this.vars = copyVars(this.startupVars);
+    for (const name of placeholders) if (!this.vars.other.has(name)) this.vars.other.set(name, "");
+  }
+
+  /** a custom placeholder (`SET myapp.x`): a dotted name the catalog Postgres does not list (an extension's, `plpgsql.*`, it lists) */
+  private async isPlaceholder(name: string): Promise<boolean> {
+    return name.includes(".") && !(await this.server.catalogSettings()).has(name.toLowerCase());
+  }
+
+  /**
+   * WHAT THE CLIENT IS TOLD OF ITS REPORTED PARAMETERS (GUC_REPORT): a ParameterStatus for each whose value is not the one
+   * last reported — all of them at the startup, those a SET, a RESET, RESET ALL or DISCARD ALL moved after it — as
+   * Postgres reports a changed one (`ReportChangedGUCOptions`), each value `sessionSetting`'s through `reportedParameters`.
+   * A driver that caches them (pgjdbc, npgsql) was left with a SET's value after RESET ALL (GitHub issue 41). After the
+   * startup, `ready` alone calls it: what a request moved is told once, before its ReadyForQuery.
+   */
+  private reportChanges(): Buffer[] {
+    const out: Buffer[] = [];
+    for (const [name, value] of this.reportedParameters()) {
+      if (this.reported.get(name) === value) continue;
+      this.reported.set(name, value);
+      out.push(parameterStatus(name, value));
+    }
+    return out;
+  }
+
+  /**
+   * A REQUEST'S END: the reported parameters it changed, then its ReadyForQuery — where Postgres 14+ reports them
+   * (`ReportChangedGUCOptions` in PostgresMain, just before ReadyForQuery): after the statement's CommandComplete, and
+   * ONCE per parameter per Query string or Sync, its last value (`SET application_name = 'a'; SET application_name =
+   * 'b'` reports 'b' alone). A request that failed half-way reports what its earlier statements moved, as Postgres does.
+   */
+  private ready(): Buffer[] {
+    return [...this.reportChanges(), readyForQuery(this.txStatus())];
   }
 
   /** The catalog Postgres validates a parameter this server has no opinion on; its own error is the answer. Inside a
@@ -932,13 +1093,13 @@ class Session {
       const e = asPgError(err, sql);
       this.refuse(e, sql);
       if (this.tx === "open") this.tx = "failed";
-      this.send(readyForQuery(this.txStatus()));
+      this.send(...this.ready());
       return;
     }
-    if (stmts.length === 0) { this.send(emptyQueryResponse(), readyForQuery(this.txStatus())); return; }
+    if (stmts.length === 0) { this.send(emptyQueryResponse(), ...this.ready()); return; }
     for (const raw of stmts) {
       const text = statementText(sql, raw);
-      this.asked = { sql: text, method: "QUERY", startedAt: Date.now() };
+      this.asked = { sql: text, method: "QUERY", startedAt: Date.now(), sentAt: this.sentBytes };
       try {
         const out = await this.runSimple(raw, text, sql);
         this.sendAll(out);
@@ -949,7 +1110,7 @@ class Session {
         break;
       }
     }
-    this.send(readyForQuery(this.txStatus()));
+    this.send(...this.ready());
   }
 
   /**
@@ -961,9 +1122,10 @@ class Session {
    */
   private refuse(e: PgError, sql: string, at?: string): void {
     this.server.log(refusalLine(this.id, e.fields, sql));
-    this.recordRequest(e, sql);
+    const response = errorResponse(e.fields);
+    this.recordRequest(e, sql, undefined, [response]);
     this.traceRefusal(e, at);
-    this.send(errorResponse(e.fields));
+    this.send(response);
   }
 
   private traceRefusal(e: PgError, at?: string): void {
@@ -977,25 +1139,30 @@ class Session {
    * statement's ErrorResponse goes out), and for a refused password (CONNECT), through `options.record`. A catalog
    * read, a SET or a SHOW answered is the protocol's chatter, not recorded. Never throws: `record` buffers.
    */
-  private recordRequest(answer: PgError | { rows: number; startedAt?: number }, sql?: string, refusedUser?: string,
-    of?: { method: string; jsonReads: readonly string[] | undefined }): void {
-    // `of`: a statement recorded after its own messages (a portal dropped suspended), not the one being asked now
-    const asked = of === undefined ? this.asked : { sql: sql ?? "", method: of.method, startedAt: Date.now(), ...(of.jsonReads !== undefined ? { jsonReads: of.jsonReads } : {}) };
+  private recordRequest(answer: PgError | { rows: number; startedAt?: number }, sql?: string, refusedUser?: string, then: readonly Buffer[] = [],
+    of?: { method: string; jsonReads: readonly string[] | undefined; carried: number }): void {
+    // `of`: a statement recorded after its own messages (a portal dropped suspended), not the one being asked now: what
+    // it sent is what its pages sent (`carried`), nothing since
+    const asked: Asked | null = of === undefined ? this.asked
+      : { sql: sql ?? "", method: of.method, startedAt: Date.now(), sentAt: this.sentBytes, carried: of.carried, ...(of.jsonReads !== undefined ? { jsonReads: of.jsonReads } : {}) };
     const startedAt = (!(answer instanceof PgError) ? answer.startedAt : undefined) ?? asked?.startedAt ?? Date.now();
+    const bytesSent = this.bytesFor(then, asked);
     // a refusal's statement is the one refuse() names (a simple Query's own statement, an Execute's portal's)
     const stored = storedPayload(sql ?? asked?.sql ?? "");
     const user = this.token?.user ?? refusedUser;
-    const role = this.token?.role;
+    // the EFFECTIVE role: the user's own, else the roles file's default (what the statement was held to)
+    const role = this.roleName();
     this.server.options.record({
       requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs: Date.now() - startedAt,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
-      caller: hashCaller(this.presented),
+      caller: hashCaller(this.presented), bytesSent,
       ...(user !== undefined ? { user } : {}),
       ...(role !== undefined ? { role } : {}),
       ...(asked?.jsonReads !== undefined && asked.jsonReads.length > 0 ? { jsonReads: asked.jsonReads } : {}),
       ...(answer instanceof PgError
         ? { status: answer.status, sqlstate: answer.fields.code, error: answer.fields.message,
-            ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}) }
+            ...(answer.fields.detail ? { detail: answer.fields.detail } : {}), ...(answer.fields.hint ? { hint: answer.fields.hint } : {}),
+            ...(answer.gap !== null ? { gap: answer.gap } : {}) }
         : { status: 200, rows: answer.rows }),
     });
   }
@@ -1022,20 +1189,22 @@ class Session {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
         const e = await this.explaining(raw, whole, t, []);
-        if (e.plan === null) return catalogExplained(await this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user)), e.options);
+        if (e.plan === null) return catalogExplained(await this.forwardSimple(this.spliced(text, raw)), e.options);
         const controller = new AbortController();
         const disarm = this.armTimeout(controller);
         try {
           const { field, rows } = await this.duckExplain({ options: e.options, plan: e.plan }, [], [], { parse: now, exec: now }, controller);
-          this.recordRequest({ rows: rows.length });
-          return [rowDescription([field]), ...rows, commandComplete("EXPLAIN")];
+          const out = [rowDescription([field]), ...rows, commandComplete("EXPLAIN")];
+          this.recordRequest({ rows: rows.length }, undefined, undefined, out);
+          return out;
         } finally { disarm(); }
       }
-      case "catalog": return this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user));
+      case "catalog": return this.forwardSimple(this.spliced(text, raw));
       case "set": return this.setStatement(t);
+      case "set_config": return this.setConfigStatement(t);
       case "show": return this.showStatement(t.name);
       case "transaction": return [...this.transaction(t.tag)];
-      case "discard": this.statements.clear(); this.dropPortals(); this.vars = { ...defaultVars(), applicationName: this.vars.applicationName }; return [commandComplete("DISCARD ALL")];
+      case "discard": return this.discard(t.target);
       case "deallocate": this.statements.clear(); return [commandComplete("DEALLOCATE ALL")];
       case "duckdb": {
         const plan = await this.duckPlan(raw, whole, []);
@@ -1048,8 +1217,9 @@ class Session {
             this.send(rowDescription(fields));
             await this.streamRest(cursor);
           } finally { cursor.answer.close(); }
-          this.recordRequest({ rows: cursor.sent });
-          return [commandComplete(`SELECT ${cursor.sent}`)];
+          const done = [commandComplete(`SELECT ${cursor.sent}`)];
+          this.recordRequest({ rows: cursor.sent }, undefined, undefined, done);
+          return done;
         } finally { disarm(); }
       }
     }
@@ -1065,7 +1235,10 @@ class Session {
     const text = bytes.subarray(base, raw.stmt_len ? base + raw.stmt_len : bytes.length).toString("utf8");
     const { searchPath, timeZone } = under;
     const grants = this.grants();
-    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, grants?.name ?? "", () =>
+    // the plan cache's key is the role the plan is held to: the effective one (a default's plans are that role's), and
+    // a user with no role under a file with no default its own key, never a token's ("")
+    const key = grants?.noRole !== undefined ? "\u0000no role" : this.roleName() ?? "";
+    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, key, () =>
       this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound, grants));
   }
 
@@ -1074,26 +1247,78 @@ class Session {
    * every plan, every Execute and every catalog read — the user's role is re-read with the user before each statement
    * (`stillLive`), the roles file whenever it changes (`PgApiOptions.roles`), so a role given, taken or edited applies at
    * the next statement, with no restart. undefined: no roles anywhere (nothing to hold, and no reads to record);
-   * null: a session with no role beside roles (its plan still names its reads). FAIL CLOSED: a role the file no
-   * longer names, or a file that cannot be read as it is now, refuses the statement by name, never widens.
+   * null: a session held to nothing beside roles — a token's (its plan still names its reads). FAIL CLOSED: a role the
+   * file no longer names, or a file that cannot be read as it is now, refuses the statement by name, never widens.
+   *
+   * A USER WITH NO ROLE OF ITS OWN IS HELD TO WHAT THE FILE SAYS (stage 1b, never a default in the code): no roles file,
+   * every copied table; the file's `default:`, that role (read here at every statement, so an edit of `default:` applies
+   * at the next one); a file with no `default:`, nothing (`RoleGrants.noRole`: every statement that reads a copied table
+   * refused with the two ways out, src/duck/grants.ts noRoleRefusal). A token, which is no user, reads every copied table.
    */
   private grants(): RoleGrants | null | undefined {
     const live = this.server.rolesNow();
-    const role = this.token?.role;
-    if (role === undefined) return live.grants.size === 0 ? undefined : null;
+    const own = this.token?.role;
     const user = this.token?.user ?? this.user;
+    if (own === undefined) {
+      if (this.token?.user === undefined || live.file === null) return live.grants.size === 0 ? undefined : null;
+      if (live.problem !== null) {
+        throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the statements of the user ${JSON.stringify(user)} are refused: the user has no role of its own and the file's default cannot be read: ${live.problem}`,
+          hint: `fix ${live.file}: a user with no role is held to its default: line` }, 503);
+      }
+      if (live.default !== null) return live.grants.get(live.default) ?? this.notInFile(live, live.default, user);
+      return { name: "", file: live.file, tables: new Map(), all: false, noRole: { user, example: exampleRole(live) } };
+    }
     if (live.problem !== null) {
-      throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the role ${role}'s statements are refused: ${live.problem}`,
-        hint: `fix ${live.file ?? "the roles file"}: the role ${role} is the user ${JSON.stringify(user)}'s (a user with no role is not held to the file)` }, 503);
+      throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the role ${own}'s statements are refused: ${live.problem}`,
+        hint: `fix ${live.file ?? "the roles file"}: the role ${own} is the user ${JSON.stringify(user)}'s` }, 503);
     }
-    const g = live.grants.get(role);
-    if (g === undefined) {
-      const named = [...live.grants.keys()];
-      throw new PgError({ code: "42501", message: `permission denied: the role ${role} of the user ${JSON.stringify(user)} is not in ${live.file ?? "the project's roles file (mason/roles.yml)"}`,
-        detail: `the user keeps the role it was added with; a role the file no longer names reads nothing until it is added again or the user is made again${named.length ? ` (the roles: ${named.join(", ")})` : " (the file names no role)"}`,
-        hint: `add the role ${role} to ${live.file ?? "mason/roles.yml"}, or mason user remove ${user} and mason user add ${user}${named.length ? ` --role ${named[0]}` : ""}` }, 403);
-    }
-    return g;
+    return live.grants.get(own) ?? this.notInFile(live, own, user);
+  }
+
+  /** a role the roles file does not name (now): refused by name, never widened */
+  private notInFile(live: RolesLive, role: string, user: string): never {
+    const named = [...live.grants.keys()];
+    throw new PgError({ code: "42501", message: `permission denied: the role ${role} of the user ${JSON.stringify(user)} is not in ${live.file ?? "the project's roles file (mason/roles.yml)"}`,
+      detail: `the user keeps the role it was added with; a role the file no longer names reads nothing until it is added again or the user is made again${named.length ? ` (the roles: ${named.join(", ")})` : " (the file names no role)"}`,
+      hint: `add the role ${role} to ${live.file ?? "mason/roles.yml"}, or mason user remove ${user} and mason user add ${user}${named.length ? ` --role ${named[0]}` : ""}` }, 403);
+  }
+
+  /**
+   * THE ROLE THE SESSION IS HELD TO NOW, by name — the user's own, else (a user with none) the roles file's `default:`;
+   * undefined for a token, with no roles file, under a file with no default, or one that cannot be read (`grants`
+   * refuses that). Read by the catalog's `SET ROLE` (`catalogAs`), the plan cache's key and the request log's `role`,
+   * so each says the role the statement was held to. Never throws (the request log reads it).
+   */
+  private roleName(): string | undefined {
+    const own = this.token?.role;
+    if (own !== undefined) return own;
+    if (this.token?.user === undefined) return undefined;
+    const live = this.server.rolesNow();
+    return live.file !== null && live.problem === null ? live.default ?? undefined : undefined;
+  }
+
+  /**
+   * THE CATALOG'S ROLE OF THIS SESSION NOW: the effective role (`roleName`), or — for a user the file holds to nothing
+   * (no role, no `default:`) — `NO_ROLE_CATALOG`, a role with no grant, so information_schema lists it nothing and every
+   * privilege function is false, as on Postgres for a login with no grant. Undefined: the catalog's own (a token, no
+   * roles file). Throws where `grants` refuses (fail closed).
+   */
+  private catalogRole(): string | undefined {
+    return this.grants()?.noRole !== undefined ? NO_ROLE_CATALOG : this.roleName();
+  }
+
+  /** a user the roles file holds to nothing (no role of its own, no `default:`), read without throwing: its catalog
+   *  statements answer `current_user`, `current_role` and `user` as its own name (`userSpliced`), as Postgres does for
+   *  a login with no grant, never the catalog role's */
+  private heldToNothing(): boolean {
+    if (this.token?.role !== undefined || this.token?.user === undefined) return false;
+    const live = this.server.rolesNow();
+    return live.file !== null && live.problem === null && live.default === null;
+  }
+
+  /** the statement as the catalog runs it for this session: the user's name spliced for the keywords that name it */
+  private spliced(text: string, raw: RawStmt): string {
+    return userSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user, this.heldToNothing() ? HELD_TO_NOTHING_OPS : SESSION_OPS);
   }
 
   /** a plan's reads held to the session's role of THIS moment (a role given or taken since the Parse): refused as the
@@ -1101,26 +1326,35 @@ class Session {
   private heldToRole(plan: DuckPlan): void {
     const grants = this.grants();
     if (grants === null || grants === undefined) return;
-    if (plan.reads === undefined) {
+    if (plan.reads === undefined && grants.noRole === undefined) {
       throw new PgError({ code: "42501", message: `permission denied: the statement was prepared before the user ${JSON.stringify(this.token?.user ?? this.user)} had the role ${grants.name}`,
         hint: "prepare the statement again: its reads are then held to the role" }, 403);
+    }
+    if (plan.reads === undefined) {
+      // a plan made before any roles file existed, for a user the file now holds to nothing: prepared again, held then
+      throw new PgError({ code: "42501", message: `permission denied: the statement was prepared before ${grants.file} held the user ${JSON.stringify(grants.noRole!.user)} to a role`,
+        hint: "prepare the statement again: its reads are then held to the roles file" }, 403);
     }
     const refused = grantRefusal(plan.reads, grants);
     if (refused !== null) throw refused;
   }
 
   /**
-   * A CATALOG REQUEST OF THIS SESSION, AS ITS ROLE (src/api/postgres/catalog.ts asRole): a session with a role runs its
-   * catalog statements under `SET ROLE`, RESET after, in the one request the catalog runs whole, so `information_schema`,
+   * A CATALOG REQUEST OF THIS SESSION, WITH ITS SETTINGS AND AS ITS ROLE (src/api/postgres/catalog.ts asSession, asRole):
+   * every request carries the session's settings (`sessionSettings`), so `current_setting(name)` answers what `SHOW`
+   * does, and a session with a role runs its catalog statements under `SET ROLE`, RESET after, each in the one request
+   * the catalog runs whole, so `information_schema`,
    * `has_table_privilege` and `has_column_privilege` answer for the role and no other session's request meets it. A
    * role the catalog has not made yet (its rebuild a moment behind the file) refuses the statement, said; a role the
    * file no longer names is refused before it reaches the catalog (`grants`).
    */
   private async catalogAs(message: Buffer): Promise<Array<{ type: string; frame: Buffer }>> {
-    const role = this.token?.role;
-    if (role === undefined) return splitFrames(await this.server.catalog.run(message));
-    this.grants();
-    const { frames, setRoleRefused } = unwrapRole(splitFrames(await this.server.catalog.run(asRole(message, role))));
+    // fail closed first (a role the file lacks, a file that cannot be read), then the catalog's role of the session
+    // (`catalogRole`; both read the roles once, with no await between)
+    const role = this.catalogRole();
+    const reply = unwrapSession(splitFrames(await this.server.catalog.run(asSession(role === undefined ? message : asRole(message, role), this.sessionSettings()))));
+    if (role === undefined) return reply;
+    const { frames, setRoleRefused } = unwrapRole(reply);
     if (setRoleRefused !== null) {
       const e = relayedError(setRoleRefused);
       throw new PgError({ code: "42501", message: `permission denied: the catalog has no role ${role} yet (${e.message})`, hint: "run the statement again: the catalog is rebuilt with the roles as the roles file changes" }, 403);
@@ -1203,7 +1437,7 @@ class Session {
     this.running = controller;
     try {
       const values = await this.duckValues(e.plan, params, clock);
-      const lines = await runner.explain(e.plan.sql, values, this.duckSession(), controller.signal,
+      const lines = await runner.explain(e.plan.sql, values, await this.duckSession(), controller.signal,
         { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
           // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
           copies: copyFacts(this.server.options.duck.copies?.() ?? []) });
@@ -1226,7 +1460,16 @@ class Session {
     return this.duckRunner;
   }
 
-  private duckSession(): { timeZone: string; searchPath: string } { return { timeZone: this.vars.timeZone, searchPath: this.vars.searchPath }; }
+  /**
+   * WHAT A DUCKDB STATEMENT OF THIS SESSION RUNS UNDER: its TimeZone and search_path, and every setting
+   * `current_setting(name)` reads beside a copied table (src/duck/rewrite.ts) — the catalog Postgres's own
+   * (`Server.catalogSettings`) with the session's laid over (`sessionSettings`), as the catalog's `current_setting`
+   * answers them, never DuckDB's own settings.
+   */
+  private async duckSession(): Promise<DuckSession> {
+    const settings = new Map([...await this.server.catalogSettings(), ...this.sessionSettings()]);
+    return { timeZone: settings.get("timezone") ?? "UTC", searchPath: settings.get("search_path") ?? "", settings: Object.fromEntries(settings) };
+  }
 
   /** A DuckDB statement run: its columns (Postgres's, where it has a plan), and its rows to read, encoded in the
    *  formats asked */
@@ -1239,7 +1482,7 @@ class Session {
     this.running = controller;
     try {
       const values = await this.duckValues(plan, params, clock);
-      const a = await runner.run(plan.sql, values, this.duckSession(), controller.signal, plan.fields, plan.exact ?? []);
+      const a = await runner.run(plan.sql, values, await this.duckSession(), controller.signal, plan.fields, plan.exact ?? []);
       // a SELECT's analysis always has its RowDescription; without one, DuckDB's own columns are said as they are
       const fields = plan.fields !== null
         ? plan.fields.map((f, i) => ({ name: f.name, typeOid: a.columns[i]!.oid, typeSize: f.size, typeModifier: a.columns[i]!.oid === f.oid ? f.typmod : -1, format: formatAt(resultFormats, i) }))
@@ -1283,6 +1526,7 @@ class Session {
   private flushPending(c: DuckCursor): void {
     if (c.pending.length === 0) return;
     c.sent += c.pending.length;
+    if (this.asked !== null) this.asked.rows = c.sent;
     this.sendAll(c.pending);
     c.pending = [];
   }
@@ -1344,7 +1588,7 @@ class Session {
     const c = portal?.cursor;
     if (portal !== undefined && c !== undefined && c.suspended === true && c.recorded !== true && c.failed === undefined) {
       c.recorded = true;
-      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, portal.statement.sql, undefined, { method: "EXECUTE", jsonReads: portal.statement.duck?.jsonReads });
+      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, portal.statement.sql, undefined, [], { method: "EXECUTE", jsonReads: portal.statement.duck?.jsonReads, carried: portal.bytes });
     }
     c?.answer.close();
     this.portals.delete(name);
@@ -1360,19 +1604,48 @@ class Session {
   }
 
   private async setStatement(t: Extract<Translation, { kind: "set" }>): Promise<Buffer[]> {
-    if (t.name === "all") { this.vars = { ...defaultVars(), applicationName: this.vars.applicationName }; return [commandComplete("RESET")]; }
+    if (t.name === "all") { await this.resetAll(); return [commandComplete("RESET")]; }
     const tag = t.value === null ? "RESET" : "SET";
     // SET ROLE and SET SESSION AUTHORIZATION: a session is its user and becomes no one else — RESET, NONE and its own
     // name are Postgres's no-ops, any other name Postgres's refusal. Never the catalog's to validate: that is one
     // superuser connection, which accepted `SET ROLE postgres` silently (a review finding of #35)
     if (t.name === "role" || t.name === "session_authorization") {
-      const own = t.value === null || t.value === this.user || (t.name === "role" && t.value.toLowerCase() === "none");
+      // its own name, NONE, RESET — and SET ROLE to the role it already is (its own, or the roles file's default: what
+      // current_user says), which Postgres always allows; SET SESSION AUTHORIZATION is the login's name alone
+      const own = t.value === null || t.value === this.user || (t.name === "role" && (t.value.toLowerCase() === "none" || t.value === this.roleName()));
       if (!own) throw new PgError({ code: "42501", message: `permission denied to set ${t.name === "role" ? "role" : "session authorization"} "${t.value}"` }, 403);
       return [commandComplete(tag)];
     }
-    if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
-    const status = this.setParameter(t.name, t.value);
-    return [...status, commandComplete(tag)];
+    // a placeholder (`myapp.x`) is validated here: a SET the catalog validated left it DEFINED there, with '', for every
+    // session (a `current_setting` of it answered '' where Postgres's is 42704) — its rollback undoes the value, not that
+    if (await this.isPlaceholder(t.name)) placeholderName(t.name);
+    else if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
+    if (t.value === null) await this.resetParameter(t.name); else this.setParameter(t.name, t.value);
+    return [commandComplete(tag)];
+  }
+
+  /** `SELECT set_config(name, value, false)` alone (translate.ts setConfig): the session's SET, answered as Postgres
+   *  answers the function — one text row, the value as `SHOW` then answers it (its own DataRow: one reader), the column
+   *  named `set_config` or as aliased (an Execute drops the RowDescription: a portal's is its Describe's). */
+  private async setConfigStatement(t: Extract<Translation, { kind: "set_config" }>): Promise<Buffer[]> {
+    await this.setStatement({ kind: "set", name: t.name, value: t.value, local: false });
+    const row = (await this.showStatement(t.name)).find((f) => f[0] === DATA_ROW);
+    if (row === undefined) throw new PgError({ code: "XX000", message: `SHOW ${t.name} answered no row after set_config (Mason bug: report it)` }, 500);
+    return [this.setConfigDescription(t, 0), row, commandComplete("SELECT 1")];
+  }
+
+  private setConfigDescription(t: Extract<Translation, { kind: "set_config" }>, format: 0 | 1): Buffer {
+    return rowDescription([fieldOf(t.column, "text", format)]);
+  }
+
+  /** DISCARD ALL is Postgres's CLOSE ALL, DEALLOCATE ALL and RESET ALL (its ParameterStatus with it) in one; PLANS,
+   *  SEQUENCES and TEMP find nothing of theirs here */
+  private async discard(target: string): Promise<Buffer[]> {
+    if (target !== "ALL") return [commandComplete(`DISCARD ${target}`)];
+    this.statements.clear();
+    this.dropPortals();
+    await this.resetAll();
+    return [commandComplete("DISCARD ALL")];
   }
 
   private decidesHere(name: string): boolean {
@@ -1392,10 +1665,25 @@ class Session {
     return tlsParameters(this.socket instanceof tls.TLSSocket)[n] ?? fixedParameter(n, this.vars, this.user) ?? this.vars.other.get(n) ?? null;
   }
 
+  /**
+   * EVERY PARAMETER THIS SESSION HOLDS, each `sessionSetting`'s: what `current_setting(name)` answers, in the catalog
+   * (`catalogAs`, src/api/postgres/catalog.ts asSession) and beside a copied table (`duckSession`) — so it is the string
+   * `SHOW <name>` answers, however a tool asks (GitHub issue 40). The names are those `sessionSetting` reads from.
+   */
+  private sessionSettings(): Map<string, string> {
+    const names = new Set([...Object.keys(tlsParameters(this.socket instanceof tls.TLSSocket)), ...FIXED.keys(), ...this.vars.other.keys()]);
+    const out = new Map<string, string>();
+    for (const n of names) { const v = this.sessionSetting(n); if (v !== null) out.set(n, v); }
+    return out;
+  }
+
   private async showStatement(name: string): Promise<Buffer[]> {
     if (name === "all") return this.showAll();
     const value = this.sessionSetting(name);
     if (value === null) {
+      // a placeholder this session never SET is none of its settings, whatever the one catalog every session shares
+      // has defined (a forwarded `set_config` defines one there): Postgres's 42704
+      if (await this.isPlaceholder(name)) throw new PgError({ code: "42704", message: `unrecognized configuration parameter "${name}"` });
       const reply = splitFrames(await this.server.catalog.run(frame("Q", cstr(`SHOW ${quoteIdent(name)}`))));
       const err = reply.find((f) => f.type === "E");
       if (err !== undefined) throw relayedError(err.frame);
@@ -1457,7 +1745,7 @@ class Session {
       this.skipToSync = false;
       // an implicit transaction ends at Sync; an open one keeps its "now"
       if (this.tx === "none") this.txNow = null;
-      this.send(readyForQuery(this.txStatus()));
+      this.send(...this.ready());
       return;
     }
     if (this.skipToSync || m.type === "Flush") return;
@@ -1502,10 +1790,9 @@ class Session {
     const err = reply.find((f) => f.type === "E");
     if (err !== undefined) {
       // AFTER AN ERROR IN THE EXTENDED PROTOCOL POSTGRES IGNORES EVERY MESSAGE UNTIL A SYNC (ignore_till_sync), and the
-      // sidecar is one connection every session shares: without this Sync one refused Parse silenced the catalog for
-      // every session until a restart (review of #480). The Sync's own ReadyForQuery is consumed here. (A request run
-      // as a role carries its own Sync, catalog.ts asRole: the RESET ROLE after it must run)
-      if (this.token?.role === undefined && !parts.some((p) => p[0] === 0x53 /* S */)) await this.server.catalog.run(frame("S"));
+      // sidecar is one connection every session shares: one refused Parse with no Sync after it silenced the catalog for
+      // every session until a restart (review of #480). Every request carries one (catalog.ts asSession: the RESET of
+      // the session's settings after it must run), its ReadyForQuery dropped here
       throw relayedError(err.frame);
     }
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
@@ -1536,7 +1823,7 @@ class Session {
         const own = this.statements.get(m.name);
         // the unnamed statement is replaced by a Parse; the sidecar's must be closed first
         const close = own?.catalogName !== null && own !== undefined ? [frame("C", Buffer.from("S"), cstr(own.catalogName))] : m.name === "" ? [frame("C", Buffer.from("S"), cstr(statement.catalogName))] : [];
-        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(sessionUserSpliced(m.sql, raw.stmt, raw.stmt_location ?? 0, this.user)),
+        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(this.spliced(m.sql, raw)),
           int16(m.paramTypes.length), ...m.paramTypes.map(int32)));
         this.statements.set(m.name, statement);
         // the CloseComplete of the close this server added is not the client's
@@ -1567,7 +1854,7 @@ class Session {
       }
       this.dropPortal(m.portal);
       const rows = reply.slice(2, -2);
-      this.portals.set(m.portal, { statement, params: [], boundAt: this.server.now(), resultFormats: m.resultFormats, rows: null, sent: 0, fields: null,
+      this.portals.set(m.portal, { statement, params: [], boundAt: this.server.now(), resultFormats: m.resultFormats, rows: null, sent: 0, fields: null, bytes: 0,
         catalog: { description, rows: statement.explainCatalog === undefined ? rows : catalogExplained(rows, statement.explainCatalog), sent: 0, done } });
       return [bound];
     }
@@ -1585,7 +1872,7 @@ class Session {
     const boundAt = this.server.now();
     this.txNow ??= boundAt;
     this.dropPortal(m.portal);
-    this.portals.set(m.portal, { statement, params, boundAt, resultFormats: m.resultFormats, rows: null, sent: 0, fields: null });
+    this.portals.set(m.portal, { statement, params, boundAt, resultFormats: m.resultFormats, rows: null, sent: 0, fields: null, bytes: 0 });
     return [bindComplete()];
   }
 
@@ -1596,6 +1883,7 @@ class Session {
       if (statement.catalogName !== null) return this.catalogRun(frame("D", Buffer.from("S"), cstr(statement.catalogName)));
       const shape = statement.shape;
       if (shape?.kind === "show") return [parameterDescription([]), ...await this.showDescription(shape.name)];
+      if (shape?.kind === "set_config") return [parameterDescription([]), this.setConfigDescription(shape, 0)];
       if (statement.explain !== undefined) {
         const e = statement.explain;
         return [parameterDescription(e.plan.params.map((o, i) => { const given = statement.paramOids[i] ?? 0; return given !== 0 ? given : o; })), rowDescription([explainField(e.options, 0)])];
@@ -1612,6 +1900,7 @@ class Session {
     if (portal.catalog !== undefined) return [portal.catalog.description];
     const shape = portal.statement.shape;
     if (shape?.kind === "show") return this.showDescription(shape.name);
+    if (shape?.kind === "set_config") return [this.setConfigDescription(shape, formatAt(portal.resultFormats, 0))];
     if (portal.statement.explain !== undefined) return [rowDescription([explainField(portal.statement.explain.options, formatAt(portal.resultFormats, 0))])];
     const d = portal.statement.duck;
     if (d !== undefined) return [d.fields !== null && d.fields.length ? rowDescription(d.fields.map((c, i) => ({ name: c.name, typeOid: c.oid, typeSize: c.size, typeModifier: c.typmod, format: formatAt(portal.resultFormats, i) }))) : noData()];
@@ -1628,6 +1917,8 @@ class Session {
       c.sent += take;
       return c.sent < c.rows.length ? [...out, portalSuspended()] : [...out, c.done];
     }
+    // what its earlier Executes sent is this one's row's too (`bytesFor`)
+    if (this.asked !== null) this.asked.carried = portal.bytes;
     const statement = portal.statement;
     if (statement.raw?.stmt === undefined) return [emptyQueryResponse()];
     const t = statement.shape ?? this.classify(statement.raw.stmt, statementText(statement.sql, statement.raw));
@@ -1638,10 +1929,11 @@ class Session {
       case "empty": return [emptyQueryResponse()];
       case "catalog": throw new PgError({ code: "XX000", message: "a catalog statement bound as a query (Mason bug: report it)" }, 500);
       case "set": return this.setStatement(t);
+      case "set_config": return (await this.setConfigStatement(t)).filter((f) => f[0] !== ROW_DESCRIPTION);
       // as Postgres: the extended protocol's Execute sends the rows and the tag, the RowDescription is the Describe's
       case "show": return (await this.showStatement(t.name)).filter((f) => f[0] !== ROW_DESCRIPTION);
       case "transaction": return this.transaction(t.tag);
-      case "discard": this.statements.clear(); this.dropPortals(); return [commandComplete("DISCARD ALL")];
+      case "discard": return this.discard(t.target);
       case "deallocate": this.statements.clear(); return [commandComplete("DEALLOCATE ALL")];
       case "duckdb": {
         const controller = portal.cursor?.controller ?? new AbortController();
@@ -1664,11 +1956,29 @@ class Session {
         const take = m.maxRows > 0 ? Math.min(m.maxRows, rows.length - portal.sent) : rows.length - portal.sent;
         const out = rows.slice(portal.sent, portal.sent + take);
         portal.sent += take;
-        if (portal.sent < rows.length) return [...out, portalSuspended()];
-        this.recordRequest({ rows: rows.length });
-        return [...out, commandComplete("EXPLAIN")];
+        if (portal.sent < rows.length) return this.pageSent(portal, [...out, portalSuspended()]);
+        const done = [...out, commandComplete("EXPLAIN")];
+        this.recordRequest({ rows: rows.length }, undefined, undefined, done);
+        return done;
       }
     }
+  }
+
+  /**
+   * THE BYTES SENT FOR THE STATEMENT BEING ASKED, `then` (the frames that end it, sent just after) among them: what its
+   * portal's earlier Executes sent (`carried`), and what the session was written since this message arrived — exact,
+   * since one message is handled at a time and a portal read aside meanwhile is read, never sent (`readAside`). Never
+   * the session's bytes since a portal's first Execute: another portal's rows sent between two of its Executes were
+   * counted in both rows.
+   */
+  private bytesFor(then: readonly Buffer[], asked: Asked | null = this.asked): number {
+    return (asked?.carried ?? 0) + this.sentBytes - (asked?.sentAt ?? this.sentBytes) + then.reduce((n, b) => n + b.length, 0);
+  }
+
+  /** a page of a portal, suspended: what it sends is kept on the portal (`Portal.bytes`) for its last Execute's row */
+  private pageSent(portal: Portal, frames: Buffer[]): Buffer[] {
+    portal.bytes = this.bytesFor(frames);
+    return frames;
   }
 
   /** the statement being answered reads these JSON paths: its request log row says so, answered or failed */
@@ -1681,7 +1991,7 @@ class Session {
     // each Execute of a paged portal is a message of its own: the last one's row in the request log carries the reads
     if (statement.duck !== undefined) this.readsOf(statement.duck);
     if (portal.cursor === undefined) {
-      if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a DuckDB statement without its plan: report it (Mason's Postgres listener)" });
+      if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a statement without its plan: report it (Mason's Postgres listener)" });
       // a row count on the wire bounds the rows: the plan made for it where it differs (boundOnWire)
       const plan = m.maxRows > 0 ? await this.boundOnWire(statement, statement.duck, controller) : statement.duck;
       const exec = this.txNow ??= this.server.now();
@@ -1697,19 +2007,21 @@ class Session {
       if (m.maxRows <= 0) {
         try { await this.streamRest(c); } finally { c.answer.close(); }
         c.recorded = true;
-        this.recordRequest({ rows: c.sent, startedAt: c.startedAt });
-        return [commandComplete(`SELECT ${c.sent}`)];
+        const done = [commandComplete(`SELECT ${c.sent}`)];
+        this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, undefined, undefined, done);
+        return done;
       }
       // at most maxRows (JDBC's fetch size, a cursor): suspended while a row is left, read one chunk ahead to know it
       while (!c.done && c.pending.length <= m.maxRows) await this.fill(c);
       const out = c.pending.splice(0, m.maxRows);
       c.sent += out.length;
-      // suspended: its row is written at its last Execute, or when it is dropped (dropPortal)
-      if (c.pending.length > 0) { c.suspended = true; return [...out, portalSuspended()]; }
+      // suspended: its row is written at its last Execute, or when it is dropped (dropPortal), with what its pages sent
+      if (c.pending.length > 0) { c.suspended = true; return this.pageSent(portal, [...out, portalSuspended()]); }
       c.answer.close();
       c.recorded = true;
-      this.recordRequest({ rows: c.sent, startedAt: c.startedAt });
-      return [...out, commandComplete(`SELECT ${c.sent}`)];
+      const done = [...out, commandComplete(`SELECT ${c.sent}`)];
+      this.recordRequest({ rows: c.sent, startedAt: c.startedAt }, undefined, undefined, done);
+      return done;
     } catch (e) {
       // its refusal is its row (refuse)
       c.recorded = true;
@@ -1750,7 +2062,9 @@ class Session {
       // could not tell: this statement is refused, the session kept, and the next statement asks again
       if (err instanceof ApiError && err.status === 503) return new PgError({ code: "57P03", message, hint: "run the statement again once Mason can read its list of users" }, 503);
       if (err instanceof ApiError) this.recordRefusal(asked.toUpperCase(), err);
-      this.fatal("28000", `the session's user is no longer accepted: ${message}`, `a removed user's sessions end at their next statement; mason user add ${user} makes it again, with a new password`);
+      this.fatal("28000", `the session's user is no longer accepted: ${message}`, err instanceof ApiError && err.code === USER_DISABLED
+        ? `a disabled user's sessions end at their next statement; mason user enable ${user} lets it connect again, with the same password`
+        : `a removed user's sessions end at their next statement; mason user add ${user} makes it again, with a new password`);
       return null;
     }
     this.verifiedAt = now;
@@ -1779,34 +2093,66 @@ const isUtf8 = (encoding: string): boolean => /^(utf-?8|unicode)$/i.test(encodin
 const quoteIdent = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 const quoteLiteral = (text: string): string => `'${text.replaceAll("'", "''")}'`;
 
+/** the SQLValueFunction ops that name a user, each with its keyword (the text at its location, and its column's name) */
+const USER_OPS: Readonly<Record<string, string>> = { SVFOP_SESSION_USER: "session_user", SVFOP_CURRENT_USER: "current_user", SVFOP_CURRENT_ROLE: "current_role", SVFOP_USER: "user" };
+/** every session: `session_user` alone (`current_user` is the catalog's role: the session's role under SET ROLE) */
+const SESSION_OPS: ReadonlySet<string> = new Set(["SVFOP_SESSION_USER"]);
+/** a user the roles file holds to nothing: its catalog role is `NO_ROLE_CATALOG`, never a name it should answer */
+const HELD_TO_NOTHING_OPS: ReadonlySet<string> = new Set(Object.keys(USER_OPS));
+/** `userSpliced`'s mark for the `pg_catalog.` of a qualified `current_setting`, never a keyword's text */
+const SETTING = "\u0000setting";
+
 /**
- * `session_user` IN A STATEMENT THE CATALOG ANSWERS IS THIS SESSION'S USER, never the catalog's superuser (it answered
- * `postgres` for every session while `SHOW session_authorization` said the user's name: a review finding of #35). The
- * keyword cannot be overridden as `version()` and `current_setting` are, so each SESSION_USER of the parse tree is
- * spliced in the text with a scalar subquery named as the keyword names its column, `(SELECT 'agent'::name AS
- * session_user)`: the name, the type and every expression around it stay Postgres's. (`current_user` is the catalog's
- * role: the session's role under SET ROLE, src/api/postgres/catalog.ts asRole.) `base`: the statement's offset in the
- * text the parse tree's locations count from.
+ * WHAT A STATEMENT THE CATALOG ANSWERS READS OF ITS SESSION, spliced in its text at the parse tree's locations:
+ * - `session_user` IS THIS SESSION'S USER, never the catalog's superuser (it answered `postgres` for every session while
+ *   `SHOW session_authorization` said the user's name: a review finding of #35). The keyword cannot be overridden as
+ *   `version()` and `current_setting` are, so each one of `ops` is spliced with a scalar subquery named as the keyword
+ *   names its column, `(SELECT 'agent'::name AS session_user)`: the name, the type and every expression around it stay
+ *   Postgres's. `current_user`, `current_role` and `user` are the catalog's role (the session's role under SET ROLE,
+ *   src/api/postgres/catalog.ts asRole), spliced only for a user the roles file holds to nothing
+ *   (`HELD_TO_NOTHING_OPS`), whose catalog role is `NO_ROLE_CATALOG`: Postgres answers its own name for all three to a
+ *   login with no grant.
+ * - `pg_catalog.current_setting(…)`, so written, is the session's override (`public.current_setting`, catalog.ts
+ *   currentSettingSql): Postgres's own is called by its OID's C function whatever its catalog row says, so it cannot be
+ *   replaced, and so qualified it answered the catalog's values after a SET (GitHub issue 40).
+ * `base`: the statement's offset in the text the parse tree's locations count from.
  */
-function sessionUserSpliced(text: string, stmt: unknown, base: number, user: string): string {
-  const at: number[] = [];
+function userSpliced(text: string, stmt: unknown, base: number, user: string, ops: ReadonlySet<string>): string {
+  // a user keyword by its location, or `setting`: the `pg_catalog.` of a qualified current_setting
+  const at = new Map<number, string>();
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) { for (const x of n) walk(x); return; }
     if (typeof n !== "object" || n === null) return;
     const f = (n as { SQLValueFunction?: { op?: string; location?: number } }).SQLValueFunction;
-    if (f !== undefined && f.op === "SVFOP_SESSION_USER" && typeof f.location === "number") at.push(f.location);
+    if (f !== undefined && f.op !== undefined && ops.has(f.op) && typeof f.location === "number") at.set(f.location, USER_OPS[f.op]!);
+    const c = (n as { FuncCall?: { funcname?: Array<{ String?: { sval?: string } }>; location?: number } }).FuncCall;
+    const name = c?.funcname?.map((x) => x.String?.sval ?? "");
+    if (c !== undefined && typeof c.location === "number" && name?.length === 2 && name[0] === "pg_catalog" && name[1] === "current_setting") at.set(c.location, SETTING);
     for (const v of Object.values(n)) walk(v);
   };
   walk(stmt);
-  if (at.length === 0) return text;
+  if (at.size === 0) return text;
   const bytes = Buffer.from(text, "utf8");
   const parts: Buffer[] = [];
   let end = bytes.length;
-  for (const loc of [...new Set(at)].sort((a, b) => b - a)) {
+  for (const loc of [...at.keys()].sort((a, b) => b - a)) {
+    const keyword = at.get(loc)!;
     const from = loc - base;
-    if (from < 0 || !/^session_user$/i.test(bytes.subarray(from, from + 12).toString("utf8"))) continue;
-    parts.unshift(bytes.subarray(from + 12, end));
-    parts.unshift(Buffer.from(`(SELECT ${quoteLiteral(user)}::name AS session_user)`, "utf8"));
+    if (from < 0) continue;
+    let written: string;
+    if (keyword === SETTING) {
+      // the qualifier as written (`pg_catalog.`, `"pg_catalog" .`): what is spliced is its span, never a guess at it
+      const q = /^(?:pg_catalog|"pg_catalog")\s*\.\s*/i.exec(bytes.subarray(from, from + 64).toString("utf8"));
+      if (q === null) continue;
+      written = q[0];
+    } else {
+      if (bytes.subarray(from, from + keyword.length).toString("utf8").toLowerCase() !== keyword) continue;
+      // the keyword must end there (`user` is the start of `user_name`): the parser placed it, so a word character after is not it
+      if (/^[A-Za-z0-9_$]/.test(bytes.subarray(from + keyword.length, from + keyword.length + 1).toString("utf8"))) continue;
+      written = keyword;
+    }
+    parts.unshift(bytes.subarray(from + Buffer.byteLength(written), end));
+    parts.unshift(Buffer.from(keyword === SETTING ? "public." : `(SELECT ${quoteLiteral(user)}::name AS ${keyword})`, "utf8"));
     end = from;
   }
   parts.unshift(bytes.subarray(0, end));
@@ -1874,6 +2220,8 @@ function relayedError(frame: Buffer): PgError {
 
 class Server {
   readonly sessions = new Map<number, Session>();
+  /** the catalog Postgres's own settings, by name (`catalogSettings`), read once */
+  private baseSettings: Promise<ReadonlyMap<string, string>> | null = null;
   /** the DuckDB plans by text, search_path, TimeZone, declared parameter types and an Execute's bound (Session.boundOnWire), for
    *  the schema they were made under */
   private duckPlans = new Map<string, DuckPlan>();
@@ -1939,13 +2287,13 @@ class Server {
     this.lastRoles = options.roles?.() ?? NO_ROLES;
     const version = versionText(options.product ?? "Mason", options.masonVersion);
     this.catalog = new PgCatalog(this.lastSchema, {
-      roles: this.lastRoles.grants,
+      roles: catalogRolesOf(this.lastRoles),
       log: (line) => this.log(line),
       setup: [
         // `version()` says whose Postgres this is; search_path lists pg_catalog AFTER public so the override wins
         `CREATE OR REPLACE FUNCTION public.version() RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT '${version.replaceAll("'", "''")}' $$`,
-        // `current_setting('ssl')` says what every session of this listener is (tlsParameters), as SHOW does
-        ...currentSettingSql(tlsParameters(options.tls !== null)),
+        // `current_setting(name)` answers the session's settings, carried in by each of its requests (catalog.ts asSession)
+        ...currentSettingSql(),
         "SET search_path = public, pg_catalog",
         ...databaseNameSql(options.database),
       ],
@@ -1954,6 +2302,23 @@ class Server {
     });
   }
   get database(): string { return this.options.database; }
+
+  /**
+   * THE CATALOG POSTGRES'S OWN SETTINGS, every name its `current_setting` knows with the value it answers (`block_size`,
+   * `server_version_num` …), read once (they are the catalog's build's and its setup's, the same at every start): what a
+   * session's `current_setting` answers beside a copied table for a name the session does not hold (`duckSession`).
+   */
+  catalogSettings(): Promise<ReadonlyMap<string, string>> {
+    this.baseSettings ??= (async () => {
+      const reply = decodeBackend(Buffer.from(await this.catalog.run(frame("Q", cstr("SELECT name, pg_catalog.current_setting(name) FROM pg_catalog.pg_settings")))));
+      const err = reply.find((m) => m.type === "ErrorResponse");
+      if (err?.type === "ErrorResponse") throw new PgError({ code: "XX000", message: `the catalog Postgres's settings could not be read: ${err.fields.M} (Mason bug: report it)` }, 500);
+      return new Map(reply.flatMap((m) => m.type === "DataRow" ? [[m.values[0]!.toString("utf8").toLowerCase(), m.values[1]?.toString("utf8") ?? ""] as [string, string]] : []));
+    })();
+    // a read that failed is read again at the next statement, never kept
+    this.baseSettings.catch(() => { this.baseSettings = null; });
+    return this.baseSettings;
+  }
   /** the clock "now" is read from */
   now(): number { return (this.options.clock ?? Date.now)(); }
   log(line: string): void { (this.options.log ?? ((l: string) => console.log(l)))(`[postgres] ${line}`); }
@@ -1965,7 +2330,7 @@ class Server {
     if (s !== this.lastSchema || r !== this.lastRoles) {
       this.lastSchema = s;
       this.lastRoles = r;
-      void this.catalog.replace(s, r.grants).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
+      void this.catalog.replace(s, catalogRolesOf(r)).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
     }
     return s;
   }
@@ -1978,10 +2343,63 @@ class Server {
 
   forget(s: Session): void { this.sessions.delete(s.id); }
 
+  /** A CancelRequest: the session's statement stopped when the key is the session's (`interrupt`). */
   cancel(pid: number, secret: number): void {
     const s = this.sessions.get(pid);
     if (s === undefined || s.secret !== secret) return;   // as Postgres: a wrong key is ignored, never answered
+    this.interrupt(s);
+  }
+
+  /**
+   * THE ONE WAY A SESSION'S STATEMENT IS CANCELLED, for a CancelRequest and `mason cancel` alike: its controller aborted
+   * with no reason, so DuckDB is interrupted (or the wait for the client woken) and the client is told 57014 "canceling
+   * statement due to user request", recorded as cancelled. Answers what it stopped, or null when nothing ran.
+   */
+  interrupt(s: Session): RunningStatement | null {
+    const running = s.runningNow(Date.now());
     s.running?.abort();
+    return running;
+  }
+
+  /** `mason cancel <session>` (`POST /api/cancel`): the session's statement stopped as a CancelRequest stops it — with
+   *  `statement`, only while it is the one the session runs (a listing's statement may have ended, and the session
+   *  begun another, by the time the cancel arrives) */
+  cancelSession(id: number, statement?: number): CancelAnswer {
+    const s = this.sessions.get(id);
+    if (s === undefined) return { unknown: id };
+    if (statement !== undefined) {
+      const now = s.runningNow(Date.now());
+      if (now !== null && now.statement !== statement) return { other: now, asked: statement };
+    }
+    const stopped = this.interrupt(s);
+    if (stopped === null) return { idle: id };
+    this.log(`session ${id}: its statement cancelled by mason cancel`);
+    return { cancelled: stopped };
+  }
+
+  /** The sessions logged in now, by user and client, the most open first (`SessionsOpen`). */
+  openSessions(): SessionsOpen {
+    const now = Date.now();
+    const by = new Map<string, { user: string; client: string; open: number; running: number }>();
+    let open = 0;
+    for (const s of this.sessions.values()) {
+      if (s.phase !== "ready") continue;
+      open++;
+      const user = s.token?.user ?? "", client = s.vars.applicationName;
+      const k = JSON.stringify([user, client]);
+      const g = by.get(k) ?? { user, client, open: 0, running: 0 };
+      g.open++;
+      if (s.runningNow(now) !== null) g.running++;
+      by.set(k, g);
+    }
+    return { open, byClient: [...by.values()].sort((a, b) => b.open - a.open || (a.user < b.user ? -1 : a.user > b.user ? 1 : a.client < b.client ? -1 : a.client > b.client ? 1 : 0)) };
+  }
+
+  /** The statements running now, oldest first. */
+  running(): RunningStatement[] {
+    const now = Date.now();
+    return [...this.sessions.values()].map((s) => s.runningNow(now)).filter((r): r is RunningStatement => r !== null)
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.session - b.session);
   }
 }
 
@@ -2002,6 +2420,9 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
   return {
     port,
     get sessions() { return server.sessions.size; },
+    openSessions: () => server.openSessions(),
+    running: () => server.running(),
+    cancel: (session, statement) => server.cancelSession(session, statement),
     async close() {
       for (const s of [...server.sessions.values()]) s.end("server closing");
       await new Promise<void>((resolve) => listener.close(() => resolve()));

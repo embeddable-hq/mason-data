@@ -33,10 +33,10 @@ const codeOf = (status: number): string => status === 400 ? "usage" : status ===
 /** The sources file to edit: where it is, its text, what it says, and the file read as the run reads it (its URL resolved). */
 export interface EditTarget { root: string; file: string; text: string; parsed: SourceFile; read: ProjectSource }
 
-/** The database an edit is checked against: its catalog (preflight.ts readSourceFacts), its name, and whether its changes
- *  are read by logical replication (a `--key` table cannot be); `measured`, with Mason up, what the run measured of a
- *  table (a poll's cost is estimated from it: `pollCost`). */
-export interface EditCatalog { tables: readonly SourceTable[]; database: string; replication: boolean; measured?: (table: string) => PollMeasure | null }
+/** The database an edit is checked against: its catalog (preflight.ts readSourceFacts) and its name; `measured`, with
+ *  Mason up, what the run measured of a table (a poll's cost is estimated from it: `pollCost`). Whether a table can be
+ *  replicated is its entry's sync and the catalog's (src/cli/sources.ts entryProblems), never the run's. */
+export interface EditCatalog { tables: readonly SourceTable[]; database: string; measured?: (table: string) => PollMeasure | null }
 
 /** What a run measured of a table, for an estimate of its poll's cost (src/duck/sync.ts `Sync.measured`): its last
  *  poll's time, and one reader's rate at its copy (rows a second, the copy's rows over its time and readers) */
@@ -65,7 +65,7 @@ export function pollCost(t: Pick<SourceTable, "source" | "rows">, sync: TableSyn
   const s = (x: number): string => x < 90 ? `${Math.round(x)} s` : x < 5400 ? `${Math.round(x / 60)} min` : `${(x / 3600).toFixed(1)} h`;
   return `${entryName(t.source)} has about ${rows} rows, and each poll scans it whole on your database: about ${s(seconds)} a poll, from ${basis}. ` +
     `sync: ${syncText(sync)} is stretched to a poll every ${s(every)} at most (a poll waits four times its own time), one backend of your database ` +
-    `busy ${Math.round((seconds / every) * 100)} % of the time — a longer interval (--sync "poll 1h"), or mason start --replication, costs it less`;
+    `busy ${Math.round((seconds / every) * 100)} % of the time — a longer interval (--sync "poll 1h"), or --sync replication (the change log), costs it less`;
 }
 
 /**
@@ -92,7 +92,7 @@ export function sourceToEdit(folder: string | null, root: string, read: () => Pr
 /** The file's other entries against the database: an edit is never written over a file the run would not take. */
 function othersHold(at: EditTarget, db: EditCatalog, without: readonly string[], then: string): void {
   const others = { ...at.parsed, tables: at.parsed.tables.filter((e) => !without.includes(e.table)) };
-  const held = addedTables(others, db.tables, db.database, at.root, { replication: db.replication });
+  const held = addedTables(others, db.tables, db.database, at.root);
   if (!Array.isArray(held)) throw new Refusal(409, `${held.message}${held.why ? `\n${held.why}` : ""} — fix it first, then ${then}`);
 }
 
@@ -103,17 +103,20 @@ export interface PickResult {
   file: string;
   /** the entry's key (`orders`, `billing.invoices`), and what it copies */
   entry: string; columns: string[] | null; exclude: string[]; key: string[] | null;
-  /** the key's columns added to a --columns list (a copy always has its key) */
+  /** the key's columns added to a --columns list (a synced table always has its key) */
   addedKey: string[];
   /** secret-looking columns every-column left out (sources.ts looksSecret) */
   skippedSecrets: string[];
   /** the file named it so already: nothing was written */
   already: boolean;
-  /** how it is kept current after its first copy (src/lib/table-sync.ts syncText), and where that is said: its entry's
+  /** how it is kept current after its first sync (src/lib/table-sync.ts syncText), and where that is said: its entry's
    *  own `sync:` (written by --sync, or `off` for a big table), the file's top `sync:`, or the default (`off`) */
   sync: { value: string; from: "entry" | "file" | "default" };
   /** the table is over BIG_TABLE_ROWS and the file's default polls: its entry was written `sync: off`, said */
   bigOff: boolean;
+  /** the file's default is `replication` and the table cannot be replicated: its entry was written `sync: poll 5m`, and
+   *  this is why (no primary key: a `--key` table; REPLICA IDENTITY NOTHING); null otherwise */
+  notReplicated: string | null;
   /** a poll every so often of a table this big would cost the database this, estimated (`pollCost`); null otherwise */
   pollCost: string | null;
 }
@@ -126,7 +129,9 @@ export interface PickResult {
  *
  * ITS SYNC (`o.sync`, --sync): written on the entry as its own `sync:`; else an entry's own is kept; else a NEW entry
  * follows the file's default — unless the table is over `BIG_TABLE_ROWS` and that default polls, when the entry is
- * written `sync: off` and said (`bigOff`): a poll scans its table whole. `o.keep`: only the sync is asked of a table
+ * written `sync: off` and said (`bigOff`): a poll scans its table whole — or the default is `replication` and the table
+ * cannot be (a `--key` table, REPLICA IDENTITY NOTHING), when it is written `sync: poll 5m` and said why (`notReplicated`;
+ * an explicit `--sync replication` of such a table is refused, at its entry). `o.keep`: only the sync is asked of a table
  * already added (`mason add orders --sync "poll 30s"`), so its columns and key stay as they are, and only its `sync:`
  * line is written (`withEntrySync`: its comments too).
  */
@@ -136,7 +141,6 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   if (!t) throw new Refusal(404, `${table} is not a table of ${db.database} that this user can read`);
   if (key !== null && t.key.length) throw new Refusal(400, `${table} has a primary key (${t.key.join(", ")}), which Mason keys it by: leave --key out`);
   if (key === null && !t.key.length) throw new Refusal(409, `${table} cannot be added: ${unaddableReason(t)}`);
-  if (key !== null && db.replication) throw new Refusal(409, `${table} has no primary key, and logical replication cannot apply its changes by --key: sync it by polling (mason start --poll), then add it`);
   const was = at.parsed.tables.find((e) => e.table === table);
   const keep = o.keep === true && was !== undefined;
   const chosen = keep ? { columns: was.columns, exclude: was.exclude, addedKey: [], skipped: [] } : chooseColumns(t, columns, key);
@@ -145,10 +149,23 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   // its own sync: asked, else the one its entry has, else none (the file's) — but a new big table under a polling default
   const fileSync = effectiveSync(at.parsed, undefined).sync;
   const bigOff = o.sync === undefined && was === undefined && fileSync.mode === "poll" && t.rows !== null && t.rows > BIG_TABLE_ROWS;
-  const sync: TableSync | null = o.sync ?? was?.sync ?? (bigOff ? { mode: "off" } : null);
+  // a table logical replication cannot keep, under a file whose default is replication: polled, said (never refused for
+  // the default it did not choose; its own --sync replication is refused at its entry, below)
+  const keyed = keep ? was.key !== null : key !== null;
+  const unreplicable = keyed ? "it has no primary key, so logical replication cannot apply its changes by its key:"
+    : t.replicaIdentity === "n" ? "it has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail" : null;
+  const notReplicated = o.sync === undefined && (was?.sync ?? null) === null && fileSync.mode === "replication" ? unreplicable : null;
+  // --sync replication asked of one: refused with the COMMAND to run (the person is at it), its own flags kept — the
+  // file's words are for an entry written by hand (src/cli/sources.ts entryProblems)
+  if (o.sync?.mode === "replication" && unreplicable !== null) {
+    const others = columns.filter((c) => c !== "*");
+    const flags = keep ? "" : `${columns.includes("*") ? (others.length ? ` --include ${others.join(",")}` : "") : ` --columns ${others.join(",")}`}${key !== null ? ` --key ${key.join(",")}` : ""}`;
+    throw new Refusal(400, `${table} cannot be kept current by logical replication: ${unreplicable} — mason add ${entryName(table)}${flags} --sync "poll 5m" polls it instead`);
+  }
+  const sync: TableSync | null = o.sync ?? was?.sync ?? (bigOff ? { mode: "off" } : notReplicated !== null ? { mode: "poll", every: "5m", seconds: 300 } : null);
   const entry = { name: was?.name ?? entryName(table), table, columns: chosen.columns, exclude: chosen.exclude, key: keep ? was.key : key === null ? null : [...key], sync };
   // the entry itself, as the run will read it: a --key that does not tell the rows apart is refused here, not at the copy
-  const own = entryProblems(t, entry, db.tables, db.database, { replication: db.replication });
+  const own = entryProblems(t, entry, db.tables, db.database, effectiveSync(at.parsed, entry).sync);
   if (own.length) throw new Refusal(400, own.join("; "));
   const same = was !== undefined && JSON.stringify([was.columns, was.exclude, was.key, was.sync]) === JSON.stringify([entry.columns, entry.exclude, entry.key, entry.sync]);
   if (!same) {
@@ -158,7 +175,7 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   }
   const eff = effectiveSync(at.parsed, entry);
   return { table, file: at.file, entry: entry.name, columns: entry.columns, exclude: entry.exclude, key: entry.key, addedKey: chosen.addedKey, skippedSecrets: chosen.skipped, already: same,
-    sync: { value: syncText(eff.sync), from: eff.from }, bigOff, pollCost: pollCost(t, eff.sync, db.measured?.(table) ?? null) };
+    sync: { value: syncText(eff.sync), from: eff.from }, bigOff, notReplicated, pollCost: pollCost(t, eff.sync, db.measured?.(table) ?? null) };
 }
 
 /** What `mason remove` did: the tables (schema.table) whose entries it cut, and the sources file, absolute. */

@@ -24,7 +24,7 @@ CLI lacks).
   every option named in it, and a wrong option answered with the usage. A new command is added to the registry, or it
   does not run. **The list is the runbook** (the commands in the order a user will likely need them): `STEPS`
   (src/cli/registry.ts) names each command's step — Learn (`help` first), Set up (`doctor`, `init`, `start`), Add your
-  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`, `mcp`), Run (`status`, `ui`, `sync`, `logs`, `stop`, `destroy`), Go to
+  tables (`tables`, `add`, `remove`, `wait`), Connect (`user`, `mcp`), Run (`status`, `ui`, `sync`, `logs`, `cancel`, `usage`, `stop`, `destroy`), Go to
   production (`serve`) — and `mason --help` prints the steps as headings, and under Learn the guides too, a line each
   beside `mason help`; `COMMANDS` is derived from it. A command's old name (`dev`, `purge`, `rm`, `connect`, `list`, …)
   answers with the new one and exit 2 (src/cli/main.ts), never runs. Nothing a command prints refers to a repository
@@ -100,17 +100,28 @@ CLI lacks).
   destroy` removes it with the synced data.
   Why: a first try must need nothing installed, and must run the read path production runs. **Its port is in the URL
   alone** (chosen free at init, read back by `demoPort`): a second record would disagree with an edited `.env`, which the
-  run refuses with the way out. **Poll only**: the demo database has no change log, so `--replication` is refused before
-  anything starts (`demoChangesRefusal`). A command that connects while the run is down (`tables`, `add`, `remove`, `doctor`) says the
+  run refuses with the way out. **Poll only**: the demo database has no change log, so a file with `sync: replication`
+  is refused before anything starts (`demoChangesRefusal`). A command that connects while the run is down (`tables`, `add`, `remove`, `doctor`) says the
   demo database runs inside mason start — told by the config's `demo`, never by sniffing the URL.
 - **Up means it answers** (what a reboot does to a run): a run is up only when its command server answers
   `/api/ping` with the run's token and its own pid (`answers`, src/cli/runs.ts); a pid in the config that is alive is
   not proof — after a reboot the number belongs to someone else.
-- **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state`, `/api/slow`,
-  `/api/refused`, `/api/requests`, `/api/users`, `POST /api/pick|remove|sync`), with the run's token as `Authorization:
+- **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state?columns=1` (the page polls it lean), `/api/slow`,
+  `/api/refused`, `/api/unsupported`, `/api/requests`, `/api/queries`, `/api/running`, `/api/events`, `/api/usage`, `/api/logs`, `/api/users`, `POST /api/pick|remove|sync|cancel`), with the run's token as `Authorization:
   Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
   Under `mason start` it serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), whose users are
-  `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`), so the page and the CLI cannot disagree.
+  `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`, `disableUser`, `enableUser`), so the page and the CLI cannot disagree.
+  **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
+  — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is
+  worded once (its key spelled as the entrance spells it). `mason status`'s query summary is its own endpoint
+  (`/api/queries`, one scan of the ledger, shared for 30 s: `SUMMARY_TTL_MS`), never part of `/api/state`, which the page asks every 2 s. `mason cancel`
+  cancels through the listener's one path, the CancelRequest's (`interrupt`, src/api/postgres/server.ts); what it
+  names is the statement `mason logs --running` listed (`--statement`, `RunningStatement.statement`), refused 409 when
+  the session runs another by then — a session's number alone is whatever it runs at the moment. **A time is read by ONE
+  grammar** (`timeOf`, src/cli/request-filter.ts: an age 30m / 2h / 7d, or an ISO 8601 time WITH its zone; none without one)
+  for `--since` / `--until` of `mason logs` and `mason usage` and the `since` / `until` of `/api/requests`, `/api/events`,
+  `/api/usage` and `/api/logs`; `/api/users` reads the request log only with `?lastUsed=1` (`mason user list`), because the
+  web page polls it every 2 s.
 - **`mason wait` shows every added table and is exact** (after `mason add a b c` where `a` and `c` were quick, it showed
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still syncing at the bottom — redrawn in place on a terminal, printed when it changes
@@ -123,9 +134,10 @@ CLI lacks).
   source's — `kind: postgres` (any other kind refused by name, "not yet"), `url:` a literal URL or `${NAME}` (read by
   `appEnvValue`, src/lib/dotenv.ts: `.env.local`, `.env`, the shell; unset is refused with the way out), `tables:` a MAP
   of entries: `{}` every column, `columns:` those (the key always copied), `exclude:` every column but those (never
-  both), `sync:` how it is kept current (`off`, `poll <interval>`; the file's top `sync:` is every entry's default, and
-  none written is `off`, said at `mason start`), `key:` only for a table with no primary key (refused on one that has one; refused under replication, where the
-  app's UPDATEs to it would fail in a publication). Types are never in the file: the run reads them at every start. A
+  both), `sync:` how it is kept current (`off`, `poll <interval>`, `replication`; the file's top `sync:` is every entry's
+  default, and none written is `off`, said at `mason start`), `key:` only for a table with no primary key (refused on
+  one that has one; refused under `sync: replication`, whose changes the stream applies by key), and `publication:` at
+  the top (the publication replication reads, `${PG_PUBLICATION}` allowed). Types are never in the file: the run reads them at every start. A
   second file is refused ("one source per project for now"). ONE reader (`readSource`, `parseSourceText`, then
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every
   mistake of a file on ONE report (`sourceFailure`, code `bad_source`), each with its key, a `did you mean` and the
@@ -184,20 +196,25 @@ CLI lacks).
   (`sourceServer`); the same name on another server resets the poll's watermarks (the old server's transaction ids mean
   nothing there), so every row is read and compared and only the changed ones written; another name is refused
   (`sourceMove`: `mason destroy`, then `mason start`). An identifier this user may not read (42501) is said, never guessed.
-- **`mason user add|list|remove` is the login a tool keeps** (src/cli/user.ts, src/duck/users.ts, the rules
+- **`mason user add|list|disable|enable|remove` is the login a tool keeps** (src/cli/user.ts, src/duck/users.ts, the rules
   in .claude/rules/duckdb.md "Users"): a BI tool stores ONE password that does not expire. `add` prints the password
   ONCE with the URL (one builder, `connectionUrl`), when the run is up; the command needs the project, never the run (it
   edits `.mason/users.json` beside it, `mason serve`'s data folder included). "User" is the word in everything it
   prints, never "token" or "credentials". `mason connect` (a token for a day) is gone: `mason user`
-  is enough.
+  is enough. `disable` keeps the user and its password and refuses its logins until `enable`; a no-op (disabled
+  already, not disabled) is said, `already: true`, exit 0.
 - **A roles file is read by ONE module, in the sources file's words** (`src/cli/roles.ts`: `mason/roles.yml`,
-  `roles: { <role>: { tables: { <table>: {} | { columns: [...] } | { exclude: [...] } } } }`), validated at `mason
+  `default: <role>` and `roles: { <role>: { tables: all | { <table>: {} | { columns: [...] } | { exclude: [...] } } } }`;
+  `tables: all` is every copied table, resolved at every read), validated at `mason
   start` against the tables the sources file copies and by `mason user add --role` (the listener's roles while the
   run is up, `/api/state`'s `roles`; the file with Mason stopped), every mistake at its key with a `did you mean`, code
   `bad_roles`; a role the file does not name is `not_found` with the lines to add. `LiveRoles` re-reads it when it
   changes, so an edit applies without a restart, and a file edited into a mistake keeps the last good grants for the
   catalog and refuses every statement of a user with a role (`.claude/rules/postgres-api.md`). `mason user list`,
-  `mason start` and the web page say which users carry a role the file no longer names.
+  `mason start` and the web page say which users carry a role the file no longer names. **`mason init` (and `init
+  demo`) writes the file** when the folder has none (`newRolesText`, its one writer: `default: everything`, `tables:
+  all`), and keeps one that is there. What a user with no role reads is the FILE's (`userRole`, one function for `mason
+  user add` / `list`, `mason start`'s line `rolesDefaultLine` and the web page; `roleFrom`, `readsNothing` in `--json`).
 - **`mason mcp` is an MCP server on stdio, a client of the Postgres API as a `mason user`** (src/cli/mcp.ts, docs/DESIGN.md
   "An MCP server"): stdout is the protocol's (JSON-RPC frames alone), every log line goes to stderr, and so does a
   failure to start — it takes no `--json` (`CommandSpec.stdout: "protocol"`; tests/cli-help.test.ts); a tool's failure is
@@ -225,15 +242,24 @@ CLI lacks).
   infrastructure platform; src/cli/serve.ts, docs/DESIGN.md "On a server"): it writes
   `MASON_DATA/.mason/config.json` from the environment at every start and runs `mason start --attach`'s run through
   its `serve` hooks (src/cli/dev.ts `ServeHooks`), never a second run. Every setting missing or wrong is ONE report; a
-  project `mason init` made is never taken over; `/healthz` takes no credential, so it says counts, never a name.
-- **`mason start --replication` is the production change path on a laptop** (src/cli/replication-mode.ts): the mode is
-  the project's (`config.json` `changes`) until `--poll`. Before starting it holds the developer's database to the
-  production checks' own rules (`replicationChecks`, src/cli/replication-checks.ts: `wal_level`, the role, a free slot
-  and WAL sender, the WAL cap said, not refused; a slot held by another run named with the way out). A switch keeps the
-  copies and catches each table up by one poll. The slot and publication it made are dropped, VERIFIED gone, by
-  `--poll` and `mason destroy`; when they cannot be, the rest goes and the failure prints the statements. A slot
-  outlives the run: `mason stop` says it stays and holds WAL. **A publication the operator names (`--publication`, else
-  `PG_PUBLICATION`, else the recorded one, `config.json` `publication`) is never created, altered or dropped** — only
+  project `mason init` made is never taken over; `/healthz` takes no credential, so it says counts, never a name. **`GET
+  /metrics` beside it (src/cli/metrics.ts) serves numbers only** — counts, lag, ages, sizes, never a table's, user's,
+  client's or host's name nor a statement, as a value or a label — for the same reason, rendered from the facts the state
+  and the usage sampler already compute (`metricsFacts`), never a second computation, and **a scrape never reaches the
+  source** (its rate is anyone's: the stream's position and the slot as cached, `streamStatus({ refresh: false })`,
+  absent when older than two samples). Detectors: `MetricLabel` (a label of another name does not compile) and
+  tests/conventions.test.ts (every label key literal); tests/cli-metrics.test.ts holds the renderer's reads to a closed
+  list of numbers; tests/duck-sync-facts.test.ts counts the connections a cached status opens (none).
+- **`sync: replication` is the production change path on a laptop, per table** (src/cli/replication-mode.ts): the
+  sources file alone decides — `mason start --replication`, `--poll` and `--publication` are gone, each answered with
+  the line to write and exit 2 before anything starts (`removedStartFlags`, src/lib/table-sync.ts), and `MASON_CHANGES`
+  set refuses `mason serve` on its settings report (`changesRetired`). A start that replicates any table holds the developer's database to the production checks' own rules
+  (`replicationChecks`, src/cli/replication-checks.ts: `wal_level`, the role, a free slot and WAL sender, the WAL cap
+  said, not refused; a slot held by another run named with the way out). A switch keeps the copies and catches each
+  table up by one poll. What it made is recorded (`config.json` `replication`) and dropped, VERIFIED gone, when no
+  table is replicated any more and at `mason destroy`; when they cannot be, the rest goes and the failure prints the
+  statements. A slot outlives the run: `mason stop` says it stays and holds WAL. **A publication the operator names
+  (`publication:` in the sources file, else `PG_PUBLICATION`) is never created, altered or dropped** — only
   the slot goes — and a read replica needs one, refused by name before any slot is made (`readinessVerdict`;
   `.claude/rules/duckdb.md`).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the

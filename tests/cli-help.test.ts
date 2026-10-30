@@ -62,7 +62,13 @@ test("mason --help lists the commands; a misspelt one is answered with the close
   const bare = mason();
   assert.equal(bare.status, 0);
   assert.notEqual(bare.stdout, topUsage());
-  assert.match(bare.stdout, /^Mason: your Postgres tables, synced and served to BI tools and your app\.\n {2}Project {3}/);
+  // what Mason is, in the words its reader was told it: a drop-in read replica, for analytics
+  assert.ok(bare.stdout.startsWith("Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, synced, kept current and served to psql, BI tools and your app.\n  Project   "), bare.stdout);
+  // and --help opens with the same line, then how to try it with nothing installed
+  const lines = topUsage().split("\n");
+  assert.equal(lines[2], "  Mason: a drop-in read replica of your Postgres, for analytics — the tables you add, synced, kept current and served to psql, BI tools and your app. " +
+    "Make your app's folder a project (mason init), add tables (mason add, before or after the start), start Mason (mason start), connect a tool (mason user add). It needs Node 22.13 or later; mason doctor checks.");
+  assert.equal(lines[3], "  Try it first with nothing to install: mason init demo, then mason start and mason ui (a demo shop database, hosted by Mason itself).");
   assert.match(bare.stdout, /\n {2}mason help {36}every command, and the guides\n$/);
   assert.equal(mason("help", "version").status, 0, "mason version runs, so mason help version answers");
   const typo = mason("statsu");
@@ -72,7 +78,7 @@ test("mason --help lists the commands; a misspelt one is answered with the close
 
 test("mason --help lists the commands under the steps a first session takes, in that order", () => {
   assert.deepEqual(STEPS.map(([step]) => step), ["Learn", "Set up", "Add your tables", "Connect", "Run", "Go to production"]);
-  assert.deepEqual(COMMANDS.map((c) => c.name), ["help", "doctor", "init", "start", "tables", "add", "remove", "wait", "user", "mcp", "status", "ui", "sync", "logs", "stop", "destroy", "serve"]);
+  assert.deepEqual(COMMANDS.map((c) => c.name), ["help", "doctor", "init", "start", "tables", "add", "remove", "wait", "user", "mcp", "status", "ui", "sync", "logs", "cancel", "usage", "stop", "destroy", "serve"]);
   const help = topUsage();
   let at = -1;
   for (const [step, commands] of STEPS) {
@@ -177,7 +183,7 @@ test("the --json shapes of the commands that change what is copied name the sour
   assert.deepEqual(keys("tables"), ["database", "source", "tables", "next"], "the source file the tables are read against");
   assert.deepEqual(keys("add"), ["added", "file", "error", "next"], "the sources file it wrote");
   assert.deepEqual(keys("remove"), ["removed", "file", "next"], "the sources file it wrote");
-  assert.deepEqual(keys("init"), ["name", "root", "folder", "config", "demo", "source", "database", "warnings", "next"], "the source file it wrote");
+  assert.deepEqual(keys("init"), ["name", "root", "folder", "config", "demo", "source", "roles", "database", "warnings", "next"], "the source file and the roles file it wrote");
   assert.ok(keys("status")?.includes("source") && !keys("status")?.includes("sources"), "status names its source, the database, with the sources file in it");
   assert.deepEqual(COMMANDS.filter((c) => c.json?.some((k) => /model/i.test(k))).map((c) => c.name), [], "no command answers with a model");
   for (const name of ["add", "remove", "tables"]) {
@@ -245,4 +251,12 @@ test("mason init --help says the demo adds three of its tables and leaves order_
   const r = mason("init", "--help");
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /\n {2}orders, order_items\): mason start makes it in \.mason\/demo\/ and changes it every few seconds\. Three of its tables are\n {2}added; the fourth is yours to add after mason start \(mason add order_items\), to watch its first sync begin\.\n/);
+});
+
+test("mason serve --help lists GET /metrics beside /healthz, on MASON_HEALTH_PORT's line, and says it is numbers only", () => {
+  const r = mason("serve", "--help");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /\n {4}MASON_HEALTH_PORT {7}\/healthz's and \/metrics' port \(default 4140\), on MASON_HEALTH_HOST \(default 0\.0\.0\.0\)\n/);
+  assert.match(r.stdout, /GET \/healthz for the platform's health check,\n {2}GET \/metrics for Prometheus \(numbers only: no name, no statement\)/);
+  assert.doesNotMatch(r.stdout, /duckdb(?!_memory)/i, "nothing a user sees names the engine (MASON_DUCKDB_MEMORY is a setting's name)");
 });

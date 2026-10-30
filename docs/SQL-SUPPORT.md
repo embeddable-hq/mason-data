@@ -18,9 +18,9 @@ each). The copy is read-only.
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 86 forms of them verified |
 | The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 241 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 244 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 47 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 48 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
@@ -55,17 +55,18 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (47)
+## Refused (48)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
-| `unverified` | a function, operator, cast, type or construct the oracle has not held to Postgres | answers | refused, naming each piece | write the statement without it; report it to have it verified |
+| `unverified` | a function, operator, cast, type or construct Mason has not yet verified against Postgres | answers | refused, naming each piece | write the statement without it; report it to have it verified |
 | `explain-option` | EXPLAIN (FORMAT XML), (FORMAT YAML), (GENERIC_PLAN) | the plan in XML or YAML; a plan for unbound parameters | refused by name: EXPLAIN is DuckDB's plan, in Postgres's text or JSON (docs/DESIGN.md) | FORMAT TEXT or FORMAT JSON; bind the parameters' values and EXPLAIN that |
+| `set-config-forms` | set_config() anywhere but alone in a SELECT of no table with literal arguments and is_local false: beside other columns or a FROM, in a subquery, with an expression, a parameter or NULL, with is_local true, under EXPLAIN | sets the parameter (for the transaction, under is_local) and answers its value | refused (SELECT set_config('name', 'value', false) alone is the session's SET, answered with its value as SHOW answers it) | SET name = 'value', or SELECT set_config('name', 'value', false) on its own |
 | `setop-ordinal-star` | ORDER BY a column number of a UNION / INTERSECT / EXCEPT whose first SELECT lists * | sorts by that column | refused | ORDER BY the column's name |
 | `with-ties-distinct` | FETCH FIRST … WITH TIES over SELECT DISTINCT | answers | refused (DuckDB has no WITH TIES; Mason's rank over DISTINCT is not Postgres's) | select the DISTINCT rows in a subquery and FETCH … WITH TIES from it |
-| `collation-unknown` | COLLATE with a collation other than C, POSIX, default or an ICU locale DuckDB has | sorts and compares under it | refused | COLLATE "C" for byte order, or no COLLATE for the database's |
+| `collation-unknown` | COLLATE with a collation other than C, POSIX, default or an ICU locale the copy has | sorts and compares under it | refused | COLLATE "C" for byte order, or no COLLATE for the database's |
 | `like-any-array` | LIKE / ILIKE ANY (or ALL) over an array that is not written out | answers | refused | write the patterns as ARRAY['…', '…'], or OR the LIKEs |
 | `similar-to-forms` | SIMILAR TO with a pattern or ESCAPE that is not a literal, its substring markers, or substring(… SIMILAR … ESCAPE …) | answers | refused | a literal pattern, or ~ with a POSIX regular expression |
 | `array-remove-type` | array_remove of an array of a type other than text, integers, floats, booleans, dates or timestamps | answers | refused | array_remove an array of one of those types |
@@ -117,7 +118,7 @@ Answered, but not as Postgres answers. Each is a decided difference the oracle c
 |---|---|---|---|---|
 | `libc-symbol-punctuation` | text ordered under a libc collation where punctuation or a space follows a digit or a symbol and a later letter differs only in case ('1-X' beside '1x') | the punctuation outranks the case: 1-X < 1x | the case outranks the punctuation: 1x < 1-X | ORDER BY lower(x), x when the case must not decide first |
 | `limit-errors` | a value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out: in the select list, where no index gives the ORDER BY; or in the argument of a LEFT JOIN of a list's rows ON TRUE (unnest(ARRAY[…, 'x'::int]), jsonb_each of a non-object), under a LIMIT with no ORDER BY | the select list's raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers); the lateral's answers: it stops at the limit | the select list's answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does; the lateral's raises: DuckDB computes its argument for a whole vector of rows (2,048) before the limit stops it | none needed for the select list's answer; filter the bad rows out to have neither raise |
-| `limit-lateral-filter` | a LEFT JOIN of a json document's rows ON TRUE (json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, with a filter above the join that DuckDB does not push down to the base: a WHERE on the lateral's own column (d.key <> 'n'), one holding a bound parameter ($1) in a SELECT around the join, or one in a SELECT that reads the join through a CTE | the first rows of the base, in its order, each row's members in theirs | DuckDB plans the lateral under such a filter as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (a filter on the base in the join's own SELECT, literal or parameter, or a literal one around it through a derived table, keeps Postgres's) | ORDER BY the base's key before the LIMIT, or filter the base in the SELECT that holds the join |
+| `limit-lateral-filter` | a LEFT JOIN of a json document's rows ON TRUE (json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, with a filter above the join that is not pushed down to the base: a WHERE on the lateral's own column (d.key <> 'n'), one holding a bound parameter ($1) in a SELECT around the join, or one in a SELECT that reads the join through a CTE | the first rows of the base, in its order, each row's members in theirs | the copy plans the lateral under such a filter as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (a filter on the base in the join's own SELECT, literal or parameter, or a literal one around it through a derived table, keeps Postgres's) | ORDER BY the base's key before the LIMIT, or filter the base in the SELECT that holds the join |
 | `limit-lateral-argument` | a LEFT JOIN of a list's rows ON TRUE (unnest, json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, whose argument holds a subquery (unnest(ARRAY(SELECT …))), or reads two or more columns of the row and no array (CASE WHEN t.kind = 'doc' THEN t.body END) in a SELECT whose list is a bare * or inside a join with a name of its own ((a LEFT JOIN … ON TRUE) AS j) | the first rows of the base, in its order, each row's members in theirs | DuckDB plans such a lateral as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (elsewhere an argument of two columns is computed in a step of its own before the lateral, which a * would read as a column; a subquery is a delimiter join in every form) | name the columns instead of *, or ORDER BY the base's key before the LIMIT |
 | `window-partition-order` | a window function that reads its frame in order (row_number, lag, lead, first_value, last_value, nth_value, ntile) over a window with PARTITION BY and no ORDER BY | a partition's rows in the order its sort hands them back: in practice the order they came in | a partition's rows in the order DuckDB's partitioning hands them back, another one | ORDER BY in the window (OVER (PARTITION BY a ORDER BY b)) |
 | `mixed-scale-numeric` | a numeric column whose values have several scales: an integer UNION ALL a numeric, lead(x, 1, 0) beside numeric(2,1) values, an unconstrained column holding 1 and 1.50 | each value its own scale: 1, 1.5 | one scale per column: 1.0, 1.5 | cast to numeric(p, s), or round(x, s) |
@@ -138,15 +139,15 @@ Not about one statement: what the prototype cannot do yet.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
-| `roles` | access | roles, grants on tables and columns, row-level security | a role (mason/roles.yml) grants a user tables and columns, held on the analysed tree and refused as Postgres refuses them (42501 permission denied for table …); information_schema and mason mcp list a role what it may read, pg_catalog still lists every copied column; no row filter yet; a token and a user with no role read every copied table | mason user add <name> --role <role>; copy only the tables every user may read where a row filter would be needed |
-| `poll-full-scan` | keeping current by the poll (mason start without --replication) | - | the xmin poll scans every added table whole, every poll (no index covers xmin): ~13–17 s for 13 GiB | logical replication: mason start --replication |
+| `roles` | access | roles, grants on tables and columns, row-level security | a role (mason/roles.yml) grants a user tables and columns, held on the analysed tree and refused as Postgres refuses them (42501 permission denied for table …); information_schema and mason mcp list a role what it may read, pg_catalog still lists every copied column; no row filter yet; a user with no role reads as mason/roles.yml's default: role, nothing when the file names none, every copied table when there is no file; a token reads every copied table | mason user add <name> --role <role>; copy only the tables every user may read where a row filter would be needed |
+| `poll-full-scan` | keeping current by the poll (a table's sync: poll <interval>) | - | the xmin poll scans its table whole, every poll (no index covers xmin): ~13–17 s for 13 GiB | logical replication for that table: sync: replication on its entry (mason add <table> --sync replication) |
 | `writes` | INSERT, UPDATE, DELETE, DDL, a read-write transaction | answers | refused by name: the copy is read-only (a read-write transaction: 25006) | write to the source database; the copy follows |
-| `numeric-over-38-digits` | a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside DuckDB's arithmetic or a WHERE | exact | a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact | numeric(p, s) with p ≤ 38 |
+| `numeric-over-38-digits` | a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside Mason's arithmetic or a WHERE | exact | a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact | numeric(p, s) with p ≤ 38 |
 | `numeric-array` | an unconstrained numeric[] column | exact elements | double precision elements (15 digits), said in the log | numeric(p, s)[] |
 | `numeric-parameter` | a numeric parameter ($1) compared in a WHERE | exact | a double (exact to 15 digits) | a literal |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (993)
+## What is verified (996)
 
 ### Types (49)
 
@@ -200,7 +201,7 @@ Not about one statement: what the prototype cannot do yet.
 - a value of type uuid
 - a value of type uuid[]
 
-### Functions (241)
+### Functions (244)
 
 - the function "extract"(text,date)
 - the function "extract"(text,interval)
@@ -264,7 +265,10 @@ Not about one statement: what the prototype cannot do yet.
 - the function chr(integer)
 - the function concat("any")
 - the function concat_ws(text,"any")
+- the function current_setting(text)
 - the function current_setting(text) (an extension's)
+- the function current_setting(text,boolean)
+- the function current_setting(text,boolean) (an extension's)
 - the function date(timestamp with time zone)
 - the function date(timestamp without time zone)
 - the function date_bin(interval,timestamp without time zone,timestamp without time zone)

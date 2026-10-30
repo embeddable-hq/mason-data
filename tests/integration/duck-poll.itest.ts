@@ -116,7 +116,15 @@ test("the copy and the xmin poll keep DuckDB equal to the source through every k
 
     psql(dbUrl, "INSERT INTO items VALUES (51, 'new', 9.99, NULL); UPDATE items SET v = 'changed', n = NULL WHERE id = 2; DELETE FROM items WHERE id = 3; " +
       "UPDATE shop.lines SET qty = -1 WHERE order_id = 1; DELETE FROM shop.lines WHERE order_id = 2");
+    // each copy's last sync: after its copy, the one poll that caught it up; once polled, that table's own poll
+    // (src/duck/sync.ts Synced), and its rows the copy's after it
+    const lastSync = (): unknown[] => sync.state().map((s) => { const x = (s as { synced?: { by: string; seconds: number | null } }).synced; return [s.source, x?.by, typeof x?.seconds]; });
+    assert.deepEqual(lastSync(), [["public.items", "catch-up", "number"], ["shop.lines", "catch-up", "number"]]);
+    const syncedBefore = (sync.state()[0] as { synced?: { at: string } }).synced?.at ?? "";
     await same("an insert, an update to NULL, a delete");
+    assert.deepEqual(lastSync(), [["public.items", "poll", "number"], ["shop.lines", "poll", "number"]]);
+    assert.ok(((sync.state()[0] as { synced?: { at: string } }).synced?.at ?? "") > syncedBefore, "a poll moves it");
+    assert.deepEqual(sync.state().map((s) => s.rows), [50, 27], "the rows after the poll: 50 + 1 - 1, 30 - 3");
 
     psql(dbUrl, "UPDATE items SET id = 1000 WHERE id = 4; UPDATE shop.lines SET line = 9 WHERE order_id = 3 AND line = 0");
     await same("a primary-key change");
@@ -202,7 +210,7 @@ test("an unconstrained or wide numeric is copied and polled exactly, and copied 
     await same("the first copy", 18);
     // q is a numeric(65,30) whose values use 2 decimals: 12 digits do not fit at 30, they do at 2 (the wire writes 30)
   assert.equal(await typesOf(), "id INTEGER, a DECIMAL(38,18), p DECIMAL(38,30), huge DOUBLE, odd DOUBLE, q DECIMAL(38,2)");
-    assert.ok(logged.some((l) => /public\.amounts\.huge: values of 41 digit\(s\) and 0 decimal\(s\) do not fit DuckDB's DECIMAL\(38\): copied as a double/.test(l)), logged.join("\n"));
+    assert.ok(logged.some((l) => /public\.amounts\.huge: values of 41 digit\(s\) and 0 decimal\(s\) do not fit the copy's DECIMAL\(38\): copied as a double/.test(l)), logged.join("\n"));
     assert.ok(logged.some((l) => /public\.amounts\.odd: 1 value\(s\) NaN or Infinity/.test(l)), logged.join("\n"));
     assert.ok(logged.some((l) => /public\.amounts\.a: values of 1 to 18 decimals: Mason answers each with 18, Postgres with its own/.test(l)), logged.join("\n"));
 
@@ -230,7 +238,7 @@ test("an unconstrained or wide numeric is copied and polled exactly, and copied 
 
 // A COLUMN ADDED TO A TABLE'S LIST copies that table again, and the other tables stay polled (the poll is one
 // transaction over every table: one table's statement failing stalled them all, with nothing in the ledger); A PASS
-// WITH THE SOURCE AWAY leaves every copied table copied, serving and in the catalog, its error said — and when the
+// WITH THE SOURCE AWAY leaves every synced table copied, serving and in the catalog, its error said — and when the
 // source is back the tables are polled, not copied whole again (a review finding).
 test("a changed column list copies that table again; a source away is an error on the copies, never a re-copy", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
   const db = `${tag}_c`;
@@ -906,12 +914,16 @@ test("a failed copy waits before it is tried again, and a change of its columns 
   const since = (from: number, re: RegExp): number => logged.slice(from).filter((l) => re.test(l)).length;
   const tablesLeft = async (store: DuckStore): Promise<unknown> => (await store.writer.runAndReadAll("SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'public'")).getRowsJS();
   let store = await DuckStore.open(file, (l) => logged.push(l));
-  let sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll");
+  // the sync's events (src/duck/events.ts): the failure is one, with the log's words
+  const events: Array<{ kind: string; table: string | null; message: string }> = [];
+  let sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => { events.push(e); } });
   try {
     await sync.open();
     let from = logged.length;
     void sync.setTables([T(true)]);
     await sync.once();
+    assert.deepEqual(events.map((e) => [e.kind, e.table]), [["copy_failed", "public.t"]]);
+    assert.equal(`copy of public.t failed: ${events[0]!.message}`, logged.find((l) => l.startsWith("copy of public.t failed: ")));
     assert.equal(since(from, /^copying public\.t:/), 1, logged.slice(from).join("\n"));
     assert.equal(since(from, /^copy of public\.t failed: [\s\S]*; tried again after \d\d:\d\d UTC \(failure 1 in a row\)/), 1, logged.slice(from).join("\n"));
     const [st] = sync.state();
@@ -996,7 +1008,7 @@ test("a failed catch-up waits before it is tried again, said with its time; a ch
 });
 
 // AFTER A RESTART THE COPIED TABLES ARE SERVED AT ONCE (the test server: the catalog was empty until the start's
-// first pass ended, hours behind a large copy, and every copied table was "not added"): the catalog is rebuilt when
+// first pass ended, hours behind a large copy, and every synced table was "not added"): the catalog is rebuilt when
 // the project's tables are set, on a connection of its own that a copy's transaction never holds. big's copy is HELD
 // by the test (`heldCopy`) until the catalog is read, so "still copying" holds by construction, not by its size.
 test("after a restart the copied tables are in the catalog at once, while another table is still copying", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
@@ -1239,17 +1251,20 @@ test("a mixed project: an `off` table unchanged until mason sync, a `poll 2s` on
     await assert.rejects(sync.pollNow(["public.fats"]), (e: Error) => e instanceof PollRefused && e.code === "not_found" && /^public\.fats is not added \(mason add adds it\) — did you mean `public\.fast`\?$/.test(e.message));
   } finally { await sync.stop(); store.close(); }
 
-  // in replication mode nothing is polled: mason sync answers where the stream is
+  // a replicated table is not polled: mason sync answers where the stream is
   const other = await DuckStore.open(path.join(dir, "mixed-repl.db"), (l) => logged.push(l));
   const repl = new Sync(other, source, source.database, (l) => logged.push(l), 3_600_000, "replication", { slot: "unused", publication: "unused", owned: true });
   try {
     // stopped first, as nothing here may make a slot: its tables set, no pass runs
     await repl.open();
     await repl.stop();
-    await repl.setTables([tableOf("manual", OFF)]);
+    await repl.setTables([tableOf("manual", { mode: "replication" }), tableOf("slow", OFF)]);
     const r = await repl.pollNow(["public.manual"]);
     assert.deepEqual([r.tables, r.streamed?.map((t) => t.table)], [[], ["public.manual"]]);
     assert.match(r.streamed![0]!.position, /^[0-9A-F]+\/[0-9A-F]+$/);
+    // an off table beside it, in a project that streams, is POLLED by mason sync, never answered as streamed: this
+    // sync is stopped, so the poll it owes is refused as stopping (a project that streamed every table said "streamed")
+    await assert.rejects(repl.pollNow(["public.manual", "public.slow"]), (e: Error) => e.message === "Mason is stopping");
   } finally { await repl.stop(); other.close(); }
 });
 

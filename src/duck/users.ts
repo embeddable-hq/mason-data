@@ -11,10 +11,14 @@
  * statement of its session is attributed to that user, and rotating the API key removes every user at once (no MAC
  * verifies under the new key). It never collides with a token: a token's MAC is 43 base64url characters.
  *
- * THE LIST OF LIVE USERS is a FILE in the state folder (`.mason/users.json`), never a DuckDB table: `mason user …` runs
+ * THE LIST OF USERS is a FILE in the state folder (`.mason/users.json`), never a DuckDB table: `mason user …` runs
  * as a second process beside the run, which holds DuckDB's file lock. It holds each user's name, id, when it was added
  * and the API key's fingerprint at the time (`key`, a MAC of a constant: no secret, it says which key a user was added
- * under) — never a password. A change is made under a lock file (`users.json.lock`, O_EXCL) and written beside and
+ * under) — never a password. A removed user STAYS in it with `removedAt` (so a list can show who was removed, and when):
+ * only the entries without one are live, and the listener reads only those. A DISABLED user stays too, with
+ * `disabledAt` (`mason user disable`): its password still verifies, but its login is refused as Postgres refuses a role
+ * without LOGIN (28000, "is not permitted to log in") and its sessions end at their next statement, until `mason user
+ * enable` clears it — the same id, so the same password connects again. A change is made under a lock file (`users.json.lock`, O_EXCL) and written beside and
  * renamed, so a reader sees the old list or the new one, never half of either, and two `mason user add` at once cannot
  * both win a name. The listener RE-READS it (`LiveUsers`: a stat at every connection and before every statement of a
  * user's session, the file read again when its inode, size or mtime moved), so a removal refuses the next connection
@@ -24,7 +28,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ApiError } from "../api/error.ts";
+import { ApiError, USER_DISABLED } from "../api/error.ts";
 import type { PgApiOptions, PgToken } from "../api/postgres/server.ts";
 import { tokenProblem } from "./token.ts";
 
@@ -35,7 +39,7 @@ export const USERS_FILE = "users.json";
 export const USER_NAME_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 export const USER_NAME_RULE = "1 to 63 lower case letters, digits, \"_\", \".\" or \"-\", starting with a letter or digit (e.g. metabase)";
 
-/** One live user, as the file keeps it: no secret. */
+/** One user, as the file keeps it: no secret. */
 export interface MasonUser {
   name: string;
   /** 16 hex digits, the password's middle part */
@@ -44,9 +48,19 @@ export interface MasonUser {
   addedAt: string;
   /** the API key's fingerprint when it was added (`keyFingerprint`): another one means the key was rotated since */
   key: string;
+  /** ISO 8601 UTC; set by `mason user remove`, which keeps the entry: absent for a user that is not removed */
+  removedAt?: string;
+  /** ISO 8601 UTC; set by `mason user disable`, cleared by `enable`: absent for a user that is not disabled */
+  disabledAt?: string;
   /** the role it reads as (the project's roles file, src/cli/roles.ts); absent: every copied table, as before */
   role?: string | undefined;
 }
+
+/** Whether a user has not been removed (it may still not connect: see `underKey`). */
+export const isActive = (u: MasonUser): boolean => u.removedAt === undefined;
+
+/** Whether a user is disabled (`mason user disable`): kept, its password unchanged, its logins refused until enabled. */
+export const isDisabled = (u: MasonUser): boolean => u.disabledAt !== undefined;
 
 /** A role's name as the users file may carry it (src/cli/roles.ts ROLE_NAME_RE, which the roles file holds it to). */
 const ROLE_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -96,9 +110,16 @@ function parseUsers(file: string, text: string): UsersRead {
     const o = u as Record<string, unknown> | null;
     if (typeof o !== "object" || o === null || typeof o.name !== "string" || !USER_NAME_RE.test(o.name) || typeof o.id !== "string" || !/^[0-9a-f]{16}$/.test(o.id) ||
       typeof o.addedAt !== "string" || typeof o.key !== "string" || (o.role !== undefined && (typeof o.role !== "string" || !ROLE_RE.test(o.role)))) {
-      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key, role? } as mason user add writes it` };
+      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key, role?[, removedAt][, disabledAt] } as mason user add writes it` };
     }
-    users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key, ...(typeof o.role === "string" ? { role: o.role } : {}) });
+    if (o.removedAt !== undefined && typeof o.removedAt !== "string") {
+      return { problem: `${file}: users[${i}].removedAt is not a timestamp as mason user remove writes it` };
+    }
+    if (o.disabledAt !== undefined && typeof o.disabledAt !== "string") {
+      return { problem: `${file}: users[${i}].disabledAt is not a timestamp as mason user disable writes it` };
+    }
+    users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key, ...(typeof o.role === "string" ? { role: o.role } : {}),
+      ...(o.removedAt !== undefined ? { removedAt: o.removedAt } : {}), ...(o.disabledAt !== undefined ? { disabledAt: o.disabledAt } : {}) });
   }
   return { users };
 }
@@ -145,8 +166,8 @@ export function changeUsers<R extends { refused: string }>(file: string, change:
 // ------------------------------------------------------------------ the listener's view
 
 /** The ApiError a refused user login carries: the user it asked for, so the request log names who still tries. */
-function refusal(status: 401 | 503, message: string, user: string): ApiError {
-  const e = new ApiError(status, message, status === 503 ? "users_unreadable" : "invalid_user");
+function refusal(status: 401 | 503, message: string, user: string, code: string = status === 503 ? "users_unreadable" : "invalid_user"): ApiError {
+  const e = new ApiError(status, message, code);
   e.userName = user;
   return e;
 }
@@ -164,7 +185,7 @@ export class LiveUsers {
 
   constructor(file: string, apiKey: string) { this.file = file; this.apiKey = apiKey; }
 
-  /** the users now; why not, when the file cannot be read */
+  /** the users not removed now (disabled ones included: their login is refused by name); why not, when the file cannot be read */
   now(): UsersRead {
     let stamp: string;
     try { const s = fs.statSync(this.file); stamp = `${s.ino}:${s.size}:${s.mtimeMs}`; }
@@ -172,7 +193,12 @@ export class LiveUsers {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") return { problem: `${this.file} cannot be read: ${(e as Error).message}` };
       stamp = "none";
     }
-    if (stamp !== this.seen || "problem" in this.read) { this.read = readUsers(this.file); this.seen = stamp; }
+    if (stamp !== this.seen || "problem" in this.read) {
+      const r = readUsers(this.file);
+      // a removed user is kept in the file for the list: it is no user to the listener
+      this.read = "problem" in r ? r : { users: r.users.filter(isActive) };
+      this.seen = stamp;
+    }
     return this.read;
   }
 
@@ -196,6 +222,9 @@ export class LiveUsers {
     // another user's password: refused as a wrong one is. Saying whose it is handed the name — which, with the password,
     // is the login — to anyone holding only the password (found on the test server)
     if (found.name !== user) throw refusal(401, "not a password of this project's users: mason user list shows them", user);
+    // disabled: refused only once its password verified (so the state is told to the holder of the login alone), in
+    // Postgres's words for a role without LOGIN, 28000 (src/api/postgres/server.ts reads the code)
+    if (isDisabled(found)) throw refusal(401, disabledMessage(found.name), user, USER_DISABLED);
     return { filters: [], subject: undefined, user: found.name, jti: found.id, ...(found.role !== undefined ? { role: found.role } : {}) };
   }
 
@@ -210,11 +239,16 @@ export class LiveUsers {
     if ("problem" in now) throw refusal(503, `the list of users cannot be read: ${now.problem}`, token.user);
     const found = now.users.find((u) => u.id === token.jti && u.name === token.user);
     if (found === undefined) throw refusal(401, `the user "${token.user}" was removed`, token.user);
+    if (isDisabled(found)) throw refusal(401, `the user "${token.user}" was disabled`, token.user, USER_DISABLED);
     if (found.role === token.role) return token;
     const { role: _was, ...rest } = token;
     return { ...rest, ...(found.role !== undefined ? { role: found.role } : {}) };
   }
 }
+
+/** A disabled user's refused login: Postgres's sentence for a role without LOGIN, and it alone — why is its DETAIL,
+ *  the way out its HINT (src/api/postgres/server.ts), as Postgres splits them. */
+export const disabledMessage = (name: string): string => `role "${name}" is not permitted to log in`;
 
 /**
  * HOW THE DUCKDB RUN'S LISTENER TAKES A PASSWORD (src/cli/dev.ts; the tests wire the same): a user's password (its shape)

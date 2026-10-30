@@ -1,7 +1,8 @@
 # TWO SERVICES. The Postgres API (5433) for BI tools and apps outside the cluster: a LoadBalancer of type TCP (Mason's
 # own TLS is the TLS; an HTTP ingress cannot carry the Postgres protocol — a TCP-capable ingress, e.g. ingress-nginx's
-# tcp-services ConfigMap, is the other way). /healthz (4140) for the cluster only: a ClusterIP, which is also the
-# StatefulSet's serviceName.
+# tcp-services ConfigMap, is the other way). /healthz and /metrics (4140) for the cluster only: a ClusterIP, which is
+# also the StatefulSet's serviceName. /metrics is numbers only and takes no secret; the annotations below are the ones
+# a Prometheus with the usual kubernetes-service scrape config reads (delete them if yours does not scrape by them).
 apiVersion: v1
 kind: Service
 metadata:
@@ -24,6 +25,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mason-health
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "4140"
+    prometheus.io/path: "/metrics"
 spec:
   type: ClusterIP
   selector:

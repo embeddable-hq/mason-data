@@ -2,7 +2,7 @@
 
 A drop-in replacement for a Postgres read replica, built for analytical queries.
 
-Version 0.x: until 1.0, a release may rename a command, a key or a setting, with no compatibility shim. Mason only reads your database; with `--replication` it also creates its own replication slot (and a publication, when you name none).
+Version 0.x: until 1.0, a release may rename a command, a key or a setting, with no compatibility shim. Mason only reads your database; for a table whose `sync:` is `replication` it also creates its own replication slot (and a publication, when you name none).
 
 [Documentation](#documentation) · [Website](https://masondata.ai) · [Issues](https://github.com/embeddable-hq/mason-data/issues)
 
@@ -56,6 +56,13 @@ back identical ([SQL support](#sql-support)).
 Install the CLI from npm (or, until the first release, from a checkout), then try it on a demo database Mason hosts
 itself.
 
+**A machine with no internet.** Nothing is downloaded after `npm install`: the copy's `postgres`
+and `inet` extensions ship with the CLI, one optional package per platform
+(`@mason-data/extensions-<platform>`), and the `mason-data` image has them. `mason doctor` says
+whether this machine has them; on a platform no package is built for (Linux on musl, Windows on
+arm64), or an install with `--omit=optional`, the first copy downloads them once.
+
+
 ### Try the demo
 
 ```bash
@@ -76,7 +83,7 @@ its own process, kept in `.mason/demo/` and served on a port of this machine. Th
 already; the fourth is yours, so the first thing you do is a real `mason add` and you watch its copy begin. A new order
 lands every few seconds, and the demo's sources file polls every table every 5 seconds (`sync: poll 5s`), so `mason
 status` shows the copy keeping up. Mason reads it as it reads yours, over the Postgres protocol, by polling (the demo
-database has no change log, so `--replication` does not apply).
+database has no change log, so `sync: replication` does not apply).
 
 ### On your app's database
 
@@ -123,31 +130,15 @@ A column that looks like a secret (`password`, `token`, `api_key`, …) is left 
 begins at the start); `mason add` and `mason remove` keep the rest of the file as it was, comments included. An entry
 you edit by hand is applied at the next `mason start`, and a mistake in it is refused with the key and the way out.
 
-**How each copy stays current is its `sync:`**, at the top of the file for every table and on an entry for that one:
-
-- **`sync: off`, the default**: after its first copy, Mason reads the table again only when you run `mason sync
-  orders`, which polls the tables you name once, right away — before a report, from cron, at the end of a deploy.
-  Between syncs Mason does not touch your database for it. A file that writes no `sync:` is `off`, and `mason start`
-  says so.
-- **`sync: poll <interval>`** (`5s`, `5m`, `1h`; from `1s` to `24h`, a longer wait being `off` with `mason sync` from a scheduler): the table is polled at that interval — its changed
-  rows found by `xmin` in one transaction over one snapshot. Postgres has no index on `xmin`, so each poll reads the
-  whole table: every few seconds suits a small table, every hour a big one. Mason waits at least four times as long as
-  a poll took before that table's next.
-- `mason add orders --sync "poll 30s"` writes a table's own; on a table already added, `--sync` alone changes that
-  line and nothing else. A table over a million rows added under a file that polls is written `sync: off` and said,
-  and a poll of tens of millions of rows more often than every minute is warned of with an estimate of its cost.
-- Changing a table's `sync:` keeps its copy: it is caught up by one poll, never copied again.
-- `mason status`, `mason wait`, the MCP tools and EXPLAIN say each table's sync and when it was last synced, so a
-  copy's age is never hidden.
-- Logical replication is the project's for now, never a table's: `mason start --replication` keeps every table current
-  from the change log (below), whatever its entry says.
+How each table stays current after its first copy is its `sync:`, at the top of the file or on its entry: off by
+default, polled, or replicated ([Syncing from Postgres](#syncing-from-postgres)).
 
 **2. Connect a tool.** `mason user add` makes a user of Mason's Postgres API and prints its password once, with the
 URL to paste into the tool's datasource form:
 
 ```bash
 mason user add metabase              # postgres://metabase:<password>@127.0.0.1:5433/your-app
-mason ui                             # the status page and the users, in your browser
+mason ui                             # the status, tables, users and statements, in your browser
 ```
 
 The tool sends the SQL it sends Postgres and reads the same names, types and text back; each copied table is a table
@@ -157,12 +148,15 @@ holds it) and every later start listens on the same port, so a saved connection 
 connects.
 
 **3. Keep an eye on it.** `mason status` says what Mason is doing: the database and how its changes are read, each
-table's copy, the Postgres API and how it listens, the statements it answered slowly in the last day and the ones it
-refused, each with its reason.
+table's copy, the Postgres API and how it listens, the statements it answered in the last day and week, the ones it
+answered slowly and the ones it refused, each with its reason. `mason ui` shows the same in a browser, with the
+statements, usage over time and the sync's events.
 
 ```bash
 mason status
-mason logs --requests --failed       # every statement the Postgres API refused or failed, with why
+mason logs --requests --failed       # every statement the Postgres API refused, failed or cancelled, with why
+mason logs --running                 # the statements running now; mason cancel <session> --statement <n> stops one
+mason usage --since 7d --step 1h     # the week, an hour a line: statements, the copy, memory
 mason stop                           # the copy stays; the next `mason start` resumes in seconds
 mason destroy                        # removes this project's copy and state, never its files or users
 ```
@@ -173,6 +167,49 @@ with examples; [`cli/README.md`](cli/README.md) has every command and option.
 **Driving it from a coding agent** (Claude Code, Codex, …): the commands are the same for you and for an agent. Each
 prints for a person or, with `--json`, one object of a declared shape; it says by its exit code how it went and names
 what to run next. `mason help agent` is the page an agent reads first.
+
+## Syncing from Postgres
+
+**Mason reads each table once, then only what you tell it to.** After the first copy nothing Mason does to your
+database is a hidden default: how each table stays current is its `sync:` in the sources file, committed with it, so
+production runs exactly what you ran. The top of the file sets every table's; an entry overrides it for that table:
+
+```yaml
+# mason/sources/app.yml
+kind: postgres
+url: ${DATABASE_URL}
+sync: poll 5m                 # every table: polled every 5 minutes, unless its entry says otherwise
+publication: ${PG_PUBLICATION}  # optional: the publication sync: replication reads, yours, never altered
+tables:
+  customers: {}               # polled every 5 minutes, as the top says
+  orders: { sync: replication }   # this one from the change log, within seconds
+  events: { sync: off }       # this one read again only by mason sync events
+```
+
+| `sync:` | After the first copy | What it costs your database |
+|---|---|---|
+| `off` (the default) | nothing, until `mason sync <table>` polls it once, now: before a report, from cron, at the end of a deploy | nothing between syncs |
+| `poll <interval>` (`5s`, `5m`, `1h`; `1s` to `24h`) | its changed rows found by `xmin`, in one transaction over one snapshot, at that interval | a scan of the whole table each poll (no index covers `xmin`); the next poll waits at least four times as long as the last took, so the polls never take more than a fifth of the database's time |
+| `replication` | its changes read from the change log (logical replication), within seconds | no scan; one slot for the project, which holds WAL while Mason is down |
+
+- **`off` is the default** `mason init` writes, and a file that writes no `sync:` is `off` too (`mason start` says
+  so). `mason sync orders customers` reads the tables you name right away, whatever their `sync:`.
+- **`poll`** suits a small table every few seconds and a big one every hour. `mason add orders --sync "poll 30s"`
+  writes a table's own; on a table already added, `--sync` alone changes that line and nothing else. A table over a
+  million rows added under a file that polls is written `sync: off` and said, and a poll of tens of millions of rows
+  more often than every minute is warned of with an estimate of its cost.
+- **`replication`** needs `wal_level = logical`, a user with `REPLICATION` (or `rds_replication`), and a primary key:
+  a table with none (`key:`) is polled, and `mason add` of one under a `sync: replication` file writes
+  `sync: poll 5m` on its entry and says so. The project has ONE slot and one publication carrying the replicated
+  tables alone: Mason's own, re-pointed as their `sync:` changes, or the one `publication: <name>` (or
+  `${PG_PUBLICATION}`) at the top of the file names, read as it is and never altered (a read replica needs one).
+  Cap the slot's WAL on the database with `max_slot_wal_keep_size`; when no table is replicated any more, and at
+  `mason destroy`, the slot is dropped, verified gone.
+- **Changing a table's `sync:` keeps its copy**: it is caught up by one poll, never copied again.
+- **A copy's age is never hidden**: `mason status`, `mason wait`, the MCP tools and EXPLAIN say each table's sync and
+  when it was last synced.
+- `mason start --replication`, `--poll`, `--publication` and `MASON_CHANGES` are gone: each answers with the line to
+  write in the sources file, and starts nothing.
 
 ## How it works
 
@@ -192,14 +229,14 @@ your Postgres  ──SELECTs (or its change log)──▶  the copy, kept curren
   ([`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) is the list).
 - **Read-only on your database.** By default Mason reads with `SELECT`s: each table once, then
   as its `sync:` says — `off`, read again by `mason sync <table>`, or polled at its interval. No
-  `wal_level`, slot or publication is needed or made, and it works on a read replica. Logical
-  replication (`mason start --replication`) reads the change log the way production does.
+  `wal_level`, slot or publication is needed or made, and it works on a read replica. A table
+  whose `sync:` is `replication` is read from the change log, the way production does.
 - **A copy is chunks that resume.** Each table is read a range of heap pages at a time, a few
   chunks in parallel, one Postgres backend each; a copy that stops (a crash, `mason stop`)
   continues with the ranges it did not commit. Small tables are copied first, and a copy runs
   beside the stream and the polls, never instead of them.
 - **Every statement is a row of the request log** (`mason logs --requests`): when, the outcome
-  and SQLSTATE, how long, the rows sent, the tool's `application_name` and the user's name.
+  and SQLSTATE, how long, the rows and bytes sent, the tool's `application_name` and the user's name.
 
 [`docs/DESIGN.md`](docs/DESIGN.md) is the design: how a statement is
 answered, what was decided and why, what was measured.
@@ -210,8 +247,8 @@ answered, what was decided and why, what was measured.
 Of the 3,086 statements the oracle also sends to a plain DuckDB connection, Mason answers 95% exactly as Postgres
 does, 1% differently by a decision it lists, and refuses 4% by name, saying what to write instead;
 none was answered with a wrong value. DuckDB alone, over the same tables, answers 30% of them exactly. [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md),
-rendered from the code, names the 993 pieces verified (types, functions, operators, aggregates, window functions,
-casts, constructs and their forms), the 47 shapes refused, the 16 answered differently and the 7 limits, each
+rendered from the code, names the 996 pieces verified (types, functions, operators, aggregates, window functions,
+casts, constructs and their forms), the 48 shapes refused, the 16 answered differently and the 7 limits, each
 with what to write instead.
 <!-- END GENERATED -->
 
@@ -219,8 +256,8 @@ with what to write instead.
 
 Only the project folder travels: `mason/`, the sources file and `mason.yml` (the Mason version
 it is written for). In production Mason runs as one container, `mason serve`, configured by the
-environment, its copy on one volume, with `/healthz` for the platform. `mason help production` is
-this section, offline.
+environment, its copy on one volume, with `/healthz` for the platform and `/metrics` for Prometheus
+(numbers only, no name, no secret). `mason help production` is this section, offline.
 
 From a checkout of this repository (or with `deploy/mason-data/compose.yml` and `.env.example` copied into a folder of
 yours):
@@ -241,10 +278,10 @@ docker compose exec mason mason user add metabase
   and stop the old container before the new one starts.
 - Off the container's loopback the Postgres API needs TLS: `MASON_PG_SELF_SIGNED_TLS=1` makes a
   certificate on the volume (clients connect with `sslmode=require`), or mount one a CA signed.
-- Polling needs a user that can `SELECT` the tables. Replication (`MASON_CHANGES=replication`)
+- Polling needs a user that can `SELECT` the tables. A table whose `sync:` is `replication`
   needs `wal_level = logical`, a user with `REPLICATION`, and either a publication you name
-  (`PG_PUBLICATION`, read as it is and never altered) or the right to create one; cap the slot's
-  WAL with `max_slot_wal_keep_size`.
+  (`publication: ${PG_PUBLICATION}` in the sources file, read as it is and never altered) or the
+  right to create one; cap the slot's WAL with `max_slot_wal_keep_size`.
 - **Memory**: the copy may use half the container's memory limit by default (else half the
   machine's RAM); the other half is the page cache, the catalog (~820 MB) and Node. Give the
   container enough that the page cache holds the columns your dashboards read: a query over a

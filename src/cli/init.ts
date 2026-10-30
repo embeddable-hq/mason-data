@@ -1,16 +1,19 @@
 /**
  * `mason init [<postgres url>]` (a project directory is initiated as other CLIs do it, by `mason init`):
- * makes the folder it is run in a Mason project. The database's URL comes from the argument, else the folder's
- * `.env.local` or `.env` (`DATABASE_URL`, the variable web frameworks use), else the shell's. The database is checked as
- * `mason start` checks it (checkSource) and nothing is written when it fails, unless --skip-check says the database is
- * not up yet.
+ * makes the folder it is run in a Mason project. The database's URL comes from the argument, else `MASON_DATABASE_URL`
+ * (Mason's own, for a database other than the app's), else `DATABASE_URL` (the variable web frameworks use), each from
+ * the folder's `.env.local`, then `.env`, then the shell (`appDatabaseUrl`) — or, when a sources file is here already (a
+ * clone), the variable its `url: ${…}` names, read the same way, so the database checked is the one the run copies from.
+ * The database is checked as `mason start` checks it (checkSource) and nothing is written when it fails, unless
+ * --skip-check says the database is not up yet.
  *
  * It writes `.mason/config.json` (0600: the project's name and Mason's key), the project's source file
- * (`mason/sources/<database>.yml`, src/cli/sources.ts: `kind: postgres`, `url: ${DATABASE_URL}`, `tables: {}`) — the
- * URL itself in `.env`, never in a committed file (the sources file is the developer's to commit, so the URL stays out
- * of it): nothing more when it came from there, the line added when it came from the argument or the shell — and adds
- * `.mason/` and that .env to the folder's .gitignore. It refuses a folder that is in a project already (here or above)
- * — but for a project with no source file (one an older Mason made), whose source file it writes, nothing else changed.
+ * (`mason/sources/<database>.yml`, src/cli/sources.ts: `kind: postgres`, `url: ${DATABASE_URL}` — or the variable the
+ * URL was read from, `tables: {}`) — the URL itself in `.env`, never in a committed file (the sources file is the
+ * developer's to commit, so the URL stays out of it): nothing more when it came from there, the line added when it came
+ * from the argument or the shell — and adds `.mason/` and that .env to the folder's .gitignore. It refuses a folder that
+ * is in a project already (here or above) — but for a project with no source file (one an older Mason made), whose
+ * source file it writes, nothing else changed.
  *
  * `mason init demo` (src/cli/demo.ts) writes the same files for a database Mason hosts itself: the demo's URL, on a port
  * free now, in `.env` (the one place the port is kept), three of the demo's four tables already added (the fourth,
@@ -31,6 +34,7 @@ import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateD
 import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_PORT, DEMO_SYNC, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
 import { freePort } from "./ports.ts";
 import { DEFAULT_SYNC, syncText } from "../lib/table-sync.ts";
+import { newRolesText, rolesFile } from "./roles.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 
 
@@ -40,15 +44,21 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   nothing when it cannot), then creates:
     .mason/                   this machine's: Mason's key and, once Mason runs, its synced data and state (gitignored)
     mason/sources/<db>.yml    the database and the tables to sync (mason add adds them) — commit it
+    mason/roles.yml           who may read what: one role, everything (tables: all), the default of a user added
+                              without --role, so every user reads every synced table until you narrow it — commit it
     mason/mason.yml           the Mason version the project is written for — commit it: production runs that version
-  The source file says url: \${DATABASE_URL}: the URL itself is in .env (written there when you give it here or it is
-  only in the shell), never in a committed file. .mason/ and that .env go into .gitignore. Every other mason command
-  then works anywhere in this folder. In a project with no source file (an older Mason's), it writes that file alone.
+  With no URL it reads MASON_DATABASE_URL, else your app's DATABASE_URL, each from .env.local, then .env, then the
+  shell. The source file names the variable read, url: \${DATABASE_URL} — \${MASON_DATABASE_URL} when that is the one
+  read, or when a URL given here is another database than your app's DATABASE_URL: the URL itself is in .env (written
+  there when you give it here or it is only in the shell), never in a committed file. .mason/ and that .env go into
+  .gitignore. Every other mason command then works anywhere in this folder. A source file already here (a clone of the
+  project) is kept, and a bare mason init reads the variable it names; a roles file already here is kept. In a project
+  with no source file (an older Mason's), it writes that file alone, and the roles file when there is none.
   mason init demo, in a new folder, makes a project on a demo database Mason hosts itself (a shop: customers, products,
   orders, order_items): mason start makes it in .mason/demo/ and changes it every few seconds. Three of its tables are
   added; the fourth is yours to add after mason start (mason add ${DEMO_TABLE_TO_ADD}), to watch its first sync begin.
 
-    mason init                                          DATABASE_URL from .env.local, .env or the shell
+    mason init                                          MASON_DATABASE_URL, else DATABASE_URL (.env or the shell)
     mason init postgres://me:secret@localhost:5432/shop
     mason init demo                                     a demo database Mason hosts itself: nothing to install
     mason init --folder db/mason --name shop-admin      the project's files elsewhere; another name
@@ -60,16 +70,16 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   --skip-check      write the project without connecting (the database is not up yet); mason start checks it; not with demo
   --json            as data: { name, root, folder, config, demo (true for the demo database's project, else false),
                     source: { name (the source's: its file's), file, url (as the file writes it), env (the .env line
-                    written, its value masked, or null) }, database: { url (password masked), from, version, tables },
-                    warnings, next }
+                    written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
+                    database: { url (password masked), from, version, tables }, warnings, next }
 `;
 
 export const INIT: CommandSpec = {
   name: "init",
-  summary: "make this folder a Mason project on your Postgres: mason init (DATABASE_URL from .env), mason init postgres://… or demo",
+  summary: "make this folder a Mason project on your Postgres: mason init (its URL from .env), mason init postgres://… or demo",
   usage: INIT_USAGE,
   options: { name: { type: "string" }, folder: { type: "string" }, remote: { type: "boolean" }, "skip-check": { type: "boolean" }, json: { type: "boolean" } },
-  json: ["name", "root", "folder", "config", "demo", "source", "database", "warnings", "next"],
+  json: ["name", "root", "folder", "config", "demo", "source", "roles", "database", "warnings", "next"],
 };
 
 /** Why `name` cannot be this project's, or null: not a name the Postgres API's database and the slot take. */
@@ -121,8 +131,13 @@ export function committedInGit(root: string, file: string): boolean {
  * when the folder's .env.local or .env gives it already. DATABASE_URL when the folder's files give it no other value
  * (one only in the shell is written down: the next shell may not have it); else MASON_DATABASE_URL, so the app's own
  * DATABASE_URL is never changed under it. A problem when both name other databases.
+ * A URL READ FROM A VARIABLE (`found`, a bare mason init's `appDatabaseUrl`) is kept in that variable: the one read is
+ * the one named, and nothing is written when a folder's file gave it — so a MASON_DATABASE_URL is never written again as
+ * DATABASE_URL; one only in the shell is written down under its own name.
  */
-export function urlVariable(root: string, url: string): { variable: string; line: string | null } | { problem: string } {
+export function urlVariable(root: string, url: string, found: { variable: string; file: string | null } | null = null):
+  { variable: string; line: string | null } | { problem: string } {
+  if (found !== null) return { variable: found.variable, line: found.file === null ? `${found.variable}=${url}` : null };
   for (const variable of ["DATABASE_URL", "MASON_DATABASE_URL"]) {
     const inFiles = appEnvValue(root, variable, {});
     if (inFiles === null) return { variable, line: `${variable}=${url}` };
@@ -137,7 +152,7 @@ const addEnvLine = (root: string, line: string): void => appendEnvLine(root, lin
 /** A `.env` line as it is said: its value's password masked. */
 const maskedLine = (line: string): string => { const eq = line.indexOf("="); return `${line.slice(0, eq)}=${maskedUrl(line.slice(eq + 1))}`; };
 
-export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io; version?: string } = {}): Promise<number> {
+export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io; version?: string; env?: NodeJS.ProcessEnv } = {}): Promise<number> {
   const io = deps.io ?? STDIO;
   const { out: say } = io;
   const f = parseCommand(INIT, argv);
@@ -185,26 +200,6 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const named = nameProblem(name);
   if (named) return usage(named);
 
-  // the demo's URL names a port free now, and is the one place the port is kept: mason start reads it from there
-  let url = demo ? demoUrl(await freePort(DEMO_PORT)) : f.positionals[0] ?? null;
-  let from = "";
-  let envFile: string | null = null; // the folder's file the URL was read from (.env.local or .env): ignored with .mason/
-  if (url === null) {
-    const found = appDatabaseUrl(root);
-    if (!found) {
-      // the fixes ARE the next commands, so a coding agent reads them as such too
-      return failed("init", { message: "which database? none is named, and this folder has no DATABASE_URL", code: "usage",
-        fix: "give its URL on the command line, or put it in this folder's .env as DATABASE_URL=postgres://… (your app's, usually)",
-        next: [["mason init postgres://user:password@localhost:5432/your_app", "its URL, given"], ["mason init", "again, once .env has DATABASE_URL"],
-          ["mason init demo", "a demo database Mason makes itself: nothing to install"]] }, { json, io });
-    }
-    url = found.url;
-    from = ` (DATABASE_URL in ${found.from})`;
-    envFile = found.file;
-  }
-  const parsed = parseSource(url);
-  if ("problem" in parsed) return usage(parsed.problem);
-  const remote = f.values.remote === true || sourceless?.config.remote === true;
   // THE SOURCE FILE: one already here (a clone of the project) is kept; else written, its URL a variable of .env
   const kept = sourceFileNames(folder)[0] ?? null;
   if (demo && kept !== null) {
@@ -212,12 +207,50 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     return failed("init", { message: `${path.relative(root, path.join(sourcesDir(folder), kept))} is already here: mason init demo makes a project of its own`, code: "refused",
       fix: "run it in a new folder (mkdir mason-demo && cd mason-demo && mason init demo), or mason init here for the database that file names" }, { json, io });
   }
-  const keptText = kept === null ? null : fs.readFileSync(path.join(sourcesDir(folder), kept), "utf8");
-  const keptFile = kept === null ? null : parseSourceText(keptText!, kept.replace(/\.ya?ml$/, ""), path.join(sourcesDir(folder), kept));
+  const keptPath = kept === null ? null : path.join(sourcesDir(folder), kept);
+  const keptFile = kept === null || keptPath === null ? null : parseSourceText(fs.readFileSync(keptPath, "utf8"), kept.replace(/\.ya?ml$/, ""), keptPath);
   const keptVar = keptFile !== null && !("problems" in keptFile) && "env" in keptFile.url ? keptFile.url.env : null;
+
+  // the demo's URL names a port free now, and is the one place the port is kept: mason start reads it from there
+  let url = demo ? demoUrl(await freePort(DEMO_PORT)) : f.positionals[0] ?? null;
+  let from = "";
+  let envFile: string | null = null; // the folder's file the URL was read from (.env.local or .env): ignored with .mason/
+  let envVariable: string | null = null; // the variable envFile holds the URL in, set with it: the warning names it
+  // the variable a bare mason init read the URL from: the one the sources file names (urlVariable)
+  let found: ReturnType<typeof appDatabaseUrl> = null;
+  if (url === null) {
+    // THE KEPT FILE DECIDES WHAT IS READ: the variable its url: names, as the run reads it (.env.local, .env, the shell),
+    // so the database init checks is the one mason start copies from; MASON_DATABASE_URL, then DATABASE_URL, only when
+    // no kept file names one (a clone naming DATABASE_URL was checked against a MASON_DATABASE_URL in the shell)
+    if (keptVar !== null && keptPath !== null) {
+      const v = appEnvValue(root, keptVar, deps.env ?? process.env);
+      const file = shownPath(root, keptPath);
+      if (v === null) {
+        return failed("init", { message: `which database? ${file} names url: \${${keptVar}}, and this folder has no ${keptVar}`, code: "usage",
+          why: `mason start reads the URL from ${keptVar}, so mason init checks that one`,
+          fix: `put it in this folder's .env as ${keptVar}=postgres://… (the variable ${file} names), or give its URL on the command line: mason init writes it there`,
+          next: [["mason init postgres://user:password@localhost:5432/your_app", `its URL, given: written to .env as ${keptVar}`], ["mason init", `again, once .env has ${keptVar}`]] }, { json, io });
+      }
+      found = { url: v.value, variable: keptVar, from: `${keptVar} in ${v.from}`, file: v.file };
+    } else found = appDatabaseUrl(root, deps.env ?? process.env);
+    if (!found) {
+      // the fixes ARE the next commands, so a coding agent reads them as such too
+      return failed("init", { message: "which database? none is named, and this folder has no MASON_DATABASE_URL or DATABASE_URL", code: "usage",
+        fix: "give its URL on the command line, or put it in this folder's .env as DATABASE_URL=postgres://… (your app's, usually) or as MASON_DATABASE_URL=postgres://… (read first: a database other than your app's)",
+        next: [["mason init postgres://user:password@localhost:5432/your_app", "its URL, given"], ["mason init", "again, once .env has MASON_DATABASE_URL or DATABASE_URL"],
+          ["mason init demo", "a demo database Mason makes itself: nothing to install"]] }, { json, io });
+    }
+    url = found.url;
+    from = ` (${found.from})`;
+    envFile = found.file;
+    envVariable = found.variable;
+  }
+  const parsed = parseSource(url);
+  if ("problem" in parsed) return usage(parsed.problem);
+  const remote = f.values.remote === true || sourceless?.config.remote === true;
   // a kept file's variable gets this URL in .env when the folder's files give it none; one they give another value is said
   const keptValue = keptVar === null ? null : appEnvValue(root, keptVar, {});
-  const where = kept === null ? urlVariable(root, url)
+  const where = kept === null ? urlVariable(root, url, found)
     : { variable: keptVar ?? "", line: keptVar !== null && keptValue === null ? `${keptVar}=${url}` : null };
   if ("problem" in where) return failed("init", { message: where.problem, code: "refused" }, { json, io });
 
@@ -234,6 +267,8 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   let database: { url: string; from: string | null; version: string | null; tables: number | null } = { url: db, from: from ? from.slice(2, -1) : null, version: null, tables: null };
   const rel = (p: string): string => path.relative(root, p) || ".";
   const sourceFile = kept !== null ? path.join(sourcesDir(folder), kept) : path.join(sourcesDir(folder), `${sourceNameFor(parsed.source.database)}.yml`);
+  const rolesPath = rolesFile(folder);
+  const rolesKept = fs.existsSync(rolesPath);
   // the folder an older Mason listed the tables in: read by nothing (no backwards compatibility before v1.0), said
   const oldTables = path.join(folder, OLD_TABLES_DIR);
   if (fs.existsSync(oldTables)) notes.push(`${rel(oldTables)}/ is an older Mason's, which this one does not read: mason add each table again, then remove it`);
@@ -285,10 +320,20 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
         `(${demo ? "every table polled every 5 s" : "each table read once, then again only by mason sync <table>"}) and the tables to sync, ` +
         `${demo ? `the demo's ${DEMO_ADDED_TABLES.length} added — mason add ${DEMO_TABLE_TO_ADD} adds the fourth` : "none yet (mason add)"} — commit it`);
     }
+    // THE ROLES FILE (src/cli/roles.ts newRolesText): today's access said in a committed file — every user reads every
+    // copied table, as the default role everything — kept when one is here (a clone of the project)
+    if (rolesKept) await steps.step(`Keeping ${rel(rolesPath)}`, () => undefined, () => `Kept ${rel(rolesPath)}: the roles and the default for a user added without --role`);
+    else {
+      await steps.step(`Writing ${rel(rolesPath)}`, () => {
+        fs.mkdirSync(path.dirname(rolesPath), { recursive: true });
+        fs.writeFileSync(rolesPath, newRolesText());
+      }, () => `Wrote ${rel(rolesPath)}: every user reads every synced table (default: everything, tables: all) — narrow it with a second role — commit it`);
+    }
     if (where.line !== null) {
       const envLine = where.line;
       await steps.step(`Writing ${where.variable} to .env`, () => addEnvLine(root, envLine), () => `Wrote ${maskedLine(envLine)} to .env: the URL the source file names, kept out of git`);
       envFile = ENV_FILE;
+      envVariable = where.variable;
     }
     // THE VERSION PIN (src/cli/pin.ts): what production's image is held to. A checkout's mason (`dev`) has none to write
     const cli = deps.version ?? version();
@@ -308,7 +353,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
       return after === null ? "already" : before === null ? "made" : after.added.join(" and ");
     }, (r) => r === "already" ? `.gitignore already ignores ${ignored}` : r === "made" ? `Made .gitignore, ignoring ${ignored}` : `Added ${r} to .gitignore`);
     if (envFile && committedInGit(root, envFile)) {
-      notes.push(`${envFile} holds the database URL (DATABASE_URL) and is committed in git: git rm --cached ${envFile} takes it out of the next commit (the file stays); then change the password`);
+      notes.push(`${envFile} holds the database URL (${envVariable}) and is committed in git: git rm --cached ${envFile} takes it out of the next commit (the file stays); then change the password`);
     }
   } catch (e) {
     if (!(e instanceof StepFailed)) throw e;
@@ -332,6 +377,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     say(jsonText(INIT, { name, root, folder: path.relative(root, folder) || ".", config: path.join(root, STATE_DIR, "config.json"), demo,
       source: { name: path.basename(sourceFile).replace(/\.ya?ml$/, ""), file: sourceFile, url: keptFile !== null && !("problems" in keptFile) ? ("env" in keptFile.url ? `\${${keptFile.url.env}}` : maskedUrl(keptFile.url.literal)) : `\${${where.variable}}`,
         env: where.line === null ? null : maskedLine(where.line) },
+      roles: { file: rolesPath, written: !rolesKept },
       database, warnings: notes }, next));
     return 0;
   }

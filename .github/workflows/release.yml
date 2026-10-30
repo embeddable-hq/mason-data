@@ -59,7 +59,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '26'          # never 24: ci.yml's checks job says why
 
       - id: decide
         env:
@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '26'          # never 24: ci.yml's checks job says why
           registry-url: 'https://registry.npmjs.org'
           cache: npm
       # trusted publishing needs npm >= 11.5.1
@@ -166,7 +166,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '26'          # never 24: ci.yml's checks job says why
           registry-url: 'https://registry.npmjs.org'
           cache: npm
       # trusted publishing needs npm >= 11.5.1

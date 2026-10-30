@@ -66,7 +66,7 @@ export function profiled(doc: unknown): { sql: string | null; plan: PlanNode[] }
 }
 
 /** what EXPLAIN ANALYZE says of a statement DuckDB's profiler timed no operator of */
-export const UNPROFILED = "DuckDB's profiler recorded no operator of this statement: DuckDB answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered";
+export const UNPROFILED = "the copy's profiler recorded no operator of this statement: the copy answered it while planning it (as it answers a count(*) of a whole table from the table's row count), so the plan is its EXPLAIN, with the rows it answered";
 
 /** DuckDB's operator as DuckDB's own plan prints it (`HASH_GROUP_BY` is `Hash Group By`), a scan `Table Scan` as its
  *  profiler names it: DuckDB's EXPLAIN says SEQ_SCAN for the same operator, and Postgres's `Seq Scan` says otherwise */
@@ -167,7 +167,9 @@ export function keptText(f: CopyFacts | null, now: number = Date.now()): string 
   }
   if (k.by === "recopy") return `kept current by copying it again whole, ${k.copiedAt === null ? "no copy recorded yet" : `last copied ${utc(k.copiedAt)}`}`;
   const stream = `logical replication (slot ${k.slot})`;
-  const where = `applied through ${k.position}, ${k.lastCommit === null ? "no change applied this run" : `last change committed ${utc(k.lastCommit)}`}`;
+  // the copy's age as status says it (replicated, at <lsn>, <age>), then the newest change it applied
+  const synced = k.syncedAt === null ? "not synced yet" : `last synced ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`;
+  const where = `replicated, at ${k.position}, ${synced}, ${k.lastCommit === null ? "no change applied this run" : `last change committed ${utc(k.lastCommit)}`}`;
   if (k.state === "streamed") return k.notRunning === null ? `kept current by ${stream}, ${where}`
     : `streamed by ${stream}, ${where}; NOT kept current now, the stream is not running: ${k.notRunning}`;
   return k.state === "left-out" ? `NOT kept current: left out of ${stream}: ${k.why ?? ""}`
@@ -191,7 +193,7 @@ function keptJson(f: CopyFacts | null): Record<string, unknown> {
   return {
     "Kept Current By": keptCurrentBy(f), "Kept Current": keptText(f),
     ...(k?.by === "poll" ? { Sync: syncText(k.sync), "Last Synced": k.syncedAt, "Next Poll": k.nextAt } : {}),
-    ...(k?.by === "replication" ? { Slot: k.slot, "Stream State": k.state, "Applied Through": k.position, "Last Change Committed": k.lastCommit, "Stream Not Running": k.notRunning } : {}),
+    ...(k?.by === "replication" ? { Sync: "replication", Slot: k.slot, "Stream State": k.state, "Applied Through": k.position, "Last Synced": k.syncedAt, "Last Change Committed": k.lastCommit, "Stream Not Running": k.notRunning } : {}),
   };
 }
 
@@ -227,15 +229,15 @@ function copyLine(c: Copy): string {
 /** EXPLAIN as Postgres's text format: one line a row */
 export function explainText(e: Explained, o: ExplainOptions): string[] {
   const lines: string[] = [];
-  lines.push(e.copies.length === 0 ? "Mason: answered by DuckDB, reading none of its copies"
-    : e.copies.length === 1 ? `Mason: answered by DuckDB from its copy of ${copyLine(e.copies[0]!)}` : "Mason: answered by DuckDB from its copies of");
+  lines.push(e.copies.length === 0 ? "Mason: answered without reading any of its copies"
+    : e.copies.length === 1 ? `Mason: answered from its copy of ${copyLine(e.copies[0]!)}` : "Mason: answered from its copies of");
   if (e.copies.length > 1) for (const c of e.copies) lines.push(`  ${copyLine(c)}`);
-  lines.push(`  Sent to DuckDB: ${e.sql}`);
-  lines.push(`  Computed by Mason after DuckDB: ${e.computed.length === 0 ? "nothing" : e.computed.join("; ")}`);
-  if (e.functions.length > 0) lines.push(`  Mason's functions DuckDB calls: ${e.functions.join(", ")}`);
-  for (const name of o.ignored) lines.push(`  Note: ${name} has no DuckDB meaning: ignored`);
+  lines.push(`  Sent to the copy: ${e.sql}`);
+  lines.push(`  Computed by Mason after the copy: ${e.computed.length === 0 ? "nothing" : e.computed.join("; ")}`);
+  if (e.functions.length > 0) lines.push(`  Mason's functions the copy calls: ${e.functions.join(", ")}`);
+  for (const name of o.ignored) lines.push(`  Note: ${name} has no meaning to the copy: ignored`);
   if (e.analyzed?.profiled === false) lines.push(`  Note: ${UNPROFILED}`);
-  else if (e.analyzed !== undefined && o.timing) lines.push("  Note: an operator's thread time is DuckDB's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time");
+  else if (e.analyzed !== undefined && o.timing) lines.push("  Note: an operator's thread time is the copy's, summed over the threads that ran it and the operators under it: a parallel one's exceeds the Execution Time");
   const walk = (n: PlanNode, depth: number): void => {
     const lead = depth === 0 ? "" : `${" ".repeat(6 * depth - 4)}->  `;
     const on = scannedTable(n);
@@ -249,8 +251,8 @@ export function explainText(e: Explained, o: ExplainOptions): string[] {
   e.plan.forEach((n) => walk(n, 0));
   if (e.analyzed !== undefined && o.summary) {
     const p = e.analyzed.planning, x = e.analyzed.execution;
-    lines.push(`Planning Time: ${ms(p.analysisMs + p.rewriteMs + p.duckdbMs)} ms (Postgres's analysis ${ms(p.analysisMs)}, Mason's rewrite ${ms(p.rewriteMs)}, DuckDB's planning ${ms(p.duckdbMs)})`);
-    lines.push(`Execution Time: ${ms(x.duckdbMs + x.masonMs)} ms (DuckDB ${ms(x.duckdbMs)}, Mason's conversion and exact numerics ${ms(x.masonMs)})`);
+    lines.push(`Planning Time: ${ms(p.analysisMs + p.rewriteMs + p.duckdbMs)} ms (Postgres's analysis ${ms(p.analysisMs)}, Mason's rewrite ${ms(p.rewriteMs)}, the copy's planning ${ms(p.duckdbMs)})`);
+    lines.push(`Execution Time: ${ms(x.duckdbMs + x.masonMs)} ms (the copy ${ms(x.duckdbMs)}, Mason's conversion and exact numerics ${ms(x.masonMs)})`);
   }
   return lines;
 }
@@ -265,22 +267,22 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
       "Node Type": operatorName(n.type),
       ...(on === null ? {} : { "Relation Name": on.name, Schema: on.schema }),
       ...(o.costs && n.estimate !== null ? { "Plan Rows": n.estimate } : {}),
-      ...(n.actualRows === undefined ? {} : { "Actual Rows": n.actualRows, "Actual Loops": 1, ...(o.timing && n.threadMs !== undefined ? { "DuckDB Thread Time": Number(ms(n.threadMs)) } : {}) }),
-      ...Object.fromEntries(Object.entries(n.extra).filter(([k]) => o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)).map(([k, v]) => [`DuckDB ${k}`, v])),
+      ...(n.actualRows === undefined ? {} : { "Actual Rows": n.actualRows, "Actual Loops": 1, ...(o.timing && n.threadMs !== undefined ? { "Copy Thread Time": Number(ms(n.threadMs)) } : {}) }),
+      ...Object.fromEntries(Object.entries(n.extra).filter(([k]) => o.verbose ? k !== "Table" : !VERBOSE_ONLY.has(k)).map(([k, v]) => [`Copy ${k}`, v])),
       ...(n.children.length === 0 ? {} : { Plans: n.children.map(node) }),
     };
   };
   // Postgres's plan has one root; DuckDB's has one too (a statement's), kept as a list should it ever have more
   const roots = e.plan.map(node);
   const top: Record<string, unknown> = {
-    Plan: roots.length === 1 ? roots[0] : { "Node Type": "DuckDB Plans", Plans: roots },
+    Plan: roots.length === 1 ? roots[0] : { "Node Type": "Copy Plans", Plans: roots },
     Mason: {
-      "Answered By": "DuckDB",
+      "Answered By": "the copy",
       Copies: e.copies.map((c) => ({ Table: c.table, "Estimated Rows": c.rows, ...keptJson(c.facts) })),
-      "Sent To DuckDB": e.sql,
-      "Computed After DuckDB": e.computed,
-      "Mason Functions DuckDB Calls": e.functions,
-      ...(o.ignored.length === 0 ? {} : { Ignored: o.ignored.map((n) => `${n} has no DuckDB meaning`) }),
+      "Sent To Copy": e.sql,
+      "Computed After Copy": e.computed,
+      "Mason Functions Copy Calls": e.functions,
+      ...(o.ignored.length === 0 ? {} : { Ignored: o.ignored.map((n) => `${n} has no meaning to the copy`) }),
       ...(e.analyzed?.profiled === false ? { Note: UNPROFILED } : {}),
     },
   };
@@ -288,8 +290,8 @@ export function explainJson(e: Explained, o: ExplainOptions): string {
     const p = e.analyzed.planning, x = e.analyzed.execution;
     top["Planning Time"] = Number(ms(p.analysisMs + p.rewriteMs + p.duckdbMs));
     top["Execution Time"] = Number(ms(x.duckdbMs + x.masonMs));
-    (top.Mason as Body)["Planning"] = { "Postgres Analysis": Number(ms(p.analysisMs)), "Mason Rewrite": Number(ms(p.rewriteMs)), "DuckDB Planning": Number(ms(p.duckdbMs)) };
-    (top.Mason as Body)["Execution"] = { DuckDB: Number(ms(x.duckdbMs)), "Mason Conversion": Number(ms(x.masonMs)) };
+    (top.Mason as Body)["Planning"] = { "Postgres Analysis": Number(ms(p.analysisMs)), "Mason Rewrite": Number(ms(p.rewriteMs)), "Copy Planning": Number(ms(p.duckdbMs)) };
+    (top.Mason as Body)["Execution"] = { Copy: Number(ms(x.duckdbMs)), "Mason Conversion": Number(ms(x.masonMs)) };
   }
   return JSON.stringify([top], null, 2);
 }

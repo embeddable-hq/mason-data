@@ -38,7 +38,7 @@ before(async () => {
   // the events table as the run adds it from a sources file naming its key, and as the sync declares it to the
   // catalog: `primaryKey ?? key` (src/duck/sync.ts) — the source's own, none
   const src = parseSourceText("kind: postgres\nurl: x\ntables:\n  events: { key: [tenant_id, id] }\n", "app", "/app/mason/sources/app.yml") as SourceFile;
-  const added = addedTables(src, [EVENTS], "app", "/app", { replication: false });
+  const added = addedTables(src, [EVENTS], "app", "/app");
   assert.ok(Array.isArray(added), JSON.stringify(added));
   const events = added[0]!;
   assert.deepEqual([events.key, events.primaryKey], [["tenant_id", "id"], []], "a key: table is copied by its key, and keeps the source's own primary key: none");

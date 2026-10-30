@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 import { execFileSync } from "node:child_process";
+import ts from "typescript";
 
 const ROOT = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..");
 
@@ -613,6 +614,42 @@ test("the path guard would catch the real thing", () => {
 });
 
 /**
+ * The lines of a TypeScript `src` where a STRING (a message, a log line, a JSON value, a hint) names the engine:
+ * "Nothing a user sees is named for DuckDB" (CLAUDE.md "Who this is for"). Comments, identifiers and imports are the
+ * code's; inside a string, the engine's own names are too when they are PART of one token: SQL it defines
+ * (`duckdb_memory()`), a setting (`MASON_DUCKDB_MEMORY`), a path (`~/.duckdb/extensions`), a package (`@duckdb/node-api`),
+ * a label that is hashed (`mason-duckdb-postgres:`); and the whole string "duckdb" is a tag the code switches on.
+ */
+function engineNamedInStrings(src: string): number[] {
+  const sf = ts.createSourceFile("x.ts", src, ts.ScriptTarget.Latest, true);
+  const lines: number[] = [];
+  const named = (text: string): boolean => text !== "duckdb" && /(?<![A-Za-z0-9_@./-])duck ?db(?![A-Za-z0-9_])/i.test(text);
+  const visit = (n: ts.Node): void => {
+    const text = ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
+    if (text !== null && named(text) && !ts.isImportDeclaration(n.parent) && !ts.isExportDeclaration(n.parent) && !ts.isExternalModuleReference(n.parent)) {
+      lines.push(sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return lines;
+}
+
+test("no string a user can see names the engine: a message, a log line or a JSON value says 'the copy'", () => {
+  const hits = scannedFiles(["src"]).filter((f) => f.name.endsWith(".ts")).flatMap((f) => engineNamedInStrings(f.src).map((l) => `${f.name}:${l}`));
+  // docs/SQL-SUPPORT.md renders src/duck/gaps.ts, and a doc may name the engine: its registry text is not scanned
+  assert.deepEqual(hits.filter((h) => !h.startsWith("src/duck/gaps.ts:")), [], "a string names the engine: say 'the copy' or 'Mason' (CLAUDE.md: nothing a user sees is named for DuckDB)");
+});
+
+test("the engine-name guard catches the real thing, and leaves the engine's own tokens alone", () => {
+  assert.deepEqual(engineNamedInStrings("throw new Error(`DuckDB could not open ${f}`);\nconst a = 1;"), [1]);
+  assert.deepEqual(engineNamedInStrings("const m = \"a sum past DuckDB's 38 digits\";"), [1]);
+  assert.deepEqual(engineNamedInStrings("log(`[duckdb] ${l}`);"), [1]);
+  assert.deepEqual(engineNamedInStrings("a(\"SELECT * FROM duckdb_tables()\"); b(process.env.MASON_DUCKDB_MEMORY); c(\"~/.duckdb/extensions\"); d(\"mason-duckdb-postgres:\"); const k = \"duckdb\";"), []);
+  assert.deepEqual(engineNamedInStrings("import { DuckDBValue } from \"@duckdb/node-api\"; // DuckDB says\n/* DuckDB */ const DuckDBThing = 1;"), []);
+});
+
+/**
  * A LINK IN THE FRONT DOOR RESOLVES (the README's restructure, PR 26): the path guard above reads only `src/`, `tests/`,
  * `scripts/`, `docs/` and `examples/` paths from the root, so a markdown link to `cli/README.md`, `SECURITY.md` or
  * `LICENSE`, a link from `docs/` relative to its own folder, and every `#anchor` went unchecked — a broken
@@ -778,22 +815,118 @@ test("the bare-refusal guard catches the real thing", () => {
 
 /**
  * WHAT A SESSION SAYS A PARAMETER IS, ONE READER (src/api/postgres/server.ts `sessionSetting`; a fact derived in several
- * places): `SHOW <name>`, SHOW ALL's row of that name and the ParameterStatus the startup reports each read it, so a tool
- * reads one string however it asks. `fixedParameter` is called by that reader alone.
+ * places): `SHOW <name>`, SHOW ALL's row of that name, the ParameterStatus the startup and every SET / RESET report, and
+ * `current_setting(name)` — in the catalog (every request carries `sessionSettings`, catalog.ts asSession) and beside a
+ * copied table (`duckSession`, read by src/duck/rewrite.ts `settingRead`) — each read it, so a tool reads one string
+ * however it asks (GitHub issues 40, 41: the catalog's `current_setting` was a fourth reader, answering its own values
+ * after a SET). `fixedParameter` is called by that reader alone; a request to the catalog that does not carry the
+ * session's settings is one of the few that cannot meet a `current_setting` of the session's; and DuckDB's own
+ * `current_setting` is read for the TimeZone alone (which the settle sets from the session's).
  */
-test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through one reader (sessionSetting)", () => {
+test("SHOW, SHOW ALL, the reported parameters and current_setting read a parameter through one reader (sessionSetting)", () => {
   const server = "src/api/postgres/server.ts";
   const src = fs.readFileSync(path.join(ROOT, server), "utf8");
-  for (const start of ["private async showStatement(", "private async showAll(", "private reportedParameters("]) {
+  const bodyOf = (start: string): string => {
     const at = src.indexOf(start);
     assert.ok(at >= 0, `${server} has no ${start}`);
-    const body = src.slice(at, src.indexOf("\n  }\n", at));
-    assert.match(body, /this\.sessionSetting\(/, `${start}…): read the value through sessionSetting`);
-    // and through it alone: no session variable, TLS table or fixed value read beside it
-    assert.deepEqual([...body.matchAll(/this\.vars\.\w+|\btlsParameters\(|\bfixedParameter\(/g)].map((m) => m[0]), [], `${start}…): a value read beside sessionSetting`);
+    return src.slice(at, src.indexOf("\n  }\n", at));
+  };
+  // through it alone: no session variable, TLS table or fixed value read beside it
+  const beside = /this\.vars\.\w+|\btlsParameters\(|\bfixedParameter\(|\bFIXED\.get\(/g;
+  for (const start of ["private async showStatement(", "private async showAll(", "private reportedParameters(", "private async catalogAs(", "private async duckSession("]) {
+    const body = bodyOf(start);
+    assert.match(body, /this\.sessionSettings?\(/, `${start}…): read the value through sessionSetting`);
+    assert.deepEqual([...body.matchAll(beside)].map((m) => m[0]), [], `${start}…): a value read beside sessionSetting`);
   }
+  // every setting the session holds, each sessionSetting's: its NAMES may be read from the tables, never a value
+  const settings = bodyOf("private sessionSettings(");
+  assert.match(settings, /this\.sessionSetting\(/, "sessionSettings reads each value through sessionSetting");
+  assert.deepEqual([...settings.matchAll(/this\.vars\.(?!other\.keys\(\))\w+(?:\.\w+)?|\bfixedParameter\(|\bFIXED\.get\(|tlsParameters\([^)]*\)\[/g)].map((m) => m[0]), [], "sessionSettings reads a value beside sessionSetting");
+  // every catalog request of a session carries its settings: one that does not is a method named here, each of which
+  // reads no current_setting of the session's (a close, a SET's validation, SHOW's own reads, a plan's analysis, the
+  // catalog's own settings)
+  const enclosing = (at: number): string => [...src.slice(0, at).matchAll(/\n {2}(?:private |readonly |static )*(?:async )?(\w+)\(/g)].at(-1)?.[1] ?? "?";
+  const direct = [...new Set([...src.matchAll(/catalog\.run\(/g)].map((m) => enclosing(m.index)))].sort();
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "duckPlan", "duckValues", "end", "explaining", "showAll", "showStatement", "validateElsewhere"].sort(),
+    "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
+  // DuckDB's own current_setting is the TimeZone's alone (the session's, set by src/duck/store.ts settle); a statement's
+  // current_setting is the session's map (`settingRead`)
+  const rewrite = fs.readFileSync(path.join(ROOT, "src/duck/rewrite.ts"), "utf8");
+  assert.deepEqual([...rewrite.matchAll(/fn\("current_setting", \[([^\]]*)\]/g)].map((m) => m[1]).filter((a) => a !== 'strConst("TimeZone")'), [], "DuckDB's current_setting read for another name than TimeZone");
+  assert.match(rewrite, /case "current_setting": return [^\n]*settingRead\(/, "a statement's current_setting is the session's (settingRead)");
+});
+
+/**
+ * GET /metrics TAKES NO CREDENTIAL, SO IT CARRIES NO NAME (.claude/rules/cli.md "mason serve"): every label
+ * src/cli/metrics.ts writes is one of a closed set whose values are Mason's own words (a phase, an outcome, a quantile,
+ * the version) — never a table's, a user's, a client's or a host's. The first check is the type (src/cli/metrics.ts
+ * `MetricLabel`: a label of another name does not compile); this is the second: EVERY key of every `labels:` the module
+ * writes, and a `labels:` that is not an object literal (a variable, a spread: keys this guard cannot read) refused as
+ * such. The renderer's reads are held to a closed list by tests/cli-metrics.test.ts.
+ */
+const METRIC_LABELS = new Set(["phase", "outcome", "quantile", "version"]);
+const metricLabels = (source: string): string[] => [...source.matchAll(/\blabels:\s*(\{[^}]*\}|[^\s,}]+)/g)].flatMap((m) => {
+  const v = m[1]!;
+  if (!v.startsWith("{")) return [`<not a literal: ${v}>`];
+  return v.slice(1, -1).split(",").map((kv) => kv.trim()).filter(Boolean)
+    .map((kv) => /^([a-z_]+)\s*(?::|$)/.exec(kv)?.[1] ?? `<not a literal: ${kv}>`);
+});
+
+test("GET /metrics labels only by Mason's own words (phase, outcome, quantile, version): never a name, the endpoint takes no credential", () => {
+  const labels = metricLabels(fs.readFileSync(path.join(ROOT, "src", "cli", "metrics.ts"), "utf8"));
+  assert.ok(labels.length >= 4, `the guard reads the labels: ${labels.join(", ")}`);
+  assert.deepEqual(labels.filter((l) => !METRIC_LABELS.has(l)), []);
+});
+
+test("the metrics label guard would catch the real thing", () => {
+  assert.deepEqual(metricLabels(`TABLE_PHASES.map((phase) => ({ labels: { phase }, value: 1 })); [{ labels: { table: t.source }, value: t.rows }]`), ["phase", "table"]);
+  assert.deepEqual(metricLabels(`[{ labels: { phase, user: s.user }, value: 1 }, { labels: { quantile: "0.5", ...extra }, value: 2 }]`), ["phase", "user", "quantile", "<not a literal: ...extra>"],
+    "every key, the second beside the first; a spread is refused");
+  assert.deepEqual(metricLabels(`const l = { table: name }; [{ labels: l, value: 1 }]`), ["<not a literal: l>"], "a label object built in a variable is refused");
+  assert.deepEqual(metricLabels(`interface Sample { labels?: Readonly<Partial<Record<MetricLabel, string>>> }`), [], "the type's declaration is no label written");
+});
+
+/**
+ * THE NODE CI RUNS ON (docs/DESIGN.md "The Node CI runs on", 2026-10-30): never Node 24. Its V8 (13.6) shares
+ * WebAssembly import wrappers across every isolate of a process and can free one twice when an instance dies on one
+ * thread while another thread's wasm calls out (`# Check failed: jit_page_->allocations_.erase(addr) == 1`,
+ * nodejs/node#66366, fixed in V8 by 9b8ca54d5a and not released in any Node 24). The catalog, the parser and the
+ * function worker each hold WebAssembly on a thread of their own, so a test file's process died of it at exit after
+ * every test passed (five CI runs in two days). Node 26 carries the fix; a `node-version` of 24 in any workflow brings
+ * the crash back for every process CI starts. Lift this when a Node 24 release carries nodejs/node#66376.
+ */
+const NODE_WITHOUT_THE_FIX = new Set([24]);
+
+/** Every `node-version:` a workflow sets, as `file: value` with the value unquoted. */
+function workflowNodeVersions(files: Array<{ name: string; src: string }>): Array<{ where: string; version: string }> {
+  return files.flatMap((f) => [...f.src.matchAll(/^\s*node-version:\s*['"]?([^'"\s#]+)['"]?/gm)].map((m) => ({ where: `${f.name}:${f.src.slice(0, m.index).split("\n").length}`, version: m[1] ?? "" })));
+}
+
+/** The versions a workflow names whose major is one without the fix (or that names no major at all: `lts/*`, `latest`). */
+function nodeWithoutTheFix(files: Array<{ name: string; src: string }>): string[] {
+  return workflowNodeVersions(files).filter(({ version }) => {
+    const major = /^v?(\d+)/.exec(version)?.[1];
+    return major === undefined || NODE_WITHOUT_THE_FIX.has(Number(major));
+  }).map(({ where, version }) => `${where} node-version ${version}`);
+}
+
+test("no workflow runs Node 24, whose V8 aborts a process when a WebAssembly instance dies beside another thread's (nodejs/node#66366)", () => {
+  const dir = path.join(ROOT, ".github", "workflows");
+  const files = fs.readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).map((f) => ({ name: `.github/workflows/${f}`, src: fs.readFileSync(path.join(dir, f), "utf8") }));
+  assert.ok(workflowNodeVersions(files).length >= 2, "the guard reads ci.yml's node-version lines: has the key moved?");
+  assert.deepEqual(nodeWithoutTheFix(files), [], "set node-version to '26' (docs/DESIGN.md \"The Node CI runs on\")");
+});
+
+test("the Node guard catches the real thing", () => {
+  const one = (src: string) => nodeWithoutTheFix([{ name: "w.yml", src }]);
+  assert.deepEqual(one("      - uses: actions/setup-node@v4\n        with:\n          node-version: '24'          # a comment\n"), ["w.yml:3 node-version 24"]);
+  assert.deepEqual(one("node-version: 24.22.1\n"), ["w.yml:1 node-version 24.22.1"], "unquoted, exact");
+  assert.deepEqual(one('node-version: "v24"\n'), ["w.yml:1 node-version v24"]);
+  assert.deepEqual(one("node-version: lts/*\n"), ["w.yml:1 node-version lts/*"], "a moving alias names no major: refused");
+  assert.deepEqual(one("node-version: '26'\nnode-version: 26.13.0\nnode-version: '22'\n"), [], "26 carries the fix; 22's V8 never shared the wrappers");
+  assert.deepEqual(one("# node-version: '24' in a comment\n"), [], "a comment is no setting");
 });
 
 /**
@@ -805,10 +938,12 @@ test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through 
  */
 const COPY_WORD = /\bcop(?:y|ies|ied|ying)\b/i;
 const NOT_THE_DATA = [
-  /\bdata-copy="[^"]*">Copy<\/button>/g, /\bdata-copy\b/g, /^Copied$/g, /Select and copy it/g, /I have copied it/g, // the clipboard
+  /\bdata-copy="[^"]*">Copy[^<]*<\/button>/g, /Selected: press … to copy it/g, /\bdata-copy\b/g, /^Copied$/g, /Select and copy it/g, /I have copied it/g, // the clipboard
   /no copy of the password/g,                                                            // mason user add / the Users page
   /\{ table, copy, error/g, /\(copy: \{ phase/g, /addedColumns, copy, error/g,           // the --json field `copy`, by its name
   /^(?:copy|copying|copied)$/g,                                                         // the field, and a phase's value
+  /\b(?:usage-)?copy-(?:bytes|rows)\b/g, /\bwhat-copy\b/g,   // a holder's id and a CSS class: names in the page's code
+  /syncedBy \(copy, poll/g, /totals: \{ added, copied, failed/g, /restart, copied, recovered, synced/g,   // --json's words, by their field
 ];
 
 /** Every string and template literal of a JS/TS source, as `{ line, text }`: a template's `${…}` read as code (its own
@@ -852,12 +987,15 @@ export function literals(src: string): Array<{ line: number; text: string }> {
   return out;
 }
 
+/** The Copy button's label, in the code that sets it: "Copy" alone in any other literal is a label for the data. */
+const CLIPBOARD_BUTTON = /\bbutton\("Copy", \{ copy:|\.textContent = "Copy"/g;
+
 /** The words of a file that say "copy" for what Mason does to a table's data, as `line: text`. An HTML file is read
  *  whole, its comments left out. */
 export function copyWords(name: string, src: string): string[] {
   const texts = name.endsWith(".html")
     ? src.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, "")).split("\n").map((text, n) => ({ line: n + 1, text }))
-    : literals(src);
+    : literals(src.replace(CLIPBOARD_BUTTON, (m) => m.replace('"Copy"', '""')));
   return texts.filter((l) => COPY_WORD.test(NOT_THE_DATA.reduce((t, re) => t.replace(re, ""), l.text))).map((l) => `${name}:${l.line}: ${l.text}`);
 }
 
@@ -870,6 +1008,7 @@ test("what Mason does to a table's data is sync in every word the CLI and the we
 test("the copy-word guard catches the real thing", () => {
   assert.deepEqual(copyWords("a.ts", 'next: [["mason add <table>", "copy a table into Mason"]]'), ['a.ts:1: copy a table into Mason']);
   assert.deepEqual(copyWords("a.ts", 'details: [["Copy", file]]'), ["a.ts:1: Copy"], "a label is words");
+  assert.deepEqual(copyWords("a.ts", 'button("Copy", { copy: id }); b.textContent = "Copy";'), [], "the clipboard button's label, where it is set");
   assert.deepEqual(copyWords("a.ts", 'tips: [`Mason stops ${one ? "copying it" : `copying ${n}`}`]'), ["a.ts:1: copying it", "a.ts:1: copying …"],
     "a literal inside a template's ${…} is read too");
   assert.deepEqual(copyWords("a.html", '<p>Add one and Mason copies it</p>\n<!-- copy -->'), ["a.html:1: <p>Add one and Mason copies it</p>"]);
