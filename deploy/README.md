@@ -20,6 +20,11 @@ to addresses you name ([who can reach the Postgres port](#who-can-reach-the-post
   container's writable layer too; and `.env`, which compose reads from the compose file's folder, so keep that whole
   folder on the Volume. A Volume is network-attached block storage, which meets Mason's need for a block device; we
   have not measured it.
+  **A new DigitalOcean account starts on a low tier.** On 2026-10-30 a new account was refused `m-4vcpu-32gb` ("This
+  size is currently restricted, please open a ticket to increase your account tier") and any Volume over about 100 GiB
+  ("invalid size specified"), and listed nothing above 16 GB; `m-2vcpu-16gb` and a 100 GiB Volume worked. A ticket, a
+  history of invoices or a prepayment raises the tier (https://docs.digitalocean.com/platform/resource-limits/), so
+  check what your account allows before you plan the machine, and leave room in the Volume for the copy.
 - **Fly.io and Railway: for trials on non-sensitive data, or where clients can join the private network.** Neither can
   limit a public port by source address.
 
