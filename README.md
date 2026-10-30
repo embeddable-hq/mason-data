@@ -2,7 +2,7 @@
 
 A drop-in replacement for a Postgres read replica, built for exceptionally fast analytical queries.
 
-- **Lightweight:** Mason is a single Node.js process you can run anywhere (`mason init && mason start`).
+- **Lightweight:** Mason is a single Node.js process you can run anywhere.
 - **Like a read replica:** Choose which tables and columns to sync from your Postgres database, and how each stays in sync: on demand, polling or replication. Mason makes them available to query.
 - **Lightning fast:** Under the hood, Mason uses [DuckDB](https://github.com/duckdb/duckdb)'s columnar engine to accelerate analytical queries (`COUNT`, `SUM`, `GROUP BY`, etc.) over large tables.
 - **Keep your existing SQL:** Mason is built from the ground up to match Postgres syntax and behaviour, so you can reuse existing SQL without risky rewrites or subtle changes to query semantics.
