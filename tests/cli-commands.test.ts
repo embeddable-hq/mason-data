@@ -899,10 +899,15 @@ test("mason start --replication, --poll and --publication are gone: each answers
       [["--replication"], { message: "--replication is gone: the sources file says it now", why: syncWhy,
         fix: "write sync: replication at the top of mason/sources/shop.yml, then mason start" }],
       [["--poll"], { message: "--poll is gone: the sources file says it now", why: syncWhy,
-        fix: "write sync: poll 5m at the top of mason/sources/shop.yml (any interval: poll 5s, poll 1h; or leave sync: off, the default, and run mason sync <table> when you need it), then mason start" }],
+        fix: "write sync: poll 5m at the top of mason/sources/shop.yml (any interval: poll 5s, poll 1h; or sync: off, the default, and mason sync <table> when you need it), then mason start" }],
       [["--publication", "app_pub"], { message: "--publication is gone: the sources file says it now",
         why: "the publication replication reads is the sources file's publication:, so what runs is what is committed",
-        fix: "write publication: app_pub at the top of mason/sources/shop.yml, with sync: replication on the tables it carries, then mason start" }],
+        fix: "write publication: app_pub at the top of mason/sources/shop.yml, with sync: replication on the entries of the tables it carries, then mason start" }],
+      // a publication goes with replication: one coherent way out, never "poll every table" and "replicate some" at once
+      [["--poll", "--publication", "app_pub"], { message: "--poll and --publication are gone: the sources file says it now",
+        why: `${syncWhy.replace(/, so what runs is what is committed$/, "")}, and the publication replication reads is its publication:, so what runs is what is committed`,
+        fix: "a publication goes with replication: write publication: app_pub at the top of mason/sources/shop.yml, with sync: replication on the entries of the tables it carries " +
+          "and sync: poll 5m (any interval) on the others, then mason start" }],
       // several on ONE report, --attach or not: never run
       [["--replication", "--publication=app_pub", "--attach"], { message: "--replication and --publication are gone: the sources file says it now",
         why: `${syncWhy.replace(/, so what runs is what is committed$/, "")}, and the publication replication reads is its publication:, so what runs is what is committed`,

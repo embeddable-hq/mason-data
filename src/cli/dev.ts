@@ -30,7 +30,7 @@ import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
 import { createRunServer, usageFacts, type RunContext } from "./run-server.ts";
-import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, sourcesTop, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectSource, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -210,7 +210,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const pinned = cliPinProblem(folder, o.version);
   if (pinned) { say(`mason start: ${pinned}`); return 1; }
   // how often a table is polled is the sources file's sync: now, per table: the old setting refuses the start, named
-  const pollMs = pollMsRetired(process.env);
+  const pollMs = pollMsRetired(process.env, () => sourcesTop(project.root, project.folder));
   if (pollMs !== null) return failed("start", { code: "refused", ...pollMs }, { json: false });
   // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused, named), read
   // before anything opens (src/duck/history.ts); every history below keeps them

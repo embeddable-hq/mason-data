@@ -50,10 +50,26 @@ const initAt = /^DATABASE_URL=postgres:\/\/demo@(127\.0\.0\.1:\d+)\/demo$/m.exec
 if (initAt === undefined) throw new Error("mason init demo wrote no demo URL in .env");
 const demoAt = "127.0.0.1:1";
 fs.writeFileSync(demoEnv, fs.readFileSync(demoEnv, "utf8").replace(`@${initAt}/`, `@${demoAt}/`));
-/** The commands' lines in a state: a demo project's start is given --replication, a flag that is gone, answered with
- *  the line to write and exit 2 before anything starts (a plain start there would host the demo database and run,
- *  which the matrix must not leave behind). */
-const argsIn = (state: string, cmd: string): readonly string[] => state === "demo" && cmd === "start" ? ["--replication"] : MATRIX_ARGS[cmd]!;
+/**
+ * The folder a command runs in, in a state: a demo project's `mason start` gets a sources file with `orders: { sync:
+ * replication }`, which the demo refuses before anything starts (`demoChangesRefusal`, background.ts and dev.ts) — so the
+ * row runs the start itself in the demo state (its project, its run lookup, its refusal) and never leaves a run behind,
+ * where a plain start would host the demo database and run. The refusal's words: the demo test below.
+ */
+function folderFor(state: string, cmd: string): string {
+  const root = folderIn(state);
+  if (state === "demo" && cmd === "start") demoReplicating(root);
+  return root;
+}
+
+/** A demo folder's sources file with orders set to sync: replication. */
+function demoReplicating(root: string): void {
+  const file = path.join(root, "mason", "sources", "demo.yml");
+  const was = fs.readFileSync(file, "utf8");
+  const now = was.replace(/^ {2}orders: \{\}$/m, "  orders: { sync: replication }");
+  if (now === was) throw new Error(`the demo's sources file has no "orders: {}" line to set to sync: replication:\n${was}`);
+  fs.writeFileSync(file, now);
+}
 
 /** A folder in a state; `null` config writes none. */
 function folderIn(state: string): string {
@@ -255,9 +271,7 @@ test("a demo project, stopped: mason tables says its database runs inside mason 
   assert.deepEqual([t.code, t.message, t.fix], ["unreachable", `could not connect to postgres://demo@${demoAt}/demo: the demo database is not running on ${demoAt}`,
     "the demo database runs inside mason start: start it first"]);
   for (const json of [false, true]) {
-    const root = folderIn("demo");
-    const file = path.join(root, "mason", "sources", "demo.yml");
-    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^ {2}orders: \{\}$/m, "  orders: { sync: replication }"));
+    const root = folderFor("demo", "start");
     const start = await runMason(root, ["start", ...(json ? ["--json"] : [])], matrixEnv());
     assert.equal(start.code, 1, start.stdout + start.stderr);
     if (json) assert.equal((JSON.parse(start.stdout) as { error: { code: string } }).error.code, "refused");
@@ -309,10 +323,10 @@ test("every command, in every state without a run, as a person and with --json: 
     for (const c of COMMANDS) {
       // start in a stopped project is the session's transition (it connects to the database): its refusal here is
       // the database not answering, which is checked; stop is harmless where nothing runs
-      for (const args of [argsIn(state, c.name), ...(MATRIX_EXTRA_ARGS[c.name] ?? [])]) {
+      for (const args of [MATRIX_ARGS[c.name]!, ...(MATRIX_EXTRA_ARGS[c.name] ?? [])]) {
         for (const json of takesJson(c.name) ? [false, true] : [false]) {
           jobs.push(async () => {
-            const root = folderIn(state);
+            const root = folderFor(state, c.name);
             const argv = [c.name, ...args, ...(json ? ["--json"] : [])];
             return { state, cmd: c.name, json, a: await runMason(root, argv, env, TRANSITIONS.has(c.name) ? 90_000 : 30_000) };
           });

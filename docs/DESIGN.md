@@ -237,6 +237,10 @@ read as current. **Where.** `src/duck/sync.ts` (`replicated`, `streams`, `ensure
 before anything starts, with the line to write at the top of the sources file (`sync: replication`, `sync: poll 5m`,
 `publication: <name>`) and exit 2, on one report however many are given; `MASON_CHANGES` set is one line of `mason
 serve`'s settings report, naming its `sync:` line (`removedStartFlags`, `changesRetired`, `src/lib/table-sync.ts`).
+The way out names the EDIT, read from the file (`sourcesTop`, `topEdit`): every file `mason init` writes has a `sync:`
+line at its top already, so "write `sync: replication` at the top" made a second one, a file the run refuses (the
+independent review); it says "change `sync: poll 5s` … to `sync: replication`", "keep", or "write" only where the file
+has no such line — `MASON_POLL_MS`'s too. A test applies each way out to an init-made file as written and parses it.
 **Why.** Taken where they agreed with the file (PR 2) they said nothing the file did not, and two places to say how a
 table is kept current is one more than production can be held to: the committed file is what runs. A removed setting
 refuses rather than runs a default (CLAUDE.md "Conventions"). `config.json`'s `changes`, the mode an older Mason

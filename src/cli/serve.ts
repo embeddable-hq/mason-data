@@ -24,9 +24,9 @@ import { failed, parseCommand, type CommandSpec, type Failure } from "./command.
 import { dev } from "./dev.ts";
 import { parseSource } from "./preflight.ts";
 import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
-import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
+import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir, sourcesTop } from "./sources.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
-import { changesRetiredText, pollMsRetiredText } from "../lib/table-sync.ts";
+import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { version } from "./version.ts";
 import type { CopyState } from "../duck/sync.ts";
@@ -48,6 +48,9 @@ export const SERVE: CommandSpec = {
   Settings (the environment):
     DATABASE_URL            the database to copy from, as the sources file's url: \${DATABASE_URL} names it (the variable
                             the file names is required); read-only: SELECTs, or a replication slot
+    PG_PUBLICATION          the publication the tables under sync: replication are read through, the database owner's,
+                            never altered: the sources file's publication: first (publication: \${PG_PUBLICATION} reads
+                            this one), else this; default none: Mason makes its own
     MASON_API_KEY           what the users' passwords are made with (mason user add), at least 32 characters (required)
     MASON_PROJECT           the project folder: sources/, mason.yml (default ./mason)
     MASON_DATA              the folder whose .mason/ holds the copy and the state: the volume (default .)
@@ -101,9 +104,10 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   if (!NAME_RE.test(name)) wrong.push(`MASON_NAME=${JSON.stringify(name)} is not a project name: lower case letters, digits, - and _, at most 48`);
   // how each table is kept current, and how often a table is polled, are the sources file's sync: now, per table
   // (src/lib/table-sync.ts): the old settings refused HERE with the others, before anything is written or connected
-  const changes = changesRetiredText(env, servedSourcesFile(project));
+  const top = (): SourcesTop => sourcesTop(path.dirname(project), project);
+  const changes = changesRetiredText(env, top);
   if (changes !== null) wrong.push(changes);
-  const pollMs = pollMsRetiredText(env);
+  const pollMs = pollMsRetiredText(env, top);
   if (pollMs !== null) wrong.push(pollMs);
   // the history's days: MASON_HISTORY_DAYS, a number of days; the old name refused (src/duck/history.ts)
   const days = historyDaysSetting(env);
@@ -126,12 +130,6 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   };
 }
 
-/** The project folder's sources file as the server's operator names it (`mason/sources/app.yml`), for a retired
- *  setting's line to write: its one file, else the name every project's has. */
-function servedSourcesFile(project: string): string {
-  const names = sourceFileNames(project);
-  return path.join(path.basename(project), "sources", names.length === 1 ? names[0]! : "<name>.yml");
-}
 
 /**
  * THE DATABASE'S URL AS A SETTING (the review of the sources file: an unset URL was found only after the other

@@ -131,23 +131,45 @@ export function agoText(iso: string, now: number = Date.now()): string {
 }
 
 /**
+ * THE TOP OF THE SOURCES FILE that a retired setting's way out edits (the review of PR 48: every file `mason init`
+ * writes already has a `sync:` line at its top, so "write sync: replication at the top" made it two, a file the run
+ * refuses): the file as a person names it, and the values its top-level `sync:` and `publication:` lines hold as
+ * written — null where it has no such line, or there is no file (src/cli/sources.ts `sourcesTop` reads it).
+ */
+export interface SourcesTop { shown: string; sync: string | null; publication: string | null }
+
+/**
+ * THE EDIT THAT MAKES THE TOP'S `key:` SAY ONE OF `values`, in words a person (or an agent) applies as written: change
+ * the line the file has, keep one that already says it, or write it when the file has none. `anyPoll`: any
+ * `poll <interval>` already written is kept (for "poll it", whatever the interval).
+ */
+export function topEdit(top: SourcesTop, key: "sync" | "publication", values: readonly string[], anyPoll = false): string {
+  const now = top[key] === null ? null : top[key]!.trim().replace(/\s+/g, " ");
+  const said = (v: string): boolean => now !== null && (now === v || (anyPoll && v.startsWith("poll ") && now.startsWith("poll ")));
+  const kept = values.find(said);
+  if (kept !== undefined && now !== null) return `keep ${key}: ${now} at the top of ${top.shown}`;
+  const to = values.map((v) => `${key}: ${v}`).join(" or ");
+  return now === null ? `write ${to} at the top of ${top.shown}` : `change ${key}: ${now} at the top of ${top.shown} to ${to}`;
+}
+
+/**
  * `MASON_POLL_MS` SET IS REFUSED, never run on a default (CLAUDE.md: a renamed setting refuses the start, naming the
  * line to write): how often a table is polled is the sources file's `sync:`, per table. Null when it is unset; else what
  * is wrong, why and the way out — a Failure's fields for `mason start` (before it spawns, and the run itself), joined on
- * one line of `mason serve`'s settings report (`pollMsRetiredText`).
+ * one line of `mason serve`'s settings report (`pollMsRetiredText`). `top` is read only when it is set.
  */
-export function pollMsRetired(env: Readonly<Record<string, string | undefined>>): { message: string; why: string; fix: string } | null {
+export function pollMsRetired(env: Readonly<Record<string, string | undefined>>, top: () => SourcesTop): { message: string; why: string; fix: string } | null {
   const v = env.MASON_POLL_MS;
   if (v === undefined || v === "") return null;
   const ms = Number(v);
-  const line = `sync: poll ${Number.isFinite(ms) && ms >= MIN_POLL_SECONDS * 1000 ? intervalOf(Math.min(ms / 1000, MAX_POLL_SECONDS)) : "5s"}`;
+  const every = `poll ${Number.isFinite(ms) && ms >= MIN_POLL_SECONDS * 1000 ? intervalOf(Math.min(ms / 1000, MAX_POLL_SECONDS)) : "5s"}`;
   return { message: `MASON_POLL_MS=${v} is no longer read`, why: "how often each table is polled is its sync: in the sources file",
-    fix: `write ${line} at its top (every table) or on a table's entry, then unset MASON_POLL_MS` };
+    fix: `${topEdit(top(), "sync", [every])} (every table; a table's entry may say its own), then unset MASON_POLL_MS` };
 }
 
 /** the same, as one line */
-export function pollMsRetiredText(env: Readonly<Record<string, string | undefined>>): string | null {
-  const r = pollMsRetired(env);
+export function pollMsRetiredText(env: Readonly<Record<string, string | undefined>>, top: () => SourcesTop): string | null {
+  const r = pollMsRetired(env, top);
   return r === null ? null : `${r.message}: ${r.why} — ${r.fix}`;
 }
 
@@ -161,12 +183,13 @@ function saidInTheFile(what: { sync: boolean; publication: boolean }): string {
 
 /**
  * `mason start --replication`, `--poll` AND `--publication <name>` ARE GONE (issue 33, PR 3; no backwards compatibility
- * before v1.0): each answers, without starting, with the line to write at the top of the sources file (`shown`, as a
- * person names it) — `sync: replication`, `sync: poll 5m`, `publication: <name>` — every one given on ONE report. Null
- * when none is given. Read from the raw command line, before the options are parsed, so a removed flag is answered as
- * removed and never as an unknown option.
+ * before v1.0): each answers, without starting, with the edit to make at the top of the sources file (`top`, read only
+ * when a removed flag is given) — its `sync:` line to `replication` or `poll 5m`, its `publication:` to the name —
+ * every one given on ONE report, one coherent way out (a publication goes with replication). Null when none is given.
+ * Read from the raw command line, before the options are parsed, so a removed flag is answered as removed and never
+ * as an unknown option.
  */
-export function removedStartFlags(argv: readonly string[], shown: string): { message: string; why: string; fix: string } | null {
+export function removedStartFlags(argv: readonly string[], top: () => SourcesTop): { message: string; why: string; fix: string } | null {
   let replication = false, poll = false, publication: string | null | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -178,31 +201,49 @@ export function removedStartFlags(argv: readonly string[], shown: string): { mes
   }
   const given = [...(replication ? ["--replication"] : []), ...(poll ? ["--poll"] : []), ...(publication !== undefined ? ["--publication"] : [])];
   if (given.length === 0) return null;
-  const sync = [...(replication ? ["sync: replication"] : []), ...(poll ? ["sync: poll 5m"] : [])].join(" or ");
-  const lines = [...(sync ? [sync] : []), ...(publication !== undefined ? [`publication: ${publication ?? "<name>"}`] : [])].join(" and ");
+  const t = top();
   const named = given.length === 1 ? `${given[0]} is gone` : `${given.slice(0, -1).join(", ")} and ${given.at(-1)} are gone`;
+  const pub = publication === undefined ? null : topEdit(t, "publication", [publication ?? "<name>"]);
+  let fix: string;
+  if (replication) {
+    // every table from the change log (or polled, when --poll said that too), and the publication beside it
+    const sync = topEdit(t, "sync", poll ? ["replication", "poll 5m"] : ["replication"]);
+    // two lines to write at the same top are one instruction: "write sync: replication and publication: app_pub at the top of …"
+    const at = ` at the top of ${t.shown}`;
+    const both = pub !== null && !poll && sync.startsWith("write ") && pub.startsWith("write ") && sync.endsWith(at) && pub.endsWith(at);
+    fix = both ? `${sync.slice(0, -at.length)} and ${pub.slice("write ".length)}`
+      : `${sync}${poll ? " (or each table's own on its entry)" : ""}${pub ? `, and ${pub}` : ""}`;
+  } else if (pub !== null) {
+    // a publication is read only by replication: it names the tables that are replicated, the others are polled or off
+    fix = `${poll ? "a publication goes with replication: " : ""}${pub}, with sync: replication on the entries of the tables it carries` +
+      `${poll ? " and sync: poll 5m (any interval) on the others" : ""}`;
+  } else {
+    const edit = topEdit(t, "sync", ["poll 5m"], true);
+    fix = `${edit} (${edit.startsWith("keep ") ? "every table is polled already; a table's entry may say its own"
+      : "any interval: poll 5s, poll 1h; or sync: off, the default, and mason sync <table> when you need it"})`;
+  }
   return { message: `${named}: the sources file says it now`, why: saidInTheFile({ sync: replication || poll, publication: publication !== undefined }),
-    fix: `write ${lines} at the top of ${shown}${poll ? " (any interval: poll 5s, poll 1h; or leave sync: off, the default, and run mason sync <table> when you need it)" : ""}` +
-      `${publication !== undefined && !replication ? ", with sync: replication on the tables it carries" : ""}, then mason start` };
+    fix: `${fix}, then mason start` };
 }
 
 /**
  * `MASON_CHANGES` SET IS REFUSED, never run on a default (CLAUDE.md: a removed setting refuses the start, naming the
- * line to write): how each table is kept current is the sources file's `sync:` (`shown`, as the server names it). Null
+ * edit to make): how each table is kept current is the sources file's `sync:` (`top`, read only when it is set). Null
  * when it is unset; else a Failure's fields, joined on one line of `mason serve`'s settings report
  * (`changesRetiredText`).
  */
-export function changesRetired(env: Readonly<Record<string, string | undefined>>, shown: string): { message: string; why: string; fix: string } | null {
+export function changesRetired(env: Readonly<Record<string, string | undefined>>, top: () => SourcesTop): { message: string; why: string; fix: string } | null {
   const v = env.MASON_CHANGES;
   if (v === undefined || v === "") return null;
-  const line = v === "replication" ? "sync: replication" : v === "poll" ? "sync: poll 5m" : "sync: replication (or sync: poll 5m)";
+  const edit = v === "replication" ? topEdit(top(), "sync", ["replication"]) : v === "poll" ? topEdit(top(), "sync", ["poll 5m"], true)
+    : topEdit(top(), "sync", ["replication", "poll 5m"]);
   return { message: `MASON_CHANGES=${v} is no longer read`, why: saidInTheFile({ sync: true, publication: false }),
-    fix: `write ${line} at the top of ${shown} (every table) or on a table's entry, then unset MASON_CHANGES` };
+    fix: `${edit} (every table; a table's entry may say its own), then unset MASON_CHANGES` };
 }
 
 /** the same, as one line */
-export function changesRetiredText(env: Readonly<Record<string, string | undefined>>, shown: string): string | null {
-  const r = changesRetired(env, shown);
+export function changesRetiredText(env: Readonly<Record<string, string | undefined>>, top: () => SourcesTop): string | null {
+  const r = changesRetired(env, top);
   return r === null ? null : `${r.message}: ${r.why} — ${r.fix}`;
 }
 

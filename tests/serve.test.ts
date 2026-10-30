@@ -43,10 +43,10 @@ test("the settings: every one missing or wrong said at once, each with what to s
     /MASON_PG_SELF_SIGNED_TLS="yes": 1, or 0/, /MASON_HEALTH_PORT="99999": a port number/]) assert.match(wrong.message, said);
   // a setting that is no longer read refuses the start, naming the line to write instead (never runs a default)
   assert.ok(wrong.message.includes("MASON_POLL_MS=30000 is no longer read: how often each table is polled is its sync: in the sources file — " +
-    "write sync: poll 30s at its top (every table) or on a table's entry, then unset MASON_POLL_MS"), wrong.message);
+    "write sync: poll 30s at the top of mason/sources/<name>.yml (every table; a table's entry may say its own), then unset MASON_POLL_MS"), wrong.message);
   assert.ok(wrong.message.includes("MASON_CHANGES=cdc is no longer read: how each table is kept current is its sync: in the sources file (at the top for every table, " +
-    "on an entry for that one), so what runs is what is committed — write sync: replication (or sync: poll 5m) at the top of mason/sources/<name>.yml (every table) " +
-    "or on a table's entry, then unset MASON_CHANGES"), wrong.message);
+    "on an entry for that one), so what runs is what is committed — write sync: replication or sync: poll 5m at the top of mason/sources/<name>.yml (every table; " +
+    "a table's entry may say its own), then unset MASON_CHANGES"), wrong.message);
   assert.match(wrong.message, /^7 settings are missing or wrong/);
 
   const s = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY }, "/srv");
@@ -208,6 +208,8 @@ test("mason start refuses MASON_POLL_MS too, before it spawns and in the run its
   try {
     fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
     fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+    // the file has its sync: line already (as every file mason init writes): the way out changes it, never adds a second
+    fs.writeFileSync(path.join(root, "mason", "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:secret@127.0.0.1:1/shop\nsync: off\ntables: {}\n");
     fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({
       name: "shop", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false, apiKey: KEY,
       sourceServer: null, lastRun: null, running: null,
@@ -216,14 +218,15 @@ test("mason start refuses MASON_POLL_MS too, before it spawns and in the run its
     for (const attach of [false, true]) {
       const p = await runMason(root, ["start", ...(attach ? ["--attach"] : [])], env);
       assert.equal(p.code, 1, p.stdout + p.stderr);
-      assert.match(p.stderr, /^✗ mason start: MASON_POLL_MS=30000 is no longer read\n {2}why {3}how often each table is polled is its sync: in the sources file\n {2}fix {3}write sync: poll 30s at its top \(every table\) or on a table's entry, then unset MASON_POLL_MS$/m,
+      assert.match(p.stderr, /^✗ mason start: MASON_POLL_MS=30000 is no longer read\n {2}why {3}how often each table is polled is its sync: in the sources file\n {2}fix {3}change sync: off at the top of mason\/sources\/shop\.yml to sync: poll 30s \(every table; a table's entry may say its own\), then unset MASON_POLL_MS$/m,
         `${attach ? "the run itself" : "before it spawns"}:\n${p.stdout}${p.stderr}`);
       assert.doesNotMatch(p.stdout + p.stderr, /Connecting to/, "refused before the database is connected to");
     }
     const j = await runMason(root, ["start", "--json"], env);
     assert.equal(j.code, 1, j.stdout + j.stderr);
     assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message: "MASON_POLL_MS=30000 is no longer read",
-      why: "how often each table is polled is its sync: in the sources file", fix: "write sync: poll 30s at its top (every table) or on a table's entry, then unset MASON_POLL_MS" });
+      why: "how often each table is polled is its sync: in the sources file",
+      fix: "change sync: off at the top of mason/sources/shop.yml to sync: poll 30s (every table; a table's entry may say its own), then unset MASON_POLL_MS" });
     assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -235,9 +238,11 @@ test("MASON_CHANGES set is refused with the other settings, naming the sync: lin
     fs.writeFileSync(path.join(dir, "mason", "sources", "app.yml"), "kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\ntables:\n  orders: {}\n");
     const env = { DATABASE_URL: URL_, MASON_API_KEY: KEY };
     // whatever it says, even what the file says: the setting is gone, never read where it agrees
-    const line = (v: string, sync: string): string => `a setting is missing or wrong: MASON_CHANGES=${v} is no longer read: how each table is kept current is its sync: in the sources file ` +
-      `(at the top for every table, on an entry for that one), so what runs is what is committed — write ${sync} at the top of mason/sources/app.yml (every table) or on a table's entry, then unset MASON_CHANGES`;
-    for (const [v, sync] of [["replication", "sync: replication"], ["poll", "sync: poll 5m"]] as const) {
+    // the file's top says sync: replication already: kept for replication, changed for poll — never a second sync: line
+    const line = (v: string, edit: string): string => `a setting is missing or wrong: MASON_CHANGES=${v} is no longer read: how each table is kept current is its sync: in the sources file ` +
+      `(at the top for every table, on an entry for that one), so what runs is what is committed — ${edit} (every table; a table's entry may say its own), then unset MASON_CHANGES`;
+    const edits = { replication: "keep sync: replication at the top of mason/sources/app.yml", poll: "change sync: replication at the top of mason/sources/app.yml to sync: poll 5m" };
+    for (const [v, sync] of Object.entries(edits)) {
       const refused = serveSettings({ ...env, MASON_CHANGES: v }, dir);
       assert.ok("message" in refused, v);
       assert.deepEqual([refused.code, refused.message], ["bad_config", line(v, sync)]);
@@ -250,7 +255,7 @@ test("MASON_CHANGES set is refused with the other settings, naming the sync: lin
     const code = await new Promise<number | null>((r) => child.once("exit", r));
     assert.equal(code, 1, json);
     const v = JSON.parse(json) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string }> };
-    assert.deepEqual([v.error.code, v.error.message], ["bad_config", line("replication", "sync: replication")]);
+    assert.deepEqual([v.error.code, v.error.message], ["bad_config", line("replication", edits.replication)]);
     assert.deepEqual(v.next.map((n) => n.command), ["mason serve --help"]);
     assert.equal(fs.readdirSync(dir).join(","), "mason", "mason serve wrote nothing: no .mason/");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -319,4 +324,10 @@ test("MASON_REQUEST_LOG_DAYS is MASON_HISTORY_DAYS now: set, it refuses mason se
     assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message: "MASON_REQUEST_LOG_DAYS=30 is no longer read", why, fix });
     assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason serve --help lists every setting a server sets: PG_PUBLICATION beside DATABASE_URL, with its default; MASON_CHANGES no more", () => {
+  const usage = (serveModule as unknown as { SERVE: { usage: string } }).SERVE.usage;
+  assert.match(usage, /^ {4}DATABASE_URL .*\n.*\n {4}PG_PUBLICATION {10}the publication the tables under sync: replication are read through, the database owner's,\n {28}never altered: the sources file's publication: first \(publication: \$\{PG_PUBLICATION\} reads\n {28}this one\), else this; default none: Mason makes its own\n/m);
+  assert.doesNotMatch(usage, /MASON_CHANGES/);
 });

@@ -3,10 +3,9 @@
  * command's summary, in this order — so a command cannot exist without being listed, and tests/cli-help.test.ts holds
  * each one to src/cli/command.ts's rules (its own --help, an example, every option documented).
  */
-import * as path from "node:path";
 import { failed, parseCommand, reportText, wantsJson, type Command, type CommandSpec, type NextStep } from "./command.ts";
-import { removedStartFlags } from "../lib/table-sync.ts";
-import { shownPath, sourceFileNames, sourcesDir } from "./sources.ts";
+import { removedStartFlags, type SourcesTop } from "../lib/table-sync.ts";
+import { sourcesTop } from "./sources.ts";
 import { dev } from "./dev.ts";
 import { devInBackground } from "./background.ts";
 import { ADD, LOGS, REMOVE, STATUS, STOP, TABLES, WAIT, add, logs, remove, status, stop, tables, wait } from "./commands.ts";
@@ -91,9 +90,11 @@ export const DEV: CommandSpec & { needs: "project" } = {
 };
 
 async function runDev(argv: string[]): Promise<number> {
-  // --replication, --poll and --publication are gone (issue 33): each answered with the line to write in the sources
-  // file, exit 2, before the options are parsed (it would be an unknown option there) and before anything starts
-  const removed = removedStartFlags(argv, startSourcesFile(process.cwd()));
+  // --replication, --poll and --publication are gone (issue 33): each answered with the edit to make in the sources
+  // file, exit 2, before the options are parsed (it would be an unknown option there) and before anything starts. The
+  // file is read only when one is given. A decision: `mason start --replication --help` answers the refusal, not the
+  // usage — the flag is wrong whatever else the line asks
+  const removed = removedStartFlags(argv, () => startSourcesTop(process.cwd()));
   if (removed !== null) return failed("start", { code: "usage", ...removed, next: [["mason start", "each table kept current as its sync: says"], ["mason help production", "sync: and publication:, and what each needs"]] }, { json: wantsJson(argv, DEV) });
   const f = parseCommand(DEV, argv);
   if (typeof f === "number") return f;
@@ -110,11 +111,9 @@ async function runDev(argv: string[]): Promise<number> {
 
 /** The project's sources file as a person names it (`mason/sources/app.yml`), for a removed flag's answer: the one file
  *  of the project of this folder, else the name every project's has. */
-function startSourcesFile(cwd: string): string {
+function startSourcesTop(cwd: string): SourcesTop {
   const t = theProject(cwd);
-  if ("problem" in t) return "mason/sources/<name>.yml";
-  const names = sourceFileNames(t.project.folder);
-  return names.length === 1 ? shownPath(t.project.root, path.join(sourcesDir(t.project.folder), names[0]!)) : `${shownPath(t.project.root, sourcesDir(t.project.folder))}/<name>.yml`;
+  return "problem" in t ? { shown: "mason/sources/<name>.yml", sync: null, publication: null } : sourcesTop(t.project.root, t.project.folder);
 }
 
 export const HELP: CommandSpec = {
