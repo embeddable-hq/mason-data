@@ -69,7 +69,10 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
   publication you name (`publication: ${PG_PUBLICATION}` at the top of the sources file) or the right to create one. The slot holds the database's WAL while Mason is
   down: cap it with `max_slot_wal_keep_size`.
 - **No setting chooses it**: how each table is kept current is the committed sources file's alone. `MASON_CHANGES`
-  is gone, and set it refuses the start, naming the `sync:` line to write in the sources file.
+  is gone, and set it refuses the start, naming the `sync:` line to write in the sources file. A volume an older Mason
+  streamed, under a file with no `sync:` anywhere, is refused and its slot kept: `sync: replication` keeps streaming,
+  `sync: off` or `sync: poll <interval>` confirms the drop. A publication it recorded and nothing names is refused too:
+  `publication: <name>`, or `publication: null` for Mason's own.
 - **The network**: the container must reach the database. Run it in the same private network, or allow the server's
   outbound address in the database's firewall.
 

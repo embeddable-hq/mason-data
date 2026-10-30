@@ -22,7 +22,7 @@ import { matrixEnv, runMason } from "./cli-matrix.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 const { serveSettings, serveConfig, serveSource, healthBody } = serveModule as unknown as typeof import("../src/cli/serve.ts");
-const { healthServer } = serveModule as unknown as typeof import("../src/cli/serve.ts");
+const { healthServer, serveRecordRefusal } = serveModule as unknown as typeof import("../src/cli/serve.ts");
 // imported when the tests run: the file loads at a commit without the module, and a test that needs it fails by name
 const sourcesModule = await import("../src/cli/sources.ts" as string).catch(() => ({})) as Record<string, unknown>;
 const readSource = (sourcesModule.readSource ?? (() => ({ message: "no sources module at this commit" }))) as typeof import("../src/cli/sources.ts").readSource;
@@ -101,6 +101,64 @@ test("the config: new on an empty volume, resumed over what the runs recorded; a
     const broken = serveConfig(s, readProject(dir));
     assert.ok("message" in broken);
     assert.equal(broken.code, "bad_config");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("mason serve refuses what its volume's 0.7.0 config records and the sources file does not say, before the volume or the project folder is written; each way through passes", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-record-"));
+  try {
+    const data = path.join(dir, "data"), project = path.join(dir, "project");
+    const env = { DATABASE_URL: "postgres://mason:secret@127.0.0.1:1/app", MASON_API_KEY: KEY, MASON_DATA: data, MASON_PROJECT: project, MASON_NAME: "shop" };
+    const s = serveSettings(env, "/");
+    assert.ok(!("message" in s));
+    const replication = { slot: "mason_dev_shop_app", publication: "app_pub", owned: false };
+    fs.mkdirSync(path.join(data, ".mason"), { recursive: true });
+    // no sources file yet: serve would write one saying sync: off, which is no one's choice
+    writeConfig(path.join(data, ".mason"), { ...newConfig("shop", project, true), apiKey: KEY, served: true, changes: "replication", publication: "app_pub", replication });
+    const was = fs.readFileSync(path.join(data, ".mason", "config.json"), "utf8");
+    const serveNow = async (): Promise<{ code: number | null; json: string }> => {
+      const child = spawn(process.execPath, [MAIN, "serve", "--json"], { cwd: dir, env: { PATH: process.env.PATH, HOME: dir, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+      let json = "";
+      child.stdout.on("data", (d) => { json += String(d); });
+      return { code: await new Promise<number | null>((r) => child.once("exit", r)), json };
+    };
+    const none = await serveNow();
+    assert.equal(none.code, 1, none.json);
+    const first = JSON.parse(none.json) as { error: { code: string; message: string }; next: Array<{ command: string }> };
+    assert.deepEqual([first.error.code, first.error.message], ["refused", "this project streams, and it has no sources file to say so"]);
+    assert.deepEqual(first.next.map((n) => n.command), ["mason serve"]);
+    assert.equal(fs.existsSync(project), false, "no sources file written");
+    assert.equal(fs.readFileSync(path.join(data, ".mason", "config.json"), "utf8"), was, "the volume as it was");
+
+    // the file 0.7.0 ran: silent, and both records said on one report
+    fs.mkdirSync(path.join(project, "sources"), { recursive: true });
+    const file = path.join(project, "sources", "app.yml");
+    fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n");
+    const silent = await serveNow();
+    assert.equal(silent.code, 1, silent.json);
+    const e = (JSON.parse(silent.json) as { error: { message: string; fix: string } }).error;
+    assert.equal(e.message, "this project streams, and project/sources/app.yml does not say so: no sync: at its top or on an entry");
+    assert.match(e.fix, /write sync: replication and publication: app_pub at the top of project\/sources\/app\.yml/);
+    assert.equal(fs.readFileSync(path.join(data, ".mason", "config.json"), "utf8"), was);
+
+    // sync: replication alone: the publication is still unnamed
+    fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\ntables:\n  orders: {}\n");
+    const unnamed = serveRecordRefusal(s, readProject(data), env);
+    assert.equal(unnamed?.message, "this project reads publication app_pub, and project/sources/app.yml does not name it");
+    assert.equal(serveRecordRefusal(s, readProject(data), { ...env, PG_PUBLICATION: "app_pub" }), null, "named by the setting a server sets");
+    fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\npublication: app_pub\ntables:\n  orders: {}\n");
+    assert.equal(serveRecordRefusal(s, readProject(data), env), null);
+    fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\npublication: null\ntables:\n  orders: {}\n");
+    assert.equal(serveRecordRefusal(s, readProject(data), env), null);
+    // the file says it does not stream: the run drops what was made, as it did
+    fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\nsync: poll 5m\ntables:\n  orders: {}\n");
+    assert.equal(serveRecordRefusal(s, readProject(data), env), null);
+    // a file that cannot be read is the next step's to say, and a project init made is serveConfig's
+    fs.writeFileSync(file, "kind: nope\n");
+    assert.equal(serveRecordRefusal(s, readProject(data), env), null);
+    fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n");
+    writeConfig(path.join(data, ".mason"), { ...newConfig("shop", project, false), changes: "replication" });
+    assert.equal(serveRecordRefusal(s, readProject(data), env), null);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

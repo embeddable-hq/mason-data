@@ -31,7 +31,7 @@ import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
 import { createRunServer, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import type { RunMetrics } from "./metrics.ts";
-import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, type RunSources, type SourceFile } from "./sources.ts";
+import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, syncWritten, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectSource, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
@@ -56,10 +56,10 @@ import { isLibcCollation } from "../duck/rewrite.ts";
 import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
 import { exampleRole, LiveRoles, missingAttributesText, noRoleWayOut, readRoles, resolveRoles, rolesDefaultLine, rolesFile, usersMissingAttributes, usersWithNoRole, usersWithoutRole } from "./roles.ts";
 import { READY_LINE, readRestarts } from "./supervise.ts";
-import { dropOwnReplication, dropStatements, liveReadinessFailure, madeReplication, namedPublication, projectReplication, replicationReadiness, staleReplication } from "./replication-mode.ts";
+import { dropOwnReplication, dropStatements, liveReadinessFailure, madeReplication, namedPublication, projectReplication, recordRefusal, replicationReadiness, staleReplication } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
 import { LogBuffer } from "../lib/log-buffer.ts";
-import { syncText, type TableSync } from "../lib/table-sync.ts";
+import { BIG_TABLE_ROWS, syncText, type TableSync } from "../lib/table-sync.ts";
 
 export interface DevOptions {
   /** the port the commands reach the run on (src/cli/run-server.ts), or the next free one */
@@ -167,12 +167,12 @@ function syncCounts(tables: ReadonlyArray<{ sync?: TableSync }>): string {
  */
 export function syncDefaultLine(file: SourceFile, shown: string, copiedBefore = 0): string {
   const d = effectiveSync(file, undefined);
-  const noneWritten = d.from === "default" && file.tables.every((e) => e.sync === null);
-  if (noneWritten && copiedBefore > 0) {
-    // true of a file an older Mason polled and of one written by hand that never was: "not polled", the old way said
-    return `sync: off (the default): ${copiedBefore === 1 ? "1 table is" : `${copiedBefore} tables are`} not polled (an older Mason polled every table every 5 s); ` +
-      `write \`sync: poll 5s\` at the top of ${shown} ` +
-      "to keep them current as before, or `mason sync <table>` when you need it";
+  if (!syncWritten(file) && copiedBefore > 0) {
+    // true of a file an older Mason polled and of one written by hand that never was: "not polled", the old way said.
+    // That Mason left a big table out of its polls, and the line that keeps the rest as before does not (BIG_TABLE_ROWS)
+    return `sync: off (the default): ${copiedBefore === 1 ? "1 table is" : `${copiedBefore} tables are`} not polled (an older Mason polled every table under ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows every 5 s); ` +
+      `\`sync: poll 5s\` at the top of ${shown} keeps them current as before, but polls the bigger ones too, each poll a full scan on your database: ` +
+      "give those `sync: off` on their entry (mason tables shows the rows), or use `mason sync <table>` when you need it";
   }
   if (d.from === "default") return `sync: off (the default): after its first sync, a table is read again only by mason sync <table> — sync: poll 5m at the top of ${shown} polls every table, or on an entry that one`;
   return d.sync.mode === "off" ? `sync: off (${shown}): after its first sync, a table is read again only by mason sync <table>, unless its entry says sync: poll <interval>`
@@ -226,6 +226,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // always was (after the listener's checks): a demo project's port is needed first
   const readSources = (): ReturnType<typeof projectSource> => projectSource(project, process.env, { shellFirst: o.serve !== undefined });
   const src = readSources();
+  // what the config records and the file does not say (an older Mason's replication): refused before the port below is
+  // recorded or the pin written, and long before anything on the database is dropped or made
+  const unsaid = "message" in src ? null : recordRefusal(cfg, src, process.env, shownPath(project.root, src.file), o.serve ? "mason serve" : "mason start");
+  if (unsaid !== null) return failed("start", unsaid, { json: false });
   // a demo project's database listens on the port its URL names (the one place it is kept), which no listener of the
   // run's may take: read BEFORE the Postgres API's port is chosen and recorded, so the choice avoids it (a recorded or
   // named port that is the demo's is refused by choosePgPort, nothing recorded), and the command server is kept off it
@@ -342,12 +346,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     recordReplication(cfg, repl, home);
   } else if ((cfg.replication ?? null) !== null || cfg.changes === "replication") {
     // THE SLOT GOES WHENEVER NO TABLE IS REPLICATED: it holds the database's WAL while nobody reads it. A project an
-    // older Mason streamed whole (its `changes: "replication"`, recorded in config.json) is told why, with the line that
-    // streams them again
-    if (cfg.changes === "replication") {
-      say(`  an older Mason streamed every table of this project (its mason start --replication); ${shownFile} says how each table is kept current now, and none says sync: replication — ` +
-        `write sync: replication at its top to stream them again`);
-    }
+    // older Mason streamed whole (its `changes: "replication"`) reaches this only when the file says so: a file silent
+    // on sync: was refused above (recordRefusal)
+    if (cfg.changes === "replication") say(`  an older Mason streamed every table of this project; ${shownFile} says otherwise now, so what it made goes`);
     try { for (const d of await dropOwnReplication(source, before)) say(`  dropped ${d} from ${source.database}: no table's sync is replication`); }
     catch (e) {
       say(`mason start: ${(e as Error).message}. They hold the database's WAL while nobody reads them: drop them by hand — ${dropStatements(before)}`);

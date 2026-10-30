@@ -188,11 +188,15 @@ test("publication: at the top names the publication replication reads, a ${VARIA
     fs.rmSync(path.join(root, ".env"));
     const unset = S.readSource(folder, root, {}) as Failure;
     assert.deepEqual([unset.code, unset.message, unset.fix], ["bad_source", "mason/sources/app.yml: publication: ${PG_PUBLICATION} is not set — not in .env.local, .env or the shell",
-      "put PG_PUBLICATION=<the publication's name> in .env (or export it), or take publication: out of the file and Mason makes its own"]);
+      "put PG_PUBLICATION=<the publication's name> in .env (or export it), or write publication: null and Mason makes its own"]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  // `publication: null` is Mason's own, said on purpose, past PG_PUBLICATION too; no line says nothing
+  const said = parse("kind: postgres\nurl: x\npublication: null\ntables: {}\n") as { publication: unknown };
+  assert.deepEqual(said.publication, { own: true });
+  assert.equal((parse("kind: postgres\nurl: x\ntables: {}\n") as { publication: unknown }).publication, null);
   const problems = (text: string): string[] => (parse(text) as { problems: string[] }).problems;
   assert.deepEqual(problems("kind: postgres\nurl: x\npublication: $PG_PUBLICATION\ntables: {}\n"), ['publication: "$PG_PUBLICATION" — write ${NAME} alone, like ${PG_PUBLICATION}, or the publication\'s name']);
-  assert.deepEqual(problems("kind: postgres\nurl: x\npublication: ''\ntables: {}\n"), ["publication: write publication: ${PG_PUBLICATION}, or a publication's name (leave it out and Mason makes its own)"]);
+  assert.deepEqual(problems("kind: postgres\nurl: x\npublication: ''\ntables: {}\n"), ["publication: write publication: ${PG_PUBLICATION}, or a publication's name (publication: null and Mason makes its own)"]);
   assert.deepEqual(problems("kind: postgres\nurl: x\npublcation: app_pub\ntables: {}\n"), ["unexpected key publcation — did you mean `publication`? — a source file takes kind, url, database, sync, publication, tables"]);
 });
 

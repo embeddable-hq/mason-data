@@ -22,6 +22,7 @@ import { liveRun } from "./runs.ts";
 import { projectSource, startSettingRefusal, theProject } from "./project.ts";
 import { runListenerSettings } from "./pg-tls.ts";
 import { demoChangesRefusal, demoPort } from "./demo.ts";
+import { recordRefusal } from "./replication-mode.ts";
 import { shownPath } from "./sources.ts";
 import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
 import { historyDaysSetting } from "../duck/history.ts";
@@ -78,6 +79,9 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   const shown = file === null ? "" : shownPath(t.project.root, file.file);
   const demoRefused = demoChangesRefusal(t.project.config, file, shown);
   if (demoRefused) return failed("start", demoRefused, { json: o.json });
+  // what the config records and the file does not say (src/cli/replication-mode.ts), before a run is spawned
+  const unsaid = file === null ? null : recordRefusal(t.project.config, file, process.env, shown, "mason start");
+  if (unsaid !== null) return failed("start", unsaid, { json: o.json });
   // a setting a start refuses, here where the person (or --json) reads it, by the run's own list (src/cli/project.ts)
   const setting = startSettingRefusal(t.project, process.env, { serve: false });
   if (setting !== null) return failed("start", setting, { json: o.json });

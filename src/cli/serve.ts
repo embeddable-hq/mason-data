@@ -31,6 +31,7 @@ import { connectDatabase, DATABASE_SETTING, databaseNameProblem } from "../lib/d
 import { appEnvValue } from "../lib/dotenv.ts";
 import { imagePinProblem, PIN_FILE } from "../lib/project-version.ts";
 import { commandPinProblem } from "./pin.ts";
+import { recordRefusal } from "./replication-mode.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { runningVersion, version, type RunningVersion } from "./version.ts";
@@ -257,6 +258,21 @@ export function serveSource(s: ServeSettings, env: NodeJS.ProcessEnv): { wrote: 
   return "message" in r ? r : { wrote, database: connectDatabase(r, { served: true }, env) };
 }
 
+/**
+ * WHAT THE VOLUME'S CONFIG RECORDS AND THE SOURCES FILE DOES NOT SAY (src/cli/replication-mode.ts recordRefusal), asked
+ * BEFORE `serveSource` and the config are written: a file a serve writes itself says `sync: off`, no one's choice, and a
+ * refused serve leaves the volume and the project folder as it found them. A file that cannot be read, and a project a
+ * serve does not take over, are said by the steps after this.
+ */
+export function serveRecordRefusal(s: ServeSettings, existing: Project | BrokenProject | null, env: NodeJS.ProcessEnv): Failure | null {
+  if (existing === null || "broken" in existing || existing.config.served !== true) return null;
+  const written = sourceFileNames(s.project).length > 0;
+  if (!written && fs.existsSync(path.join(s.project, OLD_TABLES_DIR))) return null;
+  const file = written ? readSource(s.project, s.data, env, { shellFirst: true }) : null;
+  if (file !== null && "message" in file) return null;
+  return recordRefusal(existing.config, file, env, sourcesTop(path.dirname(s.project), s.project).shown, "mason serve");
+}
+
 /** Where a serve is: what /healthz and /metrics say. Once ready, `metrics` reads the run's numbers (src/cli/run-server.ts
  *  `metricsFacts`): required, so no ready phase exists where /healthz says ready and /metrics `mason_ready 0`. */
 export type ServePhase = { phase: "starting" }
@@ -326,10 +342,13 @@ export async function serve(argv: string[]): Promise<number> {
   if ("message" in s) return failed("serve", s, { json });
   const pinned = servePin(s, runningVersion());
   if (pinned) return failed("serve", pinned, { json });
+  const existing = readProject(s.data);
+  const unsaid = serveRecordRefusal(s, existing, process.env);
+  if (unsaid !== null) return failed("serve", unsaid, { json });
   // the project folder: its sources file is the list of what is copied, one with no table written when there is none
   const made = serveSource(s, process.env);
   if ("message" in made) return failed("serve", made, { json });
-  const c = serveConfig(s, readProject(s.data));
+  const c = serveConfig(s, existing);
   if ("message" in c) return failed("serve", c, { json });
   try { writeConfig(path.join(s.data, STATE_DIR), c.config); }
   catch (e) {

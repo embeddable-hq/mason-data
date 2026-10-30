@@ -138,7 +138,7 @@ CLI lacks).
   both), `sync:` how it is kept current (`off`, `poll <interval>`, `replication`; the file's top `sync:` is every entry's
   default, and none written is `off`, said at `mason start`), `key:` only for a table with no primary key (refused on
   one that has one; refused under `sync: replication`, whose changes the stream applies by key), and `publication:` at
-  the top (the publication replication reads, `${PG_PUBLICATION}` allowed). Types are never in the file: the run reads them at every start. A
+  the top (the publication replication reads, `${PG_PUBLICATION}` allowed; `publication: null` is Mason's own, on purpose). Types are never in the file: the run reads them at every start. A
   second file is refused ("one source per project for now"). ONE reader (`readSource`, `parseSourceText`, then
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every
   mistake of a file on ONE report (`sourceFailure`, code `bad_source`), each with its key, a `did you mean` and the
@@ -278,7 +278,13 @@ CLI lacks).
 - **`sync: replication` is the production change path on a laptop, per table** (src/cli/replication-mode.ts): the
   sources file alone decides — `mason start --replication`, `--poll` and `--publication` are gone, each answered with
   the line to write and exit 2 before anything starts (`removedStartFlags`, src/lib/table-sync.ts), and `MASON_CHANGES`
-  set refuses `mason serve` on its settings report (`changesRetired`). A start that replicates any table holds the developer's database to the production checks' own rules
+  set refuses `mason serve` on its settings report and `mason start` by `startSettingRefusal` (`changesRetired`).
+  **What the config records and the file does not say is refused, never acted on** (`recordRefusal`,
+  src/cli/replication-mode.ts: the start, its run and `serveRecordRefusal`, before anything is written or connected): an
+  older Mason's `changes: "replication"` under a file with no `sync:` at its top or on an entry (any `sync:` is the
+  file saying so: `replication` keeps the slot, `off` or `poll <interval>` confirms the drop), and a recorded
+  `publication` that a replicating file and `PG_PUBLICATION` do not name (`publication: <name>`, or `publication: null`
+  for Mason's own), both on one report. A start that replicates any table holds the developer's database to the production checks' own rules
   (`replicationChecks`, src/cli/replication-checks.ts: `wal_level`, the role, a free slot and WAL sender, the WAL cap
   said, not refused; a slot held by another run named with the way out). A switch keeps the copies and catches each
   table up by one poll. What it made is recorded (`config.json` `replication`) and dropped, VERIFIED gone, when no

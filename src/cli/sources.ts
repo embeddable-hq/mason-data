@@ -10,6 +10,7 @@
  *                                 (the default: until mason sync <table>), poll <interval> or replication; an entry's
  *                                 own overrides it
  *   publication: ${PG_PUBLICATION}  the publication `replication` reads, its owner's (never altered); none: Mason's own
+ *                                   (`publication: null` says so, past one an earlier start recorded)
  *   tables:
  *     orders:                     a bare name is in `public`; `billing.invoices` names its schema
  *       columns: [id, customer_id, status]
@@ -75,13 +76,19 @@ export interface SourceFile {
   sync: TableSync | null;
   /** the publication the `replication` tables are read through, its owner's: `${NAME}` (resolved by `readSource`) or
    *  its name written in the file; null: none named, so Mason makes its own (src/duck/sync.ts ensurePublication) */
-  publication: { env: string } | { literal: string } | null;
+  publication: { env: string } | { literal: string } | { own: true } | null;
   tables: TableEntry[];
 }
 
 /** The tables a file keeps current by replication, by their effective sync (`effectiveSync`): what streams. */
 export function replicatedEntries(src: Pick<SourceFile, "sync" | "tables">): TableEntry[] {
   return src.tables.filter((e) => effectiveSync(src, e).sync.mode === "replication");
+}
+
+/** Whether the file says how anything is kept current: a `sync:` at its top or on any entry. A file with none has every
+ *  table on the default, by no one's choice: what an older Mason's file looks like. */
+export function syncWritten(file: Pick<SourceFile, "sync" | "tables">): boolean {
+  return file.sync !== null || file.tables.some((e) => e.sync !== null);
 }
 
 /** A table's sync: its entry's, else the file's, else the default (`off`) — and which of the three said it. */
@@ -216,10 +223,13 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
 
   // the publication a replicated table is read through: a name, or ${NAME} as url: takes one (resolved by readSource)
   let publication: SourceFile["publication"] = null;
-  if (v.publication !== undefined && v.publication !== null) {
+  // the key written with no value (`publication: null`): Mason's own, on purpose, past a name a start recorded
+  // (src/cli/replication-mode.ts recordRefusal); no line at all says nothing
+  if (v.publication === null) publication = { own: true };
+  else if (v.publication !== undefined) {
     const p = typeof v.publication === "string" ? v.publication.trim() : "";
     const m = ENV_REF.exec(p);
-    if (p === "") problems.push("publication: write publication: ${PG_PUBLICATION}, or a publication's name (leave it out and Mason makes its own)");
+    if (p === "") problems.push("publication: write publication: ${PG_PUBLICATION}, or a publication's name (publication: null and Mason makes its own)");
     else if (m) publication = { env: m[1]! };
     else if (p.includes("$")) problems.push(`publication: ${JSON.stringify(p)} — write \${NAME} alone, like \${PG_PUBLICATION}, or the publication's name`);
     else publication = { literal: p };
@@ -399,12 +409,12 @@ export function readSource(folder: string, root: string, env: NodeJS.ProcessEnv 
   // the publication's name, read as url: is: ${NAME} from the same places, in the same order
   let publicationName: string | null = null;
   if (parsed.publication !== null && "literal" in parsed.publication) publicationName = parsed.publication.literal;
-  else if (parsed.publication !== null) {
+  else if (parsed.publication !== null && "env" in parsed.publication) {
     const v = parsed.publication.env;
     const p = appEnvValue(root, v, env, { shellFirst: o.shellFirst === true });
     if (p === null || p.value.trim() === "") {
       return { message: `${shownPath(root, file)}: publication: \${${v}} is not set — not in ${where}`, code: "bad_source",
-        fix: `put ${v}=<the publication's name> in ${shownPath(root, path.join(root, ENV_FILE))} (or export it), or take publication: out of the file and Mason makes its own` };
+        fix: `put ${v}=<the publication's name> in ${shownPath(root, path.join(root, ENV_FILE))} (or export it), or write publication: null and Mason makes its own` };
     }
     publicationName = p.value.trim();
   }
