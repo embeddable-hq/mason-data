@@ -1,5 +1,5 @@
 /**
- * A PUBLICATION THE OPERATOR NAMED, READ AS IT IS: `mason start --replication --publication <name>`
+ * A PUBLICATION THE OPERATOR NAMED, READ AS IT IS: `publication: <name>` at the top of the sources file
  * (or `PG_PUBLICATION`) streams through a publication that is the database owner's, never Mason's — on a read replica
  * Mason could not make one (CREATE PUBLICATION is refused on a standby), and on a customer's primary the one object
  * Mason creates is its slot (CLAUDE.md "We are read-only on a customer's Postgres"). So it is VERIFIED, never created,

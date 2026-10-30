@@ -34,6 +34,7 @@ import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateD
 import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_PORT, DEMO_SYNC, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
 import { freePort } from "./ports.ts";
 import { DEFAULT_SYNC, syncText } from "../lib/table-sync.ts";
+import { newRolesText, rolesFile } from "./roles.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
 
 
@@ -43,14 +44,16 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   nothing when it cannot), then creates:
     .mason/                   this machine's: Mason's key and, once Mason runs, its copy and state (gitignored)
     mason/sources/<db>.yml    the database and the tables to copy (mason add adds them) — commit it
+    mason/roles.yml           who may read what: one role, everything (tables: all), the default of a user added
+                              without --role, so every user reads every copied table until you narrow it — commit it
     mason/mason.yml           the Mason version the project is written for — commit it: production runs that version
   With no URL it reads MASON_DATABASE_URL, else your app's DATABASE_URL, each from .env.local, then .env, then the
   shell. The source file names the variable read, url: \${DATABASE_URL} — \${MASON_DATABASE_URL} when that is the one
   read, or when a URL given here is another database than your app's DATABASE_URL: the URL itself is in .env (written
   there when you give it here or it is only in the shell), never in a committed file. .mason/ and that .env go into
   .gitignore. Every other mason command then works anywhere in this folder. A source file already here (a clone of the
-  project) is kept, and a bare mason init reads the variable it names. In a project with no source file (an older
-  Mason's), it writes that file alone.
+  project) is kept, and a bare mason init reads the variable it names; a roles file already here is kept. In a project
+  with no source file (an older Mason's), it writes that file alone, and the roles file when there is none.
   mason init demo, in a new folder, makes a project on a demo database Mason hosts itself (a shop: customers, products,
   orders, order_items): mason start makes it in .mason/demo/ and changes it every few seconds. Three of its tables are
   added; the fourth is yours to add after mason start (mason add ${DEMO_TABLE_TO_ADD}), to watch its copy begin.
@@ -67,8 +70,8 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   --skip-check      write the project without connecting (the database is not up yet); mason start checks it; not with demo
   --json            as data: { name, root, folder, config, demo (true for the demo database's project, else false),
                     source: { name (the source's: its file's), file, url (as the file writes it), env (the .env line
-                    written, its value masked, or null) }, database: { url (password masked), from, version, tables },
-                    warnings, next }
+                    written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
+                    database: { url (password masked), from, version, tables }, warnings, next }
 `;
 
 export const INIT: CommandSpec = {
@@ -76,7 +79,7 @@ export const INIT: CommandSpec = {
   summary: "make this folder a Mason project on your Postgres: mason init (its URL from .env), mason init postgres://… or demo",
   usage: INIT_USAGE,
   options: { name: { type: "string" }, folder: { type: "string" }, remote: { type: "boolean" }, "skip-check": { type: "boolean" }, json: { type: "boolean" } },
-  json: ["name", "root", "folder", "config", "demo", "source", "database", "warnings", "next"],
+  json: ["name", "root", "folder", "config", "demo", "source", "roles", "database", "warnings", "next"],
 };
 
 /** Why `name` cannot be this project's, or null: not a name the Postgres API's database and the slot take. */
@@ -264,6 +267,8 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   let database: { url: string; from: string | null; version: string | null; tables: number | null } = { url: db, from: from ? from.slice(2, -1) : null, version: null, tables: null };
   const rel = (p: string): string => path.relative(root, p) || ".";
   const sourceFile = kept !== null ? path.join(sourcesDir(folder), kept) : path.join(sourcesDir(folder), `${sourceNameFor(parsed.source.database)}.yml`);
+  const rolesPath = rolesFile(folder);
+  const rolesKept = fs.existsSync(rolesPath);
   // the folder an older Mason listed the tables in: read by nothing (no backwards compatibility before v1.0), said
   const oldTables = path.join(folder, OLD_TABLES_DIR);
   if (fs.existsSync(oldTables)) notes.push(`${rel(oldTables)}/ is an older Mason's, which this one does not read: mason add each table again, then remove it`);
@@ -315,6 +320,15 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
         `(${demo ? "every table polled every 5 s" : "each table read once, then again only by mason sync <table>"}) and the tables to copy, ` +
         `${demo ? `the demo's ${DEMO_ADDED_TABLES.length} added — mason add ${DEMO_TABLE_TO_ADD} adds the fourth` : "none yet (mason add)"} — commit it`);
     }
+    // THE ROLES FILE (src/cli/roles.ts newRolesText): today's access said in a committed file — every user reads every
+    // copied table, as the default role everything — kept when one is here (a clone of the project)
+    if (rolesKept) await steps.step(`Keeping ${rel(rolesPath)}`, () => undefined, () => `Kept ${rel(rolesPath)}: the roles and the default for a user added without --role`);
+    else {
+      await steps.step(`Writing ${rel(rolesPath)}`, () => {
+        fs.mkdirSync(path.dirname(rolesPath), { recursive: true });
+        fs.writeFileSync(rolesPath, newRolesText());
+      }, () => `Wrote ${rel(rolesPath)}: every user reads every copied table (default: everything, tables: all) — narrow it with a second role — commit it`);
+    }
     if (where.line !== null) {
       const envLine = where.line;
       await steps.step(`Writing ${where.variable} to .env`, () => addEnvLine(root, envLine), () => `Wrote ${maskedLine(envLine)} to .env: the URL the source file names, kept out of git`);
@@ -363,6 +377,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     say(jsonText(INIT, { name, root, folder: path.relative(root, folder) || ".", config: path.join(root, STATE_DIR, "config.json"), demo,
       source: { name: path.basename(sourceFile).replace(/\.ya?ml$/, ""), file: sourceFile, url: keptFile !== null && !("problems" in keptFile) ? ("env" in keptFile.url ? `\${${keptFile.url.env}}` : maskedUrl(keptFile.url.literal)) : `\${${where.variable}}`,
         env: where.line === null ? null : maskedLine(where.line) },
+      roles: { file: rolesPath, written: !rolesKept },
       database, warnings: notes }, next));
     return 0;
   }

@@ -100,8 +100,8 @@ CLI lacks).
   destroy` removes it with the copy.
   Why: a first try must need nothing installed, and must run the read path production runs. **Its port is in the URL
   alone** (chosen free at init, read back by `demoPort`): a second record would disagree with an edited `.env`, which the
-  run refuses with the way out. **Poll only**: the demo database has no change log, so `--replication` and a file with
-  `sync: replication` are refused before anything starts (`demoChangesRefusal`). A command that connects while the run is down (`tables`, `add`, `remove`, `doctor`) says the
+  run refuses with the way out. **Poll only**: the demo database has no change log, so a file with `sync: replication`
+  is refused before anything starts (`demoChangesRefusal`). A command that connects while the run is down (`tables`, `add`, `remove`, `doctor`) says the
   demo database runs inside mason start — told by the config's `demo`, never by sniffing the URL.
 - **Up means it answers** (what a reboot does to a run): a run is up only when its command server answers
   `/api/ping` with the run's token and its own pid (`answers`, src/cli/runs.ts); a pid in the config that is alive is
@@ -204,13 +204,17 @@ CLI lacks).
   is enough. `disable` keeps the user and its password and refuses its logins until `enable`; a no-op (disabled
   already, not disabled) is said, `already: true`, exit 0.
 - **A roles file is read by ONE module, in the sources file's words** (`src/cli/roles.ts`: `mason/roles.yml`,
-  `roles: { <role>: { tables: { <table>: {} | { columns: [...] } | { exclude: [...] } } } }`), validated at `mason
+  `default: <role>` and `roles: { <role>: { tables: all | { <table>: {} | { columns: [...] } | { exclude: [...] } } } }`;
+  `tables: all` is every copied table, resolved at every read), validated at `mason
   start` against the tables the sources file copies and by `mason user add --role` (the listener's roles while the
   run is up, `/api/state`'s `roles`; the file with Mason stopped), every mistake at its key with a `did you mean`, code
   `bad_roles`; a role the file does not name is `not_found` with the lines to add. `LiveRoles` re-reads it when it
   changes, so an edit applies without a restart, and a file edited into a mistake keeps the last good grants for the
   catalog and refuses every statement of a user with a role (`.claude/rules/postgres-api.md`). `mason user list`,
-  `mason start` and the web page say which users carry a role the file no longer names.
+  `mason start` and the web page say which users carry a role the file no longer names. **`mason init` (and `init
+  demo`) writes the file** when the folder has none (`newRolesText`, its one writer: `default: everything`, `tables:
+  all`), and keeps one that is there. What a user with no role reads is the FILE's (`userRole`, one function for `mason
+  user add` / `list`, `mason start`'s line `rolesDefaultLine` and the web page; `roleFrom`, `readsNothing` in `--json`).
 - **`mason mcp` is an MCP server on stdio, a client of the Postgres API as a `mason user`** (src/cli/mcp.ts, docs/DESIGN.md
   "An MCP server"): stdout is the protocol's (JSON-RPC frames alone), every log line goes to stderr, and so does a
   failure to start — it takes no `--json` (`CommandSpec.stdout: "protocol"`; tests/cli-help.test.ts); a tool's failure is
@@ -244,16 +248,15 @@ CLI lacks).
   and the usage sampler already compute (`metricsFacts`), never a second computation (tests/conventions.test.ts holds
   its labels to a closed set; tests/cli-metrics.test.ts feeds it names and holds them absent).
 - **`sync: replication` is the production change path on a laptop, per table** (src/cli/replication-mode.ts): the
-  sources file decides — `--replication`, `--poll` and `MASON_CHANGES` are taken only where they agree with it, and
-  refused otherwise in the Failure shape naming the `sync:` line to write (`changesAgreement`; the next release removes
-  them). A start that replicates any table holds the developer's database to the production checks' own rules
+  sources file alone decides — `mason start --replication`, `--poll` and `--publication` are gone, each answered with
+  the line to write and exit 2 before anything starts (`removedStartFlags`, src/lib/table-sync.ts), and `MASON_CHANGES`
+  set refuses `mason serve` on its settings report (`changesRetired`). A start that replicates any table holds the developer's database to the production checks' own rules
   (`replicationChecks`, src/cli/replication-checks.ts: `wal_level`, the role, a free slot and WAL sender, the WAL cap
   said, not refused; a slot held by another run named with the way out). A switch keeps the copies and catches each
   table up by one poll. What it made is recorded (`config.json` `replication`) and dropped, VERIFIED gone, when no
   table is replicated any more and at `mason destroy`; when they cannot be, the rest goes and the failure prints the
   statements. A slot outlives the run: `mason stop` says it stays and holds WAL. **A publication the operator names
-  (`publication:` in the sources file, else `--publication` — both is refused — else `PG_PUBLICATION`, else the
-  recorded one, `config.json` `publication`) is never created, altered or dropped** — only
+  (`publication:` in the sources file, else `PG_PUBLICATION`) is never created, altered or dropped** — only
   the slot goes — and a read replica needs one, refused by name before any slot is made (`readinessVerdict`;
   `.claude/rules/duckdb.md`).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the

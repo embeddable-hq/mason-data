@@ -4,7 +4,7 @@
  * background start with its demo step, the copy of the three tables init adds, the fourth added by the person with
  * `mason add order_items` while the run is up and copied, the writer's orders reaching the copy and the
  * Postgres API, the stop that keeps the demo database, a second start that opens it again (and answers --json with its
- * Postgres API), the three refusals before a run (a held port, an edited URL, --replication), and the destroy that
+ * Postgres API), the three refusals before a run (a held port, an edited URL, a table set to sync: replication), and the destroy that
  * removes it and the start that seeds it again.
  * The pieces' own tests are tests/cli-demo.test.ts, tests/demo-source.test.ts and tests/cli-project.test.ts; this is
  * the one that runs them together, as a person does.
@@ -114,6 +114,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const sourcesFile = path.join(root, "mason", "sources", "demo.yml");
     fs.writeFileSync(sourcesFile, sources.replace(/^sync: poll 5s /m, "sync: poll 1s "));
     assert.equal(config().demo, true);
+    // the roles file every project starts with (stage 1b): every user reads every copied table, said in a committed file
+    assert.match(fs.readFileSync(path.join(root, "mason", "roles.yml"), "utf8"), /^default: everything {3}# [^\n]*\n\nroles:\n {2}everything:\n {4}tables: all /m);
     assert.ok(!fs.existsSync(demoDir), "nothing is hosted before mason start");
     // THE DEMO ON A PORT THE OS NEVER HANDS OUT (out of its ephemeral range, claimed: tests/test-ports.ts), never the 5434 init prefers (src/cli/demo.ts DEMO_PORT): init takes 5434
     // whenever it is free at that moment, and another run of this file (a second worktree's check), another test's demo
@@ -148,6 +150,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const connected = s.stdout.search(new RegExp(`✓ Connected to postgres://demo@127\\.0\\.0\\.1:${demoPort}/demo: Postgres 18[.\\d]*, 4 table\\(s\\)`));
     assert.ok(step >= 0, `the demo step: ${said(s)}`);
     assert.ok(connected > step, `connected after the demo step: ${said(s)}`);
+    // the roles line, once, after the listener's: what a user added without --role reads (src/cli/roles.ts rolesDefaultLine)
+    assert.match(s.stdout, /^ {2}1 role from mason\/roles\.yml \(everything\); default: everything \(a user added without --role\)$/m, said(s));
     // the run's lines in one column (src/cli/background.ts relays them)
     assert.match(s.stdout, new RegExp(`^ {2}Postgres API {2}postgres://<user>:<password>@127\\.0\\.0\\.1:${pgPort}/${config().name} {2}\\(mason user add <name> makes a user\\)$`, "m"));
     assert.match(s.stdout, /^ {2}Demo {10}a new order lands every 0\.3 s: mason status shows the copy keeping up$/m);
@@ -284,15 +288,20 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.equal(envUrl(), demoUrl);
   });
 
-  test("mason start --replication: refused in the failure shape before anything starts", async () => {
-    const s = await mason(["start", "--replication"]);
-    assert.equal(s.code, 1, said(s));
-    assert.match(s.stderr, /^✗ mason start: the demo database is read by polling only: --replication does not apply to it$/m);
-    assert.match(s.stderr, /^ {2}fix +mason start, without --replication$/m);
-    const j = await mason(["start", "--replication", "--json"]);
-    assert.equal(j.code, 1, said(j));
-    assert.equal((JSON.parse(j.stdout) as { error: { code: string } }).error.code, "refused");
-    assert.equal(config().running ?? null, null, "no run was started");
+  test("a table set to sync: replication: refused in the failure shape before anything starts", async () => {
+    const file = path.join(root, "mason", "sources", "demo.yml");
+    const was = fs.readFileSync(file, "utf8");
+    fs.writeFileSync(file, was.replace(/^ {2}orders: \{\}$/m, "  orders: { sync: replication }"));
+    try {
+      const s = await mason(["start"]);
+      assert.equal(s.code, 1, said(s));
+      assert.match(s.stderr, /^✗ mason start: the demo database is read by polling only: sync: replication does not apply to it \(orders\)$/m);
+      assert.match(s.stderr, /^ {2}fix +write sync: poll 5s for it in mason\/sources\/demo\.yml, then mason start$/m);
+      const j = await mason(["start", "--json"]);
+      assert.equal(j.code, 1, said(j));
+      assert.equal((JSON.parse(j.stdout) as { error: { code: string } }).error.code, "refused");
+      assert.equal(config().running ?? null, null, "no run was started");
+    } finally { fs.writeFileSync(file, was); }
   });
 
   test("mason destroy removes the demo database with the copy, and the next mason start seeds it again", async () => {

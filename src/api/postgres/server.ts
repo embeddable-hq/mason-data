@@ -58,7 +58,7 @@ import { ApiError, USER_DISABLED } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
 import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
-import { grantRefusal, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
+import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
 import { asRole, databaseNameSql, PgCatalog, unwrapRole } from "./catalog.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
@@ -1094,7 +1094,8 @@ class Session {
     // a refusal's statement is the one refuse() names (a simple Query's own statement, an Execute's portal's)
     const stored = storedPayload(sql ?? asked?.sql ?? "");
     const user = this.token?.user ?? refusedUser;
-    const role = this.token?.role;
+    // the EFFECTIVE role: the user's own, else the roles file's default (what the statement was held to)
+    const role = this.roleName();
     this.server.options.record({
       requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs: Date.now() - startedAt,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
@@ -1132,7 +1133,7 @@ class Session {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
         const e = await this.explaining(raw, whole, t, []);
-        if (e.plan === null) return catalogExplained(await this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user)), e.options);
+        if (e.plan === null) return catalogExplained(await this.forwardSimple(this.spliced(text, raw)), e.options);
         const controller = new AbortController();
         const disarm = this.armTimeout(controller);
         try {
@@ -1142,7 +1143,7 @@ class Session {
           return out;
         } finally { disarm(); }
       }
-      case "catalog": return this.forwardSimple(sessionUserSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user));
+      case "catalog": return this.forwardSimple(this.spliced(text, raw));
       case "set": return this.setStatement(t);
       case "show": return this.showStatement(t.name);
       case "transaction": return [...this.transaction(t.tag)];
@@ -1177,7 +1178,10 @@ class Session {
     const text = bytes.subarray(base, raw.stmt_len ? base + raw.stmt_len : bytes.length).toString("utf8");
     const { searchPath, timeZone } = under;
     const grants = this.grants();
-    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, grants?.name ?? "", () =>
+    // the plan cache's key is the role the plan is held to: the effective one (a default's plans are that role's), and
+    // a user with no role under a file with no default its own key, never a token's ("")
+    const key = grants?.noRole !== undefined ? "\u0000no role" : this.roleName() ?? "";
+    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, key, () =>
       this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound, grants));
   }
 
@@ -1186,26 +1190,78 @@ class Session {
    * every plan, every Execute and every catalog read — the user's role is re-read with the user before each statement
    * (`stillLive`), the roles file whenever it changes (`PgApiOptions.roles`), so a role given, taken or edited applies at
    * the next statement, with no restart. undefined: no roles anywhere (nothing to hold, and no reads to record);
-   * null: a session with no role beside roles (its plan still names its reads). FAIL CLOSED: a role the file no
-   * longer names, or a file that cannot be read as it is now, refuses the statement by name, never widens.
+   * null: a session held to nothing beside roles — a token's (its plan still names its reads). FAIL CLOSED: a role the
+   * file no longer names, or a file that cannot be read as it is now, refuses the statement by name, never widens.
+   *
+   * A USER WITH NO ROLE OF ITS OWN IS HELD TO WHAT THE FILE SAYS (stage 1b, never a default in the code): no roles file,
+   * every copied table; the file's `default:`, that role (read here at every statement, so an edit of `default:` applies
+   * at the next one); a file with no `default:`, nothing (`RoleGrants.noRole`: every statement that reads a copied table
+   * refused with the two ways out, src/duck/grants.ts noRoleRefusal). A token, which is no user, reads every copied table.
    */
   private grants(): RoleGrants | null | undefined {
     const live = this.server.rolesNow();
-    const role = this.token?.role;
-    if (role === undefined) return live.grants.size === 0 ? undefined : null;
+    const own = this.token?.role;
     const user = this.token?.user ?? this.user;
+    if (own === undefined) {
+      if (this.token?.user === undefined || live.file === null) return live.grants.size === 0 ? undefined : null;
+      if (live.problem !== null) {
+        throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the statements of the user ${JSON.stringify(user)} are refused: the user has no role of its own and the file's default cannot be read: ${live.problem}`,
+          hint: `fix ${live.file}: a user with no role is held to its default: line` }, 503);
+      }
+      if (live.default !== null) return live.grants.get(live.default) ?? this.notInFile(live, live.default, user);
+      return { name: "", file: live.file, tables: new Map(), all: false, noRole: { user, example: exampleRole(live) } };
+    }
     if (live.problem !== null) {
-      throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the role ${role}'s statements are refused: ${live.problem}`,
-        hint: `fix ${live.file ?? "the roles file"}: the role ${role} is the user ${JSON.stringify(user)}'s (a user with no role is not held to the file)` }, 503);
+      throw new PgError({ code: "57P03", message: `the roles file cannot be read as it is now, so the role ${own}'s statements are refused: ${live.problem}`,
+        hint: `fix ${live.file ?? "the roles file"}: the role ${own} is the user ${JSON.stringify(user)}'s` }, 503);
     }
-    const g = live.grants.get(role);
-    if (g === undefined) {
-      const named = [...live.grants.keys()];
-      throw new PgError({ code: "42501", message: `permission denied: the role ${role} of the user ${JSON.stringify(user)} is not in ${live.file ?? "the project's roles file (mason/roles.yml)"}`,
-        detail: `the user keeps the role it was added with; a role the file no longer names reads nothing until it is added again or the user is made again${named.length ? ` (the roles: ${named.join(", ")})` : " (the file names no role)"}`,
-        hint: `add the role ${role} to ${live.file ?? "mason/roles.yml"}, or mason user remove ${user} and mason user add ${user}${named.length ? ` --role ${named[0]}` : ""}` }, 403);
-    }
-    return g;
+    return live.grants.get(own) ?? this.notInFile(live, own, user);
+  }
+
+  /** a role the roles file does not name (now): refused by name, never widened */
+  private notInFile(live: RolesLive, role: string, user: string): never {
+    const named = [...live.grants.keys()];
+    throw new PgError({ code: "42501", message: `permission denied: the role ${role} of the user ${JSON.stringify(user)} is not in ${live.file ?? "the project's roles file (mason/roles.yml)"}`,
+      detail: `the user keeps the role it was added with; a role the file no longer names reads nothing until it is added again or the user is made again${named.length ? ` (the roles: ${named.join(", ")})` : " (the file names no role)"}`,
+      hint: `add the role ${role} to ${live.file ?? "mason/roles.yml"}, or mason user remove ${user} and mason user add ${user}${named.length ? ` --role ${named[0]}` : ""}` }, 403);
+  }
+
+  /**
+   * THE ROLE THE SESSION IS HELD TO NOW, by name — the user's own, else (a user with none) the roles file's `default:`;
+   * undefined for a token, with no roles file, under a file with no default, or one that cannot be read (`grants`
+   * refuses that). Read by the catalog's `SET ROLE` (`catalogAs`), the plan cache's key and the request log's `role`,
+   * so each says the role the statement was held to. Never throws (the request log reads it).
+   */
+  private roleName(): string | undefined {
+    const own = this.token?.role;
+    if (own !== undefined) return own;
+    if (this.token?.user === undefined) return undefined;
+    const live = this.server.rolesNow();
+    return live.file !== null && live.problem === null ? live.default ?? undefined : undefined;
+  }
+
+  /**
+   * THE CATALOG'S ROLE OF THIS SESSION NOW: the effective role (`roleName`), or — for a user the file holds to nothing
+   * (no role, no `default:`) — `NO_ROLE_CATALOG`, a role with no grant, so information_schema lists it nothing and every
+   * privilege function is false, as on Postgres for a login with no grant. Undefined: the catalog's own (a token, no
+   * roles file). Throws where `grants` refuses (fail closed).
+   */
+  private catalogRole(): string | undefined {
+    return this.grants()?.noRole !== undefined ? NO_ROLE_CATALOG : this.roleName();
+  }
+
+  /** a user the roles file holds to nothing (no role of its own, no `default:`), read without throwing: its catalog
+   *  statements answer `current_user`, `current_role` and `user` as its own name (`userSpliced`), as Postgres does for
+   *  a login with no grant, never the catalog role's */
+  private heldToNothing(): boolean {
+    if (this.token?.role !== undefined || this.token?.user === undefined) return false;
+    const live = this.server.rolesNow();
+    return live.file !== null && live.problem === null && live.default === null;
+  }
+
+  /** the statement as the catalog runs it for this session: the user's name spliced for the keywords that name it */
+  private spliced(text: string, raw: RawStmt): string {
+    return userSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user, this.heldToNothing() ? HELD_TO_NOTHING_OPS : SESSION_OPS);
   }
 
   /** a plan's reads held to the session's role of THIS moment (a role given or taken since the Parse): refused as the
@@ -1213,9 +1269,14 @@ class Session {
   private heldToRole(plan: DuckPlan): void {
     const grants = this.grants();
     if (grants === null || grants === undefined) return;
-    if (plan.reads === undefined) {
+    if (plan.reads === undefined && grants.noRole === undefined) {
       throw new PgError({ code: "42501", message: `permission denied: the statement was prepared before the user ${JSON.stringify(this.token?.user ?? this.user)} had the role ${grants.name}`,
         hint: "prepare the statement again: its reads are then held to the role" }, 403);
+    }
+    if (plan.reads === undefined) {
+      // a plan made before any roles file existed, for a user the file now holds to nothing: prepared again, held then
+      throw new PgError({ code: "42501", message: `permission denied: the statement was prepared before ${grants.file} held the user ${JSON.stringify(grants.noRole!.user)} to a role`,
+        hint: "prepare the statement again: its reads are then held to the roles file" }, 403);
     }
     const refused = grantRefusal(plan.reads, grants);
     if (refused !== null) throw refused;
@@ -1228,16 +1289,17 @@ class Session {
    * role the catalog has not made yet (its rebuild a moment behind the file) refuses the statement, said; a role the
    * file no longer names is refused before it reaches the catalog (`grants`).
    */
-  private async catalogAs(message: Buffer): Promise<Array<{ type: string; frame: Buffer }>> {
-    const role = this.token?.role;
-    if (role === undefined) return splitFrames(await this.server.catalog.run(message));
-    this.grants();
+  private async catalogAs(message: Buffer): Promise<{ frames: Array<{ type: string; frame: Buffer }>; asRole: boolean }> {
+    // fail closed first (a role the file lacks, a file that cannot be read), then the catalog's role of the session
+    // (`catalogRole`; both read the roles once, with no await between)
+    const role = this.catalogRole();
+    if (role === undefined) return { frames: splitFrames(await this.server.catalog.run(message)), asRole: false };
     const { frames, setRoleRefused } = unwrapRole(splitFrames(await this.server.catalog.run(asRole(message, role))));
     if (setRoleRefused !== null) {
       const e = relayedError(setRoleRefused);
       throw new PgError({ code: "42501", message: `permission denied: the catalog has no role ${role} yet (${e.message})`, hint: "run the statement again: the catalog is rebuilt with the roles as the roles file changes" }, 403);
     }
-    return frames;
+    return { frames, asRole: true };
   }
 
   /**
@@ -1466,7 +1528,7 @@ class Session {
   private dropPortals(): void { for (const name of [...this.portals.keys()]) this.dropPortal(name); }
 
   private async forwardSimple(text: string): Promise<Buffer[]> {
-    const reply = await this.catalogAs(frame("Q", cstr(text)));
+    const { frames: reply } = await this.catalogAs(frame("Q", cstr(text)));
     const err = reply.find((f) => f.type === "E");
     if (err !== undefined) throw relayedError(err.frame);
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
@@ -1479,7 +1541,9 @@ class Session {
     // name are Postgres's no-ops, any other name Postgres's refusal. Never the catalog's to validate: that is one
     // superuser connection, which accepted `SET ROLE postgres` silently (a review finding of #35)
     if (t.name === "role" || t.name === "session_authorization") {
-      const own = t.value === null || t.value === this.user || (t.name === "role" && t.value.toLowerCase() === "none");
+      // its own name, NONE, RESET — and SET ROLE to the role it already is (its own, or the roles file's default: what
+      // current_user says), which Postgres always allows; SET SESSION AUTHORIZATION is the login's name alone
+      const own = t.value === null || t.value === this.user || (t.name === "role" && (t.value.toLowerCase() === "none" || t.value === this.roleName()));
       if (!own) throw new PgError({ code: "42501", message: `permission denied to set ${t.name === "role" ? "role" : "session authorization"} "${t.value}"` }, 403);
       return [commandComplete(tag)];
     }
@@ -1608,7 +1672,7 @@ class Session {
 
   /** runs frames in the sidecar; throws the first ErrorResponse; returns the rest, less ReadyForQuery */
   private async catalogRun(...parts: Buffer[]): Promise<Buffer[]> {
-    const reply = await this.catalogAs(Buffer.concat(parts));
+    const { frames: reply, asRole: wrapped } = await this.catalogAs(Buffer.concat(parts));
     // the sidecar answered NOTHING to a batch: it is ignoring everything until a Sync (an earlier error nobody synced)
     // — a protocol state this server must never leave it in; said, never relayed as an empty answer
     if (reply.length === 0) throw new PgError({ code: "XX000", message: "the catalog Postgres answered nothing: report it (its extended-protocol state is out of step)" }, 500);
@@ -1618,7 +1682,7 @@ class Session {
       // sidecar is one connection every session shares: without this Sync one refused Parse silenced the catalog for
       // every session until a restart (review of #480). The Sync's own ReadyForQuery is consumed here. (A request run
       // as a role carries its own Sync, catalog.ts asRole: the RESET ROLE after it must run)
-      if (this.token?.role === undefined && !parts.some((p) => p[0] === 0x53 /* S */)) await this.server.catalog.run(frame("S"));
+      if (!wrapped && !parts.some((p) => p[0] === 0x53 /* S */)) await this.server.catalog.run(frame("S"));
       throw relayedError(err.frame);
     }
     return reply.filter((f) => f.type !== "Z").map((f) => f.frame);
@@ -1649,7 +1713,7 @@ class Session {
         const own = this.statements.get(m.name);
         // the unnamed statement is replaced by a Parse; the sidecar's must be closed first
         const close = own?.catalogName !== null && own !== undefined ? [frame("C", Buffer.from("S"), cstr(own.catalogName))] : m.name === "" ? [frame("C", Buffer.from("S"), cstr(statement.catalogName))] : [];
-        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(sessionUserSpliced(m.sql, raw.stmt, raw.stmt_location ?? 0, this.user)),
+        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(this.spliced(m.sql, raw)),
           int16(m.paramTypes.length), ...m.paramTypes.map(int32)));
         this.statements.set(m.name, statement);
         // the CloseComplete of the close this server added is not the client's
@@ -1916,34 +1980,46 @@ const isUtf8 = (encoding: string): boolean => /^(utf-?8|unicode)$/i.test(encodin
 const quoteIdent = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 const quoteLiteral = (text: string): string => `'${text.replaceAll("'", "''")}'`;
 
+/** the SQLValueFunction ops that name a user, each with its keyword (the text at its location, and its column's name) */
+const USER_OPS: Readonly<Record<string, string>> = { SVFOP_SESSION_USER: "session_user", SVFOP_CURRENT_USER: "current_user", SVFOP_CURRENT_ROLE: "current_role", SVFOP_USER: "user" };
+/** every session: `session_user` alone (`current_user` is the catalog's role: the session's role under SET ROLE) */
+const SESSION_OPS: ReadonlySet<string> = new Set(["SVFOP_SESSION_USER"]);
+/** a user the roles file holds to nothing: its catalog role is `NO_ROLE_CATALOG`, never a name it should answer */
+const HELD_TO_NOTHING_OPS: ReadonlySet<string> = new Set(Object.keys(USER_OPS));
+
 /**
  * `session_user` IN A STATEMENT THE CATALOG ANSWERS IS THIS SESSION'S USER, never the catalog's superuser (it answered
  * `postgres` for every session while `SHOW session_authorization` said the user's name: a review finding of #35). The
- * keyword cannot be overridden as `version()` and `current_setting` are, so each SESSION_USER of the parse tree is
+ * keyword cannot be overridden as `version()` and `current_setting` are, so each one of `ops` in the parse tree is
  * spliced in the text with a scalar subquery named as the keyword names its column, `(SELECT 'agent'::name AS
- * session_user)`: the name, the type and every expression around it stay Postgres's. (`current_user` is the catalog's
- * role: the session's role under SET ROLE, src/api/postgres/catalog.ts asRole.) `base`: the statement's offset in the
- * text the parse tree's locations count from.
+ * session_user)`: the name, the type and every expression around it stay Postgres's. `current_user`, `current_role` and
+ * `user` are the catalog's role (the session's role under SET ROLE, src/api/postgres/catalog.ts asRole), spliced only
+ * for a user the roles file holds to nothing (`HELD_TO_NOTHING_OPS`), whose catalog role is `NO_ROLE_CATALOG`: Postgres
+ * answers its own name for all three to a login with no grant. `base`: the statement's offset in the text the parse
+ * tree's locations count from.
  */
-function sessionUserSpliced(text: string, stmt: unknown, base: number, user: string): string {
-  const at: number[] = [];
+function userSpliced(text: string, stmt: unknown, base: number, user: string, ops: ReadonlySet<string>): string {
+  const at = new Map<number, string>();
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) { for (const x of n) walk(x); return; }
     if (typeof n !== "object" || n === null) return;
     const f = (n as { SQLValueFunction?: { op?: string; location?: number } }).SQLValueFunction;
-    if (f !== undefined && f.op === "SVFOP_SESSION_USER" && typeof f.location === "number") at.push(f.location);
+    if (f !== undefined && f.op !== undefined && ops.has(f.op) && typeof f.location === "number") at.set(f.location, USER_OPS[f.op]!);
     for (const v of Object.values(n)) walk(v);
   };
   walk(stmt);
-  if (at.length === 0) return text;
+  if (at.size === 0) return text;
   const bytes = Buffer.from(text, "utf8");
   const parts: Buffer[] = [];
   let end = bytes.length;
-  for (const loc of [...new Set(at)].sort((a, b) => b - a)) {
+  for (const loc of [...at.keys()].sort((a, b) => b - a)) {
+    const keyword = at.get(loc)!;
     const from = loc - base;
-    if (from < 0 || !/^session_user$/i.test(bytes.subarray(from, from + 12).toString("utf8"))) continue;
-    parts.unshift(bytes.subarray(from + 12, end));
-    parts.unshift(Buffer.from(`(SELECT ${quoteLiteral(user)}::name AS session_user)`, "utf8"));
+    if (from < 0 || bytes.subarray(from, from + keyword.length).toString("utf8").toLowerCase() !== keyword) continue;
+    // the keyword must end there (`user` is the start of `user_name`): the parser placed it, so a word character after is not it
+    if (/^[A-Za-z0-9_$]/.test(bytes.subarray(from + keyword.length, from + keyword.length + 1).toString("utf8"))) continue;
+    parts.unshift(bytes.subarray(from + keyword.length, end));
+    parts.unshift(Buffer.from(`(SELECT ${quoteLiteral(user)}::name AS ${keyword})`, "utf8"));
     end = from;
   }
   parts.unshift(bytes.subarray(0, end));
@@ -2076,7 +2152,7 @@ class Server {
     this.lastRoles = options.roles?.() ?? NO_ROLES;
     const version = versionText(options.product ?? "Mason", options.masonVersion);
     this.catalog = new PgCatalog(this.lastSchema, {
-      roles: this.lastRoles.grants,
+      roles: catalogRolesOf(this.lastRoles),
       log: (line) => this.log(line),
       setup: [
         // `version()` says whose Postgres this is; search_path lists pg_catalog AFTER public so the override wins
@@ -2102,7 +2178,7 @@ class Server {
     if (s !== this.lastSchema || r !== this.lastRoles) {
       this.lastSchema = s;
       this.lastRoles = r;
-      void this.catalog.replace(s, r.grants).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
+      void this.catalog.replace(s, catalogRolesOf(r)).catch((e: unknown) => this.log(`replacing the catalog failed: ${e instanceof Error ? e.message : String(e)}`));
     }
     return s;
   }

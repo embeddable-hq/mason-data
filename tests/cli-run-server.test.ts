@@ -638,7 +638,7 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.equal(added.status, 200, added.text);
   const a = JSON.parse(added.text) as Record<string, unknown>;
   // mason user add --json's shape: the password, once, and the URL to paste
-  assert.deepEqual(Object.keys(a), ["user", "id", "addedAt", "password", "database", "url", "psql", "host", "port", "sslmode", "next"]);
+  assert.deepEqual(Object.keys(a), ["user", "id", "addedAt", "password", "database", "url", "psql", "host", "port", "sslmode", "roleFrom", "next"]);
   assert.equal(a.user, "metabase");
   assert.equal(a.password, userPassword(API_KEY, "metabase", a.id as string), "the password the listener takes (src/duck/users.ts)");
   assert.equal(a.url, `postgres://metabase:${a.password as string}@127.0.0.1:5433/app`);
@@ -650,9 +650,10 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.ok("users" in file);
   assert.deepEqual(file.users.map((u) => [u.name, u.id]), [["metabase", a.id]]);
   assert.ok(!fs.readFileSync(usersFile, "utf8").includes(a.password as string), "users.json holds no password");
-  // the list: removedAt null, last used from the request log, the URL to paste WITHOUT the password (the add's own builder)
+  // the list: removedAt null, last used from the request log, the URL to paste WITHOUT the password (the add's own builder);
+  // roleFrom none: no roles file, every copied table (stage 1b)
   const listed = await list();
-  assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, disabledAt: null, live: true, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app" }]);
+  assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, disabledAt: null, live: true, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app", roleFrom: "none" }]);
   assert.deepEqual([listed.lastUsedNote, listed.urlNote, listed.requestLogDays], [null, null, 7]);
   assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: null }, "asked for the window the user was a user in");
   // the web page asks every 2 s and shows no last use: without ?lastUsed=1 the request log is never scanned
@@ -697,7 +698,7 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.deepEqual(gone, { removed: { name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt },
     next: [{ command: "mason user list", what: "the users, removed ones included" }, { command: "mason user add <name>", what: "a new user, with a new password" }] });
   // kept, marked removed: no URL, does not connect, last used asked within [addedAt, removedAt]
-  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt, disabledAt: null, live: false, lastUsedAt: "2026-10-24T10:04:00.000Z", url: null }]);
+  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt, disabledAt: null, live: false, lastUsedAt: "2026-10-24T10:04:00.000Z", url: null, roleFrom: "none" }]);
   assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: gone.removed.removedAt });
   // removing it again is not found; the name can be added again, as a new id, and the removed entry stays
   assert.equal((await call("DELETE", "/api/users/metabase")).status, 404);

@@ -36,7 +36,7 @@ import { closest, didYouMean } from "../lib/did-you-mean.ts";
 import type { Failure, NextStep } from "./command.ts";
 import { maskedUrl, type SourceTable } from "./preflight.ts";
 import type { AddedTable } from "../duck/sync.ts";
-import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
+import { DEFAULT_SYNC, parseSync, syncText, type SourcesTop, type TableSync } from "../lib/table-sync.ts";
 
 export const SOURCES_DIR = "sources";
 const KEYS = ["kind", "url", "sync", "publication", "tables"] as const;
@@ -259,6 +259,35 @@ export function sourceFileNames(folder: string): string[] {
   const dir = sourcesDir(folder);
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir).filter((f) => /\.ya?ml$/.test(f) && !f.startsWith(".")).sort();
+}
+
+/**
+ * THE TOP OF A PROJECT'S SOURCES FILE, for a retired setting's way out (src/lib/table-sync.ts `topEdit`): its one file
+ * as a person names it from `root`, and the values its top-level `sync:` and `publication:` lines hold as written, so
+ * the way out changes the line the file has rather than writing a second. No file (or several): the place every
+ * project's file has, and no line. A file that cannot be read or parsed is said by the run in its own words
+ * (`readSource`); here it only words the edit, as for a file with no such line.
+ */
+export function sourcesTop(root: string, folder: string): SourcesTop {
+  const names = sourceFileNames(folder);
+  if (names.length !== 1) return { shown: `${shownPath(root, sourcesDir(folder))}/<name>.yml`, sync: null, publication: null };
+  const file = path.join(sourcesDir(folder), names[0]!);
+  const shown = shownPath(root, file);
+  let text: string;
+  try { text = fs.readFileSync(file, "utf8"); }
+  catch (e) {
+    // the run's own read says it, with the file and the error (readSource); the edit is worded as for no line
+    if ((e as NodeJS.ErrnoException).code === undefined) throw e;
+    return { shown, sync: null, publication: null };
+  }
+  const doc = parseDocument(text);
+  const at = (key: "sync" | "publication"): string | null => {
+    if (!isMap(doc.contents)) return null;
+    const node = doc.contents.get(key, true);
+    if (node === undefined || node === null) return null;
+    return isScalar(node) ? String(node.value) : String(node);
+  };
+  return { shown, sync: at("sync"), publication: at("publication") };
 }
 
 /** The file `mason init` writes: the database, how its tables are kept current (`sync`: `off`, the default; the demo's

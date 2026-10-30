@@ -64,3 +64,20 @@ test("mason help production says where the metrics are, beside the health check,
   assert.ok(text.includes("GET /metrics on the same port is for Prometheus: numbers only"), text.slice(0, 400));
   assert.ok(text.includes("never a table's or a user's name, so it needs no secret"));
 });
+
+test("mason help production says how each table is kept current: sync: at the top and per entry, off by default, the poll's stretch, replication's slot and publication, the flags gone", async () => {
+  const text = (await guideText("production")).replace(/\s+/g, " ");
+  for (const said of [
+    "How each table is kept current after its first copy is the sources file's sync:, committed with it, so the server runs what you ran — at the top for every table, and on an entry for that one:",
+    "sync: off the file's default for every table tables: orders: { sync: replication }",
+    "off (the default mason init writes): after the first copy Mason reads the table again only when you run mason sync <table>",
+    "stretched to four times the last poll's own time, so the polls never take more than a fifth of the database's time",
+    "a user with REPLICATION", "publication: ${PG_PUBLICATION} at the top of the sources file",
+    "cap it on the database with max_slot_wal_keep_size", "dropped, verified gone, when no table's sync is replication any more",
+    "The flags --replication, --poll and --publication of mason start, and MASON_CHANGES on a server, are gone: each answers with the line to write in the sources file.",
+    "mason sync customers any table read again now, whatever its sync:",
+  ]) assert.ok(text.includes(said), said);
+  // the stretch the guide states is the poll's own (src/cdc/poll.ts nextPollDelayMs)
+  const { nextPollDelayMs } = await import("../src/cdc/poll.ts");
+  assert.equal(nextPollDelayMs(5000, 10_000), 40_000);
+});

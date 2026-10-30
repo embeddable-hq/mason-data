@@ -409,12 +409,16 @@ test("a Failure renders as the CLI's four parts: ✗ what is wrong, why, fix, th
   assert.equal(textOf(fn<[Failure], string>("renderFailure")({ code: "failed", message: "only this" })), "✗ only this", "no empty why, fix or Next");
 });
 
-test("the users: a user's role (mason user add --role) in its own column; one the roles file no longer names is said", () => {
+test("the users: a user's role (mason user add --role) in its own column; one the roles file no longer names is said; stage 1b: the file's default marked, a user it holds to nothing said", () => {
   const renderUsers = fn<[unknown, string | null, number?], string>("renderUsers");
   const at = { addedAt: "2026-10-29T08:00:00.000Z", removedAt: null, live: true, lastUsedAt: null, url: null };
-  const html = renderUsers({ users: [{ name: "agent", id: "0000000000000001", ...at, role: "agent", roleKnown: true },
-    { name: "old", id: "0000000000000002", ...at, role: "gone", roleKnown: false }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
+  const html = renderUsers({ users: [{ name: "agent", id: "0000000000000001", ...at, role: "agent", roleFrom: "file", roleKnown: true },
+    { name: "old", id: "0000000000000002", ...at, role: "gone", roleFrom: "file", roleKnown: false },
+    // stage 1b (src/cli/roles.ts userRole): one reading as the roles file's default, one the file holds to nothing (no default:)
+    { name: "dflt", id: "0000000000000003", ...at, role: "everything", roleFrom: "default" },
+    { name: "bare", id: "0000000000000004", ...at, roleFrom: "none", readsNothing: true }], lastUsedNote: null, urlNote: null, requestLogDays: 7 }, null, Date.parse("2026-10-29T09:00:00.000Z"));
   assert.match(textOf(html), /^User Role Status Added Last used agent id 0000000000000001 agent Active .* old id 0000000000000002 gone not in the roles file: its statements are refused Active /);
+  assert.match(textOf(html), /dflt id 0000000000000003 everything \(default\) Active .* bare id 0000000000000004 no role, and the roles file names no default: its statements are refused Active /);
 });
 
 test("the users: a row each, active first then removed without Remove; Remove asks first; none is said", () => {
@@ -447,6 +451,23 @@ test("the users: a row each, active first then removed without Remove; Remove as
   assert.match(unknown, /Active does not connect: the API key was rotated since it was added 2026-10-20 08:00 UTC unknown /);
   // the URL is the Connect panel's, never a row's: its note goes with it
   assert.match(unknown, /Last used: unknown: the request log could not be read \(busy\)\.$/);
+});
+
+test("the users while the roles file cannot be read: mason user list's tip, word for word, and every user's role said refused", async () => {
+  // /api/state's roles (mason status --json's) beside /api/users' list: the problem the listener refuses every user for (57P03)
+  const renderUsers = fn<[unknown, string | null, number, unknown, unknown], string>("renderUsers");
+  const { rolesProblemText } = await import("../src/cli/roles.ts") as unknown as { rolesProblemText: (file: string, problem: string) => string };
+  const at = { removedAt: null, disabledAt: null, live: true, lastUsedAt: null, url: null };
+  const list = { users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", ...at, roleFrom: "none" },
+    { name: "agent", id: "0000000000000001", addedAt: "2026-10-29T08:00:00.000Z", ...at, role: "agent", roleFrom: "file" }], lastUsedNote: null, urlNote: null, requestLogDays: 7 };
+  const NOW_R = Date.parse("2026-10-29T09:00:00.000Z");
+  const problem = "mason/roles.yml: it is not YAML: Flow sequence in block collection must be sufficiently indented and end with a ] at line 1, column 18";
+  const html = renderUsers(list, null, NOW_R, null, { file: "mason/roles.yml", roles: [], problem, default: null, all: [] });
+  assert.ok(textOf(html).startsWith(`${rolesProblemText("mason/roles.yml", problem)} User Role Status Added Last used `), textOf(html));
+  assert.match(textOf(html), /metabase id 0123456789abcdef refused: the roles file cannot be read Active 2026-10-27 .* agent id 0000000000000001 refused: the roles file cannot be read Active 2026-10-29/);
+  // a readable file: nothing said; the page's own roles are the state's (/api/state roles), read beside the users
+  assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, { file: "mason/roles.yml", roles: ["agent"], problem: null, default: null, all: [] })), /cannot be read/);
+  assert.doesNotMatch(textOf(renderUsers(list, null, NOW_R, null, null)), /cannot be read/);
 });
 
 test("a user just added: the password and the URL to paste, each with a copy button, and that it will not be shown again", () => {

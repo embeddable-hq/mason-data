@@ -131,17 +131,28 @@ export function productionGuide(): string {
   return `GOING TO PRODUCTION — the project folder (mason/sources/, mason/mason.yml) is all that travels: its sources file
 names the tables the server copies, and its url: names the variable that holds the database's URL. Nothing in .mason/ goes with it; the server makes its own copy and state on its volume.
 
-1. PREPARE THE DATABASE. Mason only reads it. How each table is kept current after its first copy is the sources
-   file's sync: — off (the default: read again only by mason sync <table>, from cron or a deploy), poll <interval>
-   or replication, per table — and needs a user that can SELECT the tables; each poll costs the database a scan of its
-   table (a poll waits four times its own time, so the polls never take more than a fifth of it), and it works on a
-   read replica. A table under sync: replication is read from the change log, through one slot and one publication
-   for the project: it needs wal_level = logical, a user with REPLICATION, a primary key (a key: table is polled), and
+1. PREPARE THE DATABASE. Mason only reads it, as a user that can SELECT the tables. How each table is kept current
+   after its first copy is the sources file's sync:, committed with it, so the server runs what you ran — at the top
+   for every table, and on an entry for that one:
+     sync: off                                      the file's default for every table
+     tables:
+       orders: { sync: replication }                this one from the change log, within seconds
+       customers: { sync: poll 5m }                 this one polled every 5 minutes
+       events: {}                                   off, as the top says
+   off (the default mason init writes): after the first copy Mason reads the table again only when you run mason sync
+   <table> (before a report, from cron, at the end of a deploy) — nothing Mason does to your database is a hidden
+   default. poll <interval> (1s to 24h): a SELECT that scans the table whole, at that interval, stretched to four
+   times the last poll's own time, so the polls never take more than a fifth of the database's time; it works on a
+   read replica. replication: the change log, through one slot and one publication for the project; it needs
+   wal_level = logical, a user with REPLICATION (or rds_replication), a primary key (a key: table is polled), and
    either a publication you name (publication: \${PG_PUBLICATION} at the top of the sources file, read as it is, never
-   altered: it must carry every replicated table) or the right to create Mason's own, which carries the replicated
-   tables alone. The slot holds the database's WAL while Mason is down, so cap it with max_slot_wal_keep_size; it is
-   dropped when no table's sync is replication. Try it locally first:
+   altered: it must carry every replicated table; a read replica needs one) or the right to create Mason's own, which
+   carries the replicated tables alone. The slot holds the database's WAL while Mason is down, so cap it on the
+   database with max_slot_wal_keep_size (Postgres 13+); it is dropped, verified gone, when no table's sync is
+   replication any more, and at mason destroy. The flags --replication, --poll and --publication of mason start, and
+   MASON_CHANGES on a server, are gone: each answers with the line to write in the sources file. Try it locally first:
      mason add orders --sync replication             that table from the change log, as the server reads it
+     mason sync customers                           any table read again now, whatever its sync:
 
 2. RUN IT: one container, ghcr.io/embeddable-hq/mason-data:<version> (the version mason.yml names), running mason serve:
      DATABASE_URL           the database to copy from (the variable the sources file's url: names)
@@ -174,7 +185,10 @@ names the tables the server copies, and its url: names the variable that holds t
    The tool connects to the Postgres API (5433) as to a read replica, each added table a table. Changing
    MASON_API_KEY removes every user. mason/roles.yml ships with mason/ (mason help user shows the file): a user with
    a role is refused anything past it as Postgres refuses it (42501), and information_schema and mason mcp list it only
-   what it may read; a user with no role reads every copied table.
+   what it may read; a user added without --role reads as the file's default: (mason init writes default:
+   everything, tables: all — every copied table), and nothing when the file names no default. A roles file from
+   before this release names no default: write default: <role> at its top before upgrading, or its roleless users
+   read nothing.
 
 4. CHANGE IT: ship mason/ with your release and restart the container; a table added or removed is copied or dropped
    at the next start, or beside the server:

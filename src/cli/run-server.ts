@@ -210,7 +210,8 @@ function fileBytes(file: string): number | null {
 }
 
 /** `RunState.roles` (src/cli/commands.ts): the file, the roles it names and what is wrong with it now */
-export const rolesState = (r: RolesLive): { file: string | null; roles: string[]; problem: string | null } => ({ file: r.file, roles: [...r.grants.keys()], problem: r.problem });
+export const rolesState = (r: RolesLive): { file: string | null; roles: string[]; problem: string | null; default: string | null; all: string[] } =>
+  ({ file: r.file, roles: [...r.grants.keys()], problem: r.problem, default: r.default, all: [...r.grants.values()].filter((g) => g.all).map((g) => g.name) });
 
 async function state(ctx: RunContext, columns = false): Promise<unknown> {
   return runState(ctx, ctx.duck.copies(), await ctx.duck.stream(), Date.now(), { columns });
@@ -610,7 +611,8 @@ export function createRunServer(ctx: RunContext): http.Server {
           const roleProblem = body.role === undefined ? null : roleToAdd(body.role, ctx.roles?.() ?? NO_ROLES);
           if (roleProblem !== null) { sendFailure(res, statusOf(roleProblem), roleProblem); return; }
           // mason user add --json's shape: its password, once, and the URL to paste (this run is up, so it has one)
-          const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database, ...(typeof body.role === "string" ? { role: body.role } : {}) });
+          const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database, roles: ctx.roles?.() ?? NO_ROLES,
+            ...(typeof body.role === "string" ? { role: body.role } : {}) });
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           const { replaced, ...added } = r;
           ctx.log(`user ${added.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}`);

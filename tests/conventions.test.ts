@@ -851,3 +851,44 @@ test("GET /metrics labels only by Mason's own words (phase, outcome, quantile, v
 test("the metrics label guard would catch the real thing", () => {
   assert.deepEqual(metricLabels(`TABLE_PHASES.map((phase) => ({ labels: { phase }, value: 1 })); [{ labels: { table: t.source }, value: t.rows }]`), ["phase", "table"]);
 });
+
+/**
+ * THE NODE CI RUNS ON (docs/DESIGN.md "The Node CI runs on", 2026-10-30): never Node 24. Its V8 (13.6) shares
+ * WebAssembly import wrappers across every isolate of a process and can free one twice when an instance dies on one
+ * thread while another thread's wasm calls out (`# Check failed: jit_page_->allocations_.erase(addr) == 1`,
+ * nodejs/node#66366, fixed in V8 by 9b8ca54d5a and not released in any Node 24). The catalog, the parser and the
+ * function worker each hold WebAssembly on a thread of their own, so a test file's process died of it at exit after
+ * every test passed (five CI runs in two days). Node 26 carries the fix; a `node-version` of 24 in any workflow brings
+ * the crash back for every process CI starts. Lift this when a Node 24 release carries nodejs/node#66376.
+ */
+const NODE_WITHOUT_THE_FIX = new Set([24]);
+
+/** Every `node-version:` a workflow sets, as `file: value` with the value unquoted. */
+function workflowNodeVersions(files: Array<{ name: string; src: string }>): Array<{ where: string; version: string }> {
+  return files.flatMap((f) => [...f.src.matchAll(/^\s*node-version:\s*['"]?([^'"\s#]+)['"]?/gm)].map((m) => ({ where: `${f.name}:${f.src.slice(0, m.index).split("\n").length}`, version: m[1] ?? "" })));
+}
+
+/** The versions a workflow names whose major is one without the fix (or that names no major at all: `lts/*`, `latest`). */
+function nodeWithoutTheFix(files: Array<{ name: string; src: string }>): string[] {
+  return workflowNodeVersions(files).filter(({ version }) => {
+    const major = /^v?(\d+)/.exec(version)?.[1];
+    return major === undefined || NODE_WITHOUT_THE_FIX.has(Number(major));
+  }).map(({ where, version }) => `${where} node-version ${version}`);
+}
+
+test("no workflow runs Node 24, whose V8 aborts a process when a WebAssembly instance dies beside another thread's (nodejs/node#66366)", () => {
+  const dir = path.join(ROOT, ".github", "workflows");
+  const files = fs.readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).map((f) => ({ name: `.github/workflows/${f}`, src: fs.readFileSync(path.join(dir, f), "utf8") }));
+  assert.ok(workflowNodeVersions(files).length >= 2, "the guard reads ci.yml's node-version lines: has the key moved?");
+  assert.deepEqual(nodeWithoutTheFix(files), [], "set node-version to '26' (docs/DESIGN.md \"The Node CI runs on\")");
+});
+
+test("the Node guard catches the real thing", () => {
+  const one = (src: string) => nodeWithoutTheFix([{ name: "w.yml", src }]);
+  assert.deepEqual(one("      - uses: actions/setup-node@v4\n        with:\n          node-version: '24'          # a comment\n"), ["w.yml:3 node-version 24"]);
+  assert.deepEqual(one("node-version: 24.22.1\n"), ["w.yml:1 node-version 24.22.1"], "unquoted, exact");
+  assert.deepEqual(one('node-version: "v24"\n'), ["w.yml:1 node-version v24"]);
+  assert.deepEqual(one("node-version: lts/*\n"), ["w.yml:1 node-version lts/*"], "a moving alias names no major: refused");
+  assert.deepEqual(one("node-version: '26'\nnode-version: 26.13.0\nnode-version: '22'\n"), [], "26 carries the fix; 22's V8 never shared the wrappers");
+  assert.deepEqual(one("# node-version: '24' in a comment\n"), [], "a comment is no setting");
+});
