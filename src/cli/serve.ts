@@ -13,6 +13,8 @@
  *     platform restarts it; there is no supervisor of its own (src/cli/supervise.ts is `mason start`'s).
  *   - A HEALTH ENDPOINT (`healthBody`): `GET /healthz` on MASON_HEALTH_PORT, 503 while it starts and stops, 200 once it
  *     answers. It needs no credential, so it names nothing of the database: counts only.
+ *   - METRICS BESIDE IT (src/cli/metrics.ts): `GET /metrics` on the same port, Prometheus's text format, numbers only
+ *     (counts, lag, ages, sizes) for the same reason: never a table's, a user's or a host's name, never a statement.
  *   - A CLEAN STOP ON SIGTERM: the run's own stop (a copy in flight interrupted and rolled back, DuckDB closed).
  *
  * The commands beside it work as on a laptop, in the data folder: `docker compose exec mason mason add orders`.
@@ -29,6 +31,8 @@ import { appEnvValue } from "../lib/dotenv.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { version } from "./version.ts";
+import { phaseCounts } from "./readiness.ts";
+import { METRICS_CONTENT_TYPE, metricsText, type RunMetrics } from "./metrics.ts";
 import type { CopyState } from "../duck/sync.ts";
 
 export const SERVE: CommandSpec = {
@@ -38,9 +42,10 @@ export const SERVE: CommandSpec = {
 
   Runs Mason as mason start --attach does, for a server or a container: nothing asked, its settings from the
   environment, its state in one folder (a volume), its log on stdout, GET /healthz for the platform's health check,
-  and a clean stop on SIGTERM. The tables it copies are the ones the project folder's sources file names
-  (sources/<name>.yml): make it with mason init and mason add on a laptop and commit it, or with mason add beside the
-  running server. A project folder with no sources file gets one, url: \${DATABASE_URL}, with no table yet.
+  GET /metrics for Prometheus (numbers only: no name, no statement), and a clean stop on SIGTERM. The tables it
+  copies are the ones the project folder's sources file names (sources/<name>.yml): make it with mason init and mason
+  add on a laptop and commit it, or with mason add beside the running server. A project folder with no sources file
+  gets one, url: \${DATABASE_URL}, with no table yet.
 
     DATABASE_URL=postgres://mason:…@db.internal:5432/app MASON_API_KEY=… mason serve
     docker compose exec mason mason add public.orders     beside it, in its container
@@ -55,7 +60,7 @@ export const SERVE: CommandSpec = {
     MASON_PROJECT           the project folder: sources/, mason.yml (default ./mason)
     MASON_DATA              the folder whose .mason/ holds the copy and the state: the volume (default .)
     MASON_NAME              the project's name, the database name clients connect to (default mason)
-    MASON_HEALTH_PORT       /healthz's port (default 4140), on MASON_HEALTH_HOST (default 0.0.0.0)
+    MASON_HEALTH_PORT       /healthz's and /metrics' port (default 4140), on MASON_HEALTH_HOST (default 0.0.0.0)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
@@ -219,8 +224,14 @@ export function serveSource(s: ServeSettings, env: NodeJS.ProcessEnv): { wrote: 
   return "message" in r ? r : { wrote };
 }
 
-/** Where a serve is: what /healthz says. */
-export type ServePhase = { phase: "starting" } | { phase: "ready"; tables: () => CopyState[] } | { phase: "stopping" };
+/** Where a serve is: what /healthz and /metrics say. Once ready, `metrics` reads the run's numbers (src/cli/run-server.ts
+ *  `metricsFacts`): required, so no ready phase exists where /healthz says ready and /metrics `mason_ready 0`. */
+export type ServePhase = { phase: "starting" }
+  | { phase: "ready"; tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">> }
+  | { phase: "stopping" };
+
+/** seconds since the serve started: /healthz's `uptimeSeconds` and /metrics' `mason_uptime_seconds`, one number */
+const uptimeSeconds = (startedAt: number, now: number): number => Math.floor((now - startedAt) / 1000);
 
 /**
  * /healthz's answer: 200 once the run answers, whatever its copies are doing (a table still copying, or one that failed,
@@ -228,19 +239,44 @@ export type ServePhase = { phase: "starting" } | { phase: "ready"; tables: () =>
  * endpoint takes no credential.
  */
 export function healthBody(state: ServePhase, startedAt: number, now = Date.now()): { status: number; body: Record<string, unknown> } {
-  const base = { status: state.phase, version: version(), uptimeSeconds: Math.floor((now - startedAt) / 1000) };
+  const base = { status: state.phase, version: version(), uptimeSeconds: uptimeSeconds(startedAt, now) };
   if (state.phase !== "ready") return { status: 503, body: base };
-  const counts = { total: 0, copied: 0, copying: 0, waiting: 0, failed: 0 };
-  for (const t of state.tables()) { counts.total++; counts[t.phase]++; }
-  return { status: 200, body: { ...base, tables: counts } };
+  return { status: 200, body: { ...base, tables: phaseCounts(state.tables()) } };
 }
 
-/** The health endpoint: GET /healthz, nothing else. */
-export function healthServer(state: () => ServePhase, startedAt: number): http.Server {
+/**
+ * /metrics' answer: ALWAYS 200 (a scrape that errors while Mason starts is an alert about nothing; whether it is up is
+ * /healthz's to say) — `mason_ready 0` and `mason_info` while it starts or stops, the run's numbers once it serves.
+ */
+export async function metricsBody(state: ServePhase, startedAt: number, now = Date.now()): Promise<string> {
+  if (state.phase !== "ready") return metricsText({ version: version(), run: null });
+  const run = await state.metrics();
+  return metricsText({ version: version(), run: { ...run, uptimeSeconds: uptimeSeconds(startedAt, now) } });
+}
+
+/** The health server: GET /healthz and GET /metrics, nothing else. `log` says a scrape whose numbers could not be read. */
+export function healthServer(state: () => ServePhase, startedAt: number, log: (line: string) => void = say): http.Server {
   return http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://health");
-    if (url.pathname !== "/healthz") { res.writeHead(404, { "content-type": "text/plain" }).end("GET /healthz\n"); return; }
+    if (url.pathname !== "/healthz" && url.pathname !== "/metrics") { res.writeHead(404, { "content-type": "text/plain" }).end("GET /healthz or GET /metrics\n"); return; }
     if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, { allow: "GET, HEAD" }).end(); return; }
+    if (url.pathname === "/metrics") {
+      const asked = state();
+      metricsBody(asked, startedAt).then(
+        (body) => { res.writeHead(200, { "content-type": METRICS_CONTENT_TYPE, "cache-control": "no-store" }).end(req.method === "HEAD" ? undefined : body); },
+        (e: unknown) => {
+          // a run stopping under the scrape (its copy closing): said as stopping, as it now is
+          if (state().phase !== "ready") {
+            res.writeHead(200, { "content-type": METRICS_CONTENT_TYPE, "cache-control": "no-store" }).end(req.method === "HEAD" ? undefined : metricsText({ version: version(), run: null }));
+            return;
+          }
+          // anything else fails the scrape (Prometheus's `up` turns 0) and is said in the log; the error's text stays in
+          // the log, never in the answer, which takes no credential (it could name a table or a host)
+          log(`  /metrics: the run's numbers could not be read: ${(e as Error).message}`);
+          res.writeHead(500, { "content-type": "text/plain", "cache-control": "no-store" }).end("the run's numbers could not be read: mason serve's log says why\n");
+        });
+      return;
+    }
     const h = healthBody(state(), startedAt);
     res.writeHead(h.status, { "content-type": "application/json", "cache-control": "no-store" }).end(`${JSON.stringify(h.body)}\n`);
   });
@@ -280,12 +316,13 @@ export async function serve(argv: string[]): Promise<number> {
   if (made.wrote) say(`  wrote ${made.wrote}: the database (url: \${DATABASE_URL}), no table yet (mason add beside it adds one)`);
   for (const l of c.said) say(`  ${l}`);
   say(`  health    http://${s.health.host}:${s.health.port}/healthz`);
+  say(`  metrics   http://${s.health.host}:${s.health.port}/metrics`);
   // the run reads the project of the folder it runs in (src/cli/project.ts): the data folder's
   process.chdir(s.data);
   let code: number;
   try {
     code = await dev({ port: 4039, version: version(), selfSignedTls: s.selfSignedTls,
-      serve: { log: say, ready: (run) => { state = { phase: "ready", tables: run.tables }; }, stopping: () => { state = { phase: "stopping" }; } } });
+      serve: { log: say, ready: (run) => { state = { phase: "ready", tables: run.tables, metrics: run.metrics }; }, stopping: () => { state = { phase: "stopping" }; } } });
   } finally {
     // a platform's health check may hold a keep-alive connection open, which close() alone would wait for
     health.closeAllConnections();

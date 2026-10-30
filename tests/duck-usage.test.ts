@@ -22,7 +22,8 @@ const store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined, {
 after(() => { store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
 const facts = { copyBytes: 12_345, totals: { added: 3, copied: 2, failed: 1, rows: 1_000 }, oldestSyncSeconds: 42.5, streamLag: { bytes: 2_048, seconds: 1.5 }, copied: [] as string[],
-  slotWalHeldBytes: 4_096, diskFreeBytes: 80 * 2 ** 30, sessionsOpen: 3 };
+  slotWalHeldBytes: 4_096, diskFreeBytes: 80 * 2 ** 30, sessionsOpen: 3, tables: { total: 3, copied: 2, copying: 0, waiting: 0, failed: 1 },
+  streamLagReadAt: null, slotWalReadAt: null };
 const row = (durationMs: number, o: Partial<ApiLogRow> = {}): ApiLogRow => ({ requestId: "r", at: new Date(), method: "QUERY", status: 200, durationMs, ...o });
 const NEVER = 3_600_000;
 

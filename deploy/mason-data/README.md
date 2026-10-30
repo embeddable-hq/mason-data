@@ -36,6 +36,26 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
   their next statement, without a restart. The list is `.mason/users.json` on the volume (no passwords in it).
   **Changing `MASON_API_KEY` removes every user at once**: add each again.
 
+## Metrics
+
+`GET /metrics` on the health port (4140, beside `/healthz`) is Mason's numbers in Prometheus's text format: tables by
+phase, the copy's size, how old the stalest copy is, the stream's lag and the WAL its slot holds, disk free, sessions
+open, statements by outcome (a counter) and their p50 / p95 (`curl -s localhost:4140/metrics` lists each with its
+help). It is **numbers only and needs no secret**: no table, column, user, client or host name and no statement text
+appears in it, not even as a label. A scrape costs your database nothing: it reads what Mason already holds (the
+stream's position as last sampled, once a minute), never a connection or a query on the source, however often it is
+asked. While Mason starts it answers 200 with `mason_ready 0`; `/healthz` is the probe.
+A Prometheus beside the container scrapes it with:
+
+```yaml
+scrape_configs:
+  - job_name: mason
+    static_configs: [{ targets: ["mason:4140"] }]
+```
+
+Per-table or per-user detail (which table is stale, who sent what) would need a credential and is not served there:
+`docker compose exec mason mason status` and `mason usage` say it.
+
 ## Your database
 
 - **Polling** (the default) needs a user that can SELECT the tables. Each table is read once, then as the sources

@@ -1902,13 +1902,18 @@ export class Sync {
    * WHERE THE STREAM IS (`StreamStatus`): its position, the database's, the lag, the last batch, and each added table's
    * part in it with what it applied this run. Null outside replication mode. The database's position costs a
    * connection at most every 5 s (`databasePosition`); everything else is the run's own.
+   *
+   * `refresh: false` NEVER REACHES THE DATABASE: the position and the slot as last read (`database.at`, `slotWal.at` say
+   * when), or "not read yet". What an unauthenticated reader asks with (`GET /metrics`, src/cli/run-server.ts
+   * `metricsFacts`): a scraper's rate, or anyone's loop on the health port, must never become connections and SELECTs
+   * on the source; the usage sampler, `mason status` and `mason wait` keep the reads fresh.
    */
-  async streamStatus(): Promise<StreamStatus | null> {
+  async streamStatus({ refresh = true }: { refresh?: boolean } = {}): Promise<StreamStatus | null> {
     if (!this.streams()) return null;
     const r = this.replication!;
     const s = this.stream;
     const position = s?.position() ?? this.appliedLsn;
-    const db = await this.databasePosition();
+    const db = refresh ? await this.databasePosition() : this.dbPosition ?? { error: "not read yet: nothing has asked where the database is since the run began", at: Date.now() };
     const now = Date.now();
     const iso = (ms: number): string => new Date(ms).toISOString();
     // each table's part, as `keptOf` says it for EXPLAIN (`streamTable`), with what it applied this run

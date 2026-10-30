@@ -109,6 +109,15 @@ export function syncTotals(added: number, copies: readonly CopyState[]): SyncTot
   return { added, copied: copied.length, failed: copies.filter((c) => syncStateOf(c) === "failed").length, rows: copied.reduce((n, c) => n + (c.rows ?? 0), 0), syncedAt: latest };
 }
 
+/** THE SYNC'S COPIES BY PHASE: what `/healthz` says (src/cli/serve.ts `healthBody`) and `GET /metrics`' `mason_tables`
+ *  (src/cli/metrics.ts, through `usageFacts`) — counts only, one count for both endpoints. */
+export interface PhaseCounts { total: number; copied: number; copying: number; waiting: number; failed: number }
+export function phaseCounts(copies: readonly CopyState[]): PhaseCounts {
+  const counts: PhaseCounts = { total: 0, copied: 0, copying: 0, waiting: 0, failed: 0 };
+  for (const c of copies) { counts.total++; counts[c.phase]++; }
+  return counts;
+}
+
 /** WHERE A RUN IS IN ONE WORD, as `mason status` heads its last line and the web page's Status says it: every added
  *  table copied and served, a failure, or still under way. */
 export function readinessWord(r: Readiness): "Ready" | "Failed" | "Under way" {

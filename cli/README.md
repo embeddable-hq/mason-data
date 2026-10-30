@@ -111,7 +111,7 @@ again and remove `mason/models/`.
 | `mason usage [--since 7d] [--step 1h]` | What Mason did over time, from a sample a minute kept `MASON_HISTORY_DAYS` days: the statements and their p95, the rows and bytes sent, the copy's size and rows, the stalest copy, the stream's lag, the memory; then each copy's own size. |
 | `mason stop` | Stops Mason for this project. The copy and the state stay: the next `mason start` resumes in seconds. |
 | `mason destroy` | Removes this project's copy of the data (its file) and Mason's state in `.mason/`, stopping Mason first if it runs — and, when a table was replicated, its slot (and its publication, when Mason made it) on the database. Your files, `.mason/config.json` and the users stay: the next `mason start` copies the tables again. |
-| `mason serve` | Mason for a server or a container: `mason start --attach` configured by the environment alone, its state in one folder (a volume), its log on stdout, `GET /healthz`, a clean stop on SIGTERM. `mason serve --help` lists every setting with its default. |
+| `mason serve` | Mason for a server or a container: `mason start --attach` configured by the environment alone, its state in one folder (a volume), its log on stdout, `GET /healthz`, `GET /metrics` (Prometheus, numbers only), a clean stop on SIGTERM. `mason serve --help` lists every setting with its default. |
 
 Every command documents itself: `mason --help` lists them, and `mason <command> --help` (or `mason help <command>`) says
 how to use one, with examples. Every command but `help` and `mcp` (whose stdout is the MCP protocol's) takes `--json`. A command means the project of the folder it
