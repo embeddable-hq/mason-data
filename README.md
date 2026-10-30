@@ -1,10 +1,10 @@
 # Mason
 
-A drop-in replacement for a Postgres read replica, built for exceptionally fast analytical queries.
+A drop-in replacement for a Postgres read replica, just much, much faster.
 
 - **Lightweight:** Mason is a single Node.js process you can run anywhere.
 - **Works like a read replica:** Choose which tables and columns to sync from your Postgres database, and how each stays in sync: on demand, polling or logical replication. Mason makes them available to query from any Postgres client.
-- **Lightning fast:** Mason rewrites your Postgres queries to run on [DuckDB](https://github.com/duckdb/duckdb)'s columnar engine, in the form DuckDB runs fastest. Analytical queries (`COUNT`, `SUM`, `GROUP BY`, etc.) over large tables run [significantly faster](#performance-vs-postgres) than on Postgres.
+- **Exceptionally fast:** Mason rewrites your Postgres queries to run on [DuckDB](https://github.com/duckdb/duckdb)'s columnar engine, in the form DuckDB runs fastest. Analytical queries (`COUNT`, `SUM`, `GROUP BY`, etc.) over large tables run [significantly faster](#performance-vs-postgres) than on Postgres.
 - **Same SQL, same answers:** Mason is built from the ground up [to match Postgres syntax and behaviour](#postgres-compatibility), so you can confidently point your existing SQL queries at Mason, without needing to port them to another SQL dialect (where subtle differences change your results).
 - **Built for AI agents:** Give AI agents fast, secure access to your data: a user per agent, role-based access control (RBAC) that limits the tables, columns and rows each one can read, every query logged, and native MCP support.
 
