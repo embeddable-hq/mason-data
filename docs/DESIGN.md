@@ -1228,6 +1228,170 @@ The oracle holds a Mason role of `tables: all` to a Postgres role granted `ALL T
 access, but visible in a committed file: narrowing it is an edit a reviewer sees, and deleting the `default:` line is
 the one-line way to make every roleless user read nothing. A file already there (a clone) is kept byte for byte.
 
+### Roles: rows per user (2026-10-30, GitHub issue 30, stage 2)
+
+**Decision (the owner, 2026-10-30): one PR carrying `where:` and `through:`, scalars and lists, and a user missing a
+value refused loudly.** A role declares `attributes:` (`[tenant]`, or `{ tenant: scalar, regions: list }`); a table of
+it takes `where: "<SQL reading :name>"` or `through: <a table of the role>` (`through: { orders: order_id }` naming the
+column); a user carries its values (`mason user add … --set tenant=42`, a list by repeating `--set`; `attributes` in
+`.mason/users.json`). Answering a user that lacks a value with no rows would look like an empty tenant — a silent wrong
+answer — so every statement of such a user is refused 42501 with the attribute, the `where:` and the exact commands,
+and `mason start` and `mason user list` name such users.
+
+**One grammar.** `:name` is found by one lexer (`whereParts`, src/duck/row-filter.ts) that skips strings, quoted
+identifiers, dollar quotes, comments and `::` casts. The `where:` is analysed by the catalog Postgres at the file's read
+as `SELECT 1 FROM <table> WHERE <$n>`, which types each attribute as Postgres infers it there (`tenant_id = :tenant`:
+integer; `region = ANY(:regions)`: uuid[]); a list used as a scalar or the reverse is Postgres's own error at the key,
+told again with declared types so the message is the one a developer would meet. Bound, a scalar is `CAST('42' AS
+integer)` and a list `CAST(ARRAY['12', '41'] AS integer[])` — literals the catalog reads, never a value pasted into a
+statement's text. In the statement, each read of a filtered table (a `RangeVar` resolved by `to_regclass` under the
+session's search_path, every read the analysis found accounted for, as views are) is replaced by `(SELECT * FROM t WHERE
+<filter>) AS t`, a `through:` by an `EXISTS` over the parent's own filtered read, recursively; the result is analysed
+again and goes through the same grants, rewrite and allowlist as any statement. So a view, a CTE, a subquery, a join's
+side and a prepared statement's every Execute meet the filter because there is no read without it. The plan cache is
+keyed by the role AND the bound filters, and an Execute whose filters moved (the file edited) is planned again.
+
+**Postgres row security is the reference, twice.** The catalog holds the filters as real policies (`ENABLE ROW LEVEL
+SECURITY`, `CREATE POLICY … FOR SELECT TO <role> USING (… current_setting('mason.attr.tenant')::integer …)`), the
+attributes sent with each catalog request as the session's settings and unsettable by the session; and the oracle
+mirrors each Mason user with a Postgres login under the same policies (`ALTER ROLE … SET mason.attr.…`, a list read by
+`string_to_array(…)::int[]`), asking thirty shapes as six users and as an unfiltered one (tests/integration/oracle/row-filters.ts).
+**An empty list is not expressible**: `--set regions=` is refused and an empty list in the users file counts as a missing
+value, since a user reading no row of its role is a user of another role, and an empty array would be the silent zero rows
+this design refuses.
+
+**The security barrier (the review of PR 51).** A Postgres policy is a barrier: a statement's condition runs below it only
+if it is leakproof. The first form of this feature had none. The filtered read was a plain subquery, DuckDB flattened it,
+and the statement's WHERE went below a `through:`'s or a list's SEMI join, onto every row of the table, so
+`WHERE 1/(CASE WHEN qty = 99 THEN 0 ELSE 1 END) > 0` answered "does a hidden row satisfy P?" for any P, as 22012 or a
+count. The tests had hidden it: DuckDB's dynamic join filter prunes hidden rows by itself below 50 build keys or over a
+narrow key range, so **a test of this needs more than 50 visible keys over a wide range**, and the oracle's and the wire
+test's do. Now the outermost filtered read ends `LIMIT 9223372036854775807` (`BARRIER`, src/duck/row-filter.ts): the filter
+pushdown does not cross a LIMIT, which would change what it keeps. **The limit need not reach the plan**: statistics
+propagation runs after the pushdown and drops a limit above the table's row count, so most plans hold no limit node, and
+the statement's expression stays above the role's filter all the same; that is also why the barrier costs so little. So
+the detector reads where the expression runs, never whether a Limit is there (`tests/duck-roles-barrier-wire.test.ts`).
+With the `try` wall off (`wallSwitch`, below), removing it fails that file's limit test and, per user, the shapes counted
+below; with `try` on, nothing fails, which is why the limit has a test of its own.
+
+Measured on DuckDB 2.0, ten cores, a file of 30 M orders and 60 M items, a user keeping half the rows, min of five (three
+for the last three rows), ms. One thing changed per column:
+
+| Statement over the filtered read | No barrier | `LIMIT` max | `OFFSET 0` |
+|---|---:|---:|---:|
+| `count(*)` | 6 | 5 | 26 |
+| `sum`, `avg` over every row | 12 | 10 | 48 |
+| GROUP BY with a WHERE of its own | 18 | 23 | 85 |
+| the same, the filter a 50-value list | 16 | 23 | 83 |
+| a WHERE a zone map would prune (`id BETWEEN`) | 0 | 15 | 60 |
+| `through:`, an aggregate | 539 | 541 | 492 |
+| `through:`, a WHERE a zone map would prune | 98 | 505 | 514 |
+| a join of two filtered tables | 28 | 26 | 133 |
+| that join, a selective WHERE | 8 | 8 | 64 |
+| ORDER BY … LIMIT 10 | 19 | 18 | 83 |
+| 15 M rows returned | 130 | 72 | 160 |
+| a window, a WHERE of its own | 21 | 34 | 74 |
+| `count(*)` of a DISTINCT | 60 | 63 | 255 |
+
+`OFFSET 0`, Postgres's own idiom, is a barrier too, but statistics cannot drop it and it runs a serial operator under the
+default `preserve_insertion_order`: three to five times the cost, for nothing. **`WITH … AS MATERIALIZED` is no barrier**:
+the same reproduction raised 22012 through it, read once or twice, and it costs more (`sum` 165 ms, a `through:` aggregate
+1,319). **What the barrier costs is the
+statement's own pruning**: every shape is within noise but those whose WHERE a zone map would have pruned, the worst five
+times over on a `through:`, 400 ms on 60 M rows.
+
+**A table's statistics (the second review of PR 51).** The review found EXPLAIN telling a filtered user what the engine
+knew of the whole table: `Empty Result` and the first line's `answered reading no synced table` for `WHERE secret > N`
+above the column's maximum, a binary search on a hidden row, and `rows=` and `actual rows=` beside it. Then a probe with no
+EXPLAIN in it did the same: `WHERE 1/(id - id) > 0 AND secret > N` raised 22012 below the hidden maximum and answered 0
+above it, because the engine proved the condition false from the column's statistics and took the Filter away, the
+division with it. The limit stops a filter, not a fact: statistics pass up through it, through a UNION ALL's arms, `[x][1]`,
+struct and unnest, `any_value`, `try_cast`, `list_concat`, `flatten`, `struct_pack` and `row()`. So hiding EXPLAIN was not
+enough, and turning off the engine's `statistics_propagation` is not open: `disabled_optimizers` is global, visible from
+another connection, so a per-statement setting would race every other session.
+
+**Two things hold it.** The filtered read ends in `SELECT try(COLUMNS(*)) AS "\0" FROM (… LIMIT max)` (`wallStatistics`):
+`try(col)` is opaque to the propagation (the plan was identical either side of N), and it keeps every column's name, type
+and text, 34 types and 16 odd names held by `tests/duck-roles-try-types.test.ts`. Postgres has no `COLUMNS(*)`, so
+`filteredSql` writes `*`, Postgres analyses that, and the list is replaced after the rewrite, where the read-back check
+holds the text. **The wall's select is found by a name chosen after reading the statement**, the first of
+`__mason_barrier`, `__mason_barrier_1`, … that no string of it holds, with the count of reads Mason wrote: a fixed name
+counted a user's own subquery as Mason's, and a mismatch is refused by the gap `roles`. `COLUMNS` is printed the same way,
+from calls marked in the tree under a name the text holds nowhere else, never by replacing characters a literal could
+spell. And an EXPLAIN of a statement that reads
+a filtered table never shows the statement to the engine: the tables are `plan.reads`, the first line constant, `Plan` a
+constant node so a viewer and `mason mcp` keep reading `Mason.Tables`, and ANALYZE is refused by the gap `roles`, since a
+profile is a count of what the engine read and there is nothing left to run it for. A session with no filter is untouched.
+
+**What guarantees what.** The LIMIT's guarantee is the engine's semantics: a filter pushed through a LIMIT would change
+what it keeps. `try` stopping the pushdown and `try` stopping statistics are both observations of this engine, not
+guarantees: a later version could carry a minimum and a maximum through it. So each has its own detector. With `try` on, the
+pushdown stops at `try` and a test cannot tell whether the LIMIT holds anything (`BARRIER` empty passed every test of the
+two wire files), so `tests/duck-roles-barrier-wire.test.ts` runs every shape with the `try` wall off by a test-only switch
+(`wallSwitch`), where the LIMIT stands alone. `tests/duck-roles-rows-wire.test.ts`'s statistics test is `try`'s detector, on the
+wire because Postgres itself raises 22012 by written order on that statement, so the oracle cannot hold it. Both stay.
+
+The oracle's data had to change with this. At a sixth of the invoices visible (`tenant`) or a third (`list2`), the join's own
+filter pruned the hidden rows and the barrier shapes passed with the barrier removed. At about half visible, removing both
+walls fails 7 shapes of `tenant` and of `list1`, 14 of `list2` and 15 of `regions`. The rest of a scalar's shapes cannot fail:
+one value is a table filter in the scan, which runs before the statement's Filter with no barrier at all.
+
+Measured on the same file, the same run, DuckDB 2.0, min of five (three for the last three rows), ms. **The machine was
+loaded** (load average about 40), so compare across a row and never with the table above, whose rows are a quiet machine's:
+
+| Statement over the filtered read | No barrier | `LIMIT` max | `LIMIT` and `try` |
+|---|---:|---:|---:|
+| `count(*)` | 7 | 7 | 8 |
+| `sum`, `avg` over every row | 14 | 38 | 29 |
+| GROUP BY with a WHERE of its own | 64 | 53 | 72 |
+| the same, the filter a 50-value list | 43 | 103 | 146 |
+| a WHERE a zone map would prune (`id BETWEEN`) | 1 | 14 | 22 |
+| `through:`, an aggregate | 2,210 | 2,366 | 2,008 |
+| `through:`, a WHERE a zone map would prune | 334 | 2,070 | 2,109 |
+| a join of two filtered tables | 84 | 65 | 62 |
+| that join, a selective WHERE | 11 | 32 | 32 |
+| ORDER BY … LIMIT 10 | 46 | 30 | 54 |
+| 15 M rows returned | 375 | 136 | 463 |
+| a window, a WHERE of its own | 25 | 69 | 167 |
+| `count(*)` of a DISTINCT | 342 | 211 | 406 |
+
+`try` costs per row read (each column is evaluated through it), so it shows where a statement returns or sorts many rows,
+up to about twice the limit's, and nothing where the time is the join's. A point lookup of a wide column costs 26 ms
+against 0.9 ms on 150,000 visible 2 KB rows, and that is the LIMIT's, not `try`'s: the statement's own pruning, as above.
+
+**A `where:` the rewrite cannot send is the file's problem.** `checkRoles` ran Postgres's analysis only, so a predicate
+Postgres read and Mason cannot answer (a value of a type not verified) reached each user as 0A000, statement by statement.
+It now plans the filter's own read too, every attribute NULL, the one value of every type (`filterProbe`).
+
+**A value its type refuses is the attribute's problem.** `filterProbe` cannot see a value: `--set tenant=abc` on an integer
+passed, and every statement of the filtered table answered `22P02` naming no attribute. A data exception on a filtered
+statement now re-reads the bound values of the filters that statement reads (`attributeRefused`), and one the type refuses is 42501 with the attribute, the user
+and the `mason user add` line; a statement's own bad literal stays Postgres's. `mason user add` does not refuse it at the
+door: the type is the catalog's inference, a run's, and the command also works with Mason stopped.
+
+**A GROUP BY of a filtered table's key.** A table turned into a subquery has no primary key, so `SELECT o.id, o.status … GROUP
+BY o.id`, which Postgres accepts under row security, failed the filtered text's analysis with 42803. Each column the select
+reads outside an aggregate now joins the GROUP BY (`carryKeyDependency`), gated on the key being grouped whole: a group is
+then one row of the table and no added column can split it. The gate is the key and never Postgres's acceptance, because
+`GROUP BY lower(status)` reads a column ungrouped too. What the carrying does not reach (a grouping set, a `json` column) is
+a 42803 only the wrap can cause, so it is refused by the gap `roles`, with the way out.
+
+**`SHOW ALL`** lists no `mason.attr.*`, and that is Postgres's answer: a placeholder is `GUC_NO_SHOW_ALL`, and the oracle
+holds it, for a `SET myapp.x` and for an attribute `ALTER ROLE` set.
+
+**No leakproof gate.** Postgres omits the barrier for a leakproof condition, and the "No barrier" column is the most a
+gate could win back. It was not built: a gate must judge what reaches the engine, not what the user wrote, and Mason's
+rewrite turns a comparison into its own functions (a collation's key, an exact numeric), so `pg_proc.proleakproof` on the
+analysed tree says nothing about them. A safe gate needs an audit of every rewrite of every operator it admits, kept true
+as the rewrite changes, and it must read the whole tree, since a derived table's expression becomes the outer condition
+once substituted. A mistake there is the leak this section closes; its gain is the two pruned rows above. Timing is out of
+scope either way: how long a statement runs depends on rows it cannot read, on Postgres too.
+
+**Where.** `src/duck/row-filter.ts`, `src/cli/roles.ts` (`attributesOf`, `rowsOf`, `throughColumns`),
+`src/api/postgres/server.ts` (`withRows`, `checkRoles`), `src/api/postgres/catalog.ts` (`catalogPolicies`),
+`src/cli/user.ts` (`attributesToAdd`); `tests/duck-roles-rows-wire.test.ts`, `tests/cli-roles.test.ts`,
+`tests/duck-row-filter.test.ts`, the oracle's `rowFilterCases`.
+
 ### An MCP server (2026-10-29)
 
 **Decision.** `mason mcp` is an MCP server on stdio — newline-delimited JSON-RPC, stdout the protocol's alone — that is

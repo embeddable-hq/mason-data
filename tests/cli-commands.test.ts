@@ -380,7 +380,7 @@ test("msText: a duration in ms as a person reads it — ms under a second, then 
 
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
-  const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", role: "", endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
+  const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", role: "", attributes: null, endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", status: "completed", sqlstate: null, message: null,
     rows: 20, durationMs: 1234, query: "SELECT id\n FROM public.orders LIMIT 20" }, PLAIN),
     "2026-10-26 14:02:11  ok                   1.2 s      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");
@@ -1001,6 +1001,86 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
   const plain = (JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: Array<{ name: string; role?: string }> }).users.find((u) => u.name === "plain");
   assert.deepEqual(plain && { role: plain.role, roleKnown: "roleKnown" in plain, roleFrom: (plain as { roleFrom?: string }).roleFrom, readsNothing: (plain as { readsNothing?: boolean }).readsNothing },
     { role: undefined, roleKnown: false, roleFrom: "none", readsNothing: true }, JSON.stringify(plain));
+});
+
+test("mason user add --set with Mason stopped: every attribute the role declares, none other, a scalar once, a list once per value and never empty; list says each user's values and the ones it lacks", async () => {
+  // src/cli/user.ts attributesToAdd, src/cli/roles.ts (attributes:, where:, through:): refused before anything is
+  // written, each at its key with the way out; with Mason up the same check reads the listener's roles (/api/state)
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-user-set-")));
+  opened.push(async () => { fs.rmSync(root, { recursive: true, force: true }); });
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
+  fs.writeFileSync(path.join(folder, "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ntables:\n  orders: {}\n  order_items: {}\n  customers: {}\n");
+  const rolesFile = path.join(folder, "roles.yml");
+  fs.writeFileSync(rolesFile, `default: everything
+roles:
+  everything:
+    tables: all
+  tenant:
+    attributes: [tenant]
+    tables:
+      orders: { where: "tenant_id = :tenant" }
+      order_items: { through: orders }
+  region:
+    attributes: { regions: list, plan: scalar }
+    tables:
+      customers: { where: "region = ANY(:regions) AND plan = :plan" }
+`);
+  const run = (argv: string[]) => runMason(root, argv, matrixEnv());
+  const failure = (a: Answer): Failure & { code: string } => (JSON.parse(a.stdout) as { error: Failure & { code: string } }).error;
+  const usersFile = path.join(root, ".mason", "users.json");
+  // a missing attribute: the attribute, the role, the where: that reads it and the exact --set — a wrong command line
+  const missing = await run(["user", "add", "acme", "--role", "tenant", "--json"]);
+  assert.equal(missing.code, 2, missing.stdout + missing.stderr);
+  assert.deepEqual([failure(missing).code, failure(missing).message, failure(missing).fix],
+    ["usage", "the role tenant needs --set tenant=…: its users carry the attribute tenant (roles.tenant.tables.orders.where: tenant_id = :tenant)", "mason user add acme --role tenant --set tenant=<value>"]);
+  const person = await run(["user", "add", "acme", "--role", "tenant"]);
+  assert.equal(person.code, 2);
+  assert.match(person.stderr, /^✗ mason user: the role tenant needs --set tenant=…/m);
+  for (const [argv, want] of [
+    [["--set", "tenat=1"], "--set tenat: the role tenant has no attribute tenat — did you mean `tenant`?"],
+    [["--set", "tenant=1", "--set", "tenant=2"], "--set tenant twice: tenant is a scalar of the role tenant, one value"],
+    [["--set", "tenant"], "--set tenant: is <attribute>=<value>, like --set tenant=42"],
+    [["--set", "Tenant=1"], "--set Tenant=1: \"Tenant\" is not an attribute's name: 1 to 63 lower case letters, digits or \"_\", starting with a letter or \"_\" (e.g. tenant)"],
+  ] as const) {
+    const a = await run(["user", "add", "acme", "--role", "tenant", ...argv, "--json"]);
+    assert.equal(a.code, 2, a.stdout + a.stderr);
+    assert.equal(failure(a).message, want);
+  }
+  // a list: once per value, never empty; a scalar beside it given twice is refused with the list as the near name only where it is one
+  const empty = await run(["user", "add", "emea", "--role", "region", "--set", "regions=", "--set", "plan=pro", "--json"]);
+  assert.equal(empty.code, 2);
+  assert.match(failure(empty).message, /^--set regions=: regions is a list, and a list's value is never empty/);
+  const listMissing = await run(["user", "add", "emea", "--role", "region", "--set", "plan=pro", "--json"]);
+  assert.equal(failure(listMissing).fix, "mason user add emea --role region --set plan=pro --set regions=<value> --set regions=<another>");
+  // the user's default role declares none: an attribute is refused by name
+  const noAttr = await run(["user", "add", "bot", "--set", "tenant=1", "--json"]);
+  assert.equal(noAttr.code, 2);
+  assert.match(failure(noAttr).message, /^--set tenant: the role everything has no attribute tenant/);
+  assert.ok(!fs.existsSync(usersFile), "nothing written by any refusal");
+  // written: a scalar (a comma is a character of it), and a list in the order given
+  const acme = await run(["user", "add", "acme", "--role", "tenant", "--set", "tenant=4,2", "--json"]);
+  assert.equal(acme.code, 0, acme.stdout + acme.stderr);
+  assert.deepEqual((JSON.parse(acme.stdout) as { attributes: unknown }).attributes, { tenant: "4,2" });
+  const emea = await run(["user", "add", "emea", "--role", "region", "--set", "regions=eu", "--set", "plan=pro", "--set", "regions=uk"]);
+  assert.equal(emea.code, 0, emea.stdout + emea.stderr);
+  assert.match(emea.stdout, /^ {2}attributes +regions=\[eu, uk\], plan=pro$/m);
+  // a user added before its role gained an attribute: list names what it lacks, with the way out
+  const users = JSON.parse(fs.readFileSync(usersFile, "utf8")) as { users: Array<Record<string, unknown>> };
+  users.users.push({ name: "old", id: "0123456789abcdef", addedAt: new Date().toISOString(), key: users.users[0]!.key, role: "tenant" });
+  fs.writeFileSync(usersFile, JSON.stringify(users));
+  const list = await run(["user", "list", "--json"]);
+  assert.equal(list.code, 0, list.stdout + list.stderr);
+  assert.deepEqual((JSON.parse(list.stdout) as { users: Array<{ name: string; attributes?: unknown; missingAttributes?: string[] }> }).users.map((u) => [u.name, u.attributes, u.missingAttributes]),
+    [["acme", { tenant: "4,2" }, undefined], ["emea", { regions: ["eu", "uk"], plan: "pro" }, undefined], ["old", undefined, ["tenant"]]]);
+  const listed = await run(["user", "list"]);
+  assert.match(listed.stdout, /^ {2}acme +role tenant \(tenant=4,2\) +id /m);
+  assert.match(listed.stdout, /^ {2}old +role tenant +id .*has no value for tenant: its statements are refused$/m);
+  assert.match(listed.stdout, /Tip: A user without a value its role's rows are filtered by is refused at every statement: the user old has no value for tenant, which the role tenant filters rows by: its statements are refused — mason user remove old && mason user add old --role tenant --set tenant=<value>\./);
+  // --set with another verb: usage
+  assert.equal((await run(["user", "list", "--set", "tenant=1"])).code, 2);
 });
 
 test("mason start --replication, --poll and --publication are gone: each answers with the line to write in the sources file and exit 2, as a person and with --json, and starts nothing", async () => {

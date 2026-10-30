@@ -31,6 +31,7 @@ import * as path from "node:path";
 import { ApiError, USER_DISABLED } from "../api/error.ts";
 import type { PgApiOptions, PgToken } from "../api/postgres/server.ts";
 import { tokenProblem } from "./token.ts";
+import { ATTRIBUTE_NAME_RE, type AttributeValues } from "./row-filter.ts";
 
 export const USERS_FILE = "users.json";
 
@@ -54,6 +55,17 @@ export interface MasonUser {
   disabledAt?: string;
   /** the role it reads as (the project's roles file, src/cli/roles.ts); absent: every copied table, as before */
   role?: string | undefined;
+  /** its attribute values (`mason user add … --set tenant=42`, a list's by repeating it), which its role's row filters
+   *  read (src/duck/row-filter.ts); absent: none */
+  attributes?: Record<string, string | string[]> | undefined;
+}
+
+/** a user's attributes as the file keeps them: a name each, a string or a list of strings */
+function attributesValid(v: unknown): v is Record<string, string | string[]> {
+  // a NUL ends the statement it is bound into, wherever it is: every statement of the user would fail as a syntax error
+  const value = (x: unknown): boolean => typeof x === "string" && !x.includes("\0");
+  return typeof v === "object" && v !== null && !Array.isArray(v) &&
+    Object.entries(v).every(([k, x]) => ATTRIBUTE_NAME_RE.test(k) && (value(x) || (Array.isArray(x) && x.every(value))));
 }
 
 /** Whether a user has not been removed (it may still not connect: see `underKey`). */
@@ -109,8 +121,9 @@ function parseUsers(file: string, text: string): UsersRead {
   for (const [i, u] of list.entries()) {
     const o = u as Record<string, unknown> | null;
     if (typeof o !== "object" || o === null || typeof o.name !== "string" || !USER_NAME_RE.test(o.name) || typeof o.id !== "string" || !/^[0-9a-f]{16}$/.test(o.id) ||
-      typeof o.addedAt !== "string" || typeof o.key !== "string" || (o.role !== undefined && (typeof o.role !== "string" || !ROLE_RE.test(o.role)))) {
-      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key, role?[, removedAt][, disabledAt] } as mason user add writes it` };
+      typeof o.addedAt !== "string" || typeof o.key !== "string" || (o.role !== undefined && (typeof o.role !== "string" || !ROLE_RE.test(o.role))) ||
+      (o.attributes !== undefined && !attributesValid(o.attributes))) {
+      return { problem: `${file}: users[${i}] is not { name, id, addedAt, key, role?, attributes?[, removedAt][, disabledAt] } as mason user add writes it` };
     }
     if (o.removedAt !== undefined && typeof o.removedAt !== "string") {
       return { problem: `${file}: users[${i}].removedAt is not a timestamp as mason user remove writes it` };
@@ -119,6 +132,7 @@ function parseUsers(file: string, text: string): UsersRead {
       return { problem: `${file}: users[${i}].disabledAt is not a timestamp as mason user disable writes it` };
     }
     users.push({ name: o.name, id: o.id, addedAt: o.addedAt, key: o.key, ...(typeof o.role === "string" ? { role: o.role } : {}),
+      ...(attributesValid(o.attributes) ? { attributes: o.attributes } : {}),
       ...(o.removedAt !== undefined ? { removedAt: o.removedAt } : {}), ...(o.disabledAt !== undefined ? { disabledAt: o.disabledAt } : {}) });
   }
   return { users };
@@ -225,7 +239,7 @@ export class LiveUsers {
     // disabled: refused only once its password verified (so the state is told to the holder of the login alone), in
     // Postgres's words for a role without LOGIN, 28000 (src/api/postgres/server.ts reads the code)
     if (isDisabled(found)) throw refusal(401, disabledMessage(found.name), user, USER_DISABLED);
-    return { filters: [], subject: undefined, user: found.name, jti: found.id, ...(found.role !== undefined ? { role: found.role } : {}) };
+    return { filters: [], subject: undefined, user: found.name, jti: found.id, ...(found.role !== undefined ? { role: found.role } : {}), ...attributesOf(found) };
   }
 
   /**
@@ -240,11 +254,14 @@ export class LiveUsers {
     const found = now.users.find((u) => u.id === token.jti && u.name === token.user);
     if (found === undefined) throw refusal(401, `the user "${token.user}" was removed`, token.user);
     if (isDisabled(found)) throw refusal(401, `the user "${token.user}" was disabled`, token.user, USER_DISABLED);
-    if (found.role === token.role) return token;
-    const { role: _was, ...rest } = token;
-    return { ...rest, ...(found.role !== undefined ? { role: found.role } : {}) };
+    if (found.role === token.role && JSON.stringify(found.attributes ?? null) === JSON.stringify(token.attributes ?? null)) return token;
+    const { role: _was, attributes: _had, ...rest } = token;
+    return { ...rest, ...(found.role !== undefined ? { role: found.role } : {}), ...attributesOf(found) };
   }
 }
+
+/** a user's attributes as its session's token carries them (src/api/postgres/server.ts PgToken) */
+const attributesOf = (u: MasonUser): { attributes?: AttributeValues } => u.attributes !== undefined && Object.keys(u.attributes).length > 0 ? { attributes: u.attributes } : {};
 
 /** A disabled user's refused login: Postgres's sentence for a role without LOGIN, and it alone — why is its DETAIL,
  *  the way out its HINT (src/api/postgres/server.ts), as Postgres splits them. */

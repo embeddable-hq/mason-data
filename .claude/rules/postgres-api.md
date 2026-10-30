@@ -99,6 +99,48 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   privilege functions are false, `current_user` / `current_role` / `user` spliced to the user's name, `set_config`
   refused), never as the catalog's superuser. A token reads every copied table. Why: a default in the code is a grant nobody committed. DETECTOR:
   `tests/duck-roles-wire.test.ts` (stage 1b's tests), `tests/cli-roles.test.ts`.
+- **A role's rows are filtered by REPLACING every read of a filtered table on the analysed tree, never by text, and a
+  user missing a value is refused, never answered with no rows** (`src/duck/row-filter.ts` `expandRowFilters`,
+  `server.ts` `withRows`; docs/DESIGN.md "Roles: rows per user"): each read of the table — a view's, a CTE's, a
+  subquery's, a join side's — becomes its filtered read (`through:` an EXISTS over the parent's filtered read), the
+  attributes bound as typed literals the catalog inferred, and the result goes through the grants, rewrite and
+  allowlist again (one grammar). The plan cache is keyed by role AND bound filters; an Execute whose filters moved is
+  planned again. The catalog holds the same filters as `CREATE POLICY`, reading `current_setting('mason.attr.…')`,
+  which the session may SHOW but never SET. Why: zero rows for a missing value is a silent wrong answer, and a filter
+  in the text misses the read a view or a CTE hides. DETECTOR: `tests/duck-roles-rows-wire.test.ts`, the oracle's
+  `rowFilterCases` (Postgres logins under the same policies). Every `duck.plan` caller passes the session's `grants`
+  (`tests/conventions.test.ts`).
+- **A filtered read is a SECURITY BARRIER: a statement's own expression never runs on a hidden row** (`BARRIER`,
+  `src/duck/row-filter.ts`; docs/DESIGN.md "Roles: rows per user"): the outermost filtered read ends in a LIMIT the filter
+  pushdown cannot cross, for a `where:`, a list and a `through:`, with no gate, because `proleakproof` on the analysed
+  tree says nothing about what the rewrite sends. Why: below a filter's SEMI join an expression that raises answers "does
+  a hidden row satisfy P?" for any P. The LIMIT is the guarantee (a filter pushed through it would change what it keeps);
+  `try` stops the pushdown too, but only as an observation. DETECTOR: `tests/duck-roles-barrier-wire.test.ts`, every shape
+  with the `try` wall off by `wallSwitch`, so the LIMIT stands alone (with `try` on, no test can tell), the expression
+  above the role's filter and in no scan, read from the engine's plan of what is sent, never "a Limit is there", which
+  statistics propagation drops, nor the text; and the oracle's `BARRIER_SHAPES`. **A test of this needs more than 50
+  visible keys over a wide range, about half the table visible**, or the engine's join filter hides the leak. RESPONSE:
+  on a DuckDB upgrade these fail before the leak ships; the barrier's form changes, never the guarantee. Timing is out of
+  scope, and the docs say so.
+- **A filtered read keeps what the table's key decides** (`carryKeyDependency`, `src/duck/row-filter.ts`): a subquery has no
+  key, so a column a `GROUP BY` of the primary key decides joins the GROUP BY, only when the key is grouped whole (no added
+  column can then split a group). Why: the filtered text is analysed again, and 42803 there is Mason's doing, never the
+  statement's. DETECTOR: the oracle's `GROUP BY the key` shapes, and `GROUP BY an expression` beside them. RESPONSE: what it
+  cannot carry is refused by the gap `roles` with the way out.
+- **A table's statistics reach nothing a filtered user reads** (`wallStatistics`, `src/duck/row-filter.ts`;
+  docs/DESIGN.md "Roles: rows per user"): the filtered read ends in `try(col)` of every column, which this engine carries no
+  statistics through (an observation, not a guarantee, so it has its detector), its select found by a name chosen after
+  reading the statement and the count of reads Mason wrote, never by a fixed name; and an EXPLAIN of a statement that reads a filtered table never shows it to the engine: the tables
+  are the statement's (`plan.reads`, never the engine's plan's), no line varies with the data, `FORMAT JSON` keeps its
+  shape, and ANALYZE is refused by the gap `roles`, the way out said (a user with no row filter reads the full plan).
+  Why: a column's table-wide maximum proves a condition false, and whether it was proved is a binary search on a hidden
+  row, as `Empty Result`, as the plan's `rows=`, or as an error that did not happen. A session with no filter, and a
+  statement that reads no filtered table, are unchanged. DETECTOR: `tests/duck-roles-rows-wire.test.ts`, the same
+  statement either side of a hidden row's value answers byte-identical text in every form for `where:`, a list,
+  `through:` and a join, and an ordinary SELECT alike. `tests/duck-roles-try-types.test.ts` holds name, type and text through the wall.
+  RESPONSE: reads walled other than the ones Mason wrote are refused by the gap `roles` (`wallStatistics`); a DuckDB upgrade
+  that carries statistics through `try` fails the SELECT test, and the wall's form changes. Nothing new
+  may print the engine's plan or scanned tables for a plan with `rowFilters`.
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
   src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
   `application_name`, a token's NAME (never the token) or the user's name, and the registry entry that refused it

@@ -59,7 +59,8 @@ import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request
 import { gapMark, type GapId } from "../../duck/gaps.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type ResolvedRead, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
-import { asRole, asSession, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
+import { asRole, asSession, catalogPolicies, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
+import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
 import { parseSql, PostgresSyntaxError, stopParser } from "./parser.ts";
@@ -167,6 +168,11 @@ export interface ExplainHow {
   exact: readonly ExactColumn[];
   planning: { analysisMs: number; rewriteMs: number };
   copies: readonly CopyFacts[];
+  /** the tables the session's role filters that the statement reads, the filter in words (DuckPlan.rowFilters): none
+   *  given, the engine's plan is said; given, the statement is not shown to the engine at all (`Explained.filtered`) */
+  rowFilters?: ReadonlyArray<{ table: string; words: string }>;
+  /** every table the statement reads, for a statement with row filters: its table lines, never the engine's plan's */
+  reads?: readonly string[];
 }
 /** A statement's DuckDB plan (src/duck/plan.ts): Postgres's analysis of it, and the DuckDB SQL that answers it alike. */
 export interface DuckPlan {
@@ -194,6 +200,21 @@ export interface DuckPlan {
   /** the copied tables and columns Postgres's analysis says it reads (src/duck/grants.ts), where roles exist: what an
    *  Execute is held to under the session's role of that moment */
   reads?: readonly ResolvedRead[];
+  /** the tables whose rows the session's role filters that the statement reads (its filtered tables and the parents they
+   *  are read through), each with the filter in words: EXPLAIN's per-table line (src/duck/row-filter.ts) */
+  rowFilters?: ReadonlyArray<{ table: string; words: string }>;
+  /** the row filters it was made under, bound (`rowsKeyOf`): an Execute under others plans it again (executeDuck) */
+  rowsKey?: string;
+}
+
+/** whether any role of the file filters rows (src/duck/row-filter.ts): nothing is checked, bound or keyed where none does */
+const filtersRows = (live: RolesLive): boolean => [...live.grants.values()].some((g) => g.filters !== undefined && g.filters.size > 0);
+
+/** the row filters a session's role holds, bound to its user's values, as one string: a plan's key and its `rowsKey`;
+ *  "" where it holds none */
+function rowsKeyOf(g: RoleGrants | null | undefined): string {
+  if (g?.rows === undefined || g.rows.size === 0) return "";
+  return JSON.stringify([...g.rows.values()].map((f) => [f.table, f.predicate ?? null, f.through ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
 }
 /** the DuckDB halves the listener calls: a session's connection, and a statement's plan */
 export interface DuckOptions {
@@ -262,7 +283,9 @@ export function versionText(product: string, version: string): string {
  * which every statement over a table and every catalog read is held to; a session with none reads every copied table.
  * (`filters` and `subject` are always empty: src/duck/users.ts still writes them.)
  */
-export interface PgToken { filters?: readonly []; subject?: undefined; jti?: string | undefined; user?: string | undefined; role?: string | undefined }
+export interface PgToken { filters?: readonly []; subject?: undefined; jti?: string | undefined; user?: string | undefined; role?: string | undefined;
+  /** the user's attribute values (`mason user add … --set tenant=42`), which its role's row filters read (src/duck/row-filter.ts) */
+  attributes?: AttributeValues | undefined }
 
 /**
  * How often a user's session asks again whether its user is still live (`PgApiOptions.recheck`) when `recheckMs` is
@@ -319,6 +342,11 @@ export interface PgApiOptions {
 export interface PgApiServer {
   readonly port: number;
   close(): Promise<void>;
+  /** the roles as the listener holds them now, their row filters checked by the catalog Postgres (`checkRoles`): a filter
+   *  Postgres refuses is the roles' `problem`. What `/api/state` says of the roles, and `mason user add` is held to */
+  roles(): RolesLive;
+  /** the roles with every row filter checked by the catalog Postgres now (it starts it where needed): `mason start`'s line */
+  checkRoles(): Promise<RolesLive>;
   /** sessions open now (every connection, its login under way included) */
   readonly sessions: number;
   /** the sessions logged in now, by user and client, and how many of each run a statement (`/api/state` `sessions`) */
@@ -764,6 +792,10 @@ class Session {
     if ((m.type === "Query" || m.type === "Parse" || m.type === "Execute") && !(m.type !== "Query" && this.skipToSync)) {
       const refused = await this.stillLive(m.type);
       if (this.phase === "closed") return;
+      // the roles' row filters checked by the catalog Postgres for the roles as they are now, before any statement is
+      // held to them (Server.checkRoles: once per roles file and copied tables; nothing to do where no role filters rows)
+      await this.server.checkRoles();
+      if ((this.phase as string) === "closed") return;
       if (refused !== null) {
         this.refuse(refused, m.type === "Execute" ? this.sqlOf(m) : m.sql);
         if (this.tx === "open") this.tx = "failed";
@@ -1158,6 +1190,7 @@ class Session {
       caller: hashCaller(this.presented), bytesSent,
       ...(user !== undefined ? { user } : {}),
       ...(role !== undefined ? { role } : {}),
+      ...(this.token?.attributes !== undefined && Object.keys(this.token.attributes).length > 0 ? { attributes: this.token.attributes } : {}),
       ...(asked?.jsonReads !== undefined && asked.jsonReads.length > 0 ? { jsonReads: asked.jsonReads } : {}),
       ...(answer instanceof PgError
         ? { status: answer.status, sqlstate: answer.fields.code, error: answer.fields.message,
@@ -1236,10 +1269,14 @@ class Session {
     const { searchPath, timeZone } = under;
     const grants = this.grants();
     // the plan cache's key is the role the plan is held to: the effective one (a default's plans are that role's), and
-    // a user with no role under a file with no default its own key, never a token's ("")
-    const key = grants?.noRole !== undefined ? "\u0000no role" : this.roleName() ?? "";
-    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, key, () =>
-      this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound, grants));
+    // a user with no role under a file with no default its own key, never a token's ("") — and, where the role filters
+    // rows, the filters bound to the user's values (a plan holds them as literals)
+    const rowsKey = rowsKeyOf(grants);
+    const key = `${grants?.noRole !== undefined ? "\u0000no role" : this.roleName() ?? ""}${rowsKey === "" ? "" : `\u0000${rowsKey}`}`;
+    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, key, async () => {
+      const plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound, grants);
+      return rowsKey === "" ? plan : { ...plan, rowsKey };
+    });
   }
 
   /**
@@ -1256,7 +1293,54 @@ class Session {
    * refused with the two ways out, src/duck/grants.ts noRoleRefusal). A token, which is no user, reads every copied table.
    */
   private grants(): RoleGrants | null | undefined {
-    const live = this.server.rolesNow();
+    const g = this.ownGrants();
+    return g === null || g === undefined ? g : this.withRows(g);
+  }
+
+  /**
+   * THE ROLE'S ROW FILTERS BOUND TO THIS SESSION'S USER (src/duck/row-filter.ts): each table's `where:` with the user's
+   * attribute values as literals of the types the catalog inferred (`Server.checkRoles`), each `through:` read through
+   * its parent. A USER WITHOUT A VALUE ITS ROLE'S FILTERS READ IS REFUSED, LOUDLY, at every statement — never answered
+   * with no rows (a user added before the roles file gained the attribute): 42501, the attribute and the filter in the
+   * DETAIL, the exact commands in the HINT. A filter not checked yet (the catalog a step behind the file) refuses the
+   * statement, said: fail closed.
+   */
+  private withRows(g: RoleGrants): RoleGrants {
+    if (g.filters === undefined || g.filters.size === 0) return g;
+    const values = this.token?.attributes ?? {};
+    const cached = this.boundRows;
+    if (cached !== null && cached.of === g && cached.values === values) return cached.bound;
+    const user = this.token?.user ?? this.user;
+    const missing = missingAttributes(g.filters.values(), values);
+    if (missing.length > 0) {
+      const sets = missing.map((m) => `--set ${m.attr}=<value>`).join(" ");
+      const shapes = g.attributes ?? new Map();
+      throw new PgError({ code: "42501", message: `permission denied: the user ${JSON.stringify(user)} has no value for the attribute ${missing.map((m) => m.attr).join(", ")}, which the role ${g.name} filters rows by`,
+        detail: missing.map((m) => `${m.at} reads :${m.attr} (${m.where})${shapes.get(m.attr) === "list" ? `, a list: one --set ${m.attr}=… per value` : ""}`).join("; ") + `; the user was added without it, and Mason refuses rather than answer no rows`,
+        hint: `mason user remove ${user} && mason user add ${user} --role ${g.name} ${sets}` }, 403);
+    }
+    const rows = new Map<string, BoundFilter>();
+    for (const f of g.filters.values()) {
+      if (f.where === undefined) { rows.set(f.table, bindFilter(f, new Map(), values)); continue; }
+      const types = g.filterTypes?.get(f.table);
+      // a table not copied yet has no types (nothing reads it: the statement is Postgres's 42P01); a copied one must
+      if (types === undefined) {
+        if (g.filterTypes === undefined) {
+          throw new PgError({ code: "57P03", message: `the role ${g.name}'s row filters are being checked by the catalog: run the statement again in a moment`, hint: "the catalog Postgres checks each where: of the roles file as it changes" }, 503);
+        }
+        continue;
+      }
+      rows.set(f.table, bindFilter(f, types, values));
+    }
+    const bound = { ...g, rows, ...(user !== undefined ? { rowsUser: user } : {}) };
+    this.boundRows = { of: g, values, bound };
+    return bound;
+  }
+  private boundRows: { of: RoleGrants; values: AttributeValues; bound: RoleGrants } | null = null;
+
+  /** the role the session is held to now, its filters unbound (`grants` binds them) */
+  private ownGrants(): RoleGrants | null | undefined {
+    const live = this.server.rolesChecked();
     const own = this.token?.role;
     const user = this.token?.user ?? this.user;
     if (own === undefined) {
@@ -1337,6 +1421,11 @@ class Session {
     }
     const refused = grantRefusal(plan.reads, grants);
     if (refused !== null) throw refused;
+    // a plan holds the filters it was made under as literals: one made under others (the roles file edited since its
+    // Parse) never runs — executeDuck plans it again first, so this is the last guard
+    if ((plan.rowsKey ?? "") !== rowsKeyOf(grants)) {
+      throw new PgError({ code: "42501", message: "permission denied: the statement was prepared under other row filters of its role", hint: "prepare the statement again: it is then held to the role's filters as they are now" }, 403);
+    }
   }
 
   /**
@@ -1417,8 +1506,12 @@ class Session {
     if (found === null) throw new PgError({ code: "0A000", message: "Mason cannot find the statement this EXPLAIN explains in its text (a Mason gap: report it, with the statement)" });
     let plan: DuckPlan;
     try {
+      const grants = this.grants();
       plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), found.text, t.query, base + Buffer.byteLength(text.slice(0, found.offset)), paramOids,
-        this.vars.searchPath, this.vars.timeZone, this.server.userTypes(), false, this.grants());
+        this.vars.searchPath, this.vars.timeZone, this.server.userTypes(), false, grants);
+      // the row filters it was made under, as every plan of a session carries them (Session.duckPlan)
+      const rowsKey = rowsKeyOf(grants);
+      if (rowsKey !== "") plan = { ...plan, rowsKey };
     } catch (e) {
       // a refusal of the statement explained is placed as Postgres places it: in the whole text, past `EXPLAIN …`
       if (!(e instanceof StatementError) || e.fields.position === undefined) throw e;
@@ -1432,15 +1525,22 @@ class Session {
   private async duckExplain(e: { options: ExplainOptions; plan: DuckPlan }, params: readonly (string | null)[], resultFormats: number[], clock: { parse: number; exec: number },
     controller: AbortController): Promise<{ field: FieldDescription; rows: Buffer[] }> {
     this.heldToRole(e.plan);
+    // ANALYZE RUNS THE STATEMENT AND REPORTS WHAT THE ENGINE DID, which is a count of what it read and what it proved
+    // of the whole table: nothing of it can be said to a filtered user, so there is nothing left to run it for
+    const filtered = e.plan.rowFilters ?? [];
+    if (e.options.analyze && filtered.length > 0) {
+      throw gapRefusal("roles", `EXPLAIN ANALYZE is not answered for a statement that reads a table the role filters (${filtered.map((f) => f.table).join(", ")})`,
+        "EXPLAIN without ANALYZE says the tables and what is sent to the engine; a user with no row filter reads the full plan and its rows");
+    }
     await this.readAside();
     const runner = await this.duck();
     this.running = controller;
     try {
-      const values = await this.duckValues(e.plan, params, clock);
+      const values = filtered.length > 0 ? [] : await this.duckValues(e.plan, params, clock);
       const lines = await runner.explain(e.plan.sql, values, await this.duckSession(), controller.signal,
         { options: e.options, fields: e.plan.fields, exact: e.plan.exact ?? [], planning: e.plan.timing ?? { analysisMs: 0, rewriteMs: 0 },
           // how each copy is kept current, as the sync says it to mason status, read now (src/duck/sync.ts KeptCurrent)
-          copies: copyFacts(this.server.options.duck.copies?.() ?? []) });
+          copies: copyFacts(this.server.options.duck.copies?.() ?? []), ...(filtered.length > 0 ? { rowFilters: filtered, reads: (e.plan.reads ?? []).map((r) => r.table) } : {}) });
       return { field: explainField(e.options, formatAt(resultFormats, 0)), rows: lines.map((l) => dataRow([Buffer.from(l)])) };
     } finally { this.settled(); }
   }
@@ -1616,6 +1716,9 @@ class Session {
       if (!own) throw new PgError({ code: "42501", message: `permission denied to set ${t.name === "role" ? "role" : "session authorization"} "${t.value}"` }, 403);
       return [commandComplete(tag)];
     }
+    // a user's attributes are the users file's (mason user add --set), never the session's to change: Postgres's refusal
+    // of a parameter a role may not set
+    if (t.name.toLowerCase().startsWith("mason.attr.")) throw new PgError({ code: "42501", message: `permission denied to set parameter "${t.name}"`, hint: "a user's attributes are set by mason user add --set, never by the session" }, 403);
     // a placeholder (`myapp.x`) is validated here: a SET the catalog validated left it DEFINED there, with '', for every
     // session (a `current_setting` of it answered '' where Postgres's is 42704) — its rollback undoes the value, not that
     if (await this.isPlaceholder(t.name)) placeholderName(t.name);
@@ -1662,7 +1765,7 @@ class Session {
    */
   private sessionSetting(name: string): string | null {
     const n = name.toLowerCase();
-    return tlsParameters(this.socket instanceof tls.TLSSocket)[n] ?? fixedParameter(n, this.vars, this.user) ?? this.vars.other.get(n) ?? null;
+    return tlsParameters(this.socket instanceof tls.TLSSocket)[n] ?? fixedParameter(n, this.vars, this.user) ?? attributeSetting(n, this.token?.attributes) ?? this.vars.other.get(n) ?? null;
   }
 
   /**
@@ -1671,7 +1774,10 @@ class Session {
    * `SHOW <name>` answers, however a tool asks (GitHub issue 40). The names are those `sessionSetting` reads from.
    */
   private sessionSettings(): Map<string, string> {
-    const names = new Set([...Object.keys(tlsParameters(this.socket instanceof tls.TLSSocket)), ...FIXED.keys(), ...this.vars.other.keys()]);
+    const names = new Set([...Object.keys(tlsParameters(this.socket instanceof tls.TLSSocket)), ...FIXED.keys(), ...this.vars.other.keys(),
+      // the user's attributes, as `mason.attr.<name>` (a list's values joined by commas): what the catalog's row security
+      // policies read (catalog.ts catalogPolicies), as Postgres's read `current_setting('mason.attr.tenant')`
+      ...Object.keys(this.token?.attributes ?? {}).map((a) => `mason.attr.${a}`)]);
     const out = new Map<string, string>();
     for (const n of names) { const v = this.sessionSetting(n); if (v !== null) out.set(n, v); }
     return out;
@@ -1992,6 +2098,13 @@ class Session {
     if (statement.duck !== undefined) this.readsOf(statement.duck);
     if (portal.cursor === undefined) {
       if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a statement without its plan: report it (Mason's Postgres listener)" });
+      // A ROLE'S ROW FILTERS MOVED SINCE THE PARSE (the roles file edited): planned again under them, as Postgres plans a
+      // prepared statement again after its policies change — where its columns and parameters are what the Parse said
+      if (statement.raw !== null && (statement.duck.rowsKey ?? "") !== rowsKeyOf(this.grants())) {
+        const again = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.vars);
+        const shape = (p: DuckPlan): string => JSON.stringify([p.params, p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null]);
+        if (shape(again) === shape(statement.duck)) { statement.duck = again; delete statement.duckOnWire; }
+      }
       // a row count on the wire bounds the rows: the plan made for it where it differs (boundOnWire)
       const plan = m.maxRows > 0 ? await this.boundOnWire(statement, statement.duck, controller) : statement.duck;
       const exec = this.txNow ??= this.server.now();
@@ -2341,6 +2454,80 @@ class Server {
     return this.lastRoles;
   }
 
+  /**
+   * THE ROLES WITH THEIR ROW FILTERS CHECKED BY THE CATALOG POSTGRES (src/duck/row-filter.ts filterTypes): each `where:`
+   * of a copied table analysed as `SELECT 1 FROM <table> WHERE <it>`, the type of each attribute it reads taken from
+   * Postgres's inference (the ONE derivation: every binding and the catalog's policies read it), and a filter Postgres
+   * refuses made the roles' `problem` — said once in the log, at its key, and every statement of a user held to a role
+   * refused until it is fixed (fail closed, as for any mistake of the file). The catalog's row security policies are
+   * written from the same types (catalog.ts catalogPolicies). Once per roles object and copied tables; nothing where no
+   * role filters rows. A check that could not run (the catalog failed) is said as the problem and tried again next time.
+   */
+  async checkRoles(): Promise<RolesLive> {
+    const raw = this.rolesNow();
+    const schema = this.lastSchema;
+    if (!filtersRows(raw)) return raw;
+    if (this.checked?.of === raw && this.checked.schema === schema) return this.checked.live;
+    if (this.checking?.of === raw && this.checking.schema === schema) return this.checking.done;
+    const done = (async (): Promise<RolesLive> => {
+      const copied = new Set(schema.tables.map((t) => `${t.schema ?? "public"}.${t.name}`));
+      const problems: string[] = [];
+      const typed = new Map<string, RoleGrants>();
+      try {
+        for (const g of raw.grants.values()) {
+          if (g.filters === undefined) { typed.set(g.name, g); continue; }
+          const types = new Map<string, ReadonlyMap<string, string>>();
+          for (const f of g.filters.values()) {
+            if (f.where === undefined || !copied.has(f.table)) continue;
+            const r = await filterTypes((b) => this.catalog.run(b), f, g.attributes ?? new Map());
+            if ("problem" in r) { problems.push(r.problem); continue; }
+            types.set(f.table, r.types);
+            // Postgres read it; the rewrite must too, or each of the role's users would meet the refusal, statement by statement
+            const probe = filterProbe(f, r.types, g.attributes ?? new Map());
+            const stmt = (await parseSql(probe)).stmts?.[0]?.stmt;
+            if (stmt === undefined) throw new Error(`a filter's read does not parse: ${probe}`);
+            try { await this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined); }
+            catch (e) {
+              if (!(e instanceof StatementError)) throw e;
+              problems.push(`${f.at}.where: ${e.fields.message}${e.fields.hint !== undefined ? ` (${e.fields.hint})` : ""} — the predicate is read as SELECT 1 FROM ${f.table} WHERE ${f.where.text}`);
+            }
+          }
+          typed.set(g.name, { ...g, filterTypes: types });
+        }
+        await this.catalog.policies(catalogPolicies(schema, catalogRolesOf({ ...raw, grants: typed })));
+      } catch (e) {
+        const problem = `the roles' row filters could not be checked by the catalog: ${e instanceof Error ? e.message : String(e)}`;
+        // tried again at every statement of every session, so said once a streak: the line a streak's end answers
+        if (!this.rolesCheckFailing) { this.rolesCheckFailing = true; this.log(`roles: ${problem} — tried again at each statement, every statement of a user held to a role refused until then`); }
+        return { ...raw, problem: raw.problem ?? problem };
+      }
+      if (this.rolesCheckFailing) { this.rolesCheckFailing = false; this.log("roles: the catalog checks the row filters again"); }
+      const problem = raw.problem ?? (problems.length === 0 ? null : `${raw.file ?? "the roles file"}: ${problems.join("; ")}`);
+      if (problem !== null && raw.problem === null && problem !== this.saidProblem) {
+        this.saidProblem = problem;
+        this.log(`roles: ${problem} — every statement of a user held to a role is refused until it is fixed`);
+      }
+      const live: RolesLive = { ...raw, grants: typed, problem };
+      if (this.lastRoles === raw && this.lastSchema === schema) this.checked = { of: raw, schema, live };
+      return live;
+    })();
+    this.checking = { of: raw, schema, done };
+    try { return await done; }
+    finally { if (this.checking?.done === done) this.checking = null; }
+  }
+  private checked: { of: RolesLive; schema: PgSchema; live: RolesLive } | null = null;
+  private checking: { of: RolesLive; schema: PgSchema; done: Promise<RolesLive> } | null = null;
+  private saidProblem: string | null = null;
+  private rolesCheckFailing = false;
+
+  /** the roles now, their row filters checked where the check for them is done (`checkRoles`), else as read: a
+   *  session's `grants` refuses a filter not checked yet */
+  rolesChecked(): RolesLive {
+    const raw = this.rolesNow();
+    if (!filtersRows(raw)) return raw;
+    return this.checked?.of === raw && this.checked.schema === this.lastSchema ? this.checked.live : raw;
+  }
+
   forget(s: Session): void { this.sessions.delete(s.id); }
 
   /** A CancelRequest: the session's statement stopped when the key is the session's (`interrupt`). */
@@ -2420,6 +2607,8 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
   return {
     port,
     get sessions() { return server.sessions.size; },
+    roles: () => server.rolesChecked(),
+    checkRoles: () => server.checkRoles(),
     openSessions: () => server.openSessions(),
     running: () => server.running(),
     cancel: (session, statement) => server.cancelSession(session, statement),
