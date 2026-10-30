@@ -345,9 +345,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // destroy drops what was made by its own name
     recordReplication(cfg, repl, home);
   } else if ((cfg.replication ?? null) !== null || cfg.changes === "replication") {
-    // THE SLOT GOES WHENEVER NO TABLE IS REPLICATED: it holds the database's WAL while nobody reads it. A project an
-    // older Mason streamed whole (its `changes: "replication"`) reaches this only when the file says so: a file silent
-    // on sync: was refused above (recordRefusal)
+    // THE SLOT GOES WHEN THE FILE SAYS NO TABLE IS REPLICATED: it holds the database's WAL while nobody reads it. A file
+    // naming tables and silent on sync: was refused above (recordRefusal)
     if (cfg.changes === "replication") say(`  an older Mason streamed every table of this project; ${shownFile} says otherwise now, so what it made goes`);
     try { for (const d of await dropOwnReplication(source, before)) say(`  dropped ${d} from ${source.database}: no table's sync is replication`); }
     catch (e) {
@@ -434,7 +433,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // the views first: setting the tables rebuilds the catalog, which reads them. The sources file read again: a mistake in it
   // keeps the tables read before (a typo never drops a copy), said in the log and by mason status
   const added = (): void => {
-    const r = rereadSources(sources, readSources(), src.resolved, facts.tables, source.database, project.root, { replicationChecked });
+    const r = rereadSources(sources, readSources(), src.resolved, facts.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
     if (r.said !== null) logLine(`[sync] ${r.said}`);
     sources = { file: r.file, tables: r.tables, problem: r.problem };
     sync.setViews(facts.views ?? []);

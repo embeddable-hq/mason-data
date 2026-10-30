@@ -129,6 +129,25 @@ test("mason start over a project 0.7.0 streamed: refused with nothing touched; s
   for (let i = 0; i < 60 && seen !== "201"; i++) { seen = psql(api, "SELECT count(*) FROM public.items"); if (seen !== "201") await new Promise((r) => setTimeout(r, 500)); }
   assert.equal(seen, "201", "the row inserted while stopped, by the stream");
   stop();
+  // THE SAME OMISSION BY A PROJECT OF THIS RELEASE: no `changes`, its slot recorded, the line taken out
+  fs.writeFileSync(file, SOURCE(""));
+  const current = fs.readFileSync(config, "utf8");
+  const lost = mason("start", "--json");
+  assert.equal(lost.status, 1, lost.out);
+  assert.match(errorOf(lost).message, /^this project streams, and /);
+  assert.equal(fs.readFileSync(config, "utf8"), current);
+  assert.deepEqual([slots(), publications()], [slot, ownPublications]);
+  fs.writeFileSync(file, SOURCE("sync: replication\n"));
+  start("the line back");
+  // AND WITH THE RUN UP: the file gone silent reaches the run by a command; the tables read before are kept, the slot too
+  fs.writeFileSync(file, SOURCE(""));
+  mason("remove", "notes", "--json");
+  const status = ok(mason("status", "--json"), "mason status");
+  assert.match(JSON.stringify(status.json), /no sync: at its top or on an entry, and this project streams through replication slot/);
+  assert.deepEqual([slots(), publications()], [slot, ownPublications], "the live path retired nothing");
+  assert.notEqual((JSON.parse(fs.readFileSync(config, "utf8")) as { replication: unknown }).replication, null);
+  stop();
+  fs.writeFileSync(file, SOURCE("sync: replication\n"));
   assert.equal(await rowsRead("items"), 0, "no scan of the source's table: nothing copied again");
   assert.equal(await rowsRead("notes"), 0);
   assert.equal("changes" in (JSON.parse(fs.readFileSync(config, "utf8")) as object), false, "the older record goes once the file said it");

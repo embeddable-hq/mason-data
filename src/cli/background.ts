@@ -79,9 +79,6 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   const shown = file === null ? "" : shownPath(t.project.root, file.file);
   const demoRefused = demoChangesRefusal(t.project.config, file, shown);
   if (demoRefused) return failed("start", demoRefused, { json: o.json });
-  // what the config records and the file does not say (src/cli/replication-mode.ts), before a run is spawned
-  const unsaid = file === null ? null : recordRefusal(t.project.config, file, process.env, shown, "mason start");
-  if (unsaid !== null) return failed("start", unsaid, { json: o.json });
   // a setting a start refuses, here where the person (or --json) reads it, by the run's own list (src/cli/project.ts)
   const setting = startSettingRefusal(t.project, process.env, { serve: false });
   if (setting !== null) return failed("start", setting, { json: o.json });
@@ -89,6 +86,9 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   // check (src/duck/history.ts), refused here as in the run
   const days = historyDaysSetting(process.env);
   if (typeof days !== "number") return failed("start", { code: "refused", ...days }, { json: o.json });
+  // what the config records and the file does not say (src/cli/replication-mode.ts), in the run's order: settings first
+  const unsaid = file === null ? null : recordRefusal(t.project.config, file, process.env, shown, "mason start");
+  if (unsaid !== null) return failed("start", unsaid, { json: o.json });
   // a MASON_PG_PORT that is no port, or is held, is refused HERE, where the person (or --json) reads it, before a run is
   // spawned; the run checks again for itself (choosePgPort, src/cli/ports.ts), since a port may be taken in between.
   // A demo project's database port (its URL's, src/cli/demo.ts demoPort) is avoided as the run avoids it

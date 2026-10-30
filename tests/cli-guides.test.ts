@@ -75,7 +75,7 @@ test("mason help production says how each table is kept current: sync: at the to
     "a user with REPLICATION", "publication: ${PG_PUBLICATION} at the top of the sources file",
     "cap it on the database with max_slot_wal_keep_size", "dropped, verified gone, when no table's sync is replication any more",
     "The flags --replication, --poll and --publication of mason start, and MASON_CHANGES, are gone: each answers with the line to write in the sources file.",
-    "A project an older Mason streamed, under a file with no sync: anywhere, is refused rather than dropped (sync: replication keeps the slot; sync: off or sync: poll <interval> confirms the drop)",
+    "A project that streams, under a file with no sync: anywhere, is refused rather than dropped (sync: replication keeps the slot; sync: off or sync: poll <interval> confirms the drop)",
     "mason sync customers any table read again now, whatever its sync:",
   ]) assert.ok(text.includes(said), said);
   // the stretch the guide states is the poll's own (src/cdc/poll.ts nextPollDelayMs)

@@ -160,9 +160,9 @@ there (`mason status` lists them); `MASON_STORE_JSON_PATHS=off` turns that off.
 | `--attach` | Stay in the foreground: the terminal shows Mason's progress, and Ctrl-C stops it. |
 
 `--replication`, `--poll` and `--publication` are gone: each answers with the line to write at the top of the sources
-file (`sync: replication`, `sync: poll 5m`, `publication: <name>`) and exit 2, and starts nothing. A project an older
-Mason streamed, with no `sync:` anywhere in its file, is refused with its slot kept: `sync: replication` keeps streaming,
-`sync: off` or `sync: poll <interval>` confirms the drop. One it recorded a publication for needs `publication: <name>`,
+file (`sync: replication`, `sync: poll 5m`, `publication: <name>`) and exit 2, and starts nothing. A project that
+streams, with no `sync:` anywhere in its file, is refused with its slot kept: `sync: replication` keeps streaming,
+`sync: off` or `sync: poll <interval>` confirms the drop. One with a recorded publication needs `publication: <name>`,
 or `publication: null` for Mason's own.
 
 A database on another machine needs `mason init --remote`, which records that you mean it: the synced data leaves the

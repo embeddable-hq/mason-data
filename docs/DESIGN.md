@@ -245,13 +245,15 @@ has no such line — `MASON_POLL_MS`'s too. A test applies each way out to an in
 table is kept current is one more than production can be held to: the committed file is what runs. A removed setting
 refuses rather than runs a default (CLAUDE.md "Conventions"). `config.json`'s `changes`, the mode an older Mason
 recorded, is still READ — never written — so `mason destroy` drops that older run's slot, and a start under a file that
-says `sync: off` or `poll` drops it too; the first start past that deletes it. **A file with no `sync:` at all REFUSES
-the start** (2026-10-30, before v0.8.0; `recordRefusal`, src/cli/replication-mode.ts): that start used to drop the slot
-and go on, so an operator who merely omitted a line paid a full scan of every table on their production database. A
-silent file is an omission; any `sync:` at the top or on an entry is a decision, so a project that chose polling has
+says `sync: off` or `poll` drops it too; the first start past that deletes it. **A file naming tables with no `sync:` at all
+REFUSES the start of a project with a slot, and a run up keeps the tables it read** (2026-10-30, before v0.8.0;
+`recordRefusal`, src/cli/replication-mode.ts; `rereadSources`; the independent review widened it from 0.7.0's record to
+any recorded slot): that start used to drop the slot and go on, so an operator who merely omitted a line paid a full
+scan of every table on their production database. A silent file is an omission; any `sync:` at the top or on an entry is a decision, so a project that chose polling has
 its way through. The same for a recorded `publication` no line names, which silently became a publication Mason made
-on the source (0.7.0 read the record at each start; `publication: null` is the way to Mason's own on purpose, since a
-keyword could be someone's publication and taking the line out is what the omission looks like). `MASON_CHANGES` set
+on the source (0.7.0 read the record at each start; the literal `publication: null` is the way to Mason's own on purpose, since a
+keyword could be someone's publication and taking the line out is what the omission looks like; a bare `publication:`
+is a mistake, and `publication: null` beside `PG_PUBLICATION` is refused, since it is a CREATE on the source). `MASON_CHANGES` set
 refuses `mason start` too. **Where.** `src/cli/registry.ts`, `src/cli/serve.ts`,
 `src/lib/table-sync.ts`; `tests/cli-commands.test.ts`, `tests/serve.test.ts`.
 

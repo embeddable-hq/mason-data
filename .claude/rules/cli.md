@@ -138,7 +138,7 @@ CLI lacks).
   both), `sync:` how it is kept current (`off`, `poll <interval>`, `replication`; the file's top `sync:` is every entry's
   default, and none written is `off`, said at `mason start`), `key:` only for a table with no primary key (refused on
   one that has one; refused under `sync: replication`, whose changes the stream applies by key), and `publication:` at
-  the top (the publication replication reads, `${PG_PUBLICATION}` allowed; `publication: null` is Mason's own, on purpose). Types are never in the file: the run reads them at every start. A
+  the top (the publication replication reads, `${PG_PUBLICATION}` allowed; the literal `publication: null` is Mason's own, on purpose). Types are never in the file: the run reads them at every start. A
   second file is refused ("one source per project for now"). ONE reader (`readSource`, `parseSourceText`, then
   `addedTables` against the catalog, src/cli/sources.ts) for the run, `mason tables`, `mason add` and `serve`; every
   mistake of a file on ONE report (`sourceFailure`, code `bad_source`), each with its key, a `did you mean` and the
@@ -280,15 +280,17 @@ CLI lacks).
   the line to write and exit 2 before anything starts (`removedStartFlags`, src/lib/table-sync.ts), and `MASON_CHANGES`
   set refuses `mason serve` on its settings report and `mason start` by `startSettingRefusal` (`changesRetired`).
   **What the config records and the file does not say is refused, never acted on** (`recordRefusal`,
-  src/cli/replication-mode.ts: the start, its run and `serveRecordRefusal`, before anything is written or connected): an
-  older Mason's `changes: "replication"` under a file with no `sync:` at its top or on an entry (any `sync:` is the
-  file saying so: `replication` keeps the slot, `off` or `poll <interval>` confirms the drop), and a recorded
-  `publication` that a replicating file and `PG_PUBLICATION` do not name (`publication: <name>`, or `publication: null`
-  for Mason's own), both on one report. A start that replicates any table holds the developer's database to the production checks' own rules
+  src/cli/replication-mode.ts: the start, its run and `serveRecordRefusal`, before anything is written or connected): a
+  recorded slot or an older Mason's `changes: "replication"` under a file naming tables with no `sync:` at its top or on
+  an entry (any `sync:` is the file saying so: `replication` keeps the slot, `off` or `poll <interval>` confirms the
+  drop), and a recorded `publication` that a replicating file and `PG_PUBLICATION` do not name (`publication: <name>`,
+  or the literal `publication: null` for Mason's own), both on one report; `publication: null` beside a set
+  `PG_PUBLICATION` is refused too, and a bare `publication:` is a mistake in the file. With the run up, a file gone
+  silent keeps the tables read before (`silentOverSlot`, `rereadSources`). Settings are asked first at both entrances. A start that replicates any table holds the developer's database to the production checks' own rules
   (`replicationChecks`, src/cli/replication-checks.ts: `wal_level`, the role, a free slot and WAL sender, the WAL cap
   said, not refused; a slot held by another run named with the way out). A switch keeps the copies and catches each
-  table up by one poll. What it made is recorded (`config.json` `replication`) and dropped, VERIFIED gone, when no
-  table is replicated any more and at `mason destroy`; when they cannot be, the rest goes and the failure prints the
+  table up by one poll. What it made is recorded (`config.json` `replication`) and dropped, VERIFIED gone, when the
+  file says no table is replicated any more and at `mason destroy`; when they cannot be, the rest goes and the failure prints the
   statements. A slot outlives the run: `mason stop` says it stays and holds WAL. **A publication the operator names
   (`publication:` in the sources file, else `PG_PUBLICATION`) is never created, altered or dropped** — only
   the slot goes — and a read replica needs one, refused by name before any slot is made (`readinessVerdict`;

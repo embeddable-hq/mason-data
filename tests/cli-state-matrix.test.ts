@@ -325,13 +325,15 @@ test("MASON_CHANGES refuses mason start as it does mason serve, naming the line,
     assert.equal(start.code, 1, start.stdout + start.stderr);
     const e = (JSON.parse(start.stdout) as { error: { code: string; message: string; fix: string } }).error;
     assert.equal(e.code, "refused", state);
-    assert.equal(e.message, state === "streamed_0_7" ? "this project streams, and mason/sources/shop.yml does not say so: no sync: at its top or on an entry" : "MASON_CHANGES=replication is no longer read", state);
+    // settings first, at both entrances: the record's refusal is the next edit's
+    assert.equal(e.message, "MASON_CHANGES=replication is no longer read", state);
     assert.equal(fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8"), was, state);
-    if (state !== "streamed_0_7") assert.equal(e.fix, "write sync: replication at the top of mason/sources/shop.yml (every table; a table's entry may say its own), then unset MASON_CHANGES");
+    assert.equal(e.fix, "write sync: replication at the top of mason/sources/shop.yml (every table; a table's entry may say its own), then unset MASON_CHANGES");
     assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, "refused before a run was spawned");
     // the run, as --attach reaches it
-    const attached = await runMason(root, ["start", "--attach"], matrixEnv({ MASON_CHANGES: "poll" }));
+    const attached = await runMason(root, ["start", "--attach"], matrixEnv({ MASON_CHANGES: "replication" }));
     assert.equal(attached.code, 1, attached.stdout + attached.stderr);
+    assert.ok((attached.stdout + attached.stderr).includes(e.message), `${state}: --attach says the same: ${attached.stdout}${attached.stderr}`);
   }
   const none = await runMason(folderIn("no_project"), ["start", "--json"], matrixEnv({ MASON_CHANGES: "poll" }));
   assert.equal((JSON.parse(none.stdout) as { error: { code: string } }).error.code, "no_project");
