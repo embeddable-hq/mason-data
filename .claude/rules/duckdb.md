@@ -508,7 +508,8 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   (`mason status`, `wait`, EXPLAIN, the MCP tools) says its sync and its copy's age; `tests/duck-sync-schedule.test.ts`
   and `tests/integration/duck-poll.itest.ts` hold the schedule and the switch. ("Each table's sync") **A polled table's
   `kept.pending` is `pollable`'s answer, never a second check**: nothing pending means a `mason sync` of it runs, so a table
-  stays pending until its rebuild ended, the writer's turn after its catch-up. A pass is ONE
+  stays pending until its rebuild ended, the writer's turn after its catch-up, and says so in its own words
+  (`notStreamedReason`; `rebuildingNow.kind` turns to `catch-up` as the whole read ends). A pass is ONE
   attachment of the source (`attach` / `detach`: a new connection on the database), so at `poll 1s`, the floor, a
   table costs the source a connection a second beside its scan; holding the attachment across close passes is a later
   step, measured first.

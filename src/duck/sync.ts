@@ -1920,6 +1920,12 @@ export class Sync {
     if (st?.phase === "failed") return `its first sync failed (${(st.error ?? "").split("\n")[0]}): ${joins}`;
     const b = this.behind.get(source);
     if (!this.needsCopy(t) && b !== undefined) return `it is caught up by one poll ${b.why} first`;
+    // synced, caught up, and not yet polled (`pollable`): its rebuild's last writer's turn, or a rebuild still queued
+    if (st?.phase === "copied") {
+      if (this.rebuildingNow?.source === source) return "its sync is ending: it is kept current from then on";
+      const queued = this.queued.get(source)?.kind;
+      if (queued !== undefined) return queued === "copy" ? `it is queued to be read whole: ${joins}` : "it is queued to be caught up by one poll";
+    }
     return `it waits for its first sync: ${joins}`;
   }
 
@@ -2503,6 +2509,9 @@ export class Sync {
         return null;
       }
       if (r.kind === "copy") await this.copy(t);
+      // the whole read is over, whatever comes next: what the table is said to be doing from here (`notStreamedReason`,
+      // `refuseRebuilding`, `state`'s `rebuilding`)
+      this.rebuildingNow = { source: t.source, kind: "catch-up" };
       // a table its copy left behind (`swap`), or one marked so before: one poll, unless a copy of it comes first — the
       // table as it is added NOW, which may have changed while it was copied (then copied again at once: `followUp`)
       const now = this.tables.get(t.source);
