@@ -161,12 +161,18 @@ export async function share(argv: string[]): Promise<number> {
 interface Holding { run: DevRun; held: HeldAnswer; opened: OpenedShare; password: string; json: boolean; plan: () => TunnelPlan; timeoutMs: number }
 
 /** The share from its socket on: the tunnel, the report, and the wait for its end. Everything is left closed on every way out. */
+/** `send`, each call begun once the one before ended: an "up" must never be overtaken and set back by its "opening". */
+export function inOrder<T>(send: (t: T) => Promise<void>): (t: T) => Promise<void> {
+  let last = Promise.resolve();
+  return (t) => (last = last.then(() => send(t)));
+}
+
 async function holding(h: Holding): Promise<number> {
   const { run, held, opened, password, json } = h;
-  const tell = async (t: ShareTunnel): Promise<void> => {
+  const tell = inOrder(async (t: ShareTunnel): Promise<void> => {
     // what mason status shows, and the run's way to stop the client: the run gone is said by `held.ended`, the share's end
     await callRun(run, "POST", `/api/share/${encodeURIComponent(opened.user)}`, t).catch((e: unknown) => say(`  the run was not told of the tunnel: ${(e as Error).message}`));
-  };
+  });
   const stop = new Promise<NodeJS.Signals>((resolve) => { process.once("SIGINT", () => resolve("SIGINT")); process.once("SIGTERM", () => resolve("SIGTERM")); });
   const runEnded = held.ended.then((why) => ({ runEnded: why ?? "the connection to Mason was lost" }));
   const steps = stepRenderer({ line: (t) => { if (!json) say(t); }, live: !json && process.stderr.isTTY ? { write: (t) => { process.stderr.write(t); } } : null, style: styleErr() });

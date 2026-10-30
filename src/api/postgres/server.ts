@@ -340,8 +340,9 @@ export interface ShareDoor {
   pendingLimit?: number;
   /** default DEFAULT_PENDING_MS */
   pendingMs?: number;
-  /** a login refused here: the startup packet's user, as sent (the socket's peer is the tunnel's client: no source to name) */
-  refused?(user: string): void;
+  /** a login refused here: the startup packet's user (the socket's peer is the tunnel's client: no source to name).
+   *  false: it is counted, and no row of the request log, whose growth a stranger would otherwise set */
+  refused?(user: string): boolean;
   /** a connection dropped without logging in: `why`, in a few words */
   dropped?(why: string): void;
 }
@@ -647,6 +648,9 @@ interface Asked { sql: string; method: string; startedAt: number; sentAt: number
 // ---------------------------------------------------------------------------------------------------------------------
 // one connection
 
+/** A name as Postgres takes one from a startup packet: its first 63 bytes (NAMEDATALEN - 1). */
+const nameLength = (name: string | undefined): string | undefined => name === undefined ? undefined : Buffer.from(name, "utf8").subarray(0, 63).toString("utf8");
+
 /** The hint a refused login is told on the run's own listener. */
 const USER_LOGIN_HINT = "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL";
 
@@ -666,7 +670,7 @@ interface Door {
   /** reachable by anyone: nothing about the project is said before a login, and a CancelRequest reaches its own sessions alone */
   public: boolean;
   logins: LoginQueue | null;
-  refused?: ((user: string) => void) | undefined;
+  refused?: ((user: string) => boolean) | undefined;
 }
 
 /**
@@ -712,6 +716,8 @@ class Session {
   user = "";
   token: PgToken | null = null;
   presented: string | null = null;
+  /** the database a public socket's startup named that is not this one: refused once the login is good */
+  private wrongDatabase: string | null = null;
   /** when the user was last found live (a user's session is asked again, `recheckMs`) */
   verifiedAt = 0;
   vars: Vars = defaultVars();
@@ -892,6 +898,10 @@ class Session {
     }
   }
 
+  private databaseHint(): string {
+    return `this Mason serves the project "${this.server.database}": connect with database=${this.server.database}`;
+  }
+
   private fatal(code: string, message: string, hint?: string): void {
     this.send(errorResponse({ severity: "FATAL", code, message, hint }));
     this.end(`fatal: ${message}`);
@@ -919,18 +929,20 @@ class Session {
           this.fatal("28000", "this server requires TLS: the password must not travel in clear (connect with sslmode=require)");
           return;
         }
-        const user = m.params.user;
+        // a public socket's refused logins are rows of the request log: what a stranger names is a name's length there
+        const user = this.door.public ? nameLength(m.params.user) : m.params.user;
         if (user === undefined || user === "") { this.fatal("28000", "no PostgreSQL user name specified in startup packet"); return; }
         this.user = user;
         const database = m.params.database ?? user;
         if (database !== this.server.database) {
-          // a share's socket is public, and this is before any password: the project's name is its login's to know
-          this.fatal("3D000", `database "${database}" does not exist`, this.door.public ? undefined : `this Mason serves the project "${this.server.database}": connect with database=${this.server.database}`);
-          return;
+          // a share's socket is public: refused here, a wrong name and the right one would answer apart before any
+          // password, so a stranger could guess the project's. It is refused after the login, as Postgres does
+          if (!this.door.public) { this.fatal("3D000", `database "${database}" does not exist`, this.databaseHint()); return; }
+          this.wrongDatabase = database;
         }
         const encoding = m.params.client_encoding;
         if (encoding !== undefined && !isUtf8(encoding)) { this.fatal("22023", `client_encoding ${encoding} is not supported: this API sends UTF8 only`); return; }
-        if (m.params.application_name !== undefined) this.vars.applicationName = m.params.application_name;
+        if (m.params.application_name !== undefined) this.vars.applicationName = (this.door.public ? nameLength(m.params.application_name) : m.params.application_name)!;
         try {
           if (m.params.options !== undefined) this.commandLineOptions(m.params.options);
           for (const [k, v] of Object.entries(m.params)) {
@@ -1020,14 +1032,14 @@ class Session {
       // a tool that cannot connect is the first thing to look for in the request log
       this.asked = { sql: "", method: "CONNECT", startedAt: Date.now(), sentAt: this.sentBytes };
       const response = errorResponse({ ...refused.fields, severity: "FATAL" });
-      this.recordRequest(refused, undefined, err instanceof ApiError ? err.userName : undefined, [response]);
+      if (this.door.refused?.(this.user) !== false) this.recordRequest(refused, undefined, err instanceof ApiError ? err.userName : undefined, [response]);
       this.send(response);
-      this.door.refused?.(this.user);
       this.end("authentication failed");
       return;
     }
     if (this.phase !== "password") return;   // the socket closed while the ledger was read
     this.door.logins?.settled(this);
+    if (this.wrongDatabase !== null) { this.fatal("3D000", `database "${this.wrongDatabase}" does not exist`, this.databaseHint()); return; }
     this.token = token;
     this.presented = m.password;
     this.verifiedAt = this.server.now();

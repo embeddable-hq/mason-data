@@ -40,7 +40,7 @@ import type { LogBuffer } from "../lib/log-buffer.ts";
 import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, UnsupportedSql } from "../duck/requests.ts";
 import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
-import type { RunShares, ShareTunnel } from "./share-run.ts";
+import { tunnelReport, type RunShares } from "./share-run.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
@@ -639,7 +639,8 @@ export function createRunServer(ctx: RunContext): http.Server {
           await openShare(ctx, req, res);
         } else if (req.method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {
           // what the command knows of its tunnel, as it knows it: mason status says it, and the run stops the client
-          const body = JSON.parse(await readBody(req, 64 * 1024)) as ShareTunnel;
+          const body = tunnelReport(JSON.parse(await readBody(req, 64 * 1024)));
+          if (body === null) throw new Refusal(400, "send { via?, host?, port?, endsAt?, state?, pid? }: what the command knows of its tunnel");
           const user = decodeURIComponent(url.pathname.slice("/api/share/".length));
           if (ctx.shares?.update(user, body) !== true) { sendFailure(res, 404, { message: `no share ${user} is open`, code: "not_found" }); return; }
           sendJson(res, 200, { ok: true });

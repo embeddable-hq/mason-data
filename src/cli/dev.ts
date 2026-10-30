@@ -528,7 +528,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the project's own certificate, as --self-signed-tls serves it: made once, and recorded as that flag records it
     certificate: () => {
       try {
-        const pair = selfSignedPair(home, cfg.name);
+        const pair = selfSignedPair(home);
         if (pair.said) logLine(`[postgres] ${pair.said} (SHA-256 ${pair.fingerprint})`);
         const recorded = { cert: SELF_SIGNED_FILES.cert, key: SELF_SIGNED_FILES.key, fingerprint: pair.fingerprint };
         if (JSON.stringify(cfg.selfSignedTls ?? null) !== JSON.stringify(recorded)) { cfg.selfSignedTls = recorded; writeConfig(home, cfg); }
@@ -687,7 +687,7 @@ function listenerTls(listen: PgListenerSettings, selfSigned: boolean, home: stri
   if (listen.tls === null) return { tls: null, listener: { host: listen.host, tls: null } };
   if (selfSigned) {
     let made: ReturnType<typeof ensureSelfSigned>;
-    try { made = ensureSelfSigned(home, cfg.name); }
+    try { made = ensureSelfSigned(home); }
     catch (e) { return { problem: `the self-signed certificate could not be written to ${home}: ${(e as Error).message}`, code: "failed" }; }
     if (made.said) say(`  ${made.said} (SHA-256 ${made.fingerprint}); a later mason start --self-signed-tls serves it again`);
     const recorded = { cert: SELF_SIGNED_FILES.cert, key: SELF_SIGNED_FILES.key, fingerprint: made.fingerprint };

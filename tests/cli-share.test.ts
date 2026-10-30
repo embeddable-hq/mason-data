@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { DuckDBInstance } from "@duckdb/node-api";
@@ -29,8 +30,8 @@ import type { ShareDoor, ShareSocket } from "../src/api/postgres/server.ts";
 // (scripts/fails-without.ts)
 const absent = (): Record<string, unknown> => ({});
 const { lastLines, pinggyConfig, probeShare, tunnelAddress, tunnelEnds, tunnelPlan } = await import("../src/cli/tunnel.ts" as string).catch(absent) as typeof import("../src/cli/tunnel.ts");
-const { newSharePassword, RunShares, shareRole, shareSecret } = await import("../src/cli/share-run.ts" as string).catch(absent) as typeof import("../src/cli/share-run.ts");
-const { chosenRole } = await import("../src/cli/share.ts" as string).catch(absent) as typeof import("../src/cli/share.ts");
+const { newSharePassword, RunShares, shareRole, shareSecret, tunnelReport } = await import("../src/cli/share-run.ts" as string).catch(absent) as typeof import("../src/cli/share-run.ts");
+const { chosenRole, inOrder } = await import("../src/cli/share.ts" as string).catch(absent) as typeof import("../src/cli/share.ts");
 
 const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 
@@ -179,6 +180,35 @@ test("refused logins are logged once a minute with how many, and name no source;
   assert.equal(f.shares.state()?.droppedConnections, 1);
 });
 
+test("refused logins are rows of the request log up to ten a minute; every one is counted", async () => {
+  const f = fakeShares();
+  await f.shares.open({ secret: shareSecret("a") });
+  const rows = Array.from({ length: 25 }, (_, i) => f.door().refused?.(`scanner${i}`));
+  assert.deepEqual(rows, Array.from({ length: 25 }, (_, i) => i < 10));
+  assert.equal(f.shares.state()?.refusedLogins, 25);
+});
+
+test("what the command reports of its tunnel is kept field by field, its types held: a pid is a process the run may stop", () => {
+  const good = { via: "pinggy", host: "a.example", port: 4242, endsAt: "2026-10-30T19:37:41.557Z", state: "up", pid: 123 };
+  assert.deepEqual(tunnelReport(good), good);
+  assert.deepEqual(tunnelReport({ endsAt: null }), { endsAt: null });
+  assert.deepEqual(tunnelReport({ pid: 5, extra: "kept nowhere" }), { pid: 5 });
+  for (const bad of [null, [], "x", { pid: "1" }, { pid: -1 }, { pid: 1.5 }, { pid: 2 ** 40 }, { port: 0 }, { port: 70_000 }, { state: "gone" }, { endsAt: "soon" }, { host: 5 }, { host: "x".repeat(300) }, { via: "" }]) {
+    assert.equal(tunnelReport(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("what the command tells the run arrives in the order it was said: a slow \"opening\" is never overtaken by its \"up\"", async () => {
+  const seen: string[] = [];
+  const tell = inOrder(async (t: string) => {
+    if (t === "opening") await new Promise((r) => setTimeout(r, 30));
+    seen.push(t);
+  });
+  void tell("opening");
+  await tell("up");
+  assert.deepEqual(seen, ["opening", "up"]);
+});
+
 test("the certificate that cannot be made is the command's failure, and leaves no share", async () => {
   const shares = new RunShares({ listener: { openShare: () => Promise.reject(new Error("never")) }, roles: () => NO_ROLES, database: "shop", log: () => undefined,
     certificate: () => ({ message: "the self-signed certificate could not be written", code: "failed" }) });
@@ -221,7 +251,17 @@ const stubState = path.join(root, "stub-state");
 const pgPort = await unassignedPort();
 const env = matrixEnv({ MASON_PG_PORT: String(pgPort), PATH: `${stubs}:/usr/bin:/bin`, STUB_STATE: stubState });
 const mason = (argv: string[], timeoutMs = 120_000, extra: Record<string, string> = {}): Promise<Answer> => runMason(root, argv, { ...env, ...extra }, timeoutMs);
-const config = (): { apiKey: string; running?: { pid: number; postgresUrl: string } | null } => JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
+/** The certificate a connection is handed, before any login. */
+const peerCertificate = (port: number): Promise<tls.DetailedPeerCertificate> => new Promise((resolve, reject) => {
+  const socket = net.connect(port, "127.0.0.1", () => socket.write(Buffer.from([0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f])));
+  socket.once("error", reject);
+  socket.once("data", () => {
+    const secure = tls.connect({ socket, rejectUnauthorized: false }, () => { const c = secure.getPeerCertificate(true); secure.destroy(); resolve(c); });
+    secure.once("error", reject);
+  });
+});
+
+const config = (): { apiKey: string; running?: { pid: number; postgresUrl: string; controlUrl: string; token: string } | null } => JSON.parse(fs.readFileSync(path.join(home, "config.json"), "utf8"));
 
 /** the stub tunnel: records, prints its address, then does what `mode` says */
 const STUB = `#!/bin/sh
@@ -359,6 +399,13 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     const args = fs.readFileSync(path.join(stubState, "args"), "utf8");
     assert.ok(args.includes(`-R0:127.0.0.1:${r.port}\n`), `pointed at the share's socket: ${args}`);
     assert.ok(!args.includes(`:${pgPort}`), "never the plain one");
+
+    // what any connection is handed before a login: the certificate, which names no project
+    const peer = await peerCertificate(r.port);
+    assert.equal(peer.subject.CN, "mason");
+    assert.ok(!peer.raw.includes(path.basename(root)) && !peer.raw.includes(r.database), "the project's name is in no field of it");
+    const bad = await fetch(`${config().running!.controlUrl}/api/share/${r.user}`, { method: "POST", headers: { authorization: `Bearer ${config().running!.token}` }, body: JSON.stringify({ pid: "1" }) });
+    assert.equal(bad.status, 400, "a report that is not one is refused");
 
     // a real client: TLS required there, a session on the synced data
     const secure = client(r.port, r);

@@ -37,10 +37,31 @@ export const newSharePassword = (): string => crypto.randomBytes(24).toString("h
 /** How often a refused login is written to the log, at most: the rest are counted. */
 const REFUSED_LOG_MS = 60_000;
 
+/** How many refused logins a minute are rows of the request log, at most: the rest are counted (`mason status`), so a
+ *  stranger on a public address cannot set the log's growth. */
+const REFUSED_ROWS_A_MINUTE = 10;
+
 /** One role to choose between: what `mason share` lists, and asks a person to pick from. */
 export interface ShareChoice { role: string; reads: string; default: boolean }
 
 /** The tunnel of a share, as its command tells the run (`POST /api/share/<user>`). */
+/** What `POST /api/share/<user>` was sent, as a ShareTunnel, or null: its `pid` is a process the run may stop, so
+ *  what the run keeps is these fields, each its own type, never the body. */
+export function tunnelReport(body: unknown): ShareTunnel | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const { via, host, port, endsAt, state, pid } = body as Record<string, unknown>;
+  const text = (x: unknown): x is string => typeof x === "string" && x !== "" && x.length <= 255;
+  const whole = (x: unknown, max: number): x is number => typeof x === "number" && Number.isInteger(x) && x >= 1 && x <= max;
+  if (via !== undefined && !text(via)) return null;
+  if (host !== undefined && !text(host)) return null;
+  if (port !== undefined && !whole(port, 65_535)) return null;
+  if (endsAt !== undefined && endsAt !== null && !(text(endsAt) && !Number.isNaN(Date.parse(endsAt)))) return null;
+  if (state !== undefined && state !== "opening" && state !== "up" && state !== "reconnecting") return null;
+  if (pid !== undefined && !whole(pid, 2 ** 31 - 1)) return null;
+  return { ...(via !== undefined ? { via } : {}), ...(host !== undefined ? { host } : {}), ...(port !== undefined ? { port } : {}),
+    ...(endsAt !== undefined ? { endsAt } : {}), ...(state !== undefined ? { state } : {}), ...(pid !== undefined ? { pid } : {}) };
+}
+
 export interface ShareTunnel {
   via?: string;
   host?: string;
@@ -136,6 +157,8 @@ export class RunShares {
   /** the socket once it listens */
   private live: ShareSocket | null = null;
   private refused = 0;
+  private rowsFrom = -Infinity;
+  private rows = 0;
   private dropped = 0;
   private lastSaid = -Infinity;
   private unsaid = 0;
@@ -174,7 +197,7 @@ export class RunShares {
       authenticate: (password, user) => this.authenticate(password, user),
       recheck: (token) => this.recheck(token),
       loginHint: "the password mason share printed: every run of it makes a new one",
-      refused: (user) => { this.refused++; this.note(`a login refused for the user ${JSON.stringify(user.slice(0, 63))}`); },
+      refused: (user) => { this.refused++; this.note(`a login refused for the user ${JSON.stringify(user)}`); return this.rowFree(Date.now()); },
       dropped: (why) => { this.dropped++; this.note(`a connection dropped before its login: it ${why}`); },
     });
     return { opening, fingerprint: cert.fingerprint };
@@ -194,6 +217,12 @@ export class RunShares {
   /** a session's login, asked again before a statement: a share closed ends its sessions at once, and this is why none outlives it */
   private async recheck(token: PgToken): Promise<void> {
     if (token.jti === undefined || !this.held.has(token.jti)) throw new ApiError(401, "the share ended", "invalid_share");
+  }
+
+  /** whether a refused login at `now` is a row of the request log */
+  private rowFree(now: number): boolean {
+    if (now - this.rowsFrom >= 60_000) { this.rowsFrom = now; this.rows = 0; }
+    return ++this.rows <= REFUSED_ROWS_A_MINUTE;
   }
 
   /** the log's line: at most one a minute, saying how many it stands for, with no source (the header says why) */

@@ -255,7 +255,7 @@ test("a share's socket requires TLS on a plain server: a plain startup refused t
 test("only the share's own login opens its socket, and that login opens nothing else: a token is refused there, the share's password on the run's listener, each 28P01 with its door's hint, recorded and counted", async (t) => {
   const records: Array<{ user?: string; role?: string; sqlstate?: string; method: string }> = [];
   const refusedUsers: string[] = [];
-  const { api, share } = await withShare(t, { refused: (u) => refusedUsers.push(u) }, { record: (r) => { records.push(r as (typeof records)[number]); } });
+  const { api, share } = await withShare(t, { refused: (u) => { refusedUsers.push(u); return true; } }, { record: (r) => { records.push(r as (typeof records)[number]); } });
 
   const token = shareClient(share.port, { rejectUnauthorized: false }, { user: "anyone", password: "good-token" });
   await assert.rejects(token.connect(), (e: pg.DatabaseError) => e.code === "28P01" && e.hint === "the password mason share printed");
@@ -299,14 +299,40 @@ test("a connection held open without logging in cannot starve a login: the oldes
   assert.ok(dropped.includes("did not log in in time"), dropped.join(", "));
 });
 
-test("a public socket says nothing of the project before a login", async (t) => {
+test("a public socket says nothing of the project before a login: a wrong database and the right one answer alike until the password is good", async (t) => {
   const { api, share } = await withShare(t);
-  const wrong = shareClient(share.port, { rejectUnauthorized: false }, { database: "guess" });
-  await assert.rejects(wrong.connect(), (e: pg.DatabaseError) => e.code === "3D000" && e.hint === undefined && !/shop/.test(e.message));
-  // the plain socket still says it, to a developer on this machine
-  const local = shareClient(api.port, false, { user: "anyone", password: "good-token", database: "guess" });
+  const told = (database: string, password: string): Promise<pg.DatabaseError> => shareClient(share.port, { rejectUnauthorized: false }, { database, password }).connect()
+    .then(() => { throw new Error("it connected"); }, (e: pg.DatabaseError) => e);
+  // Without the password, nothing tells the name from a guess
+  const guessed = await told("guess", "wrong"), right = await told("shop", "wrong");
+  assert.equal(guessed.code, "28P01");
+  assert.equal(guessed.message, right.message);
+  assert.equal(guessed.hint, right.hint);
+  // With it, the holder is told: the report that gave them the password names the database
+  const holder = await told("guess", SHARE_PASSWORD);
+  assert.equal(holder.code, "3D000");
+  assert.match(holder.message, /^database "guess" does not exist$/);
+  assert.match(holder.hint ?? "", /connect with database=shop/);
+  // the plain socket says it at once, to a developer on this machine
+  const local = shareClient(api.port, false, { user: "anyone", password: "wrong", database: "guess" });
   await assert.rejects(local.connect(), (e: pg.DatabaseError) => e.code === "3D000" && /shop/.test(e.hint ?? ""));
+});
 
+test("what a stranger can write to the request log through a public socket is bounded: a name's length, and no row when the door says none", async (t) => {
+  const records: Array<{ user?: string; client?: string; error?: string; method: string }> = [];
+  let free = true;
+  const { share } = await withShare(t, { refused: () => free }, { record: (r) => { records.push(r as (typeof records)[number]); } });
+  const long = "x".repeat(4_000);
+  const c = new pg.Client({ host: "127.0.0.1", port: share.port, user: long, password: "wrong", database: "shop", application_name: long, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 5_000 });
+  await assert.rejects(c.connect(), (e: pg.DatabaseError) => e.code === "28P01" && e.message.length < 150);
+  const row = records.find((r) => r.method === "CONNECT")!;
+  assert.equal(row.user, "x".repeat(63));
+  assert.equal(row.client, `postgres:${"x".repeat(63)}`);
+  assert.ok(row.error!.length < 150, row.error);
+  records.length = 0;
+  free = false;
+  await assert.rejects(shareClient(share.port, { rejectUnauthorized: false }, { password: "wrong" }).connect(), (e: pg.DatabaseError) => e.code === "28P01");
+  assert.deepEqual(records, [], "refused, and no row");
 });
 
 test("a connection reset in the middle of its TLS handshake ends that session alone", async (t) => {

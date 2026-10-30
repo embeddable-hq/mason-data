@@ -100,23 +100,31 @@ test("what the listener serves, one line: its address, TLS and whose certificate
 
 test("--self-signed-tls's files: made 0600 in .mason/, the same served again, made again when the key is not its own or it expired", () => {
   const home = tmp("mason-tls-");
-  const first = ensureSelfSigned(home, "shop");
+  const first = ensureSelfSigned(home);
   assert.match(first.said ?? "", /^made a self-signed certificate: \.mason\/postgres-tls\.crt$/);
   for (const f of Object.values(SELF_SIGNED_FILES)) assert.equal(fs.statSync(path.join(home, f)).mode & 0o777, 0o600, `${f} is the developer's alone`);
   const x = new crypto.X509Certificate(fs.readFileSync(path.join(home, SELF_SIGNED_FILES.cert)));
   assert.equal(x.fingerprint256, first.fingerprint);
-  assert.equal(x.subject, "CN=mason-shop");
-  const again = ensureSelfSigned(home, "shop");
+  assert.equal(x.subject, "CN=mason", "a certificate is handed to whoever connects, before any login");
+  assert.equal(x.issuer, "CN=mason");
+  const again = ensureSelfSigned(home);
   assert.deepEqual(again, { fingerprint: first.fingerprint, said: null }, "a later start serves the same certificate: a tool that pinned it keeps connecting");
   // another key beside it: made again, said why
   fs.writeFileSync(path.join(home, SELF_SIGNED_FILES.key), selfSignedCertificate("other").key);
-  const rekeyed = ensureSelfSigned(home, "shop");
+  const rekeyed = ensureSelfSigned(home);
   assert.notEqual(rekeyed.fingerprint, first.fingerprint);
   assert.match(rekeyed.said ?? "", /was not the key of \.mason\/postgres-tls\.crt/);
   // expired: made again
-  const later = ensureSelfSigned(home, "shop", new Date(Date.now() + 11 * 365 * 86_400_000));
+  const later = ensureSelfSigned(home, new Date(Date.now() + 11 * 365 * 86_400_000));
   assert.notEqual(later.fingerprint, rekeyed.fingerprint);
   assert.match(later.said ?? "", /the one in \.mason\/ expired/);
+  // one a project made before it named nothing: made again, so the name stops being handed out, and said: its fingerprint moves
+  const named = selfSignedCertificate("mason-shop");
+  fs.writeFileSync(path.join(home, SELF_SIGNED_FILES.cert), named.cert);
+  fs.writeFileSync(path.join(home, SELF_SIGNED_FILES.key), named.key);
+  const renamed = ensureSelfSigned(home);
+  assert.match(renamed.said ?? "", /^made a new self-signed certificate: the one in \.mason\/ named this project to whoever connected$/);
+  assert.equal(new crypto.X509Certificate(fs.readFileSync(path.join(home, SELF_SIGNED_FILES.cert))).subject, "CN=mason");
 });
 
 test("mason start refuses a plain listener off loopback before it starts anything, in the Failure shape, as a person and with --json, in the background and attached", async () => {
