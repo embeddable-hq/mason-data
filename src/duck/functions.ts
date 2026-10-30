@@ -23,7 +23,7 @@ import { compare, div, evaluateText, NumericError, numericText, parseNumeric, ty
 import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
 import { gapMark } from "./gaps.ts";
-import { CANCEL_SLOTS, cancelTable, isCancelled, slotOf } from "./cancel.ts";
+import { beat, cancelTable, isCancelled, slotOf } from "./cancel.ts";
 
 /** How the source database changes a letter's case: glibc's (towupper per character), ICU's (full mappings: `ß` is
  *  `SS`), or the C locale's (ASCII letters only). */
@@ -460,6 +460,7 @@ function scalar(conn: DuckDBConnection, name: string, params: Array<typeof VARCH
       const vectors = all.slice(1);
       try {
         for (let r = 0; r < input.rowCount; r++) {
+          beat(cancels);   // one vector of wide documents is seconds of this loop: the watch must see it run
           const args = vectors.map((v) => v.getItem(r) as DuckDBValue);
           out.setItem(r, opts.nulls !== "pass" && args.some((a) => a === null) ? null : body(args) as DuckDBValue);
         }
@@ -601,11 +602,10 @@ function icuKeysOf(v: DuckDBValue): string[] {
  * EVERY CALL CARRIES ITS SESSION, FIRST (the test server: a client leaving mid-statement hung the process
  * for good). A scalar function runs on the thread that registered it — the executor worker (src/duck/executor.ts) —
  * while an executor thread waits for it, so that thread can never wait for the executor — and closing a result or a
- * connection does, to cancel the executor's tasks. An interrupt does not end those tasks (they run on until the close),
- * so a statement that calls one of these functions is cancelled another way: its session's cell of the CANCEL TABLE
- * (src/duck/cancel.ts) says it is cancelled, and the statement's next call raises. DuckDB may hand that error back
- * while another task of the query still waits for a call, so the result is closed only once the session's calls have
- * stopped (src/duck/store.ts `cleanUp`; a deadlock under load). The table is shared memory: the listener's thread writes it
+ * connection does, to cancel the executor's tasks. So such a statement is cancelled through its session as well as
+ * interrupted: its session's cell of the CANCEL TABLE (src/duck/cancel.ts) says it is cancelled, the statement's next call
+ * raises, and its result is closed only once DuckDB ended the query off this thread (src/duck/store.ts `cleanUp`; a
+ * deadlock under load). The table is shared memory: the listener's thread writes it
  * while this one is busy with the statement's calls. The rewrite (src/duck/rewrite.ts `fn`) passes
  * `getvariable('__mason_session')` as every `__mason_*` function's first argument, which DuckDB folds to the session's
  * literal at bind time; the session runner sets the variable on its connection (its slot, `s<n>`). A connection without
@@ -629,16 +629,11 @@ let cancels: Int32Array = cancelTable();
 export function useCancelTable(t: Int32Array): void { cancels = t; }
 export function cancelsTable(): Int32Array { return cancels; }
 
-/** when each session's last call was answered (performance.now(), on this thread): what a session's runner reads to know
- *  that no task of a statement still waits for a call before it closes the statement's result (src/duck/store.ts
- *  `cleanUp`) */
-const lastCallAt = new Float64Array(CANCEL_SLOTS);
-export function msSinceCall(slot: number): number { return performance.now() - (lastCallAt[slot] ?? 0); }
-
-/** the session's vector (the first argument, a constant): raises when the session's statement is cancelled */
+/** the session's vector (the first argument, a constant): raises when the session's statement is cancelled. Every call
+ *  starts here, so every call beats (src/duck/cancel.ts) */
 function cancelled(info: { setError(message: string): void }, vectors: ReadonlyArray<{ getItem(i: number): unknown }>, rows: number): boolean {
+  beat(cancels);
   const slot = rows > 0 ? slotOf(text(vectors[0]?.getItem(0) as DuckDBValue)) : null;
-  if (slot !== null) lastCallAt[slot] = performance.now();
   if (slot === null || !isCancelled(cancels, slot)) return false;
   info.setError(CANCELLED);
   return true;

@@ -270,7 +270,8 @@ export const TOOLS = [
     name: "explain",
     title: "How Mason answers a statement",
     description: "How Mason answers one statement, as its EXPLAIN prints it: each synced table the statement reads with its rows and how current it is, " +
-      "the SQL Mason runs for it, and the plan. analyze: true runs the statement too and adds each step's rows and time.",
+      "the SQL Mason runs for it, and the plan. analyze: true runs the statement too and adds each step's rows and time. " +
+      "For a statement that reads a table your role filters: no plan and no row counts, and analyze is refused.",
     inputSchema: { type: "object", properties: {
       sql: { type: "string", description: "one statement, in Postgres's SQL (without EXPLAIN)" },
       analyze: { type: "boolean", default: false, description: "run it, and say each step's rows and time" },
@@ -643,7 +644,7 @@ interface CopyRow { Table: string; "Estimated Rows": number | null; "Kept Curren
 function copyFacts(c: CopyRow | { error: string } | undefined): Record<string, unknown> {
   if (c === undefined) return { rows_about: null, kept: "how it is kept current is unknown: Mason has not synced it" };
   if ("error" in c) return { rows_about: null, kept: `how it is kept current could not be read: ${c.error}` };
-  return { rows_about: c["Estimated Rows"], kept: c["Kept Current"], kept_current_by: c["Kept Current By"],
+  return { rows_about: c["Estimated Rows"] ?? null, kept: c["Kept Current"], kept_current_by: c["Kept Current By"],
     ...(c.Sync !== undefined ? { sync: c.Sync, last_synced: c["Last Synced"] ?? null } : {}) };
 }
 

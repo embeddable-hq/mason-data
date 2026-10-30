@@ -76,7 +76,7 @@ export const PRESS_HOLD_MS = 2000;
 export * from "./shared.js";
 export { copyingText, tableLine, keptAge, sourceRows, renderStatus } from "./pages/status.js";
 export { tableFacts, addedLines, removedReport, pickBody, columnsPath, renderTableAdded, renderTablesRemoved, renderTables } from "./pages/tables.js";
-export { renderUsers, renderAdded } from "./pages/users.js";
+export { renderUsers, renderAdded, attributesText } from "./pages/users.js";
 export { renderRequests } from "./pages/queries.js";
 export { renderRunning, renderSessions, renderClients, renderSlowest, queriesHref } from "./pages/usage.js";
 

@@ -117,7 +117,9 @@ export interface RunState {
   ui?: boolean;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
-  roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[] };
+  roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[];
+    /** each role's attributes and their shapes, and its where:s (src/duck/row-filter.ts): what mason user add --set is held to */
+    attributes?: Record<string, Record<string, "scalar" | "list">>; wheres?: Record<string, Array<{ table: string; at: string; where: string }>> };
 }
 
 // ------------------------------------------------------------------ shared
@@ -1388,7 +1390,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --running        the statements running now (Mason must be running)
   --json           as data: { lines: [{ at, text }] } (the log's entries, oldest first; at is null for a line with no
                    time); with --requests { requests: [{ requestId, startedAt, endedAt, session, applicationName,
-                   tokenName, user (the mason user), method, outcome (ok, refused, failed, cancelled), status
+                   tokenName, user (the mason user), role, attributes (the user's values its role's row filters read, or
+                   null), method, outcome (ok, refused, failed, cancelled), status
                    (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
                    bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
                    or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,

@@ -177,10 +177,9 @@ export function countsText(c: ChangeCounts): string {
 
 /** A table's changes in a batch, folded to one per key, in what they mean once applied in commit order. */
 export interface TableChanges {
-  /** the columns its rows' values are in: the copy's, as `StreamTarget.tables` gave them when they were decoded (null:
-   *  none decoded yet). Changes decoded in another shape — before the table was copied again — are never applied to the
-   *  new copy (src/duck/sync.ts `applyStreamed`) */
-  columns: readonly string[] | null;
+  /** the table's stay in the stream they were decoded in (`StreamedTable.stay`; null: none decoded yet): every row here
+   *  is in that stay's columns, and a stay that has ended is never applied (src/duck/sync.ts `applyStreamed`) */
+  stay: number | null;
   /** a TRUNCATE in the batch: every row stored before it goes first */
   truncated: boolean;
   /** by the key's JSON, the key's values and its net change */
@@ -189,7 +188,7 @@ export interface TableChanges {
   counts: ChangeCounts;
 }
 /** a table's changes, none yet */
-export const noChanges = (columns: readonly string[] | null = null): TableChanges => ({ columns, truncated: false, keys: new Map(), counts: noCounts() });
+export const noChanges = (stay: number | null = null): TableChanges => ({ stay, truncated: false, keys: new Map(), counts: noCounts() });
 
 /** The change folded into what the batch holds for its key: a later whole row or delete replaces it, a later partial
  *  row keeps the earlier row's values where it carries none. */
@@ -241,7 +240,7 @@ export function applySize(big: boolean, flushMs: number, flushRows: number): { m
 /** A later batch's changes of a table folded into what is held of it (Sync `catchUp`): what they mean once applied in
  *  commit order after it, as `fold` does within a batch */
 export function foldInto(held: TableChanges, later: TableChanges): void {
-  held.columns ??= later.columns;
+  held.stay ??= later.stay;
   if (later.truncated) { held.truncated = true; held.keys.clear(); }
   for (const { key, change } of later.keys.values()) fold(held, key, change);
   addCounts(held.counts, later.counts);
@@ -250,10 +249,11 @@ export function foldInto(held: TableChanges, later: TableChanges): void {
 /** What a stream's relation (a published table) is to the copy: its source name and columns as they arrive. */
 interface Relation { source: string; columns: RelationColumn[] }
 
-/** A streamed table as the stream decodes it: the COPY's columns (never the sources file's of the moment, never the publication's), its key,
+/** A streamed table as the stream decodes it: its STAY, one unbroken time in the stream of one copy (a new number once it
+ *  left or its copy was swapped, never used twice), the COPY's columns (never the sources file's of the moment, never the publication's), its key,
  *  and the columns the stream may lack because Postgres publishes none (a generated column before 18: read from the
  *  source by key, `refetch`) */
-export interface StreamedTable { columns: readonly string[]; key: readonly string[]; generated?: readonly string[]; big?: boolean }
+export interface StreamedTable { stay: number; columns: readonly string[]; key: readonly string[]; generated?: readonly string[]; big?: boolean }
 
 export interface StreamTarget {
   /** the streamed tables, by source (`schema.table`), each in the copy's own columns. Read at EVERY change: a table joins
@@ -441,7 +441,10 @@ export class ReplicationStream {
                 continue;
               }
               if (table.big === true) big = true;
-              const t = batch.get(rel.source) ?? noChanges(table.columns);
+              // ONE STAY A BATCH: what an ended stay left in it would be dropped at the apply (`applyStreamed`), and held
+              // beside these it is rows of another shape, or an old change replayed after the poll that read a newer
+              const open = batch.get(rel.source);
+              const t = open?.stay === table.stay ? open : noChanges(table.stay);
               batch.set(rel.source, t);
               txnChanges.set(rel.source, (txnChanges.get(rel.source) ?? 0) + 1);
               t.counts[msg.type === "insert" ? "inserts" : msg.type === "update" ? "updates" : msg.type === "delete" ? "deletes" : "truncates"]++;

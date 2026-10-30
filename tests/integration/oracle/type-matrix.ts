@@ -726,6 +726,10 @@ function* matrix(): Generator<Matrixed> {
   yield q("enum columns in information_schema", "SELECT column_name, data_type, udt_schema, udt_name FROM information_schema.columns WHERE table_name = 'moods' ORDER BY ordinal_position");
   // ANY / ALL over a NULL array is NULL (DuckDB read it as an empty one)
   yield q("ANY / ALL over a NULL array", "SELECT id, 1 = ANY (ai), 1 <> ALL (ai), 1 < ANY (ai), 1 = ALL (ai), (1 = ANY (ai)) IS NULL FROM typed WHERE id < 100 ORDER BY id");
+  // A ROLE'S ROW FILTER AS MASON BINDS IT (src/duck/row-filter.ts bindFilter): a scalar attribute a CAST of a literal, a list
+  // attribute a CAST of an ARRAY of literals to the column's array type — integer[] and uuid[] — under = ANY and <> ALL
+  yield q("a row filter's bound list: = ANY of a cast array", "SELECT id FROM typed WHERE i4 = ANY (CAST(ARRAY['0', '1', '7'] AS integer[])) OR u = ANY (CAST(ARRAY['a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '00000000-0000-0000-0000-000000000001'] AS uuid[])) ORDER BY id");
+  yield q("a row filter's bound list: <> ALL of a cast array, a scalar's cast", "SELECT id FROM typed WHERE i4 <> ALL (CAST(ARRAY['2', '3'] AS integer[])) AND (u IS NULL OR u <> CAST('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' AS uuid)) AND id >= CAST('1' AS integer) ORDER BY id");
   // ---- date_trunc of a timestamptz in the session's zone and in a zone of its own (src/duck/rewrite.ts truncInstant):
   // the instant's arithmetic in UTC, the offset kept below a day elsewhere, every part Postgres accepts --------------
   const UNITS = ["microseconds", "milliseconds", "second", "minute", "hour", "day", "week", "month", "quarter", "year", "decade", "century", "millennium"];

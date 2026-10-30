@@ -263,6 +263,7 @@ are `.claude/rules/duckdb.md` "Keeping a copy current". Why each is so:
 | a batch (500 ms or 10 k changes) commits with its position before it is acknowledged; idle, the server's position is acknowledged | a run that dies skips what it applied; an idle slot holds no WAL |
 | a large transaction is applied in committed pieces of `PIECE_CHANGES` (10,000) | 607,000 changes in one transaction ran a sync out of a 96 MB heap folded whole; in pieces it ran in 48 MB |
 | a change is written as the COPY's columns (`Sync.asCopied`, `projectTuple`) | a column removed from a 22 M-row table's entry and restored during its re-copy: held changes named a column the copy lacked (`Binder Error`) and the table stopped |
+| a batch holds a table's changes of ONE stay in the stream, and only the stay it is in now is applied (`StreamedTable.stay`) | told apart by columns, two copies inside one 500 ms flush (a sources file edited and restored, 0.2 s each on CI) mixed two shapes in a batch and held the table 5 minutes; the same race dropped changes made after the catch-up's poll, and could replay an old change over a newer one |
 | a table needing a copy or catch-up gets a pass at once or at its back-off's end (`followUp`, `wakeAt`) | a pass runs only when kicked: 7+ minutes with no copy on the test server |
 | each join and leave is a log line with its position; `mason status` shows position, lag and counts | the first run printed one stream line in 35 minutes; commit → applied then measured 0.2–5.5 s |
 | the database's position: a connection at most every 5 s, never the keepalive | a walsender's keepalive carries its READ position, wrong while it decodes a backlog |
@@ -995,11 +996,63 @@ checkpointed.
 | a cancel is a cell of a `SharedArrayBuffer` table the listener writes at once (`src/duck/cancel.ts`) | the worker is busy for seconds with calls; a message would wait behind them |
 | whether a statement calls a function is its PLAN's (`PlannedSql.functions`), never its text's | `__mason_visible` matched a text test: a self-join ran 82 s past a 300 ms timeout and answered "ok"; after, 57014 at 319 ms |
 | a cancel asked is answered 57014, however the statement ends | a scalar subquery's early calls let a cancelled statement finish "ok" |
-| a calling statement's unfinished result is cancelled, interrupted, and closed after `CALLS_QUIET_MS` (50 ms) with no call (`SessionRunner.cleanUp`) | under load the suite sat at 0 % CPU for good: the result's close (`Executor::CancelTasks`) waiting for a task waiting for the worker. After: released 21–63 ms after the client left; a 300 ms timeout answered at ~305 ms |
+| a statement's unfinished result is interrupted, read on off the worker's thread until DuckDB ended it, proved ended, and closed (`SessionRunner.cleanUp`; "The watch" says why, 2026-10-30) | under load the suite sat at 0 % CPU for good: the result's close (`Executor::CancelTasks`) waiting for a task waiting for the worker. Until issue 58 the guard was 50 ms with no call, which was no proof |
 | nothing is closed under a pending call; a statement in flight at a stop gets 57P01 | a stop during a drain aborted the process (exit 134, `Napi::Error`) |
-| a worker silent `SILENT_MS` (60 s) is given up on (57P02, the run exits for its supervisor); `close` settles in `CLOSE_GRACE_MS` (5 s) | a thread blocked in native code survives `worker.terminate()` and `process.exit`; one join (`a.id > b.id AND a.id - b.id = -7`, 1 M rows) takes ~10 s to honour an interrupt in DuckDB itself |
+| a worker silent `SILENT_MS` (60 s) is given up on (57P02, the run exits for its supervisor); `close` settles in `CLOSE_GRACE_MS` (5 s) | a thread blocked in native code survives `worker.terminate()` and `process.exit`. This row once said one join (`a.id > b.id AND a.id - b.id = -7`, 1 M rows) takes ~10 s to honour an interrupt; measured again in 2026-10, its close took 91 ms |
 | a worker given up on is asked to shut down and terminated only once it answered, referenced until then; an answer's close is a request (2026-10-28) | a test file under four suites' load aborted at exit (`libc++abi: terminating due to uncaught exception of type Napi::Error`): the after-hook's close outlasted 5 s and the executor terminated the worker under a Mason function call. A close with a 1 ms grace under a calling statement: 6 aborts in 6 before, 0 in 4 after; a script ending while a closed answer drained: 4 in 4 before, 0 in 4 after. Twenty CPU burners beside the file alone did not reproduce it (3 runs). A terminate under a call-free statement still aborts (2 in 12): nothing terminates a worker with a statement in flight |
 | a statement closed while it starts is released once DuckDB hands the start back; a session's close closes an answer opened while it waits (2026-10-28) | Linux CI then failed the new grace test (`FATAL ERROR: Error::Error napi_define_properties`, the worker's loop still turning): the shutdown answered with a result still open. In a Linux container (node 24, arm64) the test's "grace" child aborted 6 in 30, 7 in 30, 3 in 20 (0 in 30 on the Mac, where a start takes 1–8 ms); traced with synchronous writes, the abort's run met the statement with no answer yet (`stream()` pending), released it at once, and the start was handed back 1 ms later to nobody. After: 0 in 40, twice, and the test file 3 of 3. A start is short (a calling count: 1–8 ms start, 1.7–4.7 s first fetch), so the test makes it late on purpose: a worker whose `stream()` hands DuckDB's start back only once the close's interrupt landed. It first held the start 300 ms after saying "starting" BEFORE DuckDB's own start, and under load the close's interrupt landed inside that start, which DuckDB failed (`INTERRUPT Error: Interrupted!`): told 57014 and released after its failure, correct, but not the case the test names (CI once, two local full checks; 3 – 4 runs in 24 of the child alone, 12 at once). The start is now whole before the close and the close an event, never a timer: 0 in 96 |
+
+### The watch
+
+**What happened** (issue 58, 2026-10-30). A test failed with 57P02 "stuck inside the engine" on a healthy machine, and
+looking found three separate things behind that one message:
+
+| | what | the worker | was the message true? |
+|---|---|---|---|
+| A | the main thread blocked or frozen past 60 s | idle, healthy | no |
+| B | one calling statement holds the worker's loop for a whole 999-call turn | running, on CPU | no |
+| C | a close on the worker's thread waits for a task that waits for that thread | deadlocked at 0 % CPU, for good | yes |
+
+A: the watch compared the clock with the last message, so a block counted as silence, and after one the tick ran before
+the answer waiting in the port was read: `SELECT 41 + 1` refused in 0 ms, no load, and a 66 s SIGSTOP refused a healthy
+statement at its resume. B: the pong needs a loop turn, and a turn lasts 999 × a call's CPU (6.8 ms at ~54 bytes, 103 ms at
+5 kB, 322 ms at 20 kB), so a read of 5 kB documents fires on any machine; with the watchdog disarmed a 20 kB statement
+answered after 1,232 s with a longest silence of 1,151 s. A read of such documents took the whole server down.
+
+C was the 50 ms: a task doing native work before its call makes no call for as long as that takes, and a cancel before
+the first call read the previous statement's time as quiet. Cancels hung 1 in 3,329 over small documents and 5 in 1,303
+over 20 kB ones, and by construction (a vector with `md5(repeat(j, K))` in the call's argument) every time at K = 20000.
+
+**Decision.** The watch counts unanswered pings on the main thread's own ticks, and every Mason function call and row
+adds to a shared beat. Nothing on the worker's thread waits for DuckDB's tasks.
+
+**What does the wait, read from DuckDB 2.0's source and held by experiment.** The prototype of this fix read on, then ran
+`SELECT 1` "to wait"; which of the two waited was not known. `ClientContext::EndQueryInternal` runs
+`Executor::CancelTasks` on the calling thread, and every end of a query passes through it. An interrupted result's next
+fetch fails in `BufferedData::Participate` before it computes anything, and `HandleFetchFailure` ends the query on the
+fetching thread, libuv's. A statement cannot do it: `InitialCleanup` refuses one while a result holds the connection
+(`connection has an open result`, measured: refused while open, interrupted or not, and run after the fetch failed). So the
+FETCH is the wait, and `SELECT 1` is the proof it happened. It is kept for that, as a probe: the contract answers one.
+
+**What it costs: less.** From the abort, median of 30 on a loaded laptop (macOS, Node 24, 3 M rows):
+
+| | client told, before → after | session free, before → after |
+|---|---:|---:|
+| calling, cancel between two chunks | 8.3 → 3.3 ms | 81.5 → 7.0 ms |
+| calling, cancel inside a fetch | 4.0 → 1.5 ms | 62.0 → 3.5 ms |
+| call-free, cancel between two chunks | 0.9 → 0.3 ms | 3.4 → 2.4 ms |
+| call-free, cancel inside a fetch | 0.9 → 0.6 ms | 4.6 → 2.3 ms |
+
+The call-free close was its own false alarm in waiting, which is why it takes the same path: DuckDB checks nothing inside
+a vector, so a close held the thread for the rest of one. With another session's `SELECT 41 + 1` as the measure, a
+vector of `md5(repeat(j, K))` over 1 M rows, before → after: 748 → 3 ms, and 17,872 → 5 ms. The session that closed still
+waits for its vector (15.8 s there), and nobody else does. The join this page once said took ~10 s closed in 91 ms.
+
+**What the message means now.** It fires on a thread that neither turned its loop nor ran a row of a Mason function for 60 s
+of the main thread's time: inside the engine, or spinning. Both are Mason bugs, so a statement that holds the worker
+for minutes no longer fires, and a real deadlock still does. **Where.** `src/duck/executor.ts` (the watch),
+`src/duck/cancel.ts` (the beat), `src/duck/store.ts` `cleanUp`, `src/duck/executor-worker.ts` `conn.close`;
+`tests/duck-executor.test.ts`.
 
 **Still true.** A calling statement starves the worker for its run, and every other request to the copy (another
 session's statement: 8.2 s beside an 8.7 s calling one); the listener, logins, catalog, commands and cancels do not
@@ -1213,6 +1266,170 @@ The oracle holds a Mason role of `tables: all` to a Postgres role granted `ALL T
 `tables: all`, and `default: everything`, with a narrower role as a comment to copy. A new project starts with today's
 access, but visible in a committed file: narrowing it is an edit a reviewer sees, and deleting the `default:` line is
 the one-line way to make every roleless user read nothing. A file already there (a clone) is kept byte for byte.
+
+### Roles: rows per user (2026-10-30, GitHub issue 30, stage 2)
+
+**Decision (the owner, 2026-10-30): one PR carrying `where:` and `through:`, scalars and lists, and a user missing a
+value refused loudly.** A role declares `attributes:` (`[tenant]`, or `{ tenant: scalar, regions: list }`); a table of
+it takes `where: "<SQL reading :name>"` or `through: <a table of the role>` (`through: { orders: order_id }` naming the
+column); a user carries its values (`mason user add … --set tenant=42`, a list by repeating `--set`; `attributes` in
+`.mason/users.json`). Answering a user that lacks a value with no rows would look like an empty tenant — a silent wrong
+answer — so every statement of such a user is refused 42501 with the attribute, the `where:` and the exact commands,
+and `mason start` and `mason user list` name such users.
+
+**One grammar.** `:name` is found by one lexer (`whereParts`, src/duck/row-filter.ts) that skips strings, quoted
+identifiers, dollar quotes, comments and `::` casts. The `where:` is analysed by the catalog Postgres at the file's read
+as `SELECT 1 FROM <table> WHERE <$n>`, which types each attribute as Postgres infers it there (`tenant_id = :tenant`:
+integer; `region = ANY(:regions)`: uuid[]); a list used as a scalar or the reverse is Postgres's own error at the key,
+told again with declared types so the message is the one a developer would meet. Bound, a scalar is `CAST('42' AS
+integer)` and a list `CAST(ARRAY['12', '41'] AS integer[])` — literals the catalog reads, never a value pasted into a
+statement's text. In the statement, each read of a filtered table (a `RangeVar` resolved by `to_regclass` under the
+session's search_path, every read the analysis found accounted for, as views are) is replaced by `(SELECT * FROM t WHERE
+<filter>) AS t`, a `through:` by an `EXISTS` over the parent's own filtered read, recursively; the result is analysed
+again and goes through the same grants, rewrite and allowlist as any statement. So a view, a CTE, a subquery, a join's
+side and a prepared statement's every Execute meet the filter because there is no read without it. The plan cache is
+keyed by the role AND the bound filters, and an Execute whose filters moved (the file edited) is planned again.
+
+**Postgres row security is the reference, twice.** The catalog holds the filters as real policies (`ENABLE ROW LEVEL
+SECURITY`, `CREATE POLICY … FOR SELECT TO <role> USING (… current_setting('mason.attr.tenant')::integer …)`), the
+attributes sent with each catalog request as the session's settings and unsettable by the session; and the oracle
+mirrors each Mason user with a Postgres login under the same policies (`ALTER ROLE … SET mason.attr.…`, a list read by
+`string_to_array(…)::int[]`), asking thirty shapes as six users and as an unfiltered one (tests/integration/oracle/row-filters.ts).
+**An empty list is not expressible**: `--set regions=` is refused and an empty list in the users file counts as a missing
+value, since a user reading no row of its role is a user of another role, and an empty array would be the silent zero rows
+this design refuses.
+
+**The security barrier (the review of PR 51).** A Postgres policy is a barrier: a statement's condition runs below it only
+if it is leakproof. The first form of this feature had none. The filtered read was a plain subquery, DuckDB flattened it,
+and the statement's WHERE went below a `through:`'s or a list's SEMI join, onto every row of the table, so
+`WHERE 1/(CASE WHEN qty = 99 THEN 0 ELSE 1 END) > 0` answered "does a hidden row satisfy P?" for any P, as 22012 or a
+count. The tests had hidden it: DuckDB's dynamic join filter prunes hidden rows by itself below 50 build keys or over a
+narrow key range, so **a test of this needs more than 50 visible keys over a wide range**, and the oracle's and the wire
+test's do. Now the outermost filtered read ends `LIMIT 9223372036854775807` (`BARRIER`, src/duck/row-filter.ts): the filter
+pushdown does not cross a LIMIT, which would change what it keeps. **The limit need not reach the plan**: statistics
+propagation runs after the pushdown and drops a limit above the table's row count, so most plans hold no limit node, and
+the statement's expression stays above the role's filter all the same; that is also why the barrier costs so little. So
+the detector reads where the expression runs, never whether a Limit is there (`tests/duck-roles-barrier-wire.test.ts`).
+With the `try` wall off (`wallSwitch`, below), removing it fails that file's limit test and, per user, the shapes counted
+below; with `try` on, nothing fails, which is why the limit has a test of its own.
+
+Measured on DuckDB 2.0, ten cores, a file of 30 M orders and 60 M items, a user keeping half the rows, min of five (three
+for the last three rows), ms. One thing changed per column:
+
+| Statement over the filtered read | No barrier | `LIMIT` max | `OFFSET 0` |
+|---|---:|---:|---:|
+| `count(*)` | 6 | 5 | 26 |
+| `sum`, `avg` over every row | 12 | 10 | 48 |
+| GROUP BY with a WHERE of its own | 18 | 23 | 85 |
+| the same, the filter a 50-value list | 16 | 23 | 83 |
+| a WHERE a zone map would prune (`id BETWEEN`) | 0 | 15 | 60 |
+| `through:`, an aggregate | 539 | 541 | 492 |
+| `through:`, a WHERE a zone map would prune | 98 | 505 | 514 |
+| a join of two filtered tables | 28 | 26 | 133 |
+| that join, a selective WHERE | 8 | 8 | 64 |
+| ORDER BY … LIMIT 10 | 19 | 18 | 83 |
+| 15 M rows returned | 130 | 72 | 160 |
+| a window, a WHERE of its own | 21 | 34 | 74 |
+| `count(*)` of a DISTINCT | 60 | 63 | 255 |
+
+`OFFSET 0`, Postgres's own idiom, is a barrier too, but statistics cannot drop it and it runs a serial operator under the
+default `preserve_insertion_order`: three to five times the cost, for nothing. **`WITH … AS MATERIALIZED` is no barrier**:
+the same reproduction raised 22012 through it, read once or twice, and it costs more (`sum` 165 ms, a `through:` aggregate
+1,319). **What the barrier costs is the
+statement's own pruning**: every shape is within noise but those whose WHERE a zone map would have pruned, the worst five
+times over on a `through:`, 400 ms on 60 M rows.
+
+**A table's statistics (the second review of PR 51).** The review found EXPLAIN telling a filtered user what the engine
+knew of the whole table: `Empty Result` and the first line's `answered reading no synced table` for `WHERE secret > N`
+above the column's maximum, a binary search on a hidden row, and `rows=` and `actual rows=` beside it. Then a probe with no
+EXPLAIN in it did the same: `WHERE 1/(id - id) > 0 AND secret > N` raised 22012 below the hidden maximum and answered 0
+above it, because the engine proved the condition false from the column's statistics and took the Filter away, the
+division with it. The limit stops a filter, not a fact: statistics pass up through it, through a UNION ALL's arms, `[x][1]`,
+struct and unnest, `any_value`, `try_cast`, `list_concat`, `flatten`, `struct_pack` and `row()`. So hiding EXPLAIN was not
+enough, and turning off the engine's `statistics_propagation` is not open: `disabled_optimizers` is global, visible from
+another connection, so a per-statement setting would race every other session.
+
+**Two things hold it.** The filtered read ends in `SELECT try(COLUMNS(*)) AS "\0" FROM (… LIMIT max)` (`wallStatistics`):
+`try(col)` is opaque to the propagation (the plan was identical either side of N), and it keeps every column's name, type
+and text, 34 types and 16 odd names held by `tests/duck-roles-try-types.test.ts`. Postgres has no `COLUMNS(*)`, so
+`filteredSql` writes `*`, Postgres analyses that, and the list is replaced after the rewrite, where the read-back check
+holds the text. **The wall's select is found by a name chosen after reading the statement**, the first of
+`__mason_barrier`, `__mason_barrier_1`, … that no string of it holds, with the count of reads Mason wrote: a fixed name
+counted a user's own subquery as Mason's, and a mismatch is refused by the gap `roles`. `COLUMNS` is printed the same way,
+from calls marked in the tree under a name the text holds nowhere else, never by replacing characters a literal could
+spell. And an EXPLAIN of a statement that reads
+a filtered table never shows the statement to the engine: the tables are `plan.reads`, the first line constant, `Plan` a
+constant node so a viewer and `mason mcp` keep reading `Mason.Tables`, and ANALYZE is refused by the gap `roles`, since a
+profile is a count of what the engine read and there is nothing left to run it for. A session with no filter is untouched.
+
+**What guarantees what.** The LIMIT's guarantee is the engine's semantics: a filter pushed through a LIMIT would change
+what it keeps. `try` stopping the pushdown and `try` stopping statistics are both observations of this engine, not
+guarantees: a later version could carry a minimum and a maximum through it. So each has its own detector. With `try` on, the
+pushdown stops at `try` and a test cannot tell whether the LIMIT holds anything (`BARRIER` empty passed every test of the
+two wire files), so `tests/duck-roles-barrier-wire.test.ts` runs every shape with the `try` wall off by a test-only switch
+(`wallSwitch`), where the LIMIT stands alone. `tests/duck-roles-rows-wire.test.ts`'s statistics test is `try`'s detector, on the
+wire because Postgres itself raises 22012 by written order on that statement, so the oracle cannot hold it. Both stay.
+
+The oracle's data had to change with this. At a sixth of the invoices visible (`tenant`) or a third (`list2`), the join's own
+filter pruned the hidden rows and the barrier shapes passed with the barrier removed. At about half visible, removing both
+walls fails 7 shapes of `tenant` and of `list1`, 14 of `list2` and 15 of `regions`. The rest of a scalar's shapes cannot fail:
+one value is a table filter in the scan, which runs before the statement's Filter with no barrier at all.
+
+Measured on the same file, the same run, DuckDB 2.0, min of five (three for the last three rows), ms. **The machine was
+loaded** (load average about 40), so compare across a row and never with the table above, whose rows are a quiet machine's:
+
+| Statement over the filtered read | No barrier | `LIMIT` max | `LIMIT` and `try` |
+|---|---:|---:|---:|
+| `count(*)` | 7 | 7 | 8 |
+| `sum`, `avg` over every row | 14 | 38 | 29 |
+| GROUP BY with a WHERE of its own | 64 | 53 | 72 |
+| the same, the filter a 50-value list | 43 | 103 | 146 |
+| a WHERE a zone map would prune (`id BETWEEN`) | 1 | 14 | 22 |
+| `through:`, an aggregate | 2,210 | 2,366 | 2,008 |
+| `through:`, a WHERE a zone map would prune | 334 | 2,070 | 2,109 |
+| a join of two filtered tables | 84 | 65 | 62 |
+| that join, a selective WHERE | 11 | 32 | 32 |
+| ORDER BY … LIMIT 10 | 46 | 30 | 54 |
+| 15 M rows returned | 375 | 136 | 463 |
+| a window, a WHERE of its own | 25 | 69 | 167 |
+| `count(*)` of a DISTINCT | 342 | 211 | 406 |
+
+`try` costs per row read (each column is evaluated through it), so it shows where a statement returns or sorts many rows,
+up to about twice the limit's, and nothing where the time is the join's. A point lookup of a wide column costs 26 ms
+against 0.9 ms on 150,000 visible 2 KB rows, and that is the LIMIT's, not `try`'s: the statement's own pruning, as above.
+
+**A `where:` the rewrite cannot send is the file's problem.** `checkRoles` ran Postgres's analysis only, so a predicate
+Postgres read and Mason cannot answer (a value of a type not verified) reached each user as 0A000, statement by statement.
+It now plans the filter's own read too, every attribute NULL, the one value of every type (`filterProbe`).
+
+**A value its type refuses is the attribute's problem.** `filterProbe` cannot see a value: `--set tenant=abc` on an integer
+passed, and every statement of the filtered table answered `22P02` naming no attribute. A data exception on a filtered
+statement now re-reads the bound values of the filters that statement reads (`attributeRefused`), and one the type refuses is 42501 with the attribute, the user
+and the `mason user add` line; a statement's own bad literal stays Postgres's. `mason user add` does not refuse it at the
+door: the type is the catalog's inference, a run's, and the command also works with Mason stopped.
+
+**A GROUP BY of a filtered table's key.** A table turned into a subquery has no primary key, so `SELECT o.id, o.status … GROUP
+BY o.id`, which Postgres accepts under row security, failed the filtered text's analysis with 42803. Each column the select
+reads outside an aggregate now joins the GROUP BY (`carryKeyDependency`), gated on the key being grouped whole: a group is
+then one row of the table and no added column can split it. The gate is the key and never Postgres's acceptance, because
+`GROUP BY lower(status)` reads a column ungrouped too. What the carrying does not reach (a grouping set, a `json` column) is
+a 42803 only the wrap can cause, so it is refused by the gap `roles`, with the way out.
+
+**`SHOW ALL`** lists no `mason.attr.*`, and that is Postgres's answer: a placeholder is `GUC_NO_SHOW_ALL`, and the oracle
+holds it, for a `SET myapp.x` and for an attribute `ALTER ROLE` set.
+
+**No leakproof gate.** Postgres omits the barrier for a leakproof condition, and the "No barrier" column is the most a
+gate could win back. It was not built: a gate must judge what reaches the engine, not what the user wrote, and Mason's
+rewrite turns a comparison into its own functions (a collation's key, an exact numeric), so `pg_proc.proleakproof` on the
+analysed tree says nothing about them. A safe gate needs an audit of every rewrite of every operator it admits, kept true
+as the rewrite changes, and it must read the whole tree, since a derived table's expression becomes the outer condition
+once substituted. A mistake there is the leak this section closes; its gain is the two pruned rows above. Timing is out of
+scope either way: how long a statement runs depends on rows it cannot read, on Postgres too.
+
+**Where.** `src/duck/row-filter.ts`, `src/cli/roles.ts` (`attributesOf`, `rowsOf`, `throughColumns`),
+`src/api/postgres/server.ts` (`withRows`, `checkRoles`), `src/api/postgres/catalog.ts` (`catalogPolicies`),
+`src/cli/user.ts` (`attributesToAdd`); `tests/duck-roles-rows-wire.test.ts`, `tests/cli-roles.test.ts`,
+`tests/duck-row-filter.test.ts`, the oracle's `rowFilterCases`.
 
 ### An MCP server (2026-10-29)
 
