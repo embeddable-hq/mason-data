@@ -155,6 +155,13 @@ export function addEntry(at: EditTarget, db: EditCatalog, table: string, columns
   const unreplicable = keyed ? "it has no primary key, so logical replication cannot apply its changes by its key:"
     : t.replicaIdentity === "n" ? "it has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail" : null;
   const notReplicated = o.sync === undefined && (was?.sync ?? null) === null && fileSync.mode === "replication" ? unreplicable : null;
+  // --sync replication asked of one: refused with the COMMAND to run (the person is at it), its own flags kept — the
+  // file's words are for an entry written by hand (src/cli/sources.ts entryProblems)
+  if (o.sync?.mode === "replication" && unreplicable !== null) {
+    const others = columns.filter((c) => c !== "*");
+    const flags = keep ? "" : `${columns.includes("*") ? (others.length ? ` --include ${others.join(",")}` : "") : ` --columns ${others.join(",")}`}${key !== null ? ` --key ${key.join(",")}` : ""}`;
+    throw new Refusal(400, `${table} cannot be kept current by logical replication: ${unreplicable} — mason add ${entryName(table)}${flags} --sync "poll 5m" polls it instead`);
+  }
   const sync: TableSync | null = o.sync ?? was?.sync ?? (bigOff ? { mode: "off" } : notReplicated !== null ? { mode: "poll", every: "5m", seconds: 300 } : null);
   const entry = { name: was?.name ?? entryName(table), table, columns: chosen.columns, exclude: chosen.exclude, key: keep ? was.key : key === null ? null : [...key], sync };
   // the entry itself, as the run will read it: a --key that does not tell the rows apart is refused here, not at the copy

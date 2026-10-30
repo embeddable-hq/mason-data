@@ -224,3 +224,20 @@ test("mason start refuses MASON_POLL_MS too, before it spawns and in the run its
     assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("MASON_CHANGES against the sources file is refused with the other settings, before anything is written or connected; one that agrees is taken", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-changes-"));
+  try {
+    fs.mkdirSync(path.join(dir, "mason", "sources"), { recursive: true });
+    const file = (text: string): void => fs.writeFileSync(path.join(dir, "mason", "sources", "app.yml"), text);
+    const env = { DATABASE_URL: URL_, MASON_API_KEY: KEY };
+    file("kind: postgres\nurl: ${DATABASE_URL}\nsync: poll 5m\ntables:\n  orders: { sync: replication }\n");
+    const refused = serveSettings({ ...env, MASON_CHANGES: "poll" }, dir);
+    assert.ok("message" in refused);
+    assert.equal(refused.message, "a setting is missing or wrong: MASON_CHANGES=poll polls every table, and mason/sources/app.yml streams orders (sync: replication) — " +
+      "write sync: poll 5m (or off) on the entry of orders — or keep the file as it is — then unset MASON_CHANGES, then start again");
+    assert.equal(fs.readdirSync(dir).join(","), "mason", "nothing written beside the project: no .mason/");
+    file("kind: postgres\nurl: ${DATABASE_URL}\nsync: replication\ntables:\n  orders: {}\n");
+    assert.ok(!("message" in serveSettings({ ...env, MASON_CHANGES: "replication" }, dir)), "every table replicated: it agrees");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

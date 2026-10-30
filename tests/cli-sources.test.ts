@@ -570,7 +570,31 @@ test("mason add's sync: --sync writes the entry's sync: alone, comments kept; a 
     assert.deepEqual([follows.sync, follows.notReplicated], [{ value: "replication", from: "file" }, null]);
     assert.ok(fs.readFileSync(file, "utf8").endsWith("  billing.invoices: {}\n"));
     // asked for by --sync, it is what was asked: refused at its entry, the line to write
-    assert.throws(() => E.addEntry(edit(replTop), { tables: [...CATALOG], database: "shop" }, "public.events", ["*"], ["tenant_id", "id"], { sync: { mode: "replication" } }),
-      /public\.events has no primary key, so logical replication cannot apply its changes by its key: \(sync: replication\) — give its entry sync: poll <interval> \(poll 5m\), or sync: off/);
+    // asked for by --sync, refused with the COMMAND to run, its own flags kept (the person is at it), nothing written
+    const said = (f: () => unknown): string => { try { f(); } catch (e) { return (e as Error).message; } return "taken"; };
+    const REPL = { sync: { mode: "replication" } as const };
+    const keyedText = edit(replTop);
+    assert.equal(said(() => E.addEntry(keyedText, { tables: [...CATALOG], database: "shop" }, "public.events", ["*"], ["tenant_id", "id"], REPL)),
+      "public.events cannot be kept current by logical replication: it has no primary key, so logical replication cannot apply its changes by its key: — " +
+      "mason add events --key tenant_id,id --sync \"poll 5m\" polls it instead");
+    assert.equal(fs.readFileSync(file, "utf8"), replTop, "nothing written");
+    assert.equal(said(() => E.addEntry(edit(replTop), { tables: [...CATALOG, table({ table: "audit", replicaIdentity: "n" })], database: "shop" }, "public.audit", ["id"], null, REPL)),
+      "public.audit cannot be kept current by logical replication: it has REPLICA IDENTITY NOTHING, and a publication carrying it would make your app's own UPDATEs and DELETEs on it fail — " +
+      "mason add audit --columns id --sync \"poll 5m\" polls it instead");
+    // --sync alone on one added already: the command is --sync alone
+    const withAudit = "kind: postgres\nurl: postgres://me@localhost/shop\ntables:\n  audit: {}\n";
+    assert.match(said(() => E.addEntry(edit(withAudit), { tables: [...CATALOG, table({ table: "audit", replicaIdentity: "n" })], database: "shop" }, "public.audit", ["*"], null, { ...REPL, keep: true })),
+      / — mason add audit --sync "poll 5m" polls it instead$/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the run's re-read keeps the tables read before when the file sets one to sync: replication the run never checked the database for, said with the way out", () => {
+  const prev = { file: parse("kind: postgres\nurl: x\nsync: poll 5m\ntables:\n  orders: {}\n") as Sources.SourceFile, tables: [], problem: null };
+  const now = { ...(parse("kind: postgres\nurl: x\nsync: poll 5m\ntables:\n  orders: { sync: replication }\n") as Sources.SourceFile), resolved: "x", from: "mason/sources/app.yml", publicationName: null } as unknown as Sources.ProjectSource;
+  const kept = S.rereadSources(prev, now, "x", CATALOG, "shop", "/app", { replicationChecked: false });
+  assert.equal(kept.file, prev.file, "the tables read before");
+  assert.equal(kept.problem, "mason/sources/app.yml: orders is sync: replication, and this run has not checked shop for logical replication (no table was replicated when it started): " +
+    "mason stop && mason start checks it and streams them");
+  // checked (the start replicated a table, or the edit's check passed): taken
+  assert.equal(S.rereadSources(prev, now, "x", CATALOG, "shop", "/app", { replicationChecked: true }).problem, null);
 });

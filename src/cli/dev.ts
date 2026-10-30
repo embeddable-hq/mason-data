@@ -50,7 +50,7 @@ import { isLibcCollation } from "../duck/rewrite.ts";
 import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
 import { LiveRoles, readRoles, resolveRoles, usersWithoutRole } from "./roles.ts";
 import { READY_LINE } from "./supervise.ts";
-import { changesAgreement, dropOwnReplication, dropStatements, madeReplication, namedPublication, projectReplication, publicationConflict, replicationReadiness } from "./replication-mode.ts";
+import { changesAgreement, dropOwnReplication, dropStatements, liveReadinessFailure, madeReplication, namedPublication, projectReplication, publicationConflict, replicationReadiness, staleReplication } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
 import { pollMsRetired, syncText, type TableSync } from "../lib/table-sync.ts";
 
@@ -296,6 +296,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const twice = publicationConflict(o.publication, src, shownFile);
   if (twice) return failed("start", twice, { json: false });
   const replicating = replicatedEntries(src).length > 0;
+  // whether this run has held the database to logical replication's checks: at this start when the file replicates a
+  // table, else when an edit first sets one to replication (checkReplication below)
+  let replicationChecked = replicating;
   if (o.publication !== null && !replicating) {
     return failed("start", { message: `--publication names the publication logical replication reads, and no table's sync is replication in ${shownFile}`, code: "refused",
       fix: `write sync: replication at the top of ${shownFile} (or on a table's entry), and publication: ${o.publication} beside it; then mason start` }, { json: false });
@@ -303,7 +306,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // THE PUBLICATION: one the operator named (the file's publication:, the flag, PG_PUBLICATION, or the one an earlier start
   // recorded) is read as it is, never altered (src/duck/publication.ts); else Mason makes its own, carrying the replicated
   // tables alone. What the run before made, as it recorded it, is what goes when no table is replicated (madeReplication)
-  const named = src.publicationName !== null ? { name: src.publicationName, from: "file" as const } : namedPublication(o.publication, process.env, cfg.publication);
+  const named = namedPublication(src, o.publication, process.env);
   const repl = projectReplication(cfg.name, src.name, named?.name ?? null);
   const before = madeReplication(cfg, src.name);
   if (replicating) {
@@ -317,15 +320,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     }
     done(repl.owned ? `Logical replication for ${replicatedEntries(src).length} table(s): Mason makes publication ${repl.publication} and slot ${repl.slot} on ${source.database} (mason destroy drops them, and so does a sources file in which no table's sync is replication)`
       : `Logical replication for ${replicatedEntries(src).length} table(s): publication ${repl.publication} is read as it is, never altered; Mason makes slot ${repl.slot} on ${source.database} (mason destroy drops the slot alone, and so does a sources file in which no table's sync is replication)`);
-    if (named?.from === "recorded") say(`  publication ${repl.publication} was named at an earlier start of this copy, and is read again (publication: <name> at the top of ${shownFile} names another)`);
     for (const w of ready.warnings) say(`  ! ${w.name}: ${w.detail}`);
-    // A SLOT RECORDED UNDER ANOTHER NAME (the sources file renamed since) is one this run no longer reads, and it holds
-    // the database's WAL while it exists: it goes, verified, before the record names the new one
-    const was = cfg.replication ?? null;
-    if (was !== null && was.slot !== repl.slot) {
-      try { for (const d of await dropOwnReplication(source, was)) say(`  dropped ${d} from ${source.database}: this source's slot is ${repl.slot} now`); }
+    // WHAT THE RECORD NAMES AND THIS RUN NO LONGER READS — a slot under another name (the sources file renamed since),
+    // or Mason's own publication once another is named — goes, verified, before the record names the new one
+    const stale = staleReplication(cfg.replication ?? null, repl);
+    if (stale !== null) {
+      try { for (const d of await dropOwnReplication(source, stale.drop, null, stale.what)) say(`  dropped ${d} from ${source.database}: ${stale.why}`); }
       catch (e) {
-        say(`mason start: ${(e as Error).message}. They hold the database's WAL while nobody reads them: drop them by hand — ${dropStatements(was)}`);
+        const by = stale.what === "both" ? dropStatements(stale.drop) : `DROP PUBLICATION IF EXISTS ${stale.drop.publication};`;
+        say(`mason start: ${(e as Error).message}. Mason made ${stale.what === "both" ? "them" : "it"} and nothing reads ${stale.what === "both" ? "them" : "it"} now: drop ${stale.what === "both" ? "them" : "it"} by hand — ${by}`);
         return 1;
       }
     }
@@ -419,7 +422,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // the views first: setting the tables rebuilds the catalog, which reads them. The sources file read again: a mistake in it
   // keeps the tables read before (a typo never drops a copy), said in the log and by mason status
   const added = (): void => {
-    const r = rereadSources(sources, readSources(), src.resolved, facts.tables, source.database, project.root);
+    const r = rereadSources(sources, readSources(), src.resolved, facts.tables, source.database, project.root, { replicationChecked });
     if (r.said !== null) logLine(`[sync] ${r.said}`);
     sources = { file: r.file, tables: r.tables, problem: r.problem };
     sync.setViews(facts.views ?? []);
@@ -512,6 +515,21 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     roles: () => liveRoles.now(),
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
+    // a table set to sync: replication while the run is up, in a run that never checked the database for it: the
+    // start's own checks, now, and the edit refused when they fail (src/cli/run-server.ts /api/pick)
+    checkReplication: async (file) => {
+      const tables = replicatedEntries(file).map((e) => entryName(e.table));
+      if (replicationChecked || tables.length === 0) return null;
+      const shown = shownPath(project.root, file.file);
+      const demo = demoChangesRefusal(cfg, null, file, shown);
+      if (demo !== null) return { ...demo, fix: `mason add ${tables[0]} --sync "poll 5s" polls it`, next: [[`mason add ${tables[0]} --sync "poll 5s"`, "polls it"]] };
+      const ready = await replicationReadiness(source, repl);
+      const refused = liveReadinessFailure(ready, tables, shown, source.database);
+      if (refused !== null) return refused;
+      if (!("failure" in ready)) for (const w of ready.warnings) say(`  ! ${w.name}: ${w.detail}`);
+      replicationChecked = true;
+      return null;
+    },
     log: (m) => say(`  ${m}`),
     duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), stream: () => sync.streamStatus(), measured: (table) => sync.measured(table), requests,
       jsonPaths: () => sync.kept.status() },

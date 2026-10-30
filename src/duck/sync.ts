@@ -2117,7 +2117,12 @@ export class Sync {
     if (this.streams()) {
       try { await this.prepareReplication(); replicationReady = true; }
       catch (e) {
-        const m = `replication: ${e instanceof Error ? e.message : String(e)}`;
+        // the way out on the table's own line: a failure that names none (a slot the database will not make, a role that
+        // may not replicate) says the line that keeps the tables polled meanwhile — never a bare SQLSTATE's text
+        const said = e instanceof Error ? e.message : String(e);
+        const names = this.replicatedTables().map((t) => t.source);
+        const m = `replication: ${said}${/sync: poll/.test(said) ? "" : ` — ${names.join(", ")} ${names.length === 1 ? "is" : "are"} NOT kept current until it is fixed: ` +
+          `give ${names.length === 1 ? "its entry" : "their entries"} sync: poll <interval> (poll 5m) in the sources file to poll ${names.length === 1 ? "it" : "them"} instead`}`;
         // a table copied before keeps serving its copy; one never copied is failed, so mason status says why
         await this.onWriter(async () => {
           for (const t of this.replicatedTables()) { const st = this.states.get(t.source)!; await this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }); }

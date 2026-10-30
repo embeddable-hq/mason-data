@@ -432,12 +432,19 @@ export interface RunSources { file: SourceFile; tables: AddedTable[]; problem: s
  * once per new problem. A `url:` that resolves to another database than the one the run copies (a .env edited) is such a
  * problem: the run's catalog is the old database's, so it is said, and mason stop && mason start reads the new one.
  */
-export function rereadSources(prev: RunSources, read: ProjectSource | Failure, runUrl: string, catalog: readonly SourceTable[], database: string, root: string): RunSources & { said: string | null } {
+export function rereadSources(prev: RunSources, read: ProjectSource | Failure, runUrl: string, catalog: readonly SourceTable[], database: string, root: string,
+  o: { replicationChecked?: boolean } = {}): RunSources & { said: string | null } {
   let problem: string | null = null;
   let next: AddedTable[] | null = null;
   if ("message" in read) problem = `${read.message}${read.why ? `: ${read.why.replace(/\n/g, "; ")}` : ""}`;
   else if (read.resolved !== runUrl) {
     problem = `${shownPath(root, read.file)}: url: now names ${maskedUrl(read.resolved)} (${read.from}), and this run copies ${maskedUrl(runUrl)}: mason stop && mason start copies from the new one`;
+  } else if (o.replicationChecked === false && replicatedEntries(read).length > 0) {
+    // a table set to replication in a run that never checked the database for it (the commands' edits are checked, the
+    // run server's checkReplication): kept as it was, never frozen by a slot the database cannot make
+    const names = replicatedEntries(read).map((e) => entryName(e.table));
+    problem = `${shownPath(root, read.file)}: ${names.join(", ")} ${names.length === 1 ? "is" : "are"} sync: replication, and this run has not checked ${database} for logical replication ` +
+      "(no table was replicated when it started): mason stop && mason start checks it and streams them";
   } else {
     const t = addedTables(read, catalog, database, root);
     if (Array.isArray(t)) next = t;

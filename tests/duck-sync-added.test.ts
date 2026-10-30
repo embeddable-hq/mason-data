@@ -435,3 +435,21 @@ test("a table just copied says its copy's age at once, never 'never synced' unti
     assert.doesNotMatch(line, /never synced/);
   });
 });
+
+test("replication the database will not set up is said on the replicated table's line with the line that polls it, never a bare error (a slot it cannot make, a role)", async () => {
+  // a database at wal_level = replica: the source reachable, the slot refused with Postgres's own words (the review's run)
+  await withSync({ mode: "poll", replication: replicationX, tables: [{ ...table("a"), sync: { mode: "replication" } }],
+    seed: async (run) => { await run("CREATE TABLE public.a (id BIGINT)"); await run(copied("a")); await run(lastPoll("a")); } }, async (sync) => {
+    const inner = sync as unknown as { pass(): Promise<void>; prepareReplication(): Promise<void>; attach(): Promise<void>; detach(): Promise<void> };
+    inner.prepareReplication = async () => { throw new Error("ERROR: logical decoding requires wal_level >= logical"); };
+    inner.attach = async () => undefined;
+    inner.detach = async () => undefined;
+    await assert.rejects(inner.pass.bind(sync)(), /logical decoding requires wal_level >= logical/);
+    const a = sync.state().find((s) => s.source === "public.a")!;
+    assert.equal(a.phase, "copied", "its copy still served");
+    assert.equal(a.error, "replication: ERROR: logical decoding requires wal_level >= logical — public.a is NOT kept current until it is fixed: " +
+      "give its entry sync: poll <interval> (poll 5m) in the sources file to poll it instead");
+    // its line says it, as mason status reads kept
+    assert.match(keptText(a as KeptState), /give its entry sync: poll <interval> \(poll 5m\) in the sources file to poll it instead/);
+  });
+});

@@ -30,7 +30,7 @@ import { readiness } from "./readiness.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
 import { addedNext, addUser, roleToAdd, listUsers, removeUser, REMOVED_NEXT } from "./user.ts";
 import { postgresLink } from "./pg-url.ts";
-import { catalogTable, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
+import { catalogTable, parseSourceText, shownPath, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
 import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -70,6 +70,9 @@ export interface RunContext {
   sources: () => { file: SourceFile | null; problem: string | null };
   /** the sources file changed (a table added or removed): the run reads it again */
   sourcesChanged: () => void;
+  /** a sources file that replicates a table, held to the database's checks for logical replication when this run never
+   *  made them (it replicated nothing when it started): the refusal, or null when it may (absent: never refused) */
+  checkReplication?: (file: SourceFile) => Promise<Failure | null>;
   /** the sources file read as the run reads it, its URL resolved (src/cli/sources.ts readSource) */
   readSource: () => ProjectSource | Failure;
   /** the database's URL the run copies from, as the sources file resolved it at the start */
@@ -187,8 +190,9 @@ const catalogOf = (ctx: RunContext): EditCatalog => ({ tables: ctx.facts().table
  * ADD A TABLE: the check-and-write every entrance shares (src/cli/source-edit.ts addEntry), against the file on disk and
  * this run's catalog; the caller tells the run the file changed, and the sync starts the copy.
  */
-export function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null, o: { sync?: TableSync; keep?: boolean } = {}): PickResult {
-  return addEntry(sourceOnDisk(ctx), catalogOf(ctx), table, columns, key, o);
+export function pick(ctx: RunContext, table: string, columns: readonly string[] = ["*"], key: readonly string[] | null = null, o: { sync?: TableSync; keep?: boolean } = {},
+  at: EditTarget = sourceOnDisk(ctx)): PickResult {
+  return addEntry(at, catalogOf(ctx), table, columns, key, o);
 }
 
 /** REMOVE TABLES: the check-and-write every entrance shares (src/cli/source-edit.ts removeEntries); the run then drops their copies. */
@@ -274,7 +278,16 @@ export function createRunServer(ctx: RunContext): http.Server {
           if (body.columns !== undefined && !(Array.isArray(body.columns) && body.columns.every((c) => typeof c === "string"))) throw new Refusal(400, "columns is a list of column names, or [\"*\"]");
           if (body.key !== undefined && !(Array.isArray(body.key) && body.key.length > 0 && body.key.every((c) => typeof c === "string"))) throw new Refusal(400, "key is a list of column names");
           if (body.picked) {
-            const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null, { ...(sync !== undefined ? { sync } : {}), keep: body.keep === true });
+            // the file as it was (its text, read once with the edit): an edit that sets a table to sync: replication the
+            // database cannot serve is undone below
+            const at = sourceOnDisk(ctx);
+            const r = pick(ctx, body.table, (body.columns as string[] | undefined) ?? ["*"], (body.key as string[] | undefined) ?? null, { ...(sync !== undefined ? { sync } : {}), keep: body.keep === true }, at);
+            // A LIVE SWITCH INTO REPLICATION is held to the start's checks (wal_level, the role, a free slot): one the
+            // database cannot serve would leave the table, polled until now, NOT kept current for ever — the file is put
+            // back as it was, byte for byte, and the refusal says what the database lacks and the line that polls it
+            const now = r.already || ctx.checkReplication === undefined ? null : parseSourceText(fs.readFileSync(at.file, "utf8"), at.parsed.name, at.file);
+            const refused = now === null || "problems" in now ? null : await ctx.checkReplication!(now);
+            if (refused !== null) { fs.writeFileSync(at.file, at.text); sendFailure(res, statusOf(refused), refused); return; }
             if (!r.already) ctx.log(`added ${r.table} to ${r.file}`);
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });

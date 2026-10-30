@@ -69,12 +69,16 @@ export function madeReplication(cfg: Pick<ProjectConfig, "name" | "publication" 
   return cfg.replication ?? projectReplication(cfg.name, source, cfg.publication ?? null);
 }
 
-/** The publication an operator named, and where: `--publication`, else `PG_PUBLICATION`, else the one an earlier start
- *  of this copy recorded (`config.json` `publication`), else none (Mason's own). */
-export function namedPublication(flag: string | null, env: NodeJS.ProcessEnv, recorded: string | null | undefined): { name: string; from: "flag" | "env" | "recorded" } | null {
+/**
+ * THE PUBLICATION A START READS, and where it is named: the sources file's `publication:` (its `${PG_PUBLICATION}`
+ * resolved), else `--publication`, else `PG_PUBLICATION` (both go in the next release), else none — Mason's own. NEVER
+ * the one an earlier start recorded: a file that takes `publication:` out means Mason makes its own, as every refusal's
+ * way out says (a review finding: the record kept a named one read after its line was gone).
+ */
+export function namedPublication(file: { publicationName: string | null }, flag: string | null, env: NodeJS.ProcessEnv): { name: string; from: "file" | "flag" | "env" } | null {
+  if (file.publicationName !== null) return { name: file.publicationName, from: "file" };
   if (flag) return { name: flag, from: "flag" };
   if (env.PG_PUBLICATION) return { name: env.PG_PUBLICATION, from: "env" };
-  if (recorded) return { name: recorded, from: "recorded" };
   return null;
 }
 
@@ -152,6 +156,22 @@ export async function replicationReadiness(source: Source, repl: ProjectReplicat
   } finally { c.pg.close(); }
 }
 
+/**
+ * A TABLE SET TO `sync: replication` WHILE THE RUN IS UP, in a run that replicated nothing when it started (so the
+ * database was never checked for it): the start's own checks, as the edit's refusal — what the database lacks, and the
+ * line that keeps the table polled — or null when it may replicate. `tables` are the entries' names (`orders`).
+ */
+export function liveReadinessFailure(ready: Awaited<ReturnType<typeof replicationReadiness>>, tables: readonly string[], shown: string, database: string): Failure | null {
+  const refused: ProductionCheck[] = "failure" in ready ? [{ name: "database", ok: false, detail: ready.failure }] : ready.refused;
+  if (!refused.length) return null;
+  const one = tables.length === 1;
+  return { message: `${tables.join(", ")} cannot be kept current by logical replication from ${database}: ${refused.map((c) => c.name).join(", ")}`, code: "refused",
+    why: refused.map((c) => `${c.name}: ${c.detail}${c.sql ? ` (${c.sql})` : ""}`).join("\n"),
+    fix: `poll ${one ? "it" : "them"} instead: mason add ${tables[0]} --sync "poll 5m"${one ? "" : " (and each of the others)"}, or sync: poll 5m on ${one ? "its entry" : "their entries"} in ${shown}, ` +
+      "which needs none of this — or fix the database as said, then mason stop && mason start",
+    next: [[`mason add ${tables[0]} --sync "poll 5m"`, "polls it with SELECTs instead"]] };
+}
+
 /** The statements that remove what replication mode made, for a person to run when Mason could not: the slot, and the
  *  publication only when it is Mason's own (a named one is its owner's). */
 export function dropStatements(o: ProjectReplication): string {
@@ -160,11 +180,27 @@ export function dropStatements(o: ProjectReplication): string {
 }
 
 /**
+ * WHAT THE RECORD NAMES THAT THIS START NO LONGER READS, to drop before the record names the new one (each holds what
+ * Mason made on a database nothing would drop otherwise): a slot under another name (the sources file renamed) goes
+ * with Mason's own publication; Mason's own publication alone when the project now reads another (one named), on the
+ * same slot — a review finding, the own one was left on the database after the switch and after mason destroy.
+ */
+export function staleReplication(was: ProjectReplication | null, now: ProjectReplication): { drop: ProjectReplication; what: "both" | "publication"; why: string } | null {
+  if (was === null) return null;
+  if (was.slot !== now.slot) return { drop: was, what: "both", why: `this source's slot is ${now.slot} now` };
+  if (was.owned && (was.publication !== now.publication || !now.owned)) {
+    return { drop: was, what: "publication", why: `the replicated tables are read through publication ${now.publication} now${now.owned ? "" : ", its owner's"}` };
+  }
+  return null;
+}
+
+/**
  * Drop what replication mode made on the developer's database — the slot, and the publication when it is Mason's own,
  * never one the operator named — and verify it is gone: what was dropped, in words. A slot a reader still holds is never
- * dropped (the run must be stopped first): that is a failure.
+ * dropped (the run must be stopped first): that is a failure. `what: "publication"` drops Mason's own publication alone
+ * (the slot is still read).
  */
-export async function dropOwnReplication(source: Source, o: ProjectReplication, from: { systemIdentifier: string | null } | null = null): Promise<string[]> {
+export async function dropOwnReplication(source: Source, o: ProjectReplication, from: { systemIdentifier: string | null } | null = null, what: "both" | "publication" = "both"): Promise<string[]> {
   const c = await connectSource(source);
   if ("failure" in c) throw new Error(`could not connect to drop them: ${c.failure.message}`);
   const pg = c.pg;
@@ -178,7 +214,7 @@ export async function dropOwnReplication(source: Source, o: ProjectReplication, 
       }
     }
     const dropped: string[] = [];
-    const slot = await readSlotFacts(pg, o.slot);
+    const slot = what === "both" ? await readSlotFacts(pg, o.slot) : null;
     if (slot) {
       if (slot.active) throw new Error(`replication slot ${o.slot} is in use by a reader: stop it first`);
       await pg.query(`SELECT pg_drop_replication_slot(${lit(o.slot)})`);
@@ -190,7 +226,7 @@ export async function dropOwnReplication(source: Source, o: ProjectReplication, 
       dropped.push(`publication ${o.publication}`);
     }
     // verified, never assumed: a slot left behind holds the database's WAL for ever
-    if (await readSlotFacts(pg, o.slot)) throw new Error(`replication slot ${o.slot} is still there after pg_drop_replication_slot`);
+    if (what === "both" && await readSlotFacts(pg, o.slot)) throw new Error(`replication slot ${o.slot} is still there after pg_drop_replication_slot`);
     if (o.owned && await hasPub()) throw new Error(`publication ${o.publication} is still there after DROP PUBLICATION`);
     return dropped;
   } finally { pg.close(); }

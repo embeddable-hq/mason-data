@@ -451,3 +451,35 @@ test("every error answer carries the Failure shape beside its sentence, the catc
   const limit = JSON.parse((await call("GET", "/api/requests?limit=0")).text);
   assert.deepEqual(limit, { error: "limit is a whole number of requests, 1 to 10000", failure: { code: "usage", message: "limit is a whole number of requests, 1 to 10000", next: [] } });
 });
+
+test("a table set to sync: replication while the run is up, on a database that cannot replicate, is refused with what it lacks and the line that polls it; the file is put back byte for byte", async () => {
+  const R = await import("../src/cli/replication-mode.ts" as string) as Partial<typeof import("../src/cli/replication-mode.ts")>;
+  assert.equal(typeof R.liveReadinessFailure, "function", "src/cli/replication-mode.ts exports liveReadinessFailure");
+  chosen = folder;
+  const text = "kind: postgres\nurl: postgres://me@localhost:5432/app\nsync: poll 5m\ntables:\n  customers: {}\n";
+  fs.writeFileSync(sourceFile, text);
+  // the run's check as the run wires it (src/cli/dev.ts checkReplication): the start's readiness, here a wal_level=replica one
+  const checked: string[][] = [];
+  ctx.checkReplication = async (file) => {
+    const sources = sourcesModule as unknown as typeof import("../src/cli/sources.ts");
+    const replicated = sources.replicatedEntries(file).map((e) => sources.entryName(e.table));
+    checked.push(replicated);
+    return replicated.length === 0 ? null : R.liveReadinessFailure!({ refused: [{ name: "wal_level", ok: false, detail: "replica: logical replication needs logical" }], warnings: [] },
+      replicated, "mason/sources/app.yml", "app");
+  };
+  changed = 0;
+  try {
+    const refused = await call("POST", "/api/pick", { body: { table: "public.customers", picked: true, sync: "replication", keep: true } });
+    assert.equal(refused.status, 409, refused.text);
+    const f = JSON.parse(refused.text).failure;
+    assert.deepEqual([f.code, f.message, f.why, f.fix], ["refused", "customers cannot be kept current by logical replication from app: wal_level", "wal_level: replica: logical replication needs logical",
+      "poll it instead: mason add customers --sync \"poll 5m\", or sync: poll 5m on its entry in mason/sources/app.yml, which needs none of this — or fix the database as said, then mason stop && mason start"]);
+    assert.equal(fs.readFileSync(sourceFile, "utf8"), text, "the file as it was, byte for byte: the table stays polled");
+    assert.equal(changed, 0, "the run is not told of an edit it did not take");
+    // a polled one is taken, the check asked and answering null
+    const polled = await call("POST", "/api/pick", { body: { table: "public.customers", picked: true, sync: "poll 30s", keep: true } });
+    assert.equal(polled.status, 200, polled.text);
+    assert.equal(changed, 1);
+    assert.deepEqual(checked, [["customers"], []]);
+  } finally { delete ctx.checkReplication; fs.writeFileSync(sourceFile, text); }
+});
