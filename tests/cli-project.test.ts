@@ -148,7 +148,7 @@ test("mason init writes the project — config, the sources file, the URL in .en
     assert.equal(fs.statSync(path.join(app, ".env")).mode & 0o777, 0o600);
     assert.match(fs.readFileSync(path.join(app, ".gitignore"), "utf8"), /^node_modules\n# Mason: .*\n\.mason\/\n# the database URL mason\/sources\/ names \(mason init\)\n\.env\n$/);
     // what it did, as a checklist, then what to run next
-    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to copy, none yet \(mason add\) — commit it\n✓ Wrote mason\/roles\.yml: every user reads every synced table \(default: everything, tables: all\) — narrow it with a second role — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
+    assert.match(r.out, /^Making app a Mason project in .*\n✓ Not checking postgres:\/\/me:\*\*\*\*@localhost:5432\/shop \(--skip-check\): mason start checks it\n✓ Wrote \.mason\/config\.json: Mason's key \(this machine's\)\n✓ Wrote mason\/sources\/shop\.yml: the database \(url: \$\{DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to sync, none yet \(mason add\) — commit it\n✓ Wrote mason\/roles\.yml: every user reads every synced table \(default: everything, tables: all\) — narrow it with a second role — commit it\n✓ Wrote DATABASE_URL=postgres:\/\/me:\*\*\*\*@localhost:5432\/shop to \.env: the URL the source file names, kept out of git\n✓ Added \.mason\/ and \.env to \.gitignore\n\nTip: Mason only reads your database: no setting, slot or publication is needed or made\n\nNext:\n  mason start {35}Mason in the background, for this folder\n  mason tables /);
     assert.doesNotMatch(r.out, /secret/, "the password is never printed");
     // again here, or anywhere inside: refused, naming the project and how to point it elsewhere
     fs.mkdirSync(path.join(app, "src"));
@@ -394,7 +394,7 @@ test("a bare mason init reads MASON_DATABASE_URL first, then DATABASE_URL, and t
     assert.ok(!fs.existsSync(path.join(both, "mason", "sources", "app_dev.yml")), "not the app's database");
     assert.equal(fs.readFileSync(path.join(both, ".env"), "utf8"), envText, "nothing written to .env");
     assert.match(b.out, /\n✓ Not checking postgres:\/\/mason:\*\*\*\*@localhost:5432\/analytics \(MASON_DATABASE_URL in \.env\) \(--skip-check\): mason start checks it\n/);
-    assert.match(b.out, /\n✓ Wrote mason\/sources\/analytics\.yml: the database \(url: \$\{MASON_DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to copy/);
+    assert.match(b.out, /\n✓ Wrote mason\/sources\/analytics\.yml: the database \(url: \$\{MASON_DATABASE_URL\}\), sync: off \(each table read once, then again only by mason sync <table>\) and the tables to sync/);
     assert.doesNotMatch(b.out, /to \.env/);
     assert.doesNotMatch(b.out, /secret/);
     // the same as data: the variable read, said where it was found; no .env line
@@ -602,7 +602,7 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     assert.match(fs.readFileSync(path.join(app, ".gitignore"), "utf8"), /\.mason\/\n.*\n\.env\n$/);
     // the checklist: no connection, the database made by mason start; then what to run next
     assert.match(r.out, new RegExp(`^Making try-mason a Mason project in .*\\n✓ The demo database will be postgres://demo@127\\.0\\.0\\.1:${port}/demo: mason start makes it in \\.mason/demo/ and seeds it \\(nothing to connect to yet\\)\\n` +
-      "✓ Wrote \\.mason/config\\.json: Mason's key \\(this machine's\\)\\n✓ Wrote mason/sources/demo\\.yml: the database \\(url: \\$\\{DATABASE_URL\\}\\), sync: poll 5s \\(every table polled every 5 s\\) and the tables to copy, the demo's 3 added — mason add order_items adds the fourth — commit it\\n" +
+      "✓ Wrote \\.mason/config\\.json: Mason's key \\(this machine's\\)\\n✓ Wrote mason/sources/demo\\.yml: the database \\(url: \\$\\{DATABASE_URL\\}\\), sync: poll 5s \\(every table polled every 5 s\\) and the tables to sync, the demo's 3 added — mason add order_items adds the fourth — commit it\\n" +
       `${ROLES_WROTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n` +
       `✓ Wrote DATABASE_URL=postgres://demo@127\\.0\\.0\\.1:${port}/demo to \\.env: the URL the source file names, kept out of git\\n✓ Made \\.gitignore, ignoring \\.mason/ and \\.env\\n\\n` +
       "Tip: The demo database runs inside mason start, read by polling: a new order every few seconds; order_items is left for you to add; mason destroy removes it with the synced data\\n\\n" +

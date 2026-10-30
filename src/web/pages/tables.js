@@ -120,7 +120,7 @@ export function addedLines(b, file) {
 /** What `mason remove` prints for the tables removed (src/cli/commands.ts `removedReport`). */
 export function removedReport(removed, file) {
   return { headline: `Removed ${removed.join(", ")}`, details: [["from", file]],
-    tips: [`Mason stops syncing ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its synced data" : "theirs"}`] };
+    tips: [`Mason stops syncing ${removed.length === 1 ? "it" : "them"} and drops ${removed.length === 1 ? "its synced data" : "their synced data"}`] };
 }
 
 /**

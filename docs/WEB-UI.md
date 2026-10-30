@@ -44,11 +44,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 16 px in the text's colour.
 
 - **Overview** (`#overview`, read only): the run's word (Ready, Under way or Failed) beside a big dot, then cards for the
-  tables synced, the rows, the last sync, the copy's file, and the last day's statements with their p95. Each card has a
+  tables synced, the rows, the last sync, the synced data's file, and the last day's statements with their p95. Each card has a
   24-hour sparkline once there are two hours to draw, and **each is a link** into the view that lists what it counts:
-  the tables (the failed ones when a copy failed), Usage for the copy's file, Queries for the statements, the slow ones
+  the tables (the failed ones when a copy failed), Usage for the synced data's file, Queries for the statements, the slow ones
   for the p95.
-- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ a table copied · ✓/○ a user
+- **Overview**, Getting started (while setting up is not done): ✓ Mason is running · ✓/○ a table synced · ✓/○ a user
   created · ✓/○ a first statement answered — each ○ with its one action (Add a table → Tables, Create a user → Users,
   Copy the psql line → Connect's), from `/api/state`'s totals, `/api/users` (`mason user list --json`) and the request
   log's week (`/api/queries`). Gone once the four are done; not drawn while a read it needs is unanswered or failed.
@@ -57,7 +57,7 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   Mason anything (no statement in the last day or week) it is **Connect your first tool**, right under the cards, saying
   what the URL is for; afterwards a quieter panel after the facts. It is `/api/state` `postgres` (`mason status --json`'s
   `postgres`: `shown`, `psql`).
-- **Overview**, the copies not finished: a bar each with the line `mason wait` prints (a copy not begun shimmers, with
+- **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a copy not begun shimmers, with
   no % beside it), and nothing once every copy is done.
 - **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime
   and restarts, free disk, and sessions open. In replication mode, a Changes table shows the stream and the WAL its slot holds.
@@ -102,10 +102,10 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   client; **Older** pages back and **Newest** returns, 40 a page. **Started**, **Duration** and **Rows** sort the page
   shown (said under it: the pages follow the log's order by start). A statement is one or two lines in its row; a row
   opens in place to its whole id, times, bytes sent, statement and error — the first 16 KiB of each, said when cut.
-  A statement that reads no copied table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
+  A statement that reads no synced table (`select 1`, `select now()`, SET, SHOW, a BI tool's catalog queries) is
   answered without the copy and **not listed** — the protocol's chatter, hundreds a connection from a BI tool — and the
   page says so, as `mason logs --requests` does when it lists none; while nothing is listed, Connect offers a first
-  statement that is (`select count(*) from <a copied table>;`).
+  statement that is (`select count(*) from <a synced table>;`).
 - **Observability › Usage** (`#observability/usage`): every part follows the range. Cards: under Now, the sessions
   connected and the statements running; under any other range, the clients that sent statements in it; then the
   range's statements, failed, p95 and what was sent (bytes, and rows under it), each with a sparkline — the statement
@@ -118,11 +118,11 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
 - **Usage**, unsupported SQL: the statements of the range Mason refused for SQL it does not support, grouped by their
   entry of `docs/SQL-SUPPORT.md` (named, as the page cannot link into the repository), the most refused first — how
   many, when the latest was, who sent them and the latest statement on a line, as `mason status` says them.
-- **Usage**, charts and tables: four charts over the range (statements, p95, the copy's size, rows in the copy), their
+- **Usage**, charts and tables: four charts over the range (statements, p95, the size of the synced data, the rows in it), their
   time axis in minutes, hours or days by the range, their values compact (`1.2K`, `3.4 MiB`, `512 ms`) and exact on
-  hover; a series with one sample says its value instead. Then each copy's own size, measured every 10 minutes. The
+  hover; a series with one sample says its value instead. Then each synced table's own size, measured every 10 minutes. The
   samples, newest first (**Time** sorts them), sit behind a closed details, and the process's memory behind another.
-- **Observability › Sync events** (`#observability/syncs`): the sync's events of the range — each copy made, each
+- **Observability › Sync events** (`#observability/syncs`): the sync's events of the range — each first sync, each
   failure and recovery, each sync asked by hand (`synced`: `mason sync`, a table's **Sync now**) — newest first (**When**
   turns it round), with when, kind, table and reason. A scheduled poll that succeeds is not listed (one every few
   seconds would bury the failures): the last one's result is each table's **Last sync** on Tables. **Failures only**, a **Kind** (every kind of event) and a **Table** (every added table, whether the range has an event of it or not: one with none says so by its name) narrow the list; 100 are

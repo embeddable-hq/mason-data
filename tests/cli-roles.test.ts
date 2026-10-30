@@ -130,7 +130,7 @@ test("newRolesText: the file mason init writes is a valid roles file — default
   const g = r.resolveRoles(file, copied, "/p");
   assert.ok(!("message" in g));
   assert.equal(g.get("everything")!.tables.size, copied.length, "every synced table");
-  assert.match(text, /^# Who may read what of the tables the sources file copies\. Yours to commit, beside sources\/\.\ndefault: everything /);
+  assert.match(text, /^# Who may read what of the tables the sources file syncs\. Yours to commit, beside sources\/\.\ndefault: everything /);
   // the commented role is one to uncomment: valid once its # are gone
   const uncommented = text.replace(/^ {2}# agent:/m, "  agent:").replace(/^ {2}# {3}tables:/m, "    tables:").replace(/^ {2}# {5}(orders|customers)/gm, "      $1");
   const two = r.parseRolesText(uncommented, FILE);

@@ -434,8 +434,8 @@ const sample = { at: "2026-10-28T09:05:00.000Z", seconds: 300, copyBytes: 5 * 2 
 
 test("mason usage: a span a line under its heading — the statements, their errors, p95, rows sent, the copy, its rows, the failed tables, the stalest copy, the memory; spans and times as the options write them", () => {
   const { sampleHeading, spanSeconds, USAGE } = usageCli as UsageCli;
-  assert.equal(sampleHeading(false), "time (UTC)        statements   errors         p95    rows sent        copy           rows  failing      oldest  memory");
-  assert.equal(sampleLine(sample, false), "2026-10-28 09:05       1,204        3       1.8 s       98,765     5.0 GiB     12,345,678        1        75 s  900.0 MiB (copy 300.0 MiB of 8.0 GiB)");
+  assert.equal(sampleHeading(false), "time (UTC)        statements   errors         p95    rows sent        size           rows  failing      oldest  memory");
+  assert.equal(sampleLine(sample, false), "2026-10-28 09:05       1,204        3       1.8 s       98,765     5.0 GiB     12,345,678        1        75 s  900.0 MiB (synced data 300.0 MiB of 8.0 GiB)");
   assert.equal(sampleLine({ ...sample, statements: 0, statementsRefused: 0, statementsFailed: 0, durationP95Ms: null, tablesFailed: 0, oldestSyncSeconds: null, copyMemoryBytes: null, streamLagSeconds: 3, streamLagBytes: 10 }, true),
     "2026-10-28 09:05           0                    –       98,765     5.0 GiB     12,345,678                    –        3 s  900.0 MiB", "nothing to say is blank or a dash; the lag with replication");
   assert.equal(sampleHeading(true).endsWith("oldest        lag  memory"), true);
@@ -521,7 +521,7 @@ test("mason add of a table a replicating file cannot replicate says it was writt
   const { addedLines } = await import("../src/cli/commands.ts");
   const b = { table: "public.events", file: "/app/mason/sources/app.yml", entry: "events", columns: null, exclude: [], key: ["tenant_id", "id"], addedKey: [], skippedSecrets: [], already: false,
     sync: { value: "poll 5m", from: "entry" as const }, bigOff: false, pollCost: null, notReplicated: "it has no primary key, so logical replication cannot apply its changes by its key:" };
-  assert.deepEqual(addedLines(b, "mason/sources/app.yml"), { line: "Added public.events to mason/sources/app.yml: every column, copied by tenant_id, id", notes: [
+  assert.deepEqual(addedLines(b, "mason/sources/app.yml"), { line: "Added public.events to mason/sources/app.yml: every column, keyed by tenant_id, id", notes: [
     "sync: poll 5m written on its entry, not the file's replication: it has no primary key, so logical replication cannot apply its changes by its key: — " +
     "mason add events --sync \"poll 1h\" polls it hourly; mason add events --sync off reads it only by mason sync events"] });
   // one the file's replication keeps current: said so, and the way to poll it instead
@@ -957,7 +957,7 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
   for (const [text, want] of [
     ["role:\n  agent:\n    tables:\n      orders: {}\n", /unexpected key role — did you mean `roles`\? — a roles file takes default and roles/],
     ["roles:\n  agent: {}\n", /roles\.agent\.tables: missing — write tables: all \(every synced table\) or tables: \{ orders: \{\} \}, the tables the role may read \(a role with no table reads nothing: remove it instead\)/],
-    ["roles:\n  agent:\n    tables:\n      products: {}\n", /roles\.agent\.tables\.products: public\.products is not a table the sources file copies — a role reads copied tables only \(copied: orders, customers, billing\.invoices; mason add products copies it\)/],
+    ["roles:\n  agent:\n    tables:\n      products: {}\n", /roles\.agent\.tables\.products: public\.products is not a table the sources file syncs — a role reads synced tables only \(synced: orders, customers, billing\.invoices; mason add products syncs it\)/],
     // a bare name of a table copied under its schema: the qualified entry is suggested
     ["roles:\n  agent:\n    tables:\n      invoices: {}\n", /roles\.agent\.tables\.invoices: public\.invoices is not a table the sources file syncs — did you mean `billing\.invoices`\? — a role reads synced tables only/],
     ["roles:\n  agent:\n    tables:\n      orders:\n        columns: [id]\n        exclude: [notes]\n", /roles\.agent\.tables\.orders: columns and exclude together — columns names what the role reads, exclude what it may not read of every column; keep one/],
