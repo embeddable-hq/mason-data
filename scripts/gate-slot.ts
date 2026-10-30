@@ -27,14 +27,15 @@
  * falls through to running unqueued, and never reports success, even when the command passed.
  *
  * A PID reused by an unrelated process keeps a stale ticket alive until that process ends: a wait that errs long, which
- * the waiting lines show (each names the ticket's PID, its age and its folder).
+ * the waiting lines show (each names the ticket's PID, its age and its folder). A gate killed outright gives its slot
+ * up while the command it started may run on: a limit that errs short, for as long as that command takes.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 
-/** Measured, docs/DESIGN.md "Local gates": the most gates at once before the machine does less work per hour. */
+/** Measured, docs/DESIGN.md "Local gates": the most at once that adds gates per hour without failures taking them back. */
 const DEFAULT_SLOTS = 2;
 const LOOK_EVERY_MS = 250;
 const SAY_EVERY_MS = 30_000;

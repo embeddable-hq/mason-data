@@ -1454,6 +1454,52 @@ without, and none on Node 26.10.
 and `mason serve` terminates a catalog worker at every idle stop: there it is a rare abort the supervisor restarts.
 Lift the guard when a Node 24 release carries nodejs/node#66376.
 
+### Local gates (2026-10-30)
+
+**Measured**, over 117 agent transcripts: local test gates were 48 % of active time, and a third of that (13.5 of 39.7
+hours) was contention from gates running at once. Load reached 153 on 10 cores. `npm run check` took about 174 s with
+nothing else heavy running and about 1,012 s beside three or so others, and parallel gates made load-sensitive tests
+fail, which caused more runs. Eighteen check reruns on an unchanged tree cost 2.2 hours. `scripts/fails-without.ts` was
+200 runs and 9.0 hours, with about 4 % of verdicts anything but `PROVED`; swapping `src/` in place cost one session 1.45
+hours of its 3.1, the tree blocked. Of 47 local full-suite failures across 194 runs, about 4 or 5 were real catches in
+another file, all of them fast convention or matrix tests. Recent changes reach 86–91 % of unit test lines by imports,
+so no list of affected tests can be computed. One agent ran the full integration suite 27 times on one PR. A flake's
+fix cost about 1.75 hours plus a review.
+
+After a PR opens, 31 % of the time follows a merge of main, with 46 full gates re-run across 34 merges, most of them
+without a conflict. Gates that directly follow a merge total only 1.47 hours; the rest is entangled with a review's fix
+edits, so the rule against merging main is not credited with more.
+
+**What CI tests.** A `pull_request` run checks out `refs/pull/<n>/merge` (run 41099689116: `Merge a62e4f5 into 785b7af`,
+the head into main at that push), so a merge is tested without a local merge, as of that push and no later. `main` has
+no branch protection and no ruleset (`gh api`, 2026-10-30), and `ci.yml` has no `merge_group:` trigger, so nothing
+stops a red merge and nothing tests the merge as it lands: the 25 most recent merged PRs were all green because whoever
+merged read them, and the `push` run on main is what sees a skew.
+
+**The slot's default.** Parallel check-equivalents (`tsc`, then the unit tests) at once, each in a copy of the tree, on
+the 10-core laptop on Node 24.18, while other sessions ran their own gates: the machine was never idle (load 18 to 51 before a
+round, 38 to 47 on average during it), so these compare arms under the same disorder and do not repeat the 174 s.
+
+| at once | wall of the round | gates per hour | failed or cancelled tests per run |
+|---|---|---|---|
+| 1 | 885 s, 559 s | 4.1, 6.4 | 1 |
+| 2 | 1,026 s, 805 s | 7.0, 9.0 | 3 to 5 |
+| 3 | 1,012 s | 10.7 | about 10 |
+
+The count leaves out two tests that failed only because the copies shared one index, which is this measurement's fault.
+No run was green: one timing test failed in every run, even alone. From 2 up, the demo's and the executor's tests hit
+their timeouts; at 3, a third of a suite's slow tests were failing or cancelled, and a failed gate is a gate to read and
+run again, so its hour is not a gate. Four at once was stopped, the brief's 1,012 s being that case. The default is 2:
+the most that still adds gates per hour without the failures taking them back, on a machine that is rarely idle. On an
+idle one 1 may do better (174 s is about 21 gates an hour); `MASON_GATE_SLOTS` changes it. Once sessions queue, a gate
+meets less load than these did, so this deserves measuring again.
+
+**Decisions.** The queue is a folder of tickets, a bakery, so that it needs no lock of its own and a stale ticket can be
+removed by a name no live run can hold (`scripts/gate-slot.ts`). The folder is `/tmp`, not `$TMPDIR`, which is per
+session in a sandbox. `fails-without` copies into a linked `git worktree`, because `tests/conventions.test.ts` reads
+`git ls-files` and a plain copy would fail it on both sides. A killed run's test runner reports failures by name, which
+read as a proof, so an interrupted run now has no verdict.
+
 ## Measurements
 
 ### First copy, and the poll's cost on the source

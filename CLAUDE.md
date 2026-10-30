@@ -97,22 +97,72 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   (`.claude/rules/duckdb.md` lists them for a rewrite: the grouped view ordered by its output name, the nulls idiom,
   each collation kind, a prepared statement run after a SET): the first fix round of every PR was for shapes the brief
   had not named.
-- **Iterate on a subset, run the full gate once.** While a change is being made, `IT_ORACLE_ONLY=<regex>` runs the
-  statements it touches; the full oracle (21,000 statements, minutes) runs ONCE before the push. A measurement's dataset
-  is built once and kept until the PR is pushed. Agents that ran the full oracle after every edit and built a 20 M-row
-  table twice spent about half an hour each on nothing new.
-- **Push early, read while CI runs.** Open the PR as soon as the first commit is green locally (CI is about twelve
-  minutes a run, and it gates every merge); read the diff and run the review while it runs; land fix commits in one
-  push, not one per finding.
+- **Which gate runs when is "Local gates".** A measurement's dataset is built once and kept until the PR is pushed: an
+  agent that built a 20 M-row table twice spent the second build on nothing new.
+- **Push early, read while CI runs.** Open the PR as soon as the first commit is green locally; read the diff and run the
+  review while CI runs; land fix commits in one push, not one per finding.
 - **Delegate when it is faster, but merge nothing you have not read.** Independent pieces go to sub-agents, each in a
-  worktree of its own; the one who merges reads each diff in full, verifies it (the check, and the integration suite when
-  the engine or the listener changed), and merges it. A sub-agent's report is its claim, not the evidence. Two
+  worktree of its own; the one who merges reads each diff in full, verifies it (CI on its last commit; a local gate for a
+  reason, "Local gates"), and merges it. A sub-agent's report is its claim, not the evidence. Two
   implementations of two hours each ran side by side; the review-and-fix round after them was the next hour and a half,
   so the time to land a batch is the slowest implementation plus one review cycle, never the sum.
 - **Implementation runs on Opus 5.5; every review is Fable's.** A sub-agent or a session that writes code is started
   on Opus 5.5 (`model: "opus"` on the Agent tool, `model: "claude-opus-5-5"` on a session: a session INHERITS the
   coordinator's model when none is named). The independent review of a PR is done by the coordinating session itself
   (Fable) or by a Fable agent, never by an Opus one: the reviewer must outread the author (2026-10-29).
+
+## Local gates
+
+One laptop is shared by every session, and one gate fills it: gates are the largest single use of a session's time
+(docs/DESIGN.md "Local gates" has the measurements). **CI is the full gate**, and a local gate runs for a reason. Each
+rule says what detects it, or why nothing does: most are habits that only a session's transcript shows, which no test
+reads.
+
+- **While working, the tests nearest the change**: `node --test <file>`, with `--test-name-pattern` for one test, and
+  `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. **A full integration run is not an iteration tool**,
+  and neither is the full oracle. Nothing detects it; a transcript found it.
+- **One full `npm run check`, before a PR's first push.** A fix round after a review or a merge of main gets
+  `npm run typecheck`, `node --test tests/conventions.test.ts tests/cli-state-matrix.test.ts` and the test files of the
+  change, and CI carries the full suite: the few real catches a full local run made in another file were all such fast
+  checks. Which files are nearest is the author's judgement, not a guarantee: a recent change imports its way to most of
+  the unit tests, so no list can be computed, and CI catches the rest. Detector: `checks` red on the PR.
+- **An engine or listener change** (`src/duck/`, `src/api/`, `src/cdc/`) **also runs the full oracle once before its
+  first push**: `scripts/gate-slot.ts node --test tests/integration/duck-oracle.itest.ts`, with `UPDATE_VERIFIED=1` when
+  what is answered changed, because CI holds the allowlist but only a local run writes it. Of the other integration
+  files, those nearest the change; the rest is CI's. Detector: `integration` red on the PR.
+- **A heavy gate takes a slot.** `npm run check` and `npm run test:integration` queue for one of `MASON_GATE_SLOTS`
+  machine-wide (`scripts/gate-slot.ts`) and say who they wait for, so a long wait is not a hang: start a gate in the
+  background, because the wait can outlast a tool's foreground limit. Anything else whole goes through it by hand
+  (`scripts/gate-slot.ts <command>`); a bare `npm test` does not queue, so regenerate with `UPDATE_FIXTURE=1 npm run check`.
+  A queue that fails exits non-zero and runs nothing. Detector: `tests/gate-slot.test.ts`, which holds both scripts to it.
+- **`scripts/fails-without.ts` runs once per PR, on the final tree**, not after each edit: nearly every verdict was
+  `PROVED`, so a run before the tree is final buys little. The principle stands ("Watch every test fail before you trust
+  it"): a test written before its fix is seen failing then, and the tool's one run is the proof. Detector: its output in
+  the PR's description, read by the reviewer. How often it ran, nothing detects.
+- **Merge main only for a conflict, or just before the merge when main has moved in the same area.** A PR's run already
+  tests the merge: it checks out `refs/pull/<n>/merge`, the head merged into main as main stood at that push. It does
+  not run again when main moves, and re-running a job repeats the same commit, so a green run says nothing of what main
+  has gained since: when that touches the same area, merge main, and the push starts a new run. Nothing tests the merge
+  as it lands; a merge queue would (a `merge_group:` trigger and a ruleset), which is the owner's call. Detector: the
+  `push` run on main, red after a merge.
+- **CI does not stop a merge by itself.** `main` has no branch protection and no ruleset, so GitHub would merge a red
+  PR: whoever merges checks that every job is green on the last commit. Detector: the same `push` run, after the fact;
+  a required check would be one before it, which is the owner's call.
+- **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
+  to fix, or it is a flake, the next rule. Nothing detects it; the gate could compare the tree's hash, and does not.
+- **A flaky test met during other work is quarantined with an issue, not fixed in that PR**: a flake's fix costs more
+  than the PR it interrupts, and its review is its own. A flake here is a test the change cannot have touched, failing
+  on timing or load. The skip goes in its own commit, `test("…", { skip: "quarantined: #<issue>" }, …)`, and the issue
+  is filed as "What a session finds" says, titled `Flaky: <test>`, with the failure's text. It says what is not known,
+  because a flake can be a real fault; the fix is that issue's, and removes the skip. Never quarantined: an oracle
+  statement, a wrong answer, a crash. Detector: `tests/conventions.test.ts` holds every quarantine to its issue and
+  their number to a ceiling, so past it the next PR's `checks` is red until one is fixed; `ℹ skipped` counts them.
+- **Node: CI's decides.** CI runs Node 26, and never 24: `.github/workflows/ci.yml` says why (V8's abort at a process's
+  exit, nodejs/node#66366). A laptop may run 24, whose `# Check failed: jit_page_->allocations_.erase(addr) == 1` after
+  every test passed is that bug, not the change's fault and not a reason to run it again; `Check failed: end > addr`
+  at high load is not explained yet (issue 67). A test that differs between the two is read on Node 26. Detector for
+  CI's Node: `tests/conventions.test.ts` ("no workflow runs Node 24"); a laptop's is a fact, not a fault, so nothing
+  checks it.
 
 ## Git workflow
 
@@ -147,20 +197,22 @@ filter that failed printed the host once, and a printed line cannot be unprinted
 ## Commands
 
 ```bash
-npm install && npm run check          # typecheck + unit tests, offline, a few minutes
+npm install && npm run check          # typecheck + unit tests, offline; queues for a slot ("Local gates")
 npm run test:integration              # the real copy, stream, listener, serve and the oracle against IT_POSTGRES_URL
-                                      #   (a throwaway Postgres; tests/integration/README.md)
+                                      #   (a throwaway Postgres; tests/integration/README.md); queues for a slot
 node src/cli/main.ts --help           # the mason command from the checkout (every command, by step)
 node cli/build.ts                     # the npm package: src/ compiled to cli/dist/
 node cli/extensions.ts                # its platform packages (the copy's extensions, checksums pinned) in cli/platforms/
 docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; deploy/mason-data/compose.yml runs it
 scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it must fail with src/ as it was at <commit>
+scripts/gate-slot.ts <command>        # runs a command in one of the machine's slots, as the two gates above do
 ```
 
 ### Checks and tests
 
-- **`npm run check` (typecheck + tests) must pass.** It is offline. CI (`.github/workflows/ci.yml`) runs exactly that,
-  builds the CLI package and the image, and runs `tests/integration/` against a Postgres service, on every PR and on main.
+- **CI must be green, and `npm run check` (typecheck + tests) is that check locally.** It is offline. CI
+  (`.github/workflows/ci.yml`) runs the same two steps, builds the CLI package and the image, and runs `tests/integration/`
+  against a Postgres service, on every PR and on main. When each runs locally is "Local gates".
 - No ESLint: the `tsc` flags in `tsconfig.json` (`noUnusedLocals`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
   …) are the linter. Keep them on.
 - Tests are `tests/*.test.ts` under `node --test`, no deps. Extend the matching file when you touch its logic: the
@@ -174,8 +226,9 @@ scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it 
 - **Golden fixtures are change-detectors: update them with `UPDATE_FIXTURE=1 npm test`, then READ THE DIFF**
   (`docs/SQL-SUPPORT.md` is one, rendered from `src/duck/gaps.ts` and `src/duck/verified.ts`).
 - **Watch every test fail before you trust it.** When the fix is already in the tree, `scripts/fails-without.ts <commit>
-  <test-file>` runs the test with `src/` as it was at that commit and exits 0 only when a test that passes here fails
-  there BY NAME. A test FILE that cannot load at the commit is its own verdict, `DID NOT LOAD`, never a proof.
+  <test-file>` runs the test with `src/` as it was at that commit, in a copy of the tree that leaves this one free to
+  edit, and exits 0 only when a test that passes here fails there BY NAME (`--test-name-pattern` narrows it to one test).
+  A test FILE that cannot load at the commit is its own verdict, `DID NOT LOAD`, never a proof.
 
 **Script languages**: scripts are TypeScript run directly by Node's type stripping (`#!/usr/bin/env node`, Node ≥ 23.6
 in the checkout, no build step, no tsx); the published package is compiled by `cli/build.ts` because Node strips no types

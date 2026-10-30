@@ -1030,3 +1030,52 @@ test("the copy-word guard reads past what only looks like an exception", () => {
   assert.deepEqual(copyWords("a.ts", 'const label = done ? "copies" : "syncing";'), ["a.ts:1: copies"], "a lowercase word that is no phase");
   assert.deepEqual(copyWords("a.ts", 'i++ / 2; const s = "copy it";'), ["a.ts:1: copy it"], "a division after ++ is no regex");
 });
+
+/**
+ * A QUARANTINED TEST NAMES ITS ISSUE, AND THERE ARE FEW (CLAUDE.md "Local gates"): a flaky test met during other work is
+ * skipped with `{ skip: "quarantined: #<issue>" }` and fixed under that issue. A skip with no issue is one nobody will
+ * come back to, and the ceiling is what makes one come back: past it, CI is red until a quarantine has been fixed.
+ */
+const QUARANTINE_CEILING = 3;
+/** Each quarantine in a test file's text, as what it says after the word. */
+export function quarantines(src: string): string[] {
+  return [...src.matchAll(/\bskip\b["']?\s*[:(]\s*["'`]quarantined\b([^"'`\n]*)/g)].map((m) => m[1] ?? "");
+}
+const namesItsIssue = (said: string): boolean => /^: #\d+\b/.test(said);
+
+test("a quarantined test names its issue, and no more than a few are quarantined", () => {
+  const found = scannedFiles(["tests"]).filter((f) => f.name !== "tests/conventions.test.ts")
+    .flatMap((f) => quarantines(f.src).map((said) => ({ where: f.name, said })));
+  assert.deepEqual(found.filter((q) => !namesItsIssue(q.said)), [], 'a quarantine says { skip: "quarantined: #<issue>" }');
+  assert.ok(found.length <= QUARANTINE_CEILING, `${found.length} tests are quarantined, over the ceiling of ${QUARANTINE_CEILING}: fix one first:\n  ${found.map((q) => `${q.where}${q.said}`).join("\n  ")}`);
+});
+
+test("the quarantine guard would catch the real thing", () => {
+  const word = "quarantined";
+  assert.deepEqual(quarantines(`test("a", { skip: "${word}: #81 since 2026-10-30" }, () => {});`), [": #81 since 2026-10-30"]);
+  assert.equal(namesItsIssue(": #81 since 2026-10-30"), true);
+  assert.deepEqual(quarantines(`t.skip("${word}, flaky");`), [", flaky"], "the call form counts too");
+  assert.equal(namesItsIssue(", flaky"), false);
+  assert.equal(namesItsIssue(": issue to be filed"), false);
+  assert.deepEqual(quarantines(`{ skip: process.getuid?.() === 0 ? "root writes anywhere" : false }`), [], "another skip is not one");
+});
+
+/**
+ * A DURATION IS NOT WRITTEN WHERE A RULE READS IT (CLAUDE.md "Local gates"): "about twelve minutes" and "a few minutes"
+ * were each true once. What a gate costs moves with the suite and the machine, so it is measured and dated in
+ * docs/DESIGN.md, and these three files say what to do, never how long it takes.
+ */
+export function durationsSaid(src: string): number[] {
+  return src.split("\n").flatMap((l, i) => (/(?<![-\w])minutes?\b/i.test(l) ? [i + 1] : []));
+}
+
+test("the rules, the contributor's guide and the CI file state no gate's duration", () => {
+  for (const f of ["CLAUDE.md", "CONTRIBUTING.md", ".github/workflows/ci.yml"]) {
+    assert.deepEqual(durationsSaid(fs.readFileSync(path.join(ROOT, f), "utf8")), [], `${f}: a duration goes stale; say the rule, and measure in docs/DESIGN.md`);
+  }
+});
+
+test("the duration guard would catch the real thing", () => {
+  assert.deepEqual(durationsSaid("ok\nCI is about twelve minutes a run\ntypecheck, a few minutes"), [2, 3]);
+  assert.deepEqual(durationsSaid("    timeout-minutes: 30"), [], "a setting's key is not a claim");
+});

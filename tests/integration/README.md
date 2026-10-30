@@ -18,6 +18,9 @@ switched to `wal_level=logical`. `psql` must be on PATH. **Every file writes onl
 server (`it_<name>_<random>`) and drops at the end**, so point it at a throwaway server, never a shared one: its user
 needs CREATEDB, and REPLICATION for the stream. DuckDB's `postgres` extension is downloaded once per machine.
 
+`npm run test:integration` queues for a machine-wide slot, as `npm run check` does (CLAUDE.md "Local gates"), and is not an
+iteration tool: while working, run one file or `IT_ORACLE_ONLY=<regex>`.
+
 **One file at a time** (`--test-concurrency=1` in `npm run test:integration`): each file runs a listener on a port and a
 store of its own, and two at once double the machine's load and the chance of a port clash. CI runs the suite as two
 jobs, each with a Postgres of its own (`.github/workflows/ci.yml`, `integration`): the oracle, and every other file — a

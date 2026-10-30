@@ -1,5 +1,6 @@
-# Pre-merge gate. `checks` runs on the runner alone — no Docker, no Postgres, no .env — and finishes in a few minutes:
-# the code typechecks, the unit tests hold, the published CLI builds and answers, the image builds.
+# The full gate, on every pull request and on main; main has no branch protection, so it stops a merge only because
+# whoever merges reads it (CLAUDE.md "Local gates"). A pull request's run checks out GitHub's merge of its head into main
+# as main stood at that push. `checks` runs on the runner alone — no Docker, no Postgres, no .env: the code typechecks, the unit tests hold, the published CLI builds and answers, the image builds.
 #
 # `integration` runs the real thing against a Postgres service container: the copy and the poll, the stream (logical
 # replication), `mason serve`'s whole life, to_char, and the oracle — every statement answered by Mason held equal to
@@ -117,8 +118,8 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    # Two jobs at once, each with a Postgres of its own: the oracle runs the whole pipeline and hundreds of queries
-    # (minutes), `rest` is every other file, so a new one lands there by itself.
+    # Two jobs at once, each with a Postgres of its own: the oracle runs the whole pipeline and every statement, `rest` is
+    # every other file, so a new one lands there by itself.
     strategy:
       fail-fast: false
       matrix:
