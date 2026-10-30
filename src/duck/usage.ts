@@ -83,7 +83,21 @@ export interface UsageFacts {
   diskFreeBytes: number | null;
   /** the sessions logged in to the Postgres API (`sessions.open`) */
   sessionsOpen: number;
+  /** the sync's copies by phase, as `/healthz` counts them (src/cli/readiness.ts `phaseCounts`): what `GET /metrics`
+   *  says (src/cli/metrics.ts); a sample keeps `totals` */
+  tables: { total: number; copied: number; copying: number; waiting: number; failed: number };
 }
+
+/**
+ * THE STATEMENTS SINCE THE PROCESS STARTED, by outcome (`mason_statements_total`, src/cli/metrics.ts): counted by `count`
+ * as the listener records each, by the same rule as a sample's interval (no refused login; `outcomeOf`), so the two
+ * cannot disagree. Monotonic by construction: only ever added to, never reset while the process lives. `completedMs` is
+ * the completed statements' durations summed (the summary's `_sum`).
+ */
+export interface StatementTotals { completed: number; refused: number; failed: number; cancelled: number; completedMs: number }
+
+/** THE LAST SAMPLE'S COMPLETED STATEMENTS' p50 and p95, ms, as it computed them (null when none completed in its interval). */
+export interface LastDurations { at: string; p50Ms: number | null; p95Ms: number | null }
 
 /**
  * ONE SAMPLE as the commands read it (`mason usage --json`, `GET /api/usage`). A LEVEL is as of `at`; a COUNT is of the
@@ -209,6 +223,8 @@ export interface UsageOptions {
 
 export class UsageSampler {
   private interval: Interval = noInterval();
+  private readonly totals: StatementTotals = { completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 };
+  private latest: LastDurations | null = null;
   private last: number;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private sampling: Promise<void> = Promise.resolve();
@@ -250,6 +266,7 @@ export class UsageSampler {
     const i = this.interval;
     i.statements++;
     const outcome = outcomeOf(row.sqlstate);
+    if (outcome === "ok") { this.totals.completed++; this.totals.completedMs += row.durationMs; } else this.totals[outcome]++;
     if (outcome === "ok") {
       i.completed++;
       const kept = this.options.durationsKept ?? DURATIONS_KEPT;
@@ -262,6 +279,12 @@ export class UsageSampler {
     i.rowsSent += row.rows ?? 0;
     i.bytesSent += row.bytesSent ?? 0;
   }
+
+  /** The statements since the process started, by outcome (a copy: the counter itself is never handed out). */
+  statementTotals(): StatementTotals { return { ...this.totals }; }
+
+  /** The last sample's p50 and p95 of its completed statements; null before the first sample. */
+  lastDurations(): LastDurations | null { return this.latest; }
 
   /** Takes a sample every interval from `take` (the run's facts), and each copy's bytes every SIZE_EVERY_MS. */
   start(take: () => Promise<UsageFacts>): void {
@@ -308,8 +331,10 @@ export class UsageSampler {
     this.last = now;
     const sorted = i.durations.sort((a, b) => a - b);
     const mem = this.options.memory?.() ?? process.memoryUsage();
-    const values: DuckDBValue[] = [new Date(now).toISOString(), seconds, facts.copyBytes, facts.totals.rows, facts.totals.added, facts.totals.copied, facts.totals.failed,
-      facts.oldestSyncSeconds, i.statements, i.outcomes.refused, i.outcomes.failed, i.outcomes.cancelled, i.rowsSent, i.bytesSent, quantileCont(sorted, 0.5), quantileCont(sorted, 0.95),
+    // the p50 and p95 written are the ones GET /metrics says (lastDurations): one computation
+    this.latest = { at: new Date(now).toISOString(), p50Ms: quantileCont(sorted, 0.5), p95Ms: quantileCont(sorted, 0.95) };
+    const values: DuckDBValue[] = [this.latest.at, seconds, facts.copyBytes, facts.totals.rows, facts.totals.added, facts.totals.copied, facts.totals.failed,
+      facts.oldestSyncSeconds, i.statements, i.outcomes.refused, i.outcomes.failed, i.outcomes.cancelled, i.rowsSent, i.bytesSent, this.latest.p50Ms, this.latest.p95Ms,
       facts.streamLag?.bytes ?? null, facts.streamLag?.seconds ?? null, mem.rss, mem.heapUsed, copyMemory, this.memoryLimitBytes, facts.slotWalHeldBytes, facts.diskFreeBytes, facts.sessionsOpen];
     const sql = `INSERT INTO ${USAGE_TABLE} (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map((c, j) => `$${j + 1}${c === "sampled_at" ? "::TIMESTAMPTZ" : ""}`).join(", ")})`;
     try {

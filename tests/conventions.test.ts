@@ -832,3 +832,22 @@ test("SHOW, SHOW ALL and the startup's ParameterStatus read a parameter through 
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
 });
+
+/**
+ * GET /metrics TAKES NO CREDENTIAL, SO IT CARRIES NO NAME (.claude/rules/cli.md "mason serve"): every label
+ * src/cli/metrics.ts writes is one of a closed set whose values are Mason's own words (a phase, an outcome, a quantile,
+ * the version) — never a table's, a user's, a client's or a host's. A label added for one of those fails here; the
+ * values are held by tests/cli-metrics.test.ts, which feeds the renderer names and holds them absent.
+ */
+const METRIC_LABELS = new Set(["phase", "outcome", "quantile", "version"]);
+const metricLabels = (source: string): string[] => [...source.matchAll(/labels: \{ ?([a-z_]+)\b/g)].map((m) => m[1]!);
+
+test("GET /metrics labels only by Mason's own words (phase, outcome, quantile, version): never a name, the endpoint takes no credential", () => {
+  const labels = metricLabels(fs.readFileSync(path.join(ROOT, "src", "cli", "metrics.ts"), "utf8"));
+  assert.ok(labels.length >= 4, `the guard reads the labels: ${labels.join(", ")}`);
+  assert.deepEqual(labels.filter((l) => !METRIC_LABELS.has(l)), []);
+});
+
+test("the metrics label guard would catch the real thing", () => {
+  assert.deepEqual(metricLabels(`TABLE_PHASES.map((phase) => ({ labels: { phase }, value: 1 })); [{ labels: { table: t.source }, value: t.rows }]`), ["phase", "table"]);
+});

@@ -58,3 +58,9 @@ test("the agent's guide says what mason init demo adds and the table it leaves f
   const text = (await guideText("agent")).replace(/\s+/g, " ");
   assert.ok(text.includes("Init adds customers, products, orders; order_items is left to add: mason add order_items --json && mason wait --json, after mason start."), text.slice(-600));
 });
+
+test("mason help production says where the metrics are, beside the health check, and that they need no secret", async () => {
+  const text = (await guideText("production")).replace(/\s+/g, " ");
+  assert.ok(text.includes("GET /metrics on the same port is for Prometheus: numbers only"), text.slice(0, 400));
+  assert.ok(text.includes("never a table's or a user's name, so it needs no secret"));
+});

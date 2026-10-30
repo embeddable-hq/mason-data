@@ -20,6 +20,7 @@ import { matrixEnv, runMason } from "./cli-matrix.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 const { serveSettings, serveConfig, serveSource, healthBody } = serveModule as unknown as typeof import("../src/cli/serve.ts");
+const { healthServer } = serveModule as unknown as typeof import("../src/cli/serve.ts");
 // imported when the tests run: the file loads at a commit without the module, and a test that needs it fails by name
 const sourcesModule = await import("../src/cli/sources.ts" as string).catch(() => ({})) as Record<string, unknown>;
 const readSource = (sourcesModule.readSource ?? (() => ({ message: "no sources module at this commit" }))) as typeof import("../src/cli/sources.ts").readSource;
@@ -145,6 +146,68 @@ test("/healthz: 503 while it starts and stops, 200 once it answers whatever its 
   assert.doesNotMatch(JSON.stringify(ready.body), /orders|users|secret_ledger|boom/, "the endpoint takes no credential");
 });
 
+test("GET /metrics on the health port: 200 in Prometheus's text format while it starts and once it serves; /healthz as it was; another path 404", async () => {
+  const t0 = Date.now() - 90_000;
+  const copy = (source: string, phase: CopyState["phase"]): CopyState => ({ source, phase, rows: null, bytes: null, seconds: null, copiedAt: null, error: null });
+  const usage = { copyBytes: 4_096, totals: { added: 2, copied: 1, failed: 0, rows: 10 }, oldestSyncSeconds: 3, streamLag: null, copied: ["public.secret_orders"],
+    slotWalHeldBytes: null, diskFreeBytes: 1_000_000, sessionsOpen: 2, tables: { total: 2, copied: 1, copying: 1, waiting: 0, failed: 0 } };
+  const statements = { completed: 5, refused: 1, failed: 0, cancelled: 0, completedMs: 50 };
+  let broken = false;
+  type Phase = Parameters<typeof healthBody>[0];
+  let state: Phase = { phase: "starting" };
+  const logged: string[] = [];
+  const server = healthServer(() => state, t0, (l: string) => { logged.push(l); });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const base = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
+  const get = async (p: string, method = "GET"): Promise<{ status: number; type: string | null; body: string }> => {
+    const r = await fetch(`${base}${p}`, { method });
+    return { status: r.status, type: r.headers.get("content-type"), body: await r.text() };
+  };
+  const TYPE = "text/plain; version=0.0.4; charset=utf-8";
+  try {
+    const starting = await get("/metrics");
+    assert.deepEqual([starting.status, starting.type], [200, TYPE], "a scrape never fails while Mason starts");
+    assert.match(starting.body, /^mason_ready 0$/m);
+    assert.match(starting.body, /^mason_info\{version="[^"]+"\} 1$/m);
+    assert.doesNotMatch(starting.body, /^mason_(tables|uptime_seconds|statements_total)/m, "nothing of the run before it serves");
+    // /healthz as it was: 503 and JSON while it starts
+    const health = await get("/healthz");
+    assert.deepEqual([health.status, health.type, (JSON.parse(health.body) as { status: string }).status], [503, "application/json", "starting"]);
+    state = { phase: "ready", tables: () => [copy("public.secret_orders", "copied"), copy("public.users", "copying")],
+      metrics: async () => { if (broken) throw new Error("the copy of public.secret_orders on db.internal could not be read"); return { usage, statements, durations: null }; } };
+    const ready = await get("/metrics");
+    assert.deepEqual([ready.status, ready.type], [200, TYPE]);
+    assert.match(ready.body, /^mason_ready 1$/m);
+    assert.match(ready.body, /^mason_tables\{phase="copying"\} 1$/m);
+    assert.match(ready.body, /^mason_statements_total\{outcome="completed"\} 5$/m);
+    const up = Number(/^mason_uptime_seconds (\d+)$/m.exec(ready.body)?.[1]);
+    const healthy = await get("/healthz");
+    const h = JSON.parse(healthy.body) as { status: string; uptimeSeconds: number; tables: unknown };
+    assert.deepEqual([healthy.status, h.status, h.tables], [200, "ready", { total: 2, copied: 1, copying: 1, waiting: 0, failed: 0 }]);
+    assert.ok(Math.abs(up - h.uptimeSeconds) <= 1 && up >= 90, `/metrics' uptime is /healthz's: ${up}, ${h.uptimeSeconds}`);
+    assert.ok(!ready.body.includes("secret_orders") && !healthy.body.includes("secret_orders"), "never a table's name");
+    const head = await get("/metrics", "HEAD");
+    assert.deepEqual([head.status, head.type, head.body], [200, TYPE, ""]);
+    assert.equal((await get("/metrics", "POST")).status, 405);
+    // the run's numbers that cannot be read fail the scrape, said in the log; the error's text (a name) never in the answer
+    broken = true;
+    const failed = await get("/metrics");
+    assert.equal(failed.status, 500);
+    assert.doesNotMatch(failed.body, /secret_orders|db\.internal/);
+    assert.deepEqual(logged.map((l) => /secret_orders/.test(l)), [true], "said once, in the log");
+    // stopping: as starting
+    state = { phase: "stopping" };
+    const stopping = await get("/metrics");
+    assert.deepEqual([stopping.status, /^mason_ready 0$/m.test(stopping.body)], [200, true]);
+    assert.equal((await get("/healthz")).status, 503);
+    // any other path: 404, as before
+    for (const p of ["/", "/metrics/", "/api/state"]) assert.equal((await get(p)).status, 404, p);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
 test("a serve answers /healthz before its database does: 503 starting while it connects; refused settings exit 1 in the failure shape", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-"));
   // a database that takes the connection and never answers: the run is still connecting while /healthz is asked
@@ -178,6 +241,12 @@ test("a serve answers /healthz before its database does: 503 starting while it c
     assert.equal(answer.status, 503);
     assert.equal(answer.body.status, "starting");
     assert.equal((await fetch(`http://127.0.0.1:${health}/`)).status, 404);
+    // /metrics beside it, on the same port: 200 while it starts, the run not ready yet
+    const scrape = await fetch(`http://127.0.0.1:${health}/metrics`);
+    assert.deepEqual([scrape.status, scrape.headers.get("content-type")], [200, "text/plain; version=0.0.4; charset=utf-8"]);
+    assert.match(await scrape.text(), /^mason_ready 0$/m);
+    for (let i = 0; i < 50 && !out.includes("/metrics"); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.match(out, new RegExp(`\\n  health    http://127\\.0\\.0\\.1:${health}/healthz\\n  metrics   http://127\\.0\\.0\\.1:${health}/metrics\\n`), "its start says both");
     assert.match(fs.readFileSync(path.join(env.MASON_PROJECT, "sources", "app.yml"), "utf8"), /\nurl: \$\{DATABASE_URL\}.*\n[^]*\ntables: \{\}\n$/, "the project's sources file made, no table until one is added");
     const cfg = readProject(env.MASON_DATA);
     assert.ok(cfg && !("broken" in cfg) && cfg.config.served === true, "the state written to MASON_DATA");

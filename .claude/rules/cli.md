@@ -238,7 +238,11 @@ CLI lacks).
   infrastructure platform; src/cli/serve.ts, docs/DESIGN.md "On a server"): it writes
   `MASON_DATA/.mason/config.json` from the environment at every start and runs `mason start --attach`'s run through
   its `serve` hooks (src/cli/dev.ts `ServeHooks`), never a second run. Every setting missing or wrong is ONE report; a
-  project `mason init` made is never taken over; `/healthz` takes no credential, so it says counts, never a name.
+  project `mason init` made is never taken over; `/healthz` takes no credential, so it says counts, never a name. **`GET
+  /metrics` beside it (src/cli/metrics.ts) serves numbers only** — counts, lag, ages, sizes, never a table's, user's,
+  client's or host's name nor a statement, as a value or a label — for the same reason, rendered from the facts the state
+  and the usage sampler already compute (`metricsFacts`), never a second computation (tests/conventions.test.ts holds
+  its labels to a closed set; tests/cli-metrics.test.ts feeds it names and holds them absent).
 - **`sync: replication` is the production change path on a laptop, per table** (src/cli/replication-mode.ts): the
   sources file decides — `--replication`, `--poll` and `MASON_CHANGES` are taken only where they agree with it, and
   refused otherwise in the Failure shape naming the `sync:` line to write (`changesAgreement`; the next release removes

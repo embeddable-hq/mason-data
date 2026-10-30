@@ -26,7 +26,7 @@ import { projectFingerprint } from "../lib/project-files.ts";
 import { guard, SECURITY_HEADERS } from "./security.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
-import { readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
@@ -42,6 +42,7 @@ import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from ".
 import type { PgApiServer } from "../api/postgres/server.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
+import type { RunMetrics } from "./metrics.ts";
 
 /** A statement answered in this many milliseconds or more is slow (one constant: src/cli/request-filter.ts SLOW_MS, the
  *  request log's `slow` filter's too): what mason status lists (src/duck/requests.ts slow). */
@@ -110,7 +111,7 @@ export interface RunContext {
     /** the sync's failures and notable events (src/duck/events.ts, `_mason.sync_events`): mason logs --events, mason status */
     events: Pick<SyncEvents, "recent" | "days">;
     /** usage over time (src/duck/usage.ts, `_mason.usage`): mason usage */
-    usage: Pick<UsageSampler, "samples" | "copySizes" | "days" | "sampleSeconds">;
+    usage: Pick<UsageSampler, "samples" | "copySizes" | "days" | "sampleSeconds" | "statementTotals" | "lastDurations">;
     /** the run's restarts, as its supervisor records them in `.mason/restarts.json` (src/cli/supervise.ts readRestarts:
      *  a file that cannot be read throws, said as the request's failure); merged with the events */
     restarts: () => Restart[];
@@ -232,7 +233,8 @@ export function tableColumns(ctx: RunContext, table: string): { table: string; c
 /**
  * WHAT A USAGE SAMPLE READS OF THE RUN (src/duck/usage.ts): `/api/state` at that moment, never a second computation of
  * any of it — the copy file's bytes (`engine.bytes`), `totals`, the stalest added table's `sync.ageSeconds`, the
- * stream's `lag` and its slot's `walHeldBytes`, the bytes free under the copy (`disk.freeBytes`), the sessions open (`sessions.open`), and the copies served.
+ * stream's `lag` and its slot's `walHeldBytes`, the bytes free under the copy (`disk.freeBytes`), the sessions open (`sessions.open`), the copies served, and
+ * the copies by phase (`phaseCounts`, the count `/healthz` says) for `GET /metrics`.
  */
 export async function usageFacts(ctx: RunContext, now = Date.now()): Promise<UsageFacts> {
   const copies = ctx.duck.copies();
@@ -242,7 +244,16 @@ export async function usageFacts(ctx: RunContext, now = Date.now()): Promise<Usa
   const slot = s.stream?.slotWal;
   return { copyBytes: s.engine.bytes, totals: s.totals, oldestSyncSeconds: ages.length ? Math.max(...ages) : null, streamLag: s.stream?.lag ?? null,
     copied: copies.filter((c) => c.phase === "copied").map((c) => c.source), slotWalHeldBytes: slot !== undefined && "walHeldBytes" in slot ? slot.walHeldBytes : null,
-    diskFreeBytes: s.disk.freeBytes, sessionsOpen: s.sessions.open };
+    diskFreeBytes: s.disk.freeBytes, sessionsOpen: s.sessions.open, tables: phaseCounts(copies) };
+}
+
+/**
+ * WHAT `GET /metrics` READS OF THE RUN (src/cli/metrics.ts, `mason serve`'s health port): a usage sample's own facts
+ * (`usageFacts`, above: no number computed a second way), the statements since the process started as the sampler counts
+ * them as they are recorded (`statementTotals`), and the last sample's p50 / p95 (`lastDurations`).
+ */
+export async function metricsFacts(ctx: RunContext, now = Date.now()): Promise<Omit<RunMetrics, "uptimeSeconds">> {
+  return { usage: await usageFacts(ctx, now), statements: ctx.duck.usage.statementTotals(), durations: ctx.duck.usage.lastDurations() };
 }
 
 /** A `since` / `until` of a query string, read by the one time grammar (src/cli/request-filter.ts timeOf), as an ISO time. */

@@ -118,7 +118,7 @@ let disk: { path: string; freeBytes: number | null; projectedBytes: number | nul
 const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
 const copySize = { table: "public.orders", bytes: 4_194_304, at: "2026-10-28T09:10:00.000Z" };
 let usageSamples: Array<Record<string, unknown>> = [];
-const usage = { days: 7, sampleSeconds: 60, samples: async (o: { since: string; until: string; stepSeconds?: number }) => { usageAsks.push(o); return usageSamples as never[]; }, copySizes: async () => [copySize] };
+const usage = { days: 7, sampleSeconds: 60, samples: async (o: { since: string; until: string; stepSeconds?: number }) => { usageAsks.push(o); return usageSamples as never[]; }, copySizes: async () => [copySize], statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null };
 const usersFile = path.join(root, "app", ".mason", "users.json");
 const API_KEY = "k".repeat(48);
 const ctx: RunContext = {
@@ -514,7 +514,9 @@ test("a usage sample reads /api/state's own facts: the copy file's bytes, the to
   const facts = await runServer.usageFacts!(c, now);
   const state = runServer.runState(c, states, stream, now) as { totals: unknown; engine: { bytes: number } };
   assert.deepEqual(facts, { copyBytes: state.engine.bytes, totals: { added: 3, copied: 3, failed: 0, rows: 1_023, syncedAt: at }, oldestSyncSeconds: 3690.5, streamLag: lag,
-    copied: ["public.customers", "public.orders", "public.logs"], slotWalHeldBytes: 65_536, diskFreeBytes: 75 * 2 ** 30, sessionsOpen: 3 });
+    copied: ["public.customers", "public.orders", "public.logs"], slotWalHeldBytes: 65_536, diskFreeBytes: 75 * 2 ** 30, sessionsOpen: 3,
+    // the sync's copies by phase, every one it holds (the one not added too), as /healthz counts them: what GET /metrics says
+    tables: { total: 4, copied: 3, copying: 1, waiting: 0, failed: 0 } });
   assert.equal(state.engine.bytes, 10, "the copy file's size, as engine.bytes says it");
   const polled = await runServer.usageFacts!({ ...c, duck: { ...c.duck, stream: async () => null } }, now) as { streamLag: unknown; slotWalHeldBytes: unknown };
   assert.equal(polled.streamLag, null, "no stream when polling");

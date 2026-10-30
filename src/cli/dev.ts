@@ -29,7 +29,8 @@ import * as path from "node:path";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
-import { createRunServer, usageFacts, type RunContext } from "./run-server.ts";
+import { createRunServer, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
+import type { RunMetrics } from "./metrics.ts";
 import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
@@ -78,8 +79,9 @@ export interface DevOptions {
 export interface ServeHooks {
   /** each line of the run's log, as it is written to .mason/mason.log: a container's log is its stdout */
   log: (line: string) => void;
-  /** the run answers: its listener is up and its tables are added (they may still be copying) */
-  ready: (run: { tables: () => CopyState[] }) => void;
+  /** the run answers: its listener is up and its tables are added (they may still be copying); `metrics` reads what
+   *  `GET /metrics` says (src/cli/run-server.ts `metricsFacts`) */
+  ready: (run: { tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">> }) => void;
   /** a SIGTERM or SIGINT is stopping it */
   stopping: () => void;
 }
@@ -658,7 +660,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (elsewhere) say(`  ${elsewhere}`);
   say(READY);
   say("");
-  o.serve?.ready({ tables: () => sync.state() });
+  o.serve?.ready({ tables: () => sync.state(), metrics: () => metricsFacts(runCtx) });
   return await stopped;
 }
 
