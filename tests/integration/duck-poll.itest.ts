@@ -1330,6 +1330,52 @@ test("what a sync says of a table right after its copy and after each poll is th
   } finally { await sync.stop(); store.close(); }
 });
 
+// WHAT `kept` SAYS OF A TABLE IS WHAT A POLL OF IT WOULD DO, ONE DERIVATION (`Sync.pollable`): `kept.pending` was its own
+// check of the copy and the catch-up, which missed the rebuild's end — caught up, `rebuildingNow` still set until the
+// writer's next turn — and a re-read whose columns were restored under it. In both a table said current refused the
+// `mason sync` asked next (CI: the first poll after `settled`, once in a few hundred runs). Held at those two moments,
+// whatever the machine's timing.
+test("a table is said kept current only when a poll of it would run: not while its rebuild ends, nor while it is read again under columns restored", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const source = ownDatabase("pending", "CREATE TABLE t (id int PRIMARY KEY, v text); INSERT INTO t SELECT g, 'v' || g FROM generate_series(1, 5) g");
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "pending.db"), (l) => logged.push(l));
+  const copyOfT = heldCopy("public.t", false);
+  const sync = new Sync(store, source, source.database, (l) => logged.push(l), 3_600_000, "poll", null, { onChunk: copyOfT.onChunk });
+  const full = tableOf("t", OFF), narrow = { ...full, columns: full.columns.filter((c) => c.name === "id") };
+  const now = () => sync.state().find((s) => s.source === "public.t");
+  // the moment: the rebuild's last writer's turn, its detach, with the table caught up and `rebuildingNow` not yet cleared
+  const ending: Array<{ rebuilding: string; pending: string | undefined }> = [];
+  const hooks = sync as unknown as { detach: () => Promise<void> };
+  const detach = hooks.detach.bind(sync);
+  hooks.detach = async () => {
+    const s = now();
+    if (s?.rebuilding !== undefined) ending.push({ rebuilding: s.rebuilding, pending: (s.kept as { pending?: string }).pending });
+    await detach();
+  };
+  try {
+    await sync.open();
+    await sync.setTables([full]);
+    sync.start();
+    await until("the table copied and caught up", settled(sync, ["public.t"]));
+    assert.ok(ending.length > 0, `the rebuild's end was met: ${logged.join("\n")}`);
+    for (const e of ending) assert.ok(e.pending !== undefined, `still rebuilt, so not said kept current: ${JSON.stringify(ending)}`);
+    // once said so, the poll asked runs
+    assert.deepEqual((await sync.pollNow(["public.t"])).tables.map((t) => t.table), ["public.t"]);
+
+    // a column removed, and restored while its table is read again: its old copy is as added again, and it is still rebuilt
+    copyOfT.hold();
+    void sync.setTables([narrow]);
+    await until("the narrowed read held in its chunks", copyOfT.held);
+    void sync.setTables([full]);
+    assert.equal(now()?.rebuilding, "copy", "still being read again");
+    assert.match((now()?.kept as { pending?: string }).pending ?? "", /being read whole/);
+    await assert.rejects(sync.pollNow(["public.t"]), (e: Error) => e instanceof PollRefused && e.code === "nothing_yet");
+    copyOfT.release();
+    await until("read again with the restored columns, and caught up", settled(sync, ["public.t"]));
+    assert.deepEqual((await sync.pollNow(["public.t"])).tables.map((t) => t.table), ["public.t"]);
+  } finally { copyOfT.release(); await sync.stop(); store.close(); }
+});
+
 // A CHANGE OF A TABLE'S SYNC KEEPS ITS COPY AND CATCHES IT UP BY ONE POLL, never copies it again — by `mason add --sync`
 // while the run is up (`setTables`), and by hand while it is down (the ledger's record of the sync it was polled under)
 test("a table's sync switched off→poll and poll→off keeps its copy and is caught up by one poll, at once or at the next start", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {

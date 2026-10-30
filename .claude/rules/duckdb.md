@@ -474,6 +474,14 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   Error`). A relation that stops carrying a column the copy holds (a DDL, a narrower publication) refuses THAT table by
   name with the way out, marked behind before anything past it is acknowledged; the others stream on.
   ("Logical replication")
+- **A batch holds a table's changes of ONE STAY in the stream, and only the stay it is in now is applied**
+  (`StreamedTable.stay`: a new number when the table enters `streamed` or its copy is swapped, never used twice;
+  `streamOnce`, `applyStreamed`): an ended stay's changes committed before the next copy's catch-up, so that copy or
+  catch-up holds them. Never tell them apart by columns: two copies inside one flush (a sources file edited and restored,
+  0.2 s each on CI) mixed two shapes in one batch (`VALUES lists must all be the same length`, then the 5-minute
+  back-off), lost the changes after the catch-up's poll (a batch that began in a copy gone by the flush), or replayed an
+  old change over the poll that read a newer one (same columns). `duck-stream.itest.ts` "a batch open across" forces each
+  order. ("Logical replication")
 - **A table is never left neither streamed nor copied**: after every rebuild, a table that still needs a copy or a
   catch-up gets a pass at once (`followUp`; a change of its columns during its copy re-copies it at once), or when its back-off
   ends (`wakeAt`) — replication mode runs a pass only when kicked, and on the test server a failed catch-up left that table dead
@@ -498,7 +506,9 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   that polls, and warns a poll of over `COSTLY_POLL_ROWS` under a minute with its estimate and basis. A setting that
   sets an interval for every table (`MASON_POLL_MS`) refuses the start. DETECTOR: `kept` on every table's line
   (`mason status`, `wait`, EXPLAIN, the MCP tools) says its sync and its copy's age; `tests/duck-sync-schedule.test.ts`
-  and `tests/integration/duck-poll.itest.ts` hold the schedule and the switch. ("Each table's sync") A pass is ONE
+  and `tests/integration/duck-poll.itest.ts` hold the schedule and the switch. ("Each table's sync") **A polled table's
+  `kept.pending` is `pollable`'s answer, never a second check**: nothing pending means a `mason sync` of it runs, so a table
+  stays pending until its rebuild ended, the writer's turn after its catch-up. A pass is ONE
   attachment of the source (`attach` / `detach`: a new connection on the database), so at `poll 1s`, the floor, a
   table costs the source a connection a second beside its scan; holding the attachment across close passes is a later
   step, measured first.

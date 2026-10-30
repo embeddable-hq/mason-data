@@ -681,6 +681,157 @@ test("a table's columns changed in the sources file while its table copies: copi
   }
 });
 
+// A BATCH HOLDS A TABLE'S CHANGES OF ONE STAY IN THE STREAM (`StreamedTable.stay`): a stay ends when the table leaves it or
+// its copy is swapped, and what it decoded is covered by the copy and the catch-up that follow. A batch decoded across a
+// swap was told apart by the columns of its FIRST change alone, so with two copies inside one flush (a sources file edited
+// and restored; CI, 0.2 s each) each order was a failure of its own:
+//   - the columns the first change had, the copy's again by the flush: its rows, in two shapes, failed the held
+//     changes' apply (`VALUES lists must all be the same length`), and the table waited out a 5-minute back-off;
+//   - the columns of a copy gone by the flush: the whole batch dropped, the changes made after the catch-up's poll with it;
+//   - the same columns, a change the stream passed over between: an old change replayed over the poll that read a newer.
+// Each order forced here: the flush held open, the sync stopped at the swap and after the catch-up's poll, so what is
+// written lands between them whatever the machine's speed.
+test("a batch open across a table's copies keeps only what it decoded since the last: no two shapes, no change lost, none replayed over a newer poll", { skip }, async () => {
+  const db = `${tag}_stay`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE t (id int PRIMARY KEY, v text, dropme text); INSERT INTO t SELECT g, 'v' || g, 'd' || g FROM generate_series(1, 50) g; CREATE PUBLICATION every_column FOR TABLE t");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const folder = path.join(dir, "stay-project");
+  const FULL = ["id", "v", "dropme"], NARROW = ["id", "v"];
+  const logged: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "stay.db"), (l) => logged.push(l));
+  const copyOfT = heldCopy("public.t", false);
+  const sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 1_000, "replication", { slot: `${tag}_stay`, publication: "every_column", owned: false }, { onChunk: copyOfT.onChunk });
+  const reader = await store.instance.connect();
+  const read = async (sql: string): Promise<string> => ((await reader.runAndReadAll(sql)).getRowsJS() as unknown[][]).map((r) => r.map(String).join("\t")).join("\n");
+  const since = (from: number, re: RegExp): number => logged.slice(from).filter((l) => re.test(l)).length;
+  // A PLACE THE SYNC STOPS AT once armed, until the test lets it go
+  interface Stop { reached: boolean; go: () => void; released: Promise<void> }
+  const armed = new Map<string, Stop>(), every: Stop[] = [];
+  const arm = (place: string): Stop => {
+    let go!: () => void;
+    const released = new Promise<void>((r) => { go = r; });
+    const s: Stop = { reached: false, go, released };
+    armed.set(place, s); every.push(s);
+    return s;
+  };
+  const pass = async (place: string): Promise<void> => {
+    const s = armed.get(place);
+    if (s === undefined) return;
+    armed.delete(place);
+    s.reached = true;
+    await s.released;
+  };
+  const hooks = sync as unknown as { swap: (...a: unknown[]) => Promise<void>; poll: (...a: unknown[]) => Promise<unknown>; applyStreamed: (...a: unknown[]) => Promise<void>;
+    stream: { flushMs: number; target: { tables: () => unknown } } | null };
+  const swap = hooks.swap.bind(sync), poll = hooks.poll.bind(sync), applyStreamed = hooks.applyStreamed.bind(sync);
+  hooks.swap = async (...a) => { await swap(...a); await pass("swap"); };
+  hooks.poll = async (...a) => { const found = await poll(...a); await pass("poll"); return found; };
+  let asked = 0, applied = 0, decoded = 0;
+  hooks.applyStreamed = async (...a) => { asked++; await applyStreamed(...a); applied++; };
+  const NEVER = 3_600_000;
+  // written, and decoded by the stream (it reads the tables at each change): one in the batch held open
+  const write = async (sql: string): Promise<void> => {
+    const n = decoded;
+    psql(url, sql);
+    await until(() => decoded > n, `the stream decoded ${sql}`, logged, 20_000);
+  };
+  // the batch applied at this commit, or a keepalive before it (then this change is the next batch's): on the writer's
+  // turn the sync is stopped on, it is only asked for, ahead of the catch-up
+  const flushAt = async (sql: string, reached: () => boolean): Promise<void> => {
+    hooks.stream!.flushMs = 0;
+    psql(url, sql);
+    await until(reached, "the batch handed over", logged, 20_000);
+    hooks.stream!.flushMs = NEVER;
+  };
+  const set = async (columns: readonly string[]): Promise<void> => { void sync.setTables(await pick(parsed.source, folder, [["public.t", columns]])); };
+  // the narrowed copy held; its columns restored, so the table is back in the stream until that copy's swap
+  const narrowedThenRestored = async (from: number): Promise<void> => {
+    copyOfT.hold();
+    await set(NARROW);
+    await until(copyOfT.held, "the narrowed copy held in its chunks", logged);
+    await set(FULL);
+    await until(() => since(from, /^public\.t joins the stream/) > 0, "the table back in the stream", logged, 20_000);
+  };
+  const caughtUpAndEqual = async (from: number, step: string): Promise<void> => {
+    await until(() => since(from, /^caught up public\.t by one poll after its whole read/) > 0, `${step}: caught up`, logged, 20_000);
+    hooks.stream!.flushMs = 500;
+    await sync.caughtUp();
+    hooks.stream!.flushMs = NEVER;
+    assert.equal(await read("SELECT id, v, dropme FROM public.t ORDER BY id"), psql(url, "SELECT id, v, dropme FROM t ORDER BY id"), `${step}\n${logged.slice(from).join("\n")}`);
+    assert.equal(since(from, /could not be applied|failed/), 0, logged.slice(from).join("\n"));
+  };
+  try {
+    await sync.open();
+    await set(FULL);
+    await sync.once();
+    await sync.caughtUp();
+    hooks.stream!.flushMs = NEVER;
+    const target = hooks.stream!.target, tables = target.tables.bind(target);
+    target.tables = () => { decoded++; return tables(); };
+
+    // ROWS OF TWO SHAPES: a change of each of three stays in one batch, the first's columns the copy's again by the flush
+    let from = logged.length;
+    await narrowedThenRestored(from);
+    await write("UPDATE t SET v = 'in the stay before the narrowed swap' WHERE id = 1");
+    const narrowed = arm("swap");
+    copyOfT.release();
+    await until(() => narrowed.reached, "the narrowed copy's swap", logged);
+    await write("UPDATE t SET v = 'between the two swaps' WHERE id = 2");
+    const restored = arm("swap");
+    narrowed.go();
+    await until(() => restored.reached, "the restored copy's swap", logged);
+    await write("UPDATE t SET v = 'after the last swap' WHERE id = 3");
+    let n = asked;
+    await flushAt("UPDATE t SET v = 'the flush' WHERE id = 4", () => asked > n);
+    restored.go();
+    await caughtUpAndEqual(from, "a batch of three stays");
+
+    // A CHANGE LOST: the batch's first change of a copy gone by the flush, one made after the catch-up's poll behind it
+    from = logged.length;
+    await narrowedThenRestored(from);
+    const swapped = arm("swap");
+    copyOfT.release();
+    await until(() => swapped.reached, "the narrowed copy's swap", logged);
+    await write("UPDATE t SET v = 'between the swaps, once more' WHERE id = 5");
+    const polled = arm("poll");
+    swapped.go();
+    await until(() => polled.reached, "the catch-up's poll", logged);
+    await write("UPDATE t SET v = 'after the catch-up''s poll' WHERE id = 6");
+    n = applied;
+    await flushAt("UPDATE t SET v = 'the flush, once more' WHERE id = 7", () => applied > n);
+    polled.go();
+    await caughtUpAndEqual(from, "a change made after the catch-up's poll");
+
+    // A CHANGE REPLAYED OVER A NEWER ONE: same columns, and the key changed again while the stream passed the table over
+    from = logged.length;
+    await narrowedThenRestored(from);
+    await write("UPDATE t SET v = 'older' WHERE id = 8");
+    const first = arm("swap");
+    copyOfT.release();
+    await until(() => first.reached, "the narrowed copy's swap", logged);
+    copyOfT.hold();
+    first.go();
+    await until(copyOfT.held, "the restored copy held in its chunks", logged);
+    await write("UPDATE t SET v = 'newer' WHERE id = 8");
+    const last = arm("swap");
+    copyOfT.release();
+    await until(() => last.reached, "the restored copy's swap", logged);
+    n = asked;
+    await flushAt("UPDATE t SET v = 'the flush, a last time' WHERE id = 9", () => asked > n);
+    last.go();
+    await caughtUpAndEqual(from, "an old change, the same columns");
+  } finally {
+    // first: a stop interrupts DuckDB's statements, never the test's stops
+    copyOfT.release();
+    for (const s of every) s.go();
+    reader.closeSync();
+    await sync.stop();
+    store.close();
+  }
+});
+
 // A RELATION THAT NO LONGER CARRIES A COLUMN THE COPY HOLDS (a DDL on the database while Mason streams) refuses THAT
 // table by name, with the way out, and the other tables stream on; the sources file narrowed to what the table has copies it
 // again at once. The stream used to read the missing column from the source, which failed the whole stream.
