@@ -337,10 +337,10 @@ export function writtenDatabase(folder: string, root: string): { database: strin
  *  `database:` only when one is asked for (`--database`): none written, the default stays a default. */
 export function newSourceText(url = "${DATABASE_URL}", tables: readonly string[] = [], sync: TableSync = DEFAULT_SYNC, database: string | null = null): string {
   return "# The database this project syncs from, and which of its tables. Yours to commit; the URL stays out of it.\n" +
+    (database === null ? `# Tools connect with the database name ${DEFAULT_DATABASE}; database: <name> here keeps the name a tool already has.\n` : "") +
     "kind: postgres\n" +
     `url: ${url}${ENV_REF.test(url) ? "   # from .env.local, .env or the shell; a literal postgres:// URL works too" : ""}\n` +
-    (database === null ? `# Tools connect with the database name ${DEFAULT_DATABASE}; database: <name> here keeps the name a tool already has.\n`
-      : `database: ${yamlName(database)}   # the database name a tool connects with\n`) +
+    (database === null ? "" : `database: ${yamlName(database)}   # the database name a tool connects with\n`) +
     `sync: ${syncText(sync)}${sync.mode === "off" ? "   # after its first sync, a table is read again only by mason sync <table> (poll 5m: every 5 minutes)"
       : sync.mode === "replication" ? "   # each table kept current from the database's change log after its first sync (poll 5m, or off, on an entry)"
       : `   # each table polled every ${sync.every} after its first sync (off: read again only by mason sync <table>)`}\n` +
