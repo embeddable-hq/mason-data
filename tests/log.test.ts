@@ -69,7 +69,7 @@ test("a line's level: its ERROR / WARNING marker, else its stream; its component
     const { level, component, msg } = lineEntry(line, stream, "mason", {}, at);
     return { level, component, msg };
   };
-  assert.deepEqual(e("[sync] copied public.orders", "stdout"), { level: "info", component: "sync", msg: "copied public.orders" });
+  assert.deepEqual(e("[sync] synced public.orders", "stdout"), { level: "info", component: "sync", msg: "synced public.orders" });
   assert.deepEqual(e("[stream] WARNING: slow", "stderr"), { level: "warn", component: "stream", msg: "slow" });
   assert.deepEqual(e("Postgres API: postgresql://localhost:5433/app", "stdout"), { level: "info", component: "mason", msg: "Postgres API: postgresql://localhost:5433/app" });
   assert.deepEqual(e("TypeError: x is undefined", "stderr"), { level: "error", component: "mason", msg: "TypeError: x is undefined" });

@@ -211,7 +211,7 @@ test("mason status and wait in replication mode say where the stream is: its pos
     lastBatch: { appliedAt: "2026-10-26T12:00:05.300Z", committedAt: "2026-10-26T12:00:05.000Z" },
     tables: [
       { table: "public.orders", state: "streamed", why: null, applied: { inserts: 1_000, updates: 200, deletes: 4, truncates: 0 } },
-      { table: "shop.lines", state: "catching-up", why: "caught up by one poll after its copy",
+      { table: "shop.lines", state: "catching-up", why: "caught up by one poll after its whole read",
         catchUp: { phase: "polling", from: "2026-10-26T11:58:02.000Z", startedAt: "2026-10-26T12:00:07.000Z", held: 12, retryAt: null }, applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },
       { table: "public.events", state: "left-out", why: "publication app_pub does not carry public.events: ALTER PUBLICATION app_pub ADD TABLE public.events", applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },
       { table: "public.big", state: "waiting", why: "it is being read whole: it joins once synced and caught up by one poll", applied: { inserts: 0, updates: 0, deletes: 0, truncates: 0 } },
@@ -919,8 +919,8 @@ test("mason status's Disk line: free where the synced data is, and what the copi
   assert.deepEqual(diskRows!({ path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 49 * 2 ** 30, projectedBytes: null }), [["Disk", "75.0 GiB free in /data"]]);
   assert.deepEqual(diskRows!({ path: "/data", freeBytes: 75 * 2 ** 30, copyBytes: 49 * 2 ** 30, projectedBytes: 80 * 2 ** 30 }),
     [["Disk", "75.0 GiB free in /data · the first syncs running are projected to add about 80.0 GiB more — more than is free: the sync stops before the disk fills"]]);
-  assert.deepEqual(diskRows!({ path: "/data", freeBytes: null, copyBytes: null, projectedBytes: null, error: "the free space where the copy is could not be read: EACCES" }),
-    [["Disk", "the free space where the copy is could not be read: EACCES"]]);
+  assert.deepEqual(diskRows!({ path: "/data", freeBytes: null, copyBytes: null, projectedBytes: null, error: "the free space where the synced data is could not be read: EACCES" }),
+    [["Disk", "the free space where the synced data is could not be read: EACCES"]]);
   assert.deepEqual(diskRows!(undefined), [], "a run from before it: no line");
 });
 

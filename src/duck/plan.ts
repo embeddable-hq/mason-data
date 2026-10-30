@@ -131,10 +131,10 @@ export function missingRelationHint(relation: string, copies: readonly CopyState
   const matches = copies.filter((c) => c.source === relation || (!relation.includes(".") && c.source.endsWith(`.${relation}`)))
     .sort((a, b) => Number(b.source.startsWith("public.")) - Number(a.source.startsWith("public.")));
   const c = matches[0];
-  const served = "it is served once its copy commits; mason wait waits for it (mason status shows how far it is)";
-  if (c === undefined) return `a table is in Mason once it is added: mason add ${relation} copies it (mason tables lists the database's)`;
+  const served = "it is served once its first sync commits; mason wait waits for it (mason status shows how far it is)";
+  if (c === undefined) return `a table is in Mason once it is added: mason add ${relation} syncs it (mason tables lists the database's)`;
   switch (c.phase) {
-    case "waiting": return `${c.source} is added and waits its turn to be copied: ${served}`;
+    case "waiting": return `${c.source} is added and waits its turn to be synced: ${served}`;
     case "copying": {
       // the share is of the heap's PAGES read (`CopyProgressView.share`: exact, so it never moves backwards), the count
       // the rows the committed chunks and the ones reading have in; a copy can outrun the source's estimate (Postgres's
@@ -147,10 +147,10 @@ export function missingRelationHint(relation: string, copies: readonly CopyState
         : of === null || of <= 0 ? `${share}about ${so} rows so far`
         : so > of ? `${share}${so} rows so far, past the ~${of} estimated`
         : `${share}about ${so} of ~${of} rows so far${p === undefined ? `, ${Math.min(99, Math.floor((so / of) * 100))}%` : ""}`;
-      return `${c.source} is added and being copied (${how}): ${served}`;
+      return `${c.source} is added and being synced (${how}): ${served}`;
     }
-    case "failed": return `${c.source} is added, but its copy failed: ${c.error ?? "no reason recorded"}; mason logs says more`;
-    case "copied": return `${c.source} was just copied and joins the catalog as it is rebuilt: run the statement again in a moment (if it stays missing, mason logs says why)`;
+    case "failed": return `${c.source} is added, but its first sync failed: ${c.error ?? "no reason recorded"}; mason logs says more`;
+    case "copied": return `${c.source} was just synced and joins the catalog as it is rebuilt: run the statement again in a moment (if it stays missing, mason logs says why)`;
   }
 }
 

@@ -635,10 +635,10 @@ function engineNamedInStrings(src: string): number[] {
   return lines;
 }
 
-test("no string a user can see names the engine: a message, a log line or a JSON value says 'the copy'", () => {
+test("no string a user can see names the engine: a message, a log line or a JSON value says 'the engine' or 'the synced data'", () => {
   const hits = scannedFiles(["src"]).filter((f) => f.name.endsWith(".ts")).flatMap((f) => engineNamedInStrings(f.src).map((l) => `${f.name}:${l}`));
   // docs/SQL-SUPPORT.md renders src/duck/gaps.ts, and a doc may name the engine: its registry text is not scanned
-  assert.deepEqual(hits.filter((h) => !h.startsWith("src/duck/gaps.ts:")), [], "a string names the engine: say 'the copy' or 'Mason' (CLAUDE.md: nothing a user sees is named for DuckDB)");
+  assert.deepEqual(hits.filter((h) => !h.startsWith("src/duck/gaps.ts:")), [], "a string names the engine: say 'the engine', 'the synced data' or 'Mason' (CLAUDE.md: nothing a user sees is named for DuckDB)");
 });
 
 test("the engine-name guard catches the real thing, and leaves the engine's own tokens alone", () => {
@@ -932,16 +932,20 @@ test("the Node guard catches the real thing", () => {
 /**
  * WHAT MASON DOES TO A TABLE'S DATA IS "SYNC", NEVER "COPY" (CLAUDE.md "Vocabulary"): the README says "the first sync",
  * "the synced data", "each synced table", and a command that printed "the copy" beside it named one thing two ways. So
- * every literal a person or an agent may read in src/cli/ and src/web/ is held to it; what is not the data's words is
+ * every literal of src/ is held to it — a command's words, the log, a refusal on the wire, EXPLAIN's text — and
+ * upper-case COPY (SQL, the wire's COPY protocol) is not the word; what is not the data's words is
  * listed below by its phrase: a value of a declared --json shape (the field `copy`, the phase "copying"), and a copy of
  * something else (the clipboard's Copy button, the password Mason keeps none of).
  */
-const COPY_WORD = /\bcop(?:y|ies|ied|ying)\b/i;
+const COPY_WORD = /\b[Cc]op(?:y|ies|ied|ying)\b/;
 const NOT_THE_DATA = [
   /\bdata-copy="[^"]*">Copy[^<]*<\/button>/g, /Selected: press … to copy it/g, /\bdata-copy\b/g, /^Copied$/g, /Select and copy it/g, /I have copied it/g, // the clipboard
   /no copy of the password/g,                                                            // mason user add / the Users page
   /\{ table, copy, error/g, /\(copy: \{ phase/g, /addedColumns, copy, error/g,           // the --json field `copy`, by its name
   /^(?:copy|copying|copied)$/g,                                                         // the field, and a phase's value
+  /^copy again$/g,                                                                      // a rebuild's verdict (src/duck/sync.ts)
+  /^copying again$/g,                                                                   // EXPLAIN's JSON "Kept Current By"
+  /\bphase = 'copied'/g,                                                                // SQL over _mason.copy_state
   /\b(?:usage-)?copy-(?:bytes|rows)\b/g, /\bwhat-copy\b/g,   // a holder's id and a CSS class: names in the page's code
   /syncedBy \(copy, poll/g, /totals: \{ added, copied, failed/g, /restart, copied, recovered, synced/g,   // --json's words, by their field
 ];
@@ -999,8 +1003,8 @@ export function copyWords(name: string, src: string): string[] {
   return texts.filter((l) => COPY_WORD.test(NOT_THE_DATA.reduce((t, re) => t.replace(re, ""), l.text))).map((l) => `${name}:${l.line}: ${l.text}`);
 }
 
-test("what Mason does to a table's data is sync in every word the CLI and the web page say, never copy", () => {
-  const hits = scannedFiles(["src/cli", "src/web"]).flatMap((f) => copyWords(f.name, f.src));
+test("what Mason does to a table's data is sync in every word Mason says, never copy", () => {
+  const hits = scannedFiles(["src"]).flatMap((f) => copyWords(f.name, f.src));
   assert.deepEqual(hits, [], "say sync, synced, the synced data or the synced table (CLAUDE.md \"Vocabulary\"); a copy of something else " +
     "(the clipboard, a file) goes on NOT_THE_DATA by its phrase");
 });

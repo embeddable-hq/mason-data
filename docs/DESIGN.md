@@ -469,7 +469,7 @@ words, then the statement planned and refused as it would be alone (`EXPLAIN ANA
 `QUERY PLAN` text column or Postgres's JSON; a first line says which copy answered, what DuckDB was sent and what Mason
 computed after. ANALYZE runs the statement as any statement runs, DuckDB's profiler timing each operator. Operators keep
 DuckDB's names (`Table Scan`, not `Seq Scan`, which sends a reader looking for an index); time is `thread time=`
-(`DuckDB Thread Time` in JSON), never `actual time=`; FORMAT XML / YAML and GENERIC_PLAN are refused (`explain-option`).
+(`Engine Thread Time` in JSON), never `actual time=`; FORMAT XML / YAML and GENERIC_PLAN are refused (`explain-option`).
 
 **Why.** EXPLAIN was the review's critical finding, so it is built over plans. DuckDB's operator time is THREAD time
 summed over threads: a parallel scan's exceeds the Execution Time, which a reader of `actual time` takes for elapsed.
@@ -1184,7 +1184,7 @@ a client of the Postgres API like any tool, connected as a `mason user` by the U
 rows and how it is kept current), `describe` (columns, Postgres types, key, foreign keys), `query` (one statement through
 the extended protocol, `max_rows` the Execute's row count so the server stops there and says so, `timeout_ms` a
 `SET statement_timeout`) and `explain`; the agent's guide and `mason help mcp` are its resources. The rows and the kept
-line come from `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` over the wire, never the run's command server: a remote
+line come from `EXPLAIN (FORMAT JSON)`'s `Mason.Tables` over the wire, never the run's command server: a remote
 `mason serve` answers as a local run does, and the words are the sync's own, as `mason status` prints them. One
 EXPLAIN a table, a few at once: a union of them all failed whole for one table it could not plan, and left a refusal
 in the request log the agent never sent. A table is named as a statement writes it (`public."Clients"`, the formatter

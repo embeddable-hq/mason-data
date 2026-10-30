@@ -122,13 +122,13 @@ function checkPublication(required: Required, described: DescribedPublication, w
     if (d === undefined || !pub.exists) continue;
     if (d.published === null) {
       problems.push(`${table} is not published`);
-      missingLines.push(`  missing: ${table} (read by Mason's copy)`);
+      missingLines.push(`  missing: ${table} (read by Mason's sync)`);
       continue;
     }
     const lacking = inCatalogOrder(d, cols).filter((c) => !d.published!.includes(c));
     if (lacking.length) {
       problems.push(`${table} columns ${lacking.join(", ")} are not published`);
-      missingLines.push(`  missing: ${table} columns ${lacking.join(", ")} (read by Mason's copy)`);
+      missingLines.push(`  missing: ${table} columns ${lacking.join(", ")} (read by Mason's sync)`);
     }
     if (d.rowFilter !== null) {
       problems.push(`${table} is published with a row filter`);
@@ -160,7 +160,7 @@ function checkPublication(required: Required, described: DescribedPublication, w
        (found.size ? tableLines(found, columnLists).join(",\n") : "    (no tables)")]
     : [`Found: no publication named ${pub.name}. Publications on this database: ${pub.others.length ? pub.others.join(", ") : "none"}.`];
   return [
-    `publication ${pub.name} does not carry what Mason's copy of the table holds.`,
+    `publication ${pub.name} does not carry what Mason's synced table holds.`,
     "",
     ...(missingLines.length ? [...missingLines, ""] : []),
     ...(publishes.length && pub.exists ? [`  it publishes ${pub.publish.join(", ") || "nothing"}; the change reader needs insert, update and delete`, ""] : []),

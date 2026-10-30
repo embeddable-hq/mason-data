@@ -373,7 +373,7 @@ test("a source view left out is one line naming what it reads, said once per sch
   const { leftOutLine } = catalogModule as { leftOutLine?: (r: { statement: string; message: string }) => string };
   assert.ok(leftOutLine !== undefined, "leftOutLine is exported");
   assert.equal(leftOutLine({ statement: 'CREATE SCHEMA IF NOT EXISTS "public"; CREATE VIEW "public"."a ""b""" AS SELECT 1;', message: 'relation "public.gone" does not exist' }),
-    'catalog: view public.a "b" left out: it reads public.gone, which is not copied');
+    'catalog: view public.a "b" left out: it reads public.gone, which is not synced');
   assert.equal(leftOutLine({ statement: 'CREATE SCHEMA IF NOT EXISTS "public"; CREATE VIEW "public"."v" AS SELECT f();', message: "function f() does not exist" }),
     "catalog: view public.v left out (function f() does not exist)");
   assert.equal(leftOutLine({ statement: 'ALTER TABLE public."dd" ALTER COLUMN "u" SET DEFAULT uuid_generate_v4();', message: "function uuid_generate_v4() does not exist" }),
@@ -383,7 +383,7 @@ test("a source view left out is one line naming what it reads, said once per sch
   const own = new PgCatalog(views, { idleMs: 200, log: (l) => lines.push(l) });
   try {
     assert.deepEqual(rowsOf(await own.run(simpleQuery('SELECT count(*) FROM "v ok"'))), [["0"]], "the view over a copied table is there");
-    assert.deepEqual(leftOut(), ["catalog: view public.v_gone left out: it reads public.gone, which is not copied"]);
+    assert.deepEqual(leftOut(), ["catalog: view public.v_gone left out: it reads public.gone, which is not synced"]);
     assert.ok(!lines.some((l) => l.includes("CREATE VIEW")), `no definition in the log:\n${lines.join("\n")}`);
     // the instance stops idle and starts again: the view is not said again
     await new Promise((r) => setTimeout(r, 450));
@@ -400,7 +400,7 @@ test("a source view left out is one line naming what it reads, said once per sch
   const tracing = new PgCatalog(views, { trace: true, log: (l) => traced.push(l) });
   try {
     await tracing.run(simpleQuery("SELECT 1"));
-    const at = traced.indexOf("catalog: view public.v_gone left out: it reads public.gone, which is not copied");
+    const at = traced.indexOf("catalog: view public.v_gone left out: it reads public.gone, which is not synced");
     assert.ok(at >= 0, traced.join("\n"));
     assert.equal(traced[at + 1], 'trace catalog: the statement left out: CREATE SCHEMA IF NOT EXISTS "public"; CREATE VIEW "public"."v_gone" AS SELECT id FROM public.gone;');
   } finally { await tracing.stop(); }

@@ -126,8 +126,8 @@ export async function openDuck(file: string, settings: Record<string, string>): 
   catch (e) {
     const m = (e as Error).message;
     throw new Error(/lock/i.test(m)
-      ? `Mason could not open the copy ${file}: another process holds it (${m}). Is another mason start running for this project? mason status says`
-      : `Mason could not open the copy ${file}: ${m}. mason destroy deletes the copy, and the next mason start copies again`);
+      ? `Mason could not open the synced data ${file}: another process holds it (${m}). Is another mason start running for this project? mason status says`
+      : `Mason could not open the synced data ${file}: ${m}. mason destroy deletes the synced data, and the next mason start syncs again`);
   }
   const writer = await instance.connect();
   await writer.run(`CREATE SCHEMA IF NOT EXISTS ${MASON_SCHEMA}`);
@@ -166,9 +166,9 @@ export class DuckStore {
     if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(`MASON_DUCKDB_MEMORY=${JSON.stringify(memoryLimit)} is not an amount of memory: write it as 8GB or 512MiB (unset, half the machine's RAM: ${DEFAULT_MEMORY_LIMIT})`);
     const where = path.resolve(file);
     const before = opened.get(where);
-    if (before !== undefined && before.closed === null) throw new Error(`Mason could not open the copy ${file}: this process has it open already (Mason bug: report it)`);
+    if (before !== undefined && before.closed === null) throw new Error(`Mason could not open the synced data ${file}: this process has it open already (Mason bug: report it)`);
     // a copy whose thread was given up on may still hold the file: a second instance of it would lose writes
-    if (before?.abandoned != null) throw new Error(`Mason could not open the copy ${file}: this process gave up on the copy's thread before (${before.abandoned}), which may still hold it; start mason again (a new process opens it)`);
+    if (before?.abandoned != null) throw new Error(`Mason could not open the synced data ${file}: this process gave up on the engine's thread before (${before.abandoned}), which may still hold it; start mason again (a new process opens it)`);
     const mine = { closed: null as Promise<void> | null, abandoned: null as string | null };
     opened.set(where, mine);
     let executor: Executor;
@@ -185,11 +185,11 @@ export class DuckStore {
   }
   private closing: (p: Promise<void>) => void = () => undefined;
 
-  /** called once if the copy's thread dies while the run uses it (src/duck/executor.ts): the run exits with the reason */
+  /** called once if the engine's thread dies while the run uses it (src/duck/executor.ts): the run exits with the reason */
   onCrash(f: (reason: string) => void): void { this.executor.onCrash(f); }
-  /** how many vectors each Mason function was called with so far, on the copy's thread (a test's, a measurement's) */
+  /** how many vectors each Mason function was called with so far, on the engine's thread (a test's, a measurement's) */
   functionCalls(): Promise<Map<string, number>> { return this.executor.functionCalls(); }
-  /** how many rows each Mason function was handed so far, on the copy's thread (a plan's cost in calls) */
+  /** how many rows each Mason function was handed so far, on the engine's thread (a plan's cost in calls) */
   functionRows(): Promise<Map<string, number>> { return this.executor.functionRows(); }
 
   /** a connection for one Postgres session (on the executor worker: SessionRunner) */
@@ -279,20 +279,20 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   const pg = postgresWording(kind, message);
   // a refusal raised inside DuckDB (a Mason function's, the rewrite's error() call) crossed it as its text alone: the
   // entry its text names (gapIn), read here, the one place that text becomes a statement's error
-  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, detail: `the copy: ${message}` }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
+  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, detail: `the engine: ${message}` }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
   const fn = /(?:Scalar|Aggregate|Table) Function with name "?([A-Za-z_][\w]*)"? does not exist/.exec(message)?.[1];
   if (fn !== undefined) {
     // what reaches DuckDB was verified against Postgres (src/duck/verified.ts), so a function DuckDB lacks is a gap in
     // Mason's rewrite, never something for the client to write in DuckDB's dialect
-    return new StatementError({ code: "0A000", message: `function ${fn}() is not supported: Mason's copy has no ${fn}`,
-      hint: "this is a gap in Mason's translation: report it with the statement (docs/SQL-SUPPORT.md lists what is known)", detail: `the copy: ${message}` });
+    return new StatementError({ code: "0A000", message: `function ${fn}() is not supported: Mason's engine has no ${fn}`,
+      hint: "this is a gap in Mason's translation: report it with the statement (docs/SQL-SUPPORT.md lists what is known)", detail: `the engine: ${message}` });
   }
   const table = /Table with name "?([^"!\s]+)"? does not exist/.exec(message)?.[1];
   if (table !== undefined) {
     // DuckDB's miss comes after the catalog held the table (the plan passed): one dropped as no longer added, whose way
     // back is `mason add`, so no copy state is read
     return new StatementError({ code: "42P01", message: `relation "${table}" does not exist`,
-      hint: missingRelationHint(table, []), detail: `the copy: ${message}` });
+      hint: missingRelationHint(table, []), detail: `the engine: ${message}` });
   }
   const code = kind === "Parser" ? "42601"
     : kind === "Catalog" ? "42P01"
@@ -312,13 +312,13 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
     : kind === "Invalid Input" ? "22023"
     : "XX000";
   return new StatementError({ code, message: code === "57014" ? "canceling statement due to user request"
-      : code === "53200" ? "out of memory: this statement needs more than the memory Mason's copy may use, in a part that cannot spill to disk" : message,
+      : code === "53200" ? "out of memory: this statement needs more than the memory Mason's engine may use, in a part that cannot spill to disk" : message,
     // DuckDB's own advice is SET, which a client of Mason cannot do: Mason's way out instead
     ...(code === "53200" ? { hint: "ask for less at once (a filter, a LIMIT, fewer or narrower columns, a coarser GROUP BY), or raise MASON_DUCKDB_MEMORY (8GB, 24GB) and start mason again; nothing else stopped" } : {}),
     // what Mason ran (the statement as rewritten for DuckDB, src/duck/rewrite.ts): a report of the error needs it
-    detail: `the copy${kind ? ` ${kind} error` : ""}: ${message}${sql === "" ? "" : `; Mason ran: ${oneLine(sql, 2000)}`}`,
+    detail: `the engine${kind ? ` ${kind} error` : ""}: ${message}${sql === "" ? "" : `; Mason ran: ${oneLine(sql, 2000)}`}`,
     // Postgres accepted the GROUP BY (it analysed the statement first): DuckDB refusing it is Mason's rewrite's gap
-    ...(code === "42803" ? { hint: "Postgres accepts this GROUP BY and Mason's rewrite did not carry it to the copy: report it with the statement; adding the column to the GROUP BY answers meanwhile" } : {}),
+    ...(code === "42803" ? { hint: "Postgres accepts this GROUP BY and Mason's rewrite did not carry it to the engine: report it with the statement; adding the column to the GROUP BY answers meanwhile" } : {}),
   }, sql);
 }
 
@@ -338,7 +338,7 @@ function postgresWording(kind: string, message: string): { code: string; message
   // a cast to numeric(p, s) of a value with more than p - s integer digits
   if (/Casting value "[^"]*" to type DECIMAL\(\d+,\s*\d+\) failed: value is out of range/.test(message)) return { code: "22003", message: "numeric field overflow" };
   // an exact sum past DuckDB's 38 digits (a text read as numeric is summed as a DECIMAL(38,18), src/duck/rewrite.ts summed)
-  if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past the copy's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})`, gap: "numeric-exact-sum" };
+  if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past the engine's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})`, gap: "numeric-exact-sum" };
   // a numeric(p, s) read from a text holding NaN or Infinity (src/duck/rewrite.ts pgInput): DuckDB's decimal has none
   const special = /Could not convert string ['"](NaN|-?Infinity)['"] to DECIMAL/.exec(message);
   if (special) return { code: "0A000", message: `a numeric ${special[1]} read from a text is not supported by Mason (${gapMark("numeric-special")})`, gap: "numeric-special" };
@@ -578,7 +578,7 @@ export class SessionRunner implements DuckRunner {
       }
       timing.duckdbMs += performance.now() - t1;
       const r = result;
-      if (fields !== null && r.columnCount < fields.length) throw new StatementError({ code: "XX000", message: `the copy answered ${r.columnCount} column(s) where Postgres's analysis has ${fields.length}: report it (Mason's rewrite)` }, sql);
+      if (fields !== null && r.columnCount < fields.length) throw new StatementError({ code: "XX000", message: `the engine answered ${r.columnCount} column(s) where Postgres's analysis has ${fields.length}: report it (Mason's rewrite)` }, sql);
       // Postgres's columns where its analysis gave them (a WITH TIES rank DuckDB adds after them is not sent)
       const columns = fields !== null
         ? fields.map((f, i) => pgTypedColumn(f.name, f.oid, r.columnType(i), f.typmod))
@@ -662,7 +662,7 @@ export class SessionRunner implements DuckRunner {
         // whole table is the table's row count), and its plan is its EXPLAIN, the rows the ones it answered
         const profile = fs.existsSync(file) ? profiled(JSON.parse(fs.readFileSync(file, "utf8"))) : null;
         if (profile !== null && profile.sql !== sql.text) {
-          throw new StatementError({ code: "XX000", message: `the copy's profile of an EXPLAIN ANALYZE is of another statement (${oneLine(profile.sql ?? "none named")}): report it (Mason's EXPLAIN)` }, sql.text);
+          throw new StatementError({ code: "XX000", message: `the engine's profile of an EXPLAIN ANALYZE is of another statement (${oneLine(profile.sql ?? "none named")}): report it (Mason's EXPLAIN)` }, sql.text);
         }
         if (profile !== null) plan = profile.plan;
         else {
@@ -770,7 +770,7 @@ function exactColumns(columns: WireColumn[], fields: ReadonlyArray<{ name: strin
   const readers = exact[0]!.cells.map((conv, j) => cellText(typeAt(base + j), conv));
   const computed = exact.filter((e) => {
     const unreadable = readers.some((r, j) => r === null && programReads(e, j));
-    if (unreadable) columns[e.column] = { ...columns[e.column]!, divergence: `Postgres computes this numeric exactly; a part of it the copy computed as a double` };
+    if (unreadable) columns[e.column] = { ...columns[e.column]!, divergence: `Postgres computes this numeric exactly; a part of it the engine computed as a double` };
     return !unreadable;
   });
   if (computed.length === 0) return null;
@@ -803,7 +803,7 @@ function exactRows(computed: ComputedColumns, rows: DuckDBValue[][], base: numbe
 function computedOf(exact: readonly ExactColumn[], fields: ReadonlyArray<{ name: string }> | null): string[] {
   return exact.map((e) => {
     const cells = new Set(cellsOf(e.program).filter((k) => !k.startsWith("$"))).size;
-    return `column ${e.column + 1}${fields?.[e.column] === undefined ? "" : ` "${fields[e.column]!.name}"`}: Postgres's exact numeric${e.text ? " as text" : ""}, from ${cells} of the copy's value(s)`;
+    return `column ${e.column + 1}${fields?.[e.column] === undefined ? "" : ` "${fields[e.column]!.name}"`}: Postgres's exact numeric${e.text ? " as text" : ""}, from ${cells} of the engine's value(s)`;
   });
 }
 

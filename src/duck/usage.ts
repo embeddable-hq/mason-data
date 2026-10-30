@@ -144,7 +144,7 @@ export interface UsageSample {
   /** replication mode: the stream's lag in WAL bytes and seconds (`mason status`'s); null when polling */
   streamLagBytes: number | null;
   streamLagSeconds: number | null;
-  /** the run's memory: the process's resident set (the copy's thread included), and the main thread's JavaScript heap */
+  /** the run's memory: the process's resident set (the engine's thread included), and the main thread's JavaScript heap */
   rssBytes: number;
   heapUsedBytes: number;
   /** the copy's memory in use, and its limit (MASON_DUCKDB_MEMORY; half the machine's by default) */
@@ -401,12 +401,12 @@ export class UsageSampler {
         else await this.history.writer.run(sql, values);
       }
     } catch (e) {
-      this.failure("measuring each copy's size", e);
+      this.failure("measuring each synced table's size", e);
       return;
     }
-    this.ok("measuring each copy's size");
+    this.ok("measuring each synced table's size");
     // the first measure of a run is said with its time: what it costs on this machine's copies, read from the log
-    if (!this.sizedOnce) { this.sizedOnce = true; this.log(`usage: measured ${rows.length} copies' own size in ${Math.round(performance.now() - t0)} ms (every ${Math.round((this.options.sizeEveryMs ?? SIZE_EVERY_MS) / 60_000)} min)`); }
+    if (!this.sizedOnce) { this.sizedOnce = true; this.log(`usage: measured ${rows.length} synced tables' own size in ${Math.round(performance.now() - t0)} ms (every ${Math.round((this.options.sizeEveryMs ?? SIZE_EVERY_MS) / 60_000)} min)`); }
   }
 
   /** Deletes the samples and sizes older than the retention. */

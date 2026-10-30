@@ -260,7 +260,7 @@ test("the disk under the copy: free where its file is, by the sync's own measure
     s.diskFree = () => { throw new Error("ENOENT: no such file or directory"); };
     const failed = s.diskStatus!() as { freeBytes: unknown; error?: string };
     assert.equal(failed.freeBytes, null);
-    assert.match(String(failed.error), /^the free space where the copy is could not be read: ENOENT/);
+    assert.match(String(failed.error), /^the free space where the synced data is could not be read: ENOENT/);
     s.copyLive.clear();
   });
 });

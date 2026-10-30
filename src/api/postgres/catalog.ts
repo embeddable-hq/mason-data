@@ -251,7 +251,7 @@ export function catalogViews(schema: PgSchema, roles: ReadonlyMap<string, RoleGr
  * statements under `SET ROLE` (`asRole`), so `information_schema.tables` / `.columns`, `has_table_privilege` and
  * `has_column_privilege` answer for the role as Postgres's own do — and `mason mcp`'s `tables` and `describe`, which
  * ask them, list a role what it may read. `pg_catalog` itself (pg_class, pg_attribute) does not filter by privilege
- * on Postgres either; it still lists every copied column, said in docs/POSTGRES-API.md. A table the role names that the
+ * on Postgres either; it still lists every synced column, said in docs/POSTGRES-API.md. A table the role names that the
  * schema does not hold yet (added, not copied) is granted at the rebuild its copy brings; a column the copy lacks is
  * left out (the roles file was held to the copy already, src/cli/roles.ts). Rebuilt with the schema: the server
  * replaces the catalog when the roles move, as it does when the tables do. **`set_config` is revoked from PUBLIC
@@ -396,7 +396,7 @@ export function leftOutLine(r: { statement: string; message: string }): string {
   if (view === null) return `catalog: a source default left out (${r.message}): ${r.statement}`;
   const missing = /^relation "([^"]+)" does not exist$/.exec(r.message)?.[1];
   const name = `${unquote(view[1]!)}.${unquote(view[2]!)}`;
-  return missing !== undefined ? `catalog: view ${name} left out: it reads ${missing}, which is not copied` : `catalog: view ${name} left out (${r.message})`;
+  return missing !== undefined ? `catalog: view ${name} left out: it reads ${missing}, which is not synced` : `catalog: view ${name} left out (${r.message})`;
 }
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
