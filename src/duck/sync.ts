@@ -845,8 +845,9 @@ export class Sync {
   /** where the sync's failures and notable events go (src/duck/events.ts `SyncEvents.record`): never the writer's turn */
   private readonly onEvent: (e: SyncEventInput) => void;
   /** when each table was last copied or polled, its `syncedAt`: `_mason.poll_state.polled_at` and nothing else — the
-   *  value `pollStateSql` wrote is the one set here once its transaction commits, so `readPolledAt` never moves it (a
-   *  time read at the commit stood until that read replaced it: a `syncedAt` that went backwards) */
+   *  value `pollStateSql` wrote is the one set here once its transaction commits, and `readPolledAt` only moves a time
+   *  forward, so nothing moves it back (a time read at the commit stood until that read replaced it: a `syncedAt` that
+   *  went backwards). A copy's is its watermark's, taken before the swap; `copied_at`, after it, is `Synced.at`'s */
   private readonly polledAt = new Map<string, string>();
   /** the store's writer: the stream's batches, the polls, the source's attachment and every swap, one turn at a time */
   private readonly writerLane: Lane;
@@ -1294,11 +1295,21 @@ export class Sync {
     return { state: "waiting", why: this.notStreamedWhy(t.source) };
   }
 
-  /** each table's last copy or poll, from the ledger (a copy writes its watermark there too) */
+  /**
+   * Each table's last copy or poll, from the ledger (a copy writes its watermark there too), ONLY EVER FORWARD: this
+   * SELECT's snapshot may be older than a commit on the rebuilds' connection whose time is set while it is answered
+   * (`committed`, `swap`), so what it read never replaces a later time, and a table it does not hold is dropped (removed:
+   * nothing else drops it) only when no such commit gave it a time meanwhile.
+   */
   private async readPolledAt(): Promise<void> {
+    const asked = new Map(this.polledAt);
     const r = await this.store.writer.runAndReadAll(`SELECT source, epoch_ms(polled_at) FROM ${MASON_SCHEMA}.poll_state WHERE polled_at IS NOT NULL`);
-    this.polledAt.clear();
-    for (const [source, ms] of r.getRowsJS() as [string, number | bigint][]) this.polledAt.set(source, new Date(Number(ms)).toISOString());
+    const ledger = new Map((r.getRowsJS() as [string, number | bigint][]).map(([source, ms]) => [source, new Date(Number(ms)).toISOString()]));
+    for (const [source, at] of this.polledAt) if (!ledger.has(source) && at === asked.get(source)) this.polledAt.delete(source);
+    for (const [source, at] of ledger) {
+      const now = this.polledAt.get(source);
+      if (now === undefined || at > now) this.polledAt.set(source, at);
+    }
   }
   /**
    * EACH COPY'S LAST SYNC AS THE LEDGER KEEPS IT, at a start (`Synced`): the swap and every poll write
@@ -2043,8 +2054,8 @@ export class Sync {
     // (`rowsChanged`) — never a count(*), which a write by key's deletes make a scan (12 ms on 20 M rows, measured) —
     // written to the ledger IN the batch's transaction, so a run that dies keeps a count equal to its rows
     const rowsAfter = new Map<string, number>();
-    // the batch's time in the ledger and in this run: ONE value (`Synced`)
-    const at = new Date().toISOString();
+    // a batch with a position: its time in the ledger and in this run, ONE value (`Synced`)
+    const position = lsn === null ? null : { lsn, at: new Date().toISOString() };
     await w.run("BEGIN TRANSACTION");
     try {
       for (const [name, changes] of batch) {
@@ -2089,7 +2100,7 @@ export class Sync {
         if (rows !== known) await w.run(`UPDATE ${MASON_SCHEMA}.copy_state SET "rows" = $1 WHERE source = $2`, [rows, name]);
         rowsAfter.set(name, rows);
       }
-      if (lsn !== null) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.stream_state VALUES ($1, $2, $3::TIMESTAMPTZ)`, [this.replication!.slot, formatLsn(lsn), at]);
+      if (position !== null) await w.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.stream_state VALUES ($1, $2, $3::TIMESTAMPTZ)`, [this.replication!.slot, formatLsn(position.lsn), position.at]);
       await w.run("COMMIT");
     } catch (e) {
       await w.run("ROLLBACK");
@@ -2128,7 +2139,7 @@ export class Sync {
     }
     // every table the stream keeps current is current as of this batch's position (`Synced`); a piece of a large
     // transaction (no position) and the changes a catch-up held are not a position
-    if (lsn !== null) for (const source of this.joinedNow) this.synced.set(source, { at, seconds: (Date.now() - started) / 1000, by: "stream" });
+    if (position !== null) for (const source of this.joinedNow) this.synced.set(source, { at: position.at, seconds: (Date.now() - started) / 1000, by: "stream" });
   }
 
   /**

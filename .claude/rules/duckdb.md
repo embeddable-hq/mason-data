@@ -603,10 +603,15 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   rows they deleted (`rowsChanged`, `writeByKey`) — never a `count(*)` per batch (a write by key's deletes make it a
   scan) — written to `copy_state` IN the batch's transaction. When it was last brought current, and how,
   is `CopyState.synced` (`Synced`: the swap, a poll's start, the stream's last batch); `/api/state` derives each
-  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked. **That time is ONE
-  value, the ledger's**: taken once before the sync's transaction, written in it (`polled_at`, `applied_at`) and
-  remembered as written (`polledAt`, `synced`), never `now()` in the ledger beside a `new Date()` here — the two stood
-  until `readPolledAt` replaced one with the other, and a table's `syncedAt` went 8 ms backwards under `mason status`.
+  table's state in one word (`syncStateOf`, src/cli/readiness.ts) and its age at the moment asked. **A poll's or a
+  batch's time is ONE value, the ledger's**: taken once before the sync's transaction, written in it (`polled_at`,
+  `applied_at`) and remembered as written (`polledAt`, `synced`), never `now()` in the ledger beside a `new Date()`
+  here — the two stood until `readPolledAt` replaced one with the other, and a table's `syncedAt` went 8 ms backwards
+  under `mason status`. **A copy has TWO, each one value**: its watermark's `polled_at`, taken before the swap, which
+  `kept.syncedAt`, `dueAt` and `nextAt` read, and `copied_at`, taken after it, which `CopyState.synced.at` and
+  `copiedAt` read; they differ by the swap's length, and `copied_at >= polled_at` is how `readSynced` tells a copy from
+  a later poll. **`readPolledAt` only ever moves a time forward** (its SELECT's snapshot may be older than a commit on
+  the rebuilds' connection), and drops a table the ledger no longer holds only when no commit gave it a time meanwhile.
   `tests/duck-sync-facts.test.ts` and `tests/integration/duck-poll.itest.ts` hold what the run says to the ledger.
 
 ## Users (`mason user`, src/duck/users.ts)

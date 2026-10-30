@@ -137,6 +137,60 @@ test("the time a swap and a stream batch say is the time the ledger holds, at on
   });
 });
 
+// `readPolledAt` ON THE WRITER'S CONNECTION BESIDE A COMMIT ON THE REBUILDS': its SELECT's snapshot may be older than a
+// commit whose time is set while it is answered, and writing back what it read moved that time backwards. The SELECT's
+// answer is held here until a real swap has committed and said its time, so the order is the test's, never the machine's.
+test("a read of the ledger answered after a later commit leaves the later time, drops a removed table's, and keeps one a commit gave meanwhile", async () => {
+  await aRun(async ({ store, sync, st }) => {
+    const s = sync as unknown as { swap: (t: AddedTable, side: string, o: { snapshot: string | null; behind: string | null }) => Promise<void>; readPolledAt: () => Promise<void>; polledAt: Map<string, string> };
+    const kept = (): string | null | undefined => (st().kept as { syncedAt?: string | null }).syncedAt;
+    const swapped = async (): Promise<void> => {
+      await store.writer.run("CREATE TABLE public.t__mason_copy AS SELECT * FROM public.t");
+      await s.swap(T, "public.t__mason_copy", { snapshot: "200:200:", behind: null });
+    };
+    const noRow = (): Promise<unknown> => store.writer.run(`DELETE FROM ${MASON_SCHEMA}.poll_state WHERE source = 'public.t'`);
+    /** a read of the ledger whose SELECT has answered and whose answer waits for `meanwhile` */
+    const readBeside = async (meanwhile: () => Promise<void>): Promise<void> => {
+      const w = store.writer as unknown as { runAndReadAll: (...a: unknown[]) => Promise<unknown> };
+      const real = w.runAndReadAll;
+      let answered!: (r: unknown) => void;
+      const held = new Promise<unknown>((resolve) => { answered = resolve; });
+      w.runAndReadAll = (...a: unknown[]) => {
+        w.runAndReadAll = real;
+        void real.apply(store.writer, a).then(answered);
+        return held.then(async (r) => { await done; return r; });
+      };
+      let finished!: () => void;
+      const done = new Promise<void>((resolve) => { finished = resolve; });
+      const read = s.readPolledAt();
+      await held;
+      await meanwhile();
+      finished();
+      await read;
+    };
+    const older = kept();
+    assert.ok(typeof older === "string", String(older));
+    // the SELECT holds the older time (seeded an hour ago); the commit's is newer: it stands
+    let newer = "";
+    await readBeside(async () => { await swapped(); newer = kept()!; });
+    assert.ok(newer > older!, `${older} to ${newer}`);
+    assert.equal(kept(), newer, "a read answered after a later commit moves nothing back");
+    // a table the ledger no longer holds (removed): gone from what the run says, as the clear did
+    await noRow();
+    await s.readPolledAt();
+    assert.equal(s.polledAt.has("public.t"), false, "a removed table's time is dropped");
+    // no row at the SELECT, and a commit gives it one while it is answered: kept
+    await readBeside(swapped);
+    assert.equal(s.polledAt.has("public.t"), true, "a time a commit gave meanwhile is kept");
+    assert.equal(kept(), s.polledAt.get("public.t"));
+    // and a time the ledger holds and the run does not is read in
+    const was = s.polledAt.get("public.t")!;
+    s.polledAt.delete("public.t");
+    await s.readPolledAt();
+    assert.equal(s.polledAt.get("public.t"), was, "a start reads every table's");
+  });
+});
+
 test("the changes a catch-up held, replayed after its poll, are written but are no position of the stream: no table's last sync, no stream_state", async () => {
   await aRun(async ({ store, sync, st, rows }) => {
     const s = sync as unknown as {

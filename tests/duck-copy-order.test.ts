@@ -215,8 +215,12 @@ test("a copy's progress counts the chunks in flight at the measured rate, held u
     reading: [{ since: T, pages: 1 }], rate: { pagesPerSecond: 500, rowsPerSecond: 7_000, bytesPerSecond: 500 * 8192, chunks: 22 }, rowsPerPage: 14 };
   const reading = copyProgressNow(tail, T + 1_000);
   assert.equal(reading.rowsReading, Math.floor(0.9 * 14), "held under the rows its pages are expected to hold");
-  const landed = copyProgressNow({ ...tail, chunksDone: 23, pagesDone: 14_286, rowsDone: 200_000, reading: [] }, T + 1_000);
+  const committed: Live = { ...tail, chunksDone: 23, pagesDone: 14_286, rowsDone: 200_000, reading: [] };
+  const landed = copyProgressNow(committed, T + 1_000);
   assert.ok(landed.share >= reading.share, `the share never goes back: ${reading.share} to ${landed.share}`);
+  // what a person sees is copied + rowsReading (`copyingText`, src/cli/readiness.ts): that count does step back here
+  assert.ok(tail.rowsDone + reading.rowsReading > committed.rowsDone, "the count shown steps back at this commit");
+  assert.ok(reading.rowsReading > committed.rowsDone - tail.rowsDone, "by what the estimate read past the rows it committed");
   // a commit (the oldest, its 2,880 pages' rows) moves the count forward whenever it lands
   for (const s of [3, 12, 30, 600]) {
     const before = live(T), at = T + s * 1000;
