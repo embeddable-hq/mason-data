@@ -223,7 +223,7 @@ test("a list attribute and through: two levels deep: customers by region (uuids)
   assert.match(plan, /filtered by the role regions: a row of customers it references by customer_id is visible/);
   const acme = await connect("acme2", addUser("acme2", "tenant", { tenant: "1" }));
   const tenantPlan = (await rows(acme, "EXPLAIN SELECT id FROM orders")).map((r) => r[0]).join("\n");
-  assert.match(tenantPlan, /Mason: answered from its copy of public\.orders \(.*; filtered by the role tenant: tenant_id = 1\)/);
+  assert.match(tenantPlan, /Mason: answered from the synced table public\.orders \(.*; filtered by the role tenant: tenant_id = 1\)/);
 });
 
 test("a user without a value its role reads is refused loudly at every statement; an unfiltered role and a token read every row", async () => {
@@ -356,12 +356,12 @@ test("EXPLAIN says no row count for a filtered table, as text or JSON, where the
   await wire();
   const c = await connect("acme8", addUser("acme8", "tenant", { tenant: "1" }));
   const text = (await rows(c, "EXPLAIN SELECT count(*) FROM orders")).map((r) => r[0]).join("\n");
-  assert.match(text, /Mason: answered from its copy of public\.orders \((?!about)[^\n]*filtered by the role tenant: tenant_id = 1\)/);
+  assert.match(text, /Mason: answered from the synced table public\.orders \((?!about)[^\n]*filtered by the role tenant: tenant_id = 1\)/);
   assert.doesNotMatch(text.split("\n")[0]!, /about \d|rows unknown/, "the copy's estimate is every row's");
   const unfiltered = (await rows(c, "EXPLAIN SELECT sku FROM products")).map((r) => r[0]).join("\n");
   assert.match(unfiltered, /public\.products \(about 3 rows/);
-  const json = JSON.parse((await rows(c, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM orders o JOIN products p ON p.sku = o.status"))[0]![0]!) as Array<{ Mason: { Copies: Array<Record<string, unknown>> } }>;
-  const copies = json[0]!.Mason.Copies;
+  const json = JSON.parse((await rows(c, "EXPLAIN (FORMAT JSON) SELECT count(*) FROM orders o JOIN products p ON p.sku = o.status"))[0]![0]!) as Array<{ Mason: { Tables: Array<Record<string, unknown>> } }>;
+  const copies = json[0]!.Mason.Tables;
   const orders = copies.find((x) => x.Table === "public.orders")!, products = copies.find((x) => x.Table === "public.products")!;
   assert.equal(orders["Row Filter"], "filtered by the role tenant: tenant_id = 1");
   assert.equal("Estimated Rows" in orders, false);

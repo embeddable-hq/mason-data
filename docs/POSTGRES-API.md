@@ -206,11 +206,11 @@ mason user add emea --role regions --set regions=eu --set regions=uk --set plan=
   them. A session's attributes are settings it cannot change: `SHOW mason.attr.tenant` and
   `current_setting('mason.attr.tenant')` answer the user's value (a list comma-joined), and `SET mason.attr.…` is
   Postgres's refusal (`42501 permission denied to set parameter`).
-- **EXPLAIN says each table's filter** on the table's line, in words: `answered from its copy of public.orders (…;
+- **EXPLAIN says each table's filter** on the table's line, in words: `answered from the synced table public.orders (…;
   filtered by the role tenant: tenant_id = 42)`, a list as `tenant_id = ANY(12, 41)` (its first five values, then
   `… and N more`), a `through:` as `a row of orders it references by order_id is visible`; `FORMAT JSON` carries it as
-  the copy's `Row Filter`. A filtered table says no row count there (`about N rows`, `Estimated Rows`: the copy's estimate
-  is every row's). `EXPLAIN ANALYZE`'s scan still shows the rows it read, as Postgres's `Rows Removed by Filter` does.
+  the table's `Row Filter`. A filtered table says no row count there (`about N rows`, `Estimated Rows`: the estimate is
+  every row's). `EXPLAIN ANALYZE`'s scan still shows the rows it read, as Postgres's `Rows Removed by Filter` does.
 - **The request log records the values**: `attributes` in `_mason.requests` (JSON, beside `role`; null for a user with
   none and for a token).
 

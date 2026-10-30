@@ -223,7 +223,7 @@ const detail = (v: string | string[]): string => Array.isArray(v) ? v.join(", ")
 /** the details a plan line carries without VERBOSE: everything but the projections and filters, which VERBOSE adds */
 const VERBOSE_ONLY = new Set(["Projections", "Filters", "Table", "Type"]);
 
-/** a filtered table says no row count: the copy's estimate is every row's, which the role does not read */
+/** a filtered table says no row count: the estimate is every row's, which the role does not read */
 function copyLine(c: Copy): string {
   const rows = c.filter !== undefined ? "" : c.rows === null ? "rows unknown; " : `about ${count(c.rows)} rows; `;
   return `${c.table} (${rows}${keptText(c.facts)}${c.filter !== undefined ? `; ${c.filter}` : ""})`;
