@@ -42,7 +42,7 @@ A drop-in replacement for a Postgres read replica, built for exceptionally fast 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/how-mason-works-dark.svg">
-  <img alt="How Mason works: Mason syncs the tables you choose from your Postgres: on demand, by polling or by replication. A BI tool, an AI agent or your app sends SQL over the Postgres protocol. A real Postgres analyses each query, Mason runs it on its own columnar tables, and the answer is exactly what Postgres would send. If Mason can't answer exactly, it refuses with an error that says why." src="docs/how-mason-works.svg" width="100%">
+  <img alt="How Mason works: Mason syncs the tables you choose from your Postgres. Each table is kept up to date on demand, by polling or by replication. A BI tool, an AI agent (over SQL or MCP) or your app connects as a user, and the user's role limits the tables, columns and rows it can read. A real Postgres analyses each query. Mason rewrites it into the fastest exact form, runs it on its own columnar tables, and answers exactly as Postgres would. If Mason can't answer exactly, it refuses with an error that says why. Every query is logged. An oracle of tens of thousands of queries decides what is exact." src="docs/how-mason-works.svg" width="100%">
 </picture>
 
 ## Getting started

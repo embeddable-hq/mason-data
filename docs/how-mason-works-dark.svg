@@ -37,7 +37,7 @@
 <text x="290" y="587" font-size="16" fill="#e5e7eb" font-weight="700">polling</text>
 <text x="290" y="607" font-size="15" fill="#94a3b8">at an interval you set</text>
 <text x="290" y="633" font-size="16" fill="#e5e7eb" font-weight="700">replication</text>
-<text x="290" y="653" font-size="15" fill="#94a3b8">logical, in seconds</text>
+<text x="290" y="653" font-size="15" fill="#94a3b8">from the change log</text>
 <text x="248" y="696" font-size="15" fill="#94a3b8">chosen per table in</text>
 <text x="248" y="718" font-size="15" fill="#e5e7eb" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">mason/sources/&lt;name&gt;.yml</text>
 <rect x="496" y="184" width="632" height="668" rx="16" fill="#111a2e"/>
@@ -105,6 +105,7 @@
 <text x="1000" y="750" font-size="16" fill="#e5e7eb" font-weight="800">every query</text>
 <text x="1000" y="772" font-size="16" fill="#cbd5e1">is logged</text>
 <text x="1000" y="793" font-size="15" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">mason logs</text>
+<text x="1000" y="811" font-size="15" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">--requests</text>
 <rect x="1152" y="164" width="424" height="136" rx="16" fill="#1a1636" stroke="#3b2f6b" stroke-width="1"/>
 <circle cx="1196" cy="208" r="22" fill="#7c3aed"/>
 <text x="1196" y="217" font-size="24" fill="#ffffff" font-weight="700" text-anchor="middle">2</text>
