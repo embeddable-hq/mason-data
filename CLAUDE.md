@@ -61,11 +61,11 @@ tables, scripts, or other artifacts that weren't explicitly requested. If a piec
 next step or you're unsure whether it's in scope, ask for confirmation or outline the plan first and let the project's owner decide.
 ("Do it" authorizes the thing under discussion, not everything previously suggested.)
 
-**What a session finds, it acts on, without being told.** This is the one exception to the rule above, for what is found
-along the way. An obvious bug gets a session of its own to fix it; anything else that needs investigating, or a bug whose
-fix is not obvious, gets a GitHub issue saying what was seen, what is not known and what done looks like. Neither waits
-for the owner to ask, and neither stops at a line in a message, which is forgotten: the task in hand goes on, and the
-fix's PR is reviewed like any other.
+**What a session finds, it acts on, without being told.** This is the one exception to the rule above, for what is
+found along the way. An obvious bug gets a session of its own to fix it; anything else that needs investigating, or a
+bug whose fix is not obvious, gets a GitHub issue saying what was seen, what is not known and what done looks like.
+Neither waits for the owner to ask, and neither stops at a line in a message, which is forgotten: the task in hand goes
+on, and the fix's PR is reviewed like any other.
 
 ## Licensing
 
