@@ -313,7 +313,7 @@ faster at point lookups, and Mason is read-only.
 ### Why it's fast
 
 Postgres is built to find a few rows quickly. Mason is built to read millions of rows quickly. On a large table, four
-things make the difference:
+things about how DuckDB works make the difference:
 
 - **It reads only the columns a query uses.** Postgres stores a table row by row, so a query that sums one column
   still reads every row in full. Mason stores each column separately, and compressed. A `SUM(amount)` reads the
@@ -330,6 +330,17 @@ things make the difference:
   This works best on columns that grow as rows are inserted, such as `created_at` or an increasing `id`, because Mason
   keeps rows in the order they were inserted.
 
+Mason adds two things of its own, automatically:
+
+- **It stores what your queries keep computing.** When queries keep reading the same JSON field, such as
+  `payload ->> 'status'`, Mason stores that field as a column of its own, in the background. After that, reading it
+  is about 200 times faster. It does the same for sorting and grouping by a `jsonb` column. `mason status` lists what
+  it stores.
+- **It rewrites slow query shapes into fast ones, with the same answer.** BI tools send some shapes that DuckDB runs
+  slowly as written: nulls placed last with `ORDER BY col IS NULL, col`, a `date_trunc` of a `timestamptz`, a
+  `count(DISTINCT id)` of a primary key, or a `LEFT JOIN` to `jsonb_each`. Mason sends DuckDB an equivalent form that
+  it runs natively, and the oracle checks that the answer is still exactly Postgres's.
+
 [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) has every measurement and how it was taken.
 [docs/BENCHMARK.md](docs/BENCHMARK.md) shows how to run the benchmark on your own machine.
 
@@ -344,10 +355,8 @@ Most of Mason's speed comes from memory. These are the things that help most, in
 - **Filter by time.** Mason keeps rows in the order they were inserted, so a filter on `created_at` or an increasing
   `id` skips the blocks outside it. On 5 M rows inserted in time order, one day's filter read 1 of 41 blocks. Give
   your dashboards a date range where you can.
-- **Let Mason store your JSON fields.** When queries keep reading the same JSON field, such as
-  `payload ->> 'status'`, Mason stores that field as a column of its own, in the background. After that, reading it
-  is about 200 times faster. `mason status` lists the stored fields. Write `payload ->> 'status'` rather than
-  `(payload -> 'status')::text`: Mason reads `->>` directly, and the cast takes a slower path.
+- **Read JSON text with `->>`.** Write `payload ->> 'status'` rather than `(payload -> 'status')::text`. Mason reads
+  `->>` directly, and the cast takes a much slower path (0.21 s against 8.8 s for a `count(DISTINCT …)` over 5 M rows).
 - **Add cores for more users.** One query already uses every core. More cores help when many dashboards query at
   once: the benchmark's 4-core machine answered 12 queries a second with 8 clients and with 32, and the extra clients
   waited in a queue.
