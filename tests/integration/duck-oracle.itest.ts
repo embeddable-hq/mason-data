@@ -56,6 +56,7 @@ import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
+import { countGap, emptyTally, fixtureTally, fixtureText, gapSummary, type Met } from "./oracle/gap-tally.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
 import { GAP_MARK, GAPS, type GapId } from "../../src/duck/gaps.ts";
@@ -293,7 +294,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
    * a plain connection of the same copy — no analysis, no rewrite, no Mason function — scored by the oracle's own
    * verdict (names, rows, text; the OIDs taken as Postgres's, since DuckDB has none). The tallies are
    * tests/fixtures/oracle-duckdb-alone.json, which docs/SQL-SUPPORT.md's comparison renders; UPDATE_FIXTURE=1 rewrites it, and
-   * a run whose tallies moved by more than a percentage point of the statements fails until it is.
+   * a run whose tallies moved by more than a percentage point of the statements fails until it is. Its `gaps` detail
+   * (oracle/gap-tally.ts) is rewritten with it and never compared: one statement moving between two gaps is no
+   * failure, and a total that moves is already held, so the detail reads as of the last UPDATE_FIXTURE=1.
    */
   const alone = await theStore.instance.connect();
   await alone.run("SET search_path = 'public'");
@@ -345,17 +348,21 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   const known = new Set<Decided>(), decided = new Set<Decided>();
   // a statement verifies what it is made of when DuckDB answered it with rows, exactly as Postgres, in every phase
   const unproven = new Set<string>();
-  // the gaps (src/duck/gaps.ts) the statements met: a refusal that names one, a decided difference
-  const met = new Map<GapId, number>();
-  const meet = (g: GapId): void => { met.set(g, (met.get(g) ?? 0) + 1); };
+  /** the copy phase's tallies: how Mason answered each statement, and how DuckDB alone did (`duckdbAlone`) */
+  const tallies = { statements: 0, mason: { exact: 0, decided: 0, refused: 0, differs: 0 }, duckdb: { exact: 0, name: 0, refused: 0, value: 0, rows: 0, text: 0, other: 0 } };
+  // the gaps (src/duck/gaps.ts) the statements met: a refusal that names one, a decided difference. One place counts
+  // both the total and its gap, so each gap's count sums to `tallies.mason` (oracle/gap-tally.ts, the two measures)
+  const copyPhaseGaps = emptyTally(), everyAskGaps = emptyTally();
+  const meet = (met: Met, g: GapId, group: string, first: boolean): void => {
+    countGap(everyAskGaps, met, g, group);
+    if (first) { tallies.mason[met]++; countGap(copyPhaseGaps, met, g, group); }
+  };
   /** A REFUSAL BY NAME: Mason's 0A000 naming a refused gap, where Postgres answers (or refuses otherwise) */
   const namedGap = (got: Answer): GapId | null => {
     const named = "code" in got && got.code === "0A000" ? GAP_MARK.exec(`${got.message} ${got.detail ?? ""}`)?.[1] : undefined;
     return named !== undefined && named in GAPS && GAPS[named as GapId].kind === "refused" ? named as GapId : null;
   };
   let shaped = 0;
-  /** the copy phase's tallies: how Mason answered each statement, and how DuckDB alone did (`duckdbAlone`) */
-  const tallies = { statements: 0, mason: { exact: 0, decided: 0, refused: 0, differs: 0 }, duckdb: { exact: 0, name: 0, refused: 0, value: 0, rows: 0, text: 0, other: 0 } };
   // the sessions' TimeZone: UTC, as set at their start, until a statement asks for another
   let zone = "UTC";
   const run = async (phase: string): Promise<void> => {
@@ -383,9 +390,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       const broken = k?.holds === undefined ? null : "code" in got ? `refused: ${got.code} ${got.message}` : "code" in want ? `answered where Postgres refuses ${want.code} ${want.message}` : k.holds(want, got);
       if (broken !== null) { if (first) tallies.mason.differs++; differences.push({ phase, group: q.group, kind: "held", name: q.name, detail: broken, sql: q.sql }); continue; }
       // a decided case differing in ANOTHER way than decided is a difference like any other
-      if (k && (v === null || v.kind === k.kind || k.holds !== undefined)) { unproven.add(q.sql); if (first) { if (v === null) tallies.mason.exact++; else tallies.mason.decided++; } if (v !== null) { known.add(k); meet(k.gap); } continue; }
+      if (k && (v === null || v.kind === k.kind || k.holds !== undefined)) { unproven.add(q.sql); if (v !== null) { known.add(k); meet("decided", k.gap, q.group, first); } else if (first) tallies.mason.exact++; continue; }
       const gap = v === null ? null : namedGap(got);
-      if (gap !== null) { if (first) tallies.mason.refused++; meet(gap); continue; }
+      if (gap !== null) { meet("refused", gap, q.group, first); continue; }
       if (v !== null) { if (first) tallies.mason.differs++; differences.push({ phase, group: q.group, kind: v.kind, name: q.name, detail: v.detail, sql: q.sql }); continue; }
       if (first) tallies.mason.exact++;
       // THE SHAPES (oracle/shapes.ts), once, of what both answered alike with rows: the same answer at another depth
@@ -400,8 +407,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         if (sk) decided.add(sk);
         if (sv === null) continue;
         const sgap = namedGap(sg);
-        if (sgap !== null) { meet(sgap); continue; }
-        if (sk && sv.kind === sk.kind) { known.add(sk); meet(sk.gap); continue; }
+        if (sgap !== null) { meet("refused", sgap, q.group, false); continue; }
+        if (sk && sv.kind === sk.kind) { known.add(sk); meet("decided", sk.gap, q.group, false); continue; }
         differences.push({ phase, group: `${q.group} [${s.shape}]`, kind: sv.kind, name: `${q.name} [${s.shape}]`, detail: sv.detail,
           sql: s.values === undefined ? s.sql : `${s.sql} -- with ${JSON.stringify(s.values)}` });
       }
@@ -411,25 +418,27 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   alone.closeSync();
   await roleCases();
   await settingCases();
-  // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of play)
+  for (const round of [1, 2]) {
+    psql(dbUrl, mutations(round) + typedMutations(round));
+    await sync.once();
+    await run(`after changes round ${round}`);
+  }
+  const asked = all().length * 3 + shaped;
+  // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of
+  // play), and the gaps' detail beside them: here, past the last phase, as `everyAsk` counts every phase
   if (ONLY === null) {
-    const fixture = { ...tallies, measured: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy" };
+    const fixture = { ...tallies, gaps: { copyPhase: fixtureTally(copyPhaseGaps), everyAsk: { asked, ...fixtureTally(everyAskGaps) } }, measured: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy" };
     const pct = (n: number): string => `${(100 * n / tallies.statements).toFixed(1)}%`;
     console.log(`duck oracle, DuckDB alone: ${tallies.statements} statements: exact ${pct(tallies.duckdb.exact)}, the rows under its own names ${pct(tallies.duckdb.name)}, refused ${pct(tallies.duckdb.refused)}, ` +
       `a wrong value ${pct(tallies.duckdb.value)}, wrong rows ${pct(tallies.duckdb.rows)}, other text ${pct(tallies.duckdb.text)}, other ${pct(tallies.duckdb.other)}; ` +
       `Mason: exact ${pct(tallies.mason.exact)}, decided ${pct(tallies.mason.decided)}, refused by name ${pct(tallies.mason.refused)}, differs ${pct(tallies.mason.differs)}`);
-    if (UPDATE_FIXTURE) { fs.writeFileSync(ALONE_FIXTURE, `${JSON.stringify(fixture, null, 2)}\n`); console.log(`UPDATE_FIXTURE=1: wrote ${ALONE_FIXTURE}`); }
+    if (UPDATE_FIXTURE) { fs.writeFileSync(ALONE_FIXTURE, fixtureText(fixture)); console.log(`UPDATE_FIXTURE=1: wrote ${ALONE_FIXTURE}`); }
     else {
       const was = JSON.parse(fs.readFileSync(ALONE_FIXTURE, "utf8")) as typeof fixture;
       const moved = (["mason", "duckdb"] as const).flatMap((side) => Object.entries(fixture[side]).filter(([k, n]) => Math.abs(n - (was[side] as Record<string, number>)[k]!) > tallies.statements / 100)
         .map(([k, n]) => `${side}.${k}: ${n} where the fixture has ${(was[side] as Record<string, number>)[k]}`));
       assert.deepEqual(moved, [], `${ALONE_FIXTURE} is not what this run measured (docs/SQL-SUPPORT.md's comparison renders it): regenerate with UPDATE_FIXTURE=1 and read the diff`);
     }
-  }
-  for (const round of [1, 2]) {
-    psql(dbUrl, mutations(round) + typedMutations(round));
-    await sync.once();
-    await run(`after changes round ${round}`);
   }
 
   /**
@@ -690,7 +699,6 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // ---- the verdict ----------------------------------------------------------------------------------------------
   const counted = new Map<string, number>();
   for (const d of differences) counted.set(`${d.group} / ${d.kind}`, (counted.get(`${d.group} / ${d.kind}`) ?? 0) + 1);
-  const asked = all().length * 3 + shaped;
   fs.writeFileSync(report, `${asked} statements asked (${all().length} × 3 phases, and ${shaped} in other shapes); ${differences.length} differ\n` +
     [...counted].sort((a, b) => b[1] - a[1]).map(([k, n]) => `  ${n} × ${k}`).join("\n") + "\n\n" +
     differences.map((d) => `[${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`).join("\n\n") + "\n");
@@ -716,13 +724,13 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     else assert.deepEqual(equals.map((p) => `${p.table}.${p.column} ${p.steps} ${p.state}`), [], "under C or ICU no jsonb's C key is stored: the order's key equates");
     assert.deepEqual(paths.filter((p) => p.state !== "ready").map((p) => `${p.table} ${p.column} ${p.steps}: ${p.state} ${p.why}`), [], "every path stored is ready");
   }
+  for (const line of gapSummary(copyPhaseGaps, tallies.statements, everyAskGaps, asked)) console.log(line);
   // a filtered run asks only some statements: a decision it did not meet is not stale
   const stale = ONLY !== null ? [] : staleDecisions(KNOWN, known, decided);
   assert.deepEqual(stale, [], "a decided difference that no longer differs");
-  console.log(`duck oracle: gaps met: ${[...met].sort().map(([g, n]) => `${g} ${n}`).join(", ")}`);
   // A DEAD GAP: a refused or decided entry no statement meets (removed, or held by a test it names)
   const dead = ONLY !== null ? [] : (Object.entries(GAPS) as Array<[GapId, (typeof GAPS)[GapId]]>)
-    .filter(([id, g]) => g.kind !== "limit" && !("heldBy" in g) && !met.has(id)).map(([id]) => id);
+    .filter(([id, g]) => g.kind !== "limit" && !("heldBy" in g) && everyAskGaps.refused[id] === undefined && everyAskGaps.decided[id] === undefined).map(([id]) => id);
   assert.deepEqual(dead, [], "src/duck/gaps.ts entries no oracle statement meets: add a statement that does (oracle/gap-cases.ts), or remove the entry");
 
   // ---- what is verified (src/duck/verified.ts): exactly what the statements answered alike were made of ----------
