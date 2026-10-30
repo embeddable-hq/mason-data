@@ -75,6 +75,7 @@ mason init demo && mason start       # starts a demo shop database for you: noth
 mason add order_items                # adds the fourth table, so you can watch its sync start
 mason user add me                    # prints a connection URL with a password (shown only once)
 psql "<the URL it printed>" -c "select status, count(*) from orders group by 1"   # or use any Postgres client
+mason ui                             # opens Mason in your browser: the tables syncing, the users and the queries
 mason destroy                        # deletes the synced data and the demo database (the next mason start creates a new one)
 ```
 
