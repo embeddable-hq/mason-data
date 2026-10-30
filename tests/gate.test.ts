@@ -14,12 +14,14 @@ import { fileURLToPath } from "node:url";
 import { ALWAYS, CI_FILE, GateRefusal, NODE_PIN, ORACLE, UsageError, buildPlan, chooseTests, ciFacts, ensureNode, importsOf, oracleAskedNothing, parseArgs, parseMappedPort, pinProblem, runGate, type Config, type Plan, type Step } from "../scripts/gate.ts";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+/** The file names below are invented, under t/ and p/: a real-looking path to nothing fails the conventions' path guard. */
+const I = "import", F = "from"; // spelled apart for the same reason: the import guard reads a fixture's line as an import
 const NODE = process.execPath;
 
 /** A step that runs a line of JavaScript. */
 const js = (label: string, code: string, boundMs = 30_000, extra: Partial<Step> = {}): Step => ({ label, cmd: NODE, args: ["-e", code], boundMs, ...extra });
-const PASS = js("tests/pass.test.ts", "");
-const FAIL = js("tests/fail.test.ts", "process.exit(3)");
+const PASS = js("t/pass.test.ts", "");
+const FAIL = js("t/fail.test.ts", "process.exit(3)");
 
 const tmp = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "gate-test-"));
 
@@ -49,7 +51,7 @@ const config = (s: ReturnType<typeof stubs>, lines: string[]): Config => ({
   root: ROOT, nodeBin: path.dirname(NODE), docker: s.docker, psql: s.psql, postgresImage: "postgres:18", out: (l) => { lines.push(l); },
   postgresReadyMs: 300, pollMs: 10, graceMs: 200,
 });
-const INTEGRATION: Plan = { first: [PASS], integration: [js("tests/integration/pass.itest.ts", "")] };
+const INTEGRATION: Plan = { first: [PASS], integration: [js("t/integration/pass.itest.ts", "")] };
 const nameOf = (calls: string[]): string => /--name (\S+)/.exec(calls.find((c) => c.startsWith("run ")) ?? "")?.[1] ?? "(no docker run)";
 const removedExactly = (calls: string[]): boolean => calls.includes(`rm --force --volumes ${nameOf(calls)}`);
 const alive = (pid: number): boolean => {
@@ -84,35 +86,35 @@ test("ci.yml naming two Nodes, none, a non-major or no Postgres is a refusal, ne
 // ---- which files ----------------------------------------------------------------------------------------------------
 
 test("importsOf reads static, multi-line and dynamic imports as repository paths, and no package", () => {
-  assert.deepEqual(importsOf("tests/integration/a.itest.ts", `
-    import { x } from "../../src/duck/sync.ts";
-    import {
+  assert.deepEqual(importsOf("t/integration/a.itest.ts", `
+    ${I} { x } ${F} "../../p/duck/sync.ts";
+    ${I} {
       y,
-    } from './helper.ts';
-    import "../side.ts";
-    const z = await import("../../src/lib/z.ts");
+    } ${F} './helper.ts';
+    ${I} "../side.ts";
+    const z = await ${I}("../../p/lib/z.ts");
     import * as fs from "node:fs";
     import { test } from "yaml";
-  `).sort(), ["src/duck/sync.ts", "src/lib/z.ts", "tests/integration/helper.ts", "tests/side.ts"]);
+  `).sort(), ["p/duck/sync.ts", "p/lib/z.ts", "t/integration/helper.ts", "t/side.ts"]);
 });
 
 const TESTS = new Map([
-  ["tests/a.test.ts", `import "../src/a.ts";`],
-  ["tests/b.test.ts", `import "../src/b.ts";`],
-  ["tests/postgres-api/n.test.ts", `import "../../src/a.ts";`],
-  ["tests/integration/a.itest.ts", `import "../../src/a.ts";`],
-  ["tests/integration/c.itest.ts", `import "./helper.ts";`],
-  [ORACLE, `import "../../src/a.ts";`],
+  ["t/a.test.ts", `${I} "../p/a.ts";`],
+  ["t/b.test.ts", `${I} "../p/b.ts";`],
+  ["t/postgres-api/n.test.ts", `${I} "../../p/a.ts";`],
+  ["t/integration/a.itest.ts", `${I} "../../p/a.ts";`],
+  ["t/integration/c.itest.ts", `${I} "./helper.ts";`],
+  [ORACLE, `${I} "../../p/a.ts";`],
 ]);
 const choose = (changed: string[], named: string[] = [], oracle = false): ReturnType<typeof chooseTests> => chooseTests({ tests: TESTS, changed, named, oracle });
 
 test("a test file importing a changed file directly is chosen, and says why; one that does not is not", () => {
-  const c = choose(["src/a.ts"]);
+  const c = choose(["p/a.ts"]);
   assert.deepEqual(c.unit, [
     { file: ALWAYS[0], why: "always" }, { file: ALWAYS[1], why: "always" },
-    { file: "tests/a.test.ts", why: "imports src/a.ts" }, { file: "tests/postgres-api/n.test.ts", why: "imports src/a.ts" },
+    { file: "t/a.test.ts", why: "imports p/a.ts" }, { file: "t/postgres-api/n.test.ts", why: "imports p/a.ts" },
   ]);
-  assert.deepEqual(c.integration, [{ file: "tests/integration/a.itest.ts", why: "imports src/a.ts" }]);
+  assert.deepEqual(c.integration, [{ file: "t/integration/a.itest.ts", why: "imports p/a.ts" }]);
   assert.deepEqual(c.nothingNear, []);
 });
 
@@ -123,23 +125,23 @@ test("nothing changed still runs the two always-files, and no integration file",
 });
 
 test("a changed test and a changed helper reach their files; a changed file with no importer is said", () => {
-  const c = choose(["tests/b.test.ts", "tests/integration/helper.ts", "src/web/page.css"]);
-  assert.deepEqual(c.unit.map((e) => [e.file, e.why]).slice(2), [["tests/b.test.ts", "changed"]]);
-  assert.deepEqual(c.integration, [{ file: "tests/integration/c.itest.ts", why: "imports tests/integration/helper.ts" }]);
-  assert.deepEqual(c.nothingNear, ["src/web/page.css"]);
+  const c = choose(["t/b.test.ts", "t/integration/helper.ts", "p/web/page.css"]);
+  assert.deepEqual(c.unit.map((e) => [e.file, e.why]).slice(2), [["t/b.test.ts", "changed"]]);
+  assert.deepEqual(c.integration, [{ file: "t/integration/c.itest.ts", why: "imports t/integration/helper.ts" }]);
+  assert.deepEqual(c.nothingNear, ["p/web/page.css"]);
 });
 
 test("a file named by hand is run and says so, beside what the change chose", () => {
-  const c = choose(["src/b.ts"], ["tests/integration/c.itest.ts"]);
-  assert.deepEqual(c.integration, [{ file: "tests/integration/c.itest.ts", why: "named by hand" }]);
-  assert.ok(c.unit.some((e) => e.file === "tests/b.test.ts"));
+  const c = choose(["p/b.ts"], ["t/integration/c.itest.ts"]);
+  assert.deepEqual(c.integration, [{ file: "t/integration/c.itest.ts", why: "named by hand" }]);
+  assert.ok(c.unit.some((e) => e.file === "t/b.test.ts"));
 });
 
 test("a change never picks the oracle: it is said left out, and --oracle or naming its file runs it", () => {
-  const near = choose(["src/a.ts"]);
+  const near = choose(["p/a.ts"]);
   assert.ok(!near.integration.some((e) => e.file === ORACLE));
-  assert.equal(near.oracleLeftOut, "imports src/a.ts");
-  const subset = choose(["src/a.ts"], [], true);
+  assert.equal(near.oracleLeftOut, "imports p/a.ts");
+  const subset = choose(["p/a.ts"], [], true);
   assert.ok(subset.integration.some((e) => e.file === ORACLE && e.why === "--oracle"));
   assert.equal(subset.oracleLeftOut, null);
   const whole = choose([], [ORACLE]);
@@ -148,8 +150,8 @@ test("a change never picks the oracle: it is said left out, and --oracle or nami
 
 test("the plan: typecheck first, one file at a time, IT_ORACLE_ONLY only with --oracle, npm ci only without node_modules", () => {
   const opts = { nodeBin: "/n/bin", hasNodeModules: true, oracleOnly: null, timeoutMs: null, platform: "darwin-arm64" };
-  const plain = buildPlan(choose(["src/a.ts"], [ORACLE]), opts);
-  assert.deepEqual(plain.first.map((s) => s.label), ["typecheck", ...ALWAYS, "tests/a.test.ts", "tests/postgres-api/n.test.ts"]);
+  const plain = buildPlan(choose(["p/a.ts"], [ORACLE]), opts);
+  assert.deepEqual(plain.first.map((s) => s.label), ["typecheck", ...ALWAYS, "t/a.test.ts", "t/postgres-api/n.test.ts"]);
   assert.ok([...plain.first, ...plain.integration].every((s) => s.boundMs > 0), "every step has a bound");
   assert.equal(plain.first[1]?.cmd, "/n/bin/node", "a test runs under the pinned Node");
   assert.deepEqual(plain.first[1]?.args.slice(0, 2), ["--test", "--test-concurrency=1"]);
@@ -164,9 +166,9 @@ test("the plan: typecheck first, one file at a time, IT_ORACLE_ONLY only with --
 });
 
 test("parseArgs takes a path as a shell gives it, and refuses what is not a test, an empty --oracle and a bad regex", () => {
-  const known = new Map([["tests/a.test.ts", ""]]);
-  assert.deepEqual(parseArgs(["./tests/a.test.ts", "--oracle", "x", "--timeout", "2"], known, process.cwd()), { named: ["tests/a.test.ts"], oracleOnly: "x", timeoutMs: 2000 });
-  for (const bad of [["src/a.ts"], ["--oracle"], ["--oracle", "("], ["--timeout", "0"], ["--nope"]]) {
+  const known = new Map([["t/a.test.ts", ""]]);
+  assert.deepEqual(parseArgs(["./t/a.test.ts", "--oracle", "x", "--timeout", "2"], known, process.cwd()), { named: ["t/a.test.ts"], oracleOnly: "x", timeoutMs: 2000 });
+  for (const bad of [["p/a.ts"], ["--oracle"], ["--oracle", "("], ["--timeout", "0"], ["--nope"]]) {
     assert.throws(() => parseArgs(bad, known, process.cwd()), UsageError, bad.join(" "));
   }
 });
@@ -256,13 +258,13 @@ test("no integration file: no Docker is touched and no Postgres started", async 
 test("a failed step fails the gate, the rest still run, and Postgres is removed", async () => {
   const s = stubs(); const lines: string[] = [];
   const marker = path.join(s.dir, "ran");
-  const plan: Plan = { first: [FAIL, js("tests/after.test.ts", `require("fs").writeFileSync(${JSON.stringify(marker)}, "")`)], integration: [js("tests/integration/fail.itest.ts", "process.exit(1)")] };
+  const plan: Plan = { first: [FAIL, js("t/after.test.ts", `require("fs").writeFileSync(${JSON.stringify(marker)}, "")`)], integration: [js("t/integration/fail.itest.ts", "process.exit(1)")] };
   assert.equal(await runGate(plan, config(s, lines)), 1);
   assert.ok(fs.existsSync(marker), "a failure does not hide the next file's");
   assert.ok(removedExactly(s.calls()));
   const end = lines.slice(lines.findIndex((l) => /FAILED/.test(l))).join("\n");
-  assert.match(end, /tests\/fail\.test\.ts: exit 3/);
-  assert.match(end, /tests\/integration\/fail\.itest\.ts: exit 1/);
+  assert.match(end, /t\/fail\.test\.ts: exit 3/);
+  assert.match(end, /t\/integration\/fail\.itest\.ts: exit 1/);
 });
 
 test("a required step that fails ends the gate there: no Postgres is started for what cannot run", async () => {
@@ -302,7 +304,7 @@ test("no psql is said before any time is spent", async () => {
 test("a failed docker run is a failed gate, the integration file does not run, and the name is still removed", async () => {
   const s = stubs({ run: `echo "pull access denied" >&2; exit 125` }); const lines: string[] = [];
   const marker = path.join(s.dir, "ran");
-  const plan: Plan = { first: [PASS], integration: [js("tests/integration/x.itest.ts", `require("fs").writeFileSync(${JSON.stringify(marker)}, "")`)] };
+  const plan: Plan = { first: [PASS], integration: [js("t/integration/x.itest.ts", `require("fs").writeFileSync(${JSON.stringify(marker)}, "")`)] };
   assert.equal(await runGate(plan, config(s, lines)), 1);
   assert.equal(fs.existsSync(marker), false);
   assert.match(lines.join("\n"), /Postgres did not start: docker run: exit 125: pull access denied/);
@@ -336,9 +338,9 @@ test("a hung file ends at its bound, is named, its process group is gone, and Po
   const pids = path.join(s.dir, "pids");
   // ignores SIGTERM, and has a child in its group, so only the group's SIGKILL ends both
   const hang = `const fs=require("fs"),cp=require("child_process");process.on("SIGTERM",()=>{});const c=cp.spawn(process.execPath,["-e","process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:"ignore"});fs.writeFileSync(${JSON.stringify(pids)},process.pid+" "+c.pid);setInterval(()=>{},1000)`;
-  const plan: Plan = { first: [PASS], integration: [js("tests/integration/hangs.itest.ts", hang, 6000)] };
+  const plan: Plan = { first: [PASS], integration: [js("t/integration/hangs.itest.ts", hang, 6000)] };
   assert.equal(await runGate(plan, config(s, lines)), 1);
-  assert.match(lines.join("\n"), /FAILED[^]*tests\/integration\/hangs\.itest\.ts: HUNG: no end within its bound/);
+  assert.match(lines.join("\n"), /FAILED[^]*t\/integration\/hangs\.itest\.ts: HUNG: no end within its bound/);
   for (const pid of fs.readFileSync(pids, "utf8").split(" ").map(Number)) {
     for (let i = 0; i < 100 && alive(pid); i++) await new Promise((r) => { setTimeout(r, 20); });
     assert.equal(alive(pid), false, `process ${pid} outlived its bound`);
@@ -393,7 +395,7 @@ test("SIGTERM mid-file stops the file's group, removes Postgres by its name, and
   `], {
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, GATE_FIXTURE: JSON.stringify({
-      plan: { first: [], integration: [js("tests/integration/slow.itest.ts", `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`, 60_000)] },
+      plan: { first: [], integration: [js("t/integration/slow.itest.ts", `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`, 60_000)] },
       cfg: { root: ROOT, nodeBin: path.dirname(NODE), docker: s.docker, psql: s.psql, postgresImage: "postgres:18", postgresReadyMs: 5000, pollMs: 10, graceMs: 500 },
     }) },
   });

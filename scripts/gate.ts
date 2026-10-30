@@ -243,6 +243,13 @@ const summary = (log: string): string => {
   return tests === undefined ? "" : ` (${tests} tests, ${/^ℹ skipped (\d+)$/m.exec(text)?.[1] ?? "0"} skipped)`;
 };
 const tail = (log: string, lines = 40): string => fs.readFileSync(log, "utf8").trimEnd().split("\n").slice(-lines).map((l) => `    ${l}`).join("\n");
+/** The test runner's own list of failures when it has one (it repeats each with its message), else the output's end. */
+const excerpt = (log: string): string => {
+  const text = fs.readFileSync(log, "utf8");
+  const at = text.indexOf("✖ failing tests:");
+  if (at < 0) return tail(log);
+  return text.slice(at).trimEnd().split("\n").slice(0, 60).map((l) => `    ${l}`).join("\n");
+};
 const load = (): string => os.loadavg().map((n) => n.toFixed(1)).join(" ");
 
 /**
@@ -310,7 +317,7 @@ export async function runGate(plan: Plan, cfg: Config): Promise<number> {
     if (stopped !== null && !r.hung) { out(`gate: stopped  ${label}`); return false; }
     const what = empty ?? (r.hung ? `HUNG: no end within its bound, stopped after ${seconds(r.ms)}` : r.spawnError !== null ? `could not start: ${r.spawnError}` : `exit ${r.code ?? "unknown"}`);
     failures.push(`${label}: ${what}`);
-    out(`gate: FAIL ${seconds(r.ms).padStart(8)}  ${label}: ${what}\n${tail(r.log)}\n  whole output: ${r.log}`);
+    out(`gate: FAIL ${seconds(r.ms).padStart(8)}  ${label}: ${what}\n${excerpt(r.log)}\n  whole output: ${r.log}`);
     return false;
   };
   const dockerBound = cfg.dockerBoundMs ?? BOUNDS.docker;
