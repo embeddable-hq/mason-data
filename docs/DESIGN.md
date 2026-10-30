@@ -1813,7 +1813,7 @@ edits, so the rule against merging main is not credited with more.
 
 **What CI tests.** A `pull_request` run checks out `refs/pull/<n>/merge` (run 41099689116: `Merge a62e4f5 into 785b7af`,
 the head into main at that push), so a merge is tested without a local merge, as of that push and no later. `main` has
-no branch protection and no ruleset (`gh api`, 2026-10-30), and `ci.yml` has no `merge_group:` trigger, so nothing
+no branch protection and no ruleset (`gh api`, 2026-10-30, before the owner added one that evening: `CLAUDE.md`), and `ci.yml` has no `merge_group:` trigger, so nothing
 stops a red merge and nothing tests the merge as it lands: the 25 most recent merged PRs were all green because whoever
 merged read them, and the `push` run on main is what sees a skew.
 
