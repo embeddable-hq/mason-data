@@ -496,7 +496,16 @@ export class SessionRunner implements DuckRunner {
     const started = Date.now();
     let total = 0;
     let result: DuckDBResult | null = null;
-    let closed = false, fetching = false, released = false;
+    let closed = false, fetching = false, released = false, said = false;
+    // ITS LINE IS SAID WHEN IT ENDS, before its client hears the end, never when its result is released: that waits for
+    // its calls to stop (`cleanUp`, 50 ms and more), by when its client is gone and the next session's statements are
+    // running, and a reader of the log took the late line for theirs (`tests/duck-wire.test.ts`, 1 run in 100 under
+    // load). The worker's port keeps the order: a line posted before the answer is read before it
+    const say = (): void => {
+      if (said) return;
+      said = true;
+      this.log(`statement: ${total} row(s) in ${Date.now() - started} ms — ${oneLine(sql)}`);
+    };
     const release = (): void => {
       if (released) return;
       released = true;
@@ -504,7 +513,7 @@ export class SessionRunner implements DuckRunner {
       signal.removeEventListener("abort", cancel);
       result?.closeSync();
       p.destroySync();
-      this.log(`statement: ${total} row(s) in ${Date.now() - started} ms — ${oneLine(sql)}`);
+      say();
     };
     // A CALLING STATEMENT THAT DID NOT RUN TO ITS END (it failed, its cancel raised, it was closed early) IS CLOSED
     // ONLY ONCE ITS CALLS HAVE STOPPED (the suite hung for good, 0 % CPU). DuckDB hands back a failed chunk
@@ -514,6 +523,7 @@ export class SessionRunner implements DuckRunner {
     // or one read to its end, has no task left to wait for and is released at once
     const releaseAfterCleanup = (): void => {
       if (!callsFunctions || released) { release(); return; }
+      say();
       const done = (async () => { await this.cleanUp(seq, sql); release(); })();
       this.releasing.add(done);
       void done.finally(() => this.releasing.delete(done));
