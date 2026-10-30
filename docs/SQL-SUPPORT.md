@@ -110,9 +110,9 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `infinite-interval` | an infinite interval read from a text (Postgres 17+) | infinity, -infinity | refused when a row holds one (DuckDB's interval has no infinity) | filter it out first, or read it as text |
 | `relative-time-literal` | a relative time combined with anything else ('today 10:00', 'now'::date + …  written as one literal), or read from a row as a date or a time | the transaction's start (a row's value: when the row is read) | refused (a bare 'now', 'today', 'tomorrow', 'yesterday' literal is answered: the transaction's start at the Parse) | current_date + time '10:00', now(), current_date + 1 |
 
-## Answered differently (16)
+## Answered differently
 
-Answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
+16 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|

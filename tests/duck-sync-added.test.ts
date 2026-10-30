@@ -381,6 +381,19 @@ test("a table being caught up, queued or rebuilt is not due to a pass: the loop 
   });
 });
 
+test("mason sync of a table being read again says why, never that its first sync has not finished", async () => {
+  await withSync({ mode: "poll", tables: [table("a")], seed: async (run) => { await run(copied("a")); await run(lastPoll("a")); } }, async (sync) => {
+    const s = sync as unknown as { stopped: boolean; copiedAs: Map<string, string>; snapshots: Map<string, unknown> };
+    s.stopped = false;
+    const key = s.copiedAs.get("public.a")!;
+    s.copiedAs.set("public.a", "other columns");
+    await assert.rejects(sync.pollNow(["public.a"]), { message: "public.a is being read again whole (its columns changed): mason wait waits for it" });
+    s.copiedAs.set("public.a", key);
+    s.snapshots.delete("public.a");
+    await assert.rejects(sync.pollNow(["public.a"]), { message: "public.a is being read again whole (a numeric value outgrew its synced DECIMAL column): mason wait waits for it" });
+  });
+});
+
 test("a table out of its copy is polled from then on: the timer is set again after its catch-up, and after a mason sync that held the pass slot", async () => {
   await withSync({ mode: "poll", tables: [{ ...table("a"), sync: every("30s", 30) }, { ...table("b"), sync: OFF }],
     seed: async (run) => { for (const n of ["a", "b"]) { await run(copied(n)); await run(lastPoll(n)); } } }, async (sync) => {

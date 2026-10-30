@@ -1091,9 +1091,7 @@ export class Sync {
       : st.phase === "failed" ? `its first sync failed: ${firstLine(st.error)}`
       : st.phase !== "copied" ? "its first sync has not finished"
       : this.retired.has(t.source) ? "it is in an older Mason's layout, key order with an index"
-      : this.copiedAs.get(t.source) !== columnsKey(t.columns) ? "its columns changed"
-      : !this.snapshots.has(t.source) ? "a numeric value outgrew its synced DECIMAL column"
-      : null;
+      : this.readAgainWhy(t);
     if (copy !== null) return { source: t.source, copy };
     const b = this.behind.get(t.source);
     if (b !== undefined) return { source: t.source, behind: b.why };
@@ -1445,9 +1443,9 @@ export class Sync {
     // asked after the pass ahead of it: that pass may have copied it, or failed its copy
     for (const t of polled) {
       const st = this.states.get(t.source);
-      if (st?.phase !== "copied" || !this.snapshots.has(t.source) || this.copiedAs.get(t.source) !== columnsKey(t.columns)) {
-        throw new PollRefused("nothing_yet", `${t.source} is not synced yet (${st?.phase === "failed" ? `its first sync failed: ${st.error ?? "mason logs says why"}` : "its first sync has not finished"}): mason wait waits for it`);
-      }
+      if (st?.phase !== "copied") throw new PollRefused("nothing_yet", `${t.source} is not synced yet (${st?.phase === "failed" ? `its first sync failed: ${st.error ?? "mason logs says why"}` : "its first sync has not finished"}): mason wait waits for it`);
+      const again = this.readAgainWhy(t);
+      if (again !== null) throw new PollRefused("nothing_yet", `${t.source} is being read again whole (${again}): mason wait waits for it`);
       if (this.retired.has(t.source)) throw new PollRefused("nothing_yet", `${t.source} is ${RETIRED_LAYOUT} (its synced data serves as it was): it is current once read again — mason wait waits for it`);
       this.refuseRebuilding(t);
     }
@@ -1878,6 +1876,12 @@ export class Sync {
     const ahead = this.rebuildingNow;
     if (this.queued.has(source) && ahead !== null && ahead.source !== source) return `${why} — queued behind ${ahead.source}'s ${ahead.kind === "copy" ? "whole read" : "catch-up"} (one rebuild at a time)`;
     return why;
+  }
+
+  /** why a table whose first sync finished is to be read again whole, or null: what the start's line and mason sync say */
+  private readAgainWhy(t: AddedTable): string | null {
+    if (this.copiedAs.get(t.source) !== columnsKey(t.columns)) return "its columns changed";
+    return this.snapshots.has(t.source) ? null : "a numeric value outgrew its synced DECIMAL column";
   }
 
   private notStreamedReason(source: string): string {
@@ -2842,7 +2846,7 @@ export class Sync {
         // the stream (or the other tables' polls) goes on: the slot holds no WAL for this copy, and the table joins once
         // caught up from the copy's snapshot
         const beside = this.replicated(t) ? "beside the stream, which goes on keeping the other tables current: it is streamed once caught up by one poll from the snapshot it was read at"
-          : this.mode !== "recopy" ? "beside the other tables' polls: it is caught up by one poll from the snapshot it was read at once read" : "beside the other tables";
+          : this.mode !== "recopy" ? "beside the other tables' polls: once read, it is caught up by one poll from the snapshot it was read at" : "beside the other tables";
         const again = this.retired.has(t.source) ? `, again (it is ${RETIRED_LAYOUT})` : "";
         this.log(`syncing ${t.source}${again}: ${t.rows === null ? "rows unknown" : `about ${t.rows} row(s)`}, ${t.bytes} source bytes, ${beside}`);
       }

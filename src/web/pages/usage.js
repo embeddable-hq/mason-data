@@ -37,7 +37,7 @@ export function sampleCells(s) {
     rowsSent: n(s.rowsSent), bytesSent: bytesText(s.bytesSent), p95: s.durationP95Ms === null ? "–" : msText(s.durationP95Ms),
     copy: s.copyBytes === null ? "–" : fileSize(s.copyBytes), rows: n(s.copyRows), failing: s.tablesFailed === 0 ? "" : n(s.tablesFailed),
     oldest: s.oldestSyncSeconds === null ? "–" : duration(s.oldestSyncSeconds), lag: s.streamLagSeconds === null ? "–" : duration(s.streamLagSeconds),
-    memory: `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (synced data ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`,
+    memory: `${fileSize(s.rssBytes)}${s.copyMemoryBytes === null ? "" : ` (engine ${fileSize(s.copyMemoryBytes)} of ${fileSize(s.copyMemoryLimitBytes)})`}`,
   };
 }
 

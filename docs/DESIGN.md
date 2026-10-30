@@ -258,7 +258,7 @@ are `.claude/rules/duckdb.md` "Keeping a copy current". Why each is so:
 | a NAMED publication is read and verified (`checkPublication`), never created, altered or dropped | a read replica takes no CREATE PUBLICATION; on a production primary the slot is the one object Mason creates |
 | a table the publication lacks (or narrows, or filters) is refused alone; insert, update and delete must be published | a filtered row's delete never arrives; one table's gap must not stop the rest |
 | on a standby: a named publication, and Postgres 16+ | a standby decodes only from 16 |
-| `REPLICA IDENTITY NOTHING` and a `key:` table are refused | publishing their updates fails the app's own UPDATEs |
+| `REPLICA IDENTITY NOTHING` and a `key:` table are refused | publishing a table of `REPLICA IDENTITY NOTHING` fails the app's own UPDATEs and DELETEs; a `key:` table's changes carry no key to apply them by |
 | a table joins once caught up by ONE poll; a new slot catches the copies up by one poll from their watermarks | a key's changes replayed in commit order end at its state, so nothing is copied again |
 | a batch (500 ms or 10 k changes) commits with its position before it is acknowledged; idle, the server's position is acknowledged | a run that dies skips what it applied; an idle slot holds no WAL |
 | a large transaction is applied in committed pieces of `PIECE_CHANGES` (10,000) | 607,000 changes in one transaction ran a sync out of a 96 MB heap folded whole; in pieces it ran in 48 MB |
@@ -469,7 +469,7 @@ words, then the statement planned and refused as it would be alone (`EXPLAIN ANA
 `QUERY PLAN` text column or Postgres's JSON; a first line says which copy answered, what DuckDB was sent and what Mason
 computed after. ANALYZE runs the statement as any statement runs, DuckDB's profiler timing each operator. Operators keep
 DuckDB's names (`Table Scan`, not `Seq Scan`, which sends a reader looking for an index); time is `thread time=`
-(`DuckDB Thread Time` in JSON), never `actual time=`; FORMAT XML / YAML and GENERIC_PLAN are refused (`explain-option`).
+(`Engine Thread Time` in JSON), never `actual time=`; FORMAT XML / YAML and GENERIC_PLAN are refused (`explain-option`).
 
 **Why.** EXPLAIN was the review's critical finding, so it is built over plans. DuckDB's operator time is THREAD time
 summed over threads: a parallel scan's exceeds the Execution Time, which a reader of `actual time` takes for elapsed.
@@ -1184,7 +1184,7 @@ a client of the Postgres API like any tool, connected as a `mason user` by the U
 rows and how it is kept current), `describe` (columns, Postgres types, key, foreign keys), `query` (one statement through
 the extended protocol, `max_rows` the Execute's row count so the server stops there and says so, `timeout_ms` a
 `SET statement_timeout`) and `explain`; the agent's guide and `mason help mcp` are its resources. The rows and the kept
-line come from `EXPLAIN (FORMAT JSON)`'s `Mason.Copies` over the wire, never the run's command server: a remote
+line come from `EXPLAIN (FORMAT JSON)`'s `Mason.Tables` over the wire, never the run's command server: a remote
 `mason serve` answers as a local run does, and the words are the sync's own, as `mason status` prints them. One
 EXPLAIN a table, a few at once: a union of them all failed whole for one table it could not plan, and left a refusal
 in the request log the agent never sent. A table is named as a statement writes it (`public."Clients"`, the formatter

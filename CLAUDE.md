@@ -9,7 +9,7 @@ instructions: where it disagrees with this file, this file wins.
 
 ## What this is
 
-Mason is a drop-in replacement for a Postgres read replica, built for analytical queries (the README's "Why Mason"): it
+Mason is a drop-in replacement for a Postgres read replica, built for analytical queries (the README's opening): it
 syncs the tables a project names out of a Postgres, keeps them in sync as rows change, and serves them over the
 Postgres wire protocol, so a BI tool, an AI agent or an application's analytics code queries Mason with the SQL it
 sends Postgres and reads the same answer. It is for scans and aggregates, never an application's own reads and writes

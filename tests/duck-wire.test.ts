@@ -1860,7 +1860,7 @@ test("EXPLAIN ANALYZE reports the statement's own profile, never another stateme
     }
     // FORMAT JSON says the same
     const [doc] = JSON.parse(String((await c.query({ text: "EXPLAIN (ANALYZE, FORMAT JSON) SELECT count(*) FROM big", rowMode: "array", types: raw } as pg.QueryConfig)).rows[0]![0])) as Array<{ Plan: Record<string, unknown>; Mason: Record<string, unknown> }>;
-    assert.deepEqual([doc!.Plan["Node Type"], doc!.Plan["Actual Rows"], doc!.Plan["DuckDB Thread Time"]], ["Column Data Scan", 1, undefined]);
+    assert.deepEqual([doc!.Plan["Node Type"], doc!.Plan["Actual Rows"], doc!.Plan["Engine Thread Time"]], ["Column Data Scan", 1, undefined]);
     assert.match(String(doc!.Mason.Note), /^the engine's profiler recorded no operator of this statement/);
     // a statement the profiler does time is its own, after one it did not and after one of another table's; one that
     // scans a copy says its scan's rows and time
