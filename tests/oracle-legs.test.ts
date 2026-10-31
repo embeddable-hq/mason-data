@@ -10,14 +10,17 @@ import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { STAGES, deadGaps, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, verifiedDiff, wholeRunProblems, type Decision, type LegReport } from "../scripts/oracle-legs.ts";
 
 const statements = Array.from({ length: 40 }, (_, i) => ({ group: "g", name: `statement ${i}`, sql: `SELECT ${i}` }));
-const whole = statements.map((q) => ({ id: statementId(q), name: q.name }));
+/** asked in every phase and held apart from the tallies, as oracle/unordered-limit.ts's are */
+const apart = [{ group: "unordered limit", name: "unordered limit: a", sql: "SELECT a LIMIT 1" }, { group: "unordered limit", name: "unordered limit: b", sql: "SELECT b LIMIT 1" }];
+const whole: LegReport["whole"] = [...statements.map((q) => ({ id: statementId(q), name: q.name })), ...apart.map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))];
 /** every gap a whole run must meet, met in leg 1 */
 const everyGap = () => ({ refused: {}, decided: Object.fromEntries((Object.keys(GAPS) as GapId[]).map((id) => [id, { planted: 1, natural: 0 }])) });
 const decisions = (over: Partial<Decision> = {}): Decision[] => [{ sql: "/x/", why: "why", differed: true, decided: true, ...over }];
 
 function report(leg: number, of = 2): LegReport {
   const mine = statements.filter((q) => legOf(q.sql, of) === leg).map(statementId);
-  return { leg, of, whole, asked: Object.fromEntries(PHASES.map((p) => [p, [...mine]])), stages: leg === 1 ? Object.fromEntries(STAGES.map((s) => [s, 5])) : {}, shaped: 3,
+  const mineApart = apart.filter((q) => legOf(q.sql, of) === leg).map(statementId);
+  return { leg, of, whole, asked: Object.fromEntries(PHASES.map((p) => [p, [...mine, ...mineApart]])), stages: leg === 1 ? Object.fromEntries(STAGES.map((s) => [s, 5])) : {}, shaped: 3,
     tallies: { statements: mine.length, mason: { exact: mine.length }, duckdb: { exact: mine.length } }, copyPhase: { refused: {}, decided: {} }, everyAsk: leg === 1 ? everyGap() : { refused: {}, decided: {} },
     decisions: decisions({ differed: leg === 1 }), verified: [`k${leg}`], differences: 0 };
 }
@@ -43,9 +46,21 @@ test("a statement left out of a leg fails, by name, whichever phase left it out"
     const name = whole.find((s) => s.id === dropped)!.name;
     const problems = partitionProblems([a, b], 2);
     assert.equal(problems.length, 2, problems.join("\n"));
-    assert.match(problems[0]!, new RegExp(`^${phase}: the legs asked \\d+ \\+ \\d+ = 39 statements, where the whole has 40$`));
+    assert.match(problems[0]!, new RegExp(`^${phase}: the legs asked \\d+ \\+ \\d+ = 41 statements, where the whole has 42$`));
     assert.equal(problems[1], `${phase}: no leg asked ${JSON.stringify(name)}`);
   }
+});
+
+test("a statement asked apart from the tallies is held to the whole like the rest, and counts in no tally", () => {
+  const id = statementId(apart[0]!);
+  const [a, b] = legs();
+  assert.deepEqual(partitionProblems([a, b], 2), [], "the tallies are of the 40, the whole of 42");
+  const holder = a.asked[PHASES[1]]!.includes(id) ? a : b;
+  holder.asked[PHASES[1]] = holder.asked[PHASES[1]]!.filter((x) => x !== id);
+  assert.ok(partitionProblems([a, b], 2).includes(`${PHASES[1]}: no leg asked "unordered limit: a"`));
+  const [c, d] = legs();
+  (c.asked[PHASES[0]]!.includes(id) ? d : c).asked[PHASES[0]]!.push(id);
+  assert.match(partitionProblems([c, d], 2).join("\n"), /asked more often than the whole has it: "unordered limit: a"/);
 });
 
 test("a statement asked by both legs, or swapped for another, fails though the counts may sum", () => {
@@ -73,7 +88,7 @@ test("a leg missing, two reports of one leg, a leg of another split, or two whol
   assert.match(partitionProblems([report(1), report(2, 3)], 2).join("\n"), /leg 2 ran as one of 3/);
   const [a, b] = legs();
   b.whole = whole.slice(1);
-  assert.match(partitionProblems([a, b], 2).join("\n"), /list another whole \(39 and 40 statements\)/);
+  assert.match(partitionProblems([a, b], 2).join("\n"), /list another whole \(41 and 42 statements\)/);
 });
 
 test("a stage of one session runs in exactly one leg", () => {

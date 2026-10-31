@@ -40,8 +40,9 @@ export interface Decision { sql: string; why: string; machineFloat?: true; diffe
 export interface LegReport {
   leg: number;
   of: number;
-  /** every statement of the oracle, before any leg's filter: an id each, and its name to say it by */
-  whole: Array<{ id: string; name: string }>;
+  /** every statement of the oracle, before any leg's filter: an id each, and its name to say it by. `apart`: asked in
+   *  every phase like the rest and held by a verdict of its own (oracle/unordered-limit.ts), so in no tally */
+  whole: Array<{ id: string; name: string; apart?: true }>;
   /** the statements' ids as they were asked, by phase */
   asked: Record<string, string[]>;
   stages: Partial<Record<(typeof STAGES)[number], number>>;
@@ -108,7 +109,8 @@ export function partitionProblems(reports: readonly LegReport[], want: number): 
     if (ran.length !== 1) problems.push(`the stage ${stage} ran in ${ran.length} legs, where it runs whole in exactly one`);
   }
   const counted = reports.reduce((n, r) => n + r.tallies.statements, 0);
-  if (counted !== first.whole.length) problems.push(`the legs' tallies count ${counted} statements, where the whole has ${first.whole.length}`);
+  const tallied = first.whole.filter((s) => s.apart !== true).length;
+  if (counted !== tallied) problems.push(`the legs' tallies count ${counted} statements, where the whole has ${tallied}`);
   return problems;
 }
 
@@ -183,11 +185,11 @@ if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLTo
     .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as LegReport);
   const fixture = JSON.parse(fs.readFileSync(path.join(root, "tests/fixtures/oracle-duckdb-alone.json"), "utf8")) as Pick<Tallies, "mason" | "duckdb">;
   const problems = foldProblems(reports, SHARDS.oracle, fixture, VERIFIED);
-  for (const r of reports) console.log(`oracle leg ${r.leg}: ${r.tallies.statements} of ${r.whole.length} statements, ${r.shaped} in other shapes, ${r.differences} differ; stages: ${Object.keys(r.stages).join(", ") || "none"}`);
+  for (const r of reports) console.log(`oracle leg ${r.leg}: ${r.tallies.statements} tallied of ${r.whole.length} statements, ${r.shaped} in other shapes, ${r.differences} differ; stages: ${Object.keys(r.stages).join(", ") || "none"}`);
   if (problems.length > 0) {
     for (const p of problems) console.error(`oracle legs: ${p}`);
     process.exit(1);
   }
-  console.log(`oracle legs: ${reports.map((r) => r.tallies.statements).join(" + ")} = ${reports[0]!.whole.length} statements, each asked in all ${PHASES.length} phases by exactly one leg; ` +
+  console.log(`oracle legs: ${reports.map((r) => (r.asked[PHASES[0]] ?? []).length).join(" + ")} = ${reports[0]!.whole.length} statements, each asked in all ${PHASES.length} phases by exactly one leg; ` +
     `${reports.reduce((n, r) => n + r.shaped, 0)} in other shapes; no stale decision, no dead gap, src/duck/verified.ts and the fixture's tallies hold`);
 }
