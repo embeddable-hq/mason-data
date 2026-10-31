@@ -355,7 +355,8 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   const pg = postgresWording(kind, message);
   // a refusal raised inside DuckDB (a Mason function's, the rewrite's error() call) crossed it as its text alone: the
   // entry its text names (gapIn), read here, the one place that text becomes a statement's error
-  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, detail: `the engine: ${message}` }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
+  // (Mason's own refusal keeps the engine's text out of the DETAIL: it may quote the row, tests/conventions.test.ts)
+  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, ...(pg.code === "0A000" ? {} : { detail: `the engine: ${message}` }) }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
   const fn = /(?:Scalar|Aggregate|Table) Function with name "?([A-Za-z_][\w]*)"? does not exist/.exec(message)?.[1];
   if (fn !== undefined) {
     // what reaches DuckDB was verified against Postgres (src/duck/verified.ts), so a function DuckDB lacks is a gap in
@@ -416,8 +417,7 @@ function postgresWording(kind: string, message: string): { code: string; message
   // an exact sum past DuckDB's 38 digits (a text read as numeric is summed as a DECIMAL(38,18), src/duck/rewrite.ts summed)
   if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past the engine's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})`, gap: "numeric-exact-sum" };
   // a numeric(p, s) read from a text holding NaN or Infinity (src/duck/rewrite.ts pgInput): DuckDB's decimal has none
-  const special = /Could not convert string ['"](NaN|-?Infinity)['"] to DECIMAL/.exec(message);
-  if (special) return { code: "0A000", message: `a numeric ${special[1]} read from a text is not supported by Mason (${gapMark("numeric-special")})`, gap: "numeric-special" };
+  if (/Could not convert string ['"](NaN|-?Infinity)['"] to DECIMAL/.test(message)) return { code: "0A000", message: `a numeric NaN or Infinity read from a text is not supported by Mason (${gapMark("numeric-special")})`, gap: "numeric-special" };
   const conv = /Could not convert string '((?:[^']|'')*)' to (INT16|INT32|INT64|DOUBLE|FLOAT|DATE|TIMESTAMP|UUID|BOOL)/.exec(message);
   if (conv) {
     const t = { INT16: "smallint", INT32: "integer", INT64: "bigint", DOUBLE: "double precision", FLOAT: "real", DATE: "date", TIMESTAMP: "timestamp", UUID: "uuid", BOOL: "boolean" }[conv[2] as "INT16"];

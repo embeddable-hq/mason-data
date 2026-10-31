@@ -57,7 +57,7 @@ test("a libc key orders as the order read says: the first level, then the last a
   // ß is ss at the first level
   assert.equal(libcKey(o, "ß", "").split(" ")[0], libcKey(o, "ss", "").split(" ")[0]);
   assert.equal(libcKept(o, "a-b 대"), "ab");
-  assert.throws(() => libcKey(o, "é", ""), /holds U\+0301, which Mason cannot order as the database's collation en_US\.utf8 does \(Mason gap libc-uncovered\)/);
+  assert.throws(() => libcKey(o, "é", ""), /a text being ordered holds a character Mason cannot order as the database's collation en_US\.utf8 does \(Mason gap libc-uncovered\)/);
 });
 
 test("the order is read from the database once, kept in the copy, and read again when its collation version moves", async () => {

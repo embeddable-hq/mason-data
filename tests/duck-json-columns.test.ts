@@ -624,7 +624,7 @@ test("a jsonb's order is stored as its key: the function's on every row under C,
         // a marked row keeps the document: the CASE computes it, and the statement raises as the call does
         assert.deepEqual(keeper.ready(order), { name: h, exact: false });
         assert.match(on.sql.text, new RegExp(`${h} IS NULL OR .*${h} = unhex\\('0021'\\)`), on.sql.text);
-        assert.match(String(await answer(on.sql.text)), /U\+0000.*libc-uncovered/);
+        assert.match(String(await answer(on.sql.text)), /holds a character Mason cannot order .*libc-uncovered/);
       }
       assert.deepEqual(await answer(on.sql.text), await answer(off.sql.text), `${k.name}: sorted as the function sorts`);
       // the other forms that compare a jsonb read the same key; the rows the libc order covers answered alike
@@ -750,7 +750,7 @@ test("a jsonb's key marked by a write after it was counted exact is never read a
     const exact = await plan(sorted, keeper);
     assert.doesNotMatch(exact.sql.text, /__mason_jsonb_key/, "read exact (the detector has not counted it)");
     assert.match(String(await answer(exact.sql.text)), /mason\[0A000\]: a jsonb compared or sorted here holds a string Mason cannot order .*Mason gap libc-uncovered/);
-    assert.match(String(await answer((await plan(sorted, null)).sql.text)), /U\+0301.*libc-uncovered/, "as the statement's own key refuses it");
+    assert.match(String(await answer((await plan(sorted, null)).sql.text)), /holds a character Mason cannot order .*libc-uncovered/, "as the statement's own key refuses it");
     // the rows without it are sorted from the key alone, as the function sorts them
     const others = "SELECT id FROM docs WHERE id NOT IN (1, 300000) ORDER BY j DESC, id";
     assert.deepEqual(await answer((await plan(others, keeper)).sql.text), await answer((await plan(others, null)).sql.text));
@@ -769,7 +769,7 @@ test("a jsonb's key marked by a write after it was counted exact is never read a
     for (let i = 0; i < 6; i++) await keeper.review();
     assert.deepEqual(keeper.ready(order), { name: h, exact: false });
     assert.ok(keeper.generation() > gen, "the plans that read the key alone are made again");
-    assert.match(String(await answer((await plan(sorted, keeper)).sql.text)), /U\+0301.*libc-uncovered/);
+    assert.match(String(await answer((await plan(sorted, keeper)).sql.text)), /holds a character Mason cannot order .*libc-uncovered/);
     // and says what they are: the gap, never a Mason bug
     const said = host.logged.filter((l) => l.includes("marked rows")).join("\n");
     assert.match(said, /2 row\(s\) hold a character the database's libc order is not measured for.*Mason gap libc-uncovered/, said);

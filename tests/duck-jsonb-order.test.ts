@@ -264,7 +264,7 @@ test("under ICU and a libc locale a jsonb's strings sort by the collation's key 
         // a string the libc order does not cover refuses inside a jsonb as it does as text: by name, never a guess
         const e = await s.refusal(`SELECT t FROM jo, (VALUES ('"a"'), ('{"k": ["x${String.fromCodePoint(0x0E40)}"]}')) v(t) WHERE jo.id = 1 ORDER BY t::jsonb`);
         assert.equal(e.code, "0A000");
-        assert.match(e.message, /U\+0E40.*Mason gap libc-uncovered/);
+        assert.match(e.message, /holds a character Mason cannot order .*Mason gap libc-uncovered/);
         // EQUALITY NEEDS NO COLLATION (a deterministic one's equal strings are equal bytes): a row holding a string the
         // order does not cover — an emoji's variation selector, U+FE0F — is equated, grouped and made DISTINCT, and only
         // a sort refuses it, by name
@@ -282,7 +282,7 @@ test("under ICU and a libc locale a jsonb's strings sort by the collation's key 
             [["1", "2", "other", "f"], ["2", "2", "a", "t"], ["3", "2", "a", "t"], ["4", "2", "other", "f"]]],
         ] as const) assert.deepEqual(await s.rows(sql), want, sql);
         const sorted = await s.refusal(`SELECT n FROM ${rows} ORDER BY x`);
-        assert.match(sorted.message, /U\+2764.*Mason gap libc-uncovered/);
+        assert.match(sorted.message, /holds a character Mason cannot order .*Mason gap libc-uncovered/);
         // a character the order does not cover (U+200B here) refuses as a jsonb's string exactly as it does as text
         const asTextZ = await s.refusal(`SELECT t FROM jo, (VALUES ('a'), ('${zwsp}')) v(t) WHERE jo.id = 1 ORDER BY t`);
         const asJsonbZ = await s.refusal(`SELECT t FROM jo, (VALUES ('a'), ('${zwsp}')) v(t) WHERE jo.id = 1 ORDER BY to_jsonb(t)`);

@@ -144,7 +144,7 @@ function afterPrimary(icuKey: string): string {
 /**
  * The sort key of `s` as one text that orders as glibc orders (bytewise; a space parts the levels, below every hex digit,
  * so a shorter level sorts first): the first-level classes, ICU's accent and case levels of `libcKept(s)` (`icuKey`),
- * the last level's (position, weight) pairs. A value holding a character not covered is refused, naming it.
+ * the last level's (position, weight) pairs. A value holding a character not covered is refused, by the gap alone.
  */
 export function libcKey(o: LibcOrder, s: string, icuKey: string): string {
   let first = "", last = "", at = 0;
@@ -152,7 +152,8 @@ export function libcKey(o: LibcOrder, s: string, icuKey: string): string {
     at++;
     const g = ch.codePointAt(0)!;
     if (o.uncovered[g]) {
-      throw new PgEvalError("0A000", `the text ${JSON.stringify(s.length > 40 ? `${s.slice(0, 40)}…` : s)} holds U+${g.toString(16).toUpperCase().padStart(4, "0")}, which Mason cannot order as the database's collation ${o.collate} does (${gapMark("libc-uncovered")})`);
+      // never the value, nor the character: a refusal reaches any user, of a row a role may hide (issue 128)
+      throw new PgEvalError("0A000", `a text being ordered holds a character Mason cannot order as the database's collation ${o.collate} does (${gapMark("libc-uncovered")})`);
     }
     if (o.l1[g]! > 0) for (const x of o.expansions.get(g) ?? [g]) if (o.l1[x]! > 0) first += hex6(o.l1[x]!);
     if (o.l4[g]! > 0) last += hex6(at) + hex6(o.l4[g]!);

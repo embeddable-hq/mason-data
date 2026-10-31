@@ -501,7 +501,7 @@ export const PG_KINDS = {
       `(extract(hour FROM ${x}) * 3600000000 + extract(minute FROM ${x}) * 60000000 + extract(microseconds FROM ${x}))::int8) ELSE (${x})::text END`,
     read: (t: string): DuckDBValue => {
       const parts = t.split(" ");
-      if (parts.length !== 3) throw new PgEvalError("0A000", `an infinite interval (${t}) is not supported by Mason (Mason gap infinite-interval)`);
+      if (parts.length !== 3) throw new PgEvalError("0A000", `an infinite interval is not supported by Mason (${gapMark("infinite-interval")})`);
       return new DuckDBIntervalValue(Number(parts[0]), Number(parts[1]), BigInt(parts[2]!));
     },
   },
@@ -542,7 +542,7 @@ function viaPostgres(conn: DuckDBConnection, kind: PgKind): void {
           const tuples = [...g.tuples.values()];
           if (kind === "date" || kind === "timestamp" || kind === "timestamptz" || READS_TIME.test(g.template)) {
             const relative = tuples.flat().find((a) => a !== null && RELATIVE.test(a));
-            if (relative !== undefined) throw new PgEvalError("0A000", `the text '${relative}' read as a time is not supported by Mason: it means the transaction's start (Mason gap relative-time-literal)`);
+            if (relative !== undefined) throw new PgEvalError("0A000", `a text read as a time holding a relative word (now, today, tomorrow, yesterday) is not supported by Mason: it means the transaction's start (${gapMark("relative-time-literal")})`);
           }
           const n = tuples[0]!.length;
           const cols = Array.from({ length: n }, (_, i) => `a${i + 1}`);
@@ -696,7 +696,11 @@ export function registerFunctions(conn: DuckDBConnection): void {
   // an abbreviation or a POSIX zone, which Postgres reads with a fixed offset and DuckDB as another zone, refused
   scalar(conn, "__mason_zone", [VARCHAR], VARCHAR, ([z]) => {
     const read = atTimeZoneOf(String(z));
-    if ("problem" in read) throw new PgEvalError(read.sqlstate, read.sqlstate === "0A000" ? `${read.problem} (${gapMark("zone-abbreviation")})` : read.problem);
+    if ("problem" in read) {
+      // the zone is a row's here: Mason's refusal never quotes it (Postgres's own 22023 does, as Postgres does)
+      if (read.sqlstate === "0A000") throw new PgEvalError("0A000", `a time zone read from a row is an abbreviation or a POSIX zone, which Postgres reads with a fixed offset where the IANA zone of that name may move: write an IANA name (${gapMark("zone-abbreviation")})`);
+      throw new PgEvalError(read.sqlstate, read.problem);
+    }
     return read.zone;
   });
   // a division's divisor tested for zero (src/duck/rewrite.ts nonZero): Postgres's error, from a function DuckDB takes
@@ -729,7 +733,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
     const sign = s.startsWith("-") ? "-" : "";
     const [whole, frac = ""] = s.replace(/^-/, "").split(".") as [string, string?];
     const kept = frac.replace(/0+$/, "");
-    if (whole.replace(/^0+(?=\d)/, "").length > 20 || kept.length > 36) throw new PgEvalError("0A000", `the sum of the numeric ${s} is not supported by Mason (${gapMark("numeric-exact-sum")})`);
+    if (whole.replace(/^0+(?=\d)/, "").length > 20 || kept.length > 36) throw new PgEvalError("0A000", `a sum of a numeric past 20 integer or 36 fractional digits is not supported by Mason (${gapMark("numeric-exact-sum")})`);
     return part === 0 ? `${sign}${whole}.${kept.slice(0, 18) || "0"}` : `${sign}0.${kept.slice(18) || "0"}`;
   });
   // a text read as an enum (src/duck/rewrite.ts enumValue): the label, or Postgres's error for one the type lacks

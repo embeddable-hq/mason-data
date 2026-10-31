@@ -189,6 +189,11 @@ paths:
   uses it**: one the oracle verified over its scalar forms answers the others too, so a new piece added by
   `UPDATE_VERIFIED` is read in the diff for the forms it unlocks, and a form not exact is refused by name in the rewrite
   (ARRAY(SELECT …) of a numeric, an array, a row: `array-subquery-element`).
+- **A refusal raised at a row never quotes the row** (issue 128): it reaches any user, in a tool's error box and the
+  request log, of a row a role may hide, so a `PgEvalError` or `NumericError` of 0A000 and a 0A000 of `postgresWording`
+  say the gap and words alone, not the value nor one of its characters, and the engine's text stays out of their DETAIL.
+  Postgres's own errors (22P02 …) quote what Postgres quotes. `tests/conventions.test.ts` holds the source,
+  `tests/duck-refusal-values.test.ts` the wire under a filtered role.
 - **Every refusal names its entry**: `Unrewritable` takes a `GapId` from `src/duck/gaps.ts`, so a refusal without one
   does not compile; `docs/SQL-SUPPORT.md` is rendered from the registry, and `tests/duck-gaps.test.ts` fails when it is not.
 - **No dead entries**: the oracle fails when a `refused` or `differs` entry is met by none of its statements
