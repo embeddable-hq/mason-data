@@ -49,9 +49,9 @@ export const SHARE: CommandSpec & { needs: "run" } = {
   the middle of the handshake: this is for trying Mason, on data you may send that way. mason serve on a host is the
   way to keep a dashboard running.
 
-  The password is made here, printed once and good for this run alone: it is kept nowhere, works on this address only,
-  and is gone when the share ends. A mason user's password and an API token are refused here. What the share reads is
-  one role of mason/roles.yml: --role names it; with one role in the file that one is used, and with several you are
+  The password (mason_share_ and 48 hex digits) is made here, printed once and good for this run alone: it is kept
+  nowhere, works on this address only, and is gone when the share ends. A mason user's password and an API token are
+  refused here. What the share reads is one role of mason/roles.yml: --role names it; with one role in the file that one is used, and with several you are
   asked, or with --json refused with the line to run. With no roles file it reads every synced table, and says so.
 
   --via pinggy (the default) needs only ssh; a free tunnel ends after about an hour, and the share with it: run mason

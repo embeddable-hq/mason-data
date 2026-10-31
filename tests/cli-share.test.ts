@@ -23,7 +23,8 @@ import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { alive, masonProcess } from "../src/cli/runs.ts";
 import { supervisorOf } from "../src/cli/supervise.ts";
 import { unassignedPort } from "./test-ports.ts";
-import { mintToken } from "../src/duck/token.ts";
+import { mintToken, tokenProblem } from "../src/duck/token.ts";
+import { isUserPassword, listenerLogins, LiveUsers, userPassword } from "../src/duck/users.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive } from "../src/duck/grants.ts";
 import { whereParts } from "../src/duck/row-filter.ts";
 import type { ShareDoor, ShareSocket } from "../src/api/postgres/server.ts";
@@ -33,6 +34,9 @@ const absent = (): Record<string, unknown> => ({});
 const { lastLines, pinggyConfig, probeShare, tunnelAddress, tunnelEnds, tunnelPlan } = await import("../src/cli/tunnel.ts" as string).catch(absent) as typeof import("../src/cli/tunnel.ts");
 const { newSharePassword, RunShares, shareRole, shareSecret, tunnelReport } = await import("../src/cli/share-run.ts" as string).catch(absent) as typeof import("../src/cli/share-run.ts");
 const { chosenRole, inOrder } = await import("../src/cli/share.ts" as string).catch(absent) as typeof import("../src/cli/share.ts");
+
+/** a share's password: `mason_share_`, then the 192 random bits as hex */
+const SHARE_PASSWORD_RE = /^mason_share_[0-9a-f]{48}$/;
 
 const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 
@@ -184,16 +188,32 @@ function fakeShares(): { shares: InstanceType<typeof RunShares>; door: () => Sha
   return { shares, door: () => door!, closed: () => closed, lines, ended, stopped };
 }
 
+test("a share's password is recognisably Mason's: its own shape, no user's and no token's, refused on the run's own listener, and whole in a URL", () => {
+  const KEY = "the-project-api-key";
+  const password = newSharePassword();
+  assert.match(password, SHARE_PASSWORD_RE);
+  assert.notEqual(newSharePassword(), password, "made new each time");
+  assert.ok(!isUserPassword(password), "no user's by its shape");
+  assert.ok(isUserPassword(userPassword(KEY, "local", "0123456789abcdef")), "the check tells them apart: a user's still is one");
+  assert.match(tokenProblem(KEY, password) ?? "", /not a Mason user.s password or token/);
+  // what the run's own listener does with it, wired as src/cli/dev.ts wires it: no users file is needed to refuse it
+  const logins = listenerLogins(new LiveUsers(path.join(os.tmpdir(), "mason-share-no-such-project", "users.json"), KEY), KEY);
+  assert.throws(() => logins.authenticate(password, "share_abc123"), /not a Mason user.s password or token/);
+  // every character is one a URL leaves alone: `mason share` prints no URL, and a person who writes one needs no escaping
+  assert.equal(encodeURIComponent(password), password);
+  assert.equal(new URL(`postgres://share_abc123:${password}@127.0.0.1:5433/mason`).password, password);
+});
+
 test("the run holds a share's password as its hash, for its user alone: another's name, a token and a user's password refused, the login gone with the share", async () => {
   const f = fakeShares();
   const password = newSharePassword();
-  assert.match(password, /^[0-9a-f]{48}$/);
+  assert.match(password, SHARE_PASSWORD_RE);
   const opened = await f.shares.open({ secret: shareSecret(password) });
   assert.ok("user" in opened);
   assert.match(opened.user, /^share_[0-9a-f]{6}$/);
   assert.ok(!JSON.stringify(f.shares.state()).includes(shareSecret(password)), "not even its hash leaves the run");
   assert.deepEqual(await f.door().authenticate(password, opened.user), { filters: [], subject: undefined, user: opened.user, jti: opened.user });
-  for (const [p, u] of [[password, "someone"], ["wrong", opened.user], ["mason_0123456789abcdef_0123456789abcdef0123456789abcdef", opened.user]] as const) {
+  for (const [p, u] of [[password, "someone"], ["wrong", opened.user], [userPassword("a-key", opened.user, "0123456789abcdef"), opened.user]] as const) {
     assert.throws(() => f.door().authenticate(p, u), (e: { status: number; code: string; userName: string }) => e.status === 401 && e.code === "invalid_share" && e.userName === u);
   }
   await f.door().recheck({ jti: opened.user });
@@ -441,6 +461,7 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     const s = startShare();
     const r = await reported(s);
     const out = s.stdout();
+    assert.match(r.password, SHARE_PASSWORD_RE, "the report's password row, as it was made");
     assert.match(out, /^Sharing the synced data with a tool outside this machine$/m);
     assert.doesNotMatch(out.split("\n")[0]!, /pinggy/i, "the tunnel's vendor is in no headline");
     assert.equal(r.host, "127.0.0.1");
@@ -542,6 +563,7 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     assert.deepEqual(Object.keys(v), ["share", "next"]);
     const share = v.share as Record<string, unknown>;
     assert.deepEqual(Object.keys(share), ["host", "port", "database", "user", "password", "sslmode", "fingerprint", "role", "reads", "via", "endsAt", "verified"]);
+    assert.match(share.password as string, SHARE_PASSWORD_RE);
     assert.equal(share.sslmode, "require");
     assert.equal(share.verified, true, "the address answered with the share's own certificate");
     assert.equal(share.role, "everything");

@@ -32,8 +32,9 @@ import { sameSecret } from "./security.ts";
 /** What the password is stored and sent as: its SHA-256, hex. */
 export const shareSecret = (password: string): string => crypto.createHash("sha256").update(password).digest("hex");
 
-/** The new password `mason share` prints once: 192 random bits, in characters every form and URL takes. */
-export const newSharePassword = (): string => crypto.randomBytes(24).toString("hex");
+/** The new password `mason share` prints once: `mason_share_` and 192 random bits as 48 hex digits, in characters every
+ *  form and URL takes. Recognisably Mason's and apart from a user's (`isUserPassword`, src/duck/users.ts) and a token's. */
+export const newSharePassword = (): string => `mason_share_${crypto.randomBytes(24).toString("hex")}`;
 
 /** How often a refused login is written to the log, at most: the rest are counted. */
 const REFUSED_LOG_MS = 60_000;
