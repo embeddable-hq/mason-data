@@ -240,6 +240,8 @@ const KNOWN: Decided[] = [
   { sql: /^SELECT upper\('\u{10D70}'\)/u, kind: "value", gap: "unicode-16-case", why: "a Garay letter (Unicode 16): DuckDB's ICU predates it" },
   { sql: /^SELECT q\.id, x FROM docs q LEFT JOIN unnest\(ARRAY\[q\.id, \(CASE WHEN q\.id = 10 THEN 'x' ELSE '1' END\)::int\]\) x ON TRUE LIMIT 3$/, kind: "refused", gap: "limit-errors", why: "row 10's 'x' is no integer, and the limit leaves it out: Postgres stops at row 2, DuckDB computes a lateral's argument a vector of rows at a time" },
   { sql: /^SELECT q\.id, d\.key FROM docs q LEFT JOIN jsonb_each\(CASE WHEN q\.id % 1 = 0 AND q\.id > 2 THEN q\.jb END\) d ON TRUE LIMIT 3$/, kind: "refused", gap: "limit-errors", why: "an array document in a row the limit leaves out: Postgres stops before it, DuckDB computes a lateral's argument a vector of rows at a time" },
+  { sql: /^SELECT c\.id, d\.id AS d, d\.n FROM late_c c JOIN \(SELECT l\.id, l\.k, l\.c, \(l\.j ->> 'n'\)::int AS n FROM late l\) d ON d\.c = c\.id ORDER BY d\.k DESC LIMIT 3$/, kind: "answered", gap: "limit-errors", why: "row 2000's 'x' is no integer, and the limit leaves it out: Postgres computes the derived list and sorts every row, Mason computes it for the rows chosen" },
+  { sql: /^SELECT \* FROM \(SELECT l\.id, \(l\.j ->> 'n'\)::int AS n, l\.k, c\.name FROM late l JOIN late_c c ON c\.id = l\.c\) t ORDER BY t\.k DESC LIMIT 3$/, kind: "answered", gap: "limit-errors", why: "row 2000's 'x' is no integer, and the limit leaves it out: a wrapper's list folded into its join is computed for the rows chosen" },
   { sql: /^SELECT l\.id, \(l\.j ->> 'n'\)::int, c\.name FROM late l LEFT JOIN late_c c ON c\.id = l\.c ORDER BY l\.k DESC LIMIT 3$/, kind: "answered", gap: "limit-errors", why: "row 2000's 'x' is no integer, and the limit leaves it out: Postgres sorts every row (no index on k) and raises, Mason computes the list for the kept rows" },
   { sql: /^SELECT x\.id, x\.e FROM \(SELECT s\.id, s\.e::text AS e FROM \(SELECT q\.id, e FROM docs q LEFT JOIN jsonb_array_elements\(.*\) e ON TRUE\) s WHERE s\.id > \$1\) x LIMIT/, kind: "value", gap: "limit-lateral-filter", why: "a parameter in the filter around the lateral: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows (the same statement with the literal keeps Postgres's)" },
   { sql: /\), b AS \(SELECT \* FROM a WHERE a\.id > 3\) SELECT \* FROM b LIMIT 40 OFFSET 23$/, kind: "value", gap: "limit-lateral-filter", why: "a filter in the CTE that reads the lateral's CTE: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows" },
@@ -386,7 +388,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   ];
   const all = (): ReturnType<typeof every> => every().filter((q) => (ONLY === null || ONLY.test(q.name)) && (LEG === null || legOf(q.sql, LEG.of) === LEG.leg));
   /** a statement of oracle/unordered-limit.ts: asked apart from `all()`, in every phase, by the leg its text hashes to */
-  const unorderedStatement = (q: UnorderedLimit): { group: string; name: string; sql: string } => ({ group: "unordered limit", name: `unordered limit: ${q.name}`, sql: `SELECT ${q.list} ${q.from} ${q.tail}` });
+  const unorderedSql = (q: UnorderedLimit): string => `${q.head ?? ""}SELECT ${q.list} ${q.from} ${q.tail}`;
+  const unorderedStatement = (q: UnorderedLimit): { group: string; name: string; sql: string } => ({ group: "unordered limit", name: `unordered limit: ${q.name}`, sql: unorderedSql(q) });
   /** the statements as they were asked, by phase, for scripts/oracle-legs.ts to hold to `every` */
   const askedIn: Record<string, string[]> = {};
   /** what each stage of one session asked; a leg without the stages asks none */
@@ -465,15 +468,17 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   };
   /** a LIMIT with no ORDER BY: what is defined of its rows, held (oracle/unordered-limit.ts); null where it holds */
   const unorderedLimit = async (q: UnorderedLimit, source: pg.Client, mason: pg.Client): Promise<string | null> => {
-    const sql = `SELECT ${q.list} ${q.from} ${q.tail}`;
-    const [want, whole, got] = [await ask(source, sql, q.values), await ask(source, `SELECT ${q.list} ${q.whole ?? q.from}`), await ask(mason, sql, q.values)];
+    const sql = unorderedSql(q), head = q.head ?? "";
+    if (q.zone !== undefined) for (const c of [source, mason]) await c.query(`SET TimeZone = '${q.zone}'`);
+    const [want, whole, got] = [await ask(source, sql, q.values), await ask(source, `${head}SELECT ${q.list} ${q.whole ?? q.from}`), await ask(mason, sql, q.values)];
+    if (q.zone !== undefined) for (const c of [source, mason]) await c.query("SET TimeZone = 'UTC'");
     if ("code" in want || "code" in whole) return `Postgres refuses it: ${JSON.stringify("code" in want ? want : whole)}`;
     if ("code" in got) return `refused: ${got.code} ${got.message}`;
     const wrong = withinWhole(want, whole.rows, got);
     if (wrong !== null || q.pages === undefined) return wrong;
     const rows: (string | null)[][] = [];
     for (let offset = 0; offset < whole.rows.length; offset += q.pages) {
-      const page = await ask(mason, `SELECT ${q.list} ${q.from} LIMIT ${q.pages} OFFSET ${offset}`);
+      const page = await ask(mason, `${head}SELECT ${q.list} ${q.from} LIMIT ${q.pages} OFFSET ${offset}`);
       if ("code" in page) return `page at ${offset} refused: ${page.code} ${page.message}`;
       rows.push(...page.rows);
     }
@@ -486,7 +491,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       if (LEG !== null && legOf(sql, LEG.of) !== LEG.leg) continue;
       (askedIn[phase] ??= []).push(statementId(unorderedStatement(q)));
       const wrong = await unorderedLimit(q, source, mason);
-      if (wrong !== null) differences.push({ phase, group: "unordered limit", kind: "rows", name, detail: wrong, sql: `SELECT ${q.list} ${q.from} ${q.tail}` });
+      if (wrong !== null) differences.push({ phase, group: "unordered limit", kind: "rows", name, detail: wrong, sql: unorderedSql(q) });
     }
   };
   await run(PHASES[0]);
@@ -750,7 +755,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         if (ONLY !== null && !ONLY.test(n)) continue;
         asked++;
         const wrong = await unorderedLimit(q, source, mason);
-        if (wrong !== null) differences.push({ phase: "row filters", group: "row filter", kind: "rows", name: n, detail: wrong, sql: `SELECT ${q.list} ${q.from} ${q.tail}` });
+        if (wrong !== null) differences.push({ phase: "row filters", group: "row filter", kind: "rows", name: n, detail: wrong, sql: unorderedSql(q) });
       }
       // SHOW ALL: an attribute is a placeholder, listed by neither
       if (ONLY === null || ONLY.test(name(u.key, "SHOW ALL"))) {

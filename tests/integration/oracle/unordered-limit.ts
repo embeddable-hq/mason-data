@@ -16,12 +16,16 @@
  * are answered alike, and they may not weaken the verdict the others are held to.
  */
 
-export interface UnorderedLimit { name: string; list: string; from: string; tail: string; values?: string[]; pages?: number; whole?: string }
+export interface UnorderedLimit { name: string; list: string; from: string; tail: string; values?: string[]; pages?: number; whole?: string;
+  /** a WITH clause before the SELECT */
+  head?: string;
+  /** the session's TimeZone it is asked in (UTC where none is said) */
+  zone?: string }
 
 const JOINED = "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON b.id = c.b_id";
 const u = (name: string, list: string, from: string, tail: string, more: Partial<UnorderedLimit> = {}): UnorderedLimit => ({ name, list, from, tail, ...more });
 
-export const UNORDERED_LIMITS: UnorderedLimit[] = [
+const JOINED_TABLES: UnorderedLimit[] = [
   u("LEFT joins, every table's columns, the tool's preview", "a.*, b.*, c.*", JOINED, "LIMIT 12 OFFSET 0"),
   u("LEFT joins, paged", "a.id, a.note, b.payload, c.doc", JOINED, "LIMIT 7 OFFSET 7", { pages: 7 }),
   u("a LEFT join whose right side is empty of matches", "a.id, b.id AS b, b.payload", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id + 1000", "LIMIT 5"),
@@ -80,10 +84,119 @@ export const UNORDERED_LIMITS: UnorderedLimit[] = [
   u("a derived table of the join", "s.id, s.b", "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id LIMIT 3) s", "LIMIT 2", { whole: "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id) s" }),
 ];
 
+/**
+ * A JOIN'S FROM ITEMS (src/duck/late.ts; issue 134, step 2): a table, a plain derived read, or carried, each spelling of
+ * each under every kind of join. `FROM_ITEMS_*` are generated, so a kind or a spelling added is held in all of them:
+ * here with no ORDER BY, and in the type matrix (`FROM_ITEMS_SORTED`) under every collation kind and two session zones.
+ */
+/** the views a spelling reads (added to oracle/type-matrix.ts TYPED): `top_read` the plain side, `top_read2` a view of it,
+ *  `top_sums` a grouped side, and a view of a join per kind below */
+const SIDE_LIST = "b.id, b.a_id, b.a_id + 1 AS key, b.payload, 1 AS one, b.amount * 2 AS twice, upper(b.payload ->> 'k') AS up, date_trunc('day', b.seen::timestamptz) AS day";
+const SIDE = `SELECT ${SIDE_LIST} FROM top_b b WHERE b.id < 20`;
+/** the same side over the left table: a table joined to itself */
+const SIDE_SELF = "SELECT p.id, p.parent AS a_id, p.parent + 1 AS key, p.note AS payload, 1 AS one, p.id * 2 AS twice, upper(p.name) AS up, date_trunc('day', p.made) AS day FROM top_a p WHERE p.id > 1";
+const SUMS = "SELECT b.a_id, b.a_id + 1 AS key, count(*) AS id, 'sum' AS payload, 1 AS one, sum(b.amount) AS twice, max(b.payload ->> 'k') AS up, max(b.seen)::timestamptz AS day FROM top_b b GROUP BY b.a_id";
+
+const JOIN_KINDS: ReadonlyArray<{ kind: string; from: (side: string) => string; bounded: boolean }> = [
+  { kind: "LEFT", from: (d) => `top_a a LEFT JOIN ${d} ON a.id = d.a_id`, bounded: true },
+  { kind: "RIGHT", from: (d) => `top_a a RIGHT JOIN ${d} ON a.id = d.a_id`, bounded: true },
+  { kind: "FULL", from: (d) => `top_a a FULL JOIN ${d} ON a.id = d.a_id`, bounded: true },
+  { kind: "inner", from: (d) => `top_a a JOIN ${d} ON a.id = d.a_id`, bounded: true },
+  { kind: "comma", from: (d) => `top_a a, ${d} WHERE a.id = d.a_id`, bounded: true },
+  { kind: "a side with no match", from: (d) => `top_a a LEFT JOIN ${d} ON a.id = d.a_id + 1000`, bounded: false },
+  { kind: "a computed join key", from: (d) => `top_a a LEFT JOIN ${d} ON a.id = d.key`, bounded: false },
+  { kind: "a join that multiplies", from: (d) => `top_a a JOIN ${d} ON a.id % 2 = d.a_id % 2`, bounded: false },
+];
+const SELF = { kind: "a table joined to itself", from: (d: string) => `top_a a LEFT JOIN ${d} ON a.id = d.a_id`, bounded: true };
+
+const OUT = "a.id, a.name, a.made, d.id AS d_id, d.a_id, d.key, d.one, d.twice, d.up, d.day";
+const wrapped = (from: string): string => `SELECT ${OUT} FROM ${from}`;
+const viewName = (kind: string): string => `top_join_${JOIN_KINDS.findIndex((k) => k.kind === kind)}`;
+
+/** the side's spelling by kind, and the same in each view of a join */
+export const FROM_ITEM_VIEWS: string =
+  `CREATE VIEW public.top_read AS ${SIDE}; CREATE VIEW public.top_read2 AS SELECT * FROM public.top_read WHERE id > 1; CREATE VIEW public.top_sums AS ${SUMS}; ` +
+  JOIN_KINDS.map((k) => `CREATE VIEW public.${viewName(k.kind)} AS ${wrapped(k.from(`(${SIDE}) d`))}; `).join("") +
+  `CREATE VIEW public.top_join_twice AS SELECT * FROM public.top_join_0 WHERE id IS NOT NULL OR d_id > 0;`;
+
+interface Spelling { spelled: string; side?: (k: typeof SELF) => string; head?: string; from?: (k: typeof SELF) => string; carried?: boolean }
+const SPELLINGS: Spelling[] = [
+  { spelled: "a derived side", side: (k) => k.from(`(${k === SELF ? SIDE_SELF : SIDE}) d`) },
+  { spelled: "a view as a side", side: (k) => k.from("top_read d") },
+  { spelled: "a view of a view as a side", side: (k) => k.from("top_read2 d") },
+  { spelled: "a WITH query as a side", head: `WITH d AS (${SIDE}) `, side: (k) => k.from("d") },
+  { spelled: "a MATERIALIZED WITH query", head: `WITH d AS MATERIALIZED (${SIDE}) `, side: (k) => k.from("d"), carried: true },
+  { spelled: "an aggregated side", side: (k) => k.from(`(${SUMS}) d`), carried: true },
+  { spelled: "a grouped view as a side", side: (k) => k.from("top_sums d"), carried: true },
+  { spelled: "a tool's wrapper", from: (k) => `(${wrapped(k.from(`(${SIDE}) d`))}) t` },
+  { spelled: "a WITH query of the join", from: () => "j" },
+  { spelled: "a view of the join", from: (k) => viewName(k.kind) },
+];
+
+/** a spelling of a kind: the SELECT's head, its list and its FROM */
+function spelledAs(s: Spelling, k: typeof SELF): { head: string; list: string; from: string } {
+  if (s.spelled === "a WITH query of the join") return { head: `WITH j AS (${wrapped(k.from(`(${SIDE}) d`))}) `, list: "*", from: "FROM j" };
+  return s.side !== undefined ? { head: s.head ?? "", list: OUT, from: `FROM ${s.side(k)}` } : { head: "", list: "*", from: `FROM ${s.from!(k)}` };
+}
+const applies = (s: Spelling, k: typeof SELF): boolean => k !== SELF || s.spelled === "a derived side";
+
+const everySpelling = (): Array<{ s: Spelling; k: typeof SELF }> => [...JOIN_KINDS, SELF].flatMap((k) => SPELLINGS.filter((s) => applies(s, k)).map((s) => ({ s, k })));
+
+/** each spelling of each kind with no ORDER BY: pages one list where the join is proved, never where it is not */
+export const FROM_ITEMS_UNORDERED: UnorderedLimit[] = [
+  ...everySpelling().map(({ s, k }) => {
+    const { head, list, from } = spelledAs(s, k);
+    return u(`${s.spelled}, ${k.kind}`, list, from, "LIMIT 7 OFFSET 1", { ...(head !== "" ? { head } : {}), ...(k.bounded && s.carried !== true ? { pages: 6 } : {}) });
+  }),
+  // a WITH query read twice is no plain read of one reference, and a column of a side the list does not read
+  u("a WITH query read twice", "a.id, x.id AS x, y.up", "FROM top_a a LEFT JOIN w x ON x.a_id = a.id LEFT JOIN w y ON y.key = a.id", "LIMIT 9", { head: `WITH w AS (${SIDE}) ` }),
+  u("a side the list does not read", "a.id, a.note", `FROM top_a a JOIN (${SIDE}) d ON d.a_id = a.id`, "LIMIT 5"),
+  u("a zone of the session's in a derived list", "a.id, d.day", `FROM top_a a LEFT JOIN (${SIDE}) d ON d.a_id = a.id`, "LIMIT 5", { zone: "America/New_York" }),
+];
+
+const keysOver = (id: string): ReadonlyArray<{ key: string; order: string; zone?: string }> => [
+  { key: "the database's order", order: `name DESC NULLS LAST, ${id}` },
+  { key: "bytes", order: `name COLLATE "C", ${id}` },
+  { key: "ICU", order: `name COLLATE "und-x-icu" DESC, ${id}` },
+  { key: "the nulls idiom, in a zone of daylight saving", order: `(made) IS NULL ASC, made DESC, ${id}`, zone: "America/New_York" },
+];
+
+/** each spelling of each kind sorted, so every byte of the answer is held: asked in the type matrix */
+export const FROM_ITEMS_SORTED: ReadonlyArray<{ name: string; sql: string; zone?: string }> = [
+  ...everySpelling().flatMap(({ s, k }) => {
+    const { head, list, from } = spelledAs(s, k);
+    // a key of the join's row, by its output names, whatever the spelling's list, NULLs placed alike
+    return keysOver("id NULLS FIRST, d_id NULLS FIRST, a_id NULLS FIRST").map(({ key, order, zone }) => ({ name: `from items: ${s.spelled}, ${k.kind}, sorted by ${key}`, sql: `${head}SELECT ${list} ${from} ORDER BY ${order} LIMIT 6 OFFSET 2`, ...(zone !== undefined ? { zone } : {}) }));
+  }),
+  // the grouped view, by its output name, its ordinal and the qualified column, alone and joined
+  { name: "from items: the grouped view ordered by its output name", sql: "SELECT a_id, twice AS total FROM top_sums ORDER BY total DESC NULLS LAST, a_id LIMIT 3" },
+  { name: "from items: the grouped view ordered by its ordinal", sql: "SELECT a_id, twice AS total FROM top_sums ORDER BY 2, 1 LIMIT 3" },
+  { name: "from items: the grouped view joined, by its output name", sql: "SELECT a.id, s.twice AS total FROM top_a a LEFT JOIN top_sums s ON s.a_id = a.id ORDER BY total DESC NULLS LAST, a.id LIMIT 3" },
+  { name: "from items: the grouped view joined, by its ordinal", sql: "SELECT a.id, s.twice AS total FROM top_a a LEFT JOIN top_sums s ON s.a_id = a.id ORDER BY 2, 1 LIMIT 3" },
+  { name: "from items: the grouped view joined, by the qualified column", sql: "SELECT a.id, a.note, s.twice AS total FROM top_a a LEFT JOIN top_sums s ON s.a_id = a.id ORDER BY s.twice, a.id LIMIT 3" },
+  { name: "from items: a view of a view of a join", sql: "SELECT * FROM top_join_twice ORDER BY id NULLS FIRST, d_id NULLS FIRST LIMIT 6" },
+  { name: "from items: a wrapper's column of a repeated name, by a *", sql: "SELECT * FROM (SELECT a.made, a.id, b.id, a.id + b.id AS sum FROM top_a a JOIN top_b b ON b.a_id = a.id) t ORDER BY sum, made NULLS FIRST LIMIT 3" },
+  { name: "from items: a wrapper's output name before its column", sql: "SELECT id AS name FROM (SELECT a.id, b.id AS b, a.name FROM top_a a JOIN top_b b ON b.a_id = a.id) t ORDER BY name DESC, b DESC LIMIT 3" },
+  { name: "from items: a wrapper's WHERE beside its join's", sql: "SELECT * FROM (SELECT a.id, b.id AS b, b.amount FROM top_a a JOIN top_b b ON b.a_id = a.id WHERE a.id > 1 OR b.id = 1) t WHERE t.amount > 5 OR t.b < 3 ORDER BY id, b LIMIT 3" },
+  { name: "from items: a derived list's value read twice", sql: `SELECT a.id, d.twice, d.twice + 1 AS more FROM top_a a LEFT JOIN (${SIDE}) d ON d.a_id = a.id WHERE d.twice IS NULL OR d.twice > 2 ORDER BY d.twice DESC NULLS LAST, a.id, d.id LIMIT 4` },
+  { name: "from items: a volatile derived list, carried", sql: "SELECT a.id, d.id AS d, d.r < 2 AS r FROM top_a a JOIN (SELECT b.id, b.a_id, random() AS r FROM top_b b) d ON d.a_id = a.id ORDER BY a.id, d.id LIMIT 4" },
+  { name: "from items: a volatile derived WHERE, carried", sql: "SELECT a.id, d.id AS d FROM top_a a JOIN (SELECT b.id, b.a_id FROM top_b b WHERE random() < 2) d ON d.a_id = a.id ORDER BY a.id, d.id LIMIT 4" },
+  { name: "from items: a side with a column named rowid", sql: "SELECT a.id, r.rowid, r.a FROM top_a a JOIN (SELECT id, a_id, rowid, 1 AS a FROM top_r) r ON r.a_id = a.id ORDER BY a.id, r.id LIMIT 3" },
+  { name: "from items: a derived output named rowid", sql: "SELECT a.id, d.rowid FROM top_a a JOIN (SELECT b.a_id, b.id AS rowid FROM top_b b) d ON d.a_id = a.id ORDER BY a.id, d.rowid LIMIT 3" },
+  { name: "from items: two outputs of one name but for case", sql: `SELECT d."N", d.n FROM top_a a JOIN (SELECT b.a_id, b.id AS "N", b.id + 1 AS n FROM top_b b) d ON d.a_id = a.id ORDER BY a.id, d."N" LIMIT 3` },
+  { name: "from items: a LATERAL read", sql: "SELECT a.id, d.c FROM top_a a, LATERAL (SELECT count(*) AS c FROM top_b b WHERE b.a_id = a.id) d ORDER BY a.id LIMIT 3" },
+];
+
+export const UNORDERED_LIMITS: UnorderedLimit[] = [...JOINED_TABLES, ...FROM_ITEMS_UNORDERED];
+
 /** a filtered user's reads (oracle/row-filters.ts): a filtered read is a subquery by now, and stays as it was */
 export const UNORDERED_ROW_SHAPES: UnorderedLimit[] = [
   u("two filtered tables", "o.id, c.name, c.tenant_id", "FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id", "LIMIT 7"),
   u("three, paged by an offset", "i.id, o.status, c.name", "FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id JOIN shop.customers c ON c.id = o.customer_id", "LIMIT 5 OFFSET 3"),
+  u("a wrapper of two filtered tables", "*", "FROM (SELECT o.id, c.name, c.tenant_id FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id) t", "LIMIT 7"),
+  u("a plain derived read of a filtered table", "o.id, d.name", "FROM shop.orders o LEFT JOIN (SELECT id, upper(name) AS name FROM shop.customers) d ON d.id = o.customer_id", "LIMIT 7"),
+  u("a WITH query of a filtered table", "o.id, w.name", "FROM shop.orders o JOIN w ON w.id = o.customer_id", "LIMIT 7", { head: "WITH w AS (SELECT id, name FROM shop.customers) " }),
+  u("a view joined to a filtered table", "p.id, c.name", "FROM shop.paid_orders p JOIN shop.customers c ON c.id = p.customer_id", "LIMIT 7"),
 ];
 
 type Rows = ReadonlyArray<ReadonlyArray<string | null>>;
