@@ -9,7 +9,7 @@
  * Offline, over a generated table (DuckDB's own range(): no customer's data), with the listener and the run's command
  * server as `mason start` wires them (src/cli/dev.ts).
  */
-import { test } from "node:test";
+import { before, test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as net from "node:net";
@@ -24,6 +24,15 @@ import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import { API_KEY, CALLING, client, dir, inProcess, logged, nodeProcess, released, schema, store, timed, useServer } from "./duck-executor-harness.ts";
 
 useServer();
+
+// THE ENGINE WARM, as these tests have always found it: in one file they ran after the starvation test, now
+// tests/duck-executor-starve.test.ts, whose statement this is. On CI's runner a client leaving is released in about 20 ms
+// after such a statement, and in 1.3 s to past the 2 s bound as the store's first (PR 114's runs): what they hold is the
+// release of a running statement, not a cold first one.
+before(async () => {
+  const c = await client();
+  try { await c.query(CALLING); } finally { await c.end(); }
+});
 
 test("a client leaving mid-statement cancels its function-calling statement within about a second, however busy the engine's thread", { timeout: 120_000 }, async (t) => {
   const a = await client();
