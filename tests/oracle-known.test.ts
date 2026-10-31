@@ -1,6 +1,6 @@
 /**
  * When the oracle's decided differences are stale (tests/integration/oracle/known.ts; the oracle itself,
- * tests/integration/duck-oracle.itest.ts, needs a Postgres): .claude/rules/duckdb.md "No dead entries", and the one
+ * tests/integration/duck-oracle.itest.ts, needs a Postgres): .claude/rules/duck-rewrite.md "No dead entries", and the one
  * class it spares — a decided difference whose truth depends on the machine's floating-point arithmetic.
  */
 import { test } from "node:test";
