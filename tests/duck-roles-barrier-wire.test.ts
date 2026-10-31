@@ -211,7 +211,13 @@ test("a filtered role's statement does not change form: no row number of a filte
     "SELECT l.label, o.id FROM labels l JOIN orders o ON o.tenant_id = l.id LIMIT 3",
     "SELECT * FROM (SELECT l.label, o.id FROM labels l JOIN orders o ON o.tenant_id = l.id) t ORDER BY id LIMIT 3",
     "SELECT l.label, d.id FROM labels l JOIN (SELECT id, tenant_id FROM orders) d ON d.tenant_id = l.id ORDER BY d.id LIMIT 3",
-    "WITH w AS (SELECT id, label FROM labels) SELECT w.label, o.id FROM orders o JOIN w ON w.id = o.tenant_id ORDER BY o.id LIMIT 3"];
+    "WITH w AS (SELECT id, label FROM labels) SELECT w.label, o.id FROM orders o JOIN w ON w.id = o.tenant_id ORDER BY o.id LIMIT 3",
+    // issue 134, step 3: a computed key by each spelling, a number beside a `*`, USING and NATURAL
+    "SELECT l.label, o.id, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY twice LIMIT 3",
+    "SELECT l.label, o.id, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY 3 DESC LIMIT 3",
+    "SELECT *, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY twice, 1 LIMIT 3",
+    "SELECT o.id, i.qty FROM orders o JOIN (SELECT order_id AS id, qty FROM order_items) i USING (id) ORDER BY id LIMIT 3",
+    "SELECT o.id, i.qty FROM orders o NATURAL JOIN (SELECT order_id AS id, qty FROM order_items) i ORDER BY id LIMIT 3"];
   for (const user of ["scalar", "list"]) {
     for (const sql of reads) {
       logged.length = 0;

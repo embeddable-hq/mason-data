@@ -113,8 +113,22 @@ const OUT = "a.id, a.name, a.made, d.id AS d_id, d.a_id, d.key, d.one, d.twice, 
 const wrapped = (from: string): string => `SELECT ${OUT} FROM ${from}`;
 const viewName = (kind: string): string => `top_join_${JOIN_KINDS.findIndex((k) => k.kind === kind)}`;
 
+/** the tables merged columns are held over: `top_m1` and `top_m2` share columns of differing types, NULLs and repeats on
+ *  either side; `top_m4` shares two of `top_m1`'s; `top_m3` shares none */
+export const MERGE_COPIED = ["top_m1", "top_m2", "top_m3", "top_m4"];
+const MERGE_TABLES =
+  "CREATE TABLE public.top_m1 (id int PRIMARY KEY, k int, s varchar(8), t text, w bigint, f real, made timestamptz, only1 text); " +
+  "INSERT INTO public.top_m1 VALUES (1, 10, 'a', 'b', 4294967296, 0.1, '2024-03-10 23:30:00+00', 'one'), (2, 20, 'b', 'A', 2, 0.5, '2024-03-11 01:00:00+00', 'two'), (3, NULL, 'c', NULL, NULL, NULL, NULL, 'three'), " +
+  "(4, 20, NULL, 'a', 4, 1.5, '2024-11-03 05:30:00+00', 'four'), (5, 50, 'e', 'é', 5, 2.5, '2024-11-03 06:30:00+00', 'five'), (6, NULL, 'f', 'Z', 6, 3.5, NULL, 'six'); " +
+  "CREATE TABLE public.top_m2 (id bigint PRIMARY KEY, k int, s text, t text, w int, f double precision, made timestamptz, only2 text); " +
+  "INSERT INTO public.top_m2 VALUES (2, 20, 'b', 'A', 2, 0.5, '2024-03-11 01:00:00+00', 'dos'), (3, 30, 'x', 'c', 3, 0.10000000149011612, NULL, 'tres'), (4, NULL, NULL, 'a', 4, 1.5, '2024-11-03 05:30:00+00', 'cuatro'), " +
+  "(7, 20, 'g', 'é', 70, 7.5, '2024-03-10 23:30:00+00', 'siete'), (8, NULL, 'h', NULL, NULL, NULL, NULL, 'ocho'); " +
+  "CREATE TABLE public.top_m3 (x int PRIMARY KEY, y text); INSERT INTO public.top_m3 VALUES (1, 'p'), (2, 'q'); " +
+  "CREATE TABLE public.top_m4 (id int PRIMARY KEY, k int, tail text); INSERT INTO public.top_m4 VALUES (2, 20, 'l2'), (4, 21, 'l4'), (9, 90, 'l9'), (10, NULL, 'l10'); ";
+
 /** the side's spelling by kind, and the same in each view of a join */
-export const FROM_ITEM_VIEWS: string =
+export const FROM_ITEM_VIEWS: string = MERGE_TABLES +
+  "CREATE VIEW public.top_merged AS SELECT id, k, x.only1, y.only2 FROM public.top_m1 x FULL JOIN public.top_m2 y USING (id, k); " +
   `CREATE VIEW public.top_read AS ${SIDE}; CREATE VIEW public.top_read2 AS SELECT * FROM public.top_read WHERE id > 1; CREATE VIEW public.top_sums AS ${SUMS}; ` +
   JOIN_KINDS.map((k) => `CREATE VIEW public.${viewName(k.kind)} AS ${wrapped(k.from(`(${SIDE}) d`))}; `).join("") +
   `CREATE VIEW public.top_join_twice AS SELECT * FROM public.top_join_0 WHERE id IS NOT NULL OR d_id > 0;`;
@@ -156,6 +170,35 @@ export const FROM_ITEMS_UNORDERED: UnorderedLimit[] = [
   u("a zone of the session's in a derived list", "a.id, d.day", `FROM top_a a LEFT JOIN (${SIDE}) d ON d.a_id = a.id`, "LIMIT 5", { zone: "America/New_York" }),
 ];
 
+/**
+ * MERGED COLUMNS (src/duck/late.ts; issue 134, step 3): `USING` and `NATURAL` under each join kind, read through Postgres's
+ * join alias variables, in a list and in a `*`, unsorted here and sorted in the type matrix.
+ */
+const JOINS: ReadonlyArray<{ kind: string; join: string }> = [{ kind: "inner", join: "JOIN" }, { kind: "LEFT", join: "LEFT JOIN" }, { kind: "RIGHT", join: "RIGHT JOIN" }, { kind: "FULL", join: "FULL JOIN" }];
+/** a merged spelling: `from` by the join's words, the columns merged, and what sorts its rows to one order */
+const MERGED: ReadonlyArray<{ spelled: string; from: (j: string) => string; list: string; ties: string }> = [
+  { spelled: "USING (id), bigint and int", from: (j) => `top_m1 x ${j} top_m2 y USING (id)`, list: "id, x.only1, y.only2", ties: "x.only1 NULLS FIRST, y.only2 NULLS FIRST" },
+  { spelled: "USING (k), a column that repeats and holds NULLs", from: (j) => `top_m1 x ${j} top_m2 y USING (k)`, list: "k, x.only1, y.only2", ties: "x.only1 NULLS FIRST, y.only2 NULLS FIRST" },
+  { spelled: "USING of a varchar and a text", from: (j) => `top_m1 x ${j} top_m2 y USING (s)`, list: "s, x.only1, y.only2", ties: "x.only1 NULLS FIRST, y.only2 NULLS FIRST" },
+  { spelled: "USING of a bigint and an int", from: (j) => `top_m1 x ${j} top_m2 y USING (w)`, list: "w, x.only1, y.only2", ties: "x.only1 NULLS FIRST, y.only2 NULLS FIRST" },
+  { spelled: "USING of a real and a double", from: (j) => `top_m1 x ${j} top_m2 y USING (f)`, list: "f, x.only1, y.only2", ties: "x.only1 NULLS FIRST, y.only2 NULLS FIRST" },
+  { spelled: "a many-column USING", from: (j) => `top_m1 x ${j} top_m2 y USING (id, k, s, t, w, f, made)`, list: "id, k, s, t, w, f, made, x.only1, y.only2", ties: "k NULLS FIRST, x.only1 NULLS FIRST, y.only2 NULLS FIRST" },
+  { spelled: "NATURAL, two columns in common", from: (j) => `top_m1 x NATURAL ${j} top_m4 z`, list: "id, k, x.only1, z.tail", ties: "k NULLS FIRST, x.only1 NULLS FIRST, z.tail NULLS FIRST" },
+  { spelled: "NATURAL with no column in common", from: (j) => `top_m1 x NATURAL ${j} top_m3 z`, list: "id, x.only1, z.x, z.y", ties: "z.x" },
+  { spelled: "two joins merging one column", from: (j) => `top_m1 x ${j} top_m4 z USING (id) ${j} top_m2 y USING (id)`, list: "id, x.only1, z.tail, y.only2", ties: "x.only1 NULLS FIRST, z.tail NULLS FIRST, y.only2 NULLS FIRST" },
+  { spelled: "a merged column beside a join on a condition", from: (j) => `top_m1 x ${j} top_m4 z USING (id) LEFT JOIN top_m3 m ON m.x = id`, list: "id, x.only1, z.tail, m.y", ties: "x.only1 NULLS FIRST, z.tail NULLS FIRST" },
+];
+const MERGED_ROWS = MERGED.flatMap((m) => JOINS.map(({ kind, join }) => ({ name: `${m.spelled}, ${kind}`, from: `FROM ${m.from(join)}`, list: m.list, key: m.list.split(",")[0]!, ties: m.ties })));
+
+const MERGED_UNORDERED: UnorderedLimit[] = [
+  ...MERGED_ROWS.flatMap((m) => [
+    u(`merged: ${m.name}`, m.list, m.from, "LIMIT 7 OFFSET 1"),
+    u(`merged: ${m.name}, a *`, "*", m.from, "LIMIT 7"),
+  ]),
+  // a USING that equates a key is proved bounded: its pages are one list
+  ...JOINS.map(({ kind, join }) => u(`merged: paged, a key's USING, ${kind}`, "id, x.only1, z.tail", `FROM top_m1 x ${join} top_m4 z USING (id)`, "LIMIT 3", { pages: 3 })),
+];
+
 const keysOver = (id: string): ReadonlyArray<{ key: string; order: string; zone?: string }> => [
   { key: "the database's order", order: `name DESC NULLS LAST, ${id}` },
   { key: "bytes", order: `name COLLATE "C", ${id}` },
@@ -163,8 +206,100 @@ const keysOver = (id: string): ReadonlyArray<{ key: string; order: string; zone?
   { key: "the nulls idiom, in a zone of daylight saving", order: `(made) IS NULL ASC, made DESC, ${id}`, zone: "America/New_York" },
 ];
 
+/**
+ * COMPUTED SORT KEYS (src/duck/late.ts; issue 134, step 3): each spelling of one output as a key, each direction, each kind
+ * of value, its value shown: one value, read from the key.
+ */
+const COMPUTED_FROM = "FROM top_a a LEFT JOIN top_b b ON b.a_id = a.id";
+const COMPUTED_OUTPUTS: ReadonlyArray<{ value: string; what: string; zone?: string }> = [
+  { value: "a.id * 2", what: "an integer" },
+  { value: "upper(a.name)", what: "a text under the database's order" },
+  { value: "b.payload ->> 'k'", what: "a jsonb field" },
+  { value: "b.amount * 2", what: "a numeric" },
+  { value: "date_trunc('day', a.made)", what: "a day in the zone of the session" },
+  { value: "date_trunc('day', a.made)", what: "a day in a zone of daylight saving", zone: "America/New_York" },
+  { value: "to_char(a.made, 'YYYY-MM-DD HH24')", what: "a timestamptz's text in another zone", zone: "Asia/Kathmandu" },
+  { value: "coalesce(a.note, 'none') || '!'", what: "a value of a NULL" },
+];
+const DIRECTIONS = ["", " DESC", " DESC NULLS LAST", " NULLS FIRST"];
+const COMPUTED_TIES = "2 NULLS FIRST, 3 NULLS FIRST";
+const COMPUTED_SPELLINGS: ReadonlyArray<{ spelled: string; order: (value: string) => string }> = [
+  { spelled: "by name", order: () => "x" },
+  { spelled: "by ordinal", order: () => "1" },
+  { spelled: "by the repeated expression", order: (value) => value },
+];
+const COMPUTED_KEYS: ReadonlyArray<{ name: string; sql: string; zone?: string }> = [
+  ...COMPUTED_OUTPUTS.flatMap(({ value, what, zone }) => COMPUTED_SPELLINGS.flatMap(({ spelled, order }) => DIRECTIONS.map((dir) => ({
+    name: `computed key: ${what}, ${spelled}${dir}`,
+    sql: `SELECT ${value} AS x, a.id, b.id AS b, b.payload ${COMPUTED_FROM} ORDER BY ${order(value)}${dir}, ${COMPUTED_TIES} LIMIT 6 OFFSET 1`,
+    ...(zone !== undefined ? { zone } : {}) })))),
+  ...["C", "und-x-icu"].flatMap((c) => [
+    { name: `computed key: an output of its own collation ${c}, by name`, sql: `SELECT upper(a.name) COLLATE "${c}" AS x, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY x DESC, ${COMPUTED_TIES} LIMIT 5` },
+    { name: `computed key: a key of a collation the output has not, ${c}`, sql: `SELECT upper(a.name) AS x, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY upper(a.name) COLLATE "${c}", ${COMPUTED_TIES} LIMIT 5` },
+  ]),
+  { name: "computed key: the nulls idiom over a computed key", sql: `SELECT a.id * 2 AS x, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY (b.amount * 2) IS NULL ASC, b.amount * 2 DESC, ${COMPUTED_TIES} LIMIT 5` },
+  { name: "computed key: the nulls idiom of an input an output's name shadows", sql: `SELECT upper(a.note) AS name, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY (name) IS NULL ASC, name DESC, ${COMPUTED_TIES} LIMIT 5` },
+  { name: "computed key: two outputs of one expression, the second named", sql: `SELECT upper(a.name) AS x, a.id, b.id AS b, upper(a.name) AS y ${COMPUTED_FROM} ORDER BY y DESC, ${COMPUTED_TIES} LIMIT 5` },
+  { name: "computed key: an output computed over its own key", sql: `SELECT a.id * 2 AS x, a.id, b.id AS b, a.id * 2 + 1 AS y ${COMPUTED_FROM} ORDER BY x DESC, ${COMPUTED_TIES} LIMIT 5` },
+  { name: "computed key: one output twice in the sort", sql: `SELECT a.id * 2 AS x, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY x, 1 DESC, ${COMPUTED_TIES} LIMIT 5` },
+  { name: "computed key: a key no output shows", sql: `SELECT a.id, b.id AS b, b.payload ${COMPUTED_FROM} ORDER BY a.id % 3, 1, 2 NULLS FIRST LIMIT 5` },
+  { name: "computed key: beside a *, by ordinal", sql: `SELECT *, a.id * 2 AS x ${COMPUTED_FROM} ORDER BY 11 DESC, 1, 6 NULLS FIRST LIMIT 4` },
+  { name: "computed key: beside a *, by name", sql: `SELECT a.*, b.id AS b, a.id * 2 AS x ${COMPUTED_FROM} ORDER BY x DESC, b NULLS FIRST LIMIT 4` },
+  { name: "computed key: a tool's wrapper by its output's name", sql: `SELECT id, b, x FROM (SELECT a.id, b.id AS b, a.id * 2 AS x, b.payload ${COMPUTED_FROM}) t ORDER BY x DESC, 2 NULLS FIRST LIMIT 4` },
+  { name: "computed key: a tool's wrapper by the qualified column", sql: `SELECT id, b, x FROM (SELECT a.id, b.id AS b, upper(a.name) AS x, b.payload ${COMPUTED_FROM}) t ORDER BY t.x DESC, 1, 2 NULLS FIRST LIMIT 4` },
+  { name: "computed key: a wrapper's * by ordinal", sql: `SELECT * FROM (SELECT a.id, b.id AS b, upper(a.name) AS x ${COMPUTED_FROM}) t ORDER BY 3 DESC, 1, 2 NULLS FIRST LIMIT 4` },
+  { name: "computed key: a view of joins by its computed column", sql: "SELECT * FROM top_join_0 ORDER BY twice DESC NULLS LAST, id, d_id NULLS FIRST LIMIT 4" },
+  { name: "computed key: a computed output beside an aggregated side", sql: "SELECT a.id, s.twice * 2 AS total FROM top_a a LEFT JOIN top_sums s ON s.a_id = a.id ORDER BY total DESC NULLS LAST, 1 LIMIT 3" },
+  { name: "computed key: a derived side's column in a computed key", sql: `SELECT a.id, d.twice + 1 AS x, d.id AS d FROM top_a a LEFT JOIN (${SIDE}) d ON d.a_id = a.id ORDER BY x DESC NULLS LAST, 1, 3 LIMIT 4` },
+  { name: "computed key: over a merged column", sql: "SELECT id + 1 AS x, y.only2 FROM top_m1 x FULL JOIN top_m2 y USING (id) ORDER BY x DESC, 2 NULLS FIRST LIMIT 4" },
+  // what a computed key may not change: it runs on every row, as Postgres sorts every row
+  { name: "computed key: an output that raises, by name", sql: `SELECT 1 / (a.id - 2) AS x, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY x, 2, 3 LIMIT 1` },
+  { name: "computed key: a key that raises, no output shows it", sql: `SELECT a.id, b.id AS b ${COMPUTED_FROM} ORDER BY 1 / (a.id - 2), 1, 2 LIMIT 1` },
+  { name: "computed key: a cast that raises", sql: `SELECT (a.name || 'x')::int AS x, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY x, 2, 3 LIMIT 1` },
+  // random() and now(): what is defined of them
+  { name: "computed key: random() in the list, no key", sql: `SELECT random() < 2 AS r, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY a.id, b.id NULLS FIRST LIMIT 4` },
+  { name: "computed key: random() shown and a key", sql: `SELECT random() < 2 AS r, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY r, ${COMPUTED_TIES} LIMIT 4` },
+  { name: "computed key: random() a key beside the columns", sql: `SELECT a.id, b.id AS b ${COMPUTED_FROM} ORDER BY random() < 2, 1, 2 NULLS FIRST LIMIT 4` },
+  { name: "computed key: now() shown and a key", sql: `SELECT now() - now() AS r, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY r, ${COMPUTED_TIES} LIMIT 4` },
+  { name: "computed key: now() a key, in a zone", sql: `SELECT a.id, b.id AS b, a.made < now() AS gone ${COMPUTED_FROM} ORDER BY gone NULLS FIRST, 1, 2 NULLS FIRST LIMIT 4`, zone: "America/New_York" },
+];
+
+/** the merged columns sorted, each byte held: by the merged column, a `*`, each collation kind, the nulls idiom, a zone */
+const MERGED_SORTED: ReadonlyArray<{ name: string; sql: string; zone?: string }> = [
+  ...MERGED_ROWS.flatMap((m) => [
+    { name: `merged: ${m.name}, sorted by it`, sql: `SELECT ${m.list} ${m.from} ORDER BY ${m.key} NULLS FIRST, ${m.ties} LIMIT 6 OFFSET 1` },
+    { name: `merged: ${m.name}, sorted by it DESC`, sql: `SELECT ${m.list} ${m.from} ORDER BY ${m.key} DESC NULLS LAST, ${m.ties} LIMIT 6` },
+    { name: `merged: ${m.name}, a *, sorted by it`, sql: `SELECT * ${m.from} ORDER BY ${m.key} NULLS FIRST, ${m.ties} LIMIT 6` },
+  ]),
+  ...JOINS.flatMap(({ kind, join }) => {
+    const from = `FROM top_m1 x ${join} top_m2 y USING (t)`, ties = "x.only1 NULLS FIRST, y.only2 NULLS FIRST";
+    return [
+      { name: `merged: a text ${kind}, the database's order`, sql: `SELECT t, x.only1, y.only2 ${from} ORDER BY t DESC NULLS LAST, ${ties} LIMIT 6` },
+      { name: `merged: a text ${kind}, bytes`, sql: `SELECT t, x.only1, y.only2 ${from} ORDER BY t COLLATE "C", ${ties} LIMIT 6` },
+      { name: `merged: a text ${kind}, ICU`, sql: `SELECT t, x.only1, y.only2 ${from} ORDER BY t COLLATE "und-x-icu" DESC, ${ties} LIMIT 6` },
+      { name: `merged: a text ${kind}, the nulls idiom`, sql: `SELECT t, x.only1, y.only2 ${from} ORDER BY (t) IS NULL ASC, t DESC, ${ties} LIMIT 6` },
+      { name: `merged: a timestamptz ${kind}, in a zone of daylight saving`, sql: `SELECT made, date_trunc('day', made) AS day, x.only1, y.only2 FROM top_m1 x ${join} top_m2 y USING (made) ORDER BY day DESC NULLS LAST, made, x.only1 NULLS FIRST, y.only2 NULLS FIRST LIMIT 6`, zone: "America/New_York" },
+      { name: `merged: a timestamptz ${kind}, in another zone`, sql: `SELECT made, date_trunc('day', made) AS day, x.only1, y.only2 FROM top_m1 x ${join} top_m2 y USING (made) ORDER BY day DESC NULLS LAST, made, x.only1 NULLS FIRST, y.only2 NULLS FIRST LIMIT 6`, zone: "Asia/Kathmandu" },
+    ];
+  }),
+  { name: "merged: a merged column in an expression of the list", sql: "SELECT id * 2 AS d, coalesce(y.only2, 'none') AS o, x.only1 FROM top_m1 x FULL JOIN top_m2 y USING (id) ORDER BY id NULLS FIRST LIMIT 5" },
+  { name: "merged: the join's sides read apart from the merged column", sql: "SELECT id, x.id AS l, y.id AS r FROM top_m1 x FULL JOIN top_m2 y USING (id) ORDER BY l NULLS FIRST, r NULLS FIRST LIMIT 6" },
+  { name: "merged: an output's name before the merged column", sql: "SELECT x.only1 AS id, y.only2 FROM top_m1 x FULL JOIN top_m2 y USING (id) ORDER BY id NULLS FIRST, 2 NULLS FIRST LIMIT 6" },
+  { name: "merged: a WHERE on it", sql: "SELECT id, x.only1 FROM top_m1 x LEFT JOIN top_m2 y USING (id) WHERE id > 2 ORDER BY id DESC LIMIT 3" },
+  { name: "merged: a view of a merging join, by its column", sql: "SELECT * FROM top_merged ORDER BY id NULLS FIRST, k NULLS FIRST, only1 NULLS FIRST LIMIT 6" },
+  { name: "merged: a tool's wrapper of a *", sql: "SELECT * FROM (SELECT * FROM top_m1 x JOIN top_m2 y USING (id)) t ORDER BY id DESC LIMIT 3" },
+  { name: "merged: a wrapper by the merged column", sql: "SELECT id, only2 FROM (SELECT id, y.only2 FROM top_m1 x FULL JOIN top_m2 y USING (id)) t ORDER BY t.id NULLS FIRST LIMIT 6" },
+  { name: "merged: a WITH query of a merging join", sql: "WITH j AS (SELECT id, k, y.only2 FROM top_m1 x LEFT JOIN top_m2 y USING (id, k)) SELECT * FROM j ORDER BY id LIMIT 3" },
+  { name: "merged: a derived side in the USING", sql: "SELECT id, d.two, x.only1 FROM top_m1 x FULL JOIN (SELECT id, k * 2 AS two FROM top_m4) d USING (id) ORDER BY id NULLS FIRST LIMIT 6" },
+  { name: "merged: an aggregated side in the USING", sql: "SELECT id, s.n, x.only1 FROM top_m1 x FULL JOIN (SELECT id, count(*) AS n FROM top_m4 GROUP BY id) s USING (id) ORDER BY id NULLS FIRST LIMIT 6" },
+  { name: "merged: a join's own alias stays as it was", sql: "SELECT j.id, x.only1 FROM (top_m1 x JOIN top_m4 z USING (id)) AS j ORDER BY j.id LIMIT 2" },
+  { name: "merged: a table's whole row stays as it was", sql: "SELECT row_to_json(z), x.only1 FROM top_m1 x JOIN top_m4 z USING (id) ORDER BY x.id LIMIT 2" },
+];
+
 /** each spelling of each kind sorted, so every byte of the answer is held: asked in the type matrix */
 export const FROM_ITEMS_SORTED: ReadonlyArray<{ name: string; sql: string; zone?: string }> = [
+  ...MERGED_SORTED,
+  ...COMPUTED_KEYS,
   ...everySpelling().flatMap(({ s, k }) => {
     const { head, list, from } = spelledAs(s, k);
     // a key of the join's row, by its output names, whatever the spelling's list, NULLs placed alike
@@ -189,7 +324,11 @@ export const FROM_ITEMS_SORTED: ReadonlyArray<{ name: string; sql: string; zone?
   { name: "from items: a LATERAL read", sql: "SELECT a.id, d.c FROM top_a a, LATERAL (SELECT count(*) AS c FROM top_b b WHERE b.a_id = a.id) d ORDER BY a.id LIMIT 3" },
 ];
 
-export const UNORDERED_LIMITS: UnorderedLimit[] = [...JOINED_TABLES, ...FROM_ITEMS_UNORDERED];
+export const UNORDERED_LIMITS: UnorderedLimit[] = [...JOINED_TABLES, ...FROM_ITEMS_UNORDERED, ...MERGED_UNORDERED,
+  // a key that decides nothing the oracle can compare: the rows are rows of the whole join
+  u("random() as the only key", "a.id, b.id AS b", COMPUTED_FROM, "ORDER BY random() LIMIT 4", { whole: COMPUTED_FROM }),
+  u("random() by a name, shown as no value", "a.id, b.id AS b, random() * 0 AS r", COMPUTED_FROM, "ORDER BY r LIMIT 4", { whole: COMPUTED_FROM }),
+];
 
 /** a filtered user's reads (oracle/row-filters.ts): a filtered read is a subquery by now, and stays as it was */
 export const UNORDERED_ROW_SHAPES: UnorderedLimit[] = [
@@ -199,6 +338,8 @@ export const UNORDERED_ROW_SHAPES: UnorderedLimit[] = [
   u("a plain derived read of a filtered table", "o.id, d.name", "FROM shop.orders o LEFT JOIN (SELECT id, upper(name) AS name FROM shop.customers) d ON d.id = o.customer_id", "LIMIT 7"),
   u("a WITH query of a filtered table", "o.id, w.name", "FROM shop.orders o JOIN w ON w.id = o.customer_id", "LIMIT 7", { head: "WITH w AS (SELECT id, name FROM shop.customers) " }),
   u("a view joined to a filtered table", "p.id, c.name", "FROM shop.paid_orders p JOIN shop.customers c ON c.id = p.customer_id", "LIMIT 7"),
+  u("a USING of a filtered table", "id, c.name, o.status", "FROM shop.orders o JOIN shop.customers c USING (id)", "LIMIT 7"),
+  u("a computed key over a filtered table", "o.id, c.name, upper(c.name) AS shout", "FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id", "ORDER BY shout LIMIT 7"),
 ];
 
 type Rows = ReadonlyArray<ReadonlyArray<string | null>>;
