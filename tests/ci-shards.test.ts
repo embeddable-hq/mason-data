@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import { SHARDS, coverageProblems, needsProblems, partition, shardCommands, shardFiles, testFiles, weightOf, type ShardRecord } from "../scripts/ci-shards.ts";
+import { SHARDS, coverageProblems, needsProblems, partition, shardCommand, shardFiles, testFiles, weightOf, type ShardRecord } from "../scripts/ci-shards.ts";
 import { ORACLE } from "../scripts/gate.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -48,16 +48,10 @@ test("a new file lands in a shard by itself, and the partition is a function of 
 });
 
 test("a shard with no file is an error: `node --test` alone would run every test in the tree", () => {
-  assert.throws(() => shardCommands("unit", 1, []), /has no file/);
-  assert.deepEqual(shardCommands("unit", 1, ["a"]), [{ args: ["--test", "a"], env: {} }]);
-  assert.deepEqual(shardCommands("rest", 2, ["a"]), [{ args: ["--test", "--test-concurrency=1", "a"], env: {} }]);
-  assert.deepEqual(shardCommands("oracle", 2, ["a"])[0]!.env, { IT_ORACLE_LEG: "2/2" });
-});
-
-test("the executor's own tests run by themselves after their shard's others, and a shard of them alone is one command", () => {
-  const file = "tests/duck-executor.test.ts";
-  assert.deepEqual(shardCommands("unit", 1, ["a", file, "b"]).map((c) => c.args), [["--test", "a", "b"], ["--test", file]]);
-  assert.deepEqual(shardCommands("unit", 1, [file]).map((c) => c.args), [["--test", file]]);
+  assert.throws(() => shardCommand("unit", 1, []), /has no file/);
+  assert.deepEqual(shardCommand("unit", 1, ["a"]), { args: ["--test", "a"], env: {} });
+  assert.deepEqual(shardCommand("rest", 2, ["a"]), { args: ["--test", "--test-concurrency=1", "a"], env: {} });
+  assert.deepEqual(shardCommand("oracle", 2, ["a"]).env, { IT_ORACLE_LEG: "2/2" });
 });
 
 test("verify fails on a file in no shard, in two, on one not in the tree, and on a shard that left no record", () => {

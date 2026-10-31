@@ -34,8 +34,7 @@ export const isKind = (k: string | undefined): k is Kind => k === "unit" || k ==
  */
 const WEIGHTS: Readonly<Record<string, number>> = {
   "tests/duck-executor-slow-vector.test.ts": 142,
-  // 130 s alone, after its shard's other files (`ALONE`), so it counts for what those would have done in the time
-  "tests/duck-executor.test.ts": 300,
+  "tests/duck-executor.test.ts": 130,
   "tests/cli-state-matrix.test.ts": 162,
   "tests/cli-commands.test.ts": 119,
   "tests/cli-share.test.ts": 89,
@@ -74,14 +73,6 @@ const UNLISTED = 3;
 /** The executor's stress tests fill every core they get: one to a shard, before anything else is placed. */
 const APART: readonly string[] = ["tests/duck-executor-slow-vector.test.ts", "tests/duck-executor-starve.test.ts", "tests/duck-executor-cancel-stress.test.ts"];
 
-/**
- * Files that run after their shard's others, by themselves. Their tests hold a statement of 6 M rows to a bound of a
- * second or two, and split from the stress tests they used to run strictly after, one in the same shard is the likely
- * reason one missed it (`a client leaving mid-statement`, PR 114's first run). The stress tests are not trimmed, so the
- * bound gets the machine.
- */
-const ALONE: readonly string[] = ["tests/duck-executor.test.ts"];
-
 /** The files of a kind, as `npm test` and `npm run test:integration` find them: the oracle is its own kind. */
 export function testFiles(kind: Kind, root: string): string[] {
   if (kind === "oracle") return [ORACLE];
@@ -115,15 +106,11 @@ export function shardFiles(kind: Kind, shard: number, root: string): string[] {
   return partition(testFiles(kind, root), SHARDS[kind], weightOf, APART)[shard - 1]!;
 }
 
-/** The `node` commands of a shard, in turn: its files together, then each of `ALONE` by itself. Integration files run one
- *  at a time (tests/integration/README.md); `--test` with no file would run every test in the tree, so an empty shard
- *  is an error, not a pass. */
-export function shardCommands(kind: Kind, shard: number, files: readonly string[]): Array<{ args: string[]; env: Record<string, string> }> {
+/** The `node` arguments of a shard. Integration files run one at a time (tests/integration/README.md); `--test` with no
+ *  file would run every test in the tree, so an empty shard is an error, not a pass. */
+export function shardCommand(kind: Kind, shard: number, files: readonly string[]): { args: string[]; env: Record<string, string> } {
   if (files.length === 0) throw new Error(`${kind} shard ${shard} has no file: \`node --test\` would run every test in the tree`);
-  const env = kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}` } : {};
-  const together = files.filter((f) => !ALONE.includes(f));
-  return [...(together.length > 0 ? [together] : []), ...files.filter((f) => ALONE.includes(f)).map((f) => [f])]
-    .map((group) => ({ args: ["--test", ...(kind === "unit" ? [] : ["--test-concurrency=1"]), ...group], env }));
+  return { args: ["--test", ...(kind === "unit" ? [] : ["--test-concurrency=1"]), ...files], env: kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}` } : {} };
 }
 
 /** What a shard wrote of itself */
@@ -186,10 +173,11 @@ function main(argv: string[]): number {
   if (what === "files") { for (const f of files) console.log(f); return 0; }
   const out = process.env.CI_SHARD_DIR;
   if (out === undefined) { console.error("set CI_SHARD_DIR: the folder of the shard's record"); return 2; }
+  const { args, env } = shardCommand(kind, shard, files);
   console.log(`${kind} shard ${shard} of ${SHARDS[kind]}: ${files.length} file(s), about ${files.reduce((n, f) => n + weightOf(f), 0)} s of test time`);
-  // every command runs whatever the one before answered; a signal leaves status null, never a pass
-  const exits = shardCommands(kind, shard, files).map(({ args, env }) => spawnSync(process.execPath, args, { stdio: "inherit", cwd: root, env: { ...process.env, ...env } }).status ?? 1);
-  const exit = exits.find((code) => code !== 0) ?? 0;
+  const r = spawnSync(process.execPath, args, { stdio: "inherit", cwd: root, env: { ...process.env, ...env } });
+  // a signal leaves status null: never a pass
+  const exit = r.status ?? 1;
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, recordName(kind, shard)), JSON.stringify({ kind, shard, files, exit } satisfies ShardRecord));
   return exit;
