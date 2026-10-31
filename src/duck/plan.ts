@@ -342,7 +342,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the late select list, which then reads the columns this leaves
   if (kept !== null) hideKept(tree, { visible: kept.visible(), searchPath: searchSchemas(searchPath) });
   // a sorted, limited select list is computed over the rows the limit keeps (src/duck/late.ts)
-  tree = selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, await joinKeys(catalog, analysis.tree)) ?? tree;
+  tree = await selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, () => joinKeys(catalog, analysis.tree)) ?? tree;
   // ONLY WHAT THE ORACLE VERIFIED: after the rewrite, so a construct the rewrite refuses by name (with its own way out)
   // says so first
   const keys = [...resolved].sort();

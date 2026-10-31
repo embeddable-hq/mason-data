@@ -182,6 +182,22 @@ test("the keys of a statement are read only where a LIMIT with no sort reads two
   assert.equal(primaryKeysOf(rows.filter((r) => r[4] !== "2" || r[1] !== rows.find((x) => x[4] === "2")![1])).size, 1, "a key not read whole is no key");
 });
 
+test("the keys are read only for a statement the list after the limit may write: an aggregate over a join with a LIMIT asks the catalog nothing", async () => {
+  const { selectListAfterLimit } = await import("../src/duck/late.ts");
+  const reads = async (sql: string): Promise<number> => {
+    const a = await analyze(catalog, sql, []);
+    assert.ok(!("refused" in a), sql);
+    let n = 0;
+    await selectListAfterLimit({}, a.tree, async () => { n++; return new Map(); });
+    return n;
+  };
+  for (const sql of ["SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 2000",
+    "SELECT row_number() OVER () FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3",
+    "SELECT generate_series(1, 2) FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3",
+    "SELECT (SELECT 1) FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3"]) assert.equal(await reads(sql), 0, sql);
+  assert.equal(await reads("SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3"), 1, "a row-wise statement reads them once");
+});
+
 test("a count(DISTINCT x) of a primary key over its table alone is count(x): filtered, grouped, in HAVING, with a FILTER, in a subquery", async () => {
   assert.deepEqual(await dropped("SELECT count(DISTINCT o.id) FROM orders o"), [true]);
   assert.deepEqual(await dropped("SELECT o.tenant_id, count(DISTINCT o.id) FROM orders o WHERE o.status = 'paid' GROUP BY o.tenant_id HAVING count(DISTINCT o.id) > 1"), [true, true]);

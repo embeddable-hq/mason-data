@@ -148,12 +148,13 @@ function overLate(n: unknown, columns: Map<string, string>): unknown {
 
 /**
  * The statement with every sorted, limited SELECT written with its select list computed after its limit (see above),
- * or null where none is. `tree` is the rewrite's DuckDB tree, `analysis` Postgres's of the original, `keys` the catalog's
- * primary keys of the tables `fanOutTables` names.
+ * or null where none is. `tree` is the rewrite's DuckDB tree, `analysis` Postgres's of the original, `keys` reads the
+ * catalog's primary keys of the tables `fanOutTables` names: only for a statement this may write, so a tool's
+ * `SELECT count(*) … JOIN … LIMIT 2000` costs no round trip to the catalog.
  */
-export function selectListAfterLimit(tree: AstNode, analysis: TreeValue, keys: PrimaryKeys): AstNode | null {
+export async function selectListAfterLimit(tree: AstNode, analysis: TreeValue, keys: () => Promise<PrimaryKeys>): Promise<AstNode | null> {
   if (!rowWiseStatement(analysis)) return null;
-  const relations = relationsOf(analysis, keys);
+  const relations = relationsOf(analysis, await keys());
   let changed = false;
   // bottom up: a SELECT's derived tables and WITH queries first, then the SELECT (never what it was written as)
   const visit = (n: unknown): unknown => {
