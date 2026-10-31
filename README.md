@@ -107,21 +107,33 @@ polled, or replicated (see [Choosing what to sync](#choosing-what-to-sync)).
 
 **2. Connect a tool.**
 
+Which command depends on where the tool runs:
+
 ```bash
-mason user add metabase              # prints postgres://metabase:<password>@127.0.0.1:5433/mason (shown only once)
+mason user add metabase              # a tool on this machine: prints postgres://metabase:<password>@127.0.0.1:5433/mason (shown only once)
+mason share                          # a tool in the cloud: prints a temporary public address and password (Ctrl-C ends it)
 ```
 
-Paste this URL into your tool's Postgres connection form. Each synced table appears as a table in a database named
-`mason`. The port stays the same every time Mason starts, so saved connections keep working.
+| | `mason user add` | `mason share` |
+|---|---|---|
+| **For** | a tool that can reach this machine | a cloud tool, which cannot reach `127.0.0.1` |
+| **Lasts** | until you remove the user | while the command runs, about an hour on a free tunnel |
+| **Password** | kept, one for each user | new each time, gone when the share ends |
+| **Traffic** | stays on this machine | passes through a free tunnel service, encrypted with TLS |
+
+`mason share` is for trying Mason with a tool you already use, on data you may send that way: its certificate is
+self-signed, so a tool does not verify it ([From a cloud BI tool](docs/POSTGRES-API.md#from-a-cloud-bi-tool)). To keep a
+dashboard running, put Mason on a server ([Going to production](#going-to-production)).
+
+Paste the URL, or the address and password, into your tool's Postgres connection form. Each synced table appears as a
+table in a database named `mason`. With `mason user add`, the port stays the same every time Mason starts, so saved
+connections keep working.
 
 To move a tool that already reads your Postgres, change three things: its host, its port and its database name. To
 keep the database name it has, write that name in the sources file (`database: production`), and it changes only its
 host and port.
 
 [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) explains how tools connect and which SQL Mason answers.
-
-Is your BI tool in the cloud? `mason share` opens a temporary public address for an hour's evaluation, with TLS all the
-way to your laptop ([From a cloud BI tool](docs/POSTGRES-API.md#from-a-cloud-bi-tool)).
 
 **3. Keep an eye on it.**
 
