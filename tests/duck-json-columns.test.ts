@@ -274,7 +274,7 @@ test("a read is answered from its stored column only once it is ready, every rea
     assert.equal(((cold as unknown as { jsonReads?: readonly string[] }).jsonReads ?? []).length, 4, "recorded even when none is stored");
     await empty.stop();
     // a statement that lists the columns without naming them: the view, and the reads computed
-    for (const listing of ["SELECT * FROM docs ORDER BY id", "SELECT d.*, j ->> 's' FROM docs d ORDER BY id", "SELECT x.* FROM docs x JOIN docs y USING (id) ORDER BY 1",
+    for (const listing of ["SELECT * FROM docs ORDER BY id", "SELECT d.*, j ->> 's' FROM docs d ORDER BY id", "SELECT x.* FROM docs x JOIN docs y USING (id) ORDER BY 1", "SELECT x.*, y.id FROM docs x JOIN docs y ON y.id = x.id ORDER BY x.id LIMIT 5", "SELECT * FROM docs x JOIN docs y ON y.id = x.id ORDER BY x.id DESC LIMIT 5",
       "SELECT *, j ->> 's' FROM public.docs NATURAL JOIN (SELECT 1 AS id) x", "WITH w AS (SELECT * FROM docs) SELECT * FROM w ORDER BY id"]) {
       const p = await plan(listing);
       // its text names the view (`__mason_visible`); what it calls is the plan's, the calls in its text and nothing
@@ -283,7 +283,8 @@ test("a read is answered from its stored column only once it is ready, every rea
       assert.deepEqual(functions, [...new Set(p.sql.text.match(/\b__mason_[a-z0-9_]+(?=\()/g) ?? [])].sort(), `${listing}: the functions it calls`);
       if (!/->>/.test(listing)) assert.deepEqual(functions, [], `${listing} calls no Mason function`);
       assert.doesNotMatch(p.sql.text, /__mason_json_[0-9a-f]{12}/, listing);
-      assert.match(p.sql.text, new RegExp(route.VISIBLE_CATALOG), listing);
+      // a top N over joins reads the tables by row number and writes its * out, so no hidden column can be listed
+      if (!/JOIN docs y ON/.test(listing)) assert.match(p.sql.text, new RegExp(route.VISIBLE_CATALOG), listing);
       const got = await answer(p.sql.text);
       assert.equal((await reader.runAndReadAll(p.sql.text)).columnNames.length, p.fields!.length, `${listing}: DuckDB answers Postgres's columns, no more`);
       assert.ok(got.length > 0, listing);

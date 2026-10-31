@@ -151,6 +151,8 @@ export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: str
   { name: "through: two levels, aggregated", sql: "SELECT count(*), sum(quantity * unit_price), count(DISTINCT order_id) FROM shop.order_items" },
   { name: "a join of two filtered tables", sql: "SELECT c.name, count(o.id), sum(o.amount) FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id GROUP BY c.name ORDER BY c.name" },
   { name: "a join of three, items through orders", sql: "SELECT o.status, count(i.id), sum(i.quantity) FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id GROUP BY o.status ORDER BY o.status NULLS FIRST" },
+  { name: "a top N over a join of two filtered tables", sql: "SELECT o.*, c.* FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 5 OFFSET 1" },
+  { name: "a top N over joins, items through orders", sql: "SELECT o.id, i.id, i.quantity FROM shop.orders o JOIN shop.order_items i ON i.order_id = o.id ORDER BY i.id DESC LIMIT 3" },
   { name: "IN a subquery", sql: "SELECT id FROM shop.customers WHERE id IN (SELECT customer_id FROM shop.orders WHERE status = 'paid') ORDER BY id" },
   { name: "scalar subqueries", sql: "SELECT (SELECT count(*) FROM shop.order_items) AS items, (SELECT max(amount) FROM shop.orders) AS top, (SELECT count(*) FROM shop.customers) AS customers" },
   { name: "EXISTS", sql: "SELECT count(*) FROM shop.customers c WHERE EXISTS (SELECT 1 FROM shop.orders o WHERE o.customer_id = c.id AND o.amount > 500)" },
