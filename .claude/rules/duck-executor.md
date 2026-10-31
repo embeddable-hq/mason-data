@@ -90,10 +90,14 @@ paths:
 - **Libuv's pool is sized before anything uses it, by the entry, in one file** (issue 88: a statement in flight holds a
   libuv thread, and at Node's four a fifth waited 10 to 50 s; the pool is read once, at its first task, and Node 22 has
   started it before an ES entry's first line). `src/cli/pool-size.cjs` sets it, `src/cli/mason.cjs` loads that before
-  the command, and a new way of starting Mason starts THAT file. An operator's `UV_THREADPOOL_SIZE` is respected.
-  DETECTOR: `tests/cli-pool-size.test.ts` (a real pool counted, every entry named), `tests/integration/duck-pool.itest.ts`
-  (a real run's threads). RESPONSE: a start around the entry fails them. Past the pool's size a statement still waits:
-  nothing admits a fixed number of statements. ("The pool")
+  the command, and a new way of starting Mason starts THAT file. An operator's `UV_THREADPOOL_SIZE` is respected, unless
+  it is no number from 1 to 1024 or does not fit a thread limit: libuv aborts with no message past a limit, so the limit
+  is read first, the default lowered to fit and said, and a size that does not fit refuses the start. On Windows
+  `process.env` never reaches libuv: the operator's shell sets it.
+  DETECTOR: `tests/cli-pool-size.test.ts` (a real pool counted, a fake limit, every entry named),
+  `tests/integration/duck-pool.itest.ts` (a real run's threads). RESPONSE: a start around the entry fails them, and a
+  limit lowers the size or refuses. Past the pool's size a statement still waits: nothing admits a fixed number of
+  statements. ("The pool")
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a
   Mason function call; a 1 ms grace reproduced it 6 times in 6). A worker given up on (the grace, the silence) is asked

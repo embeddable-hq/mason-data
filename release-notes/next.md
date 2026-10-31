@@ -27,10 +27,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (`to_char`, a numeric bin, jsonb `@>`) held every other session, up to 57 s on one deployment. A small statement now
   answers in under about a second or two.
 - **Five or more heavy statements at once no longer stall a small one**: it waited 10 to 50 s beside five to eight, and
-  now about a second or two, at 2 vCPU as on a larger machine. Mason now starts 64 threads for statements where Node
-  starts four, which costs a few tens of MB of memory at most. Nothing to do on upgrade, unless your platform limits a
-  process's threads: Mason now runs 80 to 120 of them, by its CPUs, and past a limit it exits with no message, so set
-  `UV_THREADPOOL_SIZE` lower. A `UV_THREADPOOL_SIZE` of your own is kept.
+  now about a second or two, at 2 vCPU as on a larger machine. Mason now starts 32 threads for statements where Node
+  starts four, a few tens of MB of memory at most. The trade: past 32 running statements the queue still holds them; more
+  run at once, so a memory or spill failure can replace a long wait; a small statement's typical time rises a little
+  while its worst case falls ten-fold.
+- **A run has about 40 threads plus five a CPU (49 at 2, 89 at 10).** Under a thread limit Mason lowers the size to fit
+  and says so at the start. A `UV_THREADPOOL_SIZE` of your own is kept, but one that does not fit, or is not a number
+  from 1 to 1024, now refuses the start. On Windows, set it in the shell before `mason`: the pool otherwise stays at
+  four.
 
 ## Known
 

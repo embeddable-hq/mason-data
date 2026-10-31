@@ -104,7 +104,8 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   fs.chmodSync(logFile, 0o600);
   const from = fs.fstatSync(fd).size;
   fs.writeSync(fd, `\n--- mason start ${new Date().toISOString()} ---\n`);
-  // the run is started IN the project's root, so it finds the same project
+  // the run is started IN the project's root, so it finds the same project. Its env carries the size this process
+  // set (src/cli/pool-size.cjs), and the supervisor between them inherits it too: it never uses that many
   const run = [process.execPath, runnable(MAIN), "start", ...args.filter((a) => a !== "--json"), "--attach"];
   const child = spawn(process.execPath, [runnable(SUPERVISE), home, logFile, ...run],
     { detached: true, stdio: ["ignore", fd, fd], cwd: t.project.root, env: process.env });

@@ -24,8 +24,8 @@ const tag = `it_pool_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 const dbUrl = adminUrl ? (() => { const u = new URL(adminUrl); u.pathname = `/${tag}`; return u.toString(); })() : "";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-pool-"));
 const KEY = "p".repeat(48);
-/** the pool's threads fewer in a run told UV_THREADPOOL_SIZE=8 than in a run of 64, leaving room for threads of other kinds */
-const AT_LEAST_FEWER = 50;
+/** the pool's threads fewer in a run told UV_THREADPOOL_SIZE=8 than in a run of 32, leaving room for threads of other kinds */
+const AT_LEAST_FEWER = 20;
 /** long past what a small statement takes, and the time the heavy ones hold their threads in a run where it would wait */
 const HEAVY_LIMIT_MS = 15_000;
 
@@ -112,8 +112,8 @@ test("the pool's size is in force on mason serve and mason start, an operator's 
 
   const served = await serve("served", {});
   try {
-    const sixtyFour = threadsOf(served.child.pid!);
-    assert.ok(sixtyFour - eight >= AT_LEAST_FEWER, `mason serve runs ${sixtyFour} threads, and ${eight} told UV_THREADPOOL_SIZE=8: the size set did not reach libuv's pool`);
+    const size32 = threadsOf(served.child.pid!);
+    assert.ok(size32 - eight >= AT_LEAST_FEWER, `mason serve runs ${size32} threads, and ${eight} told UV_THREADPOOL_SIZE=8: the size set did not reach libuv's pool`);
 
     // FOUR HEAVY STATEMENTS HOLD FOUR THREADS until their limit, and each ending by that limit proves it ran the whole
     // time; the fifth is asked once they are under way and answered before any of them ends

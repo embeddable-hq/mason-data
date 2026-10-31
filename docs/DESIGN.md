@@ -1881,14 +1881,24 @@ and 269 MB after a restart, 621 MB and 563 MB after a first start. So a few tens
 sample. Peak RSS under load showed no pattern (687 to 912 MB at either size). Threads, read from the process: 81 at
 2 vCPU where a pool of 4 has 21, exactly the 60 more; 121 at 10 CPUs.
 
-**Why 64 is a number and not derived.** The size was to sit above Mason's limit on running statements, and there is no
+**Why 32, a number and not derived.** The size was to sit above Mason's limit on running statements, and there is no
 such limit: one statement runs per session, and `CANCEL_SLOTS` allows 4,096 sessions, past libuv's maximum of 1,024.
 Past the pool's size, libuv's queue is the admission, first in, first out. 1,024 was tried and refused: libuv starts
 every thread at the pool's first task and aborts with no message if one cannot be made, so `--pids-limit=300` ended the
-process with exit 133, where the bench's process with 64 ran under `--pids-limit=100`, and platforms limit threads, some
-to 256. 64 is many more statements than make progress on the machines measured, and leaves room for the sync's readers
-(at most 8, and the writer). An admission limit would be the one fact to derive this from; it would be new behaviour,
-so it was not added here.
+process with exit 133. 64 was the first choice and the table's; the review chose 32, because nothing was measured past
+eight statements, 16 already fixed five, and the old queue was the only limit on how much memory statements take at
+once. So 32 covers the same data with half the thread exposure (at 2 vCPU, eight heavy, one run: p50 321 ms, worst 1.5 s, 32 s of wall time). An admission
+limit would be the one fact to derive this from; it would be new behaviour, so it was not added here.
+
+**A thread limit is read, because its failure is silent.** A platform restarting a process that aborts with no message
+is a loop nobody can read. `src/cli/pool-size.cjs` reads `pids.max` (both cgroup versions) and `Max processes` first, and
+a run is taken to need its size plus 20 plus five a CPU, more than the threads real runs were read to have (about 40 plus
+five a CPU at 32: 49 at 2 and 89 at 10, each 32 below the 81 and 121 read at 64). Below that the default is lowered to
+fit, never under 4, and said once, by the commands that start a run; a size of the operator's own that does not fit
+refuses the start. So does one that is not a number from 1 to 1024: `abc` would run one thread and `-1` 1,024.
+
+**Windows:** `process.env` never reaches libuv's getenv there, so the size set here does nothing and the pool stays at
+four unless the shell sets it. A re-exec would cure it and was refused; the docs say so instead.
 
 **Early enough:** `process.env` at the top of an ES entry was measured on Node 22.13, 24 and 26, on a pool counted by
 parking its threads on FIFOs. On 22.13 the pool had started with four threads before the first line ran, even with no
