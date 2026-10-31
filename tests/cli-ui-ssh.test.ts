@@ -65,6 +65,7 @@ function fakeSsh(): { bin: string; line: string; pid: string } {
 printf '%s\\n' "$@" >> "${line}"
 echo $$ > "${pid}"
 case "$FAKE_SSH" in
+  host-key) echo "No ED25519 host key is known for [127.0.0.1]:22 and you have requested strict checking." >&2; echo "Host key verification failed." >&2; exit 255 ;;
   unreachable) echo "ssh: connect to host mason.example port 22: Operation timed out" >&2; exit 255 ;;
   no-mason) echo "sh: 1: mason: not found" >&2; exit 127 ;;
   old) echo "✗ mason ui: Unknown option '--bridge'. To specify a positional argument, use --" >&2; for i in 1 2 3 4 5 6; do echo "  a line of what follows" >&2; done; exit 2 ;;
@@ -73,6 +74,7 @@ case "$FAKE_SSH" in
   silent) sleep 30; exit 0 ;;
 esac
 echo "Welcome to a server whose shell prints a banner"
+echo "a login banner, as sshd sends it" >&2
 while [ "$1" != "--" ]; do shift; done
 shift; shift
 exec sh -c "$1"
@@ -205,6 +207,7 @@ test("a dropped connection is reported, exit 1, with the way back: on stderr, st
     assert.equal(await h.done, 1);
     assert.equal(h.out(), before, "stdout stays the one object");
     assert.match(h.err(), /✗ mason ui: the tunnel to deploy@mason\.example dropped/);
+    assert.match(h.err(), /why +ssh exited SIGKILL\n/, "the login's banner is not why it dropped");
     assert.match(h.err(), /mason ui --ssh deploy@mason\.example/);
     await assert.rejects(ask(h.first.port, {}), /ECONNREFUSED/);
   } finally { s.close(); }
@@ -237,6 +240,11 @@ test("each failure is one report with its way out, in the failure shape, and no 
     assert.match(down.error.why!, /^ssh exited 255: ssh: connect to host mason\.example port 22: Operation timed out$/);
     assert.match(down.error.fix!, /A firewall rule that names your old IP address is the common cause/);
     assert.deepEqual(down.next.map((n) => n.command), ["ssh deploy@mason.example true"]);
+
+    const key = await refused(ssh.bin, s.root, { FAKE_SSH: "host-key" });
+    assert.equal(key.error.message, "ssh does not trust the host key of deploy@mason.example");
+    assert.match(key.error.fix!, /check the key before you accept it/);
+    assert.doesNotMatch(key.error.fix!, /firewall/);
 
     const none = await refused(ssh.bin, s.root, { FAKE_SSH: "no-mason" });
     assert.equal(none.error.code, "not_found");
@@ -290,11 +298,15 @@ test("what the server says of itself reaches the laptop as its failure: no proje
   assert.equal(nowhere.error.code, "no_project");
   assert.match(nowhere.error.message, /^on deploy@mason\.example: /);
   assert.match(nowhere.error.fix!, /--mason "cd <MASON_DATA> && mason"/);
+  assert.deepEqual(nowhere.next, [], "mason init here would make a project on the wrong machine");
 
   const stopped = temp("stopped-server");
   fs.mkdirSync(path.join(stopped, ".mason"));
   fs.writeFileSync(path.join(stopped, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: true, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }));
-  assert.equal((await refused(ssh.bin, stopped, {})).error.code, "not_running");
+  const down = await refused(ssh.bin, stopped, {});
+  assert.equal(down.error.code, "not_running");
+  assert.equal(down.error.fix, "start mason serve on deploy@mason.example: its service or container");
+  assert.deepEqual(down.next, [], "mason start here would start nothing there");
 
   const s = await server(false);
   try {

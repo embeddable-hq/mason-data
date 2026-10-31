@@ -87,7 +87,8 @@ mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 ma
 `docker ps` names the container; on a server without Docker, leave `--mason` out or say where Mason is. Ctrl-C closes the
 tunnel. [`docs/WEB-UI.md`](../docs/WEB-UI.md#on-a-server) has how it works and what it guards.
 
-**Not yet run over real SSH.** It has been tested with a stand-in for `ssh`, on one machine. SSM Session Manager on EC2,
+**Not yet run across a real network.** It has been tested with real OpenSSH and a real sshd, on one machine, with Mason on
+the host and in a container. SSM Session Manager on EC2,
 IAP on Compute Engine and Azure Bastion should work through your `~/.ssh/config`, with port 22 closed to the internet,
 and **no one has tried them**. Kubernetes has no SSH, and Fly, Railway and other managed platforms have tooling of their
 own, so none of those is covered.

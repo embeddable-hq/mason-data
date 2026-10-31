@@ -52,8 +52,9 @@ container. From your machine, with SSH access to this one:
 mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 mason"
 ```
 
-`mason-mason-1` is the name Compose gives this file's container (`docker ps` says). Ctrl-C closes the tunnel. This has not
-yet been run against a real server or container: [`docs/WEB-UI.md`](../../docs/WEB-UI.md#on-a-server) says what has been.
+`mason-mason-1` is the name Compose gives this file's container (`docker ps` says). Ctrl-C closes the tunnel. This has been run
+with real SSH and a container on one machine, not yet with this compose file on a real server:
+[`docs/WEB-UI.md`](../../docs/WEB-UI.md#on-a-server) says what has been.
 
 ## Metrics
 

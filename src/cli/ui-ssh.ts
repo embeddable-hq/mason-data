@@ -220,6 +220,10 @@ export function exitFailure(o: { target: string; mason: string; code: number | n
   if (code === 2 && OLDER_MASON.test(stderr)) {
     return { message: `the Mason on ${target} does not know mason ui --bridge`, code: "refused", why, fix: "it is older than mason ui --ssh: upgrade the server's Mason to this one's version", next: [["mason --version", "this machine's"]] };
   }
+  if (code === 255 && /host key|host identification/i.test(stderr)) {
+    return { message: `ssh does not trust the host key of ${target}`, code: "failed", why,
+      fix: `run ssh ${target} on its own and check the key before you accept it: mason ui --ssh never answers that question for you`, next: [here] };
+  }
   if (code === 255) {
     return { message: `ssh could not reach ${target}`, code: "failed", why,
       fix: `run ssh ${target} on its own: this uses your ~/.ssh/config, as that does. A firewall rule that names your old IP address is the common cause`, next: [here] };
@@ -229,10 +233,12 @@ export function exitFailure(o: { target: string; mason: string; code: number | n
 
 /** A hello's refusal, in the words of who reads it: on this machine, about that one. */
 function refusal(h: Extract<Hello, { error: unknown }>, target: string): Failure {
-  const lost = h.error.code === "no_project";
-  const fix = lost ? `ssh lands in a folder with no Mason project. --mason says where it is: --mason "cd <MASON_DATA> && mason", or --mason "docker exec -i <container> mason"` : h.error.fix;
-  return { message: `on ${target}: ${h.error.message}`, code: h.error.code, ...(h.error.why ? { why: h.error.why } : {}), ...(fix ? { fix } : {}),
-    next: h.next.map((n): NextStep => n.what === undefined ? [n.command] : [n.command, n.what]) };
+  const lost = h.error.code === "no_project", stopped = h.error.code === "not_running";
+  const fix = lost ? `ssh lands in a folder with no Mason project. --mason says where it is: --mason "cd <MASON_DATA> && mason", or --mason "docker exec -i <container> mason"`
+    : stopped ? `start mason serve on ${target}: its service or container` : h.error.fix;
+  // these two say mason init and mason start, words for a person at that machine: run here they would do the wrong thing
+  const next = lost || stopped ? [] : h.next.map((n): NextStep => n.what === undefined ? [n.command] : [n.command, n.what]);
+  return { message: `on ${target}: ${h.error.message}`, code: h.error.code, ...(h.error.why ? { why: h.error.why } : {}), ...(fix ? { fix } : {}), next };
 }
 
 /** Starts ssh and the bridge, with a free loopback port before them: the tunnel, or why not. */
@@ -279,6 +285,8 @@ export function openSshTunnel(o: { target: string; mason: string; timeoutMs: num
             fix: "run the same Mason version on both ends", next: [["mason --version", "this machine's"]] });
           return;
         }
+        // what a later drop repeats is what ssh says from here on, never the login's banner
+        said = "";
         settle({ url: `http://127.0.0.1:${port}/?ticket=${encodeURIComponent(h.ticket)}`, port, project: h.project, serverVersion: h.version, ended, stop });
       };
       child.stdout.on("data", (b: Buffer) => {

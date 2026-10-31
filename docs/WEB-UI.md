@@ -274,8 +274,12 @@ older than `--ssh`, no project where ssh lands, Mason not running, or two ends w
 for that Host (ssh refuses it beside a command: give the tunnel a Host without one), and a host-key failure (`Host key
 verification failed`: run `ssh <user@server>` once on its own, and check the key before you accept it).
 
-**Unverified:** so far this has been run only with a stand-in for `ssh` on one machine, never over a real SSH connection or
-to a real container. Routes that are `ssh` to your `~/.ssh/config` should work without Mason knowing, and **none has
+**What has been run.** Real OpenSSH to a real sshd, both on one machine: a key, a login banner and a shell profile that
+prints on stdout and stderr, with `AllowTcpForwarding no`, a browser through it, and Mason in a container reached with
+`docker exec -i`, its page on that container's loopback. Killing ssh ended the bridge on the server.
+
+**Unverified:** it has not been run across a real network or to a cloud server, and not with a passphrase or a hardware
+key, where ssh prompts. Routes that are `ssh` to your `~/.ssh/config` should work without Mason knowing, and **none has
 been tried**: SSM Session Manager on EC2, IAP on Compute Engine, Azure Bastion. Port 22 need not be open on those, if
 that holds.
 

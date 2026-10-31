@@ -1685,7 +1685,7 @@ one per socket would be six hardware-token touches for a page. **The run's token
 gets a one-use ticket, as the URL a browser opens is on a command line, and a tunnel is what adds a Host to the guard,
 by its port, for as long as its connection lasts (`PageTunnel`), never a wider rule. Under `mason serve` a sources file
 that cannot be written takes Add and Remove off the page (`sourcesReadOnly`), since a control that can only fail must
-be absent. Tested with a fake `ssh`; real SSH, a real container and SSM, IAP and Bastion are unverified (docs/WEB-UI.md).
+be absent. Run with real OpenSSH and sshd on one machine, host and container; a real network and SSM, IAP and Bastion are unverified (docs/WEB-UI.md).
 
 ### On a server: `mason serve` and the image
 
