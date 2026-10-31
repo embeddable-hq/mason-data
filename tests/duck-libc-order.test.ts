@@ -97,6 +97,20 @@ test("ORDER BY, < and min / max under a libc collation follow the order read, th
       assert.deepEqual((await rows("SELECT s FROM coll WHERE id < 90 ORDER BY s")).flat(), ["대지", "$x", "Animal", "Dob", "Do�a", "@x", "zebra"]);
       assert.deepEqual(await rows("SELECT count(*) FILTER (WHERE s < 'b'), min(s), max(s) FROM coll WHERE id < 90"), [["3", "대지", "zebra"]]);
       await assert.rejects(c.query("SELECT s FROM coll ORDER BY s"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap libc-uncovered/.test(e.message));
+      // ISSUE 112: an output of a * sorted by its number or its bare name is that column, under the collation's key
+      const sorted = ["대지", "$x", "Animal", "Dob", "Do�a", "@x", "zebra"];
+      for (const sql of ["SELECT * FROM coll WHERE id < 90 ORDER BY 2, 1", "SELECT * FROM coll WHERE id < 90 ORDER BY s, id", "SELECT t.* FROM coll t WHERE id < 90 ORDER BY 2, 1",
+        "SELECT *, id FROM coll WHERE id < 90 ORDER BY 2, 3", "WITH w AS (SELECT * FROM coll WHERE id < 90) SELECT * FROM w ORDER BY 2, 1", "SELECT * FROM coll AS x(key, label) WHERE key < 90 ORDER BY label, key",
+        "SELECT * FROM (SELECT * FROM coll WHERE id < 90) s UNION ALL SELECT * FROM coll WHERE id < 0 ORDER BY 2, 1", "SELECT * FROM (SELECT * FROM coll WHERE id < 90) s UNION ALL SELECT * FROM coll WHERE id < 0 ORDER BY s, id"]) {
+        assert.deepEqual((await rows(sql)).map((r) => r[1]), sorted, sql);
+      }
+      // which rows a LIMIT keeps; a number past the *, of a target's own
+      assert.deepEqual((await rows("SELECT * FROM coll WHERE id < 90 ORDER BY 2, 1 LIMIT 3")).map((r) => r[1]), sorted.slice(0, 3));
+      assert.deepEqual((await rows("SELECT *, s AS again FROM coll WHERE id < 90 ORDER BY 3, 1")).map((r) => r[2]), sorted);
+      assert.deepEqual((await rows("SELECT *, lower(s) AS low FROM coll WHERE id IN (2, 3) ORDER BY 3 DESC")).map((r) => r[1]), ["zebra", "Animal"]);
+      // a list of VALUES read through its number: `a` before `B` under the collation, after it in bytes
+      assert.deepEqual((await rows("SELECT * FROM coll, (VALUES ('a'), ('B')) AS v WHERE id = 2 ORDER BY 3")).map((r) => r[2]), ["a", "B"]);
+      assert.deepEqual((await rows("SELECT * FROM coll, (VALUES ('B', 1), ('a', 2)) AS v WHERE id = 2 ORDER BY column1")).map((r) => r[2]), ["a", "B"]);
     } finally { await c.end(); }
   } finally { await api?.close(); store.close(); }
 });

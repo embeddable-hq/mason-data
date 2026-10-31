@@ -169,6 +169,9 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   s("a statement parsed before, run through a rolled-back SET and after", { prepare: "z", sql: ZONED }, "BEGIN", "SET TimeZone = 'Asia/Tokyo'", { run: "z" }, "ROLLBACK", { run: "z" }),
   s("a statement parsed under a SET LOCAL, run after", "BEGIN", "SET LOCAL TimeZone = 'Asia/Tokyo'", { prepare: "z", sql: ZONED }, { run: "z" }, "COMMIT", { run: "z" }),
   s("a statement parsed under a rolled-back SET, run after", "BEGIN", "SET TimeZone = 'Asia/Tokyo'", { prepare: "z", sql: ZONED }, "ROLLBACK", { run: "z" }),
+  // a * sorted by a text column's number: the plan after a SET is the collation's key, as before it (issue 112)
+  s("a * sorted by number, parsed before a SET, run after", { prepare: "st", sql: "SELECT * FROM public.star_o ORDER BY 3 NULLS FIRST, 1" }, { run: "st" }, "SET TimeZone = 'Asia/Tokyo'", { run: "st" }),
+  s("a * sorted by name, parsed after a SET", "SET application_name = 'a'", { prepare: "st", sql: "SELECT * FROM public.star_o ORDER BY name NULLS FIRST, id LIMIT 4" }, { run: "st" }, "SET search_path = public, other", { run: "st" }),
   s("a statement run after a failed block", { prepare: "z", sql: ZONED }, "BEGIN", "SET TimeZone = 'Asia/Tokyo'", "SELECT 1/0", "ROLLBACK", { run: "z" }),
   s("a catalog statement run after a revert", { prepare: "c", sql: ALL }, "BEGIN", "SET LOCAL TimeZone = 'Asia/Tokyo'", "SET LOCAL work_mem = '77MB'", { run: "c" }, "ROLLBACK", { run: "c" }),
   s("a set_config statement run again", { prepare: "cfg", sql: "SELECT set_config('application_name', 'c', true)" }, { run: "cfg" }, APP, "BEGIN", { run: "cfg" }, APP, "COMMIT", APP),

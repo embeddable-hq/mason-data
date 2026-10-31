@@ -12,7 +12,8 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "explain-option", sql: "EXPLAIN (FORMAT XML) SELECT id FROM typed" },
   // is_local: Postgres's change ends with the statement's own transaction, so the session's state is the same after
   { gap: "set-config-forms", sql: "SELECT set_config('application_name', 'gap-case', true) FROM public.one" },
-  { gap: "setop-ordinal-star", sql: "SELECT * FROM (SELECT id, t FROM typed) s UNION SELECT id, t FROM typed ORDER BY 1" },
+  { gap: "star-join-twin", sql: "SELECT j.* FROM (star_o a FULL JOIN star_b b USING (name)) AS j ORDER BY 1 NULLS FIRST, 2, 8" },
+  { gap: "setop-ordinal-star", sql: "SELECT *, t FROM (SELECT id, t FROM typed) s UNION SELECT id, t, t FROM typed ORDER BY 2, 1" },
   { gap: "with-ties-distinct", sql: "SELECT DISTINCT i4 FROM typed ORDER BY i4 FETCH FIRST 2 ROWS WITH TIES" },
   { gap: "collation-unknown", sql: "SELECT id FROM typed ORDER BY t COLLATE \"en_US.utf8\", id" },
   { gap: "like-any-array", sql: "SELECT id FROM typed WHERE t LIKE ANY (at) ORDER BY id" },

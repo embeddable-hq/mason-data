@@ -118,6 +118,12 @@ export interface Typed {
    *  name but another case (`"T"` beside `t`), which DuckDB cannot tell apart: the item's columns are renamed alike
    *  (caseTwins) */
   renamed: string | null;
+  /** a VAR as DuckDB can name it: the FROM item it is read from and the column's name there (an alias list's); a merged
+   *  column of a join by the join's name, or null for that of a join (or a VALUES, a subquery) with none, which only its
+   *  bare name reads. A join's name hides what it joins, so a column of a named join is read by that name, and `twin`
+   *  says the join has two of that name, which no name tells apart. What a `*` expands to has no text of its own to read
+   *  this from. Absent for a set operation's output, which only its arm's column names */
+  column?: { owner: string | null; name: string; twin?: true };
   /** a VAR read from a TABLE of its query's FROM (an RTE_RELATION): the catalog's OID of that table and the column's
    *  number in it — what a stored JSON path is found by (src/duck/kept.ts); absent for any other node, and for a column
    *  of a subquery, a CTE, a function or a join */
@@ -229,6 +235,8 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
       };
       const relation = v._node === "VAR" ? relationOf(v, rtables) : null;
       if (relation !== null) typed.relation = relation;
+      const column = v._node === "VAR" ? columnOf(v, rtables) : null;
+      if (column !== null) typed.column = column;
       const fromFunction = v._node === "VAR" ? functionColumnOf(v, rtables) : null;
       if (fromFunction !== null) typed.functionColumn = fromFunction;
       const list = out.get(loc);
@@ -242,6 +250,9 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
 
 const RTE_JOIN = 2;
 const RTE_RELATION = 0;
+/** the FROM items whose name in the analysis (`unnamed_join`, `*VALUES*`, `unnamed_subquery`) no statement can say:
+ *  RTE_SUBQUERY, RTE_JOIN, RTE_VALUES */
+const UNNAMED = new Set([1, RTE_JOIN, 5]);
 
 /** Typed.relation: the table a VAR's FROM item is, by the catalog's OID, and the column's number in it */
 function relationOf(v: TreeNode, rtables: TreeNode[][]): { relid: number; attno: number } | null {
@@ -249,6 +260,19 @@ function relationOf(v: TreeNode, rtables: TreeNode[][]): { relid: number; attno:
   const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
   const relid = rte === undefined ? null : num(rte.relid ?? null);
   return rte === undefined || attno === null || attno < 1 || num(rte.rtekind ?? null) !== RTE_RELATION || relid === null || relid === 0 ? null : { relid, attno };
+}
+/** Typed.column */
+function columnOf(v: TreeNode, rtables: TreeNode[][]): NonNullable<Typed["column"]> | null {
+  const up = num(v.varlevelsup ?? null) ?? 0, varno = num(v.varnosyn ?? null), attno = num(v.varattnosyn ?? null);
+  const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
+  if (rte === undefined || attno === null || attno < 1 || !isNode(rte.eref ?? null)) return null;
+  const eref = rte.eref as TreeNode;
+  const columns = strings(eref.colnames), name = columns[attno - 1];
+  if (name === undefined || typeof eref.aliasname !== "string" || /^\*SELECT\* \d+$/.test(eref.aliasname)) return null;
+  const kind = num(rte.rtekind ?? null) ?? -1;
+  const named = isNode(rte.alias ?? null);
+  return { owner: UNNAMED.has(kind) && !named ? null : eref.aliasname, name,
+    ...(kind === RTE_JOIN && named && columns.filter((c) => c === name).length > 1 ? { twin: true as const } : {}) };
 }
 const RTE_FUNCTION = 3;
 /** Typed.functionColumn */

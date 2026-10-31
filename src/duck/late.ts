@@ -340,10 +340,9 @@ function joinRows(select: AstNode, relations: Relation[][]): AstNode | null {
   if (tables.some((t) => t.columns.some((c) => c === "" || c.toLowerCase() === "rowid"))) return null;
   const written = writtenOut(targets, tables);
   if (written === null || written.read.size === 0) return null;
-  // a column number or a bare name beside a `*` is an output the rewrite never saw as a column: under a collation its
-  // sort reads the output's own key there, which the column read here would not
-  const starred = targets.some((t) => hasStarTarget(t));
-  if (starred && sorts.some((sort) => { const n = bodyOf(sort).node; return kindOf(n) === "A_Const" || (kindOf(n) === "ColumnRef" && (bodyOf(n).fields as unknown[]).length === 1); })) return null;
+  // the rewrite wrote a column number beside a `*` as the column it is (namedThroughStar); one left a number is a computed
+  // output, past this list's own numbering
+  if (targets.some((t) => hasStarTarget(t)) && sorts.some((sort) => kindOf(bodyOf(sort).node) === "A_Const")) return null;
   const keys = sortKeys(targets, sorts);
   if (keys === null) return null;
   // each table read itself, both times: a row number is no column of a copy's view, and nothing here lists a column

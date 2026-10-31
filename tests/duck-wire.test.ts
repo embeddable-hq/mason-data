@@ -1700,7 +1700,7 @@ test("ORDER BY x IS NULL, x is not one key where the bare x is an output column 
     for (const sql of ["SELECT id, n FROM nullish ORDER BY n IS NULL, n DESC, id", "SELECT * FROM nullish ORDER BY n IS NULL, n DESC, id"]) {
       const from = logged.length;
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
-      assert.match(sent(from), /ORDER BY n DESC NULLS LAST, id/, `${sql}\n${sent(from)}`);
+      assert.match(sent(from), /ORDER BY (nullish\.)?n DESC NULLS LAST, (nullish\.)?id/, `${sql}\n${sent(from)}`);
     }
     // an unnamed CASE is named by its ELSE where that name is strong, a cast of a CASE by its type (FigureColname):
     // read by those names from a subquery
@@ -1745,7 +1745,7 @@ test("an EXPLAIN is the statement it explains: a write under EXPLAIN ANALYZE is 
     const pairs: Array<[string, string]> = [["DELETE FROM orders WHERE id = 1", "EXPLAIN ANALYZE DELETE FROM orders WHERE id = 1"], ["UPDATE orders SET amount = 0", "EXPLAIN ANALYZE UPDATE orders SET amount = 0"],
       ["CREATE TABLE public.copy AS SELECT * FROM orders", "EXPLAIN ANALYZE CREATE TABLE public.copy AS SELECT * FROM orders"],
       // a statement Mason refuses by name: its EXPLAIN is refused with the same error and gap, never a plan of another
-      ["SELECT * FROM (SELECT id, status FROM orders) s UNION SELECT id, status FROM orders ORDER BY 1", "EXPLAIN ANALYZE SELECT * FROM (SELECT id, status FROM orders) s UNION SELECT id, status FROM orders ORDER BY 1"],
+      ["SELECT *, status FROM (SELECT id, status FROM orders) s UNION SELECT id, status, status FROM orders ORDER BY 2, 1", "EXPLAIN ANALYZE SELECT *, status FROM (SELECT id, status FROM orders) s UNION SELECT id, status, status FROM orders ORDER BY 2, 1"],
       ["SELECT nosuch FROM orders", "EXPLAIN SELECT nosuch FROM orders"]];
     for (const [alone, explained] of pairs) {
       const want = await refusal(alone);
@@ -2142,6 +2142,45 @@ test("a sorted, limited select list is computed for the rows the limit keeps, as
   } finally { await c.end(); }
 });
 
+// ISSUE 112: an output's number or bare name beside a * reached the engine as written: no rule met the column it is
+test("an output of a * is read by its number and its bare name as the column it is", async () => {
+  const c = await client();
+  try {
+    const alike = async (sql: string): Promise<void> => assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    // a citext without regard to case, through a * alone or before another target (whose number is past the list's)
+    await alike("SELECT * FROM accounts ORDER BY 2, 1");
+    await alike("SELECT * FROM accounts ORDER BY status DESC, id LIMIT 2");
+    await alike("SELECT *, id FROM accounts ORDER BY 2, 1");
+    await alike("SELECT id AS key, * FROM accounts ORDER BY 3, 1");
+    await alike("SELECT a.*, b.team FROM accounts a JOIN accounts b ON b.id = a.id ORDER BY 2, 5");
+    await alike("SELECT DISTINCT ON (4) * FROM accounts ORDER BY 4, 1");
+    await assert.rejects(c.query("SELECT DISTINCT ON (2) * FROM accounts ORDER BY 2, 1"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap citext-forms/.test(e.detail ?? ""));
+    await alike("WITH w AS (SELECT id, status FROM accounts) SELECT * FROM w ORDER BY 2, 1");
+    // a column USING merged is listed first, whatever the place it has in its table
+    await alike("SELECT * FROM accounts a JOIN (SELECT team, id * 2 AS twice FROM accounts) b USING (team) ORDER BY 1, 2");
+    await alike("SELECT * FROM accounts a NATURAL JOIN (SELECT team, 1 AS k FROM accounts) b ORDER BY 2");
+    // a primary key's GROUP BY decides the *: read column by column, a sort by one of them
+    await alike("SELECT * FROM accounts GROUP BY id ORDER BY status, id");
+    await alike("SELECT * FROM accounts GROUP BY 1 ORDER BY 2, 1");
+    await alike("SELECT *, count(*) FROM accounts GROUP BY id ORDER BY 5, 2, 1");
+    // an output named past the *: the group by its own number
+    await alike("SELECT *, length(team) AS size FROM (SELECT team FROM accounts) s GROUP BY team, size ORDER BY 2 DESC, 1");
+    // a name two outputs answer to, Postgres's refusal
+    await assert.rejects(c.query("SELECT * FROM accounts a JOIN accounts b ON b.id = a.id ORDER BY team"), (e: pg.DatabaseError) => e.code === "42702");
+    // two columns of one name a join's own name hides, which no name tells apart
+    for (const sql of ["SELECT j.* FROM (accounts a JOIN accounts b ON b.id = a.id) AS j ORDER BY 1", "SELECT j.* FROM (accounts a JOIN accounts b USING (team)) AS j"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap star-join-twin/.test(e.detail ?? ""), sql);
+    }
+    // a set operation's number of a *, its name told once: answered; told twice: refused
+    await alike("SELECT * FROM (SELECT id, status FROM orders) s UNION SELECT id, status FROM orders ORDER BY 2, 1");
+    await assert.rejects(c.query("SELECT *, status FROM (SELECT id, status FROM orders) s UNION SELECT id, status, status FROM orders ORDER BY 2, 1"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap setop-ordinal-star/.test(e.detail ?? ""));
+    // a number in a prepared statement run after a SET
+    await c.query({ name: "starred", text: "SELECT * FROM accounts ORDER BY 2, 1" });
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual((await c.query({ name: "starred", text: "SELECT * FROM accounts ORDER BY 2, 1", rowMode: "array" })).rows.map((r) => r[0]), (await postgres("SELECT * FROM accounts ORDER BY 2, 1")).rows.map((r) => Number(r[0])));
+  } finally { await c.end(); }
+});
+
 // ISSUE 105: a table preview over joined tables carried every row's wide columns through the join and the top N to
 // choose 100, and its spill filled the disk. The rows are chosen by row number, the columns read for those alone
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
@@ -2161,7 +2200,13 @@ test("a top N over joined tables chooses its rows by row number and reads the co
       "SELECT l.id AS key, *, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000 ORDER BY l.id LIMIT 2",
       "SELECT l.j, c.name FROM late_c c LEFT JOIN late l ON l.c = c.id AND l.id < 3 ORDER BY c.id, l.id NULLS FIRST LIMIT 5",
       "SELECT x.id, y.id, y.j FROM late x JOIN late y ON y.id = x.id + 1 ORDER BY x.id DESC LIMIT 2",
-      "SELECT l.id, c.name FROM late l, late_c c WHERE c.id = l.c ORDER BY l.id DESC LIMIT 2 OFFSET 100000"];
+      "SELECT l.id, c.name FROM late l, late_c c WHERE c.id = l.c ORDER BY l.id DESC LIMIT 2 OFFSET 100000",
+      // a column number or a bare name beside a *: the column it resolves to (issue 112), so the fast plan takes it
+      "SELECT l.*, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3, 1 LIMIT 3",
+      "SELECT l.*, c.* FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3 DESC, 1 LIMIT 3",
+      "SELECT *, l.id FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 DESC LIMIT 3",
+      "SELECT *, l.k AS last FROM late l JOIN late_c c ON c.id = l.c ORDER BY 7, 1 LIMIT 3",
+      "SELECT l.*, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY name DESC, k LIMIT 3"];
     for (const sql of answered) {
       assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
       assert.match(await sent(sql), /rowid AS __mason_r1.*\) AS __mason_late LEFT JOIN .* ON .*\.rowid = __mason_late\.__mason_r1/, sql);
@@ -2175,12 +2220,8 @@ test("a top N over joined tables chooses its rows by row number and reads the co
     for (const sql of ["SELECT l.id, c.name FROM late l JOIN (SELECT * FROM late_c) c ON c.id = l.c ORDER BY l.id LIMIT 2",
       "WITH w AS (SELECT * FROM late_c) SELECT l.id, w.name FROM late l JOIN w ON w.id = l.c ORDER BY l.id LIMIT 2",
       "SELECT l.id, name FROM late l JOIN late_c USING (id) ORDER BY l.id LIMIT 2",
-      // a column number or a bare name beside a *: an output, numbered after the * is expanded
-      "SELECT l.*, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3, 1 LIMIT 3",
-      "SELECT l.*, c.* FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3 DESC, 1 LIMIT 3",
-      "SELECT *, l.id FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 DESC LIMIT 3",
-      "SELECT *, l.k AS last FROM late l JOIN late_c c ON c.id = l.c ORDER BY 7, 1 LIMIT 3",
-      "SELECT l.*, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY name DESC, k LIMIT 3",
+      // a computed output beside a *: its number stays, a value of the list
+      "SELECT *, l.k + 1 AS next FROM late l JOIN late_c c ON c.id = l.c ORDER BY 7, 1 LIMIT 3",
       'SELECT r.id, r."RowId", l.id FROM rowid_cased r JOIN late l ON l.id = r.id ORDER BY r.id DESC LIMIT 2',
       "SELECT l.id * 2 AS d, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY d LIMIT 2",
       "SELECT l.id FROM late l ORDER BY l.id LIMIT 2",

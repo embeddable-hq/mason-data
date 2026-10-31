@@ -107,6 +107,11 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   after a later `SET`; `SELECT *` beside the named columns; each collation kind (C, ICU, a libc order) where a string
   is compared, and equality apart from order (equality needs no collation); a NULL or a row-held argument where
   Postgres is strict.
+- **An output's number or bare name is read through `Rewriter.outputs` alone** (issue 112): a target is one output, a `*`
+  one per column from Postgres's expansion (`Typed.column`), so every rule meets a star's column as the column named. A
+  `targets[n - 1]` of a number is the wrong column beside a `*` (the class: an output not resolved to its column).
+  A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
+  first) and beside a GROUP BY. `tests/duck-wire.test.ts`, `tests/duck-libc-order.test.ts`, the oracle's `star sort:`.
 - **A new rewrite for speed is held by the PLAN fixture too** (`tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`):
   its statement in the tool's own spelling, over the shop's million orders, its plan's skeleton in the fixture (the
   operators, a top N's count of sort keys, each scan's table and top-N / zone-map filter, the Mason functions, what it sorts by beyond a value —
