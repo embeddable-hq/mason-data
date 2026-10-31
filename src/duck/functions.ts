@@ -653,9 +653,10 @@ function cancelled(info: { setError(message: string): void }, vectors: ReadonlyA
  * function (src/duck/rewrite.ts `giveTurns`). A thread that finished a call now waits on this queue, which is served
  * only once the running queue has returned to the loop, so no thread can join the running queue while it runs. It
  * empties after the calls already in it, at most one per DuckDB thread, and the loop turns: 10 calls a turn where
- * there were 999, whatever the statements running. It costs one hop a vector, and its body is O(1): the session is
- * handed on as a constant vector, the first argument of the call it guards, so nothing is read or written per row.
- * One Value per session, so `sessions` is bounded by the cancel table's slots.
+ * there were 999, whatever the statements running. It costs one hop a vector and writes nothing per row: the session is
+ * handed on as a constant vector, the first argument of the call it guards. Reading the session goes through the API's
+ * column wrapper, whose cost is not a constant of the vector's size. One Value per
+ * session, so `sessions` is bounded by the cancel table's slots.
  */
 function registerTurn(conn: DuckDBConnection): void {
   const turn = DuckDBScalarFunction.create({
@@ -663,14 +664,24 @@ function registerTurn(conn: DuckDBConnection): void {
     // a NULL argument is no reason to skip the turn (or a NULL session's: a write of the copy, src/duck/kept.ts)
     specialHandling: true, mainFunction: () => undefined,
   });
-  const sessions = new Map<string | null, duckdb.Value>();
+  const sessions = new Map<string, duckdb.Value>();
+  let allInvalid = new ArrayBuffer(256);   // a vector's rows; a larger vector size grows it
   // the bindings' own callback: `mainFunction`'s wrapper builds the output vector's row-by-row writer, which this never uses
   duckdb.scalar_function_set_function(turn.scalar_function, (_info, input, output) => {
     beat(cancels);
     const chunk = new DuckDBDataChunk(input);
     const session = text(chunk.rowCount > 0 ? chunk.getColumnVector(0).getItem(0) as DuckDBValue : null);
+    if (session === null) {
+      // a NULL of the output's own type: `create_null_value` is a Value of type SQLNULL, no VARCHAR. Every row's bit
+      // cleared by a copy: `vector_get_validity` hands JavaScript no memory a write reaches (tests/duck-json-columns.test.ts)
+      const bytes = Math.ceil(chunk.rowCount / 8);
+      if (allInvalid.byteLength < bytes) allInvalid = new ArrayBuffer(bytes);
+      duckdb.vector_ensure_validity_writable(output);
+      duckdb.copy_data_to_vector_validity(output, 0, allInvalid, 0, bytes);
+      return;
+    }
     let value = sessions.get(session);
-    if (value === undefined) { value = session === null ? duckdb.create_null_value() : duckdb.create_varchar(session); sessions.set(session, value); }
+    if (value === undefined) { value = duckdb.create_varchar(session); sessions.set(session, value); }
     duckdb.vector_reference_value(output, value);
   });
   conn.registerScalarFunction(turn);

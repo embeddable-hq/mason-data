@@ -341,6 +341,26 @@ test("the extended protocol: each parameter is the value Postgres's input functi
   } finally { await c.end(); }
 });
 
+// A PARAMETER IN THE ARGUMENT THE TURN REPEATS (src/duck/rewrite.ts `giveTurns`) is typed by the column beside it, in
+// both places, and a statement prepared before a SET still runs after it
+test("a prepared statement whose Mason call reads a column beside a parameter runs, and runs again after a SET", async () => {
+  const c = await client();
+  try {
+    for (const [name, text] of [
+      ["turn_concat", "SELECT id, initcap(s || $1) AS v FROM texts ORDER BY id"],
+      ["turn_case", "SELECT id, initcap(CASE WHEN id = 1 THEN s ELSE $1 END) AS v FROM texts ORDER BY id"],
+      ["turn_compare", "SELECT id, to_char(id + $1::int, '999') AS v FROM texts ORDER BY id"],
+    ] as const) {
+      const value = name === "turn_compare" ? "2" : "x y";
+      const first = await c.query({ name, text, values: [value] });
+      assert.deepEqual(first.rows, (await truth.query(text, [value])).rows, name);
+      await c.query("SET TimeZone = 'Europe/Rome'");
+      assert.deepEqual((await c.query({ name, text, values: [value] })).rows, first.rows, `${name}, after a SET`);
+      await c.query("SET TimeZone = 'UTC'");
+    }
+  } finally { await c.end(); }
+});
+
 test("a timestamptz is written in the session's zone, and DuckDB computes in it (SET TimeZone reaches DuckDB)", async () => {
   const c = await client();
   try {

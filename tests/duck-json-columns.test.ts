@@ -148,6 +148,11 @@ test("the stored value is the function's answer for every JSON shape, and the re
         `FROM (SELECT j, ${kept} AS kept FROM public.docs)`))[0] as bigint[];
       assert.equal(total, BigInt(50 * SHAPES.length + 1));
       assert.equal(wrong, 0n, `the read from the column differs from the call for ${JSON.stringify(r)}`);
+      // the turn of a write (src/duck/kept.ts), over every row: a NULL session of VARCHAR, and the stored value the call's
+      const [turnNotNull, turned] = (await rows(store,
+        `SELECT count(*) FILTER (__mason_turn(NULL, j) IS NOT NULL), count(*) FILTER (${(await import("../src/duck/kept.ts")).keptValueSql({ ...r, source: "public.docs", column: "j" }, "j")} IS DISTINCT FROM ${kept}) FROM public.docs`))[0] as bigint[];
+      assert.equal(turnNotNull, 0n, "a NULL session stays NULL through the turn, on every row");
+      assert.equal(turned, 0n, `the stored value through the turn differs from the call's for ${JSON.stringify(r)}`);
       assert.deepEqual([unset, marked], [0n, 0n], `every row of ${JSON.stringify(r)} is answered by the column alone`);
     }
     // a string beginning with a NUL is its `->` text (escaped), and its `->>` the function's on that text

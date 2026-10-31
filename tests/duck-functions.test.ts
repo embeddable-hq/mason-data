@@ -139,11 +139,12 @@ test("the turn is taken by a call that reads a column, on its cheapest argument 
   assert.equal(await turned(`__mason_f(${S}, a + b)`), `__mason_f(__mason_turn(${S}, a + b), a + b)`);
   assert.equal(await turned(`__mason_f(${S}, lower(a) || b, c)`), `__mason_f(__mason_turn(${S}, c), lower(a) || b, c)`);
   assert.equal(await turned(`__mason_f(${S}, sum(a))`), `__mason_f(__mason_turn(${S}, sum(a)), sum(a))`);
+  // a parameter beside a column is typed by it (run prepared in tests/duck-wire.test.ts)
+  assert.equal(await turned(`__mason_f(${S}, a = $1)`), `__mason_f(__mason_turn(${S}, a = $1), a = $1)`);
 });
 test("the turn is not taken over an argument that must not run twice, or by a call DuckDB folds", async () => {
   assert.equal(await turned(`__mason_f(${S}, 'k', 1)`), `__mason_f(${S}, 'k', 1)`);
   assert.equal(await turned(`__mason_f(${S}, $1)`), `__mason_f(${S}, $1)`);
-  assert.equal(await turned(`__mason_f(${S}, a = $1)`), `__mason_f(${S}, a = $1)`);
   assert.equal(await turned(`__mason_f(${S}, (SELECT max(a) FROM u))`), `__mason_f(${S}, (SELECT max(a) FROM u))`);
   assert.equal(await turned(`__mason_f(${S}, sum(a) OVER ())`), `__mason_f(${S}, sum(a) OVER ())`);
   assert.equal(await turned(`__mason_f(${S}, unnest(a))`), `__mason_f(${S}, unnest(a))`);

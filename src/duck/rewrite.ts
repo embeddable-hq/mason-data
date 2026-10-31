@@ -4371,14 +4371,15 @@ const canonicalType = (n: string[]): string => { const last = (n[n.length - 1] ?
  * it, so the cheapest that qualifies is taken, and one that may not be repeated never is:
  *  - a Mason call in it would run twice. A call with no other argument relies on the turn of the call inside it, which
  *    a thread takes on the same vector;
- *  - a subquery, a window, an `unnest` or a `COLUMNS` is work or rows of its own; a `*` or a `$n` no value `ANY` can type.
+ *  - a subquery, a window, an `unnest` or a `COLUMNS` is work or rows of its own; a `*` no value `ANY` can type. (A bare `$n` reads no
+ *    column, so it is never chosen; a `$n` beside a column, `a = $1`, is typed by the column.)
  * A statement with no such argument keeps its calls as they are: it reads no column, so it calls for few rows.
  */
 export function giveTurns(tree: unknown): void {
   const never = (n: unknown): boolean => {
     if (Array.isArray(n)) return n.some(never);
     if (n === null || typeof n !== "object") return false;
-    return Object.entries(n).some(([k, v]) => k === "SubLink" || k === "A_Star" || k === "ParamRef" || k === "over"
+    return Object.entries(n).some(([k, v]) => k === "SubLink" || k === "A_Star" || k === "over"
       || (k === "FuncCall" && /^(unnest|columns|__mason_.*)$/.test(lastName((v as Body).funcname))) || never(v));
   };
   const readsColumn = (n: unknown): boolean => {
