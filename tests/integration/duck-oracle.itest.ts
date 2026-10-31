@@ -112,7 +112,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
+const COPIED = [...TABLES, "one", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -201,6 +201,8 @@ function showAllHolds(want: Answered, got: Answered): string | null {
  * part of the answer may differ in any kind but there.
  */
 const KNOWN: Decided[] = [
+  // a domain's column is its base type's: the wire and data_type say so on Postgres too, pg_typeof and format_type do not
+  { sql: /pg_typeof\(d[itzp]\)|attname = 'd[itzp]'/, kind: "value", gap: "domain-column", why: "a domain's column is read and declared as its base type" },
   // SHOW ALL (Postico sends it at every connection): the listener's settings — its catalog Postgres's, the session's
   // laid over — never the source's, so its values differ (and its rows, where the two servers list other settings); its
   // fields and the rows the sessions set are held alike (`holds`)

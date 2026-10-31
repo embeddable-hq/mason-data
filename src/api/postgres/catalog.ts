@@ -38,7 +38,7 @@ import { runnable } from "../../lib/runnable.ts";
 import { NO_ROLE_CATALOG, type RoleGrants } from "../../duck/grants.ts";
 import { renderWhere, tableSql } from "../../duck/row-filter.ts";
 import { cstr, frame, splitFrames } from "./protocol.ts";
-import { PG_API_TYPE_SPELLING, typeNameParts, type PgJoin, type PgSchema, type PgTable } from "./schema.ts";
+import { HELD_ROW_INPUT, HELD_TYPE_INPUT, madeTypeName, PG_API_TYPE_SPELLING, typeNameParts, type PgJoin, type PgSchema, type PgTable } from "./schema.ts";
 
 /** Ten minutes: long enough to outlive a tool's startup burst and a person's pause between two queries. */
 const DEFAULT_IDLE_MS = 10 * 60_000;
@@ -128,9 +128,20 @@ export function catalogDdl(schema: PgSchema): string[] {
     if (qualifier !== null && qualifier !== '"public"' && qualifier !== "public") statements.push(`CREATE SCHEMA IF NOT EXISTS ${qualifier};`);
     statements.push(`CREATE TYPE ${type} AS ENUM (${labels.map(literal).join(", ")});`);
   }
+  // a type a database made, held as its text: its name, the text's input and output, and nothing over it
+  const made = new Map(schema.tables.flatMap((t) => t.columns.filter((c) => c.made !== undefined).map((c) => [madeTypeName(c.spelled!), c.made] as const)));
+  [...made].forEach(([type, kind], i) => {
+    const input = kind === "row" ? HELD_ROW_INPUT : HELD_TYPE_INPUT;
+    const qualifier = typeNameParts(type).schema;
+    if (qualifier !== null && qualifier !== '"public"' && qualifier !== "public") statements.push(`CREATE SCHEMA IF NOT EXISTS ${qualifier};`);
+    statements.push(`CREATE TYPE ${type};`,
+      `CREATE FUNCTION pg_catalog.${input}${i}(cstring) RETURNS ${type} LANGUAGE internal IMMUTABLE STRICT AS 'textin';`,
+      `CREATE FUNCTION pg_catalog.mason_held_out${i}(${type}) RETURNS cstring LANGUAGE internal IMMUTABLE STRICT AS 'textout';`,
+      `CREATE TYPE ${type} (INPUT = pg_catalog.${input}${i}, OUTPUT = pg_catalog.mason_held_out${i}, LIKE = text);`);
+  });
   for (const table of schema.tables) {
     const lines: string[] = [];
-    for (const c of table.columns) lines.push(`${ident(c.name)} ${c.spelled ?? PG_API_TYPE_SPELLING[c.type]}${c.notNull === true ? " NOT NULL" : ""}`);
+    for (const c of table.columns) lines.push(`${ident(c.name)} ${c.made !== undefined ? `${madeTypeName(c.spelled!)}${c.spelled!.endsWith("[]") ? "[]" : ""}` : c.spelled ?? PG_API_TYPE_SPELLING[c.type]}${c.notNull === true ? " NOT NULL" : ""}`);
     if (table.primaryKey.length > 0) lines.push(`PRIMARY KEY (${table.primaryKey.map(ident).join(", ")})`);
     statements.push(`CREATE TABLE ${qualified(table)} (\n  ${lines.join(",\n  ")}\n);`);
     // the source's unique indexes, under its names: before the foreign keys that may reference them
@@ -185,8 +196,9 @@ export function sourceTypeNames(schema: PgSchema): string[] {
     for (const c of t.columns) {
       if (c.typeOid === undefined || c.spelled === undefined) continue;
       // an array column's own OID is its array type's; an element's array type is the element's spelling with []
-      names.set(c.typeOid, c.spelled);
-      if (c.typeArrayOid !== undefined && !c.spelled.endsWith("[]")) names.set(c.typeArrayOid, `${c.spelled}[]`);
+      const spelled = c.made !== undefined ? `${madeTypeName(c.spelled)}${c.spelled.endsWith("[]") ? "[]" : ""}` : c.spelled;
+      names.set(c.typeOid, spelled);
+      if (c.typeArrayOid !== undefined && !spelled.endsWith("[]")) names.set(c.typeArrayOid, `${spelled}[]`);
     }
   }
   // with no type the source made, every OID the wire sends is Postgres's: the wire's name is format_type's

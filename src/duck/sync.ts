@@ -66,6 +66,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { PgConnection, formatLsn, parseLsn, pgLiteral, type PgConnectOptions } from "../cdc/pg-wire.ts";
 import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../cdc/source.ts";
+import { holdOf } from "./held-types.ts";
 import { addCounts, countsText, duckValue, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { namedPublicationVerdict, readNamedPublication } from "./publication.ts";
@@ -685,7 +686,11 @@ export function libpqString(s: Pick<Source, "host" | "port" | "database" | "user
 }
 
 /** a table's columns as a copy is made with them: their names and source types, in order */
-const columnsKey = (columns: readonly SourceColumnInfo[]): string => JSON.stringify(columns.map((c) => [c.name, c.type]));
+const columnsKey = (columns: readonly SourceColumnInfo[]): string => JSON.stringify(columns.map((c) => {
+  // what the copy holds is part of the shape: a copy made before a column's type was held as its text is read again
+  const hold = holdOf(c.type, c.typeKind);
+  return hold === "same" && c.domain !== true ? [c.name, c.type] : [c.name, c.type, hold, ...(c.domain === true ? ["domain"] : [])];
+}));
 
 /** `postgres_query` over the attached source: a read of Postgres's own SQL in the DuckDB transaction's snapshot */
 const pq = (sql: string): string => `postgres_query(${literal(SRC)}, ${literal(sql)})`;
@@ -738,7 +743,8 @@ function storedValue(c: SourceColumnInfo): string {
 }
 
 function storedType(c: SourceColumnInfo, scanned: string): string {
-  return /^jsonb?$/.test(c.type) ? "JSON" : scanned;
+  const hold = holdOf(c.type, c.typeKind);
+  return hold === "text" ? "VARCHAR" : hold === "text[]" ? "VARCHAR[]" : /^jsonb?$/.test(c.type) ? "JSON" : scanned;
 }
 
 /** a DuckDB connection the sync runs statements on, and whether a long one is running on it (`interruptible`): what
@@ -3186,6 +3192,12 @@ export class Sync {
     const snapshot = this.mode !== "recopy" ? ((await w.runAndReadAll(`SELECT * FROM ${pq(SNAPSHOT_SQL)}`)).getRowsJS()[0] as [string, string])[0] : null;
     const described = await w.runAndReadAll(`DESCRIBE SELECT ${t.columns.map((c) => ident(c.name)).join(", ")} FROM ${SRC}.${ident(t.schema)}.${ident(t.table)}`);
     const scanned = new Map((described.getRowsJS() as unknown[][]).map((r) => [String(r[0]), String(r[1])]));
+    // a domain's column as its base type reads: the extension's scan of the table does not know a domain
+    const domains = t.columns.filter((c) => c.domain === true);
+    if (domains.length > 0) {
+      const read = await w.runAndReadAll(`DESCRIBE SELECT * FROM ${pq(`SELECT ${domains.map((c) => pgColumnSql(c, new Map(), new Set())).join(", ")} FROM ${pgFrom} LIMIT 0`)}`);
+      for (const r of read.getRowsJS() as unknown[][]) scanned.set(String(r[0]), String(r[1]));
+    }
     // the numerics the extension would read as doubles: their widths, in the copy's snapshot (NUMERIC_TYPE)
     const exact = await this.exactNumerics(t, scanned, pgFrom);
     const defs = t.columns.map((c) => `${ident(c.name)} ${exact.has(c.name) ? `DECIMAL(38,${exact.get(c.name)})` : storedType(c, scanned.get(c.name) ?? "VARCHAR")}`);
@@ -3407,33 +3419,12 @@ async function enumLists(c: DuckConnection, table: string): Promise<Set<string>>
  *  copy; the poll's read of a changed one had failed the same way */
 function pgColumnSql(c: SourceColumnInfo, exact: ReadonlyMap<string, number>, lists: ReadonlySet<string>): string {
   if (exact.has(c.name)) return `${pgIdent(c.name)}::text AS ${pgIdent(c.name)}`;
-  if (KEPT_ARRAYS.has(c.type) || lists.has(c.name)) return `${pgIdent(c.name)}::text[] AS ${pgIdent(c.name)}`;
-  return pgIdent(c.name);
+  const hold = holdOf(c.type, c.typeKind);
+  if (KEPT_ARRAYS.has(c.type) || lists.has(c.name) || hold === "text[]") return `${pgIdent(c.name)}::text[] AS ${pgIdent(c.name)}`;
+  if (hold === "text") return `${pgIdent(c.name)}::text AS ${pgIdent(c.name)}`;
+  // a domain's value as its base type, which the extension reads
+  return c.domain === true ? `${pgIdent(c.name)}::${c.type} AS ${pgIdent(c.name)}` : pgIdent(c.name);
 }
-
-/** the OID family a source type is sent in (text for every character type: DuckDB has one VARCHAR) */
-function sourceOid(spelled: string): number | null {
-  const array = spelled.endsWith("[]");
-  const base = spelled.replace(/\[\]$/, "").replace(/\(.*\)/, "").trim();
-  const oid: Record<string, number> = {
-    smallint: 21, integer: 23, bigint: 20, real: 700, "double precision": 701, numeric: 1700, text: 25, "character varying": 25, character: 25,
-    boolean: 16, uuid: 2950, date: 1082, "time without time zone": 1083, "timestamp without time zone": 1114, "timestamp with time zone": 1184,
-    interval: 1186, json: 3802, jsonb: 3802, bytea: 17,
-    // held as DuckDB text, declared as themselves: the catalog Postgres resolves their operators (citext's
-    // case-insensitive ones) and the wire sends their OID (src/duck/types.ts)
-    inet: 25, citext: 25,
-  };
-  const o = oid[base];
-  if (o === undefined) return null;
-  return array ? -o : o;
-}
-
-/** the Postgres spelling of the wire's OID: what the catalog says when the source's spelling would disagree with the wire */
-const SPELLING_OF_OID: Record<number, string> = {
-  21: "smallint", 23: "integer", 20: "bigint", 700: "real", 701: "double precision", 1700: "numeric", 25: "text", 16: "boolean", 2950: "uuid",
-  1082: "date", 1083: "time without time zone", 1114: "timestamp without time zone", 1184: "timestamp with time zone", 1186: "interval", 3802: "jsonb", 17: "bytea",
-};
-const ELEMENT_OF_ARRAY: Record<number, number> = { 1000: 16, 1001: 17, 1016: 20, 1005: 21, 1007: 23, 1009: 25, 1021: 700, 1022: 701, 1182: 1082, 1183: 1083, 1115: 1114, 1185: 1184, 1187: 1186, 1231: 1700, 2951: 2950, 3807: 3802 };
 
 const API_TYPE: Record<number, PgApiType> = { 21: "int2", 23: "int4", 20: "int8", 700: "float4", 701: "float8", 1700: "numeric", 25: "text", 16: "bool", 2950: "uuid", 1082: "date", 1184: "timestamptz", 3802: "jsonb" };
 
@@ -3444,28 +3435,28 @@ function enumLabelsOf(t: DuckDBType): readonly string[] | null {
 }
 
 /**
- * A copied column in the catalog: the SOURCE's spelling (`numeric(12,2)`, `character varying(255)`) wherever the wire
- * sends that family of type, so a tool sees the source's own types; the wire's type where they differ (an unconstrained
- * `numeric` the extension reads as DOUBLE is `double precision`, an enum is `text`).
+ * A copied column in the catalog: ALWAYS the source's type, as the source spells it (`numeric(12,2)`, `character
+ * varying(255)`, `time with time zone`, `point`), so a tool sees the source's own types whatever the copy holds
+ * (src/duck/held-types.ts) — but for the one the copy computes as another: a `numeric` past DuckDB's DECIMAL, read as
+ * DOUBLE, is `double precision` on the catalog as on the wire (the limits `numeric-over-38-digits`, `numeric-array`).
  */
 function pgColumn(c: SourceColumnInfo, duck: DuckDBType, now: SourceColumnInfo | undefined): PgColumn {
   const wire = wireColumn(c.name, duck).oid;
-  const element = ELEMENT_OF_ARRAY[wire];
-  const wireFamily = element !== undefined ? -element : wire;
-  // an array DuckDB holds as VARCHAR[] whose elements the wire writes as the source's type (src/duck/types.ts: a json's
-  // text, a jsonb's canonical text, an inet's output, a citext's bytes): declared as the source spells it
-  // an enum (or an array of one) DuckDB holds as its ENUM, in the declared order: declared as the source's type, with
-  // its labels, so Postgres orders and compares it by them
+  // an enum (or an array of one) DuckDB holds as its ENUM, in the declared order: declared with its labels, so Postgres
+  // orders and compares it by them
   const labels = enumLabelsOf(duck);
-  const spelled = labels !== null || sourceOid(c.type) === wireFamily || (wire === 1009 && KEPT_ARRAYS.has(c.type)) ? c.type
-    : element !== undefined ? `${SPELLING_OF_OID[element] ?? "text"}[]` : SPELLING_OF_OID[wire] ?? "text";
+  const double = c.type.startsWith("numeric") ? wire === 701 ? "double precision" : wire === 1022 ? "double precision[]" : null : null;
+  const spelled = double ?? c.type;
+  const kind = (now ?? c).typeKind ?? c.typeKind;
+  // a type a database made, held as its text: the catalog declares it as a type with nothing over it
+  const made = c.typeOid !== undefined && labels === null && holdOf(c.type, kind) !== "same" ? kind === "c" ? "row" as const : true : undefined;
   // `type` is the ClickHouse path's; the catalog reads `spelled`
   const type: PgApiType = API_TYPE[wire] ?? "text";
   const facts = now ?? c;
-  return { name: c.name, type, spelled, ...(c.comment ? { description: c.comment } : {}), ...(labels !== null ? { enumLabels: labels } : {}),
+  return { name: c.name, type, spelled, ...(c.comment ? { description: c.comment } : {}), ...(labels !== null ? { enumLabels: labels } : {}), ...(made !== undefined ? { made } : {}),
     ...(facts.notNull ? { notNull: true } : {}), ...(facts.default !== undefined ? { default: facts.default } : {}),
     ...(facts.identity !== undefined ? { identity: facts.identity } : {}), ...(facts.sequence !== undefined ? { sequence: facts.sequence } : {}),
-    ...(c.typeOid !== undefined && spelled === c.type ? { typeOid: c.typeOid, ...(c.typeArrayOid !== undefined ? { typeArrayOid: c.typeArrayOid } : {}) } : {}) };
+    ...(c.typeOid !== undefined && double === null ? { typeOid: c.typeOid, ...(c.typeArrayOid !== undefined ? { typeArrayOid: c.typeArrayOid } : {}) } : {}) };
 }
 
 /** a span as the stream's line says it: `2.1 s`, `3 min`, `2 h` */

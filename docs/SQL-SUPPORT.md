@@ -17,27 +17,27 @@ each). The copy is read-only.
 | Postgres | Mason |
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 87 forms of them verified |
-| The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 244 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
+| The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 387 operators, 95 aggregates, 58 window functions and 125 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 50 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 52 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,669 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 5,686 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 3,669 statements | Mason | DuckDB alone |
+| Of 5,686 statements | Mason | DuckDB alone |
 |---|---|---|
-| answered exactly as Postgres: the rows, their text, the column names | 95% | 29% |
+| answered exactly as Postgres: the rows, their text, the column names | 92% | 27% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
-| refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 4% | — |
-| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 20% |
-| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 21% |
+| refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 8% | — |
+| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 22% |
+| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 18% |
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 13% |
-| wrong rows, or the rows in another order | — | 7% |
-| the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 4% |
-| another error than Postgres's, or answered where Postgres refuses | — | 5% |
+| wrong rows, or the rows in another order | — | 9% |
+| the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 3% |
+| another error than Postgres's, or answered where Postgres refuses | — | 9% |
 
 A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
 statement. The oracle's statements are adversarial by design (NULL beside '', ties, every type's edge values), so
@@ -55,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (50)
+## Refused (52)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -99,6 +99,8 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `bc-timestamptz-zone` | a timestamptz before year 1 written in a zone other than UTC | the zone's local mean time | refused when a row holds one | SET TimeZone = 'UTC', or filter those rows out |
 | `width-bucket-forms` | width_bucket with its bounds reversed, or of an array of thresholds | answers | refused | low bound first |
 | `inet-order` | ORDER BY, <, >, min or max over an inet | orders addresses by network, then host | refused (equality, IS NULL and the value itself are answered) | sort or compare another column |
+| `held-type-compare` | what needs the type's own value of a column Mason holds as its text (money, bit, macaddr, cidr, a geometric type, a range, a tsvector, xml, a composite, an extension's type): ORDER BY, <, >, min, max, sum; a function, an operator, a cast to another type, a subscript or a field; GROUP BY or DISTINCT of a numrange, a tsquery or a tstzrange; = of a money | orders and computes by the type's own rules | refused (the value, x::text, IS NULL, count, and = and GROUP BY where equal values have one text are answered: docs/SQL-SUPPORT.md) | x::text, which sorts, groups and compares as text; or another column |
+| `binary-held-type` | a column of a type Mason holds as its text, in binary format, but a point or a box | the type's binary form | refused | ask for the column in text format |
 | `citext-forms` | GROUP BY, DISTINCT, min, max, a set operation, or = ANY (an array) over a citext | groups and sorts without regard to case, answering one spelling | refused (=, <>, <, >, IN (…), LIKE and ORDER BY are answered, case-insensitively) | GROUP BY lower(x), or x::text where case matters |
 | `bytea-forms` | encode / decode to a format other than hex, base64 or escape, or one not written as a literal; convert_to / convert_from of an encoding other than UTF8 | answers | refused | encode(x, 'hex'), 'base64' or 'escape'; the UTF8 encoding |
 | `row-value` | a row as a value outside the SELECT list, a cast to text and the json functions (compared, tested with IS NULL, grouped, sorted); a row of a row; a row of a table Mason synced in part | compares, tests and groups a row by its columns | refused | compare, test or sort its columns |
@@ -114,7 +116,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 
 ## Answered differently
 
-18 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
+19 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
@@ -135,6 +137,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `jsonb-equal-text` | GROUP BY or DISTINCT of jsonb values that are equal but written apart ('1.0' and '1.00', '{"a": 1}' and '{"a": 1.0}') | one group, written as the value its plan reads first | one group, written as the value DuckDB reads first: either may be any of them | GROUP BY j::text where the text must decide |
 | `char-n-minmax` | greatest / least of a char(n) beside a text | compares without the padding, answers the first of equal values | compares the padded text | cast the char(n) to text first |
 | `nested-exact-numeric` | an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …) | exact digits at every step | the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x), it is exact | compute it in the outermost query, or round(…, n) inside |
+| `domain-column` | a column of a domain: pg_typeof(x) and information_schema.columns.domain_name | the domain's name | the column is read and declared as its base type, which is what the wire says and what information_schema's data_type says on Postgres too; a cast to the domain's name (`x::my_domain`) is 42704 | none needed: a value of the domain is a value of its base type; cast to the base type |
 | `show-all` | SHOW ALL | every server setting with the source database's values | every setting the listener's catalog Postgres has, with this session's values laid over (search_path, TimeZone, ssl, …): Mason's settings, never your source database's | ask the source database for its settings (SHOW ALL or SHOW <name> there): Mason answers its own |
 
 ## Limits of the prototype (8)
@@ -152,29 +155,44 @@ Not about one statement: what the prototype cannot do yet.
 | `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (997)
+## What is verified (1143)
 
-### Types (49)
+### Types (93)
 
+- a value of type "char"
 - a value of type _citext (an extension's)
 - a value of type _mood (an extension's)
 - a value of type a table's row type
+- a value of type a type the source made
 - a value of type bigint
 - a value of type bigint[]
+- a value of type bit
+- a value of type bit varying
+- a value of type bit[]
 - a value of type boolean
 - a value of type boolean[]
+- a value of type box
 - a value of type bytea
 - a value of type character
 - a value of type character varying
 - a value of type character varying[]
 - a value of type character[]
+- a value of type cid
+- a value of type cidr
+- a value of type cidr[]
+- a value of type circle
 - a value of type citext (an extension's)
 - a value of type date
 - a value of type date[]
+- a value of type daterange
 - a value of type double precision
 - a value of type double precision[]
 - a value of type inet
 - a value of type inet[]
+- a value of type int4multirange
+- a value of type int4range
+- a value of type int4range[]
+- a value of type int8range
 - a value of type integer
 - a value of type integer[]
 - a value of type interval
@@ -185,31 +203,62 @@ Not about one statement: what the prototype cannot do yet.
 - a value of type jsonb[]
 - a value of type jsonpath
 - a value of type level (an extension's)
+- a value of type line
+- a value of type lseg
+- a value of type macaddr
+- a value of type macaddr8
+- a value of type macaddr[]
+- a value of type money
+- a value of type money[]
 - a value of type mood (an extension's)
 - a value of type name
 - a value of type numeric
 - a value of type numeric[]
+- a value of type numrange
+- a value of type oid
+- a value of type oid[]
+- a value of type path
+- a value of type pg_lsn
+- a value of type point
+- a value of type point[]
+- a value of type polygon
 - a value of type real
 - a value of type real[]
 - a value of type record
+- a value of type regclass
+- a value of type regtype
 - a value of type smallint
 - a value of type smallint[]
 - a value of type text
 - a value of type text[]
+- a value of type tid
+- a value of type time with time zone
+- a value of type time with time zone[]
 - a value of type time without time zone
 - a value of type time without time zone[]
 - a value of type timestamp with time zone
 - a value of type timestamp with time zone[]
 - a value of type timestamp without time zone
 - a value of type timestamp without time zone[]
+- a value of type tsquery
+- a value of type tsrange
+- a value of type tstzmultirange
+- a value of type tstzrange
+- a value of type tsvector
+- a value of type tsvector[]
 - a value of type unknown
 - a value of type uuid
 - a value of type uuid[]
+- a value of type xid
+- a value of type xid8
+- a value of type xml
 
-### Functions (244)
+### Functions (255)
 
+- the function "bit"(bit,integer,boolean)
 - the function "extract"(text,date)
 - the function "extract"(text,interval)
+- the function "extract"(text,time with time zone)
 - the function "extract"(text,time without time zone)
 - the function "extract"(text,timestamp with time zone)
 - the function "extract"(text,timestamp without time zone)
@@ -227,6 +276,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function "substring"(text,integer)
 - the function "substring"(text,integer,integer)
 - the function "substring"(text,text)
+- the function "time"(time with time zone)
 - the function "time"(timestamp with time zone)
 - the function "time"(timestamp without time zone)
 - the function "timestamp"(date)
@@ -326,6 +376,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function int8(double precision)
 - the function int8(integer)
 - the function int8(numeric)
+- the function int8(oid)
 - the function int8(real)
 - the function int8(smallint)
 - the function isfinite(date)
@@ -392,6 +443,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function octet_length(bytea)
 - the function octet_length(character)
 - the function octet_length(text)
+- the function pg_typeof("any")
 - the function power(double precision,double precision)
 - the function power(numeric,numeric)
 - the function quote_literal(text)
@@ -422,12 +474,18 @@ Not about one statement: what the prototype cannot do yet.
 - the function strpos(text,text)
 - the function substr(text,integer)
 - the function substr(text,integer,integer)
+- the function text("char")
 - the function text(boolean)
 - the function text(character)
 - the function text(inet)
+- the function text(name)
 - the function timestamptz(date)
 - the function timestamptz(timestamp with time zone,integer)
 - the function timestamptz(timestamp without time zone)
+- the function timetz(time with time zone,integer)
+- the function timetz(time without time zone)
+- the function timetz(timestamp with time zone)
+- the function timezone(text,time with time zone)
 - the function timezone(text,timestamp with time zone)
 - the function timezone(text,timestamp without time zone)
 - the function to_char(bigint,text)
@@ -453,7 +511,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function width_bucket(double precision,double precision,double precision,integer)
 - the function width_bucket(numeric,numeric,numeric,integer)
 
-### Operators (347)
+### Operators (387)
 
 - the operator !~(character,text)
 - the operator !~(text,text)
@@ -505,12 +563,14 @@ Not about one statement: what the prototype cannot do yet.
 - the operator +(integer,integer)
 - the operator +(integer,smallint)
 - the operator +(interval,interval)
+- the operator +(interval,time with time zone)
 - the operator +(numeric,numeric)
 - the operator +(real,double precision)
 - the operator +(real,real)
 - the operator +(smallint,bigint)
 - the operator +(smallint,integer)
 - the operator +(smallint,smallint)
+- the operator +(time with time zone,interval)
 - the operator +(time without time zone,interval)
 - the operator +(timestamp with time zone,interval)
 - the operator +(timestamp without time zone,interval)
@@ -539,6 +599,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator -(smallint,bigint)
 - the operator -(smallint,integer)
 - the operator -(smallint,smallint)
+- the operator -(time with time zone,interval)
 - the operator -(time without time zone,interval)
 - the operator -(time without time zone,time without time zone)
 - the operator -(timestamp with time zone,interval)
@@ -593,6 +654,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <(smallint,integer)
 - the operator <(smallint,smallint)
 - the operator <(text,text)
+- the operator <(time with time zone,time with time zone)
 - the operator <(time without time zone,time without time zone)
 - the operator <(timestamp with time zone,date)
 - the operator <(timestamp with time zone,timestamp with time zone)
@@ -628,6 +690,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <=(smallint,integer)
 - the operator <=(smallint,smallint)
 - the operator <=(text,text)
+- the operator <=(time with time zone,time with time zone)
 - the operator <=(time without time zone,time without time zone)
 - the operator <=(timestamp with time zone,date)
 - the operator <=(timestamp with time zone,timestamp with time zone)
@@ -636,10 +699,15 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <=(timestamp without time zone,timestamp with time zone)
 - the operator <=(timestamp without time zone,timestamp without time zone)
 - the operator <=(uuid,uuid)
+- the operator <>("char","char")
 - the operator <>(anyenum,anyenum)
+- the operator <>(anymultirange,anymultirange)
+- the operator <>(anyrange,anyrange)
 - the operator <>(bigint,bigint)
 - the operator <>(bigint,integer)
 - the operator <>(bigint,smallint)
+- the operator <>(bit varying,bit varying)
+- the operator <>(bit,bit)
 - the operator <>(boolean,boolean)
 - the operator <>(character,character)
 - the operator <>(citext,citext) (an extension's)
@@ -654,13 +722,20 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <>(integer,smallint)
 - the operator <>(interval,interval)
 - the operator <>(jsonb,jsonb)
+- the operator <>(macaddr,macaddr)
+- the operator <>(macaddr8,macaddr8)
+- the operator <>(name,name)
 - the operator <>(numeric,numeric)
+- the operator <>(oid,oid)
+- the operator <>(pg_lsn,pg_lsn)
 - the operator <>(real,double precision)
 - the operator <>(real,real)
 - the operator <>(smallint,bigint)
 - the operator <>(smallint,integer)
 - the operator <>(smallint,smallint)
 - the operator <>(text,text)
+- the operator <>(tid,tid)
+- the operator <>(time with time zone,time with time zone)
 - the operator <>(time without time zone,time without time zone)
 - the operator <>(timestamp with time zone,date)
 - the operator <>(timestamp with time zone,timestamp with time zone)
@@ -668,17 +743,26 @@ Not about one statement: what the prototype cannot do yet.
 - the operator <>(timestamp without time zone,date)
 - the operator <>(timestamp without time zone,timestamp with time zone)
 - the operator <>(timestamp without time zone,timestamp without time zone)
+- the operator <>(tsvector,tsvector)
 - the operator <>(uuid,uuid)
+- the operator <>(xid,xid)
+- the operator <>(xid8,xid8)
 - the operator <@(anyarray,anyarray)
 - the operator <@(jsonb,jsonb)
+- the operator =("char","char")
 - the operator =(anyarray,anyarray)
 - the operator =(anyenum,anyenum)
+- the operator =(anymultirange,anymultirange)
+- the operator =(anyrange,anyrange)
 - the operator =(bigint,bigint)
 - the operator =(bigint,integer)
 - the operator =(bigint,smallint)
+- the operator =(bit varying,bit varying)
+- the operator =(bit,bit)
 - the operator =(boolean,boolean)
 - the operator =(bytea,bytea)
 - the operator =(character,character)
+- the operator =(cid,cid)
 - the operator =(citext,citext) (an extension's)
 - the operator =(date,date)
 - the operator =(date,timestamp with time zone)
@@ -691,13 +775,20 @@ Not about one statement: what the prototype cannot do yet.
 - the operator =(integer,smallint)
 - the operator =(interval,interval)
 - the operator =(jsonb,jsonb)
+- the operator =(macaddr,macaddr)
+- the operator =(macaddr8,macaddr8)
+- the operator =(name,name)
 - the operator =(numeric,numeric)
+- the operator =(oid,oid)
+- the operator =(pg_lsn,pg_lsn)
 - the operator =(real,double precision)
 - the operator =(real,real)
 - the operator =(smallint,bigint)
 - the operator =(smallint,integer)
 - the operator =(smallint,smallint)
 - the operator =(text,text)
+- the operator =(tid,tid)
+- the operator =(time with time zone,time with time zone)
 - the operator =(time without time zone,time without time zone)
 - the operator =(timestamp with time zone,date)
 - the operator =(timestamp with time zone,timestamp with time zone)
@@ -705,7 +796,10 @@ Not about one statement: what the prototype cannot do yet.
 - the operator =(timestamp without time zone,date)
 - the operator =(timestamp without time zone,timestamp with time zone)
 - the operator =(timestamp without time zone,timestamp without time zone)
+- the operator =(tsvector,tsvector)
 - the operator =(uuid,uuid)
+- the operator =(xid,xid)
+- the operator =(xid8,xid8)
 - the operator >(anyenum,anyenum)
 - the operator >(bigint,bigint)
 - the operator >(bigint,integer)
@@ -724,12 +818,14 @@ Not about one statement: what the prototype cannot do yet.
 - the operator >(interval,interval)
 - the operator >(jsonb,jsonb)
 - the operator >(numeric,numeric)
+- the operator >(oid,oid)
 - the operator >(real,double precision)
 - the operator >(real,real)
 - the operator >(smallint,bigint)
 - the operator >(smallint,integer)
 - the operator >(smallint,smallint)
 - the operator >(text,text)
+- the operator >(time with time zone,time with time zone)
 - the operator >(time without time zone,time without time zone)
 - the operator >(timestamp with time zone,date)
 - the operator >(timestamp with time zone,timestamp with time zone)
@@ -763,6 +859,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator >=(smallint,integer)
 - the operator >=(smallint,smallint)
 - the operator >=(text,text)
+- the operator >=(time with time zone,time with time zone)
 - the operator >=(time without time zone,time without time zone)
 - the operator >=(timestamp with time zone,date)
 - the operator >=(timestamp with time zone,timestamp with time zone)
@@ -798,12 +895,13 @@ Not about one statement: what the prototype cannot do yet.
 - the operator ~*(text,text)
 - the operator ~~(character,text)
 - the operator ~~(citext,citext) (an extension's)
+- the operator ~~(name,text)
 - the operator ~~(text,text)
 - the operator ~~*(character,text)
 - the operator ~~*(citext,citext) (an extension's)
 - the operator ~~*(text,text)
 
-### Aggregates (91)
+### Aggregates (95)
 
 - the aggregate array_agg(anynonarray)
 - the aggregate avg(bigint)
@@ -836,9 +934,11 @@ Not about one statement: what the prototype cannot do yet.
 - the aggregate max(integer)
 - the aggregate max(interval)
 - the aggregate max(numeric)
+- the aggregate max(oid)
 - the aggregate max(real)
 - the aggregate max(smallint)
 - the aggregate max(text)
+- the aggregate max(time with time zone)
 - the aggregate max(time without time zone)
 - the aggregate max(timestamp with time zone)
 - the aggregate max(timestamp without time zone)
@@ -851,9 +951,11 @@ Not about one statement: what the prototype cannot do yet.
 - the aggregate min(integer)
 - the aggregate min(interval)
 - the aggregate min(numeric)
+- the aggregate min(oid)
 - the aggregate min(real)
 - the aggregate min(smallint)
 - the aggregate min(text)
+- the aggregate min(time with time zone)
 - the aggregate min(time without time zone)
 - the aggregate min(timestamp with time zone)
 - the aggregate min(timestamp without time zone)
@@ -958,11 +1060,18 @@ Not about one statement: what the prototype cannot do yet.
 - the window function sum(smallint)
 - the window function var_pop(numeric)
 
-### Casts (78)
+### Casts (125)
 
+- a cast from a table's row type to text
+- a cast from a type the source made to text
 - a cast from bigint to character varying
 - a cast from bigint to text
 - a cast from bigint[] to text
+- a cast from bit to bit varying
+- a cast from bit to text
+- a cast from bit varying to text
+- a cast from bit[] to text
+- a cast from box to text
 - a cast from bytea to text
 - a cast from character to double precision
 - a cast from character to integer
@@ -979,14 +1088,24 @@ Not about one statement: what the prototype cannot do yet.
 - a cast from character varying to timestamp with time zone
 - a cast from character varying to uuid
 - a cast from character varying[] to text[]
+- a cast from cid to text
+- a cast from cidr to inet
+- a cast from cidr[] to text
+- a cast from circle to text
 - a cast from citext (an extension's) to character varying
 - a cast from citext (an extension's) to text
 - a cast from date to character varying
 - a cast from date to text
 - a cast from date[] to text
+- a cast from daterange to text
 - a cast from double precision to character varying
 - a cast from double precision to text
+- a cast from int4multirange to text
+- a cast from int4range to text
+- a cast from int4range[] to text
+- a cast from int8range to text
 - a cast from integer to character varying
+- a cast from integer to oid
 - a cast from integer to text
 - a cast from integer[] to character varying
 - a cast from integer[] to double precision[]
@@ -1000,13 +1119,31 @@ Not about one statement: what the prototype cannot do yet.
 - a cast from jsonb to character varying
 - a cast from jsonb to json
 - a cast from jsonb to text
+- a cast from jsonpath to text
+- a cast from line to text
+- a cast from lseg to text
+- a cast from macaddr to text
+- a cast from macaddr8 to text
+- a cast from macaddr[] to text
+- a cast from money to text
+- a cast from money[] to text
 - a cast from mood (an extension's) to text
 - a cast from numeric to character varying
 - a cast from numeric to numeric
 - a cast from numeric to text
+- a cast from numrange to text
+- a cast from oid to text
+- a cast from oid[] to text
+- a cast from path to text
+- a cast from pg_lsn to text
+- a cast from point to text
+- a cast from point[] to text
+- a cast from polygon to text
 - a cast from real to character varying
 - a cast from real to text
 - a cast from record to text
+- a cast from regclass to text
+- a cast from regtype to text
 - a cast from smallint to character varying
 - a cast from smallint to text
 - a cast from text to bigint
@@ -1028,16 +1165,28 @@ Not about one statement: what the prototype cannot do yet.
 - a cast from text to uuid
 - a cast from text[] to character varying
 - a cast from text[] to text
+- a cast from tid to text
+- a cast from time with time zone to text
+- a cast from time with time zone[] to text
 - a cast from time without time zone to character varying
 - a cast from time without time zone to text
+- a cast from time without time zone[] to text
 - a cast from timestamp with time zone to character varying
 - a cast from timestamp with time zone to text
 - a cast from timestamp with time zone[] to text
 - a cast from timestamp without time zone to character varying
 - a cast from timestamp without time zone to text
 - a cast from timestamp without time zone[] to text
+- a cast from tsquery to text
+- a cast from tsrange to text
+- a cast from tstzmultirange to text
+- a cast from tstzrange to text
+- a cast from tsvector to text
+- a cast from tsvector[] to text
 - a cast from uuid to character varying
 - a cast from uuid to text
+- a cast from xid to text
+- a cast from xid8 to text
 
 ### Constructs (43)
 
