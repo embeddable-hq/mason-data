@@ -1148,6 +1148,37 @@ path goes with its JSON column; `MASON_STORE_JSON_PATHS=off` drops all. Not stor
 column. **Known**: an unread column is never dropped, its disk not reported; an empty request log stores nothing.
 **Where.** `src/duck/kept.ts`, `kept-route.ts`; `tests/duck-json-columns.test.ts`, `duck-json-paths.itest.ts`.
 
+## Generated tables
+
+Issue 124's first stage (2026-10-31): `kind: scheduled` by a whole re-run, one file per table in `mason/generated_tables/`.
+The issue's own claims were checked against the code before building and corrected on the issue, comment by comment.
+
+**Why a plan, and not a stored text.** A definition is planned as a statement is, by the listener's catalog, because that
+is what makes its answer Postgres's: the rewrite, the allowlist and the text order are the statement path's, not a second
+reading of the SQL. A plan is not stored because it depends on what the catalog and the stored JSON paths say at that
+moment. The cost is a plan per run, in milliseconds, against a run of seconds.
+
+**The planner has no session.** Generated tables are built in UTC under `public`, with no role, and what would read a
+session is refused rather than given a default: a daily table bucketed in the wrong zone is wrong with no error. Reads of a
+session are found in what Postgres resolved, since Postgres's own volatility marks are the fact: `pg_proc.provolatile`.
+Two marks needed a word: `age(timestamptz, timestamptz)` is immutable yet splits both instants in the session's zone, and
+`to_char(timestamp, text)` is stable yet reads no session here because a timestamp has no zone.
+
+**One snapshot, one set of marks.** DuckDB takes a transaction's snapshot at its first read of a table, not at `BEGIN` or
+at `SELECT 1` (measured), so a run reads the ledger on a writer's turn and takes the marks in that same turn. A commit
+before the turn is in the snapshot; one after it marks the next run. Marks are in memory because a mark inside a batch's
+transaction would add a write to every batch for a fact a restart can rebuild: at a start, a base synced after a table was
+built counts as changed since then. That costs at most one re-run.
+
+**The side table's commit and the swap are two transactions**, as a copy's are, so a long run holds no writer's turn. The
+ledger row moves with the swap, so the table and its row never disagree. `open` drops what a crash left beside them.
+
+**Stored types are a list, not a default.** A `numeric` is held out of this stage because its digits are worked out after
+the engine answers (`src/lib/pg-numeric.ts`), and a plain write would store DuckDB's double. A type joins `STORED_TYPES`
+when a statement over it is held to Postgres.
+
+**Not yet**, by stage: chains, numeric and user types, `latest`, `live`, by-group recomputes. The issue has the order.
+
 ## The Postgres API
 
 The catalog a tool reads is a Postgres (PGlite with the source's definitions): `.claude/rules/postgres-api.md`.

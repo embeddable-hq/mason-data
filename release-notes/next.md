@@ -10,6 +10,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Generated tables: a table declared in SQL, kept current by Mason.** One file per table in `mason/generated_tables/`,
+  committed beside the sources file, with `kind: scheduled`, `target_lag:` and `sql:`; `mason help generated` is the
+  guide. A table re-runs its whole SQL once a base has changed and its target comes due, inside Mason, reading nothing from
+  your database, and nothing runs over idle bases. A statement reads it by name; `mason status` shows its state and lag. A
+  role with `tables: all` reads it, and a role with a list reads it once it names it. Nothing changes if you add no file.
 - **Text under `en_*` is ordered as glibc orders it, and nothing under it is refused.** One emoji, a Thai vowel or a mark
   in a column no longer refuses the column's sort, group or dropdown, and no refusal quotes a row's value. Two rare shapes
   are listed differences (`libc-rare-letter`, `libc-mark-run-form`, in docs/SQL-SUPPORT.md); mason status's `Text order`
@@ -38,6 +43,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Known
 
+- **A generated table can't yet hold a numeric or one of your own types, or read another generated table**, and `kind:
+  live` is refused. Each is refused by file and key at the start, with the way out.
+- **`mason status` shows generated tables; the web page doesn't yet.**
 - **Five or more heavy statements at once can still stall a small one**, for tens of seconds in the worst case measured
   ([issue 88](https://github.com/embeddable-hq/mason-data/issues/88)).
 - **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows, or over

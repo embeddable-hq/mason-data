@@ -234,6 +234,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     const f = analysis.refused;
     // a table the catalog does not hold: where its copy is, or the `mason add` away
     const missing = f.C === "42P01" ? /^relation "([^"]+)" does not exist$/.exec(f.M ?? "")?.[1] : undefined;
+    // a generated table not built yet (src/duck/generated.ts): by name, and what it is doing
+    const unbuilt = missing === undefined ? undefined : copies().find((c) => c.kept?.by === "generated" && c.phase !== "copied" && (c.source === missing || c.source === `public.${missing}`));
+    if (unbuilt?.kept?.by === "generated") throw gapRefusal("generated-not-built", `the generated table ${unbuilt.source} is not built yet: ${unbuilt.kept.text}`, "mason status says how far it is", text);
     const hint = missing !== undefined ? missingRelationHint(missing, copies()) : f.H;
     throw new StatementError({ code: f.C ?? "XX000", message: f.M ?? "Postgres refused the statement", ...(f.D ? { detail: f.D } : {}), ...(hint ? { hint } : {}),
       ...(f.P ? { position: Number(f.P) } : {}) }, text);

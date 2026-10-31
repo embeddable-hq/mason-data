@@ -97,7 +97,7 @@ test("the guides are listed under Learn, a line each beside mason help, so Learn
   const help = topUsage();
   const learn = help.slice(help.indexOf("\n  Learn\n"), help.indexOf("\n  Set up\n"));
   const lines = learn.split("\n").filter((l) => l.startsWith("    mason "));
-  assert.deepEqual(lines.map((l) => l.trim().split(/\s{2,}/)[0]), ["mason help", "mason help agent", "mason help production"]);
+  assert.deepEqual(lines.map((l) => l.trim().split(/\s{2,}/)[0]), ["mason help", "mason help agent", "mason help production", "mason help generated"]);
   const w = Math.max(...COMMANDS.map((c) => c.name.length), ...Object.keys(GUIDES).map((g) => `help ${g}`.length));
   for (const [g, what] of Object.entries(GUIDES)) assert.ok(learn.includes(`mason ${`help ${g}`.padEnd(w)}   ${what}`), `${g} with its summary, aligned under Learn`);
   // and the other steps keep the commands' own column: a guide's name widens Learn alone

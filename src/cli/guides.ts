@@ -13,6 +13,7 @@ import { DEMO_ADDED_TABLES, DEMO_TABLES, DEMO_TABLE_TO_ADD } from "../demo/seed.
 export const GUIDES = {
   agent: "driving Mason from a coding agent: the commands in order, --json and its shapes, exit codes, failures",
   production: "going to production: the mason-data image, its settings, Docker Compose, logical replication, upgrades",
+  generated: "generated tables: a table declared in SQL, kept current by Mason, read by name",
 } as const;
 
 export type Guide = keyof typeof GUIDES;
@@ -20,7 +21,58 @@ export type Guide = keyof typeof GUIDES;
 /** A guide's text: built at run time from the registry's and the commands' own tables. */
 export async function guideText(guide: Guide): Promise<string> {
   if (guide === "agent") return agentGuide();
+  if (guide === "generated") return generatedGuide();
   return productionGuide();
+}
+
+/** THE GENERATED TABLES' PAGE: its keys are the reader's own table (src/cli/generated-files.ts `GENERATED_KEYS`), so it
+ *  cannot name a key the file does not take. */
+async function generatedGuide(): Promise<string> {
+  const { GENERATED_DIR, GENERATED_KEYS } = await import("./generated-files.ts");
+  const w = Math.max(...Object.keys(GENERATED_KEYS).map((k) => k.length));
+  const keys = Object.entries(GENERATED_KEYS).map(([k, what]) => `    ${k.padEnd(w)}  ${what}`).join("\n");
+  return `GENERATED TABLES — a table declared in SQL, kept current by Mason, read by name
+
+  A statement that repeats expensive work on every read can read a table that holds its answer instead. One file per
+  table in mason/${GENERATED_DIR}/, committed beside the sources file. The file's name is the table's: requests.yml is
+  public.requests, reports.daily.yml is reports.daily.
+
+    kind: scheduled
+    target_lag: 5m
+    sql: |
+      SELECT tenant_id, date_trunc('day', created_at, 'UTC') AS day, count(*) AS orders
+      FROM orders
+      GROUP BY 1, 2
+    order_by: day, tenant_id
+
+  THE KEYS
+${keys}
+
+  HOW IT STAYS CURRENT
+    A scheduled table runs its whole SQL over one snapshot, into a table beside the old one, and swaps it in. The old
+    table serves until then. It runs again once a base has changed and target_lag comes due; nothing runs over idle
+    bases. A run shares the queue that first syncs use, one at a time, and reads nothing from your database.
+    A run that fails leaves the table serving what it held, and mason status says why.
+
+  WHAT IS REFUSED, WITH THE WAY OUT
+    A file with a mistake, or SQL Mason cannot store, is refused by file, key and reason. Nothing else stops, and a
+    table already built keeps serving and being re-run from what it was built with. A table has no session, so SQL that
+    reads a time zone or a setting is refused: name the zone (t AT TIME ZONE 'UTC', date_trunc('day', t, 'UTC')).
+    A daily table in one zone doesn't serve a dashboard in another.
+    Not available yet: kind: live, numeric columns and columns of your own types, and reading another generated table.
+
+  WHO READS IT
+    A role with tables: all reads it. A role with a list of tables reads it once it names it, as mason/roles.yml names
+    any table. It inherits no limits from the tables it reads: carry a tenant column and filter it in the role's where:.
+
+  SEEING IT
+    mason start               reads the folder, says what is refused, builds what is new, and keeps looking
+    mason status              each table's kind, method, state and lag
+    mason status --json       the same as generatedTables, with each refusal's key, reason and options
+    mason logs                each run: its rows and seconds, or why it failed
+
+  EXPLAIN says how a generated table is kept current on its first line, as it does for any table.
+`;
 }
 
 /**
