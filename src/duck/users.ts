@@ -94,6 +94,9 @@ export const userPassword = (apiKey: string, name: string, id: string): string =
 /** Whether a password is a user's by its shape (else it is read as a token, src/duck/token.ts). */
 export const isUserPassword = (password: string): boolean => PASSWORD_RE.test(password);
 
+/** What every `mason share` password begins with (src/cli/share-run.ts `newSharePassword`): no user's has it, `share` being no hex. */
+export const SHARE_PASSWORD_PREFIX = "mason_share_";
+
 /** Whether a user was added under this API key (one rotated since is no longer live). */
 export const underKey = (u: MasonUser, apiKey: string): boolean => u.key === keyFingerprint(apiKey);
 
@@ -271,11 +274,13 @@ export const disabledMessage = (name: string): string => `role "${name}" is not 
  * HOW THE DUCKDB RUN'S LISTENER TAKES A PASSWORD (src/cli/dev.ts; the tests wire the same): a user's password (its shape)
  * is the users file's to judge, and its session is asked again before every statement (a stat); anything else is read as a
  * token, the kind `mason connect` minted before `mason user` (src/duck/token.ts: the API key used as a password is refused by name).
+ * A `mason share` password is refused by name too: it was never this port's, and making a user is not the way out.
  */
 export function listenerLogins(users: LiveUsers, apiKey: string): Pick<PgApiOptions, "authenticate" | "recheck" | "recheckMs"> {
   return {
     authenticate: (password, user) => {
       if (isUserPassword(password)) return users.login(user, password);
+      if (password.startsWith(SHARE_PASSWORD_PREFIX)) throw new Error("a mason share password logs in only at the address mason share printed, never on this port");
       const problem = tokenProblem(apiKey, password);
       if (problem !== null) throw new Error(problem);
       return { filters: [], subject: undefined };

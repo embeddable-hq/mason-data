@@ -198,7 +198,9 @@ test("a share's password is recognisably Mason's: its own shape, no user's and n
   assert.match(tokenProblem(KEY, password) ?? "", /not a Mason user.s password or token/);
   // what the run's own listener does with it, wired as src/cli/dev.ts wires it: no users file is needed to refuse it
   const logins = listenerLogins(new LiveUsers(path.join(os.tmpdir(), "mason-share-no-such-project", "users.json"), KEY), KEY);
-  assert.throws(() => logins.authenticate(password, "share_abc123"), /not a Mason user.s password or token/);
+  const notHere = /a mason share password logs in only at the address mason share printed, never on this port/;
+  assert.throws(() => logins.authenticate(password, "share_abc123"), notHere, "told where it works, never to make a user");
+  assert.throws(() => logins.authenticate("mason_share_cut-short", "share_abc123"), notHere, "a part of one is said the same");
   // every character is one a URL leaves alone: `mason share` prints no URL, and a person who writes one needs no escaping
   assert.equal(encodeURIComponent(password), password);
   assert.equal(new URL(`postgres://share_abc123:${password}@127.0.0.1:5433/mason`).password, password);
@@ -216,6 +218,11 @@ test("the run holds a share's password as its hash, for its user alone: another'
   for (const [p, u] of [[password, "someone"], ["wrong", opened.user], [userPassword("a-key", opened.user, "0123456789abcdef"), opened.user]] as const) {
     assert.throws(() => f.door().authenticate(p, u), (e: { status: number; code: string; userName: string }) => e.status === 401 && e.code === "invalid_share" && e.userName === u);
   }
+  // the check is the same for all of them; a refusal names what it was given, by its shape, and where that works
+  assert.throws(() => f.door().authenticate(userPassword("a-key", opened.user, "0123456789abcdef"), opened.user), /that is a mason user's password: it logs in on the run's own port, never at a share's address/);
+  assert.throws(() => f.door().authenticate(mintToken("a-key", 600).token, opened.user), /that is an API token: it logs in on the run's own port/);
+  assert.throws(() => f.door().authenticate("wrong", opened.user), /not this share's password/);
+  assert.throws(() => f.door().authenticate(password, "someone"), /not this share's password/);
   await f.door().recheck({ jti: opened.user });
   await f.shares.close(opened.user, "the test");
   assert.throws(() => f.door().authenticate(password, opened.user), /not this share's password/);
@@ -491,7 +498,7 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     assert.ok(Number((await secure.query("SELECT count(*) AS n FROM orders")).rows[0].n) > 0);
     await assert.rejects(client(r.port, r, false).connect(), (e: pg.DatabaseError) => e.code === "28000" && /requires TLS/.test(e.message));
     // the run's own port still takes a plain connection, and not this password
-    await assert.rejects(client(pgPort, r, false).connect(), (e: pg.DatabaseError) => e.code === "28P01");
+    await assert.rejects(client(pgPort, r, false).connect(), (e: pg.DatabaseError) => e.code === "28P01" && /a mason share password logs in only at the address mason share printed, never on this port/.test(e.message));
     const user = await mason(["user", "add", "local"]);
     assert.equal(user.code, 0, said(user));
     const localPassword = /^ {2}password +(.+)$/m.exec(user.stdout)![1]!;
@@ -499,8 +506,8 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     await local.connect();
     assert.equal((await local.query("SHOW ssl")).rows[0].ssl, "off");
     // a user's password and an API token are refused on the share's socket
-    await assert.rejects(client(r.port, { user: "local", password: localPassword, database: r.database }).connect(), (e: pg.DatabaseError) => e.code === "28P01");
-    await assert.rejects(client(r.port, { user: "anyone", password: mintToken(config().apiKey, 600).token, database: r.database }).connect(), (e: pg.DatabaseError) => e.code === "28P01");
+    await assert.rejects(client(r.port, { user: "local", password: localPassword, database: r.database }).connect(), (e: pg.DatabaseError) => e.code === "28P01" && /that is a mason user's password/.test(e.message));
+    await assert.rejects(client(r.port, { user: "anyone", password: mintToken(config().apiKey, 600).token, database: r.database }).connect(), (e: pg.DatabaseError) => e.code === "28P01" && /that is an API token/.test(e.message));
 
     const st = await status();
     assert.equal(st.share?.port, r.port);
