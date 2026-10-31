@@ -29,7 +29,7 @@ paths:
   outcome is ONE rule** (`outcomeOf`, src/api/request-log.ts: ok, refused, failed, cancelled = 57014), read as SQL by
   the ledger's filters and summary through `outcomeSql`, held equal code for code by tests/duck-requests.test.ts. Every
   row carries the bytes the listener sent for the statement (`bytes_sent`), and a refusal by a registry entry its id
-  (`gap`): taken from the error as the refusal was built (`gapRefusal`, src/api/postgres/server.ts; an `EncodeError`'s,
+  (`gap`): taken from the error as the refusal was built (`gapRefusal`, src/duck/statement.ts; an `EncodeError`'s,
   `NumericError`'s or `Unsupported`'s own `gap`), read from the text (`gapIn`) only where a refusal crossed DuckDB as
   its message (src/duck/store.ts `pgErrorOf`), and carried across the executor's worker (`WireError`); a re-wrap of an
   error keeps it (tests/duck-wire.test.ts holds every path). `unsupported` groups by it (`/api/unsupported`, `mason

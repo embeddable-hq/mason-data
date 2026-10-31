@@ -33,7 +33,7 @@ export type Answered = { names: string[]; oids: number[]; rows: (string | null)[
  * @param differed — the entries a statement differed by, in the kind decided
  * @param decided — the entries that decided a statement asked (the first whose pattern it matched), differing or not
  */
-export function staleDecisions(known: readonly Decided[], differed: ReadonlySet<Decided>, decided: ReadonlySet<Decided>): string[] {
+export function staleDecisions<K extends Pick<Decided, "why" | "machineFloat"> & { sql: RegExp | string }>(known: readonly K[], differed: ReadonlySet<K>, decided: ReadonlySet<K>): string[] {
   return known.filter((k) => !differed.has(k) && !(k.machineFloat === true && decided.has(k))).map((k) => decided.has(k)
     ? `${k.sql}: no longer differs (${k.why}) — remove it from KNOWN`
     : `${k.sql}: no statement asked matches it (${k.why}) — remove it from KNOWN`);

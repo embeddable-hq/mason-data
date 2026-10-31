@@ -132,7 +132,7 @@ reads.
 - **An engine or listener change** (`src/duck/`, `src/api/`, `src/cdc/`) **also runs the full oracle once before its
   first push**: `scripts/gate-slot.ts node --test tests/integration/duck-oracle.itest.ts`, with `UPDATE_VERIFIED=1` when
   what is answered changed, because CI holds the allowlist but only a local run writes it. Of the other integration
-  files, those nearest the change; the rest is CI's. Detector: `integration` red on the PR.
+  files, those nearest the change; the rest is CI's. Detector: `integration (oracle)` or `integration (rest)` red on the PR.
 - **A heavy gate takes a slot.** `npm run check`, `npm run gate` and `npm run test:integration` queue for one of
   `MASON_GATE_SLOTS` machine-wide (`scripts/gate-slot.ts`) and say who they wait for, so a long wait is not a hang: start
   a gate in the background, because the wait can outlast a tool's foreground limit. Anything else whole goes through it
@@ -225,8 +225,8 @@ scripts/gate-slot.ts <command>        # runs a command in one of the machine's s
 ### Checks and tests
 
 - **CI must be green, and `npm run check` (typecheck + tests) is that check locally.** It is offline. CI
-  (`.github/workflows/ci.yml`) runs the same two steps, builds the CLI package and the image, and runs `tests/integration/`
-  against a Postgres service, on every PR and on main. When each runs locally is "Local gates".
+  (`.github/workflows/ci.yml`) runs the same two, the tests in shards, builds the CLI package and the image, and runs
+  `tests/integration/` against a Postgres service, on every PR and on main. When each runs locally is "Local gates".
 - No ESLint: the `tsc` flags in `tsconfig.json` (`noUnusedLocals`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
   …) are the linter. Keep them on.
 - Tests are `tests/*.test.ts` under `node --test`, no deps. Extend the matching file when you touch its logic: the

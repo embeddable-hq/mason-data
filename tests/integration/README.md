@@ -22,9 +22,19 @@ needs CREATEDB, and REPLICATION for the stream. DuckDB's `postgres` extension is
 iteration tool: while working, run one file or `IT_ORACLE_ONLY=<regex>`.
 
 **One file at a time** (`--test-concurrency=1` in `npm run test:integration`): each file runs a listener on a port and a
-store of its own, and two at once double the machine's load and the chance of a port clash. CI runs the suite as two
-jobs, each with a Postgres of its own (`.github/workflows/ci.yml`, `integration`): the oracle, and every other file — a
-new file joins the second by itself.
+store of its own, and two at once double the machine's load and the chance of a port clash.
+
+**CI runs the suite as four jobs**, each with a Postgres of its own (`.github/workflows/ci.yml`): two `rest shard` jobs
+hold every file but the oracle, and two `oracle leg` jobs hold the oracle. `scripts/ci-shards.ts` computes the shards from
+the tree, so a new file lands in one by itself, and `integration (rest)` fails unless every file ran in exactly one.
+**A leg (`IT_ORACLE_LEG=1/2`) is the whole pipeline over a share of the statements**: its own copy and both rounds of
+changes, with each statement in the leg its text hashes to, `oracle/unordered-limit.ts`'s too; the stages of one session (the roles, the row filters, the
+settings) stay whole in leg 1. What only all the statements can say (a stale decision, a dead gap, `src/duck/verified.ts`,
+the fixture's tallies) is asserted by no leg: each writes a report, and `integration (oracle)` runs `scripts/oracle-legs.ts`
+over the two, which fails when the legs' counts do not sum to the whole or any statement was left out or asked twice. A
+leg refuses `IT_ORACLE_ONLY`, `UPDATE_VERIFIED=1` and `UPDATE_FIXTURE=1`: regenerating is a whole run, without `IT_ORACLE_LEG`.
+It refuses to start without `IT_ORACLE_LEG_REPORT`, which `scripts/ci-shards.ts` sets, so a leg left in a shell fails rather
+than passes as the oracle; `npm run gate` strips both.
 
 ## The ready local gate
 
