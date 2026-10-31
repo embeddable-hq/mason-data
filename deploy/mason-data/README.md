@@ -98,6 +98,10 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
             memory: 8G          # the copy may use 4 GiB of it by default
   ```
 
+- **A first sync of large JSON documents can need more than the default.** A table of 20,000 rows with `jsonb` documents
+  of up to 20 MB compressed failed with an out-of-memory under a 7.8 GiB limit, even with one reader; it synced with
+  `MASON_DUCKDB_MEMORY=12GB` on a 16 GB machine, and the setting went back afterwards. The other tables go on, and the
+  failed one is retried.
 - **When it is short**: a sort, a join or an aggregate past the limit spills to disk beside the copy; what cannot spill
   fails its own statement with 53200, naming `MASON_DUCKDB_MEMORY`, and the run goes on. A `MASON_DUCKDB_MEMORY` near
   or above the container's limit is the kernel killing the container instead.
