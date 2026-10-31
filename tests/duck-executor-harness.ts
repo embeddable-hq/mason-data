@@ -55,7 +55,7 @@ export function useScratch(): void {
 }
 
 /** the store, the listener and the command server, for every test of the file that calls it */
-export function useServer(): void {
+export function useServer(o: { warm?: boolean } = {}): void {
   before(async () => {
     store = await DuckStore.open(path.join(dir, "duck.db"), (l) => { logged.push(l); });
     await store.writer.run(`CREATE TABLE public.gen AS SELECT range::INTEGER AS id, '{"n": ' || range || ', "pad": "' || repeat('x', 40) || '"}' AS j FROM range(${ROWS})`);
@@ -82,6 +82,11 @@ export function useServer(): void {
     control = createRunServer(ctx);
     await new Promise<void>((r) => control.listen(0, "127.0.0.1", () => r()));
     controlPort = ctx.port = (control.address() as net.AddressInfo).port;
+    // in this hook: a file's second `before` would not find the listener up
+    if (o.warm === true) {
+      const c = await client();
+      try { await c.query(CALLING); } finally { await c.end(); }
+    }
   });
   after(async () => {
     control.close();
