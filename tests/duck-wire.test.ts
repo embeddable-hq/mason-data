@@ -177,6 +177,12 @@ const PG_DDL = [
   // a source's views, as the catalog has them: over the copied tables, one over another
   "CREATE VIEW public.paid_orders AS SELECT id, amount FROM public.orders WHERE status = 'paid'",
   "CREATE VIEW public.big_paid (order_id, amount) AS SELECT id, amount FROM public.paid_orders WHERE amount > 100",
+  // views over the late tables (src/duck/late.ts, FROM items): a join, a view of it, one table, one of it, grouped
+  "CREATE VIEW public.late_joined AS SELECT l.id, l.j, l.k, c.name FROM public.late l LEFT JOIN public.late_c c ON c.id = l.c",
+  "CREATE VIEW public.late_joined_again AS SELECT id, k, upper(name) AS shout FROM public.late_joined WHERE k > 10",
+  "CREATE VIEW public.late_read AS SELECT id, name, 1 AS one, id * 2 AS twice FROM public.late_c WHERE id < 30",
+  "CREATE VIEW public.late_read_again AS SELECT one, twice, id, name FROM public.late_read WHERE id > 2",
+  "CREATE VIEW public.late_counts AS SELECT c, count(*) AS n FROM public.late GROUP BY c",
 ];
 const schema: PgSchema = {
   database: "app",
@@ -225,6 +231,11 @@ const schema: PgSchema = {
   // table Mason has not copied, so the catalog leaves it out
   views: [{ schema: "public", name: "paid_orders", definition: " SELECT id, amount FROM public.orders WHERE (status = 'paid'::text);" },
     { schema: "public", name: "big_paid", definition: " SELECT id AS order_id, amount FROM public.paid_orders WHERE (amount > (100)::numeric);" },
+    { schema: "public", name: "late_joined", definition: " SELECT l.id, l.j, l.k, c.name FROM public.late l LEFT JOIN public.late_c c ON c.id = l.c;" },
+    { schema: "public", name: "late_joined_again", definition: " SELECT id, k, upper(name) AS shout FROM public.late_joined WHERE (k > 10);" },
+    { schema: "public", name: "late_read", definition: " SELECT id, name, 1 AS one, (id * 2) AS twice FROM public.late_c WHERE (id < 30);" },
+    { schema: "public", name: "late_read_again", definition: " SELECT one, twice, id, name FROM public.late_read WHERE (id > 2);" },
+    { schema: "public", name: "late_counts", definition: " SELECT c, count(*) AS n FROM public.late GROUP BY c;" },
     { schema: "public", name: "lost", definition: " SELECT 1 AS one FROM public.nowhere;" }],
 };
 /** the sync's copy state the listener reads for a table the catalog does not hold (`Sync.state` in a run) */
@@ -380,7 +391,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "late_n"], ["public", "late_p"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -2273,9 +2284,7 @@ test("a top N over joined tables chooses its rows by row number and reads the co
     assert.doesNotMatch(one, /__mason_r2|c\.rowid/);
     // the shapes that stay as they were: a row number exists of a table alone, a whole row is not listed, and a sort by
     // a computed output is one value
-    for (const sql of ["SELECT l.id, c.name FROM late l JOIN (SELECT * FROM late_c) c ON c.id = l.c ORDER BY l.id LIMIT 2",
-      "WITH w AS (SELECT * FROM late_c) SELECT l.id, w.name FROM late l JOIN w ON w.id = l.c ORDER BY l.id LIMIT 2",
-      "SELECT l.id, name FROM late l JOIN late_c USING (id) ORDER BY l.id LIMIT 2",
+    for (const sql of ["SELECT l.id, name FROM late l JOIN late_c USING (id) ORDER BY l.id LIMIT 2",
       // a computed output beside a *: its number stays, a value of the list
       "SELECT *, l.k + 1 AS next FROM late l JOIN late_c c ON c.id = l.c ORDER BY 7, 1 LIMIT 3",
       'SELECT r.id, r."RowId", l.id FROM rowid_cased r JOIN late l ON l.id = r.id ORDER BY r.id DESC LIMIT 2',
@@ -2297,6 +2306,145 @@ test("a top N over joined tables chooses its rows by row number and reads the co
     await c.query({ name: "top", text: "SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT $1", values: [2] });
     await c.query("SET TimeZone = 'Asia/Tokyo'");
     assert.deepEqual((await c.query({ name: "top", text: "SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT $1", values: [1], rowMode: "array" })).rows, [[1, "c1"]]);
+  } finally { await c.end(); }
+});
+
+// ISSUE 134, STEP 2: EVERY FROM ITEM OF A JOIN IS A TABLE, A PLAIN DERIVED READ OR CARRIED (src/duck/late.ts). A view, a WITH
+// query, a tool's wrapper and a derived side read their rows by row number too, and what has no row number passes through
+test("a join's FROM items: a plain derived read is fetched by its row number, a wrapper folded into its join, anything else carried", async () => {
+  const c = await client();
+  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  /** each statement equal to Postgres's, in the form `form` says */
+  const each = async (form: RegExp, sqls: string[], not?: RegExp): Promise<void> => {
+    for (const sql of sqls) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+      const line = await sent(sql);
+      assert.match(line, form, sql);
+      if (not !== undefined) assert.doesNotMatch(line, not, sql);
+    }
+  };
+  const FETCHED = /__mason_rid AS __mason_r\d.*\) AS __mason_late LEFT JOIN .*__mason_rid = __mason_late\.__mason_r\d/;
+  const ROWS = /rowid AS __mason_r1.*\) AS __mason_late LEFT JOIN /;
+  const CARRIED = /AS __mason_c\d.*\) AS __mason_late LEFT JOIN /;
+  try {
+    // PLAIN DERIVED READS: each join kind, each spelling of one, the WHERE inside alone
+    await each(FETCHED, [
+      "SELECT l.id, d.name FROM late l JOIN (SELECT * FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT 2",
+      "SELECT l.id, d.name, d.one, d.twice FROM late l LEFT JOIN (SELECT id + 1000 AS id, name, 1 AS one, id * 2 AS twice FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT 3",
+      "SELECT l.id, d.name, d.one FROM late l LEFT JOIN (SELECT id, name, 1 AS one FROM late_c WHERE id > 1) d ON d.id = l.c ORDER BY l.id LIMIT 4",
+      "SELECT d.id, d.one, l.id AS l FROM (SELECT id, 1 AS one FROM late_c WHERE id > 47) d RIGHT JOIN late l ON l.id = d.id ORDER BY l.id DESC LIMIT 3",
+      "SELECT l.id, d.key, d.up FROM late l RIGHT JOIN (SELECT id + 1995 AS key, upper(name) AS up FROM late_c) d ON d.key = l.id ORDER BY d.key DESC LIMIT 3",
+      "SELECT l.id, d.up, d.one FROM late l FULL JOIN (SELECT id + 1995 AS key, upper(name) AS up, 1 AS one FROM late_c) d ON d.key = l.id ORDER BY l.id NULLS FIRST, d.up LIMIT 44 OFFSET 40",
+      "SELECT l.id, d.name FROM late l, (SELECT id, name FROM late_c WHERE id < 3) d WHERE d.id = l.c ORDER BY l.id LIMIT 2 OFFSET 1",
+      "SELECT d.x, d.y, l.id FROM late l JOIN (SELECT id, name FROM late_c) AS d(x, y) ON d.x = l.c ORDER BY l.id LIMIT 2",
+      "SELECT d.a, l.id FROM (SELECT id, c AS a FROM late) d JOIN late l ON l.id = d.id + 1 ORDER BY l.id LIMIT 2",
+      "SELECT x.name, y.name AS other FROM (SELECT id, name FROM late_c) x JOIN (SELECT id, name FROM late_c) y ON y.id = x.id + 1 ORDER BY x.id LIMIT 2",
+      "SELECT l.id, r.name, r.one, r.twice FROM late l LEFT JOIN late_read r ON r.id = l.c ORDER BY l.id DESC LIMIT 3",
+      "SELECT l.id, r.name, r.one FROM late l LEFT JOIN late_read_again r ON r.id = l.c ORDER BY l.id LIMIT 4",
+      "WITH w AS (SELECT id, name, 1 AS one FROM late_c WHERE id > 1) SELECT l.id, w.name, w.one FROM late l LEFT JOIN w ON w.id = l.c ORDER BY l.id LIMIT 3",
+      "WITH w(key, label) AS (SELECT id, name FROM late_c) SELECT l.id, x.label FROM late l JOIN w AS x ON x.key = l.c ORDER BY l.id LIMIT 3",
+      "WITH v AS (SELECT id, name FROM late_c), w AS (SELECT * FROM v WHERE id > 1) SELECT l.id, w.name FROM late l JOIN w ON w.id = l.c ORDER BY l.id LIMIT 2",
+      // a sort or a WHERE reads the derived side's own expression, and a bare name finds its owner
+      "SELECT l.id, d.twice FROM late l JOIN (SELECT id, id * 2 AS twice FROM late_c) d ON d.id = l.c WHERE d.twice > 2 ORDER BY d.twice DESC, l.id LIMIT 3",
+      "SELECT l.id, label FROM late l JOIN (SELECT id AS key, name AS label FROM late_c) d ON d.key = l.c ORDER BY l.id LIMIT 3",
+      "SELECT * FROM late_c a JOIN (SELECT id AS key, upper(name) AS up FROM late_c) d ON d.key = a.id + 1 ORDER BY a.id LIMIT 2",
+    ]);
+    // A SIDE THE LIST DOES NOT READ IS NOT READ AGAIN
+    assert.doesNotMatch(await sent("SELECT l.id FROM late l JOIN (SELECT id FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT 2"), /__mason_rid/);
+    // WRAPPERS FOLD: a view of a join, of a view, a WITH query, a tool's own, a `*` of columns of one name, its keys read as what they are
+    await each(ROWS, [
+      "SELECT * FROM late_joined ORDER BY id DESC LIMIT 3",
+      "SELECT name, k FROM late_joined WHERE k > 1 ORDER BY k LIMIT 3 OFFSET 1",
+      "SELECT id, shout FROM late_joined_again ORDER BY id LIMIT 2",
+      "SELECT * FROM (SELECT * FROM late_joined WHERE id > 3) s WHERE s.k > 1 ORDER BY s.id LIMIT 2",
+      "WITH j AS (SELECT l.id, l.j, c.name FROM late l JOIN late_c c ON c.id = l.c) SELECT * FROM j ORDER BY id LIMIT 2",
+      "WITH j AS (SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c), k AS (SELECT * FROM j) SELECT id, upper(name) FROM k ORDER BY id LIMIT 2",
+      "SELECT * FROM (SELECT l.id, l.j, c.id AS key, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c WHERE l.id > 1) t ORDER BY id LIMIT 3",
+      "SELECT t.id, t.up FROM (SELECT l.id, upper(c.name) AS up FROM late l JOIN late_c c ON c.id = l.c) AS t ORDER BY t.up DESC, t.id LIMIT 3",
+      "SELECT t.x FROM (SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c) AS t(x, y) ORDER BY t.x LIMIT 2",
+      "SELECT * FROM (SELECT l.id, l.c, d.id AS d, d.one FROM late l LEFT JOIN (SELECT id, 1 AS one FROM late_c WHERE id > 1) d ON d.id = l.c) t ORDER BY id LIMIT 3",
+      "SELECT id FROM (SELECT l.id, l.c AS id2, c.name FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY id2, id LIMIT 3",
+    ]);
+    // the wrapper's output name before its input column: `ORDER BY name` is the output, and this wrapper's column is another
+    await each(ROWS, ["SELECT id AS name FROM (SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY name DESC LIMIT 2"]);
+    // two columns of one name, read by a `*` alone, in their places
+    await each(ROWS, ["SELECT * FROM (SELECT l.k, l.id, c.id, c.name FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY k LIMIT 2"]);
+    // CARRIED: what has no row number passes through, a nullable side's NULLs with it
+    await each(CARRIED, [
+      "SELECT l.id, l.j, s.n FROM late l JOIN (SELECT c, count(*) AS n FROM late GROUP BY c) s ON s.c = l.c ORDER BY l.id LIMIT 3",
+      "SELECT l.id, l.j, s.n, s.one FROM late l LEFT JOIN (SELECT c, count(*) AS n, 1 AS one FROM late WHERE c > 1 GROUP BY c) s ON s.c = l.c ORDER BY l.id LIMIT 3",
+      "SELECT l.id, s.n FROM late l LEFT JOIN late_counts s ON s.c = l.c + 40 ORDER BY l.id LIMIT 12",
+      "WITH s AS (SELECT c, count(*) AS n FROM late GROUP BY c) SELECT l.id, s.n FROM late l JOIN s ON s.c = l.c ORDER BY l.id LIMIT 3",
+      "WITH m AS MATERIALIZED (SELECT id, name FROM late_c) SELECT l.id, m.name FROM late l JOIN m ON m.id = l.c ORDER BY l.id LIMIT 3",
+      "WITH t AS (SELECT id, name FROM late_c) SELECT l.id, x.name, y.name AS other FROM late l JOIN t x ON x.id = l.c JOIN t y ON y.id = l.c + 1 ORDER BY l.id LIMIT 3",
+      "SELECT l.id, d.name FROM late l JOIN (SELECT id, name FROM late_c ORDER BY id LIMIT 5) d ON d.id = l.c ORDER BY l.id LIMIT 3",
+      "SELECT l.id, d.name FROM late l JOIN (SELECT DISTINCT id, name FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT 3",
+      "SELECT l.id, d.rn FROM late l JOIN (SELECT id, row_number() OVER (ORDER BY id) AS rn FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT 3",
+      "SELECT l.id, d.name FROM late l JOIN (SELECT id, name FROM late_c UNION ALL SELECT id + 100, name FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT 3",
+      "SELECT l.id, d.name FROM late l JOIN (SELECT c.id, c.name FROM late_c c JOIN late_p p ON p.c = c.id AND p.line = 0) d ON d.id = l.c ORDER BY l.id LIMIT 3",
+      "SELECT l.id, d.n FROM late l, LATERAL (SELECT count(*) AS n FROM late_c c WHERE c.id = l.c) d ORDER BY l.id LIMIT 3",
+      "SELECT l.id, d.name FROM late l, LATERAL (SELECT name FROM late_c c WHERE c.id = l.c) d ORDER BY l.id LIMIT 3",
+    ], /__mason_rid/);
+    // a volatile derived read stays one value: its column carried, never read again
+    const random = await sent("SELECT l.id, d.r FROM late l JOIN (SELECT id, random() AS r FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT 3");
+    assert.match(random, CARRIED);
+    assert.doesNotMatch(random, /__mason_rid/);
+    assert.doesNotMatch(await sent("SELECT l.id, d.name FROM late l JOIN (SELECT id, name FROM late_c WHERE random() < 2) d ON d.id = l.c ORDER BY l.id LIMIT 3"), /__mason_rid/);
+    assert.doesNotMatch(await sent("SELECT * FROM (SELECT l.id, random() AS r FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY id LIMIT 3"), /__mason_r1/);
+    // a derived read's whole row is the rewrite's text of its columns, read as any other list
+    await each(FETCHED, ["SELECT l.id, d FROM late l JOIN (SELECT id, 1 AS one FROM late_c WHERE id > 1) d ON d.id = l.c ORDER BY l.id LIMIT 4"]);
+    // STAYS AS IT WAS: one item of nothing to fold, a grouped view by its output name, a function, a wrapper's sort inside
+    for (const sql of ["SELECT * FROM late_counts ORDER BY n DESC, c LIMIT 2",
+      "SELECT c, n AS total FROM late_counts ORDER BY total, c LIMIT 2",
+      "SELECT * FROM (SELECT * FROM late_c WHERE id > 1) t ORDER BY id LIMIT 2",
+      "SELECT * FROM (SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id DESC) t LIMIT 2",
+      "SELECT count(*) FROM (SELECT l.id FROM late l JOIN late_c c ON c.id = l.c) t LIMIT 2",
+      "SELECT l.id, x FROM late l JOIN unnest(ARRAY[1, 2]) x ON x = l.id ORDER BY l.id LIMIT 2"]) {
+      assert.doesNotMatch(await sent(sql), /__mason_r(id|\d)/, sql);
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+    }
+    // PAGES UNDER BOTH FAN-OUT DECISIONS. Proved: a plain read's key is its table's, through a view, a WITH query and a wrapper
+    for (const sql of ["SELECT l.id, d.name FROM late l JOIN (SELECT id, name FROM late_c) d ON d.id = l.c LIMIT 3",
+      "SELECT l.id, r.name FROM late l JOIN late_read r ON r.id = l.c LIMIT 3",
+      "WITH w AS (SELECT id, name FROM late_c) SELECT l.id, w.name FROM late l LEFT JOIN w ON w.id = l.c LIMIT 3",
+      "SELECT * FROM (SELECT l.id, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c) t LIMIT 3",
+      "SELECT * FROM late_joined LIMIT 3"]) {
+      assert.match(await sent(sql), /ORDER BY \w+\.(rowid|__mason_rid)\b.*\) AS __mason_late .*ORDER BY __mason_late\.__mason_r1/, sql);
+      assert.equal((await answer(c, sql)).rows.length, 3, sql);
+    }
+    // Not proved, no sort: a key computed, a multiplying side, what is carried
+    for (const sql of ["SELECT l.id, d.name FROM late l JOIN (SELECT id + 1 AS id, name FROM late_c) d ON d.id = l.c LIMIT 3",
+      "SELECT x.id, y.c FROM (SELECT id, c FROM late) x JOIN (SELECT id, c FROM late) y ON y.c = x.c LIMIT 3",
+      "SELECT * FROM (SELECT x.id, y.j FROM late x JOIN late y ON y.c = x.c) t LIMIT 3",
+      "SELECT l.id, s.n FROM late l JOIN late_counts s ON s.c = l.c LIMIT 3"]) {
+      assert.match(await sent(sql), /AS __mason_r1(?!.* ORDER BY ).*\) AS __mason_late LEFT JOIN /, sql);
+      assert.equal((await answer(c, sql)).rows.length, 3, sql);
+    }
+    // THE DECIDED DIFFERENCE, WIDER (gap limit-errors): a derived list's value computed for the rows chosen. Row 2000 is the one 'x'
+    for (const sql of ["SELECT c.id, d.id AS d, d.n FROM late_c c JOIN (SELECT id, k, c, (j ->> 'n')::int AS n FROM late) d ON d.c = c.id ORDER BY d.k DESC LIMIT 3",
+      "SELECT * FROM (SELECT l.id, (l.j ->> 'n')::int AS n, l.k, c.name FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY t.k DESC LIMIT 3"]) {
+      await assert.rejects(postgres(sql), /invalid input syntax for type integer: "x"/, sql);
+      assert.equal((await answer(c, sql)).rows.length, 3, sql);
+    }
+    // the bad row chosen: both raise
+    await assert.rejects(c.query("SELECT c.id, d.id AS d, d.n FROM late_c c JOIN (SELECT id, k, c, (j ->> 'n')::int AS n FROM late) d ON d.c = c.id ORDER BY d.k LIMIT 3"), (e: pg.DatabaseError) => e.code === "22P02");
+    // a parameter in a derived list is one value, in both reads of it
+    assert.deepEqual((await c.query({ text: "SELECT l.id, d.p, d.name FROM late l LEFT JOIN (SELECT id, $1::int AS p, name FROM late_c WHERE id > $2) d ON d.id = l.c ORDER BY l.id LIMIT 3", values: [7, 1], rowMode: "array" })).rows,
+      (await postgres("SELECT l.id, d.p, d.name FROM late l LEFT JOIN (SELECT id, $1::int AS p, name FROM late_c WHERE id > $2) d ON d.id = l.c ORDER BY l.id LIMIT 3", [7, 1])).rows.map((r) => [Number(r[0]), r[1] === null ? null : Number(r[1]), r[2]]));
+    // what is carried has no row number: a keyed WITH query read twice is proved bounded, and goes unsorted all the same
+    assert.doesNotMatch(await sent("WITH t AS (SELECT id, name FROM late_c) SELECT l.id, x.name, y.name AS other FROM late l JOIN t x ON x.id = l.c JOIN t y ON y.id = l.c LIMIT 3"), /ORDER BY/);
+    // a prepared statement run after a SET reads the setting where it runs
+    const prepared = { name: "derived", text: "SELECT l.id, d.name FROM late l JOIN (SELECT id, name FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT $1" };
+    await c.query({ ...prepared, values: [2] });
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual((await c.query({ ...prepared, values: [1], rowMode: "array" })).rows, [[1, "c1"]]);
   } finally { await c.end(); }
 });
 
@@ -2387,7 +2535,7 @@ test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number
     assert.match(await sent(`SELECT c.name ${JOINS} LIMIT 3`), /ORDER BY c\.rowid LIMIT 3 \) AS __mason_late .*ORDER BY __mason_late\.__mason_r1/, "a table unread is no key: its rows read alike");
     // a row number exists of a table alone, and a statement with no limit in fact has nothing to choose
     for (const sql of [`SELECT l.id, c.name ${JOINS}`, `SELECT l.id, c.name ${JOINS} OFFSET 1990`, `SELECT l.id, c.name ${JOINS} LIMIT ALL`, `SELECT l.id, c.name ${JOINS} LIMIT NULL`,
-      `SELECT l.id, c.name ${JOINS} LIMIT NULL::int OFFSET 1990`, "SELECT l.id, l.j ->> 'n' FROM late l LIMIT 3", "SELECT l.id, c.name FROM late l JOIN (SELECT * FROM late_c) c ON c.id = l.c LIMIT 3",
+      `SELECT l.id, c.name ${JOINS} LIMIT NULL::int OFFSET 1990`, "SELECT l.id, l.j ->> 'n' FROM late l LIMIT 3",
       "SELECT l.id, name FROM late l JOIN late_c USING (id) LIMIT 3", `SELECT DISTINCT l.c ${JOINS} LIMIT 3`, `SELECT 1 ${JOINS} LIMIT 3`]) {
       assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
       assert.equal((await answer(c, sql)).rows.length, (await postgres(sql)).rows.length, sql);

@@ -36,23 +36,28 @@ const ROLES = `roles:
     tables:
       orders: { where: "tenant_id = :tenant" }
       order_items: { through: orders }
+      labels: {}
   list:
     attributes: { tenants: list }
     tables:
       orders: { where: "tenant_id = ANY(:tenants)" }
       order_items: { through: orders }
+      labels: {}
 `;
 const schema: PgSchema = {
   database: "shop",
   tables: [
     { name: "orders", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int8" }, { name: "tenant_id", type: "int4" }, { name: "marker", type: "int4" }] },
     { name: "order_items", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int8" }, { name: "order_id", type: "int8" }, { name: "qty", type: "int4" }] },
+    // no filter: a read of it beside a filtered read is what a row number could be taken of
+    { name: "labels", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "label", type: "text" }] },
   ],
   views: [{ schema: "public", name: "marked", definition: " SELECT id, marker FROM public.orders;" }],
 };
 const copied = [
   { source: "public.orders", columns: [{ name: "id" }, { name: "tenant_id" }, { name: "marker" }], key: ["id"], foreignKeys: [] },
   { source: "public.order_items", columns: [{ name: "id" }, { name: "order_id" }, { name: "qty" }], key: ["id"], foreignKeys: [{ column: "order_id", target: "public.orders", targetColumn: "id" }] },
+  { source: "public.labels", columns: [{ name: "id" }, { name: "label" }], key: ["id"], foreignKeys: [] },
 ];
 /** raises on the value hidden rows hold, every hundredth of them; 1 on every visible row */
 const RAISES = (c: string): string => `1/(CASE WHEN ${c} = 99 THEN 0 ELSE 1 END)`;
@@ -61,6 +66,7 @@ const VISIBLE = 20_000;
 let store: DuckStore;
 let api: PgApiServer;
 const clients: pg.Client[] = [];
+const logged: string[] = [];
 const users: Record<string, { role: string; attributes: Record<string, string | string[]> }> = {
   scalar: { role: "scalar", attributes: { tenant: "1" } },
   list: { role: "list", attributes: { tenants: ["1", "2"] } },
@@ -73,11 +79,12 @@ before(async () => {
   assert.ok(!("message" in grants), JSON.stringify(grants));
   // one object until it changes: the listener checks the filters of each new one
   const live = { file: FILE, grants, problem: null, default: null };
-  store = await DuckStore.open(path.join(dir, "duck.db"), () => undefined);
+  store = await DuckStore.open(path.join(dir, "duck.db"), (l) => { logged.push(l); });
   const w = store.writer;
   // an even id is tenant 3's, an odd one tenant 1's, over 2 M of keys
   await w.run("CREATE TABLE public.orders AS SELECT (i * 50 + (i % 2))::BIGINT AS id, (CASE WHEN i % 2 = 0 THEN 3 ELSE 1 END)::INTEGER AS tenant_id, (CASE WHEN i % 200 = 0 THEN 99 ELSE 1 END)::INTEGER AS marker FROM range(40000) t(i)");
   await w.run("CREATE TABLE public.order_items AS SELECT (100000 + i)::BIGINT AS id, (i * 50 + (i % 2))::BIGINT AS order_id, (CASE WHEN i % 200 = 0 THEN 99 ELSE 1 END)::INTEGER AS qty FROM range(40000) t(i)");
+  await w.run("CREATE TABLE public.labels AS SELECT i::INTEGER AS id, 'l' || i AS label FROM range(10) t(i)");
   api = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: "shop", masonVersion: "test",
     authenticate: (_p, user) => { const u = users[user]; return u === undefined ? {} : { user, ...u }; },
@@ -188,6 +195,34 @@ async function expressionAboveTheFilter(wall: boolean): Promise<void> {
   }
 }
 test("the engine's plan of what is sent: the statement's expression is above the role's filter and in no scan's own filters, the wall in the text", () => expressionAboveTheFilter(true));
+
+// ISSUE 134: a role's filtered read is no plain read (a barrier and a statistics wall stand in it, and fetching its rows
+// again needs a review of its own, step 4), and a statement holding one keeps its form: src/duck/late.ts `tablesOnly`
+test("a filtered role's statement does not change form: no row number of a filtered read, a derived read beside it, a wrapper or a WITH query", async () => {
+  const reads = ["SELECT o.id, d.qty FROM orders o JOIN (SELECT order_id, qty, 1 AS one FROM order_items) d ON d.order_id = o.id ORDER BY o.id LIMIT 3",
+    "SELECT o.id, d.qty FROM orders o JOIN (SELECT order_id, qty FROM order_items) d ON d.order_id = o.id LIMIT 3",
+    "SELECT * FROM (SELECT o.id, i.qty FROM orders o JOIN order_items i ON i.order_id = o.id) t ORDER BY id LIMIT 3",
+    "WITH w AS (SELECT order_id, qty FROM order_items) SELECT o.id, w.qty FROM orders o JOIN w ON w.order_id = o.id ORDER BY o.id LIMIT 3",
+    "WITH j AS (SELECT o.id, i.qty FROM orders o JOIN order_items i ON i.order_id = o.id) SELECT * FROM j LIMIT 3",
+    "SELECT m.id, i.qty FROM marked m JOIN order_items i ON i.order_id = m.id ORDER BY m.id LIMIT 3",
+    "SELECT o.id, s.n FROM orders o JOIN (SELECT order_id, count(*) AS n FROM order_items GROUP BY order_id) s ON s.order_id = o.id ORDER BY o.id LIMIT 3",
+    // beside a table it filters nothing of: anything but `tablesOnly` would carry the filtered read and fetch the table
+    "SELECT l.label, o.id FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY o.id LIMIT 3",
+    "SELECT l.label, o.id FROM labels l JOIN orders o ON o.tenant_id = l.id LIMIT 3",
+    "SELECT * FROM (SELECT l.label, o.id FROM labels l JOIN orders o ON o.tenant_id = l.id) t ORDER BY id LIMIT 3",
+    "SELECT l.label, d.id FROM labels l JOIN (SELECT id, tenant_id FROM orders) d ON d.tenant_id = l.id ORDER BY d.id LIMIT 3",
+    "WITH w AS (SELECT id, label FROM labels) SELECT w.label, o.id FROM orders o JOIN w ON w.id = o.tenant_id ORDER BY o.id LIMIT 3"];
+  for (const user of ["scalar", "list"]) {
+    for (const sql of reads) {
+      logged.length = 0;
+      assert.equal((await rows(user, sql)).length, 3, sql);
+      const line = logged.findLast((l) => l.startsWith("statement: "));
+      assert.ok(line !== undefined, sql);
+      assert.match(line, /try\(COLUMNS\(\*\)\)/, `${sql}: the wall in place`);
+      assert.doesNotMatch(line, /__mason_r(id|\d)|__mason_c\d/, sql);
+    }
+  }
+});
 
 /**
  * THE LIMIT'S DETECTOR. `try` also stops the pushdown, as an observation of this engine, so with it on nothing here can

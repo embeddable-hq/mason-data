@@ -56,6 +56,14 @@ async function joinKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tre
   return relids.length === 0 ? new Map() : primaryKeysOf(await catalogRows(catalog, uniqueColumnsSql(relids)));
 }
 
+/** which of `functions` the catalog says are volatile: asked only of a statement with a derived read the list after the
+ *  limit may read twice (src/duck/late.ts) */
+async function volatileFunctions(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, functions: number[]): Promise<Set<number>> {
+  if (functions.length === 0) return new Set();
+  const rows = await catalogRows(catalog, `SELECT oid::text FROM pg_proc WHERE provolatile = 'v' AND oid IN (${functions.map((f) => String(Math.trunc(f))).join(", ")})`);
+  return new Set(rows.map(([oid]) => Number(oid)));
+}
+
 /**
  * DuckDB's keywords that Postgres's are not: a column named `at` (DuckDB's AT TIME ZONE) or `qualify` is an identifier
  * the deparser writes bare, as Postgres reads it, and DuckDB refuses as a syntax error. The deparser's one quoting
@@ -342,7 +350,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the late select list, which then reads the columns this leaves
   if (kept !== null) hideKept(tree, { visible: kept.visible(), searchPath: searchSchemas(searchPath) });
   // a sorted, limited select list is computed over the rows the limit keeps (src/duck/late.ts)
-  tree = await selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, () => joinKeys(catalog, analysis.tree)) ?? tree;
+  tree = await selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, () => joinKeys(catalog, analysis.tree),
+    { volatile: (functions) => volatileFunctions(catalog, functions), tablesOnly: walls !== null }) ?? tree;
   // ONLY WHAT THE ORACLE VERIFIED: after the rewrite, so a construct the rewrite refuses by name (with its own way out)
   // says so first
   const keys = [...resolved].sort();

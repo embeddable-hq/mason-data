@@ -27,11 +27,19 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (`to_char`, a numeric bin, jsonb `@>`) held every other session, up to 57 s on one deployment. A small statement now
   answers in under about a second or two, with up to about four such statements running at once. Nothing to do on
   upgrade.
+- **A LIMIT over a view, a WITH query, a tool's `SELECT * FROM (<join>) t LIMIT 100` wrapper or a derived table beside a wide
+  table no longer reads every wide column to keep 100 rows.** Such a statement took seconds and gigabytes of spill, or
+  failed for memory; it now takes a fraction of a second and spills nothing. A narrow statement of these shapes with no
+  ORDER BY now pays for the join's whole output where the join is proved bounded: a few milliseconds at a LIMIT alone, and
+  a deep OFFSET can take about twice as long. A column of an aggregated side, and a statement of a role that filters
+  rows, are read as before. Nothing to do on upgrade.
+- **A value that raises in such a derived list no longer fails the statement when the LIMIT leaves its row out**: Postgres
+  raises there, sorting every row first. This is the decided difference `limit-errors` (docs/SQL-SUPPORT.md), wider.
 
 ## Known
 
 - **Five or more heavy statements at once can still stall a small one**, for tens of seconds in the worst case measured
   ([issue 88](https://github.com/embeddable-hq/mason-data/issues/88)).
-
-- **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows has no
-  stable order, so a tool paging one can see a row twice and miss another. Add an ORDER BY where the pages matter.
+- **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows, or over
+  an aggregated side, has no stable order, so a tool paging one can see a row twice and miss another. Add an ORDER BY
+  where the pages matter.

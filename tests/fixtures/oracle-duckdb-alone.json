@@ -1,19 +1,19 @@
 {
-  "statements": 3326,
+  "statements": 3669,
   "mason": {
-    "exact": 3157,
-    "decided": 39,
+    "exact": 3498,
+    "decided": 41,
     "refused": 130,
     "differs": 0
   },
   "duckdb": {
-    "exact": 982,
-    "name": 733,
-    "refused": 601,
-    "value": 410,
-    "rows": 265,
+    "exact": 1054,
+    "name": 734,
+    "refused": 784,
+    "value": 491,
+    "rows": 268,
     "text": 153,
-    "other": 182
+    "other": 185
   },
   "gaps": {
     "copyPhase": {
@@ -72,7 +72,7 @@
         "fromless-text-order": { "planted": 1, "natural": 0 },
         "libc-mark-run-form": { "planted": 1, "natural": 0 },
         "libc-rare-letter": { "planted": 1, "natural": 0 },
-        "limit-errors": { "planted": 1, "natural": 2 },
+        "limit-errors": { "planted": 3, "natural": 2 },
         "limit-lateral-argument": { "planted": 0, "natural": 2 },
         "limit-lateral-filter": { "planted": 0, "natural": 2 },
         "min-max-scale-tie": { "planted": 1, "natural": 0 },
@@ -86,7 +86,7 @@
       }
     },
     "everyAsk": {
-      "asked": 24051,
+      "asked": 26574,
       "refused": {
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
@@ -142,7 +142,7 @@
         "fromless-text-order": { "planted": 3, "natural": 0 },
         "libc-mark-run-form": { "planted": 3, "natural": 0 },
         "libc-rare-letter": { "planted": 3, "natural": 0 },
-        "limit-errors": { "planted": 3, "natural": 6 },
+        "limit-errors": { "planted": 9, "natural": 6 },
         "limit-lateral-argument": { "planted": 0, "natural": 6 },
         "limit-lateral-filter": { "planted": 0, "natural": 8 },
         "min-max-scale-tie": { "planted": 3, "natural": 0 },
