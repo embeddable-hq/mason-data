@@ -116,7 +116,8 @@ jobs:
           files=$(grep -rl '^#!/usr/bin/env bash' scripts/ || true)
           if [ -n "$files" ]; then shellcheck $files; else echo "no bash script under scripts/"; fi
 
-  # The unit tests, one shard of them a job: scripts/ci-shards.ts computes each shard's files from the tree.
+  # The unit tests, one shard of them a job: scripts/ci-shards.ts computes each shard's files from the tree, and runs
+  # the files that hold a second's bound over 6 M rows by themselves, after the others.
   unit:
     name: unit (${{ matrix.shard }})
     runs-on: ubuntu-latest
