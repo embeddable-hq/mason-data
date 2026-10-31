@@ -213,11 +213,13 @@ test("a dropped connection is reported, exit 1, with the way back: on stderr, st
 test("the run going away ends the tunnel: said, not silent", { timeout: 60_000 }, async () => {
   const s = await server();
   const ssh = fakeSsh();
-  const h = await hold(s.root, ssh.bin);
-  s.close();
-  assert.equal(await h.done, 1);
-  assert.match(h.err(), /Mason for shop ended the tunnel: it stopped or restarted/);
-  assert.match(h.err(), /the tunnel to deploy@mason\.example dropped/);
+  try {
+    const h = await hold(s.root, ssh.bin);
+    s.close();
+    assert.equal(await h.done, 1);
+    assert.match(h.err(), /Mason for shop ended the tunnel: it stopped or restarted/);
+    assert.match(h.err(), /the tunnel to deploy@mason\.example dropped/);
+  } finally { s.close(); }
 });
 
 const refused = async (bin: string, root: string, extra: Record<string, string>, args: string[] = ["--timeout", "20"]): Promise<{ code: number | null; error: { code: string; message: string; why?: string; fix?: string }; next: Array<{ command: string }> }> => {
