@@ -297,7 +297,6 @@ jobs:
   # Every other integration file, one shard of them a job: a new file lands in one by itself.
   rest:
     name: rest shard ${{ matrix.shard }}
-    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
