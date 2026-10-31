@@ -177,7 +177,13 @@ paths:
     rows: 0.21 s native, 8.8 s through the function. A new native read is held to Postgres by `tests/duck-wire.test.ts`
     "a ->> of a column is DuckDB's own read" (every shape, against PGlite, and the hops counted:
     `DuckStore.functionCalls`) and by the oracle. A test that must EXERCISE the function (a cancel, a timeout) reads
-    with `->` or a number, never a string's `->>`;
+    with `->` or a number, never a string's `->>`. **A constant path has one route however it is spelled**
+    (`Rewriter.jsonPath`, `constRead`; issue 130): `'{a,b}'`, `ARRAY['a', 'b']`, either cast to `text[]`, `'a'::text`, the
+    json_extract_path family, read from the analysis (`Typed.text`, `Typed.textArray`, the Const's own bytes), never
+    the statement's text, so array_in's reading of a literal is Postgres's own. A path the Parse cannot see (a parameter,
+    a row's element) is computed; a text[] parameter is bound as the JSON Postgres read it to (`readParameters`,
+    `from_json`); a cast that changes the text (`varchar(n)[]`, `char(n)[]`, `name[]`) is refused, `json-path-type`.
+    The oracle's `jsonPathCases` holds every spelling on both types;
   - **the JSON paths statements keep reading are stored as columns** (`.claude/rules/duck-stored-json.md`), which answers a number's digits and
     the rest from a plain column. ("The executor worker", "A `->>` is DuckDB's own read")
 - **A jsonb is sorted, grouped and compared by ONE key, `jsonbKey` (src/duck/jsonb-order.ts), never by its text**:

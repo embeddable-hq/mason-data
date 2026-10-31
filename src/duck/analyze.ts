@@ -80,6 +80,7 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
 const PARAM_TYPES: Record<number, string> = {
   16: "boolean", 21: "smallint", 23: "integer", 20: "bigint", 700: "real", 701: "double precision", 1700: "numeric",
   2950: "uuid", 114: "json", 3802: "jsonb", 1083: "time", 1082: "date", 1114: "timestamp", 1184: "timestamptz", 1186: "interval", 869: "inet",
+  1009: "text[]", 1015: "varchar[]",
 };
 
 /**
@@ -98,6 +99,8 @@ export async function readParameters(run: (bytes: Uint8Array) => Promise<Uint8Ar
     const x = `${quote(v)}::${type}`;
     if (oid === 1082) return `CASE WHEN isfinite(${x}) THEN (${x} - date '2000-01-01')::text ELSE ${x}::text END`;
     if (oid === 1114 || oid === 1184) return `CASE WHEN isfinite(${x}) THEN (extract(epoch FROM ${x}) * 1000000 - 946684800000000)::int8::text ELSE ${x}::text END`;
+    // a text array as JSON, which holds what array_in read (a NULL element, any character) as DuckDB reads it back
+    if (oid === 1009 || oid === 1015) return `to_json(${x})::text`;
     if (oid === 1186) return `(extract(year FROM ${x}) * 12 + extract(month FROM ${x}))::text || ' ' || extract(day FROM ${x})::text || ' ' || ((extract(hour FROM ${x}) * 60 + extract(minute FROM ${x})) * 60000000 + extract(microseconds FROM ${x}))::int8::text`;
     return `${x}::text`;
   });

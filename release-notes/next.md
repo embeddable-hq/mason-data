@@ -35,6 +35,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   rows, are read as before. Nothing to do on upgrade.
 - **A value that raises in such a derived list no longer fails the statement when the LIMIT leaves its row out**: Postgres
   raises there, sorting every row first. This is the decided difference `limit-errors` (docs/SQL-SUPPORT.md), wider.
+- **`#>> array['k']`, the form BI tools send for a JSON field, is as fast as `->> 'k'`**: on 20 M rows a `GROUP BY` of it
+  took 45-90 s and now takes about 1.2 s. The same holds for `'{k}'::text[]`, `array['k']::text[]` and
+  `json_extract_path_text(j, VARIADIC array['k'])`, and each now reads a stored JSON path where there is one. `#>` with
+  a constant path reads what `->` reads. Nothing to do on upgrade.
+- **A `text[]` parameter works as a prepared statement's value**, where it failed: a JSON path bound as `$1`, and any
+  other array of text bound the same way. Nothing to do on upgrade.
+- **A JSON path cast to `varchar(n)[]`, `char(n)[]` or `name[]` is refused by name (`json-path-type`)**, where it read the
+  path uncut or failed. Cast it to `text[]`.
+- **`SELECT *` in an arm of a UNION no longer lists a stored JSON path's hidden column**, which failed or added a column
+  once a table had one stored. Nothing to do on upgrade.
 
 ## Known
 

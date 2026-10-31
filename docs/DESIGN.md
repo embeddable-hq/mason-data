@@ -1088,6 +1088,25 @@ writes `7.00` as `7.0`), an object, an array, an index step, a document that may
 
 **Where.** `src/duck/rewrite.ts` (`jsonGet`); `tests/duck-wire.test.ts` "a ->> of a column is DuckDB's own read".
 
+**A path has one route however it is spelled** (issue 130). Only a literal `'{k}'` reached the route above; `array['k']`,
+which BI tools send, was a `to_json` of a list, so no native read, no stored path and one path counted as none. The
+constant is now read from the analysed tree (the Const's array bytes, an ARRAY's Consts), so `array_in` decides what a
+literal says. `GROUP BY` over 20 M rows of a 190-byte jsonb, wall time of a laptop shared with other work, nothing
+stored, then the path stored:
+
+| statement | before | after | stored |
+|---|---|---|---|
+| `meta ->> 'k'` | 3.2-6.7 s | 1.3-2.1 s | 0.13-0.16 s |
+| `meta #>> array['k']` | 58-89 s | 1.2-1.3 s | 0.17-0.19 s |
+| `meta #>> array['k']::text[]` | 45-70 s | 1.2 s | |
+| `meta #>> array['order','status']` | 44-55 s | 1.3-1.4 s | |
+| `jsonb_extract_path_text(meta, VARIADIC array[…])` | 54-60 s | 1.4-1.6 s | |
+| `count(meta #> array['k'])` | | | 0.05-0.07 s |
+
+`#>`, like `->`, stays the function until the path is stored: it answers a value's JSON text, which DuckDB's writer
+would respell. `(meta #> array['k'])::text` and `(meta -> 'k')::text` took 48-82 s and up to 168 s by the function
+(both the same route, the spread the machine's), and 7-14 s stored, where the rest is the cast's own function.
+
 ### What a stored path is
 
 **Decision.** A hidden VARCHAR column of the copy (`__mason_json_` + 12 hex digits of a SHA-256 of table and path)

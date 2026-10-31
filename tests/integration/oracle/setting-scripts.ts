@@ -8,7 +8,7 @@
  */
 import type pg from "pg";
 
-export type Step = string | { pipeline: string[] } | { prepare: string; sql: string } | { run: string }
+export type Step = string | { pipeline: string[] } | { prepare: string; sql: string } | { run: string; values?: Array<string | null> }
   /** a Parse, Bind and Execute of a row count of one, then `then`'s statements, in one batch */
   | { suspend: string; then: string[] }
   /** a named statement bound to a named portal, and that portal's own messages, each to its own Sync */
@@ -30,6 +30,16 @@ const FAILED: Step[] = ["BEGIN", "SET application_name = 'a'", "SELECT 1/0"];
 const ZONED = "SELECT created_at, date_trunc('day', created_at) AS day, current_setting('TimeZone') AS tz, current_setting('application_name') AS app FROM public.orders ORDER BY id LIMIT 2";
 
 const s = (name: string, ...steps: Step[]): SettingScript => ({ name, steps });
+
+/** a text[] parameter as a json read's path, spelled as a driver sends it, and the values it is bound to */
+const PATH_PARAMETERS: Array<[string, string]> = [
+  ["a list", "SELECT id, jb #>> $1::text[] AS a, j #>> $1::text[] AS b, jb #> $1::text[] AS c, j #> $1::text[] AS d FROM public.jpath ORDER BY id"],
+  ["inferred", "SELECT id, jb #>> $1 AS a FROM public.jpath ORDER BY id"],
+  ["grouped by its output name", "SELECT jb #>> $1::text[] AS v, count(*) FROM public.jpath GROUP BY 1 ORDER BY v"],
+  ["filtered", "SELECT id FROM public.jpath WHERE j #>> $1::text[] = 'alpha' ORDER BY id"],
+  ["VARIADIC", "SELECT id, jsonb_extract_path_text(jb, VARIADIC $1::text[]), json_extract_path(j, VARIADIC $1::text[]) FROM public.jpath ORDER BY id"],
+];
+const PATH_VALUES = ["{k}", "{o,b}", "{a,0}", "{a,-1}", "{0}", "{}", "{k,NULL}", null];
 
 export const SETTING_SCRIPTS: SettingScript[] = [
   // SET LOCAL outside a block: the warning, its value gone by the next request, nothing reported
@@ -165,6 +175,9 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   s("a failed block, a SHOW's portal bound before", { prepare: "w", sql: APP }, "BEGIN", { bind: "w", portal: "ps" }, "SELECT 1/0", { execute: "ps" }, { describePortal: "ps" }, "ROLLBACK", APP),
 
   // a prepared statement reads what is in force when it RUNS: a reverted setting never stays in its plan
+  // a json read's path as a parameter is not constant at the Parse (issue 130): each run reads its own, after a SET too
+  ...PATH_PARAMETERS.map(([name, sql]) => s(`a json path as a parameter, ${name}`, { prepare: "p", sql }, ...PATH_VALUES.flatMap((v, i): Step[] => [{ run: "p", values: [v] }, `SET TimeZone = '${i % 2 === 0 ? "Asia/Tokyo" : "UTC"}'`, { run: "p", values: [v] }]))),
+  s("a json path element as a parameter", { prepare: "p", sql: "SELECT id, jb #>> ARRAY[$1], j #>> ARRAY[$1, 'b'], jsonb_extract_path_text(jb, $1, 'b') FROM public.jpath ORDER BY id" }, { run: "p", values: ["o"] }, "SET TimeZone = 'Asia/Tokyo'", { run: "p", values: ["k"] }, { run: "p", values: [null] }, { run: "p", values: ["0"] }),
   s("a statement parsed before, run through SET LOCAL and after", { prepare: "z", sql: ZONED }, { run: "z" }, "BEGIN", "SET LOCAL TimeZone = 'Asia/Tokyo'", "SET LOCAL application_name = 'loc'", { run: "z" }, "COMMIT", { run: "z" }),
   s("a statement parsed before, run through a rolled-back SET and after", { prepare: "z", sql: ZONED }, "BEGIN", "SET TimeZone = 'Asia/Tokyo'", { run: "z" }, "ROLLBACK", { run: "z" }),
   s("a statement parsed under a SET LOCAL, run after", "BEGIN", "SET LOCAL TimeZone = 'Asia/Tokyo'", { prepare: "z", sql: ZONED }, { run: "z" }, "COMMIT", { run: "z" }),
@@ -207,7 +220,7 @@ interface Wire {
   removeListener(event: "message", listener: (m: Message) => void): void;
   query(text: string): void;
   parse(q: { text: string; name?: string }): void;
-  bind(c: { statement?: string; portal?: string }): void;
+  bind(c: { statement?: string; portal?: string; values?: Array<string | null> }): void;
   describe(m: { type: "P" | "S"; name?: string }): void;
   execute(c: { portal?: string; rows?: number }): void;
   close(m: { type: "P" | "S"; name: string }): void;
@@ -236,7 +249,7 @@ export async function traceStep(client: pg.Client, step: Step): Promise<string[]
           wire.execute({ rows: 1 });
           for (const text of step.then) { wire.parse({ text }); portal(""); }
         } else if ("prepare" in step) wire.parse({ name: step.prepare, text: step.sql });
-        else if ("run" in step) portal(step.run);
+        else if ("run" in step) { wire.bind({ statement: step.run, ...(step.values === undefined ? {} : { values: step.values }) }); wire.describe({ type: "P" }); wire.execute({}); }
         else if ("bind" in step) wire.bind({ statement: step.bind, portal: step.portal });
         else if ("execute" in step) wire.execute({ portal: step.execute });
         else if ("describePortal" in step) wire.describe({ type: "P", name: step.describePortal });
