@@ -314,6 +314,7 @@ for (const [step, served] of [["snapshot", "2"], ["written", "2"], ["committed",
           try { assert.equal((await c.query("SELECT count(*) AS n FROM counts")).rows[0].n, served); } finally { await c.end(); }
           assert.deepEqual(await w.rows(`SELECT "rows"::VARCHAR FROM ${MASON_SCHEMA}.generated_tables`), [[served]], "its ledger row is the table's");
           assert.ok(w.status().behindSeconds > 0, "a base synced since the build counts as changed");
+          assert.deepEqual(await w.rows("SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '%__mason_generated'"), [[0n]], "nothing left beside it, before the next run replaces it");
         } finally { release(); }
         const done = await w.until((s) => s.state === "current" && s.lastRun?.rows === 3);
         assert.equal(done.error, null);

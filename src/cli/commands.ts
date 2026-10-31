@@ -396,7 +396,7 @@ const STATUS_USAGE = `usage: mason status [--json]
            under way), keptAt, readyAt, why }]. generatedTables: [{ table, file, kind, method (whole: its SQL run again),
            state (refused, waiting, building, failed, current, behind), targetLag, behindSeconds, missingTarget, serving,
            lastRun: { at, seconds, rows }, error (the last run's, no value of a row in it), retryAt,
-           refusals: [{ key, message, why, options, text }], waitingFor }]. roles (a run with a roles file, mason/roles.yml: what a user added
+           refusals: [{ key, message, why, options, text }], waitingFor, warnings }]. roles (a run with a roles file, mason/roles.yml: what a user added
            with --role may read): { file, roles: [name], problem (what is wrong with the file now, every statement of a
            user with a role refused while there is; null), default (the role of a user added without --role; null: the
            file names none, and such a user reads nothing), all (the roles of tables: all) }
