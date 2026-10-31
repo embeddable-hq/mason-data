@@ -1,19 +1,19 @@
 {
-  "statements": 3669,
+  "statements": 3924,
   "mason": {
-    "exact": 3498,
+    "exact": 3735,
     "decided": 41,
-    "refused": 130,
+    "refused": 148,
     "differs": 0
   },
   "duckdb": {
     "exact": 1054,
     "name": 734,
-    "refused": 784,
-    "value": 491,
+    "refused": 974,
+    "value": 492,
     "rows": 268,
     "text": 153,
-    "other": 185
+    "other": 249
   },
   "gaps": {
     "copyPhase": {
@@ -34,11 +34,12 @@
         "interval-aggregates": { "planted": 0, "natural": 1 },
         "json-agg-distinct": { "planted": 1, "natural": 0 },
         "json-of-type": { "planted": 1, "natural": 1 },
+        "json-path-type": { "planted": 0, "natural": 16 },
         "json-rows-in-select": { "planted": 1, "natural": 0 },
         "jsonb-compare": { "planted": 1, "natural": 2 },
         "jsonb-set": { "planted": 0, "natural": 1 },
         "like-any-array": { "planted": 1, "natural": 0 },
-        "multidim-array": { "planted": 0, "natural": 3 },
+        "multidim-array": { "planted": 0, "natural": 5 },
         "numeric-exact-sum": { "planted": 1, "natural": 0 },
         "numeric-math": { "planted": 1, "natural": 0 },
         "numeric-special": { "planted": 0, "natural": 2 },
@@ -86,7 +87,7 @@
       }
     },
     "everyAsk": {
-      "asked": 26574,
+      "asked": 28131,
       "refused": {
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
@@ -104,11 +105,12 @@
         "interval-aggregates": { "planted": 0, "natural": 3 },
         "json-agg-distinct": { "planted": 3, "natural": 0 },
         "json-of-type": { "planted": 3, "natural": 3 },
+        "json-path-type": { "planted": 0, "natural": 48 },
         "json-rows-in-select": { "planted": 3, "natural": 0 },
         "jsonb-compare": { "planted": 3, "natural": 6 },
         "jsonb-set": { "planted": 0, "natural": 3 },
         "like-any-array": { "planted": 3, "natural": 0 },
-        "multidim-array": { "planted": 0, "natural": 9 },
+        "multidim-array": { "planted": 0, "natural": 15 },
         "numeric-exact-sum": { "planted": 3, "natural": 0 },
         "numeric-math": { "planted": 3, "natural": 0 },
         "numeric-special": { "planted": 0, "natural": 6 },

@@ -18,26 +18,26 @@ each). The copy is read-only.
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 87 forms of them verified |
 | The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 244 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 245 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
 | Anything else: 51 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,669 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,924 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 3,669 statements | Mason | DuckDB alone |
+| Of 3,924 statements | Mason | DuckDB alone |
 |---|---|---|
-| answered exactly as Postgres: the rows, their text, the column names | 95% | 29% |
+| answered exactly as Postgres: the rows, their text, the column names | 95% | 27% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 4% | — |
-| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 20% |
-| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 21% |
+| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 19% |
+| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 25% |
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 13% |
 | wrong rows, or the rows in another order | — | 7% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 4% |
-| another error than Postgres's, or answered where Postgres refuses | — | 5% |
+| another error than Postgres's, or answered where Postgres refuses | — | 6% |
 
 A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
 statement. The oracle's statements are adversarial by design (NULL beside '', ties, every type's edge values), so
@@ -153,7 +153,7 @@ Not about one statement: what the prototype cannot do yet.
 | `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (997)
+## What is verified (998)
 
 ### Types (49)
 
@@ -207,7 +207,7 @@ Not about one statement: what the prototype cannot do yet.
 - a value of type uuid
 - a value of type uuid[]
 
-### Functions (244)
+### Functions (245)
 
 - the function "extract"(text,date)
 - the function "extract"(text,interval)
@@ -351,6 +351,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function jsonb_build_object("any")
 - the function jsonb_each(jsonb)
 - the function jsonb_each_text(jsonb)
+- the function jsonb_extract_path(jsonb,text[])
 - the function jsonb_extract_path_text(jsonb,text[])
 - the function jsonb_object_keys(jsonb)
 - the function jsonb_path_exists(jsonb,jsonpath,jsonb,boolean)
