@@ -123,7 +123,7 @@ export interface Typed {
    *  bare name reads. A join's name hides what it joins, so a column of a named join is read by that name, and `twin`
    *  says the join has two of that name, which no name tells apart. What a `*` expands to has no text of its own to read
    *  this from. Absent for a set operation's output, which only its arm's column names */
-  column?: { owner: string | null; name: string; twin?: true };
+  column?: { owner: string | null; name: string; at: string; twin?: true };
   /** a VAR read from a TABLE of its query's FROM (an RTE_RELATION): the catalog's OID of that table and the column's
    *  number in it — what a stored JSON path is found by (src/duck/kept.ts); absent for any other node, and for a column
    *  of a subquery, a CTE, a function or a join */
@@ -271,7 +271,7 @@ function columnOf(v: TreeNode, rtables: TreeNode[][]): NonNullable<Typed["column
   if (name === undefined || typeof eref.aliasname !== "string" || /^\*SELECT\* \d+$/.test(eref.aliasname)) return null;
   const kind = num(rte.rtekind ?? null) ?? -1;
   const named = isNode(rte.alias ?? null);
-  return { owner: UNNAMED.has(kind) && !named ? null : eref.aliasname, name,
+  return { owner: UNNAMED.has(kind) && !named ? null : eref.aliasname, name, at: `${varno}:${attno}`,
     ...(kind === RTE_JOIN && named && columns.filter((c) => c === name).length > 1 ? { twin: true as const } : {}) };
 }
 const RTE_FUNCTION = 3;

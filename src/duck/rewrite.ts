@@ -880,10 +880,13 @@ class Rewriter {
       if (!isNode(v)) return;
       if (!hasStar(v)) { out.push({ target, name: typeof bodyOf(t).name === "string" ? bodyOf(t).name : figureColname(v), value: v, star: false, twin: false }); return; }
       const loc = bodyOf(v).location;
+      // (a set operation in a WITH query reaches the analysis's list at this offset twice: each column once)
+      const seen = new Set<string>();
       for (const c of typeof loc === "number" ? (this.types.get(loc - this.base) ?? []).filter((x) => x.node === "VAR") : []) {
         // (a set operation's own outputs carry its first SELECT's offsets)
         const n = c.column;
-        if (n === undefined) continue;
+        if (n === undefined || seen.has(n.at)) continue;
+        seen.add(n.at);
         const value: AstNode = { ColumnRef: { fields: [...(n.owner === null ? [] : [S(n.owner)]), S(n.name)], location: -1 } };
         this.original.add(bodyOf(value));
         this.synthetic.set(bodyOf(value), c);

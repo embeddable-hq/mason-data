@@ -104,6 +104,8 @@ test("ORDER BY, < and min / max under a libc collation follow the order read, th
         "SELECT * FROM (SELECT * FROM coll WHERE id < 90) s UNION ALL SELECT * FROM coll WHERE id < 0 ORDER BY 2, 1", "SELECT * FROM (SELECT * FROM coll WHERE id < 90) s UNION ALL SELECT * FROM coll WHERE id < 0 ORDER BY s, id"]) {
         assert.deepEqual((await rows(sql)).map((r) => r[1]), sorted, sql);
       }
+      // a set operation in a WITH query, which the analysis holds twice: which rows its own LIMIT keeps
+      assert.deepEqual((await rows("WITH w AS (SELECT * FROM coll WHERE id < 90 UNION ALL SELECT * FROM coll WHERE id < 0 ORDER BY s, id LIMIT 3) SELECT s FROM w")).flat().sort(), sorted.slice(0, 3).sort());
       // which rows a LIMIT keeps; a number past the *, of a target's own
       assert.deepEqual((await rows("SELECT * FROM coll WHERE id < 90 ORDER BY 2, 1 LIMIT 3")).map((r) => r[1]), sorted.slice(0, 3));
       assert.deepEqual((await rows("SELECT *, s AS again FROM coll WHERE id < 90 ORDER BY 3, 1")).map((r) => r[2]), sorted);
