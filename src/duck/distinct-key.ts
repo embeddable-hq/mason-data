@@ -251,7 +251,8 @@ function heldTable(query: TreeNode, rtable: readonly TreeValue[], ref: TreeValue
   if (t !== null) return { relid: t.relid, column: (attno) => attno };
   if (!isNode(ref) || ref._node !== "RANGETBLREF") return null;
   const rte = rtable[(num(ref.rtindex) ?? 0) - 1];
-  if (!isNode(rte)) return null;
+  // a LATERAL read is one per row of what it follows: its rows are no bound by its table's
+  if (!isNode(rte) || rte.lateral === "true") return null;
   if (num(rte.rtekind) === RTE_SUBQUERY && isNode(rte.subquery)) return plainTable(rte.subquery);
   if (num(rte.rtekind) !== RTE_CTE || (num(rte.ctelevelsup) ?? -1) !== 0) return null;
   const cte = list(query.cteList).find((c) => isNode(c) && c.ctename === rte.ctename);

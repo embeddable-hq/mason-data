@@ -29,9 +29,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   upgrade.
 - **A LIMIT over a view, a WITH query, a tool's `SELECT * FROM (<join>) t LIMIT 100` wrapper or a derived table beside a wide
   table no longer reads every wide column to keep 100 rows.** Such a statement took seconds and gigabytes of spill, or
-  failed for memory; it now takes a fraction of a second and spills nothing. Narrow statements of these shapes cost a
-  few milliseconds more. A column of an aggregated side, and a statement of a role that filters rows, are read as before.
-  Nothing to do on upgrade.
+  failed for memory; it now takes a fraction of a second and spills nothing. A narrow statement of these shapes with no
+  ORDER BY now pays for the join's whole output where the join is proved bounded: a few milliseconds at a LIMIT alone, and
+  a deep OFFSET can take about twice as long. A column of an aggregated side, and a statement of a role that filters
+  rows, are read as before. Nothing to do on upgrade.
 - **A value that raises in such a derived list no longer fails the statement when the LIMIT leaves its row out**: Postgres
   raises there, sorting every row first. This is the decided difference `limit-errors` (docs/SQL-SUPPORT.md), wider.
 

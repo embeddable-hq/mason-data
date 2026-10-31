@@ -2093,7 +2093,9 @@ two columns of one name by position; the substitution is sound because nothing f
 from outside it. A fetch keeps a nullable side's derived form, and DuckDB moved a computed list above the join in every
 plan measured, so a raising value on a row left out stayed unread (`limit-errors`, held by the oracle). A plain read
 counts for `fanOutBounded`, its bare outputs as its table's columns; what is carried has no row number and goes unsorted
-even where the proof holds. A statement with a role's filtered read keeps its form until step 4 reviews the barrier.
+even where the proof holds. A statement with a role's filtered read keeps its form until step 4 reviews the barrier. A
+folded wrapper sorted by a bare computed output's name is not rewritten (`sortKeys`), while `ORDER BY t.shout` is; computed
+keys are step 3.
 
 ### First copy, and the poll's cost on the source
 

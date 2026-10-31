@@ -347,19 +347,20 @@ function walkTree(v: TreeValue | undefined, at: (n: TreeNode) => void): void {
   for (const [k, x] of Object.entries(v)) if (k !== "_node") walkTree(x, at);
 }
 
-/** the functions a statement with a derived read and a LIMIT calls, and the operators', by OID: none for any other, so it
- *  asks the catalog nothing */
+/** the functions a statement calls, and the operators', by OID, where a query with a LIMIT holds a derived read itself:
+ *  none for any other (`SELECT … FROM (SELECT … LIMIT 10) s`), so it asks the catalog nothing */
 function derivedFunctions(tree: TreeValue): number[] {
   const out = new Set<number>();
-  let derived = false, limit = false;
+  let derived = false;
   walkTree(tree, (n) => {
-    if (n._node === "RANGETBLENTRY" && (n.rtekind === RTE_SUBQUERY || n.rtekind === RTE_CTE)) derived = true;
-    if (n._node === "QUERY" && n.limitCount !== null && n.limitCount !== undefined) limit = true;
+    if (n._node === "QUERY" && n.limitCount !== null && n.limitCount !== undefined) {
+      derived ||= treeList(n.rtable).some((e) => isTreeNode(e) && (e.rtekind === RTE_SUBQUERY || e.rtekind === RTE_CTE));
+    }
     for (const id of [n._node === "FUNCEXPR" ? n.funcid : undefined, ["OPEXPR", "DISTINCTEXPR", "NULLIFEXPR", "SCALARARRAYOPEXPR"].includes(n._node as string) ? n.opfuncid : undefined]) {
       if (typeof id === "string" && Number(id) > 0) out.add(Number(id));
     }
   });
-  return derived && limit ? [...out].sort((a, b) => a - b) : [];
+  return derived ? [...out].sort((a, b) => a - b) : [];
 }
 
 /** a query that may be read twice: a projection and a WHERE, nothing volatile, nothing of a query outside it */

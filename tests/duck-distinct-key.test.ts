@@ -168,6 +168,7 @@ test("what the proof cannot show falls to the safe side, whatever the join's row
     ["a join inside repeats a key", "SELECT 1 FROM customers o JOIN (SELECT c.id FROM customers c JOIN orders x ON x.customer_id = c.id) c ON c.id = o.id LIMIT 1"],
     ["a computed key", "SELECT 1 FROM orders o JOIN (SELECT id + 1 AS id FROM customers) c ON c.id = o.customer_id LIMIT 1"],
     ["another column under the key's name", "SELECT 1 FROM orders o JOIN (SELECT tenant_id AS id FROM customers) c ON c.id = o.tenant_id LIMIT 1"],
+    ["a LATERAL read is no plain read of its table", "SELECT 1 FROM orders o JOIN LATERAL (SELECT id FROM customers WHERE id = o.customer_id) c ON c.id = o.customer_id LIMIT 1"],
     ["a set-returning list repeats a key", "SELECT 1 FROM orders o JOIN (SELECT id, generate_series(1, 2) AS g FROM customers) c ON c.id = o.customer_id LIMIT 1"],
     ["a key in part through a derived read", "SELECT 1 FROM orders o JOIN (SELECT order_id FROM lines) l ON l.order_id = o.customer_id LIMIT 1"],
     ["a chasm through derived reads", "SELECT 1 FROM customers c JOIN (SELECT customer_id FROM orders) a ON a.customer_id = c.id JOIN (SELECT customer_id FROM orders) b ON b.customer_id = c.id LIMIT 1"],
@@ -188,6 +189,21 @@ test("a plain read counts as its table: its rows are its table's at most once, a
     ["a composite key whole", "SELECT 1 FROM orders o JOIN (SELECT order_id, line FROM lines) l ON l.order_id = o.customer_id AND l.line = o.id LIMIT 1"],
     ["both sides derived", "SELECT 1 FROM (SELECT customer_id FROM orders) o JOIN (SELECT id FROM customers) c ON c.id = o.customer_id LIMIT 1"],
   ] as const) assert.equal(await bounded(sql), true, `${why}: ${sql}`);
+});
+
+test("a statement's functions are asked of the catalog only where a limited query holds a derived read itself", async () => {
+  const { selectListAfterLimit } = await import("../src/duck/late.ts");
+  const asked = async (sql: string): Promise<number[]> => {
+    const a = await analyze(catalog, sql, []);
+    assert.ok(!("refused" in a), sql);
+    const seen: number[][] = [];
+    await selectListAfterLimit({}, a.tree, async () => new Map(), { volatile: async (functions) => { seen.push(functions); return new Set(); }, tablesOnly: false });
+    assert.equal(seen.length, 1, sql);
+    return seen[0]!;
+  };
+  assert.deepEqual(await asked("SELECT upper(s.email) FROM (SELECT email FROM customers LIMIT 10) s"), [], "the LIMIT is inside the derived read, over one table");
+  assert.deepEqual(await asked("SELECT upper(c.email) FROM customers c LIMIT 10"), [], "no derived read");
+  assert.equal((await asked("SELECT upper(s.email) FROM (SELECT email FROM customers) s LIMIT 10")).length > 0, true, "a limited query over a derived read");
 });
 
 test("the keys under a wrapper are read: its LIMIT stands over the join inside it", async () => {

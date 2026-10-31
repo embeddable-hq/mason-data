@@ -150,6 +150,8 @@ export const FROM_ITEMS_UNORDERED: UnorderedLimit[] = [
   }),
   // a WITH query read twice is no plain read of one reference, and a column of a side the list does not read
   u("a WITH query read twice", "a.id, x.id AS x, y.up", "FROM top_a a LEFT JOIN w x ON x.a_id = a.id LEFT JOIN w y ON y.key = a.id", "LIMIT 9", { head: `WITH w AS (${SIDE}) ` }),
+  u("a recursive WITH query beside a table", "a.id, a.note, r.n", "FROM top_a a JOIN r ON r.n = a.id", "LIMIT 3", { head: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT r.n + 1 FROM r WHERE r.n < 4) " }),
+  u("a set-returning derived list beside a table", "a.id, a.note, d.g", "FROM top_a a JOIN (SELECT b.a_id, generate_series(1, 2) AS g FROM top_b b) d ON d.a_id = a.id", "LIMIT 7"),
   u("a side the list does not read", "a.id, a.note", `FROM top_a a JOIN (${SIDE}) d ON d.a_id = a.id`, "LIMIT 5"),
   u("a zone of the session's in a derived list", "a.id, d.day", `FROM top_a a LEFT JOIN (${SIDE}) d ON d.a_id = a.id`, "LIMIT 5", { zone: "America/New_York" }),
 ];
