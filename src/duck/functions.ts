@@ -565,8 +565,9 @@ function viaPostgres(conn: DuckDBConnection, kind: PgKind): void {
   }));
 }
 
-const steps = (json: string, either: boolean): Step[] => (JSON.parse(json) as Array<string | number>)
-  .map((s) => typeof s === "number" ? { index: s } : either ? { either: s } : { key: s });
+type Path = Array<string | number | null>;
+const stepsOf = (path: Array<string | number>, either: boolean): Step[] => path.map((s) => typeof s === "number" ? { index: s } : either ? { either: s } : { key: s });
+const steps = (json: string, either: boolean): Step[] => stepsOf(JSON.parse(json) as Array<string | number>, either);
 
 /** The libc order's functions (src/duck/libc-order.ts), for the order the source was read with: a text's key (a value
  *  holding a character not covered refuses, by name) and jsonb's order under it (src/duck/jsonb-order.ts). */
@@ -691,9 +692,9 @@ export function registerFunctions(conn: DuckDBConnection): void {
   // (json, steps as a JSON array, a #> path's, jsonb's canonical text, ->>'s text)
   scalar(conn, "__mason_json_get", [VARCHAR, VARCHAR, BOOLEAN, BOOLEAN, BOOLEAN], VARCHAR,
     ([j, s, either, canonical, asText]) => {
-      const path = JSON.parse(String(s)) as Array<string | number | null> | null;
+      const path = JSON.parse(String(s)) as Path | null;
       // a path computed per row (a parameter's, a row's elements): NULL, or a NULL element, reads NULL (get_path_all)
-      return path === null || path.includes(null) ? null : jsonGet(String(j), steps(String(s), either === true), canonical === true, asText === true);
+      return path === null || path.includes(null) ? null : jsonGet(String(j), stepsOf(path as Array<string | number>, either === true), canonical === true, asText === true);
     });
   // the same, as a stored JSON path keeps it (keptJsonValue, src/duck/kept.ts): what the copy's writes compute
   scalar(conn, "__mason_json_kept", [VARCHAR, VARCHAR, BOOLEAN, BOOLEAN, BOOLEAN], VARCHAR,

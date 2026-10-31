@@ -3104,15 +3104,15 @@ class Rewriter {
   /** json_extract_path's elements, an argument each, as the JSON array of steps */
   private pathOfArguments(keys: AstNode[]): AstNode {
     const read = keys.map((k) => this.constRead(k)?.text);
-    if (read.some((k) => k === undefined)) return jsonSteps(keys, false);
+    if (read.some((k) => k === undefined)) return jsonSteps(keys.map((k) => this.widen(k, TEXT)), false);
     return read.includes(null) ? nullConst() : strConst(JSON.stringify(read));
   }
 
-  /** `->`'s key: an integer one an index, a constant text its one step */
+  /** `->`'s key: an integer one an index, a constant text its one step, a char(n)'s text without its padding (`widen`) */
   private jsonKey(r: AstNode, type: number | null): AstNode {
     const index = type !== null && INTEGERS.has(type);
     const text = index ? null : this.constRead(r)?.text;
-    return typeof text === "string" ? strConst(JSON.stringify([text])) : jsonSteps([r], index);
+    return typeof text === "string" ? strConst(JSON.stringify([text])) : jsonSteps([index ? r : this.widen(r, TEXT)], index);
   }
 
   // --------------------------------------------------------------------------------------------- FROM

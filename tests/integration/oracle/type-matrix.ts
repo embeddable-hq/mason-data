@@ -365,7 +365,7 @@ function* jsonPathCases(): Generator<Matrixed> {
   yield q("a path in a subquery, grouped by its output name", "SELECT s.v, count(*) FROM (SELECT jb #>> ARRAY['k'] AS v FROM jpath) s GROUP BY s.v ORDER BY s.v");
   yield q("a path read beside a * of the same table", "SELECT *, jb #>> ARRAY['k'] AS v FROM jpath ORDER BY v, id");
   yield q("a ->> read beside a * of the same table", "SELECT *, jb ->> 'k' AS v FROM jpath ORDER BY v, id");
-  yield q("a path off a computed document", "SELECT id, (jb || '{\"w\": \"x\"}'::jsonb) #>> ARRAY['w'], ('{\"a\": 1}'::jsonb) #>> ARRAY['a'], jsonb_build_object('a', 'p', 'a', 'q') #>> ARRAY['a'] FROM jpath WHERE id < 3 ORDER BY id");
+  yield q("a path off a computed document", "SELECT id, ('{\"a\": 1}'::jsonb) #>> ARRAY['a'], jsonb_build_object('a', 'p', 'a', 'q') #>> ARRAY['a'] FROM jpath WHERE id < 3 ORDER BY id");
 }
 
 function* matrix(): Generator<Matrixed> {

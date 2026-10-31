@@ -412,6 +412,7 @@ export const VERIFIED: ReadonlyMap<string, string> = new Map([
   ["function:3207", "the function jsonb_array_length(jsonb)"],
   ["function:3208", "the function jsonb_each(jsonb)"],
   ["function:3210", "the function jsonb_typeof(jsonb)"],
+  ["function:3217", "the function jsonb_extract_path(jsonb,text[])"],
   ["function:3219", "the function jsonb_array_elements(jsonb)"],
   ["function:3271", "the function jsonb_build_array(\"any\")"],
   ["function:3273", "the function jsonb_build_object(\"any\")"],
