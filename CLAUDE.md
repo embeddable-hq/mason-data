@@ -102,8 +102,8 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
 - **Push early, read while CI runs.** Open the PR as soon as the first commit is green locally; read the diff and run the
   review while CI runs; land fix commits in one push, not one per finding.
 - **Nobody waits on CI.** An implementer ends at the push and reports the PR and its head; the coordinator binds the PR
-  and lets the app's PR monitor bring the verdict (auto-merge, for a tooling PR already read and reviewed), and works on
-  meanwhile. No session sits in a wait on a run: watching CI took most of a coordinator's active time (issue 78).
+  and lets the app's PR monitor bring the verdict (auto-merge, for a tooling PR already read and reviewed), and goes on
+  with other work. No session sits in a wait on a run: watching CI took most of a coordinator's active time (issue 78).
 - **Delegate when it is faster, but merge nothing you have not read.** Independent pieces go to sub-agents, each in a
   worktree of its own; the one who merges reads each diff in full, verifies it (CI on its last commit; a local gate for a
   reason, "Local gates"), and merges it. A sub-agent's report is its claim, not the evidence. Two
