@@ -270,7 +270,13 @@ export function openSshTunnel(o: { target: string; mason: string; timeoutMs: num
         clearTimeout(timer);
         resolve(v);
       };
-      const fail = (f: Failure): void => { if (settled) return; settle(f); void stop(); };
+      // said only once ssh is gone: the command exits on this answer, and the timer that kills an ssh ignoring SIGTERM dies with it
+      const fail = (f: Failure): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        void stop().then(() => { resolve(f); });
+      };
       const timer = setTimeout(() => {
         const last = lastLines(said, null);
         fail({ message: `no answer from ${o.target} in ${Math.round(o.timeoutMs / 1000)} s`, code: "failed", ...(last === "" ? {} : { why: `ssh printed: ${last}` }),
@@ -299,7 +305,7 @@ export function openSshTunnel(o: { target: string; mason: string; timeoutMs: num
         let h: Hello;
         try { h = JSON.parse(output.subarray(at + HELLO.length + 1, eol).toString("utf8")) as Hello; }
         catch (e) { fail({ message: `the bridge on ${o.target} said something that is not its hello`, code: "failed", why: (e as Error).message, fix: "run the same Mason version on both ends" }); return; }
-        link = new FrameLink({ input: child.stdout, output: child.stdin, broken: (why) => { finish(why); void stop(); } });
+        link = new FrameLink({ input: child.stdout, output: child.stdin, broken: (why) => { void stop().then(() => { finish(why); }); } });
         helloIn(h);
         if (rest.length > 0) link.read(rest);
       });
