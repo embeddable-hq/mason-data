@@ -71,7 +71,7 @@ mkdir mason-demo && cd mason-demo
 mason init demo && mason start       # starts a demo shop database for you: nothing else to install
 mason add order_items                # adds the fourth table, so you can watch its sync start
 mason ui                             # opens Mason in your browser: the tables syncing, the users and the queries
-mason share                          # prints an address and password for any Postgres client, over a tunnel (needs ssh; Ctrl-C ends it)
+mason share                          # prints an address and password for any Postgres client, over a tunnel (Ctrl-C ends it)
 mason destroy                        # deletes the synced data and the demo database (the next mason start creates a new one)
 ```
 
