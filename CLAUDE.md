@@ -94,7 +94,7 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
 - **One review per PR, its findings in ONE message.** Findings sent to an author in three batches cost three fix
   cycles, each a CI run; collect them, then send once.
 - **A brief says what the test must hold, not only what to build.** Name the shapes the oracle must hold up front
-  (`.claude/rules/duckdb.md` lists them for a rewrite: the grouped view ordered by its output name, the nulls idiom,
+  (`.claude/rules/duck-rewrite.md` lists them for a rewrite: the grouped view ordered by its output name, the nulls idiom,
   each collation kind, a prepared statement run after a SET): the first fix round of every PR was for shapes the brief
   had not named.
 - **Which gate runs when is "Local gates".** A measurement's dataset is built once and kept until the PR is pushed: an
@@ -199,7 +199,7 @@ created, altered or dropped). **Keep the load on Mason's side** (overloading the
 Mason may do): a copy reads `MASON_COPY_PARALLEL` chunks at once, one backend each, never the attached scan's ten; the
 poll is a full scan of the table, so a table is polled only when its `sync:` says so, and `mason add` writes `sync: off` for
 a big one; a SELECT on the source
-never carries an `ORDER BY`. `.claude/rules/duckdb.md` "The copy" has the rules and the numbers.
+never carries an `ORDER BY`. `.claude/rules/duck-copy.md` "The copy" has the rules and the numbers.
 
 **A real database's data and structures are confidential.** No real table, column or dataset name, and no row, from
 any database Mason was run against, in the repo, a commit, a PR, an issue or a test: tests are written over synthetic schemas, and a finding from a real database is said
@@ -253,8 +253,18 @@ under node_modules. Erasable syntax only (`erasableSyntaxOnly`: no enums, namesp
 The rules for each subsystem are in `.claude/rules/`, and Claude Code loads one only when a file its `paths:` names is
 read or edited. **Before you answer a question about a subsystem, or plan a change to it, without having opened its
 code, read its rules file:**
-- `duckdb.md` — the engine: Postgres decides and DuckDB computes, the allowlist, the copy in heap order with no index
-  and in chunks that resume, memory, the poll and the stream, the request log, users, the oracle.
+- The engine, one `duck-*.md` per subsystem, so a session loads only what its files touch:
+  - `duck-engine.md` — what the engine is, in a paragraph (any file of the engine loads it).
+  - `duck-rewrite.md` — Postgres decides and DuckDB computes: a statement's plan, what DuckDB is sent, the plan fixture,
+    the allowlist and the refusals.
+  - `duck-executor.md` — DuckDB's worker thread: cancels, closes, the watch.
+  - `duck-stored-json.md` — stored JSON paths and a jsonb's stored keys.
+  - `duck-copy.md` — the copy in heap order with no index and in chunks that resume.
+  - `duck-sync.md` — the poll and the stream, what the sync records.
+  - `duck-memory.md` — memory, spill and the disk.
+  - `duck-request-log.md` — `_mason.requests` and usage over time.
+  - `duck-users.md` — `mason user`.
+  - `duck-testing.md` — the oracle and how the engine is tested.
 - `cli.md` — the `mason` command: one interface for people and coding agents, self-documenting commands, one output
   shape, one failure shape, every command in every state, the project folder, the run's command server, `mason serve`.
 - `postgres-api.md` — the listener: the catalog is a Postgres, the password is a user's or a token's, TLS off loopback,
