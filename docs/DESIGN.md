@@ -1896,8 +1896,23 @@ one list. Paging joins of 0.7–1 M rows to their end, with a plain statement, i
 never, most pages differed when asked twice, and at `LIMIT 100` over the first 3,000 rows one of four joins already repeated
 152; one thread: none; sorted by row number, the same five joins paged: none repeated, none missed, every page alike when asked twice. Postgres promises nothing here either, but a fixed plan gives it in practice, and a tool's preview
 pages. The numbered form (`row_number() OVER ()` over the chosen rows, kept outside) cost 0.04 to 0.08 s where the sort costs
-0.04 to 0.58 s and kept that overlap, so the sort it is: the top N on row numbers is cheap because nothing but row numbers
-goes through it. `LIMIT -1` is refused 42804 where Postgres says 2201W, with or without a join: not this path's.
+0.04 to 0.58 s and kept that overlap.
+
+**The sort has a price, accepted for stable pages.** A top N over row numbers is a full join where a streaming LIMIT stops
+early, so its cost grows with the join, and a narrow join that used to stop early pays it with nothing spilled to save. An
+unsorted row-number inner query costs about what the old plan did, at the price of overlapping pages. Over a 50 M-row table,
+min of 3 warm runs:
+
+| Narrow join, no ORDER BY | old plan | sorted by row number |
+|---|---|---|
+| `big JOIN dim LIMIT 100` | 4 ms | 4 ms |
+| `big JOIN big2 LIMIT 100` | 502 ms | 519 ms |
+| `big JOIN dim LIMIT 100 OFFSET 2000000` | 4 ms | 324 ms |
+| `big JOIN big2 LIMIT 100 OFFSET 2000000` | 465 ms | 1286 ms |
+| `dim LEFT JOIN big LIMIT 100` | 1 ms | 134 ms |
+| `dim LEFT JOIN big LIMIT 100 OFFSET 2000000` | 10 ms | 1332 ms |
+
+`LIMIT -1` is refused 42804 where Postgres says 2201W, with or without a join: not this path's.
 
 ### First copy, and the poll's cost on the source
 

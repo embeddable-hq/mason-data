@@ -44,9 +44,11 @@
  * which rows such a statement answers is defined by no one, but DuckDB's parallel join hands the same statement's rows
  * back in another order each run, and a LIMIT over them overlaps its neighbouring pages (about a third of the rows of
  * a join paged to its end came back twice; one thread, none; a Postgres of one plan, in practice none). The top N on row
- * numbers costs what the streaming LIMIT does (docs/DESIGN.md "A top N over joined tables"), and its order is total
- * over what is read: two rows of equal row numbers are the same output. `afterLimit` still needs a sort: the keys put
- * its rows back, and a list of no key has none.
+ * numbers is a full join where a streaming LIMIT stops early, so its cost grows with the join: over 50 M rows, a narrow
+ * `dim LEFT JOIN big LIMIT 100` takes 134 ms against 1 ms, 1332 ms against 10 ms at OFFSET 2,000,000 (docs/DESIGN.md
+ * "A top N over joined tables"). That is accepted for stable pages: unsorted row numbers cost about what the old plan
+ * did, and overlap. Its order is total over what is read: two rows of equal row numbers are the same output.
+ * `afterLimit` still needs a sort: the keys put its rows back, and a list of no key has none.
  *
  * Measured over a 4 M-row join with wide JSON in the last table (a 2 GB
  * limit): 12.9 s and 8.6 GiB spilled before, 0.19 s and none after; LIMIT 10,000 failed for memory before and takes 2.9 s.
