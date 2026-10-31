@@ -180,7 +180,7 @@ docker compose exec mason mason user add metabase   # users are kept on the serv
   Postgres (10.1 GiB → 1.8 GiB, on a 15 GiB machine). `mason status` shows the size of yours.
 
   To set the limit yourself, use `MASON_DUCKDB_MEMORY=4GB`, and give the container about twice that. A query that needs
-  more memory fails on its own (53200), and Mason keeps running. If you set the limit close to the container's limit,
+  more memory fails on its own (53200), one that spills past half of the free disk too (53100, `MASON_SPILL_LIMIT` sets it), and Mason keeps running. If you set the limit close to the container's limit,
   the container can be killed for running out of memory.
 - **CPU**: Memory matters first, then cores. The benchmark machine (4 vCPU Graviton3, 15 GiB) answered 12 queries a
   second at a p95 of 3.5 s, with 32 clients on 10 M rows. That is the same throughput as with 8 clients: the extra
@@ -419,7 +419,7 @@ instead. None was answered with a wrong value.
 
 [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the 996 verified pieces (types, functions,
 operators, aggregates, window functions, casts, constructs and their forms). It also lists the 48 refused shapes, the
-16 that are answered differently and the 7 limits, each with what to write instead.
+16 that are answered differently and the 8 limits, each with what to write instead.
 <!-- END GENERATED -->
 
 The tests also replay the queries that BI tools send: psql, pgjdbc, node-postgres, Metabase, Grafana, DBeaver and

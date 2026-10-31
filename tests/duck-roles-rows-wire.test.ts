@@ -250,6 +250,9 @@ test("no path reaches the copy without the filter: *, count, a view, joins, subq
   assert.equal(await ids("SELECT count(*) FROM order_items"), "4", "through: orders, so no item of another tenant's order and none with no order");
   assert.equal(await ids("SELECT i.product, p.label FROM order_items i JOIN products p ON p.sku = i.product ORDER BY i.id"), "widget:Widget,gadget:Gadget,widget:Widget,gadget:Gadget", "with an unfiltered table");
   assert.equal(await ids("SELECT o.id, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.id"), "10:Ann,11:Bo,13:,16:", "the customer of order 13 is another tenant's: hidden");
+  // a top N over joins: its rows chosen by row number only of a table, and a filtered read is none (src/duck/late.ts)
+  assert.equal(await ids("SELECT o.id, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 3"), "16:,13:,11:Bo", "the filter under a LIMIT");
+  assert.equal(await ids("SELECT i.product, p.label FROM order_items i JOIN products p ON p.sku = i.product ORDER BY i.id DESC LIMIT 1 OFFSET 3"), "widget:Widget", "one filtered, one not");
   assert.equal(await ids("SELECT id FROM (SELECT id, amount FROM orders WHERE amount > 20) s ORDER BY id"), "10,11,13");
   assert.equal(await ids("SELECT id FROM customers WHERE id IN (SELECT customer_id FROM orders) ORDER BY id"), "1,2");
   assert.equal(await ids("SELECT id FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id) ORDER BY id"), "1,2");

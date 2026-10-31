@@ -133,7 +133,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `nested-exact-numeric` | an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …) | exact digits at every step | the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x), it is exact | compute it in the outermost query, or round(…, n) inside |
 | `show-all` | SHOW ALL | every server setting with the source database's values | every setting the listener's catalog Postgres has, with this session's values laid over (search_path, TimeZone, ssl, …): Mason's settings, never your source database's | ask the source database for its settings (SHOW ALL or SHOW <name> there): Mason answers its own |
 
-## Limits of the prototype (7)
+## Limits of the prototype (8)
 
 Not about one statement: what the prototype cannot do yet.
 
@@ -145,6 +145,7 @@ Not about one statement: what the prototype cannot do yet.
 | `numeric-over-38-digits` | a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside Mason's arithmetic or a WHERE | exact | a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact | numeric(p, s) with p ≤ 38 |
 | `numeric-array` | an unconstrained numeric[] column | exact elements | double precision elements (15 digits), said in the log | numeric(p, s)[] |
 | `numeric-parameter` | a numeric parameter ($1) compared in a WHERE | exact | a double (exact to 15 digits) | a literal |
+| `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53100 past half of what is free on the disk (or MASON_SPILL_LIMIT), so the sync keeps room to write | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
 ## What is verified (996)

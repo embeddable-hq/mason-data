@@ -2112,6 +2112,60 @@ test("a sorted, limited select list is computed for the rows the limit keeps, as
   } finally { await c.end(); }
 });
 
+// ISSUE 105: a table preview over joined tables carried every row's wide columns through the join and the top N to
+// choose 100, and its spill filled the disk. The rows are chosen by row number, the columns read for those alone
+test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
+  const c = await client();
+  // this file's copy holds a jsonb as DuckDB wrote it, where a real copy holds Postgres's text: one spelling for the comparison
+  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  try {
+    const answered = ["SELECT l.*, c.* FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.id DESC LIMIT 4",
+      "SELECT * FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.k, l.id LIMIT 3 OFFSET 2",
+      "SELECT l.id AS key, *, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000 ORDER BY key LIMIT 2",
+      "SELECT l.j, c.name FROM late_c c LEFT JOIN late l ON l.c = c.id AND l.id < 3 ORDER BY c.id, l.id NULLS FIRST LIMIT 5",
+      "SELECT x.id, y.id, y.j FROM late x JOIN late y ON y.id = x.id + 1 ORDER BY x.id DESC LIMIT 2",
+      "SELECT l.id, c.name FROM late l, late_c c WHERE c.id = l.c ORDER BY l.id DESC LIMIT 2 OFFSET 100000"];
+    for (const sql of answered) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+      assert.match(await sent(sql), /rowid AS __mason_r1.*\) AS __mason_late LEFT JOIN .* ON .*\.rowid = __mason_late\.__mason_r1/, sql);
+    }
+    // only the tables the list reads are read again
+    const one = await sent("SELECT l.j FROM late l JOIN late_c c ON c.id = l.c ORDER BY c.name, l.id LIMIT 2");
+    assert.match(one, /l\.rowid AS __mason_r1,/);
+    assert.doesNotMatch(one, /__mason_r2|c\.rowid/);
+    // the shapes that stay as they were: a row number exists of a table alone, a whole row is not listed, and a sort by
+    // a computed output is one value
+    for (const sql of ["SELECT l.id, c.name FROM late l JOIN (SELECT * FROM late_c) c ON c.id = l.c ORDER BY l.id LIMIT 2",
+      "WITH w AS (SELECT * FROM late_c) SELECT l.id, w.name FROM late l JOIN w ON w.id = l.c ORDER BY l.id LIMIT 2",
+      "SELECT l.id, name FROM late l JOIN late_c USING (id) ORDER BY l.id LIMIT 2",
+      "SELECT l.id * 2 AS d, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY d LIMIT 2",
+      "SELECT l.id FROM late l ORDER BY l.id LIMIT 2",
+      "SELECT DISTINCT l.c, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 LIMIT 2",
+      "SELECT l.c, count(*) FROM late l JOIN late_c c ON c.id = l.c GROUP BY 1 ORDER BY 1 LIMIT 2",
+      "SELECT l.id, row_number() OVER (ORDER BY l.id) FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 LIMIT 2"]) {
+      assert.doesNotMatch(await sent(sql), /rowid/, sql);
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+    }
+    // TIES: l.c repeats. Which tied rows are kept is defined by no one, but they are rows of the top keys, whole
+    const tied = "SELECT l.c, l.id, l.j, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c LIMIT 60";
+    const rows = (await answer(c, tied)).rows as string[][];
+    assert.deepEqual(rows.map((r) => r[0]), [...Array(40).fill("0"), ...Array(20).fill("1")], "the keys in order");
+    for (const r of rows) assert.equal(r[3], `c${r[0]}`, "each row whole");
+    assert.equal(new Set(rows.map((r) => r[1])).size, 60, "no row twice");
+    // a prepared statement run after a SET reads the setting where it runs
+    await c.query({ name: "top", text: "SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT $1", values: [2] });
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual((await c.query({ name: "top", text: "SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT $1", values: [1], rowMode: "array" })).rows, [[1, "c1"]]);
+  } finally { await c.end(); }
+});
+
 // A `->>` OF A COLUMN IS DUCKDB'S OWN READ (the test server: every JSON read was a hop to the main thread per
 // vector, 98 s over 22 M rows with every other session waiting). Where DuckDB's reader answers as Postgres does (a string,
 // a missing path, a JSON null) the statement never reaches the function; the rest (a number's digits, an object, an
