@@ -15,7 +15,7 @@ import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
 import { pgTyplen } from "./types.ts";
 import type { CopyState } from "./sync.ts";
-import { datumText, masonCalls, rewrite, treeDifference, Unrewritable, type DuckCollation, type EnumTypes, type RowColumn } from "./rewrite.ts";
+import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type DuckCollation, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
 import { distinctCountTables, distinctKeyCounts, fanOutTables, primaryKeysOf, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
@@ -357,6 +357,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   }
   // only a statement with its filtered reads in place: no other statement's text changes, whatever it names its subqueries
   if (walls !== null && wallSwitch.statistics) wallStatistics(tree, walls);
+  // on the finished tree, so no rule above meets it; `masonCalls` below does not count it as a function called
+  giveTurns(tree);
   const sql = printed(tree as Node, text);
   // THE PRINTED TEXT MUST READ BACK AS THE TREE: a printing gap (the deparser drops or respells something) would run
   // another statement than the one Postgres analysed — refused instead, by name

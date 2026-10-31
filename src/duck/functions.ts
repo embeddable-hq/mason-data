@@ -10,7 +10,8 @@
  *    binds a lambda MACRO's constant arguments wrongly once its postgres extension is loaded: no macro is used).
  * Every name is `__mason_*`, which no Postgres function has.
  */
-import { BIGINT, BLOB, BOOLEAN, DATE, DOUBLE, DuckDBBlobValue, DuckDBDateValue, DuckDBIntervalValue, DuckDBScalarFunction, DuckDBTimestampTZValue, DuckDBTimestampValue, INTEGER, INTERVAL, LIST, TIMESTAMP, TIMESTAMPTZ, VARCHAR, listValue, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
+import duckdb from "@duckdb/node-bindings";
+import { ANY, BIGINT, BLOB, BOOLEAN, DATE, DOUBLE, DuckDBBlobValue, DuckDBDataChunk, DuckDBDateValue, DuckDBIntervalValue, DuckDBScalarFunction, DuckDBTimestampTZValue, DuckDBTimestampValue, INTEGER, INTERVAL, LIST, TIMESTAMP, TIMESTAMPTZ, VARCHAR, listValue, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
 import { pgEvalSync, PgEvalError } from "./pg-eval.ts";
 import { MARKED_FUNCTIONS } from "./kept-route.ts";
 import { libcKept, libcKey, type LibcOrder } from "./libc-order.ts";
@@ -612,6 +613,8 @@ function icuKeysOf(v: DuckDBValue): string[] {
  * it (the writer, a copy's) passes NULL: never cancelled this way.
  */
 export const SESSION_VARIABLE = "__mason_session";
+/** the function a thread passes through before a Mason function's vector (`registerTurn`) */
+export const TURN_FUNCTION = "__mason_turn";
 /** the session's settings, name to value, as `current_setting(name)` answers them (src/api/postgres/server.ts
  *  `duckSession`): set on a session's connection before each statement that finds them changed (src/duck/store.ts
  *  `settle`), read by the rewrite's `settingRead` (src/duck/rewrite.ts) */
@@ -639,8 +642,43 @@ function cancelled(info: { setError(message: string): void }, vectors: ReadonlyA
   return true;
 }
 
+/**
+ * THE TURN (issue 127: `select 1` from ten rows took 22 s beside a `to_char` over 17 M rows, 57 s on a real deployment).
+ * Every Mason function is a thread-safe function of Node's: DuckDB's threads queue a call and wait for this thread, and
+ * Node runs a queue until it is EMPTY, or for 1,000 calls, before its event loop turns (measured: 999 calls between two
+ * turns, 2.2 to 3.3 s each). With two or more DuckDB threads calling, the queue is never empty, and a statement of any
+ * size needs about eight turns of this loop (settle, prepare, stream, fetch, close, each a libuv completion).
+ *
+ * This function is the way out of that queue: a thread calls it, on a queue of its OWN, before each vector of a Mason
+ * function (src/duck/rewrite.ts `giveTurns`). A thread that finished a call now waits on this queue, which is served
+ * only once the running queue has returned to the loop, so no thread can join the running queue while it runs. It
+ * empties after the calls already in it, at most one per DuckDB thread, and the loop turns: 10 calls a turn where
+ * there were 999, whatever the statements running. It costs one hop a vector, and its body is O(1): the session is
+ * handed on as a constant vector, the first argument of the call it guards, so nothing is read or written per row.
+ * One Value per session, so `sessions` is bounded by the cancel table's slots.
+ */
+function registerTurn(conn: DuckDBConnection): void {
+  const turn = DuckDBScalarFunction.create({
+    name: TURN_FUNCTION, returnType: VARCHAR, parameterTypes: [VARCHAR, ANY],
+    // a NULL argument is no reason to skip the turn (or a NULL session's: a write of the copy, src/duck/kept.ts)
+    specialHandling: true, mainFunction: () => undefined,
+  });
+  const sessions = new Map<string | null, duckdb.Value>();
+  // the bindings' own callback: `mainFunction`'s wrapper builds the output vector's row-by-row writer, which this never uses
+  duckdb.scalar_function_set_function(turn.scalar_function, (_info, input, output) => {
+    beat(cancels);
+    const chunk = new DuckDBDataChunk(input);
+    const session = text(chunk.rowCount > 0 ? chunk.getColumnVector(0).getItem(0) as DuckDBValue : null);
+    let value = sessions.get(session);
+    if (value === undefined) { value = session === null ? duckdb.create_null_value() : duckdb.create_varchar(session); sessions.set(session, value); }
+    duckdb.vector_reference_value(output, value);
+  });
+  conn.registerScalarFunction(turn);
+}
+
 /** Registers the scalar functions on the instance (once: every connection of it sees them). */
 export function registerFunctions(conn: DuckDBConnection): void {
+  registerTurn(conn);
   for (const kind of Object.keys(PG_KINDS) as PgKind[]) viaPostgres(conn, kind);
   scalar(conn, "__mason_case", [VARCHAR, BOOLEAN, VARCHAR], VARCHAR, ([s, up, mode]) => pgCase(String(s), up === true, String(mode) as CaseMode));
   scalar(conn, "__mason_initcap", [VARCHAR, VARCHAR], VARCHAR, ([s, mode]) => initcap(String(s), String(mode) as CaseMode));

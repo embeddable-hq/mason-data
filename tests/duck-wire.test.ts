@@ -1261,7 +1261,7 @@ test("a LEFT JOIN LATERAL of json rows ON TRUE is Postgres's rows; under a LIMIT
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
       // an INNER lateral of a list never empty: the last argument of each list's function, or the array's CASE (in a
       // lambda where the join is read whole)
-      assert.match(sent(from), /CROSS JOIN LATERAL \( SELECT unnest\((CAST\()?(__mason_json_\w+\(getvariable\('__mason_session'\), .*, true\)|CASE WHEN len\(|\(list_transform\(list_value\()/, `${sql}\n${sent(from)}`);
+      assert.match(sent(from), /CROSS JOIN LATERAL \( SELECT unnest\((CAST\()?(__mason_json_\w+\(__mason_turn\(getvariable\('__mason_session'\), .*, true\)|CASE WHEN len\(|\(list_transform\(list_value\()/, `${sql}\n${sent(from)}`);
       assert.doesNotMatch(sent(from), /LEFT JOIN/, sql);
     }
     // a whole result without an ORDER BY is the same rows, in an order neither promises (the oracle's set comparison)
@@ -1432,7 +1432,7 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
       ["SELECT o.id, x FROM orders o LEFT JOIN unnest(CASE o.id WHEN 2 THEN NULL::bigint[] WHEN 3 THEN ARRAY[]::bigint[] ELSE ARRAY[o.id + 1, o.id] END) AS x ON TRUE", once],
       ["SELECT o.id, p FROM orders o LEFT JOIN unnest(string_to_array(o.status || ',' || o.id, ',')) AS p ON TRUE", once],
       ["SELECT * FROM orders o LEFT JOIN unnest(ARRAY[o.id, o.id * 10]) x ON TRUE", inside],
-      ["SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN t.id > 1 AND jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE", / AS __mason_arg1 \) AS __mason_arg1 CROSS JOIN LATERAL \( SELECT unnest\(__mason_json_keys\(getvariable\('__mason_session'\), __mason_arg1\.__mason_arg1, /],
+      ["SELECT t.id, d.key FROM jdocs t LEFT JOIN jsonb_each(CASE WHEN t.id > 1 AND jsonb_typeof(t.b) = 'object' THEN t.b END) d ON TRUE", / AS __mason_arg1 \) AS __mason_arg1 CROSS JOIN LATERAL \( SELECT unnest\(__mason_json_keys\(__mason_turn\(getvariable\('__mason_session'\), __mason_arg1\.__mason_arg1\), __mason_arg1\.__mason_arg1, /],
     ] as const) {
       const want = await truthRows(sql);
       if (sql.startsWith("SELECT o.id, x FROM orders o LEFT JOIN LATERAL")) assert.deepEqual(want.slice(0, 2), ['["1","1"]', '["1","10"]'], "Postgres's own first rows");
