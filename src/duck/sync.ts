@@ -53,7 +53,7 @@
  * Read-only on the source (CLAUDE.md): only SELECTs, through a READ_ONLY attachment.
  */
 import type { DuckStore } from "./store.ts";
-import { MASON_SCHEMA } from "./store.ts";
+import { freeBytesAt, MASON_SCHEMA } from "./store.ts";
 import { KeptJsonPaths, type KeptOptions } from "./kept.ts";
 import type { Source, SourceColumnInfo, SourceTable, SourceView } from "../cli/preflight.ts";
 import { DuckDBEnumType, DuckDBListType, type DuckDBType } from "@duckdb/node-api";
@@ -928,7 +928,7 @@ export class Sync {
     if (!(this.copyChunkSeconds > 0)) throw new Error(`a first sync's chunk takes a positive number of seconds, not ${this.copyChunkSeconds} (Mason bug: report it; copyChunkSecondsOf reads MASON_COPY_CHUNK_SECONDS)`);
     this.onChunk = options.onChunk;
     this.onEvent = options.onEvent ?? (() => undefined);
-    this.diskFree = options.diskFree ?? ((dir) => { const st = fs.statfsSync(dir); return st.bavail * st.bsize; });
+    this.diskFree = options.diskFree ?? freeBytesAt;
     if (mode === "replication" && replication === null) throw new Error("replication mode needs its slot and publication (Mason bug: report it)");
     this.replication = replication;
     this.onReplication = options.onReplication;

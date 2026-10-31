@@ -49,7 +49,7 @@ import { withPlaceholders } from "./pg-url.ts";
 import { UI } from "./ui.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
 import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION } from "../duck/store.ts";
-import { copyChunkSecondsOf, copyParallelOf, Sync, syncModeOf, type CopyState } from "../duck/sync.ts";
+import { copyChunkSecondsOf, copyParallelOf, humanBytes, Sync, syncModeOf, type CopyState } from "../duck/sync.ts";
 import { storeJsonPathsOf } from "../duck/kept.ts";
 import { readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
 import { isLibcCollation } from "../duck/rewrite.ts";
@@ -396,7 +396,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   let store: DuckStore;
   // its memory bounded (src/duck/store.ts DEFAULT_MEMORY_LIMIT): past it a statement spills, or fails alone
   const memoryLimit = process.env.MASON_DUCKDB_MEMORY || undefined;
-  try { store = await DuckStore.open(duckFile, (l) => logLine(`[engine] ${l}`), memoryLimit === undefined ? {} : { memoryLimit }); }
+  // what statements may spill (src/duck/store.ts spillCeiling): past it a statement fails alone, and the disk is kept
+  const spillLimit = process.env.MASON_SPILL_LIMIT || undefined;
+  try { store = await DuckStore.open(duckFile, (l) => logLine(`[engine] ${l}`), { ...(memoryLimit === undefined ? {} : { memoryLimit }), ...(spillLimit === undefined ? {} : { spillLimit }) }); }
   catch (e) { fail("Opening the synced data"); say(`  ${(e as Error).message}`); return 1; }
   // THE COPY'S THREAD DYING (src/duck/executor.ts: V8 out of heap there, an uncaught error) ends the run, said, for its
   // supervisor to start it again: every session's statement in flight was told 57P02, and nothing can be answered after
@@ -406,7 +408,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     if (crash !== null) crash(reason);
     else say(`  ! the engine's thread stopped: ${reason}`);
   });
-  done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling to ${path.relative(project.root, duckFile)}.tmp`);
+  done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling at most ${humanBytes(store.spillLimitBytes)} to ${path.relative(project.root, duckFile)}.tmp (MASON_SPILL_LIMIT)`);
   const syncMode = syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts

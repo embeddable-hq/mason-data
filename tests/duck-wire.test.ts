@@ -16,7 +16,7 @@ import pg from "pg";
 import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
 import { DuckDBInstance } from "@duckdb/node-api";
-import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, memoryLimitBytes } from "../src/duck/store.ts";
+import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, memoryLimitBytes, pgErrorOf, spillCeiling } from "../src/duck/store.ts";
 import { startPostgresApi, StatementError, type PgApiServer } from "../src/api/postgres/server.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import { wireColumn } from "../src/duck/types.ts";
@@ -862,6 +862,69 @@ test("a statement past DuckDB's memory fails alone, 53200 with the way out, and 
       (e: pg.DatabaseError) => e.code === "53200" && /out of memory/.test(e.message) && /MASON_DUCKDB_MEMORY/.test(e.hint ?? ""));
   } finally {
     await store.writer.run(`SET memory_limit = '${before.replace(" ", "")}'`);
+  }
+  try { assert.equal((await c.query("SELECT count(*) AS n FROM big")).rows[0].n, "150000"); }
+  finally { await c.end(); }
+});
+
+// ISSUE 105: a sort's spill took every free byte of a volume. Measured on a small volume: DuckDB's own ceiling is 90% of
+// what was free when it first spilled, read once, so a disk that fills afterwards ends in its IO error, XX000 with a path
+test("what statements may spill is half of what is free, followed as the disk fills, and never all of it", async () => {
+  const GiB = 2 ** 30;
+  assert.equal(spillCeiling(20 * GiB, 0, null), 10 * GiB, "half of what is free");
+  assert.equal(spillCeiling(10 * GiB, 4 * GiB, null), 9 * GiB, "what is spilled is not taken from the half: it is on the disk already");
+  assert.equal(spillCeiling(20 * GiB, 0, 4 * GiB), 4 * GiB, "the operator's amount");
+  assert.equal(spillCeiling(20 * GiB, 0, 40 * GiB), 18 * GiB, "the operator's amount, never past 90% of what is free");
+  assert.equal(spillCeiling(0, 0, null), 2 ** 20, "a full disk: a ceiling all the same, DuckDB reads none as its default");
+  const setting = async (st: DuckStore): Promise<string> => String((await st.writer.runAndReadAll("SELECT current_setting('max_temp_directory_size')")).getRows()[0]![0]);
+  let free = 8 * GiB;
+  const lines: string[] = [];
+  const own = await DuckStore.open(path.join(dir, "spill.db"), (l) => lines.push(l), { memoryLimit: "64MiB", diskFree: () => free });
+  try {
+    assert.equal(own.spillLimitBytes, 4 * GiB);
+    assert.equal(await setting(own), "4.0 GiB");
+    free = 2 * GiB;   // a copy took the rest
+    await own.keepSpillCeiling();
+    assert.equal(own.spillLimitBytes, GiB);
+    assert.equal(await setting(own), "1.0 GiB");
+    free = 2 * GiB + 2 ** 20;   // a move under 1 % is none
+    await own.keepSpillCeiling();
+    assert.equal(own.spillLimitBytes, GiB);
+    assert.deepEqual(lines.filter((l) => /ceiling/.test(l)), []);
+  } finally { await own.close(); }
+  await own.keepSpillCeiling();   // closed: nothing to move, and no failure
+  const set = await DuckStore.open(path.join(dir, "spill-set.db"), () => undefined, { memoryLimit: "64MiB", spillLimit: "1GiB", diskFree: () => 8 * GiB });
+  try { assert.equal(await setting(set), "1.0 GiB"); } finally { await set.close(); }
+  await assert.rejects(DuckStore.open(path.join(dir, "bad-spill.db"), () => undefined, { spillLimit: "lots" }), /MASON_SPILL_LIMIT="lots" is not an amount of disk: write it as 40GB or 512MiB/);
+});
+
+test("no room to spill is 53100 with the way out, naming no engine and no path", () => {
+  for (const [text, message] of [
+    ["Out of Memory Error: failed to offload data block of size 256.0 KiB (95.1 MiB/95.3 MiB used).\nThis limit was set by the 'max_temp_directory_size' setting.", /more room on disk than statements may take/],
+    ['IO Error: Could not write file "/data/.mason/duck.db.tmp/duckdb_temp_1.tmp": No space left on device', /No space left on device/],
+  ] as const) {
+    const e = pgErrorOf(new Error(text), "SELECT 1");
+    assert.equal(e.fields.code, "53100");
+    assert.equal(e.gap, "spill-limit");
+    assert.match(e.fields.message, message);
+    assert.match(e.fields.hint ?? "", /MASON_SPILL_LIMIT/);
+    assert.doesNotMatch(JSON.stringify(e.fields), /duckdb|duck\.db|max_temp|\/data|the engine/i);
+  }
+  assert.equal(pgErrorOf(new Error("Out of Memory Error: could not allocate block of size 256 KiB"), "SELECT 1").fields.code, "53200", "memory stays memory");
+});
+
+test("a statement past what may spill fails alone, 53100, and the session goes on", async () => {
+  const memory = String((await store.writer.runAndReadAll("SELECT current_setting('memory_limit')")).getRows()[0]![0]);
+  const spill = String((await store.writer.runAndReadAll("SELECT current_setting('max_temp_directory_size')")).getRows()[0]![0]);
+  const c = await client();
+  try {
+    await store.writer.run("SET memory_limit = '40MB'");
+    await store.writer.run("SET GLOBAL max_temp_directory_size = '2MiB'");
+    await assert.rejects(c.query("SELECT v || repeat('x', 300) AS w FROM big ORDER BY w DESC"),
+      (e: pg.DatabaseError) => e.code === "53100" && /room on disk/.test(e.message) && /MASON_SPILL_LIMIT/.test(e.hint ?? "") && !/duckdb|\.tmp/i.test(`${e.message} ${e.detail ?? ""}`));
+  } finally {
+    await store.writer.run(`SET memory_limit = '${memory.replace(" ", "")}'`);
+    await store.writer.run(`SET GLOBAL max_temp_directory_size = '${spill.replace(" ", "")}'`);
   }
   try { assert.equal((await c.query("SELECT count(*) AS n FROM big")).rows[0].n, "150000"); }
   finally { await c.end(); }

@@ -147,6 +147,7 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 |---|---|---|
 | `MASON_PG_DATABASE` | `mason` | the sources file has no `database:` and a tool must keep the database name it has (a different `database:` in the file is refused) |
 | `MASON_DUCKDB_MEMORY` | half the container's memory limit | the container's limit is not what the copy should have half of ("Memory") |
+| `MASON_SPILL_LIMIT` | half of what is free on the disk, followed as it fills | statements fail with 53100 on a disk with room to give them (never past 90% of what is free) |
 | `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a copy is slow |
 | `MASON_STATEMENT_TIMEOUT` | `5min` (0 for none) | a dashboard's statement may rightly take longer, or a runaway one should stop sooner |
 | `MASON_HISTORY_DAYS` | 7 | you want Mason's history — the request log (`mason logs --requests`), the sync's events, the usage samples (`mason usage`), all kept in the copy — longer or shorter (it was `MASON_REQUEST_LOG_DAYS`, which now refuses the start) |
