@@ -110,8 +110,8 @@ polled, or replicated (see [Choosing what to sync](#choosing-what-to-sync)).
 Which command depends on where the tool runs:
 
 ```bash
-mason user add metabase              # a tool on this machine: prints postgres://metabase:<password>@127.0.0.1:5433/mason (shown only once)
-mason share                          # a tool in the cloud: prints a temporary public address and password (Ctrl-C ends it)
+mason user add metabase              # a tool on this machine: prints a connection URL (shown only once)
+mason share                          # a tool in the cloud: prints a temporary address and login (Ctrl-C ends it)
 ```
 
 | | `mason user add` | `mason share` |
@@ -125,7 +125,7 @@ mason share                          # a tool in the cloud: prints a temporary p
 self-signed, so a tool does not verify it ([From a cloud BI tool](docs/POSTGRES-API.md#from-a-cloud-bi-tool)). To keep a
 dashboard running, put Mason on a server ([Going to production](#going-to-production)).
 
-Paste the URL, or the address and password, into your tool's Postgres connection form. Each synced table appears as a
+Paste what it prints into your tool's Postgres connection form. Each synced table appears as a
 table in a database named `mason`. With `mason user add`, the port stays the same every time Mason starts, so saved
 connections keep working.
 
