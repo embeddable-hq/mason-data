@@ -8,6 +8,9 @@ paths:
   - "src/duck/sync.ts"
   - "tests/duck-json-columns.test.ts"
   - "tests/integration/duck-json-paths.itest.ts"
+  - "src/duck/jsonb-order.ts"
+  - "src/duck/functions.ts"
+  - "tests/duck-jsonb-order.test.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->

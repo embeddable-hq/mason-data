@@ -7,6 +7,8 @@ paths:
   - "tests/duck-requests-wire.test.ts"
   - "tests/duck-requests.test.ts"
   - "tests/duck-usage.test.ts"
+  - "src/duck/store.ts"
+  - "src/duck/executor.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->

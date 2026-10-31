@@ -13,6 +13,7 @@ paths:
   - "tests/duck-sync-schedule.test.ts"
   - "tests/integration/duck-poll.itest.ts"
   - "tests/integration/duck-stream.itest.ts"
+  - "src/duck/kept.ts"
 ---
 
 <!-- Loaded only when a matching file is read or edited (the paths above). CLAUDE.md lists every rules file. -->
@@ -127,6 +128,17 @@ paths:
   second verifier. A gap in one table refuses that table alone, the others stream on; the way out is the found
   publication plus the gap as `ALTER PUBLICATION … ADD TABLE …`. On a standby a named one is required, refused before
   any slot is made. ("Logical replication")
+- **A write by key is a DELETE of its keys by ONE join against the table's key column, then an INSERT** (`writeByKey`,
+  `writeStaged`, `deleteKeys`), in the piece's one transaction; an unchanged-TOAST update is ONE `UPDATE … FROM` per set
+  of carried columns (`updateCarried`). Never `INSERT OR REPLACE` (it needs a key constraint) and never a statement per
+  row: each is a scan of the key column — 4 ms a 10,000-change piece on 1 M uuid rows, 0.35–1.8 s on 195 M, tens of
+  seconds on the test server's disk — so a stream batch that changes a table over `BIG_TABLE_ROWS` is applied by time as well
+  (`applySize`: at most every 5 s, pieces of up to 50,000). A bigserial key prunes (heap order puts its zonemaps in order).
+- **How a copy is kept current is derived ONCE, by the sync** (`Sync.keptOf`, carried on `Sync.state` as `kept`):
+  `mason status` (`kept`: its sync, `syncedAt`, `nextAt`; `streamStatus`'s tables) and EXPLAIN's first line (`keptText`, src/duck/explain.ts) both
+  read it, never the poll's ledger (a project switched to replication keeps its last poll there: EXPLAIN said "kept
+  current by polling" of a streamed table). `tests/duck-sync-added.test.ts` and `tests/duck-wire.test.ts` hold it.
+  ("EXPLAIN")
 
 ## What the sync records
 

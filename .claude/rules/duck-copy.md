@@ -82,12 +82,6 @@ paths:
   numeric as text, and as `text[]` a citext[] / inet[] / json[] (`KEPT_ARRAYS`) and an enum array (`enumLists`, by its
   stored type) — `postgres_query` hands each over as one VARCHAR DuckDB cannot cast to the column (the
   oracle's enum array failed to copy, and a poll of a changed one had always failed).
-- **A write by key is a DELETE of its keys by ONE join against the table's key column, then an INSERT** (`writeByKey`,
-  `writeStaged`, `deleteKeys`), in the piece's one transaction; an unchanged-TOAST update is ONE `UPDATE … FROM` per set
-  of carried columns (`updateCarried`). Never `INSERT OR REPLACE` (it needs a key constraint) and never a statement per
-  row: each is a scan of the key column — 4 ms a 10,000-change piece on 1 M uuid rows, 0.35–1.8 s on 195 M, tens of
-  seconds on the test server's disk — so a stream batch that changes a table over `BIG_TABLE_ROWS` is applied by time as well
-  (`applySize`: at most every 5 s, pieces of up to 50,000). A bigserial key prunes (heap order puts its zonemaps in order).
 - **What heap order gives up**, said as such: a wide uuid-keyed table's click takes seconds, a point lookup by a random
   uuid is a scan, and uniqueness is the write path's (the oracle holds every copy to the source), not the engine's. The
   later step is a sort by a declared time column once the sources file names one.
