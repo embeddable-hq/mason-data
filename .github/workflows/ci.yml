@@ -1,10 +1,24 @@
-# The full gate, on every pull request and on main; main has no branch protection, so it stops a merge only because
-# whoever merges reads it (CLAUDE.md "Local gates"). A pull request's run checks out GitHub's merge of its head into main
-# as main stood at that push. `checks` runs on the runner alone — no Docker, no Postgres, no .env: the code typechecks, the unit tests hold, the published CLI builds and answers, the image builds.
+# The full gate, on every pull request and on main. A pull request's run checks out GitHub's merge of its head into main
+# as main stood at that push.
 #
-# `integration` runs the real thing against a Postgres service container: the copy and the poll, the stream (logical
-# replication), `mason serve`'s whole life, to_char, and the oracle — every statement answered by Mason held equal to
-# what the Postgres it copies from answers (tests/integration/README.md). It blocks.
+# THE FOUR REQUIRED CHECKS ARE `checks`, `image`, `integration (oracle)` and `integration (rest)`: the ruleset on main
+# names them, so those names stay. All but `image` are final jobs that `needs` their shards: each runs `always()`, and
+# passes only when every job behind it answered `success` (`scripts/ci-shards.ts needs`), because a skipped job counts
+# as passing a required check on GitHub. `always()`, not `!cancelled()`, for the same reason: a cancelled run must not
+# skip the job that would say so. tests/ci-shards.test.ts holds this file to all of it.
+#
+#   checks                  build (once: typecheck, the CLI, the platform packages, the install, shellcheck), and
+#                           unit (1-3): every tests/**/*.test.ts file in exactly one shard (`scripts/ci-shards.ts verify`)
+#   image                   the image builds and answers
+#   integration (rest)      rest shard (1-2): every integration file but the oracle, in exactly one shard
+#   integration (oracle)    oracle leg (1-2): each the copy, the rounds of changes and its share of the statements; the
+#                           check holds the legs to the whole (`scripts/oracle-legs.ts`)
+#
+# A shard's files are computed from the tree (`scripts/ci-shards.ts`), so a new file lands in one by itself. Only
+# `build` and `unit` run on the runner alone: no Docker, no Postgres, no .env. The integration jobs run the real thing
+# against a Postgres service container: the copy and the poll, the stream (logical replication), `mason serve`'s whole
+# life, to_char, and the oracle — every statement answered by Mason held equal to what the Postgres it copies from
+# answers (tests/integration/README.md).
 name: CI
 
 on:
@@ -20,7 +34,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
+  build:
+    name: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,17 +55,6 @@ jobs:
       - name: typecheck
         if: ${{ !cancelled() }}
         run: npm run typecheck
-
-      - name: unit tests
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          npm test | tee "$RUNNER_TEMP/unit-tests.log"
-
-      # Where the job's minutes went: the twenty slowest tests of the run above, in seconds.
-      - name: slowest tests
-        if: ${{ !cancelled() }}
-        run: sed -nE 's/^ *[^ ]+ (.*) \(([0-9.]+)ms\)$/\2 \1/p' "$RUNNER_TEMP/unit-tests.log" | sort -rn | awk 'NR <= 20 { s = $1 / 1000; sub(/^[^ ]+ /, ""); printf "%8.1f %s\n", s, $0 }'
 
       # The published CLI (@mason-data/cli): src/ compiled to JavaScript (cli/build.ts), because Node strips no types
       # under node_modules. This proves the ARTIFACT runs: the built `mason` answers.
@@ -112,6 +116,71 @@ jobs:
           files=$(grep -rl '^#!/usr/bin/env bash' scripts/ || true)
           if [ -n "$files" ]; then shellcheck $files; else echo "no bash script under scripts/"; fi
 
+  # The unit tests, one shard of them a job: scripts/ci-shards.ts computes each shard's files from the tree.
+  unit:
+    name: unit (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'          # never 24: the build job says why
+          cache: npm
+
+      - run: npm ci
+
+      - name: unit tests
+        env:
+          CI_SHARD_DIR: ${{ runner.temp }}/ran
+        run: |
+          set -o pipefail
+          node scripts/ci-shards.ts run unit ${{ matrix.shard }} | tee "$RUNNER_TEMP/unit-tests.log"
+
+      # Where the job's minutes went: the twenty slowest tests of the run above, in seconds.
+      - name: slowest tests
+        if: ${{ !cancelled() }}
+        run: sed -nE 's/^ *[^ ]+ (.*) \(([0-9.]+)ms\)$/\2 \1/p' "$RUNNER_TEMP/unit-tests.log" | sort -rn | awk 'NR <= 20 { s = $1 / 1000; sub(/^[^ ]+ /, ""); printf "%8.1f %s\n", s, $0 }'
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: ran-unit-${{ matrix.shard }}
+          path: ${{ runner.temp }}/ran/
+          retention-days: 7
+          overwrite: true
+
+  # REQUIRED. Fails unless `build` and every unit shard succeeded, and every test file ran in exactly one shard.
+  checks:
+    name: checks
+    needs: [build, unit]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: every job behind this check succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci-shards.ts needs
+      - uses: actions/download-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          pattern: ran-unit-*
+          merge-multiple: true
+          path: ran
+      - name: every test file ran in exactly one shard
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-shards.ts verify unit ran
+
   # The image (docker/mason-data.Dockerfile), built as images-publish.yml builds it (one platform here): it starts,
   # and `mason --version` inside it answers.
   image:
@@ -123,19 +192,20 @@ jobs:
       - name: the mason command inside it answers
         run: docker run --rm --entrypoint mason mason-data:ci --version
 
-  integration:
+  # THE ORACLE, IN LEGS: each leg runs the whole pipeline over a Postgres of its own, and asks its share of the
+  # statements in every phase (scripts/oracle-legs.ts). A leg's job is the rest shards' below, by YAML anchor.
+  oracle:
+    name: oracle leg ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Two jobs at once, each with a Postgres of its own: the oracle runs the whole pipeline and every statement, `rest` is
-    # every other file, so a new one lands there by itself.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: [oracle, rest]
-    name: integration (${{ matrix.shard }})
-    timeout-minutes: 30
+        kind: [oracle]
+        shard: [1, 2]
     # The Postgres every file copies from. Each file writes only inside a database it creates and drops; the stream
     # needs wal_level=logical (set below: a service takes no command line). psql is on the runner image.
-    services:
+    services: &postgres-service
       postgres:
         image: postgres:18
         env:
@@ -147,14 +217,14 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-    env:
+    env: &postgres-env
       IT_POSTGRES_URL: postgres://postgres:it@127.0.0.1:5432/postgres
-    steps:
+    steps: &integration-steps
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '26'          # never 24: the checks job says why
+          node-version: '26'          # never 24: the build job says why
           cache: npm
 
       - run: npm ci
@@ -177,13 +247,89 @@ jobs:
           test "$(psql "$IT_POSTGRES_URL" -tAc 'SHOW wal_level')" = logical
 
       # one shard's files, one at a time (every file makes a database of its own, but each runs a listener on a port
-      # and a store of its own, and two at once double the runner's load): `oracle` is that file; `rest` every other
+      # and a store of its own, and two at once double the runner's load)
       - name: integration tests
+        env:
+          CI_SHARD_DIR: ${{ runner.temp }}/ran
+          IT_LOG_DIR: ${{ runner.temp }}/ran
         run: |
-          if [ "${{ matrix.shard }}" = rest ]; then
-            mapfile -t files < <(find tests/integration -name '*.itest.ts' ! -name duck-oracle.itest.ts | sort)
-          else
-            files=("tests/integration/duck-oracle.itest.ts")
-          fi
-          for f in "${files[@]}"; do test -f "$f" || { echo "no such integration file: $f" >&2; exit 1; }; done
-          node --test --test-concurrency=1 "${files[@]}"
+          mkdir -p "$IT_LOG_DIR"
+          node scripts/ci-shards.ts run ${{ matrix.kind }} ${{ matrix.shard }}
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: ran-${{ matrix.kind }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/ran/
+          retention-days: 7
+          overwrite: true
+
+  # REQUIRED. Fails unless both legs succeeded, and together they asked every statement in every phase and hold what a
+  # whole run asserts at its end: no stale decision, no dead gap, src/duck/verified.ts, the fixture's tallies.
+  integration-oracle:
+    name: integration (oracle)
+    needs: [oracle]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: every job behind this check succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci-shards.ts needs
+      - uses: actions/download-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          pattern: ran-oracle-*
+          merge-multiple: true
+          path: ran
+      - name: every leg ran
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-shards.ts verify oracle ran
+      - name: the legs are the whole oracle
+        if: ${{ !cancelled() }}
+        run: node scripts/oracle-legs.ts ran
+
+  # Every other integration file, one shard of them a job: a new file lands in one by itself.
+  rest:
+    name: rest shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [rest]
+        shard: [1, 2]
+    services: *postgres-service
+    env: *postgres-env
+    steps: *integration-steps
+
+  # REQUIRED. Fails unless both shards succeeded, and every file ran in exactly one.
+  integration-rest:
+    name: integration (rest)
+    needs: [rest]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: every job behind this check succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci-shards.ts needs
+      - uses: actions/download-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          pattern: ran-rest-*
+          merge-multiple: true
+          path: ran
+      - name: every integration file ran in exactly one shard
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-shards.ts verify rest ran

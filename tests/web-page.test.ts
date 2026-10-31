@@ -3639,19 +3639,22 @@ test("a summary's click: a link inside it keeps its own click, a details no page
   assert.match(el("syncs-run").html, /<details id="syncs-raw" open>/, "open, from the click alone");
 });
 
-test("only the clock moved: the ages are set where they are, the part not written again (a rewrite each second dropped a selection, the focus, a click)", async () => {
+test("only the clock moved: the ages are set where they are, the part not written again (a rewrite each second dropped a selection, the focus, a click)", async (t) => {
+  // the page's clock is the global Date (`new Date()` in `start`), so the test holds it: a stalled machine moves no age
+  const at = Date.parse("2026-10-31T12:00:00.000Z");
+  t.mock.timers.enable({ apis: ["Date"], now: at });
   const run = fakeRun();
-  const fresh = { ...REQUESTS[0]!, startedAt: new Date(Date.now() - 5000).toISOString() };
+  const fresh = { ...REQUESTS[0]!, startedAt: new Date(at - 5000).toISOString() };
   run.answers.set("GET /api/requests?since=15m", answer({ requests: [fresh], keptDays: 7, before: null }));
   const { el, tick, settle } = fakeBrowser(run, "#observability/queries");
   await settle();
   const log = el("request-log") as unknown as { writes: number; html: string; querySelectorAll?: (s: string) => { innerHTML: string }[] };
-  assert.match(log.html, /<time data-tick [^>]*>\ds ago<\/time>/);
+  assert.match(log.html, /<time data-tick [^>]*>5s ago<\/time>/);
   const shown = [{ innerHTML: /<time data-tick [^>]*>(\ds ago)</.exec(log.html)![1]! }];
   log.querySelectorAll = (sel: string) => sel === "time[data-tick]" ? shown : [];
   const writes = log.writes;
-  await new Promise((r) => setTimeout(r, 1100));
+  t.mock.timers.setTime(at + 2000);
   tick(); await settle();
   assert.equal(log.writes, writes, "not written again");
-  assert.match(shown[0]!.innerHTML, /^[67]s ago$/, "the age moved where it is");
+  assert.equal(shown[0]!.innerHTML, "7s ago", "the age moved where it is");
 });

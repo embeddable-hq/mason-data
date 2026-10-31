@@ -178,7 +178,9 @@ test("every synchronous close on the engine's thread is one read against the rul
   assert.deepEqual(closes("src/duck/store.ts"), ["result?.closeSync();", "this.conn.closeSync();"]);
   assert.deepEqual(closes("src/duck/executor-worker.ts"), ["try { c?.closeSync(); }", "for (const [n, c] of [...conns].reverse()) { conns.delete(n); c.closeSync(); }", "instance?.closeSync();"]);
   // and a test beside a running engine never blocks the main thread: its watch's ticks are that thread's
-  assert.doesNotMatch(fs.readFileSync(path.join(ROOT, "tests/duck-executor.test.ts"), "utf8"), /\bspawnSync\(/);
+  const executorFiles = fs.readdirSync(path.join(ROOT, "tests")).filter((f) => f.startsWith("duck-executor"));
+  assert.ok(executorFiles.includes("duck-executor.test.ts") && executorFiles.includes("duck-executor-harness.ts"), executorFiles.join(", "));
+  for (const f of executorFiles) assert.doesNotMatch(fs.readFileSync(path.join(ROOT, "tests", f), "utf8"), /\bspawnSync\(/, f);
 });
 
 test("no source file carries a committed merge-conflict marker", () => {

@@ -33,6 +33,23 @@ function hold(host: string, ipv6Only = false): Promise<Held | null> {
   });
 }
 
+/**
+ * A port only this test holds, by what `portHolder` answers for it (issue 80): the file runs beside others that bind
+ * ephemeral ports, and IPv4 and v6only sockets share a number without clashing, so a port the OS gave `host` can be
+ * someone else's on 127.0.0.1, which the probe asks first. An answer on an IPv4 address says exactly that, and is asked
+ * again of another port; a probe that does not see the holder answers null, which is returned for the test to fail on.
+ */
+async function heldAlone(host: string, ipv6Only: boolean): Promise<{ held: PortHolder | null } | null> {
+  for (let tries = 0; ; tries++) {
+    const h = await hold(host, ipv6Only);
+    if (!h) return null;
+    try {
+      const held = await portHolder(h.port);
+      if (held === null || held.address.includes(":") || tries >= 20) return { held };
+    } finally { await h.close(); }
+  }
+}
+
 test("a port held on the wildcard is taken, though 127.0.0.1 would bind beside it (macOS)", async () => {
   const h = (await hold("0.0.0.0"))!;
   try {
@@ -45,21 +62,16 @@ test("a port held on the wildcard is taken, though 127.0.0.1 would bind beside i
 });
 
 test("a port held on :: alone (v6only) is taken: 127.0.0.1 and 0.0.0.0 both bind beside it, on Linux too", async (t) => {
-  const h = await hold("::", true);
+  const h = await heldAlone("::", true);
   if (!h) { t.skip("no IPv6 on this machine"); return; }
-  try {
-    assert.deepEqual(await portHolder(h.port), { address: "::", code: "EADDRINUSE" });
-  } finally { await h.close(); }
+  assert.deepEqual(h.held, { address: "::", code: "EADDRINUSE" });
 });
 
-test("a port held on ::1 alone is taken (Node's `localhost` on macOS; a driver tries ::1 first)", { skip: "quarantined: #80" }, async (t) => {
-  const h = await hold("::1");
+test("a port held on ::1 alone is taken (Node's `localhost` on macOS; a driver tries ::1 first)", async (t) => {
+  const h = await heldAlone("::1", false);
   if (!h) { t.skip("no IPv6 loopback on this machine"); return; }
-  try {
-    const held = await portHolder(h.port);
-    assert.ok(held, "the ::1 listener is seen");
-    assert.match(held.address, /^::1?$/);
-  } finally { await h.close(); }
+  assert.ok(h.held, "the ::1 listener is seen");
+  assert.match(h.held.address, /^::1?$/);
 });
 
 test("a free port is kept; one this start already chose is not taken twice", async () => {
