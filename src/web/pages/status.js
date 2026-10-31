@@ -162,6 +162,7 @@ export function sourceRows(s) {
           `${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others by a SELECT of their changed rows`
         : s.source.demo ? "the demo database is checked this way only"
         : "sync: replication on an entry streams that table as it happens instead")],
+    ...(s.source.textOrder ? [["Text order", s.source.textOrder]] : []),
   ];
 }
 

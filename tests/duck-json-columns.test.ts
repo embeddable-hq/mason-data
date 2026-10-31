@@ -28,6 +28,7 @@ import type { AddedTable } from "../src/duck/sync.ts";
 import type { Source } from "../src/cli/preflight.ts";
 import type { Node } from "libpg-query";
 import type { LibcOrder } from "../src/duck/libc-order.ts";
+import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 
 /** planDuck over a stand-in for the stored paths (the test's keeper, or none) */
 const planKept = planDuck as (o: Omit<PlanOptions, "kept"> & { kept: unknown }) => ReturnType<typeof planDuck>;
@@ -586,7 +587,7 @@ test("a jsonb's order is stored as its key: the function's on every row under C,
     { name: "ICU", collation: { provider: "i", collate: "en-US", locale: "en-US" }, libc: undefined, key: `__mason_jsonb_key_icu(NULL, j, ${each("__mason_jsonb_strings")})`, marked: 0 },
     // the small order covers letters, digits and the space: a string holding U+0000 (SHAPES' NUL row) is not covered,
     // its key raises (libc-uncovered), and the row is marked to be computed when read
-    { name: "libc", collation: { provider: "c", collate: "en_US.utf8", locale: null }, libc: smallLibcOrder(), key: `__mason_jsonb_key_libc(NULL, j, ${each("__mason_jsonb_libc_kept")})`, marked: 20 },
+    { name: "libc", collation: { provider: "c", collate: "en_US.utf8", locale: null }, libc: smallLibcOrder(), key: "__mason_jsonb_key_libc(NULL, j)", marked: 20 },
   ];
   for (const k of kinds) {
     const store = await newStore();
@@ -629,7 +630,7 @@ test("a jsonb's order is stored as its key: the function's on every row under C,
         // a marked row keeps the document: the CASE computes it, and the statement raises as the call does
         assert.deepEqual(keeper.ready(order), { name: h, exact: false });
         assert.match(on.sql.text, new RegExp(`${h} IS NULL OR .*${h} = unhex\\('0021'\\)`), on.sql.text);
-        assert.match(String(await answer(on.sql.text)), /U\+0000.*libc-uncovered/);
+        assert.match(String(await answer(on.sql.text)), /holds a character Mason cannot order .*libc-uncovered/);
       }
       assert.deepEqual(await answer(on.sql.text), await answer(off.sql.text), `${k.name}: sorted as the function sorts`);
       // the other forms that compare a jsonb read the same key; the rows the libc order covers answered alike
@@ -755,7 +756,7 @@ test("a jsonb's key marked by a write after it was counted exact is never read a
     const exact = await plan(sorted, keeper);
     assert.doesNotMatch(exact.sql.text, /__mason_jsonb_key/, "read exact (the detector has not counted it)");
     assert.match(String(await answer(exact.sql.text)), /mason\[0A000\]: a jsonb compared or sorted here holds a string Mason cannot order .*Mason gap libc-uncovered/);
-    assert.match(String(await answer((await plan(sorted, null)).sql.text)), /U\+0301.*libc-uncovered/, "as the statement's own key refuses it");
+    assert.match(String(await answer((await plan(sorted, null)).sql.text)), /holds a character Mason cannot order .*libc-uncovered/, "as the statement's own key refuses it");
     // the rows without it are sorted from the key alone, as the function sorts them
     const others = "SELECT id FROM docs WHERE id NOT IN (1, 300000) ORDER BY j DESC, id";
     assert.deepEqual(await answer((await plan(others, keeper)).sql.text), await answer((await plan(others, null)).sql.text));
@@ -774,7 +775,7 @@ test("a jsonb's key marked by a write after it was counted exact is never read a
     for (let i = 0; i < 6; i++) await keeper.review();
     assert.deepEqual(keeper.ready(order), { name: h, exact: false });
     assert.ok(keeper.generation() > gen, "the plans that read the key alone are made again");
-    assert.match(String(await answer((await plan(sorted, keeper)).sql.text)), /U\+0301.*libc-uncovered/);
+    assert.match(String(await answer((await plan(sorted, keeper)).sql.text)), /holds a character Mason cannot order .*libc-uncovered/);
     // and says what they are: the gap, never a Mason bug
     const said = host.logged.filter((l) => l.includes("marked rows")).join("\n");
     assert.match(said, /2 row\(s\) hold a character the database's libc order is not measured for.*Mason gap libc-uncovered/, said);
@@ -1100,14 +1101,7 @@ test("a stored read of a kind this Mason does not know is inert: its ledger row 
 /** a libc order small enough to write by hand (as tests/duck-libc-order.test.ts writes one): letters with case and
  *  accents at ICU's levels, the digits, and the space with no first-level weight; nothing else covered */
 function smallLibcOrder(): LibcOrder {
-  const MAX = 0x110000;
-  const l1 = new Uint32Array(MAX), l4 = new Uint32Array(MAX), uncovered = new Uint8Array(MAX).fill(1);
-  const cp = (c: string): number => c.codePointAt(0)!;
-  const letters = "abcdefghijklmnopqrstuvwxyz".split("").map((x) => x + x.toUpperCase() + (x === "e" ? "é" : ""));
-  const first = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...letters];
-  l4[cp(" ")] = 2; uncovered[cp(" ")] = 0;
-  first.forEach((cls, i) => { for (const c of cls) { l1[cp(c)] = i + 1; uncovered[cp(c)] = 0; l4[cp(c)] = 3; } });
-  return { collate: "en_US.utf8", version: "2.41", l1, l4, uncovered, expansions: new Map() };
+  return handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" "]);
 }
 
 test("a path's spellings and its -> and ->> are ONE stored column, each read from it; an element that reads as an index is not folded", async () => {

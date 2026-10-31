@@ -73,6 +73,8 @@ export interface RunState {
   source: { url: string; database: string; remote: boolean; version: string; standby: boolean; changes: "poll" | "replication";
     /** the demo database this run hosts (`mason init demo`); absent from a run before it was said */
     demo?: boolean;
+    /** what the read of a libc collation's order leaves to say (src/duck/libc-order.ts libcOrderNote); absent: nothing */
+    textOrder?: string;
     /** the source's name: its sources file's, without `.yml` */
     name: string | null;
     /** the sources file the run copies from, absolute */
@@ -342,7 +344,7 @@ const STATUS_USAGE = `usage: mason status [--json]
            <user>:<password> in the credentials' place), psql (its psql line), listener:
            { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
            source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
-           replication, demo (the demo database this run hosts), sync: { default (every table's sync unless its entry
+           replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
            says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
            bytes, key, added, addedColumns, copy, error, kept, sync: { state (synced, syncing, failed, waiting), syncedAt (when
            it was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
@@ -542,6 +544,7 @@ export function sourceRows(s: Pick<RunState, "source">): Array<[string, string]>
           `${s.source.replication.owned ? "Mason's own, carrying them alone" : "named: read as it is, never altered"}); the others by a SELECT of their changed rows`
         : s.source.demo ? "the demo database is checked this way only"
         : "sync: replication on an entry streams that table as it happens instead")],
+    ...(s.source.textOrder ? [["Text order", s.source.textOrder] as [string, string]] : []),
   ];
 }
 

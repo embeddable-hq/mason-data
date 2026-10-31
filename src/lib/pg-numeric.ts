@@ -448,7 +448,7 @@ function specialOf(p: NumericProgram, row: Readonly<Record<string, unknown>>): s
   }
   for (const key of cellsOf(p)) {
     const v = row[key];
-    if (typeof v === "string" && SPECIAL.test(v)) throw new NumericError(`arithmetic on a numeric ${v} is not supported by Mason (${gapMark("numeric-special")})`, "0A000", "numeric-special");
+    if (typeof v === "string" && SPECIAL.test(v)) throw new NumericError(`arithmetic on a numeric NaN or Infinity is not supported by Mason (${gapMark("numeric-special")})`, "0A000", "numeric-special");
   }
   return undefined;
 }

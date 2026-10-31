@@ -195,6 +195,20 @@ paths:
   uses it**: one the oracle verified over its scalar forms answers the others too, so a new piece added by
   `UPDATE_VERIFIED` is read in the diff for the forms it unlocks, and a form not exact is refused by name in the rewrite
   (ARRAY(SELECT …) of a numeric, an array, a row: `array-subquery-element`).
+- **A libc order is read, never assumed** (`src/duck/libc-order.ts`; "A libc order, read level by level"): all four of
+  glibc's levels from comparisons alone, a spelling kept only when the source says it is equal, the result held to the
+  source (`holdLibcOrder`, a verdict that is a branch): an `en_*` locale is never refused, of any character, what differs
+  recorded (mason status) and listed as a decided difference; another locale loses the rare characters that differ, and is
+  `libc-locale-unread` where ASCII or Latin does. No ICU in it: a new case the read does not follow is a refusal by
+  name, a decided difference, or a read of it. `tests/duck-libc-order.test.ts` holds the key's mechanics,
+  `tests/integration/duck-libc-read.itest.ts` the order against the source, the oracle's `every value` the statements.
+- **A tie under ICU is two strings, ordered by their bytes** (U+FE0F is ignorable there): every order under ICU ends in
+  the bytes, `sortKeys`, `icuKey`, `textMinMax`.
+- **A refusal raised at a row never quotes the row** (issue 128): it reaches any user, in a tool's error box and the
+  request log, of a row a role may hide, so a `PgEvalError` or `NumericError` of 0A000 and a 0A000 of `postgresWording`
+  say the gap and words alone, not the value nor one of its characters, and the engine's text stays out of their DETAIL.
+  Postgres's own errors (22P02 …) quote what Postgres quotes. `tests/conventions.test.ts` holds the source,
+  `tests/duck-refusal-values.test.ts` the wire under a filtered role.
 - **Every refusal names its entry**: `Unrewritable` takes a `GapId` from `src/duck/gaps.ts`, so a refusal without one
   does not compile; `docs/SQL-SUPPORT.md` is rendered from the registry, and `tests/duck-gaps.test.ts` fails when it is not.
 - **No dead entries**: the oracle fails when a `refused` or `differs` entry is met by none of its statements

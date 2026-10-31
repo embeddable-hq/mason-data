@@ -1325,3 +1325,62 @@ test("the duration guard would catch the real thing", () => {
   assert.deepEqual(durationsSaid("    timeout-minutes: 30"), [], "a setting's key is not a claim");
   assert.deepEqual(durationsSaid("# Where the job's minutes went: the slowest tests"), [], "a length stated is the claim, not the word");
 });
+
+/**
+ * A REFUSAL RAISED AT A ROW NEVER QUOTES IT (issue 128; `tests/duck-refusal-values.test.ts` holds it on the wire). The
+ * class: a Mason refusal, 0A000, raised while rows are read reaches any user, and a role may hide the row. So where a
+ * row's value is in reach — a `PgEvalError` or `NumericError` of 0A000 (raised by a function of a row) and the engine's
+ * errors worded by `postgresWording` — the message is words and `gapMark(…)` alone. What it may interpolate besides is
+ * listed: nothing read from a row. Postgres's own errors (22P02 …) quote what Postgres quotes, and a refusal of a
+ * STATEMENT (`Unrewritable`, a `gapRefusal`) reads no row.
+ */
+const REFUSAL_MAY_SAY = /^(gapMark\("[a-z0-9-]+"\)|o\.collate)$/;
+
+/** the functions whose returned { code, message } a row's refusal is said in */
+const ROW_WORDING = new Set(["postgresWording", "markedError"]);
+
+/** the interpolations of each row-time refusal in a source, that are not on the list */
+function rowInRefusals(src: string, file = "x.ts"): string[] {
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const out: string[] = [];
+  const said = (message: ts.Node | undefined): void => {
+    if (message === undefined) { out.push("a refusal with no message"); return; }
+    if (ts.isStringLiteralLike(message)) return;
+    // ("a" + "b": a message written over lines)
+    if (ts.isBinaryExpression(message) && message.operatorToken.kind === ts.SyntaxKind.PlusToken) { said(message.left); said(message.right); return; }
+    if (!ts.isTemplateExpression(message)) { out.push(message.getText(sf)); return; }
+    for (const span of message.templateSpans) if (!REFUSAL_MAY_SAY.test(span.expression.getText(sf))) out.push(span.expression.getText(sf));
+  };
+  const code = (n: ts.Node): boolean => ts.isStringLiteralLike(n) && n.text === "0A000";
+  const visit = (n: ts.Node, wording: boolean): void => {
+    if (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && (n.expression.text === "PgEvalError" || n.expression.text === "NumericError") && (n.arguments ?? []).some(code)) {
+      said((n.arguments ?? []).find((a) => !code(a) && (ts.isTemplateExpression(a) || ts.isStringLiteralLike(a) || ts.isIdentifier(a) || ts.isPropertyAccessExpression(a))));
+    }
+    if (wording && ts.isObjectLiteralExpression(n) && n.properties.some((p) => ts.isPropertyAssignment(p) && p.name.getText(sf) === "code" && code(p.initializer))) {
+      const m = n.properties.find((p) => ts.isPropertyAssignment(p) && p.name.getText(sf) === "message");
+      said(m !== undefined && ts.isPropertyAssignment(m) ? m.initializer : undefined);
+    }
+    n.forEachChild((c) => visit(c, wording || (ts.isFunctionDeclaration(n) && ROW_WORDING.has(n.name?.text ?? ""))));
+  };
+  visit(sf, false);
+  return out;
+}
+
+test("a refusal raised at a row quotes no value of the row (issue 128)", () => {
+  const bad: string[] = [];
+  for (const dir of ["src/duck", "src/lib", "src/api", "src/api/postgres"]) {
+    for (const name of fs.readdirSync(path.join(ROOT, dir))) {
+      if (!name.endsWith(".ts")) continue;
+      bad.push(...rowInRefusals(fs.readFileSync(path.join(ROOT, dir, name), "utf8"), name).map((x) => `${dir}/${name}: \${${x}}`));
+    }
+  }
+  assert.deepEqual(bad, [], "a refusal reaches any user, of a row a role may hide: say the gap, never the value");
+  // the guard itself
+  assert.deepEqual(rowInRefusals('throw new PgEvalError("0A000", `the text ${s} is not supported (${gapMark("x")})`);'), ["s"]);
+  assert.deepEqual(rowInRefusals('throw new NumericError(`a numeric ${v}`, "0A000", "numeric-special");'), ["v"]);
+  assert.deepEqual(rowInRefusals('throw new PgEvalError("0A000", read.problem);'), ["read.problem"]);
+  assert.deepEqual(rowInRefusals('function postgresWording() { return { code: "0A000", message: `a numeric ${special[1]}` }; }'), ["special[1]"]);
+  assert.deepEqual(rowInRefusals('throw new PgEvalError("0A000", `words (${gapMark("x")})`); throw new PgEvalError("22P02", `Postgres quotes ${s}`);'), []);
+  assert.deepEqual(rowInRefusals('function other() { return { code: "0A000", message: `a statement ${x}` }; }'), []);
+  assert.deepEqual(rowInRefusals('function markedError() { return { code: "0A000", message: "a jsonb holds " + `the string ${s}` + " (Mason gap x)" }; }'), ["s"]);
+});

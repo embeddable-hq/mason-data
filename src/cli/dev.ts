@@ -51,7 +51,7 @@ import { cliPinProblem, ensurePin } from "./pin.ts";
 import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION } from "../duck/store.ts";
 import { copyChunkSecondsOf, copyParallelOf, humanBytes, Sync, syncModeOf, type CopyState } from "../duck/sync.ts";
 import { storeJsonPathsOf } from "../duck/kept.ts";
-import { readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
+import { libcOrderNote, readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
 import { isLibcCollation } from "../duck/rewrite.ts";
 import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
 import { exampleRole, LiveRoles, missingAttributesText, noRoleWayOut, readRoles, resolveRoles, rolesDefaultLine, rolesFile, usersMissingAttributes, usersWithNoRole, usersWithoutRole } from "./roles.ts";
@@ -450,6 +450,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // A LIBC COLLATION'S ORDER IS READ FROM THE DATABASE (src/duck/libc-order.ts): once, a few read-only SELECTs, kept in
   // the copy and read again when the database's collation version moves (an OS upgrade's glibc)
   let libc: LibcOrder | undefined;
+  let textOrder: string | null = null;
   const coll = facts.collation;
   if (coll !== undefined && isLibcCollation(coll.provider, coll.collate)) {
     const reading = `Reading how ${source.database} orders text (${coll.collate}${coll.version ? `, version ${coll.version}` : ""})`;
@@ -462,6 +463,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       });
       libc = r.order;
       if (r.read) done(`Read how ${source.database} orders text (${coll.collate}): kept with the synced data, read again only when its collation version moves`);
+      // what the read leaves to say is in the log and in mason status's Text order; an order not followed at the start too
+      textOrder = libcOrderNote(r.order);
+      if (textOrder !== null) (r.order.unread ? say : logLine)(`  ! ${textOrder}`);
     } catch (e) { fail(reading); say(`  ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }
   }
   begin("Starting the Postgres listener");
@@ -554,7 +558,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
   const runCtx: RunContext = {
-    source, facts: () => facts, warnings,
+    source, facts: () => facts, warnings, textOrder,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
     replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
     version: o.version, startedAt,

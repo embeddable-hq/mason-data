@@ -43,6 +43,7 @@ import pg from "pg";
 import { DuckStore } from "../src/duck/store.ts";
 import { startPostgresApi } from "../src/api/postgres/server.ts";
 import type { LibcOrder } from "../src/duck/libc-order.ts";
+import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import type { PgColumn, PgSchema } from "../src/api/postgres/schema.ts";
 import { BI_SHAPES } from "./integration/oracle/bi-shapes.ts";
@@ -502,13 +503,7 @@ async function listen(store: DuckStore, logged: string[], duck: Awaited<ReturnTy
  *  character of the orders' documents' strings, so no row of the stored key is marked */
 const LIBC_COLLATION = { provider: "c", collate: "en_US.utf8", locale: null };
 function libcOrder(): LibcOrder {
-  const MAX = 0x110000;
-  const l1 = new Uint32Array(MAX), l4 = new Uint32Array(MAX), uncovered = new Uint8Array(MAX).fill(1);
-  const cp = (ch: string): number => ch.codePointAt(0)!;
-  const letters = "abcdefghijklmnopqrstuvwxyz".split("").map((x) => x + x.toUpperCase() + (x === "e" ? "é" : ""));
-  l4[cp(" ")] = 2; uncovered[cp(" ")] = 0;
-  ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...letters].forEach((cls, i) => { for (const ch of cls) { l1[cp(ch)] = i + 1; uncovered[cp(ch)] = 0; l4[cp(ch)] = 3; } });
-  return { collate: LIBC_COLLATION.collate, version: "2.41", l1, l4, uncovered, expansions: new Map() };
+  return handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" "], { collate: LIBC_COLLATION.collate });
 }
 
 /**

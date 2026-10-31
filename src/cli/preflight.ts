@@ -280,6 +280,16 @@ interface TableRow {
  *  once per run, never per read (review of #404: a remote one over the network each time). */
 const COUNTED = new Map<number, number>();
 
+/** the server_version_num from which `pg_database_collation_actual_version` exists */
+const COLLATION_ACTUAL_VERSION_NUM = 150000;
+const COLLATION_ACTUAL_VERSION_SQL = "SELECT pg_database_collation_actual_version(oid) FROM pg_database WHERE datname = current_database()";
+
+/** The collation library's version now, else what the database recorded (`recorded`, datcollversion; before Postgres 15, none). */
+export async function collationVersion(pg: Pick<PgConnection, "query">, versionNum: number, recorded: string | null): Promise<string | null> {
+  if (versionNum < COLLATION_ACTUAL_VERSION_NUM) return recorded;
+  return (await pg.query(COLLATION_ACTUAL_VERSION_SQL)).rows[0]?.[0] ?? recorded;
+}
+
 /** The database's facts: its version, whether it is a standby, and every table this user can read. */
 export async function readSourceFacts(pg: PgConnection, counted: Map<number, number> = COUNTED): Promise<SourceFacts> {
   const r = (await pg.query("SELECT current_setting('server_version_num'), current_setting('server_version'), pg_is_in_recovery()::text")).rows[0]!;
@@ -307,8 +317,9 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
   }
   // the columns differ by version (datlocprovider from 15, daticulocale 15–16, datlocale from 17): read the row whole
   const db = JSON.parse((await pg.query("SELECT to_jsonb(d)::text FROM pg_database d WHERE datname = current_database()")).rows[0]?.[0] ?? "{}") as Record<string, string | null>;
-  // datcollversion (Postgres 15+): the library's version of it (glibc's for libc), which moves when the OS's does
-  const collation = { provider: db.datlocprovider ?? "c", collate: db.datcollate ?? "C", locale: db.datlocale ?? db.daticulocale ?? null, version: db.datcollversion ?? null };
+  // the library's version of it NOW (Postgres 15+; glibc's for libc): datcollversion is what the database was created or
+  // last refreshed under, so it stays where it was through an OS upgrade, which is what must read the order again
+  const collation = { provider: db.datlocprovider ?? "c", collate: db.datcollate ?? "C", locale: db.datlocale ?? db.daticulocale ?? null, version: await collationVersion(pg, Number(r[0]), db.datcollversion ?? null) };
   const views = (JSON.parse((await pg.query(VIEWS_SQL)).rows[0]?.[0] ?? "[]") as Array<SourceView & { oid: number }>)
     .map((v) => ({ schema: v.schema, name: v.name, definition: v.definition, comment: v.comment }));
   return { version: Number(r[0]), versionText: r[1] ?? "", standby: r[2] === "true", tables, systemIdentifier: await systemIdentifier(pg), collation, views };
