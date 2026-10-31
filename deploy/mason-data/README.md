@@ -43,6 +43,18 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
   their next statement, without a restart. The list is `.mason/users.json` on the volume (no passwords in it).
   **Changing `MASON_API_KEY` removes every user at once**: add each again.
 
+## The web page
+
+Nothing to publish: `mason serve` keeps the page on the container's loopback, and it is reached from inside the
+container. From your machine, with SSH access to this one:
+
+```bash
+mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 mason"
+```
+
+`mason-mason-1` is the name Compose gives this file's container (`docker ps` says). Ctrl-C closes the tunnel. This has not
+yet been run against a real server or container: [`docs/WEB-UI.md`](../../docs/WEB-UI.md#on-a-server) says what has been.
+
 ## Metrics
 
 `GET /metrics` on the health port (4140, beside `/healthz`) is Mason's numbers in Prometheus's text format: tables by
@@ -145,6 +157,7 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 
 | Setting | Default | Change it when |
 |---|---|---|
+| `MASON_UI_PORT` | 4039 | another service in the container wants it; the page stays on loopback whatever this says ("The web page") |
 | `MASON_PG_DATABASE` | `mason` | the sources file has no `database:` and a tool must keep the database name it has (a different `database:` in the file is refused) |
 | `MASON_DUCKDB_MEMORY` | half the container's memory limit | the container's limit is not what the copy should have half of ("Memory") |
 | `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a copy is slow |

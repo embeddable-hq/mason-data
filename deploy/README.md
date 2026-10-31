@@ -75,6 +75,23 @@ Whether 5433 can be limited to the source addresses you name is the platform's t
 | Fly.io | **no** | a public service has no source-address rule, and network policies do not affect traffic through the Fly Proxy, which carries it. The nearest is Flycast with WireGuard: no public address (`fly ips release` each one, skip `fly ips allocate-v4`), `fly ips allocate-v6 --private`, and clients on the organization's private network or on a peer from `fly wireguard create`. We have not run this |
 | Railway | **no** | the TCP Proxy has no source-address filter and passes no client address, so nothing behind it can filter either. Edge Rules match client IPs, but HTTP requests only, and the Postgres API is not HTTP. Without a TCP Proxy, only services in the same project environment reach the port. Railway's Tailscale Forwarder is its way in from outside; it needs the service listening on `::`, the image listens on `0.0.0.0` (`MASON_PG_HOST`), and we have not run this |
 
+## The web page
+
+`mason serve` serves Mason's web page on loopback alone, so **publish no port for it and add no firewall rule**. From
+your own machine, with SSH access to the server:
+
+```bash
+mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 mason"
+```
+
+`docker ps` names the container; on a server without Docker, leave `--mason` out or say where Mason is. Ctrl-C closes the
+tunnel. [`docs/WEB-UI.md`](../docs/WEB-UI.md#on-a-server) has how it works and what it guards.
+
+**Not yet run over real SSH.** It has been tested with a stand-in for `ssh`, on one machine. SSM Session Manager on EC2,
+IAP on Compute Engine and Azure Bastion should work through your `~/.ssh/config`, with port 22 closed to the internet,
+and **no one has tried them**. Kubernetes has no SSH, and Fly, Railway and other managed platforms have tooling of their
+own, so none of those is covered.
+
 ## Metrics
 
 Every platform gets `GET /metrics` on the health port (4140), beside `/healthz`: Mason's numbers in Prometheus's text

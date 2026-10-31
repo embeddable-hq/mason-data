@@ -1,5 +1,5 @@
 /**
- * THE WEB PAGE OF `mason start` (`mason ui`; docs/WEB-UI.md, and .claude/rules/web-ui.md for whoever builds it out):
+ * THE WEB PAGE OF A RUN (`mason ui`, and `mason ui --ssh` for a server's; docs/WEB-UI.md, and .claude/rules/web-ui.md for whoever builds it out):
  * the SHELL — a left sidebar (the project, then a nav of links with icons: Overview · Tables · Users, and the
  * Observability group: Queries · Usage · Logs; at its foot when it was updated and the version; an icon rail on a narrow
  * window, a menu on a phone) and one section per page, the one shown chosen by the URL's hash (`#overview`, the

@@ -178,14 +178,16 @@ export async function bridge(localPort: number): Promise<number> {
   hello({ protocol: BRIDGE_PROTOCOL, version: version(), project: run.name, ticket: String(first.ticket) });
   const page = new URL(run.control.url);
   return await new Promise<number>((resolve) => {
-    const done = (code: number): void => { close(); link.end(); resolve(code); };
+    let over = false;
+    const done = (code: number): void => { over = true; close(); link.end(); resolve(code); };
     const link = new FrameLink({ input: process.stdin, output: process.stdout, connect: () => net.connect(Number(page.port), "127.0.0.1"),
       broken: (why) => { process.stderr.write(`mason ui --bridge: ${why}\n`); done(1); } });
     process.stdin.on("data", (b: Buffer) => { link.read(b); });
     process.stdin.once("end", () => { done(0); });
     // the laptop's end gone with bytes still to write: the same end as stdin's, which says it
     process.stdout.on("error", () => { done(0); });
-    void ended.then(() => { process.stderr.write(`mason ui --bridge: Mason for ${run.name} ended the tunnel: it stopped or restarted\n`); done(1); });
+    // settles on this end's own close too, which is no news
+    void ended.then(() => { if (over) return; process.stderr.write(`mason ui --bridge: Mason for ${run.name} ended the tunnel: it stopped or restarted\n`); done(1); });
   });
 }
 
@@ -230,7 +232,7 @@ function refusal(h: Extract<Hello, { error: unknown }>, target: string): Failure
 }
 
 /** Starts ssh and the bridge, with a free loopback port before them: the tunnel, or why not. */
-export function openSshTunnel(o: { target: string; mason: string; timeoutMs: number; interactive: boolean }): Promise<SshTunnel | Failure> {
+export function openSshTunnel(o: { target: string; mason: string; timeoutMs: number; interactive: boolean; stopped: Promise<unknown> }): Promise<SshTunnel | Failure> {
   return new Promise((resolve) => {
     let link: FrameLink | null = null;
     // no link yet: nothing was handed out that names this port, so nothing that connects is ours
@@ -264,6 +266,8 @@ export function openSshTunnel(o: { target: string; mason: string; timeoutMs: num
         fail({ message: `no answer from ${o.target} in ${Math.round(o.timeoutMs / 1000)} s`, code: "failed", ...(last === "" ? {} : { why: `ssh printed: ${last}` }),
           fix: `run ssh ${o.target} on its own to see where it waits; --timeout gives it longer`, next: [[`ssh ${o.target} true`, "whether ssh reaches it on its own"]] });
       }, o.timeoutMs);
+      // Ctrl-C before an answer: ssh goes too, a process signalled alone included
+      void o.stopped.then(() => { fail({ message: "stopped before the server answered", code: "failed" }); });
       const helloIn = (h: Hello): void => {
         if ("error" in h) { fail(refusal(h, o.target)); return; }
         if (h.protocol !== BRIDGE_PROTOCOL) {

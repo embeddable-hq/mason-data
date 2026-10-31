@@ -252,6 +252,17 @@ test("each failure is one report with its way out, in the failure shape, and no 
   assert.match(missing.error.fix, /OpenSSH client/);
 });
 
+test("Ctrl-C before the server answers ends ssh too, exit 0", async () => {
+  const ssh = fakeSsh();
+  const child = spawn(process.execPath, [MAIN, "ui", "--ssh", "deploy@mason.example", "--json"], { cwd: temp("laptop"), env: env(ssh.bin, { FAKE_SSH: "silent" }), stdio: "ignore" });
+  const done = new Promise<number | null>((r) => child.on("close", (c) => r(c)));
+  for (let i = 0; i < 200 && !fs.existsSync(ssh.pid); i++) await new Promise((r) => setTimeout(r, 25));
+  await new Promise((r) => setTimeout(r, 200));
+  child.kill("SIGINT");
+  assert.equal(await done, 0);
+  assert.ok(isGone(Number(fs.readFileSync(ssh.pid, "utf8"))), "no ssh left");
+});
+
 test("what the server says of itself reaches the laptop as its failure: no project there, no run, no page", async () => {
   const ssh = fakeSsh();
   const nowhere = await refused(ssh.bin, temp("empty-server"), {});

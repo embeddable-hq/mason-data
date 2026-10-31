@@ -1675,6 +1675,18 @@ so the next start seeds it again. **Where.** `src/cli/demo.ts`, `src/demo/source
 
 ## Operating it
 
+### A server's web page: `mason ui --ssh` (2026-10-31, issue 107)
+
+**Decision.** The tunnel is ssh's stdio to a bridge beside the run (`mason ui --bridge`, `src/cli/ui-ssh.ts`), not `ssh -L`.
+Why: Docker publishes to a container's network address, never its loopback, so `-L` needed the page off loopback, and
+what keeps the page safe without TLS or a login is that it never is. A bridge inside the container makes a host and a
+container one route, with nothing published. Frames multiplex every browser connection over one ssh connection, as
+one per socket would be six hardware-token touches for a page. **The run's token never leaves the server**: the laptop
+gets a one-use ticket, as the URL a browser opens is on a command line, and a tunnel is what adds a Host to the guard,
+by its port, for as long as its connection lasts (`PageTunnel`), never a wider rule. Under `mason serve` a sources file
+that cannot be written takes Add and Remove off the page (`sourcesReadOnly`), since a control that can only fail must
+be absent. Tested with a fake `ssh`; real SSH, a real container and SSM, IAP and Bastion are unverified (docs/WEB-UI.md).
+
 ### On a server: `mason serve` and the image
 
 **Decision.** `mason serve` is `mason start --attach`'s run configured by the environment alone (`DATABASE_URL`,

@@ -114,7 +114,7 @@ async function overSsh(target: string, mason: string, timeoutMs: number, open: b
     const heard = (s: NodeJS.Signals): void => { signalled = s; resolve(s); };
     process.once("SIGINT", heard); process.once("SIGTERM", heard);
   });
-  const t = await openSshTunnel({ target, mason, timeoutMs, interactive: !json && process.stdin.isTTY === true });
+  const t = await openSshTunnel({ target, mason, timeoutMs, interactive: !json && process.stdin.isTTY === true, stopped: signal });
   if ("message" in t) return signalled !== null ? 0 : failed("ui", t, { json });
   const next: readonly NextStep[] = [[`mason ui --ssh ${target}`, "again, once this one is closed: a new port and a new ticket"]];
   if (json) out(jsonText(UI, { url: t.url, port: t.port, server: target, project: t.project, version: t.serverVersion }, next));
